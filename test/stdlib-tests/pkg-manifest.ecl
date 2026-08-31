@@ -1,4 +1,5 @@
 ### module stdlib.test.pkg-manifest
+[]
 (
  'stdlib.test.support
  ('equal 'raises 'raises-containing 'raises-data 'documented)

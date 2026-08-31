@@ -50,7 +50,7 @@ test "e2e: ecl test runs the default stateful runner" {
             "'exports {\"app.suite\" [\"suite.ecl\"]} 'requires {}}\n",
         &.{.{
             .path = "suite.ecl",
-            .source = "(0 " ++
+            .source = "[] (0 " ++
                 "((1 + dup without) within dup 1 = {'kind 'user} assert) 'first test " ++
                 "((dup without) within dup 1 = {'kind 'user} assert) 'second test " ++
                 "(missing) 'third-fails test " ++
@@ -89,11 +89,11 @@ test "e2e: ecl test accepts a userland runner" {
         &.{
             .{
                 .path = "suite.ecl",
-                .source = "((42) 'answer test) 'app.suite @defm\n",
+                .source = "[] ((42) 'answer test) 'app.suite @defm\n",
             },
             .{
                 .path = "custom.ecl",
-                .source = "((args [\"chosen\"] match? {'kind 'user} assert " ++
+                .source = "[] ((args [\"chosen\"] match? {'kind 'user} assert " ++
                     "tests dup len 1 = {'kind 'user} assert " ++
                     "first @test 'ok dict.has? {'kind 'user} assert " ++
                     "\"custom\" io.print) 'run def) 'app.custom.runner @defm\n",
@@ -150,7 +150,7 @@ test "e2e: ecl test reports project and runner failures" {
         project.dir,
         "{'format 1 'name \"app\" 'version \"0.1.0\" " ++
             "'exports {\"app.suite\" [\"suite.ecl\"]} 'requires {}}\n",
-        &.{.{ .path = "suite.ecl", .source = "((1) 'one test) 'app.suite @defm\n" }},
+        &.{.{ .path = "suite.ecl", .source = "[] ((1) 'one test) 'app.suite @defm\n" }},
     );
     var unqualified = try cli.runOptions(.{
         .argv = &.{ exe, "test", "--runner", "run" },
@@ -464,7 +464,7 @@ test "e2e: checked-in package consumer executes and remains byte-stable offline"
     });
     try scratch.dir.writeFile(io, .{
         .sub_path = "cache/smoke-1.0.0-" ++ pkg_example_hash ++ "/smoke.ecl",
-        .data = "((42) 'answer def) 'smoke @defm\n",
+        .data = "[] ((42) 'answer def) 'smoke @defm\n",
     });
     const cache = try scratch.dir.realPathFileAlloc(io, "cache", allocator);
     defer allocator.free(cache);
@@ -523,7 +523,7 @@ test "e2e: pkg vendor makes locked execution and verification cache-independent"
     });
     try scratch.dir.writeFile(io, .{
         .sub_path = "cache/" ++ pkg_runtime_key ++ "/a.ecl",
-        .data = "((42) 'answer def) 'a @defm\n",
+        .data = "[] ((42) 'answer def) 'a @defm\n",
     });
     const archive = try decodeHex(build_options.pkg_runtime_archive);
     defer allocator.free(archive);
@@ -1154,18 +1154,18 @@ test "e2e: hot reload all access paths acceptance" {
 test "e2e: module effect declaration acceptance" {
     // An omitted effect is legal and adds no inferred check: the word runs
     // across the home boundary exactly as written.
-    var missing = try run(&.{ build_options.ecl_exe, "-e", "((dup +) 'fine def) 'm @defm 2 m.fine" });
+    var missing = try run(&.{ build_options.ecl_exe, "-e", "[] ((dup +) 'fine def) 'm @defm 2 m.fine" });
     defer missing.deinit();
     try missing.expect(.{ .exit_code = 0, .stdout = "4\n", .stderr = "" });
 
-    var lying = try run(&.{ build_options.ecl_exe, "-e", "(( a -- b c ) (dup +) 'lies def) 'm @defm 1 m.lies" });
+    var lying = try run(&.{ build_options.ecl_exe, "-e", "[] (( a -- b c ) (dup +) 'lies def) 'm @defm 1 m.lies" });
     defer lying.deinit();
     try lying.expect(.{
         .exit_code = 1,
         .stderr_contains = &.{ "'kind 'contract", "'word 'm.lies" },
     });
 
-    var visible = try run(&.{ build_options.ecl_exe, "-e", "(( a -- b ) (dup +) 'dbl def) 'm @defm 'm.dbl see" });
+    var visible = try run(&.{ build_options.ecl_exe, "-e", "[] (( a -- b ) (dup +) 'dbl def) 'm @defm 'm.dbl see" });
     defer visible.deinit();
     try visible.expect(.{
         .exit_code = 0,
@@ -1178,7 +1178,7 @@ test "e2e: explicit import replacement acceptance" {
     var result = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "1 'mean set 2 'count set (3 'mean set 4 'count set) 'stats @defm " ++
+        "1 'mean set 2 'count set [] (3 'mean set 4 'count set) 'stats @defm " ++
             "'stats ('mean 'count) import mean count",
     });
     defer result.deinit();
@@ -1193,7 +1193,7 @@ test "e2e: reflection acceptance" {
     var result = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "(40 's setp ( -- n ) (s 2 +) 'f def) 'm @defm 'm ('f) import 'm.f see 'f which words",
+        "[] (40 's setp ( -- n ) (s 2 +) 'f def) 'm @defm 'm ('f) import 'm.f see 'f which words",
     });
     defer result.deinit();
     try result.expect(.{
@@ -1234,12 +1234,12 @@ test "e2e: stateful module reload acceptance" {
 }
 
 test "e2e: module removal acceptance" {
-    const module = "[7] (((dup without) within) 'peek def) seed 'core.c @defm ";
+    const module = "[7] (((dup without) within) 'peek def) 'core.c @defm ";
     var by_name = try run(&.{
         build_options.ecl_exe,
         "-e",
         module ++ "'short 'core.c alias 'short unmodule " ++
-            "(core.c.peek) @attempt 'err at 'kind at io.pp (short.peek) @attempt 'err at 'kind at io.pp " ++
+            "[] (core.c.peek) @attempt 'err at 'kind at io.pp [] (short.peek) @attempt 'err at 'kind at io.pp " ++
             module ++ "core.c.peek io.pp",
     });
     defer by_name.deinit();
@@ -1252,7 +1252,7 @@ test "e2e: module removal acceptance" {
     var by_canonical_name = try run(&.{
         build_options.ecl_exe,
         "-e",
-        module ++ "'core.c unmodule (core.c.peek) @attempt 'err at 'kind at io.pp",
+        module ++ "'core.c unmodule [] (core.c.peek) @attempt 'err at 'kind at io.pp",
     });
     defer by_canonical_name.deinit();
     try by_canonical_name.expect(.{ .exit_code = 0, .stdout = "'undefined-word\n", .stderr = "" });
@@ -1356,7 +1356,7 @@ test "e2e: annotated literal module constant and partial effect acceptance" {
     var constant = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "((-- value) 40 literal 'k def) 'm @defm m.k 'm.k which",
+        "[] ((-- value) 40 literal 'k def) 'm @defm m.k 'm.k which",
     });
     defer constant.deinit();
     try constant.expect(.{
@@ -1365,7 +1365,7 @@ test "e2e: annotated literal module constant and partial effect acceptance" {
         .stderr = "",
     });
 
-    const partial_module = "((a b -- ...) (pop pop 7 8) 'row def) 'm @defm ";
+    const partial_module = "[] ((a b -- ...) (pop pop 7 8) 'row def) 'm @defm ";
     var partial = try run(&.{ build_options.ecl_exe, "-e", partial_module ++ "1 2 m.row" });
     defer partial.deinit();
     try partial.expect(.{ .exit_code = 0, .stdout = "7 8\n", .stderr = "" });
@@ -1579,7 +1579,7 @@ test "e2e: embedded prelude is independent of cwd and ECL_PATH" {
         .argv = &.{
             "./ecl",
             "-e",
-            "(\"ECL_M12_ABSENT\" getenv) @attempt \"fallback\" result.or-else io.pp",
+            "[] (\"ECL_M12_ABSENT\" getenv) @attempt \"fallback\" result.or-else io.pp",
         },
         .cwd = .{ .dir = temporary.dir },
         .environ_map = &environment,
@@ -1630,8 +1630,8 @@ test "e2e: every stdlib module resolves with no ECL_PATH and no filesystem" {
         // auto-load, with no `ECL_PATH` and no readable directory.
         .{
             .name = "result",
-            .imported = "'result ('or-raise) import (2 3 +) @attempt or-raise io.pp",
-            .qualified = "(2 3 +) @attempt result.or-raise io.pp",
+            .imported = "'result ('or-raise) import [] (2 3 +) @attempt or-raise io.pp",
+            .qualified = "[] (2 3 +) @attempt result.or-raise io.pp",
         },
         .{ .name = "str", .imported = "'str ('upper) import \"hi\" upper io.pp", .qualified = "\"hi\" str.upper io.pp" },
         .{ .name = "io", .imported = "'io ('print) import \"hi\" print", .qualified = "\"hi\" io.print" },
@@ -1715,7 +1715,7 @@ test "e2e: result module exclusively owns the envelope vocabulary" {
     var unchanged = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "(\"original\" fail) @attempt dup (result.or-raise) partial @attempt 'err at swap 'err at match?",
+        "[] (\"original\" fail) @attempt dup (result.or-raise) partial [] swap @attempt 'err at swap 'err at match?",
     });
     defer unchanged.deinit();
     try unchanged.expect(.{ .exit_code = 0, .stdout = "1\n", .stderr = "" });
@@ -1787,6 +1787,8 @@ test "e2e: the old unit-constructor spellings are gone and the boundary error gu
         "@spawn-with",
         "@each-with",
         "@defm-with",
+        "seed",
+        "unseed",
     }) |old| {
         var result = try run(&.{ build_options.ecl_exe, "-e", old });
         defer result.deinit();
@@ -1794,32 +1796,32 @@ test "e2e: the old unit-constructor spellings are gone and the boundary error gu
     }
     // The trap the convention exists to make visible: the caller's value is
     // on screen and out of reach, so the error names the isolation.
-    var isolated = try run(&.{ build_options.ecl_exe, "-e", "3 (1 +) @attempt io.pp" });
+    var isolated = try run(&.{ build_options.ecl_exe, "-e", "3 [1] (+) @attempt io.pp" });
     defer isolated.deinit();
     try isolated.expect(.{
         .exit_code = 0,
-        .stdout_contains = &.{ "'isolation @attempt", "seed @attempt", "partial" },
+        .stdout_contains = &.{ "'isolation @attempt", "constructor's values operand", "values (q) @attempt" },
     });
-    var child = try run(&.{ build_options.ecl_exe, "-e", "3 [1 2] (+ +) @each io.pp" });
+    var child = try run(&.{ build_options.ecl_exe, "-e", "3 [1 2] [] (+ +) @each io.pp" });
     defer child.deinit();
     try child.expect(.{
         .exit_code = 1,
-        .stderr_contains = &.{ "'isolation @each", "only its element" },
+        .stderr_contains = &.{ "'isolation @each", "constructor's values operand", "list values (q) @each" },
     });
     // And the seeding composition that fixes it.
-    var seeded = try run(&.{ build_options.ecl_exe, "-e", "[3] (1 +) seed @attempt io.pp" });
+    var seeded = try run(&.{ build_options.ecl_exe, "-e", "[3] (1 +) @attempt io.pp" });
     defer seeded.deinit();
     try seeded.expect(.{ .exit_code = 0, .stdout = "{'ok [4]}\n", .stderr = "" });
 
     var seeded_each = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "[1 2] [10] (|x a| x a +) seed @each io.pp",
+        "[1 2] [10] (|x a| x a +) @each io.pp",
     });
     defer seeded_each.deinit();
     try seeded_each.expect(.{ .exit_code = 0, .stdout = "[11 12]\n", .stderr = "" });
 
-    var name_first = try run(&.{ build_options.ecl_exe, "-e", "'wrong ((1) 'x def) @defm" });
+    var name_first = try run(&.{ build_options.ecl_exe, "-e", "'wrong [] ((1) 'x def) @defm" });
     defer name_first.deinit();
     try name_first.expect(.{
         .exit_code = 1,
@@ -1828,23 +1830,23 @@ test "e2e: the old unit-constructor spellings are gone and the boundary error gu
 
     // Anonymous construction names nothing, so its isolation advice names the
     // unseeded spelling rather than a registration.
-    var anonymous_isolation = try run(&.{ build_options.ecl_exe, "-e", "3 (1 +) @module" });
+    var anonymous_isolation = try run(&.{ build_options.ecl_exe, "-e", "3 [1] (+) @module" });
     defer anonymous_isolation.deinit();
     try anonymous_isolation.expect(.{
         .exit_code = 1,
-        .stderr_contains = &.{ "'isolation @module", "seed @module" },
+        .stderr_contains = &.{ "'isolation @module", "@module" },
     });
 
     // The value the external binary shows for a module image, and the two
     // words that name one.
-    var anonymous_value = try run(&.{ build_options.ecl_exe, "-e", "(1 'x set) @module" });
+    var anonymous_value = try run(&.{ build_options.ecl_exe, "-e", "[] (1 'x set) @module" });
     defer anonymous_value.deinit();
     try anonymous_value.expect(.{ .exit_code = 0, .stdout = "<module>\n", .stderr = "" });
 
     var registered_twice = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "(0 ((1 + dup without) within) 'bump def) @module dup 'l register 'r register " ++
+        "[] (0 ((1 + dup without) within) 'bump def) @module dup 'l register 'r register " ++
             "l.bump l.bump r.bump",
     });
     defer registered_twice.deinit();

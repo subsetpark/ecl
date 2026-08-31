@@ -183,7 +183,7 @@ const test_files = [_][]const u8{
     "tests/random_test.zig",
     "tests/kernel_typed_test.zig",
     "tests/module_value_test.zig",
-    "tests/unit_plan_test.zig",
+    "tests/unit_input_test.zig",
     "tests/module_source_test.zig",
     "tests/test_language_test.zig",
 };

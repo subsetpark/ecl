@@ -1,5 +1,6 @@
 ### module pkg.data
 # Parse package metadata as inert data without evaluating it.
+[]
 (
  ### defp inert?
  (value -- bool : "Return 1 when a value recursively contains no executable words.")

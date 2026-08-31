@@ -77,7 +77,7 @@ The core kinds are a closed set: `'underflow`, `'undefined-word`, `'type`,
 `raise` throws a dict; `fail` is sugar for raising
 `{'kind 'user 'msg msg}`.
 
-`(q) @attempt` runs a self-contained quotation as a new unit on an isolated
+`[] (q) @attempt` runs a self-contained quotation as a new unit on an isolated
 substack and always pushes exactly one result value: `{'ok (values)}`
 or `{'err <error dict>}`. Uniform arity is what makes reified failure safe
 in a stack language: a failure never shares a stack with the code
@@ -92,10 +92,11 @@ and cross task boundaries unchanged.
 Concurrency is structured tasks — futures with enforced lifetime — over
 share-nothing units. Immutability makes sharing safe without copying.
 
-- `@spawn` `( unit-input -- task )` runs a quotation, or a plan's body seeded
-  by its values (the `@attempt` contract: an unseeded quotation takes its inputs
-  via `seed`/`partial`/environment, never the ambient stack), on its own
-  isolated substack, concurrently.
+- `@spawn` `( values quotation -- task )` runs a body with the explicit values
+  list as its initial stack (the `@attempt` contract: boundary arguments arrive
+  only through the constructor's values operand, never the ambient stack), on
+  its own isolated substack, concurrently. `partial` and `with` may separately
+  construct a reusable body; they are not alternative boundary inputs.
 - `await` `( task -- result )` parks the current unit until the task
   completes and delivers the same `{'ok …}`/`{'err …}` result shape as
   `@attempt`. It is idempotent — the result is cached — so task handles
@@ -149,7 +150,7 @@ prints as `[1 2 3]`, while the ragged result of `[[1 2] [3]] 10 *` prints as
 
 - `str` produces the compact single-line canonical form and carries the
   round-trip guarantee for recursively readable values: reading `str` output
-  yields a structurally matching value. Tasks, modules, unit plans, and
+  yields a structurally matching value. Tasks, modules, and
   aggregates containing them instead contain diagnostic displays and have no
   read-back guarantee.
 - `io.pp` and the REPL stack display are best-effort human layout: the same

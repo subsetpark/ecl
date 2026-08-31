@@ -6,6 +6,7 @@
 # Tables remain ordinary dictionaries: `type`, `keys`, `at`, and `put` keep
 # their normal behavior. Exported table operations validate table arguments and
 # raise an error for invalid dictionaries.
+[]
 (
  ### defp text?
  (value -- bool : "Return 1 when every item in a list is a character.")
@@ -43,7 +44,7 @@
   "Return 1 when a candidate is a table and 0 when it is not.
 
    Cancellation, allocation failure, and other runtime errors propagate.")
- (wrap (checked pop) seed @attempt dup result.ok? (pop 1) (convention-miss?) if)
+ (wrap (checked pop) @attempt dup result.ok? (pop 1) (convention-miss?) if)
  'valid? def
 
  ### def names

@@ -76,13 +76,13 @@ test "embedded prelude exposes source bodies and derived dataflow" {
         },
         .{
             .name = "seeded attempts tasks and modules",
-            .source = "[] (42) seed @attempt [2 3] (+) seed @attempt " ++
-                "[2 3] (+) seed @spawn await [2 0] (/) seed @attempt result.ok? " ++
-                "[2 3] (+) seed @attempt [2 3] (+) seed @spawn await match? " ++
-                "[4 5] (+ 'sum set) seed 'seeded @defm seeded.sum",
+            .source = "[] (42) @attempt [2 3] (+) @attempt " ++
+                "[2 3] (+) @spawn await [2 0] (/) @attempt result.ok? " ++
+                "[2 3] (+) @attempt [2 3] (+) @spawn await match? " ++
+                "[4 5] (+ 'sum set) 'seeded @defm seeded.sum",
             .expected = "{'ok [42]} {'ok [5]} {'ok [5]} 0 1 9",
         },
-        .{ .name = "results", .source = "(2 3 +) @attempt result.ok? (2 3 +) @attempt result.or-raise (missing) @attempt 9 result.or-else", .expected = "1 [5] 9" },
+        .{ .name = "results", .source = "[] (2 3 +) @attempt result.ok? [] (2 3 +) @attempt result.or-raise [] (missing) @attempt 9 result.or-else", .expected = "1 [5] 9" },
         .{
             .name = "cleaves",
             .source = "1 2 nip 3 (1 +) keep 3 (1 +) (2 *) bi 3 (1 +) (2 *) (1 -) tri " ++
@@ -185,7 +185,6 @@ fn expectInvalidPrelude(source: []const u8) !void {
     defer environment.deinit();
     var building = environment.beginCoreBuild();
     try prims.install(&building);
-    try building.installSeed("seed");
     var registry = try modules.Registry.init(host.cleanup());
     defer registry.deinit();
     var archive_owner = try spans.SpanArchiveOwner.init(&host);
@@ -237,7 +236,7 @@ test "embedded definitions retain provenance and deferred words stay absent" {
             .kind = "undefined-word",
             .word = "stdin",
         },
-        .{ .name = "result.or-raise identity", .source = "(missing) @attempt result.or-raise", .kind = "undefined-word", .word = "missing" },
+        .{ .name = "result.or-raise identity", .source = "[] (missing) @attempt result.or-raise", .kind = "undefined-word", .word = "missing" },
         .{
             .name = "cons inserts executable word forms",
             .source = "(foo) first (7) cons call",

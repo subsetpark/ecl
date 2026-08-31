@@ -1,4 +1,5 @@
 ### module m
+[]
 (
  ### defp s
  40 's setp

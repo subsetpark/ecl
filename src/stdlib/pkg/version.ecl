@@ -1,5 +1,6 @@
 ### module pkg.version
 # Validate and compare package versions using the supported SemVer subset.
+[]
 (
  ### defp digit-chars
  # Decimal digits.

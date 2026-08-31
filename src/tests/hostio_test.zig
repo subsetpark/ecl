@@ -224,7 +224,7 @@ test "hostio: getenv returns the snapshot value and unset is an error" {
     });
     // Absence is absence: defaulting is the caller's explicit idiom.
     try expectStack(.{
-        .source = "(\"ECL_TEST_ABSENT\" getenv) @attempt \"fallback\" result.or-else",
+        .source = "[] (\"ECL_TEST_ABSENT\" getenv) @attempt \"fallback\" result.or-else",
         .environ = environ,
     }, "\"fallback\"");
     try expectError(.{ .source = "42 getenv", .environ = environ }, .{

@@ -1,4 +1,5 @@
 ### module stdlib.test.pkg-name
+[]
 (
  'stdlib.test.support ('equal 'raises-containing 'documented) import
 

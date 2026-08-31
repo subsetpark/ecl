@@ -1,5 +1,6 @@
 ### module pkg.name
 # Validate package names and immutable source locators, and compare ownership prefixes.
+[]
 (
  ### defp chars-in?
  # Test whether a nonempty string contains only characters from a given set.

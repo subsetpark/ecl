@@ -1,4 +1,5 @@
 ### module stdlib.test.pkg-docs
+[]
 (
  'stdlib.test.support ('raises-word 'documented) import
 

@@ -1,4 +1,5 @@
 ### module stdlib.test.random
+[]
 (
  'stdlib.test.support
  ('equal 'raises-containing 'raises-word 'documented)

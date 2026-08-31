@@ -2029,6 +2029,6 @@ fn boolValue(evaluator: *Machine, item: *const heap.OwnedValue) MachineError!boo
             1 => true,
             else => evaluator.typeError("a 0/1 bool"),
         },
-        .float, .char, .symbol, .word, .list, .dict, .task, .module, .unit_plan => evaluator.typeError("a 0/1 bool"),
+        .float, .char, .symbol, .word, .list, .dict, .task, .module => evaluator.typeError("a 0/1 bool"),
     };
 }

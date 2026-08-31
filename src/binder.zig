@@ -233,7 +233,7 @@ pub const LowerCursor = struct {
                     if (found != null) {
                         self.diag.setFmt(
                             self.body[body_state.index].span,
-                            "local `{s}` crosses a quotation boundary; capture it explicitly with `partial`",
+                            "local `{s}` crosses a quotation boundary; use `partial` to construct a quotation that captures it",
                             .{intern.get(lookup.name)},
                         );
                         return error.Parse;
@@ -264,7 +264,7 @@ pub const LowerCursor = struct {
                         body_state.work = .nested;
                         break :result false;
                     },
-                    .int, .float, .char, .symbol, .task, .module, .unit_plan => result: {
+                    .int, .float, .char, .symbol, .task, .module => result: {
                         self.local_indices[body_state.index] = null;
                         body_state.index += 1;
                         break :result false;
@@ -318,7 +318,7 @@ pub const LowerCursor = struct {
                         dict.valueAt(header, entry) });
                     break :result false;
                 },
-                .int, .float, .char, .symbol, .task, .module, .unit_plan => result: {
+                .int, .float, .char, .symbol, .task, .module => result: {
                     _ = body_state.walk.pop().?;
                     break :result false;
                 },

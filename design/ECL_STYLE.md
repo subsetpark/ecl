@@ -154,9 +154,13 @@ state package version requirer 4 pack (catalog-manifest) with
 ```
 
 Do not build a chain of `partial` applications for the same quotation.
-Captures are explicit: a binder local may not cross a quotation boundary by
-name. Seed the quotation with `partial`, `with`, or the input contract of its
-combinator, then bind the value inside the quotation.
+Reusable captures are explicit: a binder local may not cross a quotation
+boundary by name. Construct a new quotation with `partial` or `with`, then bind
+the captured value inside it.
+
+An operator's declared input and a unit constructor's values operand are
+parameter passing, not capture. Pass those values directly rather than
+constructing a different quotation merely to move them across the boundary.
 
 ### Nested and sibling lookup
 

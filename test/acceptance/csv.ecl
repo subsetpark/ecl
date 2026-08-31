@@ -24,9 +24,9 @@ rows csv.emit csv.parse rows match? io.pp
 "" csv.parse csv.emit len io.pp
 
 # Malformed quoting is 'parse; invalid rows are 'type or 'shape.
-("\"unclosed" csv.parse) @attempt 'err at 'kind at io.pp
-("a\"b" csv.parse) @attempt 'err at 'kind at io.pp
-(5 csv.parse) @attempt 'err at 'kind at io.pp
-((5) 1 pack csv.emit) @attempt 'err at 'kind at io.pp
-(5 1 pack csv.emit) @attempt 'err at 'kind at io.pp
-([] 1 pack csv.emit) @attempt 'err at 'kind at io.pp
+[] ("\"unclosed" csv.parse) @attempt 'err at 'kind at io.pp
+[] ("a\"b" csv.parse) @attempt 'err at 'kind at io.pp
+[] (5 csv.parse) @attempt 'err at 'kind at io.pp
+[] ((5) 1 pack csv.emit) @attempt 'err at 'kind at io.pp
+[] (5 1 pack csv.emit) @attempt 'err at 'kind at io.pp
+[] ([] 1 pack csv.emit) @attempt 'err at 'kind at io.pp

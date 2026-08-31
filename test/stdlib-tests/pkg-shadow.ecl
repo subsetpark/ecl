@@ -1,4 +1,5 @@
 ### module stdlib.test.pkg-shadow
+[]
 (
  'stdlib.test.support ('equal) import
  'table ('where) import

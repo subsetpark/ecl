@@ -1067,11 +1067,11 @@ fn isLiteralValueForm(form_item: *const Form) bool {
         },
     };
 }
-/// `(body) 'name @defm`, or its seeded spelling `values (body) seed 'name
-/// @defm`: the registration shape that earns a navigation header, mirroring
-/// definition navigation. A computed name gets no header, exactly as a
-/// definition does. A phrase using ordinary `with` composition is not
-/// constructor metadata and therefore earns no registration header.
+/// `values (body) 'name @defm`: the fixed-arity registration shape that earns
+/// a navigation header, mirroring definition navigation. A computed name gets
+/// no header, exactly as a definition does. A phrase using ordinary `with`
+/// composition is not constructor metadata and therefore earns no registration
+/// header.
 /// A bare `@module` is an ordinary value-producing expression: it names
 /// nothing, so there is no header to write.
 fn moduleRegistrationName(sequence: Sequence, start: usize) ?[]const u8 {
@@ -1086,8 +1086,8 @@ fn moduleRegistrationInfo(sequence: Sequence, start: usize) ?ModuleRegistration 
     if (!sequence.definitions) return null;
     const head = sequence.parts[start].form;
     if (!isListForm(head) or isAnnotationCandidate(head)) return null;
-    // The header belongs to the whole phrase, so a seeded registration is
-    // claimed by its values list rather than by the body that follows it.
+    // The header belongs to the whole phrase, so a registration is claimed by
+    // its values list rather than by the body that follows it.
     var body_seen = false;
     var body = start;
     var named: ?[]const u8 = null;
@@ -1108,13 +1108,7 @@ fn moduleRegistrationInfo(sequence: Sequence, start: usize) ?ModuleRegistration 
                 .body = body,
                 .terminator = part_index,
             } else null;
-            if (std.mem.eql(u8, bytes, "seed")) {
-                // Recognition requires the explicit `values body seed` shape.
-                // Starting at the body itself sees no second list and therefore
-                // cannot claim the header that belongs to the values list.
-                if (!body_seen) return null;
-                continue;
-            }
+            if (!body_seen) return null;
             if (bytes.len < 2 or bytes[0] != '\'' or !lexer.validSymbol(bytes[1..])) return null;
             named = bytes[1..];
         },

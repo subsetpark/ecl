@@ -805,7 +805,7 @@ pub fn build(b: *std.Build) void {
             "tests.definition_test.",
             "tests.formatter_test.",
             "tests.module_value_test.",
-            "tests.unit_plan_test.",
+            "tests.unit_input_test.",
             "tests.stdlib_test.",
             "tests.archive_test.",
             "tests.random_test.",

@@ -7,6 +7,7 @@
 # caller quotation.
 #
 # `raise`, `fail`, and `assert` operate on errors directly and remain core words.
+[]
 (
  ### defp checked
  (result -- result : "Validate and return a result.")
@@ -71,7 +72,7 @@
   "For an ok result, run the quotation under @attempt on an isolated stack seeded with the success
    values. Return an err result unchanged.")
  (swap checked swap over 'ok dict.has?
-  (swap 'ok at swap seed @attempt)
+  (swap 'ok at swap @attempt)
   (pop)
   if)
  'and-then def
@@ -80,7 +81,7 @@
  (result quotation -- result :
   "Apply an isolated ( error -- error ) quotation to an err result. Return an ok result unchanged.")
  (swap checked swap over 'err dict.has?
-  (swap 'err at wrap swap seed @attempt
+  (swap 'err at wrap swap @attempt
    dup 'ok dict.has?
    ('ok at dup len 1 =
     'contract error.new "result.map-err expects ( error -- error )" error.with-message assert
@@ -97,7 +98,7 @@
   "For an err result, run the quotation under @attempt with the stored error. Return an ok result
    unchanged.")
  (swap checked swap over 'err dict.has?
-  (swap 'err at wrap swap seed @attempt)
+  (swap 'err at wrap swap @attempt)
   (pop)
   if)
  'recover def

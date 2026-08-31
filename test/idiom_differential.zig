@@ -422,7 +422,6 @@ fn expectValueEquivalent(left: ecl.value.Value, right: ecl.value.Value) !void {
         .word => |item| try std.testing.expectEqual(item, right.word),
         .task => |header| try std.testing.expectEqual(header, right.task),
         .module => |header| try std.testing.expectEqual(header, right.module),
-        .unit_plan => |header| try std.testing.expectEqual(header, right.unit_plan),
         .list => |header| {
             try std.testing.expectEqual(header.length(), right.list.length());
             for (0..@as(usize, @intCast(header.length()))) |index| {
@@ -546,7 +545,7 @@ test "idioms: capture shapes preserve generic behavior" {
 
 test "idioms: an ordinary replacement cannot inherit stdlib recognition" {
     const source =
-        "((pop pop \"ordinary\") 'format-valid defp " ++
+        "[] ((pop pop \"ordinary\") 'format-valid defp " ++
         "(format-valid) 'format def) 'str @defm " ++
         "[] \"\" str.format";
     var heap: SessionHeap = .init;

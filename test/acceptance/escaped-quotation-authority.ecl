@@ -25,7 +25,7 @@
  ### def peek
  (-- n)
  ((dup without) within) 'peek def
-) seed 'counter @defm
+) 'counter @defm
 
 ### module other
 [999]
@@ -37,7 +37,7 @@
  ### def peek
  (-- n)
  ((dup without) within) 'peek def
-) seed 'other @defm
+) 'other @defm
 
 ### Resolution is unaffected: a foreign private is still reached, because lookup
 ### rides the word's own scope rather than the running activation's chain.
@@ -45,7 +45,7 @@ counter.reach other.run io.pp
 
 ### `within` through the escaped quotation is 'domain, and the word is spelled by
 ### its unqualified local name -- no registration was invoked to qualify it with.
-(counter.leak other.run) @attempt 'err at dup 'kind at io.pp 'word at io.pp
+[] (counter.leak other.run) @attempt 'err at dup 'kind at io.pp 'word at io.pp
 
 ### And neither durable stack moved.
 counter.peek io.pp

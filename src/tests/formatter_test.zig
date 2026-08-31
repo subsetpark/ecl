@@ -58,19 +58,19 @@ fn expectParseEquivalent(source: []const u8) !void {
 }
 
 test "formatter keeps a fitting module registration tail together" {
-    const source = "((1) 'x def) 'stats @defm\n";
+    const source = "[] ((1) 'x def) 'stats @defm\n";
     try expectFormat(
         source,
-        "### module stats\n(\n ### def x\n (1) 'x def) 'stats @defm\n",
+        "### module stats\n[]\n(\n ### def x\n (1) 'x def) 'stats @defm\n",
     );
     try expectParseEquivalent(source);
 
     const long_name = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const long_source = try std.fmt.allocPrint(allocator, "((1) 'x def) '{s} @defm\n", .{long_name});
+    const long_source = try std.fmt.allocPrint(allocator, "[] ((1) 'x def) '{s} @defm\n", .{long_name});
     defer allocator.free(long_source);
     const long_expected = try std.fmt.allocPrint(
         allocator,
-        "### module {s}\n(\n ### def x\n (1) 'x def)\n'{s} @defm\n",
+        "### module {s}\n[]\n(\n ### def x\n (1) 'x def)\n'{s} @defm\n",
         .{ long_name, long_name },
     );
     defer allocator.free(long_expected);
@@ -202,14 +202,14 @@ test "formatter owns canonical definition section comments" {
     try expectParseEquivalent(source);
 
     const nested =
-        "(\n" ++
+        "[]\n(\n" ++
         "(-- n)\n(1)\n'visible def\n" ++
         "# note\n# def stale\n# hidden details\n" ++
         "(-- n)\n(2)\n'hidden defp\n" ++
         ") 'm @defm\n";
     try expectFormat(
         nested,
-        "### module m\n" ++
+        "### module m\n[]\n" ++
             "(\n" ++
             " ### def visible\n" ++
             " (-- n)\n (1)\n 'visible def\n # note\n\n" ++
@@ -220,13 +220,13 @@ test "formatter owns canonical definition section comments" {
     try expectParseEquivalent(nested);
 
     const nested_synthesized =
-        "(\n" ++
+        "[]\n(\n" ++
         "# attached inside the module\n" ++
         "(-- n)\n(3)\n'generated def\n" ++
         ") 'm @defm\n";
     try expectFormat(
         nested_synthesized,
-        "### module m\n" ++
+        "### module m\n[]\n" ++
             "(\n" ++
             " ### def generated\n" ++
             " # attached inside the module\n" ++
@@ -377,18 +377,18 @@ test "formatter handles the reader's maximum nesting without host recursion" {
 test "formatter synthesizes and normalizes module navigation headers" {
     // A registration earns a header on the same terms a definition does, and
     // the body keeps the definition headers it already earns inside.
-    const registration = "((1) 'x def) 'stats @defm\n";
-    const headed = "### module stats\n(\n ### def x\n (1) 'x def) 'stats @defm\n";
+    const registration = "[] ((1) 'x def) 'stats @defm\n";
+    const headed = "### module stats\n[]\n(\n ### def x\n (1) 'x def) 'stats @defm\n";
     try expectFormat(registration, headed);
     // A stale header is rewritten from the registration itself, never trusted.
     try expectFormat("### module wrong\n" ++ registration, headed);
     // The seeded phrase is one form, so its values list carries the header and
     // an attached comment stays below it exactly as it does for a definition.
-    const seeded = "# a seeded counter\n[[0]] ((1 +) 'tick def) seed 'counter @defm\n";
+    const seeded = "# a seeded counter\n[[0]] ((1 +) 'tick def) 'counter @defm\n";
     try expectFormat(
         seeded,
         "### module counter\n# a seeded counter\n[[0]]\n(\n ### def tick\n" ++
-            " (1 +) 'tick def) seed 'counter @defm\n",
+            " (1 +) 'tick def) 'counter @defm\n",
     );
     // `with` is ordinary composition rather than constructor metadata. Its
     // former seeded spelling therefore earns no module navigation header and
@@ -400,43 +400,43 @@ test "formatter synthesizes and normalizes module navigation headers" {
     );
     // A computed name gets no header, matching def's rule.
     try expectFormat(
-        "((1) 'x def) chosen-name @defm\n",
-        "(\n ### def x\n (1) 'x def) chosen-name @defm\n",
+        "[] ((1) 'x def) chosen-name @defm\n",
+        "[]\n(\n ### def x\n (1) 'x def) chosen-name @defm\n",
     );
     // Anonymous construction names nothing, so it is an ordinary expression
     // and earns no header — with or without a symbol beside it.
     try expectFormat(
-        "((1) 'x def) @module\n",
-        "(\n ### def x\n (1) 'x def) @module\n",
+        "[] ((1) 'x def) @module\n",
+        "[]\n(\n ### def x\n (1) 'x def) @module\n",
     );
     try expectFormat(
-        "((1) 'x def) @module 'stats register\n",
-        "(\n ### def x\n (1) 'x def) @module 'stats register\n",
+        "[] ((1) 'x def) @module 'stats register\n",
+        "[]\n(\n ### def x\n (1) 'x def) @module 'stats register\n",
     );
     // A header is synthesized and rewritten only where a registration is
     // recognized, so above an anonymous construction the text stays an
     // ordinary comment rather than becoming a navigation header the file has
     // no definition for.
     try expectFormat(
-        "### module stats\n((1) 'x def) @module\n",
-        "### module stats\n(\n ### def x\n (1) 'x def) @module\n",
+        "### module stats\n[] ((1) 'x def) @module\n",
+        "### module stats\n[]\n(\n ### def x\n (1) 'x def) @module\n",
     );
     try expectParseEquivalent(registration);
     try expectParseEquivalent(seeded);
     try expectParseEquivalent(composed);
-    try expectParseEquivalent("((1) 'x def) @module 'stats register\n");
+    try expectParseEquivalent("[] ((1) 'x def) @module 'stats register\n");
 }
 
 test "formatter: synthesizes and normalizes test navigation headers" {
-    const source = "((1) 'works test) 'suite @defm\n";
+    const source = "[] ((1) 'works test) 'suite @defm\n";
     const expected =
-        "### module suite\n" ++
+        "### module suite\n[]\n" ++
         "(\n" ++
         " ### test works\n" ++
         " (1) 'works test) 'suite @defm\n";
     try expectFormat(source, expected);
     try expectFormat(
-        "### module stale\n(\n ### test stale\n (1) 'works test) 'suite @defm\n",
+        "### module stale\n[]\n(\n ### test stale\n (1) 'works test) 'suite @defm\n",
         expected,
     );
     try expectFormat(
@@ -451,7 +451,7 @@ test "formatter: synthesizes and normalizes test navigation headers" {
         "### test stale\n\n### def value\n(1) 'value def\n",
     );
     try expectFormat(
-        "(# test stale\n (1) 'value def) 'ordinary @defm\n",
-        "### module ordinary\n(\n ### def value\n # test stale\n (1) 'value def) 'ordinary @defm\n",
+        "[] (# test stale\n (1) 'value def) 'ordinary @defm\n",
+        "### module ordinary\n[]\n(\n ### def value\n # test stale\n (1) 'value def) 'ordinary @defm\n",
     );
 }

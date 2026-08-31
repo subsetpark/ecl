@@ -234,8 +234,8 @@ test "module: an unknown long module prefix remains cancellable while it is inte
     // canceller then runs and requests cancellation before the target's third
     // turn.
     const source =
-        "1 pack (execute) seed @spawn dup 'target set " ++
-        "1 pack (cancel) seed @spawn await pop target await";
+        "1 pack (execute) @spawn dup 'target set " ++
+        "1 pack (cancel) @spawn await pop target await";
 
     var runtime = try session.Session.initWithConfig(allocator, &.{}, .cooperative);
     defer runtime.deinit();
@@ -303,8 +303,9 @@ test "module: long definition names stay within the cancellation bound" {
     const long_name = try intern.internNamespace(name_bytes);
     var name_runtime = try session.Session.init(allocator, &.{});
     defer name_runtime.deinit();
-    try name_runtime.pushOwned(.{ .symbol = intern.namespaceId(long_name) });
     try name_runtime.pushOwned(try list.fromValuesGeneric(allocator, &.{}));
+    try name_runtime.pushOwned(try list.fromValuesGeneric(allocator, &.{}));
+    try name_runtime.pushOwned(.{ .symbol = intern.namespaceId(long_name) });
     name_runtime.requestCancellation();
     try expectErrorContains(&name_runtime, "@defm", &.{"unit cancelled"});
     try std.testing.expect(name_runtime.lastPolls() >= 1);
@@ -326,7 +327,7 @@ test "reflection: words is sorted unique and private-safe" {
         },
     );
     defer runtime.deinit();
-    try expectOk(&runtime, "(1 'hidden setp 2 'zebra set 3 'alpha set) 'm @defm " ++
+    try expectOk(&runtime, "[] (1 'hidden setp 2 'zebra set 3 'alpha set) 'm @defm " ++
         "'m ('alpha 'zebra) import 4 'zebra set words");
     const rendered = output.written();
     try std.testing.expect(std.mem.indexOf(u8, rendered, "alpha") != null);
@@ -411,7 +412,7 @@ test "reflection remains cancellable across sorting and identifier output" {
     defer qualified_runtime.deinit();
     const module_source = try std.fmt.allocPrint(
         allocator,
-        "(1 '{s} set) 'poll-module @defm",
+        "[] (1 '{s} set) 'poll-module @defm",
         .{first_bytes},
     );
     defer allocator.free(module_source);
@@ -878,7 +879,7 @@ test "session: mutation settlement is independent of a busy sole worker" {
     {
         var runtime = try session.Session.initWithConfig(allocator, &.{}, .{ .worker_pool = 1 });
         defer runtime.deinit();
-        try expectOk(&runtime, "((1) () while) @spawn");
+        try expectOk(&runtime, "[] ((1) () while) @spawn");
         const name = try intern.internNamespace("busy-worker-retirement");
         const binding = try TestBinding.init(allocator);
         defer runtime.release(binding.body);

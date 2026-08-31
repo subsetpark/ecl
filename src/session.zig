@@ -385,7 +385,6 @@ pub const Session = enum(usize) {
         errdefer environment.deinit();
         var building = environment.beginCoreBuild();
         try prims.install(&building);
-        try building.installSeed("seed");
         var registry = try modules.Registry.init(host_owner.cleanup());
         errdefer registry.deinit();
         var test_authority = if (domain == .testing)

@@ -4,6 +4,7 @@
 # representation; raising and catching remain core control effects.
 # This module's own contract failures use schema literals so constructor
 # validation cannot recursively call the constructor it is validating.
+[]
 (
  ### defp text?
  (value -- bool : "Return 1 when a value is a string without loading the str module.")

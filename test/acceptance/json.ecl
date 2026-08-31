@@ -34,11 +34,11 @@ value json.emit corpus match? io.pp
 
 # Emission requires string or symbol dict keys, and rejects values with no
 # JSON form.
-({1 2} json.emit) @attempt 'err at 'kind at io.pp
-('foo json.emit) @attempt 'err at 'kind at io.pp
-("a" first json.emit) @attempt 'err at 'kind at io.pp
+[] ({1 2} json.emit) @attempt 'err at 'kind at io.pp
+[] ('foo json.emit) @attempt 'err at 'kind at io.pp
+[] ("a" first json.emit) @attempt 'err at 'kind at io.pp
 
 # Malformed and empty input are 'parse.
-("" json.parse) @attempt 'err at 'kind at io.pp
-("{\"a\":}" json.parse) @attempt 'err at 'kind at io.pp
-("1 2" json.parse) @attempt 'err at 'kind at io.pp
+[] ("" json.parse) @attempt 'err at 'kind at io.pp
+[] ("{\"a\":}" json.parse) @attempt 'err at 'kind at io.pp
+[] ("1 2" json.parse) @attempt 'err at 'kind at io.pp

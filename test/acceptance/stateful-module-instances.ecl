@@ -14,8 +14,8 @@
 'counter-body
 set
 
-[10] counter-body seed 'left @defm
-[100] counter-body seed 'right @defm
+[10] counter-body 'left @defm
+[100] counter-body 'right @defm
 
 ### Independent slots: separately constructed names own independent stacks.
 left.peek io.pp
@@ -28,11 +28,13 @@ right.peek io.pp
 ### Namespaced modules and dynamic dispatch use the same final-dot lookup.
 
 ### module core
+[]
 (
  ### def utils
  (0) 'utils def) 'core @defm
 
 ### module core.utils
+[]
 (
  ### def f
  (1) 'f def) 'core.utils @defm
@@ -53,7 +55,7 @@ core.utils io.pp
 
  ### def size
  ((dup len without) within) 'size def
-) seed 'pool @defm
+) 'pool @defm
 pool.size io.pp
 pool.checkout io.pp
 pool.size io.pp
@@ -61,10 +63,10 @@ pool.size io.pp
 pool.size io.pp
 
 ### Serialization: contending updates publish exactly the successful ones.
-[1] 50 take (pop (left.tick) @spawn) each await-all pop
+[1] 50 take (pop [] (left.tick) @spawn) each await-all pop
 left.peek io.pp
 
 ### The prohibited shapes are 'domain, and they publish nothing.
-(1 execute) @attempt 'err at 'kind at io.pp
-((1) within) @attempt 'err at 'kind at io.pp
-(without) @attempt 'err at 'kind at io.pp
+[] (1 execute) @attempt 'err at 'kind at io.pp
+[] ((1) within) @attempt 'err at 'kind at io.pp
+[] (without) @attempt 'err at 'kind at io.pp

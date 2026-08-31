@@ -1,5 +1,6 @@
 ### module pkg.mvs
 # Resolve reachable package manifests with minimal version selection.
+[]
 (
  ### defp node-member?
  (nodes node -- bool : "Return 1 when an exact [name version] node occurs in a list.")
@@ -36,7 +37,7 @@
  (package required-package version -- parts :
   "Validate a reachable version or raise with requirement provenance.")
  (|package required version|
-  version wrap (pkg.version.validate) seed @attempt
+  version wrap (pkg.version.validate) @attempt
   dup 'ok dict.has?
   ('ok at first)
   package required version 3 pack

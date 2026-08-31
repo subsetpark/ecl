@@ -118,7 +118,7 @@ test "which reports effect metadata without expanding documentation" {
 test "module annotations retain contracts documentation qualification and shadowing" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
-    try expectOk(&runtime, "(" ++
+    try expectOk(&runtime, "[] (" ++
         "(-- n : \"Public module word.\") (1) 'public def " ++
         "(-- n : \"Private module word.\") (2) 'private defp " ++
         "(-- text : \"Expose private documentation.\") ('private doc) 'private-doc def" ++
@@ -134,9 +134,9 @@ test "module annotations retain contracts documentation qualification and shadow
     try expectErrorContains(&runtime, "'m.private doc", "'kind 'undefined-word");
     // A documentation-only module word is one of the four legal forms, and
     // its documentation is what reflection reports.
-    try expectOk(&runtime, "((: \"Documentation only.\") (1) 'f def) 'docs @defm " ++
+    try expectOk(&runtime, "[] ((: \"Documentation only.\") (1) 'f def) 'docs @defm " ++
         "'docs.f doc \"Documentation only.\" match? pop");
-    try expectErrorContains(&runtime, "((a -- b c : \"An intentionally false contract.\") (dup +) 'f def) 'lies @defm 1 lies.f", "'kind 'contract");
+    try expectErrorContains(&runtime, "[] ((a -- b c : \"An intentionally false contract.\") (dup +) 'f def) 'lies @defm 1 lies.f", "'kind 'contract");
 }
 
 test "multiline documentation is normalized and see prints annotation and canonical body" {
@@ -206,7 +206,7 @@ test "unset and undef equivalently remove only the current scope binding" {
     // A removed name can be published again, and module construction applies
     // the same operation to public and private bindings.
     try expectOk(&runtime, "3 'again set 'again unset 5 'again set again");
-    try expectOk(&runtime, "(1 'public set 2 'private setp 'public unset 'private undef " ++
+    try expectOk(&runtime, "[] (1 'public set 2 'private setp 'public unset 'private undef " ++
         "(-- n) (7) 'kept def) 'unbound @defm unbound.kept");
     try expectErrorContains(&runtime, "unbound.public", "'kind 'undefined-word");
     try expectErrorContains(&runtime, "unbound.private", "'kind 'undefined-word");
@@ -232,7 +232,7 @@ test "nested and quoted markers remain body data" {
     try support.expectStack(
         "((-- :) '-- ':) 'inert def inert " ++
             "(-- :) 'markers set markers " ++
-            "((-- :) 'private-markers setp " ++
+            "[] ((-- :) 'private-markers setp " ++
             "(-- value : \"Return private marker data.\") (private-markers) 'get def) 'm @defm m.get",
         "(-- :) '-- ': (-- :) (-- :)",
     );
@@ -246,10 +246,10 @@ test "reserved namespace names reject every binding surface but remain readable"
         .{ .name = "value", .source = "1 ': set", .kind = "domain", .word = "def" },
         .{ .name = "local separator", .source = "1 (|--| --)", .kind = "parse" },
         .{ .name = "local colon", .source = "1 (|:| :)", .kind = "parse" },
-        .{ .name = "@defm", .source = "() '-- @defm", .kind = "domain", .word = "@defm" },
-        .{ .name = "alias", .source = "() 'm @defm '-- 'm alias", .kind = "domain", .word = "alias" },
-        .{ .name = "public export", .source = "((-- x) (1) '-- def) 'm @defm", .kind = "domain", .word = "def" },
-        .{ .name = "private value", .source = "(1 ': setp) 'm @defm", .kind = "domain", .word = "defp" },
+        .{ .name = "@defm", .source = "[] () '-- @defm", .kind = "domain", .word = "@defm" },
+        .{ .name = "alias", .source = "[] () 'm @defm '-- 'm alias", .kind = "domain", .word = "alias" },
+        .{ .name = "public export", .source = "[] ((-- x) (1) '-- def) 'm @defm", .kind = "domain", .word = "def" },
+        .{ .name = "private value", .source = "[] (1 ': setp) 'm @defm", .kind = "domain", .word = "defp" },
         .{ .name = "unset separator", .source = "'-- unset", .kind = "domain", .word = "unset" },
         .{ .name = "undef qualified", .source = "'m.x undef", .kind = "domain", .word = "undef" },
         .{ .name = "bare reserved word is readable", .source = "--", .kind = "undefined-word", .word = "--" },
@@ -424,7 +424,7 @@ test "definitions: top-level setp fails through defp's module-root check" {
             // inside a module body — the check is against the unit's current
             // scope, not the enclosing registration.
             .name = "setp inside an isolated child",
-            .source = "([1] (pop 1 'x setp) each) 'm @defm",
+            .source = "[] ([1] (pop 1 'x setp) each) 'm @defm",
             .kind = "domain",
             .word = "defp",
         },
@@ -448,16 +448,16 @@ test "definitions: def inside a word body writes the caller's scope" {
     // how the core words set and setp publish module constants, including
     // the privacy distinction. Module bodies resolve against the module's
     // own chain, so only core words (not session helpers) can be used here.
-    try support.expectStack("(7 'x set 8 'h setp (-- n) (h) 'peek def) 'm @defm m.x m.peek", "7 8");
+    try support.expectStack("[] (7 'x set 8 'h setp (-- n) (h) 'peek def) 'm @defm m.x m.peek", "7 8");
     try support.expectErrors(&.{
-        .{ .name = "private stays private", .source = "(8 'h setp) 'm @defm m.h", .kind = "undefined-word", .word = "m.h" },
+        .{ .name = "private stays private", .source = "[] (8 'h setp) 'm @defm m.h", .kind = "undefined-word", .word = "m.h" },
     });
 
     // Inside an isolated child unit it stays in that disposable scope.
     try support.expectErrors(&.{
         .{
             .name = "child scope is disposable",
-            .source = "( -- ) ((-- n) (1) 'scoped def) 'h def (h) @attempt pop scoped",
+            .source = "( -- ) ((-- n) (1) 'scoped def) 'h def [] (h) @attempt pop scoped",
             .kind = "undefined-word",
             .word = "scoped",
         },

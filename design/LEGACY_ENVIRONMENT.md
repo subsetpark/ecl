@@ -92,7 +92,7 @@ because an error dict in flight is not a result: it becomes one only when
 - `result.or-else` `( result fallback -- value )` — the success payload, or
   the fallback value.
 - `result.and-then` `( result quotation -- result )` — seeds the success
-  stack through `seed @attempt`; an existing failure is returned unchanged.
+  stack through the explicit values operand of `@attempt`; an existing failure is returned unchanged.
   There is no separate `result.map`: `@attempt`'s automatic `{'ok [...]}`
   wrapping collapses the functor map and the monadic bind into one word on
   the success side. The distinction survives only on the failure side, which

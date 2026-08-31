@@ -53,7 +53,7 @@ Recorded target-specific results and their current disposition live in
 - **Value = 16-byte two-word tagged cell** (a Zig tagged union). Word 0:
   payload (i64 / f64 / char codepoint / u32 symbol id / u32 word id / heap
   pointer). Word 1: tag. All atoms are inline; heap objects exist only for
-  lists, dicts, tasks, module images, and unit plans. NaN-boxing is impossible here: full-range int64
+  lists, dicts, tasks, and module images. NaN-boxing is impossible here: full-range int64
   with overflow-as-error cannot live in a 48-bit payload. The data stack
   is contiguous `Value` storage.
 - **Heap header (16 bytes):** `{ rc: AtomicU32, meta: u32, len: u64 }`;
@@ -411,33 +411,20 @@ Recorded target-specific results and their current disposition live in
   candidate is prepared and claimed once. A racing loser yields, retaining the
   absorption entry or completed re-scope header in an explicit pending stage,
   and retries on a later scheduler slice rather than looping locally.
-  The second half is decoded-input ownership. A constructor that received a
-  flattened quotation cannot say which part was the body, so the two halves
-  arrive separately: `heap.HeapKind.unit_plan` is a nominal kind whose private
-  `UnitPlanStorage` owns one reference to the seed list and one to the body,
-  and the typed slots make an invalid plan unrepresentable rather than asserted
-  against. Minting requires `heap.UnitPlanSeal`, an opaque authority issued by
-  one `HostOwner`: the raw constructor is private, so `root.heap` exposes no
-  allocator-plus-headers factory, and `seal` derives allocation from its issuing
-  root. `Env.init` takes that owner once and retains the derived seal privately;
-  the dedicated canonical installer therefore cannot correlate a foreign seal
-  with the Env's reclamation domain. The authority reaches execution only as the
-  payload of `env.Binding.seed`; the public generic core installer accepts a
-  quotation, not the full `Binding` union, and no ordinary handler holds the
-  seal. This is a compiler-enforced capability boundary, not a source-audit
-  call-site count. Its two owned values retire through the
-  ordinary release domain one bounded step each, exactly as a dict's payload
-  headers do, so live plan memory is bounded by simultaneously live plans rather
-  than by how many were ever made.
-  `Machine.popUnitInput` is the only tag decoder. It returns one non-struct
-  nominal owner whose empty-seed quotation representation allocates nothing.
-  Child launch borrows it until the new Unit retains its operands; fan-out moves
-  the same owner; boundary construction consumes its halves into the unchanged
-  body, root-bound rewrite, and seed materializer states. There is no public raw
-  body/seeds tuple or duplicate release helper. One `SeedMaterializer` owns the
-  retained seed list and next index for both construction boundaries and child
-  Units, reserves each granted slice before appending it, and is always serviced
-  before body code.
+  The second half is decoded-input ownership. Every constructor receives the
+  seed-values list and exact body list as separate operands; no flattened
+  quotation or tagged protocol value needs decoding. `Machine.popUnitInput`
+  validates and consumes those two lists in one place, then returns an internal
+  owner that correlates both references for transfer and cleanup. An empty seed
+  list is released immediately and represented internally without an
+  allocation. Child launch borrows the owner until the new Unit retains its
+  operands; fan-out moves the same owner; boundary construction consumes its
+  halves into the unchanged body, root-bound rewrite, and seed materializer
+  states. One `SeedMaterializer` owns the retained seed list and next index for
+  both construction boundaries and child Units, reserves each granted slice
+  before appending it, and is always serviced before body code. The exact body
+  is therefore known by operand position, while seed values remain outside the
+  lineage and re-scoping traversal.
   A candidate module image exists in both attribution branches, but
   `scopeIdForOwned` runs only after admission. Runtime-built bodies therefore
   execute with their existing word scopes and retain no attribution-only scope
@@ -553,9 +540,10 @@ Recorded target-specific results and their current disposition live in
   module then core. Nothing is snapshotted at construction, so there is no
   mutation epoch to validate, no resumable copy pass to bound, no second
   environment to retire, and no context to propagate through calls,
-  applications, or images. A construction receives what it needs through a
-  `seed` plan, and those values are inert data on the construction stack like
-  any other. Seeding is bounded work, not a reservation: seeds are appended in
+  applications, or images. A construction receives what it needs through its
+  explicit seed-values operand, and those values are inert data on the
+  construction stack like any other. Seeding is bounded work, not a
+  reservation: seeds are appended in
   fixed slices by the driver that opened the boundary — for a child Unit, by
   that Unit's own first slices, since the evaluator services a driver before the
   activation's code — and any prefix already on the stack is owned by the
@@ -1024,9 +1012,10 @@ Any change to this machinery must preserve:
   cursor. No result-sized loop survives.
 - **`@each` owns construction and joining without dictionary
   authority.** Its public primitive installs a `WorkDriver` that owns the
-  input sequence, quotation, and exact task buffer. Each slice publishes
-  the unchanged quotation with an explicit borrowed seed; initialization
-  retains that seed as the child's sole initial stack value. Completion
+  input sequence, shared seed list, quotation, and exact task buffer. Each
+  slice publishes the unchanged quotation with the iterated element deepest
+  and the explicit shared seeds above it. Initialization retains those inputs
+  before body execution. Completion
   transfers the task list into the evaluator's ordered join state — a
   private tagged machine representation, not a private binding; name
   resolution has no privileged core-access mode. `await-all` is the

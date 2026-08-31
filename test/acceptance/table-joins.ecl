@@ -12,7 +12,7 @@ customers io.pp
 
 # Both tables carry a `region` column, so a single-key join on `customer`
 # alone collides on a non-key name. That is 'domain, resolved with rename.
-(orders customers [["customer" "customer"]] inner-join) @attempt result.ok? io.pp
+[] (orders customers [["customer" "customer"]] inner-join) @attempt result.ok? io.pp
 orders customers {"region" "home"} rename 'renamed set
 
 # A duplicate right key expands many-to-many in left-major, right-minor order:
@@ -35,8 +35,9 @@ orders customers [["customer" "customer"] ["region" "region"]]
 {"tier" "unknown"} left-join-with "tier" column io.pp
 
 # The fill must name exactly the appended right columns: no fewer, no more.
-(orders customers [["customer" "customer"] ["region" "region"]] {} left-join-with)
+[] (orders customers [["customer" "customer"] ["region" "region"]] {} left-join-with)
 @attempt 'err at 'kind at io.pp
+[]
 (orders customers [["customer" "customer"] ["region" "region"]] {"tier" 'null "extra" 1}
  left-join-with)
 @attempt

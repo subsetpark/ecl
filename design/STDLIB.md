@@ -92,51 +92,49 @@ masks.
 `< not`.
 
 ### @attempt
-`( unit-input -- result )` — *Unit constructor.* Run a quotation, or a plan's
-body seeded by its values (an unseeded quotation's contract is `( -- ... )`;
-inputs via `seed`, `literal`, or `partial`) as a new unit on an isolated
-substack. Always pushes exactly one result:
+`( values quotation -- result )` — *Unit constructor.* Initialize an isolated
+substack from the explicit values list, then run the quotation as a new unit.
+Use `[]` for no initial values. Always pushes exactly one result:
 `{'ok (values)}` with the successful stack values as a list, or
 `{'err <error dict>}`.
 
 Observationally `@spawn await` — same result shape, same error protocol,
 same self-contained-quotation contract — differing only in scheduling.
 That identity is what makes the isolation non-arbitrary rather than an
-implementation accident. Seed it with `values (q) seed @attempt`. See
+implementation accident. The complete form is `values (q) @attempt`. See
 Errors.
 
 ### @defm
-`( unit-input 'module-name -- )` — *Unit constructor.* Exactly `@module` followed
+`( values body 'module-name -- )` — *Unit constructor.* Exactly `@module` followed
 by `register`: run the body on a fresh environment, then validate the
 canonical module path and register the resulting image under it. The body is
 evaluated before the name is validated, so the two spellings agree on every
 observable outcome.
 
 The name is last, matching `def` and `set`: the bound name sits nearest
-the binder. Seeded registration is therefore `values (body) seed 'name
-@defm`, with the name riding above the plan and no shuffle at all. See
+the binder. Registration is therefore `values (body) 'name @defm`. See
 Modules.
 
 ### @each
-`( sequence unit-input -- results )` — *Unit constructor*, one fresh unit
+`( sequence values quotation -- results )` — *Unit constructor*, one fresh unit
 per element, contract `( a -- b )` enforced per element. Concurrent
 `each`: ordered results, leftmost failure re-raised after cancelling and
-quiescing the remainder. Each child's stack is seeded with exactly its
-element; `list values (q) seed @each` adds shared values above it. See
+quiescing the remainder. Each child's stack starts with its element deepest;
+`list values (q) @each` adds the shared values above it. See
 Concurrency.
 
 ### @module
-`( unit-input -- module )` — *Unit constructor.* Run the body on a fresh
+`( values body -- module )` — *Unit constructor.* Run the body on a fresh
 environment and return the resulting anonymous immutable module image. No
 registry name is claimed and no name is validated. The body's final operand
-stack becomes the image's initial-state template. Seed it with `values (body)
-seed @module`. See [Modules](SPEC.md#modules).
+stack becomes the image's initial-state template. Use `values (body) @module`.
+See [Modules](SPEC.md#modules).
 
 ### @spawn
-`( unit-input -- task )` — *Unit constructor*, contract `( -- ... )`
-(inputs via `seed`/`partial`, never the ambient stack). Run a
-self-contained quotation concurrently in a child task. Seed it with
-`values (q) seed @spawn`. See [Concurrency](SPEC.md#concurrency).
+`( values quotation -- task )` — *Unit constructor.* Initialize a child stack
+from the explicit values list and run the quotation concurrently. Use `[]` for
+no initial values; the ambient stack never crosses the boundary. See
+[Concurrency](SPEC.md#concurrency).
 
 ### @test
 `( descriptor -- result )` — Test-Session-only protected invocation. Validate
@@ -716,13 +714,6 @@ print with their authored local names even though execution uses the lowered
 provenance fall back to their canonical value form. Native origins are
 displayed in native body descriptors.
 
-### seed
-`( values quotation -- unit-plan )` — Seal a values list and a construction
-body into one immutable unit plan, holding the two separately. Nothing is
-executed, stamped, copied, or parsed: a plan is exactly the pair it was given.
-The result is the seeded input every unit constructor accepts; `seed` itself
-constructs no unit. See [Seeding a unit](SPEC.md#seeding-a-unit).
-
 ### set
 `( annotation? value 'name -- )` — Bind a value as a constant word in the current
 environment. Reference applies the constant's body and pushes the exact
@@ -859,13 +850,6 @@ every alias targeting the slot in the same publish and is `'domain` when
 initiated from inside any state application, since a unit holds at most one
 slot's turn. See [Modules](SPEC.md#modules).
 
-### unseed
-`( unit-plan -- values quotation )` — Return the exact values list and
-construction body a unit plan holds. Whether a transformed body is still module
-text is answered the same way as for any other value: by whether the reader
-wrote it. `'type` for anything but a plan. See
-[Seeding a unit](SPEC.md#seeding-a-unit).
-
 ### unset
 `( name -- )` — Remove a direct binding from the current scope, or do nothing
 when that scope does not bind the name. An exact alias of `undef`; removing a
@@ -920,10 +904,10 @@ an inert input to a quotation, preserving order. Calling the result starts
 with the list's elements as separate stack values. Defined in ecl as
 `((literal) each) dip append raze`.
 
-This is ordinary quotation composition and constructs nothing. It is not how a
-unit is seeded: the flattened quotation it returns is runtime-built, so a
-constructor cannot tell the body from the values, and `@module` and `@defm`
-therefore give it no module attribution. Use `seed`.
+This is ordinary quotation composition and constructs nothing. It is not a
+unit's seed operand: the flattened quotation it returns is a runtime-built
+body, so `@module` and `@defm` give it no reader attribution. Pass initial
+values as the constructor's separate list operand.
 
 ### within
 `( quotation -- ... )` — Run the quotation against a
@@ -1441,8 +1425,8 @@ A success payload is always a list representing a stack.
 success whose value is the list of success stacks in input order.
 
 ### and-then
-`( result quotation -- result )` — Seed a success payload onto an isolated
-stack and run the quotation through `seed @attempt`; return an existing
+`( result quotation -- result )` — Use a success payload as the explicit values
+list for `@attempt`; return an existing
 failure unchanged.
 
 ### either

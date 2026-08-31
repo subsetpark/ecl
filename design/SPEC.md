@@ -39,14 +39,6 @@ semantics, and [`PERFORMANCE.md`](PERFORMANCE.md) states implementation and
 distribution guarantees. Neither document may alter language behavior defined
 here.
 
-A named operation is a **semantic primitive** when its canonical spelling
-creates or consumes a language capability, establishes a semantic boundary,
-accesses state unavailable to ordinary ECL composition, or defines a protocol
-on which other operations depend. Its complete behavior belongs here even if
-a particular interpreter implements it in ECL. Whether an operation is native
-code is not relevant to this classification. `STDLIB.md` remains the
-exhaustive vocabulary index for both semantic primitives and library words.
-
 The key words **must**, **must not**, **should**, **should not**, and **may**
 are normative. An implementation limit is a documented finite bound permitted
 by this specification. Unspecified behavior is behavior for which this
@@ -81,8 +73,6 @@ them. A later action that changes one of those existing entities takes that
 entity as a parameter.
 
 ## Language overview
-
-*This section is non-normative.*
 
 ECL is a homoiconic concatenative array language. A program is a sequence of
 values evaluated from left to right against an operand stack. Evaluating a
@@ -209,9 +199,9 @@ dedented, or margin-stripped form. The escapes are exactly `\\`, `\"`,
 only); any other escape is a parse error. A string is a rank-1 char
 vector, not a distinct type.
 
-The exact decimal form `<task:N>` (ASCII digits, no sign) is reserved as an
-unparseable runtime display marker wherever an atom may occur. The same bytes
-inside a string literal are ordinary character data.
+The exact form `<...>` is reserved as an unparseable runtime display marker
+wherever an atom may occur. The same bytes inside a string literal are ordinary
+character data.
 
 ### Forms
 
@@ -243,17 +233,17 @@ binder   :=  "|" name+ "|"           # names: distinct unqualified symbols
   unqualified symbols; the empty binder `(||)` is a parse error; the exact
   names `--` and `:` are parse errors in a binder. A local name is not
   visible inside a nested quotation within the binder body; referencing
-  one there is an error whose message suggests `partial`. The sugar does
-  not involve `set`; locals and environment assignment are unrelated
-  mechanisms.
+  one there is an error whose message identifies `partial` as construction of
+  a reusable capturing quotation. The sugar does not involve `set`; locals and
+  environment assignment are unrelated mechanisms.
 
 ## Values and external representations
 
 The value-kind universe is closed. Every ECL value has exactly one of these
-ten kinds:
+nine kinds:
 
 ```text
-int  float  char  symbol  word  list  dict  task  module  unit-plan
+int  float  char  symbol  word  list  dict  task  module
 ```
 
 A conforming implementation may choose any representation for these kinds but
@@ -267,7 +257,7 @@ Values are observationally immutable: a value's kind and content never
 change. Operations on lists and dictionaries produce values; storage reuse is
 not observable language behavior. `def` and `set` replace bindings rather than
 mutating values. A task is an immutable capability identifying an externally
-evolving task, and module images and unit plans are immutable. Storage
+evolving task, and module images are immutable. Storage
 specialization, copy-on-write strategies, and amortized bounds are
 implementation or performance concerns.
 
@@ -291,25 +281,18 @@ implementation or performance concerns.
   equal-length lists, and rank is depth, not an intrinsic property.
   Ragged data (a list of lists of unequal length) is legal. A string is a
   list of chars.
-- **dict** — an insertion-ordered map. Any value is a legal key
-  (immutability makes every value hashable); symbols are the idiom. Key
-  identity is whole-value `match?` identity. Insertion order is preserved
-  by storage, iteration, and printing, but ignored by equality: two dicts
-  with the same key–value pairs in different orders are equal.
+- **dict** — an insertion-ordered map. Any value is a legal key (immutability
+  makes every value hashable). Key identity is whole-value `match?` identity.
+  Insertion order is preserved by storage, iteration, and printing, but ignored
+  by equality: two dicts with the same key–value pairs in different orders are
+  equal.
 - **task** — a handle to a concurrent unit of work (see Concurrency).
   Tasks are runtime capabilities bound to their session: `match?` and
   hashing use handle identity, and a task prints as `<task:N>`, which the
-  reader rejects. A task value cannot be forged from text.
+  reader rejects.
 - **module** — an opaque immutable module image (see Modules). Module values
   compare and hash by image identity. A module prints diagnostically as
-  `<module>` and cannot be forged from text.
-- **unit-plan** — a sealed pair of seed values and a construction body,
-  built only by `seed` and consumed only by a unit constructor. Like a
-  task it is opaque: `match?` and hashing use plan identity, it prints as
-  `<unit-plan>`, which the reader rejects, and it cannot be called,
-  concatenated, indexed, serialized, or passed to a native word. It is an
-  ordinary first-class value for everything else — `dup`, `pop`, storage,
-  selection, and passage between words.
+  `<module>`, which the reader rejects.
 
 ### Readable representations and display
 
@@ -321,7 +304,7 @@ resolution metadata, and reader lineage need not be reproduced: they do not
 participate in structural matching.
 
 A **diagnostic display** is human-facing text without a read-back guarantee.
-The displays for tasks, modules, and unit plans are diagnostic displays, not
+The displays for tasks and modules are diagnostic displays, not
 external representations. An aggregate containing any such value is likewise
 not round-trippable. An operation may produce display text for every value,
 but any print/read guarantee applies only to the readable subset.
@@ -338,7 +321,7 @@ identity, and hashing must be congruent with it.
 - Numbers are equivalent by mathematical value across `int` and `float`:
   `2` and `2.0` are equivalent, as are `0.0` and `-0.0`. Mixed numeric
   comparison is exact; it does not first round an integer to binary64.
-- Tasks, modules, and unit plans are equivalent only when they have the same
+- Tasks and modules are equivalent only when they have the same
   capability identity.
 - Resolution context, reader lineage, and provenance do not participate in
   equivalence or hashing. Consequently, two matching quotations may behave
@@ -499,16 +482,13 @@ constant-continuation choices for iterative and tail-recursive shapes.
 
 #### The `@` spelling convention
 
-A leading `@` marks exactly the words that apply their quotation **in a
-fresh unit** — one unit per application for `@each`. There are five:
-`@attempt`, `@spawn`, `@each`, `@module`, and `@defm`. Unit construction is
-the whole of the class invariant; the marked word may or may not seed the
-unit it makes. Handed a bare quotation, `@attempt`, `@spawn`,
-`@module`, and `@defm` seed nothing, so that quotation must be
-self-contained: its effect is `( -- ... )` and inputs arrive through a plan's
-seeds, or via `literal`/`partial`/`compose`, or through environment names,
-never the ambient stack. `@each` seeds each child with exactly its element.
-Handed a plan, every one of the five seeds the unit it makes. `register` is not marked: it publishes an already-constructed
+A leading `@` marks those words that apply their quotation **in a fresh unit**
+— one unit per application for `@each`. There are five: `@attempt`, `@spawn`,
+`@each`, `@module`, and `@defm`. Each takes an explicit seed-values list and a
+body quotation as separate operands. An empty seed list is written `[]`; no
+constructor reads the ambient stack across its unit boundary. `@each` also
+places the iterated element deepest in each child stack, beneath the shared
+seed values. `register` is not marked: it publishes an already-constructed
 module value and takes no quotation.
 
 Words that are isolated but *not* marked, with their reasons:
@@ -516,15 +496,11 @@ Words that are isolated but *not* marked, with their reasons:
 - `each`, `zip-with`, `fold`, `scan`, `stencil`, `unfold`, `for` — they
   apply in the **same** unit, on a substack, and are implicitly fed their
   elements, windows, or states.
-- `infra` and `within` — they apply on an explicitly named *other* stack;
-  the substitution is the word's meaning, not a new unit.
+- `infra` and `within` — they apply on an explicitly named *other* stack.
 - `import`, `load`, `unmodule`, `register` — they construct, publish, or retire
   without taking a quotation.
 - `await`, `await-all`, `await-any`, `await-for`, `cancel`, `tasks` —
   they consume tasks rather than making them.
-- `with` — pure composition; it constructs nothing.
-- `seed`, `unseed` — a unit constructor's *input*, sealed and unsealed. A
-  plan is not a unit and running one is not a thing you can do.
 
 `@` is an ordinary word character, not reader-reserved: a user's `@retry`
 lexes and defines normally. The convention is enforced for first-party
@@ -546,49 +522,32 @@ spelling from user definitions.
 
 #### Seeding a unit
 
-There are no `-with` words. Every unit constructor takes one input, the
-tagged sum
+Every unit constructor receives its seed values and exact body separately:
 
-    UnitInput = unseeded quotation | unit-plan
+    values (q) @attempt
+    values (q) @spawn
+    list values (q) @each          ( element deepest in each child )
+    values (body) @module
+    values (body) 'name @defm
 
-A bare quotation seeds nothing, which is why the concise spellings are
-unchanged. A plan supplies seeds, and `seed` is the only word that builds
-one:
+Both `values` and the body must be lists. The new unit's operand stack is
+initialized from the values list in list order, and then the body runs. `[]`
+is the explicit no-seed operand. Seeds are values, not code contributed to the
+body: even when a seed is itself a reader-built quotation, none of its contents
+is part of the construction body's text. `@each` puts the iterated element
+deepest in each child stack, beneath the shared seeds.
 
-    values (q) seed @attempt
-    values (q) seed @spawn
-    list values (q) seed @each          ( element deepest in each child )
-    values (body) seed @module
-    values (body) seed 'name @defm
-
-`seed` is `( values quotation -- unit-plan )`. It consumes a values list
-and a quotation and returns an immutable opaque plan owning the two
-*separately*. It does not execute, stamp, copy, parse, or otherwise
-transform either input, and it is not itself a unit constructor: a plan
-is an input protocol, not a unit.
-
-`unseed` is `( unit-plan -- values quotation )`, the metaprogramming
-escape hatch: it returns the exact two values a plan holds, so a program
-may unpack a plan, transform either ordinary value, and seal the result
-into another plan.
-
-The new unit's operand stack is initialized from the seed list in list
-order, and then the body runs. Seeds are values, not code contributed to
-the body: even when a seed is itself a reader-built quotation, none of its
-contents is part of the construction body's text. `@each` puts the
-iterated element deepest in each child stack, beneath the plan's shared
-seeds.
-
-Keeping the two apart is what makes seeding compatible with module text.
-`with` also produces something a constructor accepts, because its result
-is an ordinary quotation, but the flattened value it returns can no longer
-say which part was the body — and `@module` and `@defm` must know. A
-`with`-seeded construction is therefore a runtime-built body and takes no
-module attribution; see Modules.
+Keeping the two operands separate is what makes seeding compatible with module
+text: `@module` and `@defm` know exactly which list is the construction body.
+Generic quotation-building operations such as `with` may still produce a body,
+but a runtime-built body has no reader lineage and therefore takes no module
+attribution; see Modules.
 
 Underflow against the floor of a constructed unit is reported specially:
-the message names the isolation and the seeding remedy, and the error
-dict carries `'isolation` naming the constructor. It is the one underflow
+the message names the isolation and the constructor's values operand, and the
+error dict carries `'isolation` naming the constructor. It does not prescribe
+`partial` or `with`: those construct a different, reusable quotation rather
+than pass arguments through this boundary. It is the one underflow
 whose cause is invisible — the values the caller meant to pass are on
 screen and out of reach.
 
@@ -601,9 +560,9 @@ searches locally and then follows that parent chain. The complete scope shapes
 are:
 
 ```text
-core          (no parent)
-session   → core
-child     → enclosing scope
+core           (no parent)
+session      → core
+child        → enclosing scope
 module image → core
 ```
 
@@ -611,8 +570,7 @@ Session-authored code may therefore shadow core definitions. A child unit may
 define names visible to code authored or dynamically resolved in that child.
 A module image sees its own public and private bindings followed by core and
 never sees the invoking session. Core and prelude definitions resolve in core.
-Parentage does not change after scope creation. Qualified registry resolution
-is a separate mechanism, not an edge in a scope chain.
+Parentage does not change after scope creation.
 
 Resolution scope and module home are independent parts of an activation.
 Resolution scope determines where a word's spelling is looked up. Module home
@@ -637,7 +595,7 @@ representations but expose the same binding model.
   published body is `((value) first)`. Reference applies that body and
   pushes exactly the captured value, quotations included — the capture is
   inert, so nothing in it executes or resolves. `v 'name set` is therefore
-  observationally `v literal 'name def`, exactly: the sugar synthesizes no
+  observationally `v literal 'name def`: the sugar synthesizes no
   annotation of its own, while an annotation beneath `v` is preserved for
   `def` to consume. `which` reports the resulting public `def`, while `see`
   prints its literal-capture body, preceded by the annotation when one is
@@ -693,8 +651,7 @@ four forms as top-level `def`: no annotation, effect only, documentation
 only, or both. A top-level effect is reflective metadata only; a module
 word's declared effect is a live contract, checked dynamically against the
 observed effect when application crosses a module boundary (violation:
-`'contract`). An omitted module effect means there is no such check, not
-an inferred one, and reflection preserves whether each portion is absent.
+`'contract`). An omitted module effect means there is no such check.
 This source-language relaxation does not weaken the native ABI, whose
 `Call` effect and documentation remain mandatory; the shipped prelude
 keeps its stronger repository policy requiring meaningful documentation.
@@ -738,20 +695,6 @@ locals, module names, aliases, exports, or native entries. Binding attempts are 
 binder use is a parse error. Longer names containing the same punctuation
 remain legal.
 
-### Metaprogramming
-
-There is no macro system. Runtime quotation construction — `literal`,
-`compose`, `cons`, and the list words — plus `def` is the metaprogramming
-system: a quotation you wrote or `parse` produced is a list, list surgery
-builds a new one, `def` rebinds. `parse` turns source text into a quotation.
-Parse-time transforms are capped at the binder desugaring and the literal
-readers. The material is code you hold, never code a binding holds: no
-operation extracts a published body, so metaprogramming cannot reach inside
-an existing definition. Runtime list construction grants neither a
-quotation-wide scope nor reader lineage. Existing word occurrences retain
-their individual scope annotations; a newly created unannotated word resolves
-in the activation that invokes it.
-
 ## Pervasion and conformability
 
 Scalar arithmetic and comparison words are *pervasive*: they recurse
@@ -770,90 +713,78 @@ descent:
 - Chars participate ordinally: `char int +` is a char, `char char -` is an
   int, `char char +` is an error; comparison is by codepoint.
 
-There is a unified-value dividend: an all-numeric quotation *is* a vector,
-so `(1 2 3) 10 *` is simply `[10 20 30]`.
-
 Selection operations use the same recursive shape rule on their selector
 rather than on the collection value. For a list collection, `at`, `put`, and
 `update` descend a nested list selector to integer leaves. `at` preserves the
 selector shape, `put` conforms a replacement value to it with atom extension,
 and `update` applies its unary quotation at each leaf in left-to-right order.
+
 For a dictionary, the selector is always one atomic whole-value key, even when
 that key is a list. The `dict.at` and `dict.update` adapters supply the distinct
 operation of traversing an outer list of such whole keys.
 
 ## Numbers
 
-- Arithmetic on int64 that overflows is an `'overflow` error — no
-  wrapping, no promotion to float or bignum. Scalar and array arithmetic
-  behave identically.
-- `/` is float division. `div` is checked integer division. Division by
-  zero is `'domain`.
-- `inf` and `-inf` are values and propagate through arithmetic IEEE-style
-  when an *operand* is non-finite. Producing a non-finite result from
-  finite inputs is `'overflow` (e.g. `0 log`, float overflow). Any
-  operation whose IEEE result would be NaN is `'domain` (e.g. `-1 log`,
-  `inf -inf +`). NaN therefore never exists.
+- Arithmetic on int64 that overflows is an `'overflow` error — no wrapping, no
+  promotion to float or bignum. Scalar and array arithmetic behave identically.
+- `/` is float division. `div` is checked integer division. Division by zero is
+  `'domain`.
+- `inf` and `-inf` are values and propagate through arithmetic IEEE-style when
+  an *operand* is non-finite. Producing a non-finite result from finite inputs
+  is `'overflow` (e.g. `0 log`, float overflow). Any operation whose IEEE
+  result would be NaN is `'domain` (e.g. `-1 log`, `inf -inf +`). NaN therefore
+  never exists.
 - `floor`, `ceil`, and `round` return int64 (`'overflow` when the result
-  exceeds the range): their results are indices and mask material, and
-  int-ness keeps integer pipelines integer. `pow` returns float.
+  exceeds the range): their results are indices and mask material, and int-ness
+  keeps integer pipelines integer. `pow` returns float.
 - `str` output for numbers round-trips (see Printing); float equality is
   numeric everywhere (see Equality).
-- The bitwise words `band`, `bor`, `bxor`, `bnot`, `bsl`, and `bsr` are
-  *pattern* words, not arithmetic: they read an int as its 64-bit
-  two's-complement pattern and are int-only, so a float or a char is
-  `'type` rather than a coercion. Because a pattern has no magnitude,
-  they never overflow — `bsl` truncates bits off the top where `*` would
-  raise. Their `count` operand is the one place they can fail on a value:
-  a shift outside `0..63` is `'domain`. They pervade and align dicts like
-  every other pervasive word.
+- The bitwise words `band`, `bor`, `bxor`, `bnot`, `bsl`, and `bsr` read an int
+  as its 64-bit two's-complement pattern and are int-only, so a float or a char
+  is `'type` rather than a coercion. They never overflow — `bsl` truncates bits
+  off the top where `*` would raise. Their `count` operand is the one place
+  they can fail on a value: a shift outside `0..63` is `'domain`. They pervade
+  and align dicts like every other pervasive word.
 
 ## Randomness
 
-Randomness is *counter-based*, not stateful: a generator state is a
-two-element list `[key counter]`, and every draw is a pure function of
-it. `rand.int`, `rand.ints`, and `rand.float` each take a state and
-return the advanced state alongside the result, so a program's draws are
-reproducible by construction — running it twice from the same key
-produces the same values, and nothing hidden accumulates between units,
-tasks, or module loads.
+Randomness is *counter-based*: a generator state is a two-element list `[key
+counter]`, and every draw is a pure function of it. `rand.int`, `rand.ints`,
+and `rand.float` each take a state and return the advanced state alongside the
+result, so a program's draws are reproducible by construction — running it
+twice from the same key produces the same values, and nothing hidden
+accumulates between units, tasks, or module loads.
 
-- The mixer is SplitMix64 applied to `key + counter * gamma`. Each draw
-  addresses its own counter position rather than stepping a register, so
-  `rand.ints` produces the same list whatever order its elements are
-  materialized in, and two states that share a key but differ in counter
-  do not correlate.
 - `rand.entropy` is the only word that reads the host, and the only
   nondeterministic word in the language. A program is reproducible unless
   it explicitly seeds from `rand.entropy`; there is no ambient default seed
   drawn at startup, and no word silently reaches a CSPRNG.
 - The `rng` module carries a state so ordinary code need not thread one
-  by hand (see The standard library). It is threaded state, not global
-  state: the module's own binding holds it, `rng.seed` replaces it, and a
-  fresh process starts from the same fixed key.
+  by hand (see The standard library).
 
 ## Chars and strings
 
 A string is a rank-1 char vector; there is no separate string type. `len`,
-`at`, `reverse`, `each`, and every other list word operate on codepoints.
-UTF-8 exists only at IO boundaries: source files and `io.prin`/`io.pp` encode
-and decode UTF-8, and invalid UTF-8 on input is an error. Char semantics
-are codepoint semantics, stated honestly: grapheme segmentation,
-normalization, non-ASCII case mapping, and locale collation are not
-provided, so composed and decomposed `"café"` have lengths 4 and 5.
-Symbols are interned at parse; strings are plain uninterned vectors.
+`at`, `reverse`, `each`, and every other list word operate on codepoints. UTF-8
+exists only at IO boundaries: source files and `io.prin`/`io.pp` encode and
+decode UTF-8, and invalid UTF-8 on input is an error. Char semantics are
+codepoint semantics: grapheme segmentation, normalization, non-ASCII case
+mapping, and locale collation are not provided, so composed and decomposed
+`"café"` have lengths 4 and 5. Symbols are interned at parse; strings are plain
+uninterned vectors.
 
 ## Modules
 
-A module is a value; a *registration* is a name that owns one. A per-session
-registry maps symbols to registrations; files are transport.
+A module is a value; a *registration* is the assignment of a module to a public
+name. A per-session registry maps symbols to registrations; files are
+transport.
 
 Construction and publication are separate operations, so a module can exist
 anonymously, be passed as data, and be registered more than once.
 
 ### Operations and values
 
-- `@module` is `( body -- module )`. It runs the body on a fresh, isolated
+- `@module` is `( values body -- module )`. It runs the body on a fresh, isolated
   environment and returns an **anonymous immutable module image**: its frozen
   environment, its definitions, and the body's final operand stack as an
   *initial-state template*. It claims no registry name. The body runs
@@ -862,18 +793,17 @@ anonymously, be passed as data, and be registered more than once.
   and publishes the image under it. Registration is an upsert: a missing name
   creates its registration, and an existing name installs the new image while
   keeping the durable state that registration already owns.
-- `@defm` is `( body 'module-name -- )` and is exactly `@module` followed by
+- `@defm` is `( values body 'module-name -- )` and is exactly `@module` followed by
   `register`, including failure and effect order. The body is evaluated before
   the name is validated or publication is attempted. If construction fails,
   registration is not attempted. If construction succeeds and registration
   fails, completed external construction effects survive under ordinary unit
   semantics. `@defm` introduces no transaction spanning both operations. It
   is the source spelling for a module definition.
-- `values (body) seed @module` and `values (body) seed 'name @defm` supply
-  seeds without disturbing the same isolated construction. The values form the
-  body unit's initial stack, in list order; the body may consume, reorder, or
-  extend them. The plan keeps the seeds and the body apart, which is what lets
-  attribution below name the body exactly.
+- `values (body) @module` and `values (body) 'name @defm` initialize the same
+  isolated construction. The values form the body unit's initial stack, in list
+  order; the body may consume, reorder, or extend them. The separate operands
+  let attribution below name the body exactly.
 - **A module value is an opaque capability.** Its `type` is `'module`; it
   prints as the unreadable marker `<module>`; `match?` compares **image
   identity**, so one construction duplicated matches itself and two
@@ -1327,144 +1257,62 @@ initially ∀ *transaction*: `Transaction` · ¬**transaction-created?** *transa
   child see each other. There is no case where a binding resolves against a
   chain it was not defined in. So a module exporting a word named like a core one shadows it
   for that module's own callers, never inside the prelude words the module
-  calls: `table.where` does not become the `where` that `filter` is written
-  against. The same holds for the session, which is what makes shadowing
-  predictable rather than retroactive:
+  calls: `table.where` will shadow bare references to `where` inside of
+  `table`, but it will not be invoked by calls to `filter` (which includes
+  `where` in its own spelling), even inside of the `table` module. The same
+  holds for the session, which is what makes shadowing predictable:
 
       1 wrap                                  -- [1], reaching core's `cons`
       (pop pop 42) 'cons def   1 wrap          -- still [1]
       (pop pop 42) 'cons def   1 [] cons       -- 42, the session's own `cons`
       (pop pop 42) 'cons def   (() cons) 'wrap def   1 wrap    -- 42
 
-  A session `def` shadows a name *for session code*. It does not rewrite what
-  an already-evaluated definition means, because that definition's references
-  resolve where they were written. Adopting new behavior inside a prelude word
-  is redefining that word: the replacement is a session definition, so it
-  resolves in the session and shadows the prelude one for session callers.
-  Reaching further in is deliberately not available — changing what `filter`'s
-  own `where` means requires redefining `filter`.
-  Late binding is unaffected. The lookup still happens at call time; what is
-  fixed is which chain it happens in. **The sealing extends to quotation
-  literals, and it has to.** A quotation literal written inside a body is
-  sealed the way the body's own references are: it resolves in the scope its
-  text was written in, whoever ends up applying it. `all?` is
-  `(|l q| l q each 1 (and) fold)` and `over` is `(swap dup (swap) dip)`, so a
+  A session `def` shadows a name *for session code*. Adopting new behavior
+  inside a prelude word is redefining that word: the replacement is a session
+  definition, so it resolves in the session and shadows the prelude one for
+  session callers. Late binding is unaffected. The lookup still happens at call
+  time; what is fixed is which chain it happens in. A quotation literal written
+  inside a body is sealed the way the body's own references are: it resolves in
+  the scope its text was written in, whoever ends up applying it. `all?` is
+  `(|l q| l q each 1 (and) fold)` and `over` is `(swap dup (swap) dip)`, but a
   session `and` or `swap` leaves both alone:
 
       (pop pop 42) 'and def   [1 1] (1 =) all?      -- 1
       (pop pop 99) 'swap def  1 2 over              -- 1 2 1
 
-  A quotation the session wrote is still session code, so a combinator does
-  see the definitions of whoever *wrote* the quotation it was handed:
-  `(pop pop 42) '+ def [1 2 3] 0 (+) fold` is 42. The two cases separate
-  because each word occurrence carries its own scope rather than inheriting
-  one from the quotation or activation. `all?` hands `each` its caller's `q`,
-  whose words were written in the session, and hands `fold` its own `(and)`,
-  whose word was written in the prelude; each resolves where its occurrence
-  was written from the same activation. Splicing or rearranging quotations
-  preserves the annotations on their existing word occurrences. Only a word
-  created without reader context is unannotated and resolves dynamically in
-  its invoking activation.
-  A word written in a module body names *that image*. Reloading publishes a new
-  image under the name, so a fresh call through the name runs the new code —
-  which is the whole of what redefinition needs to do. Code that already
-  exists is not re-pointed: a running body keeps the image it entered, and a
-  quotation that escaped one goes on meaning what it meant. This is Forth's
-  rule rather than Erlang's, and deliberately: Erlang's version coexistence
-  exists to upgrade a live stateful system in place without losing state, and
-  ECL has no such need. Redefining at a prompt happens between units, with
-  nothing on the stack, so the cases that separate the two designs do not arise
-  in the workflow the feature is for.
-  Applying a word whose scoped image is no longer available is `'domain`, never
-  a fallback to core, the invoking chain, or a newer registered generation.
-  **Which text is the module's is decided by what the reader produced.** A
-  construction body's words name the image, and so do the words of everything
-  the reader built inside it, whatever container they sit in — a quotation, a
-  list literal, a dict literal. A value assembled at run time is not the
-  module's text: its parts already name the scopes they were written in, and
-  `@module` and `@defm` leave them alone. That is what makes a quotation
-  handed in as a parameter keep the caller's scope, since `with` captures each
-  seed with `literal` and a capture is built at run time.
-- **An undefined-word failure says which chain it searched.** Its `'data`
-  carries `'scope` alongside `'name`: `'session` for the activation's own
-  lexical chain over core, `'module` for a module image's definitions over
-  core, `'core` for a primitive or prelude definition, whose chain is core
-  alone, `'qualified` for a dotted reference resolved through the registry,
-  and `'module-value` for a missing public export of a module reached as a
-  value — which is not a scope miss at all. A session name being invisible to
-  a module and to a prelude word are different failures, and the field is what
-  distinguishes them.
-- **`invoke` is the only operation that runs a module value's code.**
-  `module 'name invoke` calls one public export of an image reached as a value
+  Splicing or rearranging quotations preserves the
+  annotations on their existing word occurrences. Only a word created without
+  reader context is unannotated and resolves dynamically in its invoking
+  activation. Re-registering a module publishes a new image under the module
+  name, so a fresh call through the name runs the new code. Already-executed
+  code is not re-pointed. Applying a word whose scoped image is no longer
+  available is `'domain`. Seed values passed to unit constructors are not part
+  of the construction body. Runtime-built captures retain their existing
+  word scopes.
+- `module 'name invoke` calls one public export of an image reached as a value
   rather than through a registered name. A module value is otherwise an
-  ordinary opaque value: `register` consumes one and `type` reports `'module`,
-  and those are the only other things that accept it. It is the same dispatch a qualified call performs — the
-  home is the image, so a public reaches its own privates, and lookup is
-  public-only, so a private is as absent as a missing name. What it cannot do
-  is open state: an image owns no slot, so `within` inside a handle-called word
-  is `'domain` exactly as it is in a construction root. **A nameless module is
-  stateless.** A module that needs state returns it — a `new` word handing back
-  a value the caller threads through later calls — rather than encapsulating
-  it; durable state and `within` remain the province of a registration, which
-  is what a canonical name buys.
-  The observation words take a *symbol*, so they remain registration-driven:
-  `which`, `see`, and `doc` look a name up, and a name is what a
-  registration is. A value has none to offer them.
-  A nameless image has no canonical spelling either, so a failure inside a
-  handle-called word traces its bare local name — `['missing 'boom]` where a
-  registered call would say `['missing 'named.boom]`. Borrowing the caller's
-  parameter name would read better and claim more than is true.
-  Two images exporting the same name may be held and invoked at once, which a
-  registry keyed by name cannot represent.
-  A stateless module is formally a record of functions, so it is worth saying
-  why it is not a dict of quotations. A dict would lose both halves of what a
-  module carries: its privates, which are absent from its public face but
-  reachable from it, and the home its bodies resolve against. A dict of
-  quotations hands out the code and keeps neither: the quotations would be
-  values a caller can index, reorder, and re-`def`, and a private would be
-  reachable by dissecting a public. The module kind exists to carry that
-  environment, and `invoke` is the operation that enters it.
-- **Capture is parameterization, and parameterization is the only capture.**
-  A construction receives everything it needs on its stack, seeded by a plan
-  — `values (body) seed @module`, `values (body) seed 'name @defm` — and
-  nothing else crosses the boundary.
-  There is no ambient environment between a module's own definitions and core,
-  and no construction-time snapshot of one.
-  To depend on a session value, pass the value. To depend on behavior, pass a
-  quotation you write at the call site — `[(2 *)] ('scale def …) seed 'm @defm`
-  — which is the functor discipline: the caller writes the structure it hands
-  in. To share a *word* between a session and a module, or between two
-  modules, make it a module both parties call. No operation lifts a published
-  body out of the home it resolves against, so a word is never the currency; a
-  quotation you wrote, or a module you both call, is. Both are ordinary values
-  on an ordinary stack, which is why this needs no construction-specific
-  mechanism and no new vocabulary.
-  Every consequence follows from having nothing to stale. A later top-level
-  definition cannot change an existing image, because the image never referred
-  to the session. Nested construction needs no special rule, because it
-  receives its parameters the same way. Registrations and aliases of one image
-  share its definitions, because that is all there is to share. Module text the
-  loader executes — an embedded standard module, a file found on `ECL_PATH`, a
-  locked package entry — behaves identically to text typed at the session,
-  because neither can see a session, so load order is not observable.
-  A whole module may be a parameter, which is how a substitutable dependency
-  is expressed: pass the image and call it with `invoke`. That keeps the choice
-  of implementation with the caller instead of making it a fact about the
-  global registry, which is what makes a test double local and two versions of
-  one package able to coexist.
-  A quotation parameter carries the scope it was written in, so its own
-  references are the caller's rather than the module's. With `10 'k set` in
-  scope, `[(k *)] ('scale def ( -- n ) (4 scale) 'go def) seed 'm @defm` makes
-  `m.scale` multiply by ten, and the module needs no parameter for `k`. That is
-  what a functor argument should do: the caller supplies the behavior, and the
-  behavior means what it meant where it was written.
-  Purity comes from the unit-constructor boundary, not from transitivity. The
-  *construction body* is not an ordinary application — `@module` and `@defm`
-  run it in the image's own chain whatever scope its text was written in, so a
-  bare `k` inside the body is undefined however recently the session defined
-  one. The module still cannot reach the session, and everything still arrives
-  as a parameter. A label decides one thing only: where a handed-in
-  quotation's own words resolve once the module applies it.
+  ordinary opaque value: `register` consumes one and `type` reports `'module`.
+  It is the same dispatch a qualified call performs — the home is the image, so
+  a public reaches its own privates, and lookup is public-only, so a private is
+  as absent as a missing name. On the other hand, it can't access module
+  registration state: module stacks are associated with module names, *not*
+  with anonymous module values. `within` inside a handle-called word is
+  therefore `'domain` exactly as it is in a construction root.
+- Module constructors are parameterized by the seed operand — `values (body)
+  @module`, `values (body) 'name @defm` — and nothing else crosses the
+  boundary. There is no ambient environment between a module's own definitions
+  and core.
+  Modules can be parameterized with anaonymous module handles, enabling a
+  simple kind of dependency injection.
+  A quotation parameter carries the scope it was written in, so it preserves
+  its references on injection into a module. Given:
+
+      10 'k set
+      [(k *)] (
+               'scale def
+               ( -- n ) (4 scale) 'go def) 'm @defm
+      m.go                                          -- 40
+
 - **A word resolves in the scope its text was written in.** The scope is
   carried by the word itself, not by the quotation containing it, so it
   survives every operation that moves code around: `cat` and `compose` splice
@@ -1472,50 +1320,28 @@ initially ∀ *transaction*: `Transaction` · ¬**transaction-created?** *transa
   written in. A module word may hand `(private-helper)` to `each` and the
   private still resolves, because the literal was written inside the module;
   a module word may accept `(bump)` from its caller and that `bump` resolves in
-  the caller, because the caller wrote it; and both hold when the stdlib splices
-  the caller's quotation into a plan's seeds. Neither depends on which
-  activation launched the combinator. A word with no written-in scope — one a
-  host built, or one appearing in an error trace — resolves where it is invoked.
-  Reading is what assigns a scope, so `load` and `parse` both give the words
-  they produce the scope of the unit that asked for them: `"foo bar" parse call`
-  means what typing `(foo bar)` there would mean.
-  There is no exception for the `@` words. An `@attempt` child's parent is the
-  enclosing scope, so a word written outside still resolves through the chain
-  while one defined inside the child is found first. `@module` and `@defm`
-  differ only because an image's scope has no parent: they stamp the
-  construction body with the image's scope, which is why a bare session name
-  inside a construction body is undefined while a quotation handed in as a
-  *seed* — a separate value, never inside the body — keeps the caller's.
-  What a word *defines* — `def`, `set`, `setp` — still lands in the invoking
-  context, which is how `setp` inside a module body binds a module private.
-  `def`-ing a quotation therefore makes the *binding* local without re-siting
-  the quotation's *references*: they stay where the text was written.
-  Resolution moved; definition placement did not.
-- **Module text is exactly what the reader wrote inside the designated body.**
-  Two independent facts decide attribution, and both are required. First, the
-  constructor's input identifies the exact body value, separately from its
-  seeds — which is what `seed` preserves and `with` destroys. Second, the body
-  must carry reader-text lineage. Every word occurrence in the reader-built
-  subtree rooted at such a body is copied with the new image's scope, descending
-  through nested quotations, list literals, and dict literals alike.
-  Lineage survives only the interpreter's scope-only construction rewrite. That
-  rewrite copies, and the copy is the same reader text with different scopes on
-  its words, so a later constructor may re-stamp that exact rewritten body to
-  its own image — which is what makes a construction nested inside a
-  construction body resolve against its own image rather than the enclosing one.
-  Ordinary runtime reconstruction loses the lineage. `cat`, `compose`, `cons`,
-  `append`, `raze`, slicing, reversal, `with`, and every other generic
-  reconstruction produce values with none, so a body built that way is stamped
-  nowhere and is not descended into: it is not module text merely because its
-  parts came from the reader, and reader lineage carried by nested fragments
-  grants no admission through a root that has none. So `7 'k set ((k) 'geta)
-  (def) cat 'm @defm` leaves `k` naming the session, and `m.geta` is `7`;
-  wrapping that same runtime-built body in a plan changes only its initial
-  stack, never its attribution.
-  Seeds are never traversed or stamped, whatever they contain. Nothing about
-  archive-wide membership, a coinciding source range, or the operation history
-  of a runtime list is a substitute for lineage, and no operation grants lineage
-  to a value chosen by its caller.
+  the caller, because the caller wrote it; and both hold when the stdlib passes
+  the caller's quotation as ordinary data.
+- **Only a reader-authored body becomes module text.** The constructor identifies
+  the body by its operand position; the values operand never participates. The
+  body must also carry reader lineage: it came either directly from the reader
+  or from construction's own scope-only copy of reader text. Construction then
+  copies that body and gives every word in its reader-built subtree the new
+  image's scope, including words nested in quotation, list, and dict literals.
+  The copy retains its lineage, so a construction nested inside it can scope its
+  own body to its own image.
+
+  Generic runtime list operations do not create lineage. A body produced by
+  `cat`, `compose`, `cons`, `append`, `raze`, slicing, reversal, `with`, or a
+  similar operation keeps the scopes already carried by its parts, but module
+  construction does not traverse or re-scope it. Reader-authored fragments do
+  not make their runtime-built container reader-authored. For example,
+  `7 'k set [] ((k) 'geta) (def) cat 'm @defm` builds the module body at
+  runtime. The `k` inside `(k)` keeps its session scope, so `m.geta` resolves
+  the session's `k` and returns `7`.
+
+  Seed values only initialize the construction stack. They are never traversed
+  or re-scoped, and they cannot affect whether the body is module text.
 - **`within` is the explicit stack boundary.** `within` runs a quotation
   against the current registration's durable stack rather than the ambient
   operand stack. It requires a
@@ -1524,9 +1350,7 @@ initially ∀ *transaction*: `Transaction` · ¬**transaction-created?** *transa
   raises `'domain` if it reaches `within`. The operation never infers a slot
   from an image or targets some caller's slot. Homeless helpers and same-image
   calls preserve an existing registered context; dispatch into another image
-  replaces it according to the ordinary invocation rules. There is no
-  module-value-targeted form. Inputs cross the boundary only when the invoking
-  code captures them explicitly with `partial` or `with`. Semantically,
+  replaces it according to the ordinary invocation rules. Semantically,
   `within` is the module-state counterpart of `infra`: `infra` names a supplied
   list as a temporary stack, while `within` selects the active registration's
   durable stack.

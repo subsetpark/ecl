@@ -5139,16 +5139,16 @@ pub const Machine = struct {
                 .attempt => .{
                     .constructor = "@attempt",
                     .advice = "the substack is isolated from the caller's stack — " ++
-                        "seed it with `values (q) seed @attempt` or capture with `partial`",
+                        "pass initial values in the constructor's values operand: `values (q) @attempt`",
                 },
                 .module => |construction| if (construction.registration == null) .{
                     .constructor = "@module",
                     .advice = "the substack is isolated from the caller's stack — " ++
-                        "seed it with `values (body) seed @module` or capture with `partial`",
+                        "pass initial values in the constructor's values operand: `values (body) @module`",
                 } else .{
                     .constructor = "@defm",
                     .advice = "the substack is isolated from the caller's stack — " ++
-                        "seed it with `values (body) seed 'name @defm` or capture with `partial`",
+                        "pass initial values in the constructor's values operand: `values (body) 'name @defm`",
                 },
                 .state => null,
             };
@@ -5157,13 +5157,13 @@ pub const Machine = struct {
         return switch (self.unit.constructor) {
             .spawn => .{
                 .constructor = "@spawn",
-                .advice = "the child unit's stack is isolated from the caller's — " ++
-                    "seed it with `values (q) seed @spawn` or capture with `partial`",
+                .advice = "the child unit's stack is isolated from the caller's stack — " ++
+                    "pass initial values in the constructor's values operand: `values (q) @spawn`",
             },
             .each => .{
                 .constructor = "@each",
-                .advice = "the child unit's stack holds only its element — " ++
-                    "seed it with `list values (q) seed @each` or capture with `partial`",
+                .advice = "the child unit's stack is isolated from the caller's stack — " ++
+                    "pass shared initial values in the constructor's values operand: `list values (q) @each`",
             },
             .@"test" => .{
                 .constructor = "@test",
@@ -5206,31 +5206,22 @@ pub const Machine = struct {
             }
         }.accepts);
     }
-    /// Pops the input every unit constructor takes: a bare quotation, which
-    /// seeds nothing, or a unit plan, which names its seeds and its body
-    /// separately. Nothing else is accepted, and the type error is the one a
-    /// constructor has always reported for a non-quotation.
-    ///
-    /// A plan's two fields are borrows, so each is retained here: the returned
-    /// input owns both halves independently of the plan it came from, which is
-    /// what lets the plan itself be released before the body starts running.
+    /// Pops the two inputs every unit constructor takes: a seed-values list
+    /// followed by the construction body. The fixed arity keeps the exact body
+    /// separate without a wrapper value. The returned owner takes both stack
+    /// references directly; an empty seed list is released here and represented
+    /// internally by null so an unseeded construction needs no materializer.
     pub fn popUnitInput(self: *Machine) MachineError!OwnedUnitInput {
-        var item = try self.popValue();
-        defer item.deinit();
-        switch (item.borrow()) {
-            .list => |quotation| {
-                _ = item.take();
-                return OwnedUnitInput.init(null, quotation);
-            },
-            .unit_plan => |plan| {
-                const seeds = heap.unitPlanSeeds(plan);
-                const body = heap.unitPlanBody(plan);
-                heap.incRef(seeds);
-                heap.incRef(body);
-                return OwnedUnitInput.init(seeds, body);
-            },
-            else => return self.typeError("a quotation/list or unit plan"),
-        }
+        try self.require(2);
+        var body = try self.popQuotation();
+        errdefer body.deinit();
+        var seeds = try self.popList();
+        defer seeds.deinit();
+        const seed_header = if (seeds.borrow().list.length() == 0)
+            null
+        else
+            seeds.take().list;
+        return OwnedUnitInput.init(seed_header, body.take().list);
     }
     pub fn popString(self: *Machine) MachineError!heap.OwnedValue {
         return self.popChecked("a string", struct {
@@ -5966,40 +5957,6 @@ pub const Machine = struct {
             .validation = .init(binding),
         });
     }
-    /// The whole of `seed`: seal the two values into one immutable plan.
-    ///
-    /// It lives here rather than behind a handler value because `seed` is a
-    /// binding kind, not a primitive anything can be bound to. The two halves
-    /// come off this unit's own stack and the binding's opaque seal derives the
-    /// plan allocation from the Env's host owner, so no allocator crosses this
-    /// call boundary.
-    ///
-    /// The two stay separate for the whole life of the plan: nothing here
-    /// executes, stamps, copies, parses, or otherwise transforms either input,
-    /// because the only thing a plan is for is letting a unit constructor tell
-    /// a body from the values handed to it.
-    fn sealUnitPlan(
-        self: *Machine,
-        seal: *const heap.UnitPlanSeal,
-    ) MachineError!void {
-        try self.require(2);
-        var body = try self.popQuotation();
-        errdefer body.deinit();
-        var values = try self.popList();
-        errdefer values.deinit();
-        // `popList` and `popQuotation` established both tags, so the factory's
-        // list parameters are satisfied without a second check and without
-        // projecting a tag anything here has not established.
-        const plan = try seal.seal(
-            values.borrow().list,
-            body.borrow().list,
-        );
-        // The plan owns both references now; the local handles hand theirs over
-        // rather than releasing them.
-        _ = values.take();
-        _ = body.take();
-        try self.pushOwned(plan);
-    }
     /// Resolves a word in the scope its text was written in, which is carried
     /// by the occurrence rather than by the quotation containing it. A word
     /// with no written-in scope — anything not produced by the reader, and any
@@ -6381,7 +6338,7 @@ pub const Machine = struct {
     /// and what runs inside them, never in how the boundary is opened. The
     /// caller keeps the frame-count check, because what it has to release on
     /// refusal differs; past that point failure releases the body here. A
-    /// plan's seeds are never handed in: they belong to the driver that
+    /// seed values are never handed in: they belong to the driver that
     /// materializes them after the boundary is open.
     fn openBoundary(
         self: *Machine,
@@ -6466,10 +6423,10 @@ pub const BorrowedUnitInput = struct {
     }
 };
 
-/// The decoded input every unit constructor takes. A raw quotation owns only
-/// `body`; a plan independently owns both list references. This remains the
-/// one nominal owner through validation, child borrowing, fan-out transfer,
-/// and boundary handoff. Moving it empties the source, and `deinit` is the sole
+/// The decoded input every unit constructor takes. It remains the one nominal
+/// owner through validation, child borrowing, fan-out transfer, and boundary
+/// handoff. Empty seeds use the null representation; otherwise it owns both
+/// list references. Moving it empties the source, and `deinit` is the sole
 /// destructor for an input that has not split into later boundary states.
 pub const OwnedUnitInput = enum(u128) {
     consumed = 0,
@@ -6540,10 +6497,9 @@ pub const InitialStack = union(enum) {
     empty,
     /// `@each`'s per-child element and nothing else.
     borrowed_element: Value,
-    /// A plan's seed values, in list order.
+    /// Explicit seed values, in list order.
     borrowed_seeds: *Header,
-    /// `@each` over a plan: the element deepest, the plan's shared seeds
-    /// above it.
+    /// `@each` with shared seeds: the element deepest and the seeds above it.
     borrowed_element_and_seeds: struct { element: Value, seeds: *Header },
 };
 
@@ -6557,7 +6513,7 @@ pub fn initialize(unit: *Unit, code: *Header, initial_stack: InitialStack) error
         .borrowed_seeds => |items| .{ null, items },
         .borrowed_element_and_seeds => |both| .{ both.element, both.seeds },
     };
-    // One element is O(1) and goes on now, deepest. A plan's seeds are
+    // One element is O(1) and goes on now, deepest. Explicit seeds are
     // user-sized, so the Unit is instead handed a driver that materializes them
     // in bounded slices: the evaluator services a driver before the
     // activation's code, so the body still starts on a fully seeded stack.
@@ -6986,7 +6942,7 @@ fn poll(self: *Machine) MachineError!void {
 fn dispatch(self: *Machine, form: Value) MachineError!void {
     const word = switch (form) {
         .word => |reference| reference,
-        .int, .float, .char, .symbol, .list, .dict, .task, .module, .unit_plan => return self.pushBorrowed(form),
+        .int, .float, .char, .symbol, .list, .dict, .task, .module => return self.pushBorrowed(form),
     };
     try self.executeWord(word);
 }
@@ -7363,7 +7319,7 @@ fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
         // may. One that hands its work to a scheduler driver has to: the check
         // below reads the stack the instant the primitive returns, which is
         // before any deferred output exists.
-        .builtin, .seed => if (cross_home_effect == null)
+        .builtin => if (cross_home_effect == null)
             null
         else
             try prepareEffectCheck(self, cross_home_effect, resolved.trace_word),
@@ -7410,20 +7366,6 @@ fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
                 resolved.takeBorrowPin(),
                 resolved.takeBorrowedCell(),
             );
-        },
-        .seed => |seal| {
-            self.sealUnitPlan(seal) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.Ecl => {
-                    const failure_value = self.takePrimitiveFailure() orelse
-                        EclErr.init(.domain, "builtin primitive returned error.Ecl without a failure payload");
-                    return self.installPrimitiveFailure(failure_value);
-                },
-            };
-            if (self.takePrimitiveFailure()) |failure_value| {
-                return self.installPrimitiveFailure(failure_value);
-            }
-            if (check) |*effect_check| try finishEffectCheck(self, effect_check);
         },
         .builtin => |primitive| {
             primitive(self) catch |err| switch (err) {
@@ -8964,7 +8906,7 @@ fn advanceRegistration(
     return .yielded;
 }
 
-/// The one bounded owner/progress state for plan seed materialization. Both an
+/// The one bounded owner/progress state for explicit seed materialization. Both an
 /// in-machine construction boundary and a fresh child Unit embed this exact
 /// state machine. Capacity for a granted slice is secured before its first
 /// append, so allocation failure adds none of that slice; an earlier prefix is
@@ -9026,7 +8968,7 @@ const ConstructionTarget = union(enum) {
 };
 
 /// The user-sized half of opening a unit: re-scoping a witnessed construction
-/// body, and materializing a plan's seeds onto the stack it seeds.
+/// body, and materializing explicit seed values onto the construction stack.
 ///
 /// Both are proportional to what the program wrote, so neither may run to
 /// completion inside one scheduler step. Everything the boundary will need is
@@ -9144,7 +9086,7 @@ const ConstructionDriver = struct {
 };
 
 /// The child half of the same rule: a fresh Unit's own first slices put its
-/// plan's seeds on its stack, so a spawn never copies a user-sized seed list
+/// input's seeds on its stack, so a spawn never copies a user-sized seed list
 /// inside the step that created it — and `@each` cannot multiply that copy by
 /// the number of children it starts per turn.
 const ChildSeedDriver = struct {

@@ -132,7 +132,7 @@ const PackageScratch = struct {
         );
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "lockprobe-1.0.0-" ++ lock_probe_hash ++ "/lockprobe.ecl",
-            .data = "((42) 'answer def) 'lockprobe @defm\n",
+            .data = "[] ((42) 'answer def) 'lockprobe @defm\n",
         });
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "lockprobe-1.0.0-" ++ lock_probe_hash ++ "/ecl.pkg",
@@ -155,7 +155,7 @@ const PackageScratch = struct {
         try self.directory.dir.createDir(std.testing.io, key, .default_dir);
         try self.directory.dir.writeFile(std.testing.io, .{
             .sub_path = key ++ "/a.ecl",
-            .data = "(() 'noop def) 'a @defm\n",
+            .data = "[] (() 'noop def) 'a @defm\n",
         });
         try self.directory.dir.writeFile(std.testing.io, .{
             .sub_path = key ++ "/ecl.pkg",
@@ -583,16 +583,16 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         "(3 4 +) 'oom-sum def oom-sum pop " ++
             "1 2 stack pop pop pop " ++
             "1 'oom-unset set 'oom-unset unset 2 'oom-unset set 'oom-unset undef " ++
-            "(1 0 /) @attempt pop (5 6 +) @attempt pop " ++
-            "({'kind 'custom 'data {'detail 7}} raise) @attempt pop " ++
+            "[] (1 0 /) @attempt pop [] (5 6 +) @attempt pop " ++
+            "[] ({'kind 'custom 'data {'detail 7}} raise) @attempt pop " ++
             "[3 4] (+) with call pop 2 3 (+) (*) (-) tri2 pop pop pop " ++
-            "[5 6] (+) seed @attempt pop " ++
-            "[7 8] (+) seed @spawn await pop " ++
-            "[1] (2) seed unseed seed @attempt pop " ++
+            "[5 6] (+) @attempt pop " ++
+            "[7 8] (+) @spawn await pop " ++
+            "[1] (2) @attempt pop " ++
             // This admitted reader body reaches ConstructionDriver allocation
             // after the re-scope cursor owns its source. Exhausting that exact
             // allocation proves cleanup remains with only one movable owner.
-            "[9 10] (+ 'x set) seed 'oom-seeded @defm oom-seeded.x pop",
+            "[9 10] (+ 'x set) 'oom-seeded @defm oom-seeded.x pop",
     );
     try runOk(
         &runtime,
@@ -621,18 +621,18 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     try runOk(
         &runtime,
         "oom-concurrency.ecl",
-        "([1 2 3] str) @spawn await pop " ++
-            "(1) @spawn dup pair await-any pop pop " ++
-            "(1) @spawn dup await pop 0 await-for pop " ++
-            "(1) @spawn 1000000 await-for pop " ++
-            "((1) () while) @spawn dup cancel await pop " ++
-            "[(1) (missing) (2 3)] (@spawn) each await-all pop " ++
-            "[1 2 3] (dup *) @each pop",
+        "[] ([1 2 3] str) @spawn await pop " ++
+            "[] (1) @spawn dup pair await-any pop pop " ++
+            "[] (1) @spawn dup await pop 0 await-for pop " ++
+            "[] (1) @spawn 1000000 await-for pop " ++
+            "[] ((1) () while) @spawn dup cancel await pop " ++
+            "[(1) (missing) (2 3)] ([] swap @spawn) each await-all pop " ++
+            "[1 2 3] [] (dup *) @each pop",
     );
     try runOk(
         &runtime,
         "oom-reflection.ecl",
-        "(( -- n ) (1) 'f def) 'reflection-module @defm " ++
+        "[] (( -- n ) (1) 'f def) 'reflection-module @defm " ++
             "'reflection-module ('f) import words " ++
             "'f which 'reflection-module.f see",
     );
@@ -644,40 +644,40 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "7 'sample 'increment qualify execute pop " ++
             "[1 2] sample.sum-list pop {'a 1 'b 2} sample.sum-dict pop " ++
             "'answer 42 sample.pair-dict pop sample.builder-budget pop " ++
-            "sample.cooperative pop (9 sample.draft-fail) @attempt pop " ++
-            "(9 sample.yield-forever) @spawn dup cancel await pop",
+            "sample.cooperative pop [] (9 sample.draft-fail) @attempt pop " ++
+            "[] (9 sample.yield-forever) @spawn dup cancel await pop",
     );
     try runOk(
         &runtime,
         "oom-module.ecl",
         "*file* pop " ++
-            "(1 'x setp ( -- n ) (x) 'get def) 'allocation-module @defm " ++
+            "[] (1 'x setp ( -- n ) (x) 'get def) 'allocation-module @defm " ++
             "'allocation-module ('get) import get pop 'short 'allocation-module alias short.get pop " ++
-            "(2 'x setp ( -- n ) (x) 'get def) 'allocation-module @defm get pop " ++
-            "(((dup) 'f def) 'bad @defm) @attempt pop " ++
+            "[] (2 'x setp ( -- n ) (x) 'get def) 'allocation-module @defm get pop " ++
+            "[] ([] ((dup) 'f def) 'bad @defm) @attempt pop " ++
             // A non-empty construction stack is captured as durable slot
             // state, so capture, commit, and re-registration discard each
             // have an allocation-failure path of their own.
-            "[11 12 13] (1 +) seed 'oom-stateful @defm " ++
-            "[21 22] (2 +) seed 'oom-stateful @defm " ++
+            "[11 12 13] (1 +) 'oom-stateful @defm " ++
+            "[21 22] (2 +) 'oom-stateful @defm " ++
             // Transactional updates allocate on the draft, the replacement
             // snapshot, and the caller window; the failing half must leave
             // the durable stack and the caller stack untouched.
             "[0] (((1 + dup without) within) 'bump def " ++
             "((dup without missing) within) 'boom def " ++
-            "((dup without) within) 'peek def) seed 'oom-within @defm " ++
-            "oom-within.bump pop (oom-within.boom) @attempt pop " ++
+            "((dup without) within) 'peek def) 'oom-within @defm " ++
+            "oom-within.bump pop [] (oom-within.boom) @attempt pop " ++
             // The failing half must publish nothing, so the durable stack
             // still holds exactly what the successful half left.
             "oom-within.peek 1 match? pop " ++
             // Namespaced registration plus branded qualification and ordinary
             // late-bound execution each have Session-only allocation paths.
-            "((33) 'dynamic def) 'oom.namespaced @defm " ++
+            "[] ((33) 'dynamic def) 'oom.namespaced @defm " ++
             "'oom.namespaced 'dynamic qualify execute pop " ++
             "3 (dup) first execute pop pop " ++
             // Removal closes, quiesces, and retires through the same bounded
             // work, so its allocation-failure paths belong in the sweep too.
-            "[1 2] (((dup without) within) 'peek def) seed 'oom-removed @defm " ++
+            "[1 2] (((dup without) within) 'peek def) 'oom-removed @defm " ++
             "oom-removed.peek pop 'oom-removed unmodule",
     );
     try runOk(
@@ -686,8 +686,8 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         // The value wrapper, the registration record, the copied state
         // template, and the barrier publication each have their own ordinals.
         // One construction registered twice and one reload reach all four.
-        "(1) @module dup 'oom-left register 'oom-right register " ++
-            "(2) @module 'oom-left register (3) @module pop",
+        "[] (1) @module dup 'oom-left register 'oom-right register " ++
+            "[] (2) @module 'oom-left register [] (3) @module pop",
     );
     var completion = try runtime.completionCandidates("allocation-");
     defer completion.deinit();
@@ -947,9 +947,9 @@ fn stdlibSessionAllocationProbe(
                     "\"probe\\ntext\" \"{s}{c}probe.txt\" io.spit " ++
                     "\"{s}{c}probe.txt\" io.slurp pop " ++
                     "\"{s}{c}probe.txt\" io.lines pop " ++
-                    "\"{s}{c}absent.txt\" (io.slurp) partial @attempt pop " ++
+                    "\"{s}{c}absent.txt\" (io.slurp) partial [] swap @attempt pop " ++
                     "\"ECL_OOM_PROBE\" getenv pop " ++
-                    "(\"ECL_OOM_ABSENT\" getenv) @attempt pop (io.stdin) @attempt pop",
+                    "[] (\"ECL_OOM_ABSENT\" getenv) @attempt pop [] (io.stdin) @attempt pop",
                 .{
                     scratch_path, std.fs.path.sep,
                     scratch_path, std.fs.path.sep,
@@ -963,8 +963,8 @@ fn stdlibSessionAllocationProbe(
         .http => try runOk(
             &runtime,
             "oom-http.ecl",
-            "(\"http://127.0.0.1:1/x\" {} http.get) @attempt pop " ++
-                "(\"http://127.0.0.1:1/x\" {} http.get-bytes) @attempt pop",
+            "[] (\"http://127.0.0.1:1/x\" {} http.get) @attempt pop " ++
+                "[] (\"http://127.0.0.1:1/x\" {} http.get-bytes) @attempt pop",
         ),
         .package_sync_module => try runOk(
             &runtime,
@@ -1023,7 +1023,7 @@ fn testSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     try runOk(
         &runtime,
         "oom-tests.ecl",
-        "((1) 'one test) 'oom.tests @defm tests first @test pop",
+        "[] ((1) 'one test) 'oom.tests @defm tests first @test pop",
     );
 }
 
@@ -1081,7 +1081,7 @@ test "oom: core: full-session surfaces propagate every allocation failure" {
     );
 }
 
-const admitted_construction_source = "() 'oom-driver @defm";
+const admitted_construction_source = "[] () 'oom-driver @defm";
 
 fn admittedConstructionAllocationCount() !usize {
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
@@ -1126,7 +1126,7 @@ test "oom: core: admitted construction driver allocation failure transfers its c
     }
 }
 
-const batch_import_setup = "(1 'a set 2 'b set) 'oom-import @defm";
+const batch_import_setup = "[] (1 'a set 2 'b set) 'oom-import @defm";
 const batch_import_source = "'oom-import ('a 'b) import";
 
 fn batchImportAllocationCount() !usize {

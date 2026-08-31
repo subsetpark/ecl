@@ -48,7 +48,7 @@ test "native runtime: loaded artifacts behave identically at one and eight worke
 }
 
 test "native runtime: spawned units inherit native loading context" {
-    const source = "(41 sample.increment) @spawn await";
+    const source = "[] (41 sample.increment) @spawn await";
     var one = try run(source, "1", false);
     defer one.deinit();
     var eight = try run(source, "8", false);
@@ -70,7 +70,7 @@ test "native runtime: aggregates larger than one quantum complete" {
 }
 
 test "native runtime: inadmissible values and duplicate keys are language errors" {
-    var task_input = try run("() @spawn sample.forward", "1", false);
+    var task_input = try run("[] () @spawn sample.forward", "1", false);
     defer task_input.deinit();
     try task_input.expect(.{
         .exit_code = 1,
@@ -80,7 +80,7 @@ test "native runtime: inadmissible values and duplicate keys are language errors
 
     // A module image is a runtime capability on the same terms as a task: the
     // ABI has no representation for it, in scalar or in view position.
-    var module_input = try run("(1) @module sample.forward", "1", false);
+    var module_input = try run("[] (1) @module sample.forward", "1", false);
     defer module_input.deinit();
     try module_input.expect(.{
         .exit_code = 1,
@@ -88,7 +88,7 @@ test "native runtime: inadmissible values and duplicate keys are language errors
         .stderr_contains = &.{ "'kind 'type", "native words cannot observe module capabilities" },
     });
 
-    var module_element = try run("((1) @module) sample.sum-list", "1", false);
+    var module_element = try run("([] (1) @module) sample.sum-list", "1", false);
     defer module_element.deinit();
     try module_element.expect(.{
         .exit_code = 1,
@@ -148,7 +148,7 @@ test "native runtime: source precedence and path-root order are observable" {
     defer same_root.cleanup();
     try same_root.dir.writeFile(std.testing.io, .{
         .sub_path = "sample.ecl",
-        .data = "(100 'increment set) 'sample @defm",
+        .data = "[] (100 'increment set) 'sample @defm",
     });
     try std.Io.Dir.copyFile(
         std.Io.Dir.cwd(),
@@ -182,7 +182,7 @@ test "native runtime: source precedence and path-root order are observable" {
     defer source_root.cleanup();
     try source_root.dir.writeFile(std.testing.io, .{
         .sub_path = "sample.ecl",
-        .data = "(100 'increment set) 'sample @defm",
+        .data = "[] (100 'increment set) 'sample @defm",
     });
     const native_root_path = try native_root.dir.realPathFileAlloc(
         std.testing.io,
