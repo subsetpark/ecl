@@ -326,6 +326,8 @@ native modules.
   semantics, errors, and modules.
 - [`design/STDLIB.md`](design/STDLIB.md) is the exhaustive reference for the
   shipped core, prelude, and standard-library vocabulary.
+- [`design/ENVIRONMENT.md`](design/ENVIRONMENT.md) defines module loading,
+  packages, command-line behavior, and source formatting.
 - [`design/ECL_STYLE.md`](design/ECL_STYLE.md) is the authoring guide for
   first-party ECL source.
 - [`design/INTERPRETER.md`](design/INTERPRETER.md) describes the runtime

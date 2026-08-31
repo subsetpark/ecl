@@ -1149,9 +1149,8 @@ left to right.
 raises `'domain`. An allowed exit first cancels and quiesces the root task
 scope, then terminates the process with the supplied status.
 
-## Legacy environment material
+## Standard environment
 
-Material for the standard environment, host, packages, CLI, and formatter is
-preserved in [`LEGACY_ENVIRONMENT.md`](LEGACY_ENVIRONMENT.md). It is outside
-the scope of this language specification and is not assembled into this
-report.
+[`ENVIRONMENT.md`](ENVIRONMENT.md) defines the shipped module transports,
+host-backed library contracts, project and package system, command-line
+interface, and source formatter.

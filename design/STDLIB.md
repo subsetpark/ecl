@@ -1228,8 +1228,8 @@ Return normalized regular-file paths in archive order. Unsafe, linked,
 special, duplicate, malformed, or over-limit members are `'domain`; invalid
 byte items are `'domain`; wrong container kinds are `'type`; unavailable host
 I/O and filesystem or destination conflicts are `'io`. Failure never publishes
-a partial destination. See the language specification's
-[`archive` contract](SPEC.md#archive) for the complete
+a partial destination. See the environment's
+[`archive` contract](ENVIRONMENT.md#byte-lists-and-archives) for the complete
 format, limit, containment, and publication contract.
 
 ## csv
@@ -1658,6 +1658,14 @@ Host-backed package archive and publication capabilities. Every traversal,
 write, rollback, and output materialization advances through bounded scheduler
 work; no word exposes a host handle or generic filesystem mutation.
 
+### gc
+`( retained-store-keys -- removed-count )` — Derive the shared cache root from
+the captured environment, preserve the supplied canonical keys and every
+unknown cache node, and remove other canonical real-directory entries through
+bounded detach/walk/delete phases. A non-list, non-string key, or malformed
+store key is `'type` or `'domain`; unavailable cache selection and filesystem
+failures are `'io`.
+
 ### inspect
 `( bytes package-name -- manifest-text )` — Validate one tgz's hostile-input
 and source-only archive envelope without creating a filesystem destination.
@@ -1675,27 +1683,23 @@ destination.
 directory. A symlink, non-directory, inaccessible path, or unavailable host
 I/O is `'io`.
 
-### verify
-`( destination package-name hash -- )` — Stream the installed package's
-reserved archive seal and require its SHA-256 to equal `hash`. Failures name
-the package and carry the destination path for host-I/O errors.
-
 ### read-seal
 `( destination package-name hash -- bytes )` — Perform the same streamed seal
 verification as `verify`, then return its exact octets as an ordinary integer
 byte list. It never reads a caller-selected child filename.
 
+### verify
+`( destination package-name hash -- )` — Stream the installed package's
+reserved archive seal and require its SHA-256 to equal `hash`. Failures name
+the package and carry the destination path for host-I/O errors.
+
 ### write-lock
 `( text path -- )` — Atomically replace a regular lock file through a unique
 sibling temporary. Failure preserves the prior file or absence.
 
-### gc
-`( retained-store-keys -- removed-count )` — Derive the shared cache root from
-the captured environment, preserve the supplied canonical keys and every
-unknown cache node, and remove other canonical real-directory entries through
-bounded detach/walk/delete phases. A non-list, non-string key, or malformed
-store key is `'type` or `'domain`; unavailable cache selection and filesystem
-failures are `'io`.
+### write-new
+`( text path -- )` — Atomically create a regular project data file through a
+unique sibling temporary. A present or racing destination is left unchanged.
 
 ## pkg.sync
 
@@ -1732,8 +1736,8 @@ cache or vendor root and return the selection count.
 exact transitive manifest graph, resolve it with `pkg.mvs.resolve`, fetch and
 atomically install only selected missing store entries, then atomically write
 the canonical `ecl.lock` beneath `project-root`. Return the validated lock.
-See [Packages / Synchronization](SPEC.md#synchronization) for cache selection, two-pass fetch, error, and
-partial-success contracts.
+See [Synchronization](ENVIRONMENT.md#synchronization) for cache selection,
+two-pass fetch, error, and partial-success contracts.
 
 ### run-offline
 `( root-manifest project-root -- lock )` — Perform the same discovery,
@@ -2023,9 +2027,8 @@ unchanged.
 ## table
 
 Every operation except `valid?` first validates the ordinary column dict as a
-table. See the language specification's [table contract](SPEC.md#table) for
-the table convention and frozen error
-kinds.
+table. See the environment's [table contract](ENVIRONMENT.md#tables) for the
+table convention and frozen error kinds.
 
 ### aggregate
 `( table names specs -- table )` — Group by `names` and aggregate each group
