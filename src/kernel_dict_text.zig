@@ -136,12 +136,6 @@ pub fn keysForModule(evaluator: *Machine) MachineError!void {
     return keysPrimitive(evaluator);
 }
 
-pub fn sizeForModule(evaluator: *Machine) MachineError!void {
-    var dictionary = try evaluator.popDict();
-    defer dictionary.deinit();
-    try evaluator.pushOwned(.{ .int = @intCast(dictionary.borrow().dict.length()) });
-}
-
 fn valsPrimitive(evaluator: *Machine) MachineError!void {
     var dictionary = try evaluator.popDict();
     defer dictionary.deinit();

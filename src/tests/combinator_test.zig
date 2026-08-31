@@ -56,6 +56,10 @@ fn expectCancelledAfterSetup(
 test "combinators: isolated iteration broadcast reduction and infra" {
     try support.expectStacks(&.{
         .{ .name = "each", .source = "[1 2 3] (dup *) each", .expected = "[1 4 9]" },
+        .{ .name = "each dict values", .source = "{'a 1 'b 2} (1 +) each", .expected = "{'a 2 'b 3}" },
+        .{ .name = "each empty dict", .source = "{} (missing) each", .expected = "{}" },
+        .{ .name = "for dict values", .source = "{'a 1 'b 2} (1 + pop) for 42", .expected = "42" },
+        .{ .name = "for empty dict", .source = "{} (missing) for 42", .expected = "42" },
         .{ .name = "zip-with right broadcast", .source = "[1 2 3] 10 (pair) zip-with", .expected = "([1 10]\n [2 10]\n [3 10])" },
         .{ .name = "zip-with left broadcast", .source = "10 [1 2 3] (pair) zip-with", .expected = "([10 1]\n [10 2]\n [10 3])" },
         .{ .name = "fold", .source = "[1 2 3] 0 (+) fold", .expected = "6" },
@@ -168,7 +172,20 @@ test "combinators: contracts and conformability are structural errors" {
             },
         },
         .{ .name = "each no result", .source = "[10] (pop) each", .kind = "contract", .word = "each" },
+        .{ .name = "dict each no result", .source = "{'a 10} (pop) each", .kind = "contract", .word = "each" },
         .{ .name = "for result", .source = "[10] (dup) for", .kind = "contract", .word = "for" },
+        .{ .name = "dict for result", .source = "{'a 10} (dup) for", .kind = "contract", .word = "for" },
+        .{
+            .name = "dict for follows insertion order",
+            .source = "{'first 10 'second 20} (dup 20 = (pop 1) (pop) if) for",
+            .kind = "contract",
+            .word = "for",
+            .data = &.{
+                .{ .name = "index", .expected = .{ .int = 1 } },
+                .{ .name = "seeded", .expected = .{ .int = 1 } },
+                .{ .name = "observed", .expected = .{ .int = 1 } },
+            },
+        },
         .{ .name = "fold extra result", .source = "[10] 0 (dup) fold", .kind = "contract", .word = "fold" },
         .{ .name = "scan extra result", .source = "[10] 0 (dup) scan", .kind = "contract", .word = "scan" },
         .{ .name = "zip-with atoms", .source = "1 2 (+) zip-with", .kind = "type", .word = "zip-with" },

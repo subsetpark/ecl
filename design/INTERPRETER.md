@@ -862,6 +862,14 @@ allocation failure interrupt it at bounded intervals.
   uses the same rule while owning its selector validation, isolated scalar
   applications, unpublished value buffer, and final list or dictionary
   materializer in one resumable state.
+- **Dictionary combinators iterate values, not entries.** `each` retains the
+  dictionary's own key list and enters the same scheduler-visible update state
+  used by `dict.update`; the update boundary preserves keys and insertion order
+  and owns empty-input, contract, cancellation, and materialization behavior.
+  `for` reads those values through the same insertion-order storage without
+  collecting a result. The list-only idiom recognizer declines dictionaries,
+  so optimized and generic dispatch cannot acquire different dictionary
+  semantics.
 - **Composite name work remains composite while suspended.** An unknown
   qualified module prefix installs one `InternModuleNameCursor` that owns both
   insertion and module-name validation, then transfers the validated brand to

@@ -607,6 +607,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "[1 2 3] (dup 'each-local set each-local *) each pop " ++
             "[1] [2] (pop dup 'zip-with-local set zip-with-local pop) zip-with pop " ++
             "[1] (dup 'for-local set pop) for " ++
+            "{'a 1} (1 + pop) for " ++
             "[1] 0 (+ dup 'fold-local set) fold pop " ++
             "[1] 0 (+ dup 'scan-local set) scan pop " ++
             "[1] (dup 'infra-local set) infra pop " ++
@@ -849,7 +850,7 @@ fn stdlibSessionAllocationProbe(
             "[['a 1] ['b 2]] dict.from-pairs dup dict.keys pop dup dict.vals pop " ++
                 "dup 'a dict.has? pop dup ['b 'a] dict.at pop dup {} dict.merge dup dict.pairs dict.from-pairs pop " ++
                 "dup ['a 'b] dict.keys-exactly? pop dup ['a] (1 +) dict.update " ++
-                "dup 'c 0 (1 +) dict.update-or dup (nip) dict.map dup (1 +) dict.map-values " ++
+                "dup 'c 0 (1 +) dict.update-or dup (nip) dict.map dup (1 +) each " ++
                 "dup (pop pop 1) dict.filter dup (pop pop 0) dict.reject dup ['a] dict.take " ++
                 "dup ['a] dict.drop dup ['a] dict.split pop pop " ++
                 "{'a 2} (|key left right| key pop left right +) dict.merge-with pop " ++

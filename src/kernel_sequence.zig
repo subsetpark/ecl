@@ -1306,9 +1306,14 @@ const RangeDriver = struct {
 };
 
 fn lenPrimitive(evaluator: *Machine) MachineError!void {
-    var collection = try evaluator.popList();
+    var collection = try evaluator.popValue();
     defer collection.deinit();
-    try evaluator.pushOwned(.{ .int = @intCast(collection.borrow().list.length()) });
+    const count = switch (collection.borrow()) {
+        .list => |header| header.length(),
+        .dict => |header| header.length(),
+        else => return evaluator.typeError("a list or dict"),
+    };
+    try evaluator.pushOwned(.{ .int = @intCast(count) });
 }
 
 const ShapeProgress = union(enum) { pending, complete: []usize, ragged, too_deep };

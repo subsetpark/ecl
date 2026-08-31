@@ -781,7 +781,8 @@ accumulates between units, tasks, or module loads.
 ## Chars and strings
 
 A string is a rank-1 char vector; there is no separate string type. `len`,
-`at`, `reverse`, `each`, and every other list word operate on codepoints. UTF-8
+`at`, `reverse`, and list applications of `each` and `for` operate on
+codepoints. UTF-8
 exists only at IO boundaries: source files and `io.prin`/`io.pp` encode and
 decode UTF-8, and invalid UTF-8 on input is an error. Char semantics are
 codepoint semantics: grapheme segmentation, normalization, non-ASCII case

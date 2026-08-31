@@ -424,19 +424,23 @@ from the end when negative. (The stack word is `pop`.)
 `( x -- x x )` — Duplicate the top stack value.
 
 ### each
-`( list quotation -- list )` — *Isolated*, contract `( a -- b )`. Apply
-one level down the leading axis, exactly one result per element; the
-result specializes when rectangular. Depth composes by nesting:
-`((q) each) each`. There is no collect-all map whose output length
-follows dynamic stack behavior: filtering is the mask idiom (or
-`filter`), and flat-map is `each raze`. Derived verbs come free from
-homoiconicity: `((1 +) each) 'inc-all def`.
+`( collection quotation -- collection )` — *Isolated*, contract `( a -- b )`.
+For a list, apply one level down the leading axis, exactly one result per
+element; the result specializes when rectangular. For a dictionary, apply to
+its values in insertion order while preserving its keys. Depth composes by
+nesting: `((q) each) each`. There is no collect-all map whose output length
+follows dynamic stack behavior: filtering is the mask idiom (or `filter`), and
+flat-map is `each raze`. Derived verbs come free from homoiconicity:
+`((1 +) each) 'inc-all def`.
 
 #### Examples
 
 ```ecl
 [1 2 3] (dup *) each
 # => [1 4 9]
+
+{'a 1 'b 2} (1 +) each
+# => {'a 2 'b 3}
 ```
 
 ### each-prior
@@ -514,8 +518,9 @@ Reduce a nonempty list left-to-right from its first element. The explicit
 accumulator form `fold` is required for an empty list. Defined in ecl.
 
 ### for
-`( list quotation -- )` — *Isolated*, contract `( a -- )`. The ordered
-effect loop: left-to-right, collects nothing.
+`( collection quotation -- )` — *Isolated*, contract `( a -- )`. Apply to list
+elements or dictionary values in insertion order, left-to-right, collecting
+nothing.
 
 ### getenv
 `( name -- string )` — The value of an environment variable, read from an
@@ -617,8 +622,8 @@ the value on top of the quotation's results. Equivalent to
 Equivalent to `dup len 1 - at`.
 
 ### len
-`( list -- count )` — Top-level element count; works on any list,
-including ragged data.
+`( collection -- count )` — Top-level list element count or dictionary entry
+count. Lists may be ragged.
 
 ### lex-cmp
 `( left right -- order )` — Lexicographically compare two sequences using
@@ -1309,9 +1314,6 @@ absence is false: lookup machinery failures are errors, never converted to 0.
 ### keys
 `( dict -- keys )` — Return keys in insertion order.
 
-### size
-`( dict -- count )` — Return the number of entries in constant time.
-
 ### keys-exactly?
 `( candidate declared -- bool )` — Return 1 when a dictionary has exactly the
 declared keys in any order. A duplicate declaration returns 0.
@@ -1326,10 +1328,6 @@ every entry, replacing values while preserving keys and insertion order.
 {'a 1 'b 2} (swap pop 10 *) dict.map
 # => {'a 10 'b 20}
 ```
-
-### map-values
-`( dict quotation -- dict )` — Apply a `( value -- value )` quotation to every
-value, preserving keys and insertion order.
 
 ### merge
 `( left right -- dict )` — Merge two dictionaries; right-hand values win.
@@ -1350,8 +1348,9 @@ keep their positions; right-only keys append in right order.
 
 ### pairs
 `( dict -- pairs )` — Return insertion-ordered `[key value]` pairs. This is the
-bridge to generic iteration: `each`, `fold`, `all?`, and `any?` need no
-dict-specific duplicates.
+bridge to generic entry iteration when keys are needed. Value-only `each`
+operates on a dictionary directly; reductions and predicates can consume
+`dict.vals`, so they need no dictionary-specific duplicates.
 
 ### reject
 `( dict predicate -- dict )` — Call a `( key value -- bool )` predicate in
