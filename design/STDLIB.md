@@ -31,6 +31,9 @@ Conventions:
 - Predicate words end in `?`. Symbolic comparisons (`=`, `<>`, `<`, `<=`,
   `>`, `>=`) and the boolean combinators `and`, `or`, and `not` keep their
   conventional spellings.
+- Example blocks are complete expressions unless their surrounding text says
+  otherwise. A `# =>` comment shows the value or values left for the command
+  printer; it is not part of the word's behavior.
 
 ## Prelude and core
 
@@ -56,6 +59,13 @@ invoking registration.
 `( x y -- z )` — **Pervasive.** Add. Acts ordinally on chars:
 `char int +` (either order) is a char; `char char +` is `'type`. Integer
 overflow is `'overflow`.
+
+#### Examples
+
+```ecl
+1 2 +
+# => 3
+```
 
 ### -
 `( x y -- z )` — **Pervasive.** Subtract. Acts ordinally on chars:
@@ -103,6 +113,13 @@ That identity is what makes the isolation non-arbitrary rather than an
 implementation accident. The complete form is `values (q) @attempt`. See
 Errors.
 
+#### Examples
+
+```ecl
+[1 2] (3 +) @attempt
+# => {'ok [1 5]}
+```
+
 ### @defm
 `( values body 'module-name -- )` — *Unit constructor.* Exactly `@module` followed
 by `register`: run the body on a fresh environment, then validate the
@@ -135,6 +152,13 @@ from the explicit values list and run the quotation concurrently. Use `[]` for
 no initial values; the ambient stack never crosses the boundary. See
 [Concurrency](SPEC.md#concurrency).
 
+#### Examples
+
+```ecl
+[] (40 2 +) @spawn await
+# => {'ok [42]}
+```
+
 ### @test
 `( descriptor -- result )` — Test-Session-only protected invocation. Validate
 a pure descriptor returned by `tests`, late-bind its canonical module/name to
@@ -156,6 +180,13 @@ Aliases and module names may not collide in either direction.
 `( sequence predicate -- bool )` — *Isolated*, contract `( a -- bool )`.
 1 when the predicate returns 1 for every element. Equivalent to
 `(|l q| l q each 1 (and) fold)`.
+
+#### Examples
+
+```ecl
+[2 4 6] (2 mod 0 =) all?
+# => 1
+```
 
 ### and
 `( x y -- bool )` — **Pervasive.** Boolean conjunction on 0/1 values.
@@ -186,6 +217,13 @@ Pervades over nested list selectors, preserving their shape, so an index
 vector selects: `[10 20 30] [2 0] at` is `[30 10]`. A dictionary key is
 always one whole value, including when that value is a list. A missing dict
 key is an error.
+
+#### Examples
+
+```ecl
+[10 20 30] [2 0] at
+# => [30 10]
+```
 
 ### at-or
 `( collection key default -- value )` — The value at a key or index, or
@@ -274,6 +312,13 @@ every action and the else must be a quotation, validated before any
 comparison. The first key for which `match?` returns 1 selects its action.
 Defined in ecl; `'case see` renders the definition.
 
+#### Examples
+
+```ecl
+3 [1 ("one") 3 ("three") ("other")] case
+# => "three"
+```
+
 ### cat
 `( left right -- list )` — Concatenate two lists.
 
@@ -308,6 +353,13 @@ be a 0/1 boolean. The complete test result is then discarded. The first true
 test selects its action; otherwise the final else runs, in either case from
 the original checkpoint. Stack rollback does not roll back environment or IO
 effects performed by tests.
+
+#### Examples
+
+```ecl
+10 20 [(pop 10 =) (pop pop 111) (pop pop 222)] cond
+# => 111
+```
 
 ### cons
 `( value list -- list )` — Raw structural prepend. On data,
@@ -380,6 +432,13 @@ follows dynamic stack behavior: filtering is the mask idiom (or
 `filter`), and flat-map is `each raze`. Derived verbs come free from
 homoiconicity: `((1 +) each) 'inc-all def`.
 
+#### Examples
+
+```ecl
+[1 2 3] (dup *) each
+# => [1 4 9]
+```
+
 ### each-prior
 `( list seed quotation -- list )` — *Isolated*, contract
 `( current prior -- result )`. Apply left-to-right, using the explicit seed
@@ -415,6 +474,13 @@ given status.
 element as many times as its returned nonnegative int. A 0/1 predicate is
 ordinary filtering. Equivalent to `over swap each where at`.
 
+#### Examples
+
+```ecl
+[1 2 3 4] (2 mod 0 =) filter
+# => [2 4]
+```
+
 ### find
 `( sequence needle -- index )` — Index of the first element that
 returns 1 from `match?` against the needle, or the sequence length on a
@@ -435,6 +501,13 @@ list-of-lists.
 `( list accumulator quotation -- accumulator )` — *Isolated*, contract
 `( acc a -- acc )`. Reduce left-to-right from the supplied accumulator.
 
+#### Examples
+
+```ecl
+[1 2 3 4] 0 (+) fold
+# => 10
+```
+
 ### fold1
 `( list quotation -- value )` — *Isolated*, contract `( acc a -- acc )`.
 Reduce a nonempty list left-to-right from its first element. The explicit
@@ -454,9 +527,23 @@ defaulting idiom. Absent host IO is `'io`.
 `( list -- indices )` — The stable ascending sort permutation. Orders by
 `cmp`, so every element pair must be mutually comparable.
 
+#### Examples
+
+```ecl
+[3 1 2] grade
+# => [1 2 0]
+```
+
 ### group
 `( list -- dict )` — Dict from each distinct value to the list of its
 0-based indices, keyed in first-occurrence order.
+
+#### Examples
+
+```ecl
+['a 'b 'a] group
+# => {'a [0 2] 'b [1]}
+```
 
 ### if
 `( bool then else -- ... )` — *Inline.* Run `then` when the condition is 1,
@@ -472,6 +559,13 @@ is decomposed before any comparison, so `in?` cannot ask whether a
 sublist is an element: `[1 1] [[0 0] [1 1]] in?` is `[0 0]`, the results of
 two atom searches. Use `([1 1] match?) any?` for
 that.
+
+#### Examples
+
+```ecl
+[2 5] [1 2 3] in?
+# => [1 0]
+```
 
 ### import
 `( module-name q -- )` — Import the public attributes named by the symbol list
@@ -489,11 +583,25 @@ renders its one-word forwarding quotation.
 the quotation with the list's elements as the entire substack; the
 substack that remains is the result list.
 
+#### Examples
+
+```ecl
+[1 2 3] (dup) infra
+# => [1 2 3 3]
+```
+
 ### iterations
 `( value count quotation -- list )` — *Isolated*, unary contract
 `( a -- a )`. Return the initial value followed by `count` successive
 applications. `count` must be a nonnegative int, and a zero count returns a
 singleton list. Defined in ecl over `scan`.
+
+#### Examples
+
+```ecl
+1 3 (10 +) iterations
+# => [1 11 21 31]
+```
 
 ### join
 `( strings separator -- string )` — Join a list of strings with a
@@ -553,6 +661,13 @@ finite), `-1 log` is `'domain` (NaN).
 `( left right -- bool )` — Whole-value structural equality; **not**
 pervasive. `[1 2] [1 2] =` is `[1 1]`; `[1 2] [1 2] match?` is `1`.
 
+#### Examples
+
+```ecl
+[1 2] [1 2] match?
+# => 1
+```
+
 ### max
 `( x y -- z )` — **Pervasive.** The greater of two comparable atoms.
 
@@ -599,6 +714,13 @@ Equivalent to `swap dup (swap) dip`.
 preserving their order; `n` must be a nonnegative int. Equivalent to
 `() swap (cons) times`. Deliberately state-dependent stack surgery.
 
+#### Examples
+
+```ecl
+1 2 3 3 pack
+# => [1 2 3]
+```
+
 ### pair
 `( first second -- list )` — Two-element list in stack order. Equivalent
 to `() cons cons`.
@@ -607,16 +729,37 @@ to `() cons cons`.
 `( string -- quotation )` — The reader, reified: parse source text into
 an unevaluated quotation. `"42" parse first` is string-to-number.
 
+#### Examples
+
+```ecl
+"[1 2]" parse first
+# => [1 2]
+```
+
 ### partial
 `( value quotation -- quotation )` — Safe partial application: the result
 pushes the captured value inertly, then runs the quotation. Even a
 captured word remains data. Equivalent to `swap literal swap compose`;
 `3 (+) partial` is `((3) first +)`.
 
+#### Examples
+
+```ecl
+4 3 (+) partial call
+# => 7
+```
+
 ### partition
 `( sequence predicate -- matches rejects )` — *Isolated*, contract
 `( a -- bool )`. Split into elements whose predicate returned 1 and those
 returning 0. Defined in ecl.
+
+#### Examples
+
+```ecl
+[1 2 3 4] (2 mod 0 =) partition pair
+# => ([2 4] [1 3])
+```
 
 ### pop
 `( x -- )` — Discard the top stack value. (`drop` is the sequence word.)
@@ -636,6 +779,13 @@ every selected position. Selector leaves are integer indices. Repeated indices
 are processed left to right, so the last replacement wins. For a dictionary,
 the selector is always one whole-value key, including a list key.
 
+#### Examples
+
+```ecl
+[10 20 30] [0 2] 99 put
+# => [99 20 99]
+```
+
 ### qualify
 `( 'module-name 'binding-name -- qualified-word )` — Validate a canonical
 module path and one unqualified, non-reserved binding segment, then construct
@@ -649,6 +799,13 @@ to invoke the result dynamically.
 ### range
 `( bound -- list )` — The ints `[0 1 … bound-1]`; the bound must be a
 nonnegative int.
+
+#### Examples
+
+```ecl
+5 range
+# => [0 1 2 3 4]
+```
 
 ### raze
 `( list -- list )` — Flatten one level. Flat-map is `each raze`.
@@ -664,6 +821,13 @@ state and lifetime. See [Modules](SPEC.md#modules).
 ### reshape
 `( list shape -- list )` — Cycle the data into the exact nested-list
 shape; a zero axis must be final.
+
+#### Examples
+
+```ecl
+[1 2 3 4] [2 3] reshape
+# => ([1 2 3] [4 1 2])
+```
 
 ### rest
 `( list -- list )` — All but the first element of a nonempty list.
@@ -687,6 +851,13 @@ beyond the length wrap, and the empty list is returned unchanged.
 Defined in ecl as a modular index permutation (the K lineage's
 composed form; APL/J make dyadic reverse a primitive).
 
+#### Examples
+
+```ecl
+[1 2 3 4 5] 2 rotate
+# => [3 4 5 1 2]
+```
+
 ### round
 `( x -- integer )` — **Pervasive.** Round to nearest; the result is
 int64, `'overflow` outside its range.
@@ -695,6 +866,13 @@ int64, `'overflow` outside its range.
 `( list accumulator quotation -- list )` — *Isolated*, contract
 `( acc a -- acc )`. Like `fold` but returns every intermediate
 accumulator; same length as the input.
+
+#### Examples
+
+```ecl
+[1 2 3 4] 0 (+) scan
+# => [1 3 6 10]
+```
 
 ### scan1
 `( list quotation -- list )` — *Isolated*, contract `( acc a -- acc )`.
@@ -759,11 +937,25 @@ int, by sign. Equivalent to `dup 0 > swap 0 < -`.
 `( sequence -- sorted )` — Stable ascending sort by `cmp`. Equivalent to
 `dup grade at`.
 
+#### Examples
+
+```ecl
+[3 1 2] sort
+# => [1 2 3]
+```
+
 ### split
 `( string separator -- parts )` — Split a string at every occurrence of a
 separator string; the parts are strings. An empty separator splits the input
 into one single-codepoint string per Unicode scalar, with no empty boundary
 parts; splitting an empty string this way returns an empty list.
+
+#### Examples
+
+```ecl
+"a,b,c" "," split
+# => ("a" "b" "c")
+```
 
 ### sqrt
 `( x -- y )` — **Pervasive.** Square root. `'domain` on negative inputs
@@ -776,11 +968,26 @@ width, left-to-right. A width larger than the input returns `()` without
 applying the quotation; zero and negative widths are `'domain`. The result
 has `max(len-width+1, 0)` elements.
 
+#### Examples
+
+```ecl
+[1 2 3 4] 3 (sum) stencil
+# => [6 9]
+```
+
 ### str
 `( value -- string )` — The canonical printed representation; carries the
 round-trip guarantee (see
-[Printing and round-trip](SPEC.md#printing-and-round-trip)): reading it back yields the same
-value, task handles excepted.
+[Readable representations and display](SPEC.md#readable-representations-and-display)):
+reading it back yields a structurally matching value for every recursively
+readable value.
+
+#### Examples
+
+```ecl
+"abc" str
+# => "\"abc\""
+```
 
 ### sum
 `( sequence -- total )` — Sum of a numeric sequence; 0 when empty.
@@ -793,6 +1000,13 @@ Equivalent to `0 (+) fold`.
 `( list count -- list )` — The first `count` elements; a negative count
 takes from the end. When the magnitude exceeds the length, the data
 cycles.
+
+#### Examples
+
+```ecl
+[1 2 3] 5 take
+# => [1 2 3 1 2]
+```
 
 ### tasks
 `( -- tasks )` — Pending descendant tasks in deterministic spawn
@@ -815,6 +1029,13 @@ quotations to the same pair of inputs in left-to-right order. Equivalent to
 `( value -- type )` — Return the value's kind as a symbol: one of `'int`,
 `'float`, `'char`, `'symbol`, `'word`, `'list`, `'dict`, or `'task`.
 
+#### Examples
+
+```ecl
+"abc" type
+# => 'list
+```
+
 ### undef
 `( name -- )` — Remove a direct binding from the current scope, or do nothing
 when that scope does not bind the name. An exact alias of `unset`; removing a
@@ -836,6 +1057,13 @@ the step under contract `( state -- state item )`, append the item, and
 continue from the returned state. The predicate is therefore always checked
 before the first step, and a false initial predicate returns the initial
 state and `()`.
+
+#### Examples
+
+```ecl
+0 (5 <) (dup 1 + swap) unfold pair
+# => (5 [0 1 2 3 4])
+```
 
 ### unless
 `( bool else -- ... )` — *Inline.* Run the quotation when the condition
@@ -863,6 +1091,13 @@ one whole-value key. The entire selector is validated before the quotation is
 first applied; an empty selector returns the list unchanged without applying
 it.
 
+#### Examples
+
+```ecl
+[1 2 3] [2 0] (10 *) update
+# => [10 2 30]
+```
+
 ### when
 `( bool then -- ... )` — *Inline.* Run the quotation when the condition
 is 1. Equivalent to `() if`.
@@ -871,6 +1106,13 @@ is 1. Equivalent to `() if`.
 `( counts -- indices )` — Expand a list of nonnegative ints into each
 index replicated its count times. A 0/1 mask is the common case, yielding
 the positions of 1s: `[0 1 1 0] where` is `[1 2]`.
+
+#### Examples
+
+```ecl
+[0 2 1] where
+# => [1 1 2]
+```
 
 ### which
 `( 'name -- )` — Print where a name resolves (module home, shadowing),
@@ -893,9 +1135,23 @@ optimized.
 successive states through the first state for which the predicate is false.
 Defined in ecl over `unfold`.
 
+#### Examples
+
+```ecl
+1 (5 <) (1 +) while-values
+# => [1 2 3 4 5]
+```
+
 ### windows
 `( list width -- windows )` — Return every overlapping window of a positive
 width. Equivalent to `() stencil`.
+
+#### Examples
+
+```ecl
+[1 2 3 4] 3 windows
+# => ([1 2 3] [2 3 4])
+```
 
 ### with
 `( values quotation -- quotation )` — Capture every element of a list as
@@ -907,6 +1163,13 @@ This is ordinary quotation composition and constructs nothing. It is not a
 unit's seed operand: the flattened quotation it returns is a runtime-built
 body, so `@module` and `@defm` give it no reader attribution. Pass initial
 values as the constructor's separate list operand.
+
+#### Examples
+
+```ecl
+[3] (dup) with call
+# => 3 3
+```
 
 ### within
 `( quotation -- ... )` — Run the quotation against a
@@ -937,12 +1200,26 @@ sequences. Equivalent to `(pair) zip-with`.
 Zip two lists with broadcast conformability (an atom on either side
 extends). Each-left/each-right are `partial` compositions.
 
+#### Examples
+
+```ecl
+[1 2 3] [10 20 30] (+) zip-with
+# => [11 22 33]
+```
+
 ## archive
 
 ### sha256
 `( bytes -- lowercase-hex )` — Return the SHA-256 digest of an integer byte
 list. Every item must be an integer in `0..255`; strings are not byte vectors
 and are not coerced.
+
+#### Examples
+
+```ecl
+[1 2 3 4] archive.sha256
+# => "9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a"
+```
 
 ### unpack-tgz
 `( bytes destination -- regular-file-paths )` — Validate and atomically unpack
@@ -967,6 +1244,13 @@ Non-list rows and non-string cells are `'type`; a zero-field row is `'shape`.
 fields are all strings. Accept CRLF or LF records, quoted commas and newlines,
 and doubled-quote escapes; preserve empty fields and record widths. Malformed
 quoting is `'parse`.
+
+#### Examples
+
+```ecl
+"a,b\nc,d" csv.parse
+# => (("a" "b") ("c" "d"))
+```
 
 ## dict
 
@@ -1006,6 +1290,13 @@ distinct key. Duplicate keys are `'domain`.
 `( keys values -- dict )` — Build a dictionary from parallel conforming key
 and value lists. Unequal lengths are `'shape`; duplicate keys are `'domain`.
 
+#### Examples
+
+```ecl
+['a 'b] [1 2] dict.from-lists
+# => {'a 1 'b 2}
+```
+
 ### from-pairs
 `( pairs -- dict )` — Build a dictionary from a list of exact `[key value]`
 pairs in list order. A malformed pair is `'shape`; duplicate keys are
@@ -1029,6 +1320,13 @@ declared keys in any order. A duplicate declaration returns 0.
 `( dict quotation -- dict )` — Call a `( key value -- value )` quotation for
 every entry, replacing values while preserving keys and insertion order.
 
+#### Examples
+
+```ecl
+{'a 1 'b 2} (swap pop 10 *) dict.map
+# => {'a 10 'b 20}
+```
+
 ### map-values
 `( dict quotation -- dict )` — Apply a `( value -- value )` quotation to every
 value, preserving keys and insertion order.
@@ -1037,6 +1335,13 @@ value, preserving keys and insertion order.
 `( left right -- dict )` — Merge two dictionaries; right-hand values win.
 Existing left keys retain their positions and right-only keys append in right
 order. Key-aligned arithmetic remains pervasive `+` on dicts.
+
+#### Examples
+
+```ecl
+{'a 1 'b 2} {'b 20 'c 30} dict.merge
+# => {'a 1 'b 20 'c 30}
+```
 
 ### merge-with
 `( left right quotation -- dict )` — Merge two dictionaries, resolving each
@@ -1056,6 +1361,13 @@ insertion order and discard the entries for which it returns 1.
 `( dict keys -- selected rejected )` — Partition a dictionary by a key list,
 returning selected then rejected entries; ignore absent keys and preserve
 dictionary order in both results.
+
+#### Examples
+
+```ecl
+{'a 1 'b 2} ['b] dict.split pair
+# => ({'b 2} {'a 1})
+```
 
 ### take
 `( dict keys -- dict )` — Keep entries named by a key list, ignoring absent
@@ -1107,6 +1419,13 @@ with `'data` set to `data`.
 ### with-message
 `( error message -- error )` — Validate the error and string message and return
 the error with `'msg` set to `message`.
+
+#### Examples
+
+```ecl
+'io error.new "unavailable" error.with-message
+# => {'kind 'io 'msg "unavailable"}
+```
 
 ## http
 
@@ -1191,6 +1510,13 @@ arrays become lists, in-range integral numbers become ints, and other numbers
 become floats. JSON null and booleans become the ordinary symbols `'null`,
 `'true`, and `'false`.
 
+#### Examples
+
+```ecl
+"{\"a\":[1,null]}" json.parse
+# => {"a" (1 'null)}
+```
+
 ## pkg.data
 
 Pure structural helpers shared by the package-format modules.
@@ -1202,6 +1528,13 @@ when its value recursively contains an executable word.
 ### read-one
 `( text -- form )` — Parse exactly one form without evaluating it. Unreadable
 text is `'parse`; zero or multiple forms are `'shape`.
+
+#### Examples
+
+```ecl
+"[1 2]" pkg.data.read-one
+# => [1 2]
+```
 
 ### sorted-entries
 `( dict -- pairs )` — Return a dict's entries in ascending key order.
@@ -1225,6 +1558,13 @@ name: the name itself, or a name continuing after a `.` boundary. `foo` owns
 `foo.bar` and does not own `foobar`. A non-string is `'type`; a malformed
 canonical name is `'domain`.
 
+#### Examples
+
+```ecl
+"foo" "foo.bar" pkg.name.owns?
+# => 1
+```
+
 ### collides?
 `( names -- bool )` — Return 1 when any two canonical names overlap under
 `pkg.name.owns?`.
@@ -1239,6 +1579,13 @@ the supported SemVer grammar is `'domain`.
 ### less?
 `( left right -- bool )` — Return 1 when the left version precedes the right
 under Semantic Versioning 2.0.0 §11. Both operands are validated.
+
+#### Examples
+
+```ecl
+"1.2.0" "1.10.0" pkg.version.less?
+# => 1
+```
 
 ### max
 `( versions -- version )` — Return the greatest member of a nonempty list of
@@ -1428,10 +1775,24 @@ success whose value is the list of success stacks in input order.
 list for `@attempt`; return an existing
 failure unchanged.
 
+#### Examples
+
+```ecl
+[2 3] result.ok (+) result.and-then
+# => {'ok [5]}
+```
+
 ### either
 `( result on-ok on-err -- ... )` — Eliminate a result exhaustively: call the
 first quotation with the success list or the second with the error dict.
 Neither branch is isolated.
+
+#### Examples
+
+```ecl
+{'kind 'io} result.err (first) ('kind at) result.either
+# => 'io
+```
 
 ### err
 `( error -- result )` — Tag an error dict as a failed result.
@@ -1470,6 +1831,13 @@ isolated stack and run the recovery quotation; leave a success unchanged.
 `( result kinds quotation -- result )` — Recover only when a failure's kind is
 one of the listed symbols; leave every other result unchanged.
 
+#### Examples
+
+```ecl
+{'kind 'io} result.err ['io 'timeout] (pop 99 wrap) result.recover-kinds
+# => {'ok ([99])}
+```
+
 ## rand
 
 Explicit-state pseudorandom draws are pure except for `entropy`; see
@@ -1487,10 +1855,24 @@ only nondeterministic word, requires host IO, and is `'io` without it.
 `( state bound -- state result )` — Draw one unbiased uniform int in
 `[0, bound)`. A bound below 1 is `'domain`.
 
+#### Examples
+
+```ecl
+[0 0] 100 rand.int pair
+# => ([0 1] 35)
+```
+
 ### ints
 `( state count bound -- state results )` — Draw `count` uniform ints in
 `[0, bound)`, advancing the state by `count`. Each element is addressed by its
 own counter position, so materialization order cannot change the list.
+
+#### Examples
+
+```ecl
+[7 0] 4 6 rand.ints pair
+# => ([7 4] [3 0 0 3])
+```
 
 ## rng
 
@@ -1502,6 +1884,13 @@ nondeterminism.
 `( count pool -- results )` — Draw distinct values below `pool` without
 replacement. The sample is unbiased; `count > pool` is `'domain`.
 
+#### Examples
+
+```ecl
+42 rng.seed 4 8 rng.deal
+# => [5 7 0 4]
+```
+
 ### float
 `( -- result )` — Draw one uniform float in `[0, 1)`.
 
@@ -1512,11 +1901,25 @@ replacement. The sample is unbiased; `count > pool` is `'domain`.
 `( count bound -- results )` — Draw a vector of uniform integers below a
 positive bound.
 
+#### Examples
+
+```ecl
+42 rng.seed 5 10 rng.ints
+# => [3 1 8 4 0]
+```
+
 ### seed
 `( key -- )` — Rekey the generator and reset its counter.
 
 ### shuffle
 `( values -- values )` — Return a uniformly random permutation of a list.
+
+#### Examples
+
+```ecl
+42 rng.seed [10 20 30 40] rng.shuffle
+# => [20 40 10 30]
+```
 
 ## str
 
@@ -1527,14 +1930,27 @@ non-ASCII scalar passes through unchanged.
 `( string needle -- bool )` — Return 1 when a needle occurs anywhere in a
 string. The empty needle is present at index zero.
 
+#### Examples
+
+```ecl
+"hello" "ell" str.contains?
+# => 1
+```
+
 ### ends?
 `( string suffix -- bool )` — Return 1 when a string ends with a suffix.
 
 ### format
 `( values template -- string )` — Interpolate `{}` placeholders. Strings
 contribute their contents; other values contribute canonical `str`. `{{` and
-`}}` emit literal braces. `["Ada" 2] "name={} n={}" str.format` is
-`"name=Ada n=2"`.
+`}}` emit literal braces.
+
+#### Examples
+
+```ecl
+["Ada" 2] "name={} n={}" str.format
+# => "name=Ada n=2"
+```
 
 ### index-of
 `( string needle -- index )` — Return the zero-based index of a needle's first
@@ -1562,6 +1978,13 @@ string.
 needle. An empty needle inserts the replacement between adjacent scalars only,
 with no boundary insertion.
 
+#### Examples
+
+```ecl
+"a-b-c" "-" "+" str.replace
+# => "a+b+c"
+```
+
 ### starts?
 `( string prefix -- bool )` — Return 1 when a string begins with a prefix.
 
@@ -1573,6 +1996,13 @@ they are one value. Never raises.
 ### trim
 `( string -- string )` — Remove ASCII whitespace from both ends.
 
+#### Examples
+
+```ecl
+"  hello  " str.trim
+# => "hello"
+```
+
 ### trim-left
 `( string -- string )` — Remove leading ASCII whitespace.
 
@@ -1582,6 +2012,13 @@ they are one value. Never raises.
 ### upper
 `( string -- string )` — Uppercase ASCII letters, leaving every other scalar
 unchanged.
+
+#### Examples
+
+```ecl
+"Hello, wörld!" str.upper
+# => "HELLO, WöRLD!"
+```
 
 ## table
 
@@ -1615,9 +2052,23 @@ names.
 `( records -- table )` — Build a table from a nonempty list of dicts sharing
 one key set; the first record fixes schema order.
 
+#### Examples
+
+```ecl
+[{"name" "Ada" "score" 10} {"name" "Lin" "score" 20}] table.from-records
+# => {"name" ("Ada" "Lin") "score" [10 20]}
+```
+
 ### from-rows
 `( names rows -- table )` — Build a table from explicit names and exact-width
 rows. An empty row list preserves the named zero-row schema.
+
+#### Examples
+
+```ecl
+["name" "score"] [("Ada" 10) ("Lin" 20)] table.from-rows
+# => {"name" ("Ada" "Lin") "score" [10 20]}
+```
 
 ### group-by
 `( table names -- groups )` — Group row indices by named columns. Keys use
@@ -1647,6 +2098,13 @@ exactly every appended right column used for unmatched rows.
 `( table -- records )` — Return rows as dicts in schema order. An empty result
 necessarily loses its schema.
 
+#### Examples
+
+```ecl
+{"name" ("Ada" "Lin") "score" [10 20]} table.records
+# => ({"name" "Ada" "score" 10} {"name" "Lin" "score" 20})
+```
+
 ### rename
 `( table mapping -- table )` — Rename columns through an ordered old-to-new
 mapping while preserving column order; collisions are `'domain`.
@@ -1657,6 +2115,13 @@ mapping while preserving column order; collisions are `'domain`.
 ### select
 `( table names -- table )` — Keep named columns in the order given.
 
+#### Examples
+
+```ecl
+{"name" ("Ada" "Lin") "score" [10 20]} ("score") table.select
+# => {"score" [10 20]}
+```
+
 ### valid?
 `( candidate -- bool )` — Return 1 when a candidate satisfies the convention
 and 0 for a convention mismatch. Cancellation and allocation failure still
@@ -1664,6 +2129,13 @@ propagate.
 
 ### where
 `( table mask -- table )` — Keep rows selected by an exact-length 0/1 mask.
+
+#### Examples
+
+```ecl
+{"name" ("Ada" "Lin") "score" [10 20]} [1 0] table.where
+# => {"name" ("Ada") "score" [10]}
+```
 
 ### with-column
 `( table name column -- table )` — Replace an existing column or append a new

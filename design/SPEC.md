@@ -10,15 +10,6 @@ interpreter architecture, host interface, or distribution. This document
 defines the language; the shipped ECL interpreter is its reference
 implementation.
 
-This is a staged rewrite of the language report. Only material incorporated
-into this document has been reviewed under its present structure. Untouched
-core-language text from the former monolithic specification is preserved in
-[`LEGACY_LANGUAGE.md`](LEGACY_LANGUAGE.md); untouched environment and tooling
-text is preserved separately in
-[`LEGACY_ENVIRONMENT.md`](LEGACY_ENVIRONMENT.md). Neither legacy file is
-assembled into this report or represents a decision affirmed by the current
-specification work.
-
 ECL has three distinct fields of conformance:
 
 - An **ECL language implementation** conforms to this document. It provides
@@ -238,16 +229,6 @@ binder   :=  "|" name+ "|"           # names: distinct unqualified symbols
   environment assignment are unrelated mechanisms.
 
 ## Values and external representations
-
-### Formal value model
-
-The Pantagruel source is
-[`formal/values.pant`](formal/values.pant). Its documentation and checked
-formulae are rendered here as one normative text. Concrete representation,
-source grammar, printing, pervasion, and value-consuming operations remain
-governed by the prose outside the model.
-
-#### Checked model
 
 #### Chapter 1
 
@@ -505,6 +486,104 @@ guarantee applies only to the formally defined readable subset. Reader
 provenance, resolution metadata, and reader lineage need not be reproduced by
 that round trip.
 
+Printing never exposes storage specialization. A non-string list uses `[...]`
+when its value has canonical array shape—a homogeneous flat vector or a
+rectangular nesting of such vectors—and `(...)` otherwise. Both delimiters
+read as the same list kind. Thus `(1 2 3)` prints as `[1 2 3]`, while the
+ragged result of `[[1 2] [3]] 10 *` prints as `([10 20] [30])`. Strings use
+quoted string syntax.
+
+**Imports:** ECL_VALUES
+
+#### Chapter 1
+
+##### Rules
+
+> This model is normative for canonical rendering, its read-back guarantee, and display elision. It abstracts over concrete atom spellings, escapes, delimiters, whitespace, indentation, stack layout, terminal width, and the reader's treatment of source containing more or less than one value. The surrounding language specification governs those subjects.  `canonical-render` is the string produced by `str` for one value. Canonical output is always a compact single line and never contains a display-elision marker. For every recursively readable value, that string is readable as one value and the result matches the original value. Task and module values, and aggregates containing them, retain diagnostic canonical displays without a read-back guarantee.
+
+**canonical-render** *value*: `Value` ⇒ `String`.
+
+**source-readable-as-one?** *source*: `String` ⇒ `Bool`.
+
+**read-one** *source*: `String`, **source-readable-as-one?** *source* ⇒ `Value`.
+
+**single-line?** *text*: `String` ⇒ `Bool`.
+
+**contains-elision-marker?** *text*: `String` ⇒ `Bool`.
+
+---
+
+> Every canonical rendering is single-line and free of display elision.
+
+∀ *value*: `Value` · **single-line?** (**canonical-render** *value*) ∧ ¬**contains-elision-marker?** (**canonical-render** *value*).
+
+> Canonical rendering of every readable value is readable as one value.
+
+∀ *value*: `Value`, **readable?** *value* · **source-readable-as-one?** (**canonical-render** *value*).
+
+> Reading a readable value's canonical rendering produces a structurally matching value.
+
+∀ *value*: `Value`, **readable?** *value*, **source-readable-as-one?** (**canonical-render** *value*) · **matches?** (**read-one** (**canonical-render** *value*)) *value*.
+
+> Dictionary rendering preserves insertion order across canonical read-back: each read entry matches the original key and value at the same position.
+
+∀ *value*: `Value`, **value-type** *value* = **dict-type**, **readable?** *value*, **source-readable-as-one?** (**canonical-render** *value*) · **value-type** (**read-one** (**canonical-render** *value*)) = **dict-type** ∧ **dict-length** (**read-one** (**canonical-render** *value*)) = **dict-length** *value*.
+
+∀ *value*: `Value`, *index*: `Nat`, **value-type** *value* = **dict-type**, **readable?** *value*, **source-readable-as-one?** (**canonical-render** *value*), **value-type** (**read-one** (**canonical-render** *value*)) = **dict-type**, *index* ≤ **dict-length** *value* · **matches?** (**dict-key-at-index** (**read-one** (**canonical-render** *value*)) *index*) (**dict-key-at-index** *value* *index*) ∧ **matches?** (**dict-value-at-index** (**read-one** (**canonical-render** *value*)) *index*) (**dict-value-at-index** *value* *index*).
+
+#### Chapter 2
+
+##### Rules
+
+> `display-render` is the best-effort text used for a single value by `io.pp` and by stack displays. A list longer than 256 elements is replaced as a whole by a count-bearing marker before its children are rendered. The same rule applies recursively inside lists and dictionaries. Canonical rendering remains unaffected.
+
+**display-render** *value*: `Value` ⇒ `String`.
+
+**display-contains-elision?** *value*: `Value` ⇒ `Bool`.
+
+---
+
+> Scalar and capability values contain no nested display elision.
+
+∀ *value*: `Value`, (**value-type** *value* = **int-type** ∨ **value-type** *value* = **float-type** ∨ **value-type** *value* = **char-type** ∨ **value-type** *value* = **symbol-type** ∨ **value-type** *value* = **word-type** ∨ **value-type** *value* = **task-type** ∨ **value-type** *value* = **module-type**) · ¬**display-contains-elision?** *value*.
+
+> A displayed list contains elision exactly when it exceeds 256 elements, or when an unelided child recursively contains elision.
+
+∀ *value*: `Value`, **value-type** *value* = **list-type** · **display-contains-elision?** *value* ↔ **list-length** *value* > 256 ∨ **list-length** *value* ≤ 256 ∧ (∃ *index*: `Nat`, *index* ≤ **list-length** *value* · **display-contains-elision?** (**list-element** *value* *index*)).
+
+> A displayed dictionary contains elision exactly when one of its rendered keys or values recursively contains elision.
+
+∀ *value*: `Value`, **value-type** *value* = **dict-type** · **display-contains-elision?** *value* ↔ (∃ *index*: `Nat`, *index* ≤ **dict-length** *value* · **display-contains-elision?** (**dict-key-at-index** *value* *index*) ∨ **display-contains-elision?** (**dict-value-at-index** *value*
+*index*)).
+
+> Display text contains an elision marker exactly when recursive value rendering elides some list.
+
+∀ *value*: `Value` · **contains-elision-marker?** (**display-render** *value*) ↔ **display-contains-elision?** *value*.
+
+
+
+`io.pp` and the REPL use a best-effort display layout with canonical atom
+spellings and delimiters. Rows of rectangular matrices, plus one enclosing
+group axis, are separated by newline and indentation. A displayed non-string
+list longer than 256 elements becomes `[<N-values-elided>]` or
+`(<N-values-elided>)` according to its delimiter. A displayed string longer
+than 256 characters becomes `"<N-characters-elided>"`. Elision occurs before
+matrix-shape scanning or child rendering. Canonical `str` output never elides.
+
+A displayed dictionary remains compact when it has at most three pairs and
+contains no nested dictionary or matrix-valued key or value. Every other
+dictionary uses one pair per indented line, applying the same choice
+recursively. Flat vector fields remain compact. Canonical `str` output is
+always compact.
+
+`io.stack` applies the same per-value display layout and emits each visible
+operand slot as a bottom-up indexed block. `[0]` is the bottom of the visible
+window and the largest index is its top; continuation lines align after the
+index prefix. The denser REPL layout instead keeps stack order from left to
+right and places each value's rectangle beside its neighbors on a shared
+bottom row. Padding is measured in bytes and ends with each row's last value.
+Neither layout wraps to terminal width.
+
 ### Equality and ordering
 
 `match?` exposes the model's whole-value equivalence. Numeric magnitude maps
@@ -594,14 +673,24 @@ represented by an absent field, never by a nil value. Runtime-assembled code
 has no source position by construction, and no host exception or host stack
 frame is exposed as ECL error data.
 
-#### Formal error model
+A completion-time source-word effect violation identifies the opening
+delimiter of the deepest reader-built quotation selected by ordinary tail
+control in that checked activation. The checked body supplies the initial
+location. An empty selected quotation identifies its opening `(`.
 
-The Pantagruel source is
-[`formal/errors.pant`](formal/errors.pant). Its documentation and checked
-formulae define the error dictionary schema and core error-kind taxonomy.
-Error propagation and diagnostic attribution remain governed by prose.
+Non-tail helper calls and isolated or inline application iterations preserve
+that location. An application's own contract failure retains its separate
+application boundary; dynamically applied tail-control quotations within the
+application may replace that boundary's selected location. Guard predicates
+are disposable observations. After guard restoration, the selected `cond`
+action or true `while` body replaces the enclosing selection, and tail control
+inside that action may refine it. Each iteration starts with a fresh boundary.
 
-##### Checked model
+The error reports the deepest selected quotation's opening delimiter and
+preserves its element index, falling back to the application quotation when
+no dynamic selection occurred. When that quotation was assembled at runtime,
+all source fields are absent; attribution never falls back to a less-specific
+location or invents one.
 
 **Imports:** ECL_VALUES
 
@@ -739,6 +828,10 @@ Error propagation and diagnostic attribution remain governed by prose.
 
 **failed-result-value?** *value*: `Value` ⇒ `Bool`.
 
+**successful-result-values** *value*: `Value` ⇒ `Value`.
+
+**failed-result-error** *value*: `Value` ⇒ `Value`.
+
 **ok-field** ⇒ `Value`.
 
 **err-field** ⇒ `Value`.
@@ -755,8 +848,13 @@ Error propagation and diagnostic attribution remain governed by prose.
 
 > A failed result is exactly a one-entry dictionary tagged `'err` whose payload satisfies the error schema.
 
-∀ *value*: `Value` · **failed-result-value?** *value* ↔ **value-type** *value* = **dict-type** ∧ **dict-length** *value* = 1 ∧ **dict-has-key?** *value* **err-field** ∧ **error-value?** (**dict-value-for-key** *value*
-**err-field**).
+∀ *value*: `Value` · **failed-result-value?** *value* ↔ **value-type** *value* = **dict-type** ∧ **dict-length** *value* = 1 ∧ **dict-has-key?** *value* **err-field** ∧ **error-value?** (**dict-value-for-key** *value* **err-field**).
+
+> The payload accessors expose the successful values list or failed error after the corresponding result form has been established.
+
+∀ *value*: `Value`, **successful-result-value?** *value* · **successful-result-values** *value* = **dict-value-for-key** *value* **ok-field**.
+
+∀ *value*: `Value`, **failed-result-value?** *value* · **failed-result-error** *value* = **dict-value-for-key** *value* **err-field**.
 
 > Results are exactly the successful and failed forms.
 
@@ -766,6 +864,35 @@ Error propagation and diagnostic attribution remain governed by prose.
 
 ∀ *value*: `Value`, **successful-result-value?** *value* · ¬**failed-result-value?** *value*.
 
+#### Chapter 4
+
+##### Rules
+
+> Cancellation and timeout errors are classified by their required `'kind` field. They retain the ordinary error schema, including any optional or kind-specific diagnostic fields. Their result forms are ordinary failed result envelopes. A timeout result is an observation only; it is not the target task's terminal result.
+
+**cancelled-error?** *value*: `Value` ⇒ `Bool`.
+
+**timeout-error?** *value*: `Value` ⇒ `Bool`.
+
+**cancelled-result?** *value*: `Value` ⇒ `Bool`.
+
+**timeout-result?** *value*: `Value` ⇒ `Bool`.
+
+---
+
+> Cancellation and timeout errors have the corresponding core kind.
+
+∀ *value*: `Value` · **cancelled-error?** *value* ↔ **error-value?** *value* ∧ **dict-value-for-key** *value* **kind-field** = **cancelled-error-kind**.
+
+∀ *value*: `Value` · **timeout-error?** *value* ↔ **error-value?** *value* ∧ **dict-value-for-key** *value*
+**kind-field** = **timeout-error-kind**.
+
+> Cancellation and timeout results contain errors of the corresponding kind.
+
+∀ *value*: `Value` · **cancelled-result?** *value* ↔ **failed-result-value?** *value* ∧ **cancelled-error?** (**failed-result-error** *value*).
+
+∀ *value*: `Value` · **timeout-result?** *value* ↔ **failed-result-value?** *value* ∧ **timeout-error?** (**failed-result-error** *value*).
+
 
 
 ### Units and the transactional stack
@@ -773,16 +900,6 @@ Error propagation and diagnostic attribution remain governed by prose.
 Ordinary evaluation may consume operands and perform effects before it fails;
 its failure outcome therefore includes the partial operand stack and the
 surviving execution state at the point of failure.
-
-#### Formal unit model
-
-The Pantagruel source is
-[`formal/units.pant`](formal/units.pant). Its documentation and checked
-formulae define the general unit lifecycle and operand-stack rollback.
-Launch, observation, and structured-concurrency policy remain outside its
-declared abstraction boundary.
-
-##### Checked model
 
 **Imports:** ECL_ERRORS
 
@@ -794,9 +911,9 @@ declared abstraction boundary.
 
 ##### Action
 
-> This model is normative for the lifecycle of a general ECL unit; its ordered entry and body values; successful completion with an ordered result stack; and failure with an error and restoration of the entry stack.  It deliberately abstracts over evaluation steps, name resolution, concrete values and error dictionaries, environment writes, I/O, randomness, and all other non-stack effects. The surrounding language specification governs those subjects and requires that unit failure does not roll back effects already performed. The model also omits launch and observation policy, task identity, task trees, scheduling, awaiting, deadlines, cancellation causes, and reclamation. In particular, cancellation reaches this model only as an evaluator-supplied failure error, while a waiting operation's timeout does not alter the target unit.  `@attempt` begins a unit, waits synchronously for one terminal transition, and reifies that outcome. `@spawn` begins the same kind of unit and returns a task capability immediately; `await` later reifies the attached unit's terminal outcome through the same mapping. Thus `@attempt` is observationally equivalent to `@spawn await`, while task lifetime and waiting behavior remain outside this model.  `Begin unit` receives the complete entry stack and exact body as separate ordered inputs. It selects one never-before-created unit identity, records those inputs unchanged, and makes that unit active. Reader-delimited units, `load`, and isolated unit constructors differ in how they supply these inputs and expose the eventual outcome; those policies do not change unit execution semantics.
+> This model is normative for the lifecycle of a general ECL unit; its ordered entry and body values; successful completion with an ordered result stack; and failure with an error and restoration of the entry stack.  It deliberately abstracts over evaluation steps, name resolution, concrete values and error dictionaries, environment writes, I/O, randomness, and all other non-stack effects. The surrounding language specification governs those subjects and requires that unit failure does not roll back effects already performed. The model also omits launch and observation policy, task identity, task trees, scheduling, awaiting, deadlines, cancellation causes, and reclamation. In particular, cancellation reaches this model only as an evaluator-supplied failure error, while a waiting operation's timeout does not alter the target unit.  `@attempt` begins a unit, waits synchronously for one terminal transition, and reifies that outcome. `@spawn` begins the same kind of unit and returns a task capability immediately; `await` later reifies the attached unit's terminal outcome through the same mapping. Thus `@attempt` is observationally equivalent to `@spawn await`, while task lifetime and waiting behavior remain outside this model.  `Begin unit` receives the complete entry-stack list and exact quotation body as separate ECL list values. It selects one never-before-created unit identity, records those inputs unchanged, and makes that unit active. Reader-delimited units, `load`, and isolated unit constructors differ in how they supply these inputs and expose the eventual outcome; those policies do not change unit execution semantics.
 
-**`Units`** ↝ Begin unit *entry*: [`Value`], *body*: [`Value`].
+**`Units`** ↝ Begin unit *entry*: `Value`, *body*: `Value`, **value-type** *entry* = **list-type**, **value-type** *body* = **list-type**.
 
 ---
 
@@ -822,11 +939,11 @@ declared abstraction boundary.
 
 {**`Units`**} **unit-failed?** *unit*: `Unit` ⇒ `Bool`.
 
-{**`Units`**} **unit-entry** *unit*: `Unit` ⇒ [`Value`].
+{**`Units`**} **unit-entry** *unit*: `Unit` ⇒ `Value`.
 
-{**`Units`**} **unit-body** *unit*: `Unit` ⇒ [`Value`].
+{**`Units`**} **unit-body** *unit*: `Unit` ⇒ `Value`.
 
-{**`Units`**} **unit-stack** *unit*: `Unit` ⇒ [`Value`].
+{**`Units`**} **unit-stack** *unit*: `Unit` ⇒ `Value`.
 
 {**`Units`**} **unit-error** *unit*: `Unit` ⇒ `Value`.
 
@@ -848,6 +965,10 @@ declared abstraction boundary.
 
 ∀ *candidate*: `Unit`, **unit-created?** *candidate* · **unit-active?** *candidate* ∨ **unit-succeeded?** *candidate* ∨ **unit-failed?** *candidate*.
 
+> Every created unit retains list values for its entry stack, quotation body, and exposed stack.
+
+∀ *candidate*: `Unit`, **unit-created?** *candidate* · **value-type** (**unit-entry** *candidate*) = **list-type** ∧ **value-type** (**unit-body** *candidate*) = **list-type** ∧ **value-type** (**unit-stack** *candidate*) = **list-type**.
+
 > Initially no unit identity has been created or entered a lifecycle phase.
 
 initially ∀ *candidate*: `Unit` · ¬**unit-created?** *candidate* ∧ ¬**unit-active?** *candidate* ∧ ¬**unit-succeeded?** *candidate* ∧ ¬**unit-failed?** *candidate*.
@@ -858,7 +979,7 @@ initially ∀ *candidate*: `Unit` · ¬**unit-created?** *candidate* ∧ ¬**uni
 
 > `Complete unit successfully` accepts the result produced by the omitted evaluator, makes the active unit terminal, and retains that result as the unit's terminal stack. The evaluator supplies the result; it is not chosen by the ECL operation that launched the unit.
 
-**`Units`** ↝ Complete unit successfully *unit*: `Unit`, *result*: [`Value`], **unit-created?** *unit*, **unit-active?** *unit*.
+**`Units`** ↝ Complete unit successfully *unit*: `Unit`, *result*: `Value`, **unit-created?** *unit*, **unit-active?** *unit*, **value-type** *result* = **list-type**.
 
 ---
 
@@ -1335,14 +1456,6 @@ anonymously, be passed as data, and be registered more than once.
   unreadable spellings do not become validated names. Reserved syntax markers
   are interned as syntax only and cannot be minted as binding names through a
   privileged validation mode.
-
-### Formal module model
-
-The Pantagruel source is
-[`formal/modules.pant`](formal/modules.pant). Its documentation and checked
-formulae are rendered here as one normative text.
-
-#### Checked model
 
 **Imports:** ECL_VALUES
 
@@ -1953,11 +2066,261 @@ initially ∀ *transaction*: `Transaction` · ¬**transaction-created?** *transa
   programs observe only the resulting registration, never whether a module is
   "loaded" or how it was transported.
 
-## Legacy material
+## Concurrency
 
-The rewritten report currently ends here. Unreviewed core-language material is
-preserved verbatim in [`LEGACY_LANGUAGE.md`](LEGACY_LANGUAGE.md). Material
-already identified as belonging to the standard environment, host, packages,
-CLI, or formatter is preserved verbatim in
-[`LEGACY_ENVIRONMENT.md`](LEGACY_ENVIRONMENT.md). These files supply migration
-inputs; this specification is complete without treating them as continuations.
+**Imports:** ECL_UNITS
+
+##### Contexts
+
+**`Concurrency`**
+
+#### Chapter 1
+
+##### Action
+
+> This model is normative for structured task identity, attachment to the general unit lifecycle, cached terminal results, observation by `await`, deadline expiry, cancellation, and the requirement that a unit quiesce its task scope before becoming terminal.  It abstracts over evaluator steps, scheduling policy, elapsed time, I/O interleaving, handle storage and lexical scope, and the selection algorithms used by `await-any`, `await-all`, and `@each`. The surrounding language specification governs those operations. A conforming scheduler may run runnable tasks serially; the model promises lifetime and result semantics, without promising simultaneous progress or fairness. Task capabilities are immutable ECL values and may be shared. The mutable evaluation state of each task remains confined to its attached unit.  `Spawn task` is the formal `@spawn` boundary. The explicit values list and quotation body become the attached unit's complete entry stack and body. Ambient operands are absent from the action, so they cannot cross the boundary. The action chooses both a fresh task identity and a fresh unit identity, attaches them permanently, and records the active unit that owns the new task's structured lifetime.
+
+**`Units`**, **`Concurrency`** ↝ Spawn task *owner*: `Unit`, *entry*: `Value`, *body*: `Value`, **unit-created?** *owner*, **unit-active?** *owner*, ¬**unit-succeeded?** *owner*, ¬**unit-failed?** *owner*, **value-type** *entry* = **list-type**, **value-type** *body* = **list-type**.
+
+---
+
+> Spawning creates one task and one attached active unit. Both identities are fresh, and all previously created task and unit state is preserved.
+
+∃ *task*: `Task`, *child*: `Unit`, ¬**task-created?** *task*, ¬**unit-created?** *child* · **task-created?**′ *task* ∧ **task-unit**′ *task* = *child* ∧ **task-owner-unit**′ *task* = *owner* ∧ **value-type** (**task-capability** *task*) = **task-type** ∧ (∀ *existing*: `Task`, **task-created?** *existing* · **task-capability** *task* ≠ **task-capability** *existing*) ∧ **unit-created?**′ *child* ∧ **unit-active?**′ *child* ∧ ¬**unit-succeeded?**′ *child* ∧ ¬**unit-failed?**′ *child* ∧ **unit-entry**′ *child* = *entry* ∧ **unit-body**′ *child* = *body* ∧ **unit-stack**′ *child* = *entry* ∧ **unit-error**′ *child* = **unit-error** *child* ∧ (∀ *other-task*: `Task`, *other-task* ≠ *task* · **task-created?**′ *other-task* = **task-created?** *other-task* ∧ **task-unit**′ *other-task* = **task-unit** *other-task* ∧ **task-owner-unit**′ *other-task* = **task-owner-unit** *other-task*) ∧ (∀ *other-unit*: `Unit`, *other-unit* ≠ *child* · **unit-created?**′ *other-unit* = **unit-created?** *other-unit* ∧ **unit-active?**′ *other-unit* = **unit-active?** *other-unit* ∧ **unit-succeeded?**′ *other-unit* = **unit-succeeded?** *other-unit* ∧ **unit-failed?**′ *other-unit* = **unit-failed?** *other-unit* ∧ **unit-entry**′ *other-unit* = **unit-entry** *other-unit* ∧ **unit-body**′ *other-unit* = **unit-body** *other-unit* ∧ **unit-stack**′ *other-unit* = **unit-stack** *other-unit* ∧ **unit-error**′ *other-unit* = **unit-error** *other-unit*).
+
+#### Chapter 2
+
+##### Domains
+
+> A created task permanently names one attached unit and its owning unit. Its capability is an ECL value of the task kind. No two task identities attach to the same unit or expose the same capability value.
+
+`Task`.
+
+##### Rules
+
+{**`Concurrency`**} **task-created?** *task*: `Task` ⇒ `Bool`.
+
+{**`Concurrency`**} **task-unit** *task*: `Task` ⇒ `Unit`.
+
+{**`Concurrency`**} **task-owner-unit** *task*: `Task` ⇒ `Unit`.
+
+**task-capability** *task*: `Task` ⇒ `Value`.
+
+---
+
+> Every created task has a task-valued capability, attaches to a created unit, and was spawned by a distinct created unit.
+
+∀ *task*: `Task`, **task-created?** *task* · **value-type** (**task-capability** *task*) = **task-type** ∧ **unit-created?** (**task-unit** *task*) ∧ **unit-created?** (**task-owner-unit** *task*) ∧ **task-unit** *task* ≠ **task-owner-unit** *task*.
+
+> Attached units are unique to their task identities.
+
+∀ *left*: `Task`, *right*: `Task`, **task-created?** *left*, **task-created?** *right*, **task-unit** *left* = **task-unit** *right* · *left* = *right*.
+
+> Created tasks have distinct capability values.
+
+∀ *left*: `Task`, *right*: `Task`, **task-created?** *left*, **task-created?** *right*, **task-capability** *left* = **task-capability** *right* · *left* = *right*.
+
+> Initially no task identity has been created.
+
+initially ∀ *task*: `Task` · ¬**task-created?** *task*.
+
+#### Chapter 3
+
+##### Rules
+
+> A task's terminal result is a single immutable ECL value. A successful attached unit yields the exact ordered terminal stack in an `'ok` envelope; a failed attached unit yields its unchanged error value in an `'err` envelope. Because `task-result` is immutable, every observation of a terminal task produces the same value.
+
+**task-result** *task*: `Task` ⇒ `Value`.
+
+---
+
+> Successful tasks have successful result envelopes.
+
+∀ *task*: `Task`, **task-created?** *task*, **unit-succeeded?** (**task-unit** *task*) · **successful-result-value?** (**task-result** *task*).
+
+> The successful result payload is exactly the attached unit's terminal stack list value.
+
+∀ *task*: `Task`, **task-created?** *task*, **unit-succeeded?** (**task-unit** *task*) · **successful-result-values** (**task-result** *task*) = **unit-stack** (**task-unit** *task*).
+
+> Failed tasks have failed result envelopes containing the unit's exact error value.
+
+∀ *task*: `Task`, **task-created?** *task*, **unit-failed?** (**task-unit** *task*) · **failed-result-value?** (**task-result** *task*).
+
+∀ *task*: `Task`, **task-created?** *task*, **unit-failed?** (**task-unit** *task*) · **failed-result-error** (**task-result** *task*) = **unit-error** (**task-unit** *task*).
+
+> A unit may become terminal only after every directly owned task is terminal. Applying the same rule recursively gives structured quiescence for the complete descendant task tree. This is the task-scope part of the rule that a failed unit leaves nothing running.
+
+∀ *owner*: `Unit`, **unit-created?** *owner*, (**unit-succeeded?** *owner* ∨ **unit-failed?** *owner*) · ∀ *task*: `Task`, **task-created?** *task*, **task-owner-unit** *task* = *owner* · **unit-succeeded?** (**task-unit** *task*) ∨ **unit-failed?** (**task-unit** *task*).
+
+#### Chapter 4
+
+##### Action
+
+> `Complete spawned task successfully` is the concurrency-layer use of the general unit success transition. The evaluator supplies the final stack. The attached unit can become terminal only after its own task scope has quiesced.
+
+**`Units`** ↝ Complete spawned task successfully *task*: `Task`, *result*: `Value`, **task-created?** *task*, **unit-active?** (**task-unit** *task*), **value-type** *result* = **list-type**, (∀ *child*: `Task`, **task-created?** *child*, **task-owner-unit** *child* = **task-unit** *task* · **unit-succeeded?** (**task-unit** *child*) ∨ **unit-failed?** (**task-unit** *child*)).
+
+---
+
+**unit-created?**′ (**task-unit** *task*).
+
+¬**unit-active?**′ (**task-unit** *task*).
+
+**unit-succeeded?**′ (**task-unit** *task*).
+
+¬**unit-failed?**′ (**task-unit** *task*).
+
+**unit-entry**′ (**task-unit** *task*) = **unit-entry** (**task-unit** *task*).
+
+**unit-body**′ (**task-unit** *task*) = **unit-body** (**task-unit** *task*).
+
+**unit-stack**′ (**task-unit** *task*) = *result*.
+
+**unit-error**′ (**task-unit** *task*) = **unit-error** (**task-unit** *task*).
+
+**successful-result-value?** (**task-result** *task*).
+
+**successful-result-values** (**task-result** *task*) = *result*.
+
+∀ *other*: `Unit`, *other* ≠ **task-unit** *task* · **unit-created?**′ *other* = **unit-created?** *other* ∧ **unit-active?**′ *other* = **unit-active?** *other* ∧ **unit-succeeded?**′ *other* = **unit-succeeded?** *other* ∧ **unit-failed?**′ *other* = **unit-failed?** *other* ∧ **unit-entry**′ *other* = **unit-entry** *other* ∧ **unit-body**′ *other* = **unit-body** *other* ∧ **unit-stack**′ *other* = **unit-stack** *other* ∧ **unit-error**′ *other* = **unit-error** *other*.
+
+#### Chapter 5
+
+##### Action
+
+> `Complete spawned task with failure` is the concurrency-layer use of the general unit failure transition. The evaluator supplies the error. The attached unit restores its entry stack and becomes terminal after its own task scope has quiesced.
+
+**`Units`** ↝ Complete spawned task with failure *task*: `Task`, *error*: `Value`, **task-created?** *task*, **unit-active?** (**task-unit** *task*), **error-value?** *error*, (∀ *child*: `Task`, **task-created?** *child*, **task-owner-unit** *child* = **task-unit** *task* · **unit-succeeded?** (**task-unit** *child*) ∨ **unit-failed?** (**task-unit** *child*)).
+
+---
+
+**unit-created?**′ (**task-unit** *task*).
+
+¬**unit-active?**′ (**task-unit** *task*).
+
+¬**unit-succeeded?**′ (**task-unit** *task*).
+
+**unit-failed?**′ (**task-unit** *task*).
+
+**unit-entry**′ (**task-unit** *task*) = **unit-entry** (**task-unit** *task*).
+
+**unit-body**′ (**task-unit** *task*) = **unit-body** (**task-unit** *task*).
+
+**unit-stack**′ (**task-unit** *task*) = **unit-entry** (**task-unit** *task*).
+
+**unit-error**′ (**task-unit** *task*) = *error*.
+
+**failed-result-value?** (**task-result** *task*).
+
+**failed-result-error** (**task-result** *task*) = *error*.
+
+∀ *other*: `Unit`, *other* ≠ **task-unit** *task* · **unit-created?**′ *other* = **unit-created?** *other* ∧ **unit-active?**′ *other* = **unit-active?** *other* ∧ **unit-succeeded?**′ *other* = **unit-succeeded?** *other* ∧ **unit-failed?**′ *other* = **unit-failed?** *other* ∧ **unit-entry**′ *other* = **unit-entry** *other* ∧ **unit-body**′ *other* = **unit-body** *other* ∧ **unit-stack**′ *other* = **unit-stack** *other* ∧ **unit-error**′ *other* = **unit-error** *other*.
+
+#### Chapter 6
+
+##### Action
+
+> `Await task` observes only a terminal attached unit and leaves both unit and task state unchanged. It yields `task-result task`; repeating the action is therefore safe and produces the cached result again. Parking and resumption before the terminal observation are scheduling details outside the model.
+
+**`Concurrency`** ↝ Await task *observer*: `Unit`, *task*: `Task`, **unit-created?** *observer*, **unit-active?** *observer*, **task-created?** *task*, (**unit-succeeded?** (**task-unit** *task*) ∨ **unit-failed?** (**task-unit** *task*)).
+
+---
+
+∀ *candidate*: `Task` · **task-created?**′ *candidate* = **task-created?** *candidate* ∧ **task-unit**′ *candidate* = **task-unit** *candidate* ∧ **task-owner-unit**′ *candidate* = **task-owner-unit** *candidate*.
+
+#### Chapter 7
+
+##### Action
+
+> `Await task until deadline expires` is the timeout branch of `await-for`. It is available only while the attached unit is active, yields a value satisfying `timeout-result?`, and leaves the task and attached unit unchanged. A terminal task therefore wins over deadline expiry, including at a zero deadline. Deadline measurement and parking are outside the model.
+
+**`Concurrency`** ↝ Await task until deadline expires *observer*: `Unit`, *task*: `Task`, **unit-created?** *observer*, **unit-active?** *observer*, **task-created?** *task*, **unit-active?** (**task-unit** *task*).
+
+---
+
+∀ *candidate*: `Task` · **task-created?**′ *candidate* = **task-created?** *candidate* ∧ **task-unit**′ *candidate* = **task-unit** *candidate* ∧ **task-owner-unit**′ *candidate* = **task-owner-unit** *candidate*.
+
+#### Chapter 8
+
+##### Action
+
+> `Cancel active task` is ordinary unit failure with a cancellation error. It restores the unit's entry stack and becomes terminal only after the task's own descendants are quiescent.
+
+**`Units`** ↝ Cancel active task *task*: `Task`, *error*: `Value`, **task-created?** *task*, **unit-active?** (**task-unit** *task*), **cancelled-error?** *error*, (∀ *child*: `Task`, **task-created?** *child*, **task-owner-unit** *child* = **task-unit** *task* · **unit-succeeded?** (**task-unit** *child*) ∨ **unit-failed?** (**task-unit** *child*)).
+
+---
+
+**unit-created?**′ (**task-unit** *task*).
+
+¬**unit-active?**′ (**task-unit** *task*).
+
+¬**unit-succeeded?**′ (**task-unit** *task*).
+
+**unit-failed?**′ (**task-unit** *task*).
+
+**unit-entry**′ (**task-unit** *task*) = **unit-entry** (**task-unit** *task*).
+
+**unit-body**′ (**task-unit** *task*) = **unit-body** (**task-unit** *task*).
+
+**unit-stack**′ (**task-unit** *task*) = **unit-entry** (**task-unit** *task*).
+
+**unit-error**′ (**task-unit** *task*) = *error*.
+
+**failed-result-value?** (**task-result** *task*).
+
+**failed-result-error** (**task-result** *task*) = *error*.
+
+∀ *other*: `Unit`, *other* ≠ **task-unit** *task* · **unit-created?**′ *other* = **unit-created?** *other* ∧ **unit-active?**′ *other* = **unit-active?** *other* ∧ **unit-succeeded?**′ *other* = **unit-succeeded?** *other* ∧ **unit-failed?**′ *other* = **unit-failed?** *other* ∧ **unit-entry**′ *other* = **unit-entry** *other* ∧ **unit-body**′ *other* = **unit-body** *other* ∧ **unit-stack**′ *other* = **unit-stack** *other* ∧ **unit-error**′ *other* = **unit-error** *other*.
+
+#### Chapter 9
+
+##### Action
+
+> Cancelling a terminal task is a no-op. Its cached result remains unchanged.
+
+**`Units`** ↝ Cancel terminal task *task*: `Task`, **task-created?** *task*, (**unit-succeeded?** (**task-unit** *task*) ∨ **unit-failed?** (**task-unit** *task*)).
+
+---
+
+∀ *candidate*: `Unit` · **unit-created?**′ *candidate* = **unit-created?** *candidate* ∧ **unit-active?**′ *candidate* = **unit-active?** *candidate* ∧ **unit-succeeded?**′ *candidate* = **unit-succeeded?** *candidate* ∧ **unit-failed?**′ *candidate* = **unit-failed?** *candidate* ∧ **unit-entry**′ *candidate* = **unit-entry** *candidate* ∧ **unit-body**′ *candidate* = **unit-body** *candidate* ∧ **unit-stack**′ *candidate* = **unit-stack** *candidate* ∧ **unit-error**′ *candidate* = **unit-error** *candidate*.
+
+
+
+### Task scopes and observation
+
+The unit that spawns a task owns its structured lifetime. A unit cannot finish
+while an owned task remains active. Leaving a scope with an active unawaited
+task requests cancellation and waits for that task's complete descendant scope
+to quiesce. The session is the root task scope. `tasks` reports pending
+descendants in deterministic spawn preorder.
+
+`await-any` accepts a nonempty task list and returns the selected index and
+cached task result. Among tasks terminal when the operation begins, the lowest
+input index wins; otherwise the first subsequent completion wins.
+
+`await-all` is the derived composition `(await) each`. It awaits every input,
+returns cached results in input order, preserves failures as data, and does not
+cancel siblings.
+
+`@each` starts one isolated unit per element and enforces exactly one result
+value from each unit. It returns results in input order. After the leftmost
+failure it cancels the remaining element tasks, waits for quiescence, and
+re-raises that failure. Selection of the leftmost failure is independent of
+schedule order. Element tasks have no simultaneous-progress guarantee; a
+program that requires cross-element rendezvous to make progress is invalid.
+
+Await order is program order. Nondeterminism enters through `await-any` and
+through I/O interleaving among concurrent tasks. I/O remains ordered within
+one task. Sequential combinators including `each`, `for`, and `fold` execute
+left to right.
+
+`exit` is available only to the root unit outside `@attempt`. Elsewhere it
+raises `'domain`. An allowed exit first cancels and quiesces the root task
+scope, then terminates the process with the supplied status.
+
+## Legacy environment material
+
+Material for the standard environment, host, packages, CLI, and formatter is
+preserved in [`LEGACY_ENVIRONMENT.md`](LEGACY_ENVIRONMENT.md). It is outside
+the scope of this language specification and is not assembled into this
+report.

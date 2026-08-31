@@ -25,13 +25,13 @@ context Units.
 > equivalent to `@spawn await`, while task lifetime and waiting behavior remain
 > outside this model.
 >
-> `Begin unit` receives the complete entry stack and exact body as separate
-> ordered inputs. It selects one never-before-created unit identity, records
+> `Begin unit` receives the complete entry-stack list and exact quotation body
+> as separate ECL list values. It selects one never-before-created unit identity, records
 > those inputs unchanged, and makes that unit active. Reader-delimited units,
 > `load`, and isolated unit constructors differ in how they supply these inputs
 > and expose the eventual outcome; those policies do not change unit execution
 > semantics.
-Units ~> Begin unit @ entry: [Value], body: [Value].
+Units ~> Begin unit @ entry: Value, body: Value, value-type entry = list-type, value-type body = list-type.
 ---
 > Beginning a unit selects one never-before-created identity, records its exact
 > entry stack and body, and makes it active with the entry stack installed.
@@ -66,9 +66,9 @@ Unit.
 {Units} unit-active? unit: Unit => Bool.
 {Units} unit-succeeded? unit: Unit => Bool.
 {Units} unit-failed? unit: Unit => Bool.
-{Units} unit-entry unit: Unit => [Value].
-{Units} unit-body unit: Unit => [Value].
-{Units} unit-stack unit: Unit => [Value].
+{Units} unit-entry unit: Unit => Value.
+{Units} unit-body unit: Unit => Value.
+{Units} unit-stack unit: Unit => Value.
 {Units} unit-error unit: Unit => Value.
 ---
 > An active unit is created and is neither successful nor failed.
@@ -98,6 +98,13 @@ all candidate: Unit, unit-created? candidate |
   unit-succeeded? candidate or
   unit-failed? candidate.
 
+> Every created unit retains list values for its entry stack, quotation body,
+> and exposed stack.
+all candidate: Unit, unit-created? candidate |
+  value-type (unit-entry candidate) = list-type and
+  value-type (unit-body candidate) = list-type and
+  value-type (unit-stack candidate) = list-type.
+
 > Initially no unit identity has been created or entered a lifecycle phase.
 initially all candidate: Unit |
   ~unit-created? candidate and
@@ -111,7 +118,7 @@ where
 > evaluator, makes the active unit terminal, and retains that result as the
 > unit's terminal stack. The evaluator supplies the result; it is not chosen by
 > the ECL operation that launched the unit.
-Units ~> Complete unit successfully @ unit: Unit, result: [Value], unit-created? unit, unit-active? unit.
+Units ~> Complete unit successfully @ unit: Unit, result: Value, unit-created? unit, unit-active? unit, value-type result = list-type.
 ---
 > Successful completion makes the unit terminal and exposes the evaluator's
 > complete result stack without changing its entry stack or body.

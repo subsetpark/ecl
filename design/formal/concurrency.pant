@@ -1,0 +1,273 @@
+module ECL_CONCURRENCY.
+
+import ECL_UNITS.
+
+context Concurrency.
+
+> This model is normative for structured task identity, attachment to the
+> general unit lifecycle, cached terminal results, observation by `await`,
+> deadline expiry, cancellation, and the requirement that a unit quiesce its
+> task scope before becoming terminal.
+>
+> It abstracts over evaluator steps, scheduling policy, elapsed time, I/O
+> interleaving, handle storage and lexical scope, and the selection algorithms
+> used by `await-any`, `await-all`, and `@each`. The surrounding language
+> specification governs those operations. A conforming scheduler may run
+> runnable tasks serially; the model promises lifetime and result semantics,
+> without promising simultaneous progress or fairness.
+> Task capabilities are immutable ECL values and may be shared. The mutable
+> evaluation state of each task remains confined to its attached unit.
+>
+> `Spawn task` is the formal `@spawn` boundary. The explicit values list and
+> quotation body become the attached unit's complete entry stack and body.
+> Ambient operands are absent from the action, so they cannot cross the
+> boundary. The action chooses both a fresh task identity and a fresh unit
+> identity, attaches them permanently, and records the active unit that owns
+> the new task's structured lifetime.
+Units, Concurrency ~> Spawn task @ owner: Unit, entry: Value, body: Value, unit-created? owner, unit-active? owner, ~unit-succeeded? owner, ~unit-failed? owner, value-type entry = list-type, value-type body = list-type.
+---
+> Spawning creates one task and one attached active unit. Both identities are
+> fresh, and all previously created task and unit state is preserved.
+some task: Task, child: Unit,
+    ~task-created? task,
+    ~unit-created? child |
+  task-created?' task and
+  task-unit' task = child and
+  task-owner-unit' task = owner and
+  value-type (task-capability task) = task-type and
+  (all existing: Task, task-created? existing |
+    task-capability task != task-capability existing) and
+  unit-created?' child and
+  unit-active?' child and
+  ~unit-succeeded?' child and
+  ~unit-failed?' child and
+  unit-entry' child = entry and
+  unit-body' child = body and
+  unit-stack' child = entry and
+  unit-error' child = unit-error child and
+  (all other-task: Task, other-task != task |
+    task-created?' other-task = task-created? other-task and
+    task-unit' other-task = task-unit other-task and
+    task-owner-unit' other-task = task-owner-unit other-task) and
+  (all other-unit: Unit, other-unit != child |
+    unit-created?' other-unit = unit-created? other-unit and
+    unit-active?' other-unit = unit-active? other-unit and
+    unit-succeeded?' other-unit = unit-succeeded? other-unit and
+    unit-failed?' other-unit = unit-failed? other-unit and
+    unit-entry' other-unit = unit-entry other-unit and
+    unit-body' other-unit = unit-body other-unit and
+    unit-stack' other-unit = unit-stack other-unit and
+    unit-error' other-unit = unit-error other-unit).
+
+where
+
+> A created task permanently names one attached unit and its owning unit. Its
+> capability is an ECL value of the task kind. No two task identities attach to
+> the same unit or expose the same capability value.
+Task.
+{Concurrency} task-created? task: Task => Bool.
+{Concurrency} task-unit task: Task => Unit.
+{Concurrency} task-owner-unit task: Task => Unit.
+task-capability task: Task => Value.
+---
+> Every created task has a task-valued capability, attaches to a created unit,
+> and was spawned by a distinct created unit.
+all task: Task, task-created? task |
+  value-type (task-capability task) = task-type and
+  unit-created? (task-unit task) and
+  unit-created? (task-owner-unit task) and
+  task-unit task != task-owner-unit task.
+
+> Attached units are unique to their task identities.
+all left: Task, right: Task,
+    task-created? left,
+    task-created? right,
+    task-unit left = task-unit right |
+  left = right.
+
+> Created tasks have distinct capability values.
+all left: Task, right: Task,
+    task-created? left,
+    task-created? right,
+    task-capability left = task-capability right |
+  left = right.
+
+> Initially no task identity has been created.
+initially all task: Task |
+  ~task-created? task.
+
+where
+
+> A task's terminal result is a single immutable ECL value. A successful
+> attached unit yields the exact ordered terminal stack in an `'ok` envelope;
+> a failed attached unit yields its unchanged error value in an `'err`
+> envelope. Because `task-result` is immutable, every observation of a
+> terminal task produces the same value.
+task-result task: Task => Value.
+---
+> Successful tasks have successful result envelopes.
+all task: Task,
+    task-created? task,
+    unit-succeeded? (task-unit task) |
+  successful-result-value? (task-result task).
+
+> The successful result payload is exactly the attached unit's terminal stack
+> list value.
+all task: Task,
+    task-created? task,
+    unit-succeeded? (task-unit task) |
+  successful-result-values (task-result task) =
+    unit-stack (task-unit task).
+
+> Failed tasks have failed result envelopes containing the unit's exact error
+> value.
+all task: Task,
+    task-created? task,
+    unit-failed? (task-unit task) |
+  failed-result-value? (task-result task).
+
+all task: Task,
+    task-created? task,
+    unit-failed? (task-unit task) |
+  failed-result-error (task-result task) =
+    unit-error (task-unit task).
+
+> A unit may become terminal only after every directly owned task is terminal.
+> Applying the same rule recursively gives structured quiescence for the
+> complete descendant task tree. This is the task-scope part of the rule that
+> a failed unit leaves nothing running.
+all owner: Unit,
+    unit-created? owner,
+    unit-succeeded? owner or unit-failed? owner |
+  all task: Task,
+      task-created? task,
+      task-owner-unit task = owner |
+    unit-succeeded? (task-unit task) or unit-failed? (task-unit task).
+
+where
+
+> `Complete spawned task successfully` is the concurrency-layer use of the
+> general unit success transition. The evaluator supplies the final stack.
+> The attached unit can become terminal only after its own task scope has
+> quiesced.
+Units ~> Complete spawned task successfully @ task: Task, result: Value, task-created? task, unit-active? (task-unit task), value-type result = list-type, (all child: Task, task-created? child, task-owner-unit child = task-unit task | unit-succeeded? (task-unit child) or unit-failed? (task-unit child)).
+---
+unit-created?' (task-unit task).
+~unit-active?' (task-unit task).
+unit-succeeded?' (task-unit task).
+~unit-failed?' (task-unit task).
+unit-entry' (task-unit task) = unit-entry (task-unit task).
+unit-body' (task-unit task) = unit-body (task-unit task).
+unit-stack' (task-unit task) = result.
+unit-error' (task-unit task) = unit-error (task-unit task).
+successful-result-value? (task-result task).
+successful-result-values (task-result task) = result.
+
+all other: Unit, other != task-unit task |
+  unit-created?' other = unit-created? other and
+  unit-active?' other = unit-active? other and
+  unit-succeeded?' other = unit-succeeded? other and
+  unit-failed?' other = unit-failed? other and
+  unit-entry' other = unit-entry other and
+  unit-body' other = unit-body other and
+  unit-stack' other = unit-stack other and
+  unit-error' other = unit-error other.
+
+where
+
+> `Complete spawned task with failure` is the concurrency-layer use of the
+> general unit failure transition. The evaluator supplies the error. The
+> attached unit restores its entry stack and becomes terminal after its own
+> task scope has quiesced.
+Units ~> Complete spawned task with failure @ task: Task, error: Value, task-created? task, unit-active? (task-unit task), error-value? error, (all child: Task, task-created? child, task-owner-unit child = task-unit task | unit-succeeded? (task-unit child) or unit-failed? (task-unit child)).
+---
+unit-created?' (task-unit task).
+~unit-active?' (task-unit task).
+~unit-succeeded?' (task-unit task).
+unit-failed?' (task-unit task).
+unit-entry' (task-unit task) = unit-entry (task-unit task).
+unit-body' (task-unit task) = unit-body (task-unit task).
+unit-stack' (task-unit task) = unit-entry (task-unit task).
+unit-error' (task-unit task) = error.
+failed-result-value? (task-result task).
+failed-result-error (task-result task) = error.
+
+all other: Unit, other != task-unit task |
+  unit-created?' other = unit-created? other and
+  unit-active?' other = unit-active? other and
+  unit-succeeded?' other = unit-succeeded? other and
+  unit-failed?' other = unit-failed? other and
+  unit-entry' other = unit-entry other and
+  unit-body' other = unit-body other and
+  unit-stack' other = unit-stack other and
+  unit-error' other = unit-error other.
+
+where
+
+> `Await task` observes only a terminal attached unit and leaves both unit and
+> task state unchanged. It yields `task-result task`; repeating the action is
+> therefore safe and produces the cached result again. Parking and resumption
+> before the terminal observation are scheduling details outside the model.
+Concurrency ~> Await task @ observer: Unit, task: Task, unit-created? observer, unit-active? observer, task-created? task, unit-succeeded? (task-unit task) or unit-failed? (task-unit task).
+---
+all candidate: Task |
+  task-created?' candidate = task-created? candidate and
+  task-unit' candidate = task-unit candidate and
+  task-owner-unit' candidate = task-owner-unit candidate.
+
+where
+
+> `Await task until deadline expires` is the timeout branch of `await-for`.
+> It is available only while the attached unit is active, yields a value
+> satisfying `timeout-result?`, and leaves the task and attached unit unchanged. A
+> terminal task therefore wins over deadline expiry, including at a zero
+> deadline. Deadline measurement and parking are outside the model.
+Concurrency ~> Await task until deadline expires @ observer: Unit, task: Task, unit-created? observer, unit-active? observer, task-created? task, unit-active? (task-unit task).
+---
+all candidate: Task |
+  task-created?' candidate = task-created? candidate and
+  task-unit' candidate = task-unit candidate and
+  task-owner-unit' candidate = task-owner-unit candidate.
+
+where
+
+> `Cancel active task` is ordinary unit failure with a cancellation error. It
+> restores the unit's entry stack and becomes terminal only after the task's
+> own descendants are quiescent.
+Units ~> Cancel active task @ task: Task, error: Value, task-created? task, unit-active? (task-unit task), cancelled-error? error, (all child: Task, task-created? child, task-owner-unit child = task-unit task | unit-succeeded? (task-unit child) or unit-failed? (task-unit child)).
+---
+unit-created?' (task-unit task).
+~unit-active?' (task-unit task).
+~unit-succeeded?' (task-unit task).
+unit-failed?' (task-unit task).
+unit-entry' (task-unit task) = unit-entry (task-unit task).
+unit-body' (task-unit task) = unit-body (task-unit task).
+unit-stack' (task-unit task) = unit-entry (task-unit task).
+unit-error' (task-unit task) = error.
+failed-result-value? (task-result task).
+failed-result-error (task-result task) = error.
+
+all other: Unit, other != task-unit task |
+  unit-created?' other = unit-created? other and
+  unit-active?' other = unit-active? other and
+  unit-succeeded?' other = unit-succeeded? other and
+  unit-failed?' other = unit-failed? other and
+  unit-entry' other = unit-entry other and
+  unit-body' other = unit-body other and
+  unit-stack' other = unit-stack other and
+  unit-error' other = unit-error other.
+
+where
+
+> Cancelling a terminal task is a no-op. Its cached result remains unchanged.
+Units ~> Cancel terminal task @ task: Task, task-created? task, unit-succeeded? (task-unit task) or unit-failed? (task-unit task).
+---
+all candidate: Unit |
+  unit-created?' candidate = unit-created? candidate and
+  unit-active?' candidate = unit-active? candidate and
+  unit-succeeded?' candidate = unit-succeeded? candidate and
+  unit-failed?' candidate = unit-failed? candidate and
+  unit-entry' candidate = unit-entry candidate and
+  unit-body' candidate = unit-body candidate and
+  unit-stack' candidate = unit-stack candidate and
+  unit-error' candidate = unit-error candidate.

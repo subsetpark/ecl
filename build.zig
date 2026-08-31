@@ -873,6 +873,13 @@ pub fn build(b: *std.Build) void {
     const rendered_value_spec = render_value_spec.captureStdOut(.{
         .basename = "values.md",
     });
+    const render_printing_spec = b.addSystemCommand(&.{
+        "pant", "--markdown", "--module-path", "design/formal",
+    });
+    render_printing_spec.addFileArg(b.path("design/formal/printing.pant"));
+    const rendered_printing_spec = render_printing_spec.captureStdOut(.{
+        .basename = "printing.md",
+    });
     const render_error_spec = b.addSystemCommand(&.{
         "pant", "--markdown", "--module-path", "design/formal",
     });
@@ -887,6 +894,13 @@ pub fn build(b: *std.Build) void {
     const rendered_unit_spec = render_unit_spec.captureStdOut(.{
         .basename = "units.md",
     });
+    const render_concurrency_spec = b.addSystemCommand(&.{
+        "pant", "--markdown", "--module-path", "design/formal",
+    });
+    render_concurrency_spec.addFileArg(b.path("design/formal/concurrency.pant"));
+    const rendered_concurrency_spec = render_concurrency_spec.captureStdOut(.{
+        .basename = "concurrency.md",
+    });
 
     const assemble_spec = b.addRunArtifact(exe);
     assemble_spec.addFileArg(b.path("design/spec/assemble.ecl"));
@@ -896,10 +910,14 @@ pub fn build(b: *std.Build) void {
     assemble_spec.addFileArg(b.path("design/spec/generated-preamble.md"));
     assemble_spec.addArg("value-model");
     assemble_spec.addFileArg(rendered_value_spec);
+    assemble_spec.addArg("printing-model");
+    assemble_spec.addFileArg(rendered_printing_spec);
     assemble_spec.addArg("error-model");
     assemble_spec.addFileArg(rendered_error_spec);
     assemble_spec.addArg("unit-model");
     assemble_spec.addFileArg(rendered_unit_spec);
+    assemble_spec.addArg("concurrency-model");
+    assemble_spec.addFileArg(rendered_concurrency_spec);
     assemble_spec.addArg("module-model");
     assemble_spec.addFileArg(rendered_module_spec);
     const update_spec = b.addUpdateSourceFiles();
@@ -916,10 +934,14 @@ pub fn build(b: *std.Build) void {
     check_spec_run.addFileArg(b.path("design/spec/generated-preamble.md"));
     check_spec_run.addArg("value-model");
     check_spec_run.addFileArg(rendered_value_spec);
+    check_spec_run.addArg("printing-model");
+    check_spec_run.addFileArg(rendered_printing_spec);
     check_spec_run.addArg("error-model");
     check_spec_run.addFileArg(rendered_error_spec);
     check_spec_run.addArg("unit-model");
     check_spec_run.addFileArg(rendered_unit_spec);
+    check_spec_run.addArg("concurrency-model");
+    check_spec_run.addFileArg(rendered_concurrency_spec);
     check_spec_run.addArg("module-model");
     check_spec_run.addFileArg(rendered_module_spec);
     const check_spec_step = b.step(
@@ -943,11 +965,21 @@ pub fn build(b: *std.Build) void {
         "0",    "--timeout", "8",       "--module-path", "design/formal",
     });
     check_values_formal_run.addFileArg(b.path("design/formal/values.pant"));
+    const check_printing_formal_run = b.addSystemCommand(&.{
+        "pant", "--check",   "--bound", "2",             "--steps",
+        "0",    "--timeout", "8",       "--module-path", "design/formal",
+    });
+    check_printing_formal_run.addFileArg(b.path("design/formal/printing.pant"));
     const check_errors_formal_run = b.addSystemCommand(&.{
         "pant", "--check",   "--bound", "2",             "--steps",
         "0",    "--timeout", "8",       "--module-path", "design/formal",
     });
     check_errors_formal_run.addFileArg(b.path("design/formal/errors.pant"));
+    const check_concurrency_formal_run = b.addSystemCommand(&.{
+        "pant", "--check",   "--bound", "2",             "--steps",
+        "2",    "--timeout", "12",      "--module-path", "design/formal",
+    });
+    check_concurrency_formal_run.addFileArg(b.path("design/formal/concurrency.pant"));
     const check_formal_step = b.step(
         "check-formal",
         "Check the bounded Pantagruel language models (needs pant and z3)",
@@ -955,7 +987,9 @@ pub fn build(b: *std.Build) void {
     check_formal_step.dependOn(&check_formal_run.step);
     check_formal_step.dependOn(&check_units_formal_run.step);
     check_formal_step.dependOn(&check_values_formal_run.step);
+    check_formal_step.dependOn(&check_printing_formal_run.step);
     check_formal_step.dependOn(&check_errors_formal_run.step);
+    check_formal_step.dependOn(&check_concurrency_formal_run.step);
 
     // zlint is a downloaded binary rather than a Zig dependency, so it is
     // optional here and blocking in CI. It is wired in when it is on PATH

@@ -194,6 +194,8 @@ where
 result-value? value: Value => Bool.
 successful-result-value? value: Value => Bool.
 failed-result-value? value: Value => Bool.
+successful-result-values value: Value => Value.
+failed-result-error value: Value => Value.
 ok-field => Value.
 err-field => Value.
 ---
@@ -221,6 +223,14 @@ all value: Value |
      dict-has-key? value err-field and
      error-value? (dict-value-for-key value err-field)).
 
+> The payload accessors expose the successful values list or failed error after
+> the corresponding result form has been established.
+all value: Value, successful-result-value? value |
+  successful-result-values value = dict-value-for-key value ok-field.
+
+all value: Value, failed-result-value? value |
+  failed-result-error value = dict-value-for-key value err-field.
+
 > Results are exactly the successful and failed forms.
 all value: Value |
   result-value? value <->
@@ -229,3 +239,37 @@ all value: Value |
 > The two result forms are disjoint.
 all value: Value, successful-result-value? value |
   ~failed-result-value? value.
+
+where
+
+> Cancellation and timeout errors are classified by their required `'kind`
+> field. They retain the ordinary error schema, including any optional or
+> kind-specific diagnostic fields. Their result forms are ordinary failed
+> result envelopes. A timeout result is an observation only; it is not the
+> target task's terminal result.
+cancelled-error? value: Value => Bool.
+timeout-error? value: Value => Bool.
+cancelled-result? value: Value => Bool.
+timeout-result? value: Value => Bool.
+---
+> Cancellation and timeout errors have the corresponding core kind.
+all value: Value |
+  cancelled-error? value <->
+    (error-value? value and
+     dict-value-for-key value kind-field = cancelled-error-kind).
+
+all value: Value |
+  timeout-error? value <->
+    (error-value? value and
+     dict-value-for-key value kind-field = timeout-error-kind).
+
+> Cancellation and timeout results contain errors of the corresponding kind.
+all value: Value |
+  cancelled-result? value <->
+    (failed-result-value? value and
+     cancelled-error? (failed-result-error value)).
+
+all value: Value |
+  timeout-result? value <->
+    (failed-result-value? value and
+     timeout-error? (failed-result-error value)).

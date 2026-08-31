@@ -1,0 +1,104 @@
+module ECL_PRINTING.
+
+import ECL_VALUES.
+
+> This model is normative for canonical rendering, its read-back guarantee,
+> and display elision. It abstracts over concrete atom spellings, escapes,
+> delimiters, whitespace, indentation, stack layout, terminal width, and the
+> reader's treatment of source containing more or less than one value. The
+> surrounding language specification governs those subjects.
+>
+> `canonical-render` is the string produced by `str` for one value.
+> Canonical output is always a compact single line and never contains a
+> display-elision marker. For every recursively readable value, that string is
+> readable as one value and the result matches the original value. Task and
+> module values, and aggregates containing them, retain diagnostic canonical
+> displays without a read-back guarantee.
+canonical-render value: Value => String.
+source-readable-as-one? source: String => Bool.
+read-one source: String, source-readable-as-one? source => Value.
+single-line? text: String => Bool.
+contains-elision-marker? text: String => Bool.
+---
+> Every canonical rendering is single-line and free of display elision.
+all value: Value |
+  single-line? (canonical-render value) and
+  ~contains-elision-marker? (canonical-render value).
+
+> Canonical rendering of every readable value is readable as one value.
+all value: Value, readable? value |
+  source-readable-as-one? (canonical-render value).
+
+> Reading a readable value's canonical rendering produces a structurally
+> matching value.
+all value: Value,
+    readable? value,
+    source-readable-as-one? (canonical-render value) |
+  matches? (read-one (canonical-render value)) value.
+
+> Dictionary rendering preserves insertion order across canonical read-back:
+> each read entry matches the original key and value at the same position.
+all value: Value,
+    value-type value = dict-type,
+    readable? value,
+    source-readable-as-one? (canonical-render value) |
+  value-type (read-one (canonical-render value)) = dict-type and
+  dict-length (read-one (canonical-render value)) = dict-length value.
+
+all value: Value,
+    index: Nat,
+    value-type value = dict-type,
+    readable? value,
+    source-readable-as-one? (canonical-render value),
+    value-type (read-one (canonical-render value)) = dict-type,
+    index <= dict-length value |
+  matches?
+    (dict-key-at-index (read-one (canonical-render value)) index)
+    (dict-key-at-index value index) and
+  matches?
+    (dict-value-at-index (read-one (canonical-render value)) index)
+    (dict-value-at-index value index).
+
+where
+
+> `display-render` is the best-effort text used for a single value by `io.pp`
+> and by stack displays. A list longer than 256 elements is replaced as a
+> whole by a count-bearing marker before its children are rendered. The same
+> rule applies recursively inside lists and dictionaries. Canonical rendering
+> remains unaffected.
+display-render value: Value => String.
+display-contains-elision? value: Value => Bool.
+---
+> Scalar and capability values contain no nested display elision.
+all value: Value,
+    value-type value = int-type or
+    value-type value = float-type or
+    value-type value = char-type or
+    value-type value = symbol-type or
+    value-type value = word-type or
+    value-type value = task-type or
+    value-type value = module-type |
+  ~display-contains-elision? value.
+
+> A displayed list contains elision exactly when it exceeds 256 elements, or
+> when an unelided child recursively contains elision.
+all value: Value, value-type value = list-type |
+  display-contains-elision? value <->
+    (list-length value > 256 or
+     (list-length value <= 256 and
+      (some index: Nat, index <= list-length value |
+        display-contains-elision? (list-element value index)))).
+
+> A displayed dictionary contains elision exactly when one of its rendered
+> keys or values recursively contains elision.
+all value: Value, value-type value = dict-type |
+  display-contains-elision? value <->
+    (some index: Nat, index <= dict-length value |
+      display-contains-elision? (dict-key-at-index value index) or
+      display-contains-elision? (dict-value-at-index value index)).
+
+> Display text contains an elision marker exactly when recursive value
+> rendering elides some list.
+all value: Value |
+  contains-elision-marker? (display-render value) <->
+    display-contains-elision? value.

@@ -9,15 +9,6 @@ interpreter architecture, host interface, or distribution. This document
 defines the language; the shipped ECL interpreter is its reference
 implementation.
 
-This is a staged rewrite of the language report. Only material incorporated
-into this document has been reviewed under its present structure. Untouched
-core-language text from the former monolithic specification is preserved in
-[`LEGACY_LANGUAGE.md`](LEGACY_LANGUAGE.md); untouched environment and tooling
-text is preserved separately in
-[`LEGACY_ENVIRONMENT.md`](LEGACY_ENVIRONMENT.md). Neither legacy file is
-assembled into this report or represents a decision affirmed by the current
-specification work.
-
 ECL has three distinct fields of conformance:
 
 - An **ECL language implementation** conforms to this document. It provides
@@ -238,16 +229,6 @@ binder   :=  "|" name+ "|"           # names: distinct unqualified symbols
 
 ## Values and external representations
 
-### Formal value model
-
-The Pantagruel source is
-[`formal/values.pant`](formal/values.pant). Its documentation and checked
-formulae are rendered here as one normative text. Concrete representation,
-source grammar, printing, pervasion, and value-consuming operations remain
-governed by the prose outside the model.
-
-#### Checked model
-
 <!-- include:value-model -->
 
 ### Representation and language roles
@@ -288,6 +269,37 @@ An operation may produce display text for every value, but any print/read
 guarantee applies only to the formally defined readable subset. Reader
 provenance, resolution metadata, and reader lineage need not be reproduced by
 that round trip.
+
+Printing never exposes storage specialization. A non-string list uses `[...]`
+when its value has canonical array shape—a homogeneous flat vector or a
+rectangular nesting of such vectors—and `(...)` otherwise. Both delimiters
+read as the same list kind. Thus `(1 2 3)` prints as `[1 2 3]`, while the
+ragged result of `[[1 2] [3]] 10 *` prints as `([10 20] [30])`. Strings use
+quoted string syntax.
+
+<!-- include:printing-model -->
+
+`io.pp` and the REPL use a best-effort display layout with canonical atom
+spellings and delimiters. Rows of rectangular matrices, plus one enclosing
+group axis, are separated by newline and indentation. A displayed non-string
+list longer than 256 elements becomes `[<N-values-elided>]` or
+`(<N-values-elided>)` according to its delimiter. A displayed string longer
+than 256 characters becomes `"<N-characters-elided>"`. Elision occurs before
+matrix-shape scanning or child rendering. Canonical `str` output never elides.
+
+A displayed dictionary remains compact when it has at most three pairs and
+contains no nested dictionary or matrix-valued key or value. Every other
+dictionary uses one pair per indented line, applying the same choice
+recursively. Flat vector fields remain compact. Canonical `str` output is
+always compact.
+
+`io.stack` applies the same per-value display layout and emits each visible
+operand slot as a bottom-up indexed block. `[0]` is the bottom of the visible
+window and the largest index is its top; continuation lines align after the
+index prefix. The denser REPL layout instead keeps stack order from left to
+right and places each value's rectangle beside its neighbors on a shared
+bottom row. Padding is measured in bytes and ends with each row's last value.
+Neither layout wraps to terminal width.
 
 ### Equality and ordering
 
@@ -378,14 +390,24 @@ represented by an absent field, never by a nil value. Runtime-assembled code
 has no source position by construction, and no host exception or host stack
 frame is exposed as ECL error data.
 
-#### Formal error model
+A completion-time source-word effect violation identifies the opening
+delimiter of the deepest reader-built quotation selected by ordinary tail
+control in that checked activation. The checked body supplies the initial
+location. An empty selected quotation identifies its opening `(`.
 
-The Pantagruel source is
-[`formal/errors.pant`](formal/errors.pant). Its documentation and checked
-formulae define the error dictionary schema and core error-kind taxonomy.
-Error propagation and diagnostic attribution remain governed by prose.
+Non-tail helper calls and isolated or inline application iterations preserve
+that location. An application's own contract failure retains its separate
+application boundary; dynamically applied tail-control quotations within the
+application may replace that boundary's selected location. Guard predicates
+are disposable observations. After guard restoration, the selected `cond`
+action or true `while` body replaces the enclosing selection, and tail control
+inside that action may refine it. Each iteration starts with a fresh boundary.
 
-##### Checked model
+The error reports the deepest selected quotation's opening delimiter and
+preserves its element index, falling back to the application quotation when
+no dynamic selection occurred. When that quotation was assembled at runtime,
+all source fields are absent; attribution never falls back to a less-specific
+location or invents one.
 
 <!-- include:error-model -->
 
@@ -394,16 +416,6 @@ Error propagation and diagnostic attribution remain governed by prose.
 Ordinary evaluation may consume operands and perform effects before it fails;
 its failure outcome therefore includes the partial operand stack and the
 surviving execution state at the point of failure.
-
-#### Formal unit model
-
-The Pantagruel source is
-[`formal/units.pant`](formal/units.pant). Its documentation and checked
-formulae define the general unit lifecycle and operand-stack rollback.
-Launch, observation, and structured-concurrency policy remain outside its
-declared abstraction boundary.
-
-##### Checked model
 
 <!-- include:unit-model -->
 
@@ -829,14 +841,6 @@ anonymously, be passed as data, and be registered more than once.
   are interned as syntax only and cannot be minted as binding names through a
   privileged validation mode.
 
-### Formal module model
-
-The Pantagruel source is
-[`formal/modules.pant`](formal/modules.pant). Its documentation and checked
-formulae are rendered here as one normative text.
-
-#### Checked model
-
 <!-- include:module-model -->
 
 ### Construction and definitions
@@ -1109,11 +1113,45 @@ formulae are rendered here as one normative text.
   programs observe only the resulting registration, never whether a module is
   "loaded" or how it was transported.
 
-## Legacy material
+## Concurrency
 
-The rewritten report currently ends here. Unreviewed core-language material is
-preserved verbatim in [`LEGACY_LANGUAGE.md`](LEGACY_LANGUAGE.md). Material
-already identified as belonging to the standard environment, host, packages,
-CLI, or formatter is preserved verbatim in
-[`LEGACY_ENVIRONMENT.md`](LEGACY_ENVIRONMENT.md). These files supply migration
-inputs; this specification is complete without treating them as continuations.
+<!-- include:concurrency-model -->
+
+### Task scopes and observation
+
+The unit that spawns a task owns its structured lifetime. A unit cannot finish
+while an owned task remains active. Leaving a scope with an active unawaited
+task requests cancellation and waits for that task's complete descendant scope
+to quiesce. The session is the root task scope. `tasks` reports pending
+descendants in deterministic spawn preorder.
+
+`await-any` accepts a nonempty task list and returns the selected index and
+cached task result. Among tasks terminal when the operation begins, the lowest
+input index wins; otherwise the first subsequent completion wins.
+
+`await-all` is the derived composition `(await) each`. It awaits every input,
+returns cached results in input order, preserves failures as data, and does not
+cancel siblings.
+
+`@each` starts one isolated unit per element and enforces exactly one result
+value from each unit. It returns results in input order. After the leftmost
+failure it cancels the remaining element tasks, waits for quiescence, and
+re-raises that failure. Selection of the leftmost failure is independent of
+schedule order. Element tasks have no simultaneous-progress guarantee; a
+program that requires cross-element rendezvous to make progress is invalid.
+
+Await order is program order. Nondeterminism enters through `await-any` and
+through I/O interleaving among concurrent tasks. I/O remains ordered within
+one task. Sequential combinators including `each`, `for`, and `fold` execute
+left to right.
+
+`exit` is available only to the root unit outside `@attempt`. Elsewhere it
+raises `'domain`. An allowed exit first cancels and quiesces the root task
+scope, then terminates the process with the supplied status.
+
+## Legacy environment material
+
+Material for the standard environment, host, packages, CLI, and formatter is
+preserved in [`LEGACY_ENVIRONMENT.md`](LEGACY_ENVIRONMENT.md). It is outside
+the scope of this language specification and is not assembled into this
+report.
