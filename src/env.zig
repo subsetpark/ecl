@@ -163,9 +163,9 @@ pub const TopPublication = union(enum) {
 };
 /// One word of a builtin-backed module: a host primitive published under a
 /// module name. The metadata is authored as plain text because these modules
-/// are compiled in, not loaded — there is no descriptor to carry it.
+/// are compiled in and therefore have no loader descriptor to carry it.
 /// Slots either side of `--` in a builtin word's declared effect. Fixed
-/// because these effects are compiled-in text, not user data.
+/// because these effects are fixed compiled-in text outside the user-data path.
 pub const max_builtin_effect_tokens: usize = 16;
 
 pub const BuiltinWord = struct {
@@ -753,7 +753,7 @@ pub const Environment = struct {
         /// The retain-before-dereference order should make a live shape reader
         /// here unreachable: a borrow acquires the image before it touches the
         /// scope, so an environment only reaches teardown once its image has no
-        /// references left. This wait is defence, not the argument. An assert
+        /// references left. This wait adds defence beyond the ownership argument. An assert
         /// would be the worst of both -- it neither prevents the race nor
         /// survives ReleaseFast, where it compiles away.
         pub fn init(target: *Environment) TeardownCursor {
@@ -1919,7 +1919,7 @@ pub const Env = enum(usize) {
         while (!session_cursor.advance()) {}
         var core_cursor = Environment.TeardownCursor.init(&backing.core);
         while (!core_cursor.advance()) {}
-        // Drain before freeing, not after. The reverse order is a
+        // Drain completely before freeing. Reversing the order causes a
         // write-after-free, and the path is short enough to walk: teardown
         // defers each binding cell, whose retirement releases its snapshots,
         // whose `spec.retire` releases a `.word` body's header, whose
@@ -1935,7 +1935,7 @@ pub const Env = enum(usize) {
         // `Session.deinit`'s earlier registry drain instead, with the cells
         // still alive, which is why the obvious `@defm` repro never reaches
         // this. Note also that a leak checker cannot witness the failure --
-        // `DebugAllocator` reports double frees and leaks, not a stray write
+        // `DebugAllocator` reports double frees and leaks but cannot report a stray write
         // into freed-but-mapped memory -- so a green allocator result here is
         // not evidence about this ordering. Only a sanitizer or this argument
         // is.
@@ -2049,7 +2049,7 @@ pub const Env = enum(usize) {
         const cell = self.privateState().scopes.get(id) orelse return .retired;
         if (cell.core) return .core;
         // A cleared scope is a definite retirement. A live one is handed over as
-        // the cell, not as the pointer: the caller has to prove liveness before
+        // the cell itself, requiring the caller to prove liveness before
         // it can read the scope out.
         if (cell.scope.load(.acquire) == null) return .retired;
         return .{ .cell = cell };
@@ -2293,7 +2293,7 @@ test "env: issued scope ids leave their reserved high bits clear" {
     const issued = ScopeIndex.radix + 3;
     var previous: u32 = 0;
     for (0..issued) |_| {
-        // Names nothing: this asserts about issued ids, not about scopes.
+        // Names nothing: this assertion concerns only issued ids.
         const cell = try container.newScopeCell(null, null);
         const raw = @intFromEnum(cell.id);
         try std.testing.expect(raw != 0);

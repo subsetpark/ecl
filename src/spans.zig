@@ -1817,7 +1817,7 @@ test "spans: every re-scope step is one budget unit, publication included" {
     try std.testing.expect(steps > 36);
 }
 
-test "spans: settled lineage storage tracks live copies, not copies ever made" {
+test "spans: settled lineage storage tracks only live copies" {
     var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
     {
         var fixture: ArchiveFixture = undefined;
@@ -1866,7 +1866,7 @@ test "spans: one reclamation root has one code provenance owner" {
     // And once the first releases its receipt the root is free again.
     var second = try SpanArchiveOwner.init(&owner);
 
-    // A receipt names one issuance, not an owner address: replaying the first
+    // A receipt names one issuance independently of owner addresses: replaying the first
     // archive's receipt cannot detach the second's registration, so the
     // surviving archive keeps recycling its slots.
     var stale: heap.HostOwner.CodeRetirementRegistration = @enumFromInt(1);

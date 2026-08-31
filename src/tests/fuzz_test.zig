@@ -655,7 +655,7 @@ fn fuzzPendingUnit(_: void, smith: *std.testing.Smith) !void {
         var probe: [64]u8 = undefined;
         const prefix = probe[0..smith.slice(&probe)];
         try std.testing.expectEqual(unit.contextAfter(prefix), single.contextAfter(prefix));
-        // Asking is a question, not a mutation.
+        // Asking observes without mutating.
         try std.testing.expectEqualSlices(u8, expected.items, unit.source());
     }
 }

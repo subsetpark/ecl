@@ -2,8 +2,8 @@
 //!
 //! Every test here is stubbed by the migration's first patch and implemented by
 //! exactly one later patch, named in its `// PENDING: Patch N` comment. A stub
-//! that outlives its named patch is an unfinished migration, not a passing
-//! suite.
+//! that outlives its named patch leaves the migration unfinished even when the
+//! suite passes.
 //!
 //! These cases follow the `kernel_test_support.zig` conventions: whole-session
 //! behavioral cases on the traceless `test_heap.SessionHeap`, source strings
@@ -719,7 +719,7 @@ test "typed kernels: explicit vector cores preserve lanes tails broadcasts alias
 }
 
 test "typed kernels: temporary bytes are bounded by output plus one kernel chunk under a DebugAllocator limit" {
-    // The bound is enforced, not sampled: the session runs under a
+    // The session enforces the bound directly under a
     // `DebugAllocator` whose live-byte limit is the output buffer plus one
     // kernel chunk plus slack. An intermediate proportional to the input — the
     // sixteen bytes per boxed cell the old route staged, or a second profiling
@@ -760,7 +760,7 @@ test "typed kernels: temporary bytes are bounded by output plus one kernel chunk
         defer allocator.free(rendered);
         limited.requested_memory_limit = std.math.maxInt(usize);
         // A failed allocation surfaces as an ecl error dict rather than a Zig
-        // error, so the rendered outcome has to be the value, not a failure.
+        // error, so the rendered outcome must contain the value and no failure.
         std.testing.expect(std.mem.indexOf(u8, rendered, "'kind") == null) catch |err| {
             std.log.err("`{s}` failed under the bound: {s}", .{ source, rendered });
             return err;

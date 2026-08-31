@@ -94,7 +94,7 @@ pub fn LeafWriter(comptime kind_value: HeapKind) type {
         }
 
         /// Stores one bounded half-open range. Asserts containment rather than
-        /// clamping: an out-of-range store is a loop bug, not an input error.
+        /// clamping: an out-of-range store proves a bug in the owning loop.
         pub fn writeRange(self: *Self, offset: usize, source: []const Element) void {
             std.debug.assert(offset + source.len <= self.length);
             if (source.len == 0) return;
@@ -1736,7 +1736,7 @@ pub const HostOwner = struct {
     /// Registers the archive that owns this root's code provenance, and is the
     /// receipt required to unregister it.
     ///
-    /// A receipt names one *issuance*, not an owner address, so a copied or
+    /// A receipt names one *issuance* independently of any owner address, so a copied or
     /// stale one cannot detach the registration that replaced it. It is
     /// host-side on purpose: workers hold `ReleaseDomain`, which has no
     /// registration surface at all, and both operations belong to the quiescent
@@ -1750,7 +1750,7 @@ pub const HostOwner = struct {
     /// Attaching is what turns lineage storage from history-proportional into
     /// live-proportional: without it, every identity ever issued keeps its
     /// directory slot for the archive's whole life. Null means this root already
-    /// has a code provenance owner — refused in every build mode, not asserted.
+    /// has a code provenance owner and is refused in every build mode.
     pub fn attachCodeRetirement(
         self: *HostOwner,
         owner: anytype,

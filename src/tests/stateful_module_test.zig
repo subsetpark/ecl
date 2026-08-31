@@ -237,7 +237,7 @@ test "modules: *module* reports the active canonical registration" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
 
-    // Identity belongs to the execution home, not the image: the same image
+    // Identity belongs to the execution home independently of the image: the same image
     // reports the registration through which the caller reached it.
     try expectStack(
         &runtime,
@@ -801,7 +801,7 @@ test "concurrency: applying an escaped quotation races reload and removal" {
     // so it actually runs under ThreadSanitizer and at eight workers — it was
     // previously in neither, which is why an earlier "TSan is green" claim on
     // this branch was not evidence about this path at all. The assertions are
-    // deliberately weak (failures stay inside the envelope, nothing wedges);
+    // deliberately weak: failures stay inside the envelope and the runtime keeps progressing;
     // TSan and the allocator are what should speak here.
     try expectOk(&runtime, "[] ((1) 'k def ((k)) 'q def) 'racer @defm racer.q 'held set");
     try expectOk(&runtime, "[1] 24 take (pop [] ([] (held call) @attempt) @spawn) each " ++
@@ -863,8 +863,8 @@ test "concurrency: a resolver racing environment teardown resolves without a der
         defer runtime.deinit();
         // Reload rather than removal, so the *old* image's environment tears
         // down through the release domain while tasks are still applying a
-        // quotation stamped against it. Teardown is driven by the domain, not by
-        // a direct call, which is the only way the waiting state is reached.
+        // quotation stamped against it. The domain drives teardown indirectly,
+        // which is the only way the waiting state is reached.
         try expectOk(
             &runtime,
             "[] ((1) 'k def ((k)) 'q def) 'reloaded @defm reloaded.q 'held set",

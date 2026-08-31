@@ -414,7 +414,7 @@ pub const Editor = struct {
     ) ReadError!ReadResult {
         // Single-row editing needs a measured row and a terminal that can be
         // put into raw mode. Without either, the canonical reader is the
-        // defined behaviour, not a guessed row width.
+        // only defined behaviour; no row width is guessed.
         if (comptime raw_supported) if (terminal.row()) |_| {
             var guard = RawModeGuard.enter() catch return error.TerminalFailure;
             errdefer if (guard.restore()) |_| {} else |_| {};

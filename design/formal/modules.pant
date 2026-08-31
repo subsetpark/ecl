@@ -1,4 +1,6 @@
-module ECLMODULES.
+module ECL_MODULES.
+
+import ECL_VALUES.
 
 context Calls.
 context Images.
@@ -94,7 +96,6 @@ Generation.
 Image.
 Definition.
 Transaction.
-Value.
 WordOccurrence.
 
 {Calls} call-active? call: Call => Bool.
@@ -272,8 +273,8 @@ some image: Image, ~constructed? image |
 where
 
 > Image availability follows semantic ownership rather than reclamation
-> mechanics. `value-held?` records that at least one reachable module value
-> owns the image, not a reference count. `Release last value owner` clears that
+> mechanics. `value-held?` records the Boolean fact that at least one reachable
+> module value owns the image; the model contains no reference count. `Release last value owner` clears that
 > fact only when the final such owner disappears. The action models
 > reachability and is not an ECL operation. Current generations and active
 > calls are the other image owners; scoped words and quotations are not.

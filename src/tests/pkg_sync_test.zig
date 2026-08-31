@@ -379,7 +379,7 @@ test "pkg store: atomic new-file publication names and preserves its actual targ
     }, false);
 }
 
-test "pkg sync: explicit project root, not ambient discovery, selects store mode" {
+test "pkg sync: explicit project root selects store mode without ambient discovery" {
     var scratch = try Scratch.init();
     defer scratch.deinit();
     try scratch.directory.dir.createDir(std.testing.io, "ambient", .default_dir);

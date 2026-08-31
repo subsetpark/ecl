@@ -1,4 +1,4 @@
-<!-- Generated from design/SPEC.src.md; edit the source fragments, not this file. -->
+<!-- Generated from design/SPEC.src.md; make changes in the source fragments. -->
 
 # ecl — language specification
 
@@ -6,9 +6,9 @@
 
 This document defines the syntax and semantics of the ECL language. The
 language is defined independently of any implementation representation,
-interpreter architecture, host interface, or distribution. The shipped ECL
-interpreter is the reference implementation, not the definition of the
-language.
+interpreter architecture, host interface, or distribution. This document
+defines the language; the shipped ECL interpreter is its reference
+implementation.
 
 This is a staged rewrite of the language report. Only material incorporated
 into this document has been reviewed under its present structure. Untouched
@@ -51,8 +51,8 @@ non-normative unless explicitly identified as normative.
 A linked Pantagruel model is normative only within the abstraction boundary
 declared by that model. Its domains, rules, actions, invariants, and initial
 state are normative within that boundary; behavior it deliberately omits is
-governed by this prose. A finite model-checking bound is verification
-machinery, not an ECL implementation limit. A contradiction between prose and
+governed by this prose. A finite model-checking bound serves only the
+verification machinery and imposes no ECL implementation limit. A contradiction between prose and
 a formal model is a specification defect and must not be resolved by silently
 preferring either account.
 
@@ -90,8 +90,8 @@ interpretation.
 Values are immutable. Bindings associate names with executable bodies and may
 be replaced without mutating either the old body or values that refer to its
 name. Reader-authored word occurrences retain where their names are to be
-looked up, but lookup remains late: they retain a scope, not a resolved
-binding.
+looked up, while lookup remains late: they retain a scope and resolve the
+binding at execution time.
 
 A unit is the boundary of failure and operand-stack rollback. Modules separate
 immutable code images from named registrations; a registration owns the
@@ -101,7 +101,7 @@ isolated units under structured concurrency.
 ## Notation and terminology
 
 In a stack effect `( before -- after )`, the top of the operand stack is at
-the right. Names in an effect describe positions, not runtime variables. `S`
+the right. Names in an effect describe positions and introduce no runtime variables. `S`
 denotes an operand-stack sequence, `P` and `Q` denote program sequences, and
 σ denotes the execution state other than the operand stack.
 
@@ -172,7 +172,7 @@ characters. An atom is classified whole-token, in this order:
      the int64 range is a parse error.
    - float64: `digits . digits` with an optional exponent (`e`/`E`,
      optional sign), or `digits` followed by an exponent. Digits are
-     required on both sides of `.` — `.5` and `5.` are words, not numbers.
+     required on both sides of `.` — `.5` and `5.` therefore lex as words.
      `_` is not permitted in float literals. A literal that overflows
      float64 is a parse error.
    - The whole tokens `inf`, `+inf`, and `-inf` are float literals (they
@@ -196,8 +196,8 @@ Segment characters are anything except whitespace, the six delimiters,
 and blank lines inside the quotes are literal; there is no triple-quoted,
 dedented, or margin-stripped form. The escapes are exactly `\\`, `\"`,
 `\n`, `\t`, and `\u{...}` (one to six hex digits, Unicode scalar values
-only); any other escape is a parse error. A string is a rank-1 char
-vector, not a distinct type.
+only); any other escape is a parse error. A string uses the rank-1 char-vector
+role of a list.
 
 The exact form `<...>` is reserved as an unparseable runtime display marker
 wherever an atom may occur. The same bytes inside a string literal are ordinary
@@ -239,94 +239,279 @@ binder   :=  "|" name+ "|"           # names: distinct unqualified symbols
 
 ## Values and external representations
 
-The value-kind universe is closed. Every ECL value has exactly one of these
-nine kinds:
+### Formal value model
 
-```text
-int  float  char  symbol  word  list  dict  task  module
-```
+The Pantagruel source is
+[`formal/values.pant`](formal/values.pant). Its documentation and checked
+formulae are rendered here as one normative text. Concrete representation,
+source grammar, printing, pervasion, and value-consuming operations remain
+governed by the prose outside the model.
 
-A conforming implementation may choose any representation for these kinds but
-must not expose another kind through `type`, matching, hashing, ordering,
+#### Checked model
+
+#### Chapter 1
+
+##### Domains
+
+> This model is normative for the closed value-kind universe; immutable scalar and aggregate content; whole-value matching; dictionary key uniqueness; recursive readability; and hash congruence. It abstracts over concrete storage, float encoding, source grammar, printing, pervasion, and the operations that construct or consume values.  Every ECL value has exactly one of the language's nine kinds. Its kind is an immutable fact: it does not belong to an action context. Boolean, string, quotation, vector, matrix, array, error, and result are roles played by these values rather than additional kinds.
+
+`Value`.
+
+`ValueType`.
+
+##### Rules
+
+**value-type** *value*: `Value` ⇒ `ValueType`.
+
+**int-type** ⇒ `ValueType`.
+
+**float-type** ⇒ `ValueType`.
+
+**char-type** ⇒ `ValueType`.
+
+**symbol-type** ⇒ `ValueType`.
+
+**word-type** ⇒ `ValueType`.
+
+**list-type** ⇒ `ValueType`.
+
+**dict-type** ⇒ `ValueType`.
+
+**task-type** ⇒ `ValueType`.
+
+**module-type** ⇒ `ValueType`.
+
+---
+
+> The value-kind universe is closed: every value has one of these nine kinds.
+
+∀ *value*: `Value` · **value-type** *value* = **int-type** ∨ **value-type** *value* = **float-type** ∨ **value-type** *value* = **char-type** ∨ **value-type** *value* = **symbol-type** ∨ **value-type** *value* = **word-type** ∨ **value-type** *value* = **list-type** ∨ **value-type** *value* = **dict-type** ∨ **value-type** *value* = **task-type** ∨ **value-type** *value* = **module-type**.
+
+> The nine kind names are distinct, so the total `value-type` rule assigns exactly one kind to every value.
+
+**int-type** ≠ **float-type** ∧ **int-type** ≠ **char-type** ∧ **int-type** ≠ **symbol-type** ∧ **int-type** ≠ **word-type** ∧ **int-type** ≠ **list-type** ∧ **int-type** ≠ **dict-type** ∧ **int-type** ≠ **task-type** ∧ **int-type** ≠ **module-type** ∧ **float-type** ≠ **char-type** ∧ **float-type** ≠ **symbol-type** ∧ **float-type** ≠ **word-type** ∧ **float-type** ≠ **list-type** ∧ **float-type** ≠ **dict-type** ∧ **float-type** ≠ **task-type** ∧ **float-type** ≠ **module-type** ∧ **char-type** ≠ **symbol-type** ∧ **char-type** ≠ **word-type** ∧ **char-type** ≠ **list-type** ∧ **char-type** ≠ **dict-type** ∧ **char-type** ≠ **task-type** ∧ **char-type** ≠ **module-type** ∧ **symbol-type** ≠ **word-type** ∧ **symbol-type** ≠ **list-type** ∧ **symbol-type** ≠ **dict-type** ∧ **symbol-type** ≠ **task-type** ∧ **symbol-type** ≠ **module-type** ∧ **word-type** ≠ **list-type** ∧ **word-type** ≠ **dict-type** ∧ **word-type** ≠ **task-type** ∧ **word-type** ≠ **module-type** ∧ **list-type** ≠ **dict-type** ∧ **list-type** ≠ **task-type** ∧ **list-type** ≠ **module-type** ∧ **dict-type** ≠ **task-type** ∧ **dict-type** ≠ **module-type** ∧ **task-type** ≠ **module-type**.
+
+#### Chapter 2
+
+##### Domains
+
+> Scalar payloads and aggregate contents determine value identity within their respective kinds. Numeric magnitude separately determines mathematical matching across int and float, so distinct float payloads such as positive and negative zero may still match. A list's contents are finite and ordered. A dictionary's entries are finite and insertion-ordered, while its keys are unique under whole-value matching.  `matches?` is the equivalence exposed by `match?` and used for dictionary-key identity. Lists match recursively by position. Dictionaries match by their key-value pairs regardless of insertion order. Task and module values match only themselves. Resolution context, reader lineage, provenance, and storage identity are absent from these rules and therefore cannot affect matching or hashing.
+
+`NumericMagnitude`.
+
+`FloatPayload`.
+
+##### Rules
+
+**int-payload** *value*: `Value`, **value-type** *value* = **int-type** ⇒ `Int`.
+
+**float-payload** *value*: `Value`, **value-type** *value* = **float-type** ⇒ `FloatPayload`.
+
+**char-codepoint** *value*: `Value`, **value-type** *value* = **char-type** ⇒ `Nat0`.
+
+**symbol-spelling** *value*: `Value`, **value-type** *value* = **symbol-type** ⇒ `String`.
+
+**word-spelling** *value*: `Value`, **value-type** *value* = **word-type** ⇒ `String`.
+
+**list-length** *value*: `Value`, **value-type** *value* = **list-type** ⇒ `Nat0`.
+
+**list-element** *value*: `Value`, *index*: `Nat`, **value-type** *value* = **list-type**, *index* ≤ **list-length** *value* ⇒ `Value`.
+
+**dict-length** *value*: `Value`, **value-type** *value* = **dict-type** ⇒ `Nat0`.
+
+**dict-key-at-index** *value*: `Value`, *index*: `Nat`, **value-type** *value* = **dict-type**, *index* ≤ **dict-length** *value* ⇒ `Value`.
+
+**dict-value-at-index** *value*: `Value`, *index*: `Nat`, **value-type** *value* = **dict-type**, *index* ≤ **dict-length** *value* ⇒ `Value`.
+
+**dict-has-key?** *dictionary*: `Value`, *key*: `Value`, **value-type** *dictionary* = **dict-type** ⇒ `Bool`.
+
+**dict-value-for-key** *dictionary*: `Value`, *key*: `Value`, **value-type** *dictionary* = **dict-type**, **dict-has-key?** *dictionary* *key* ⇒ `Value`.
+
+**numeric-value?** *value*: `Value` ⇒ `Bool`.
+
+**numeric-magnitude** *value*: `Value`, **numeric-value?** *value* ⇒ `NumericMagnitude`.
+
+**boolean-value?** *value*: `Value` ⇒ `Bool`.
+
+**string-value?** *value*: `Value` ⇒ `Bool`.
+
+**matches?** *left*: `Value`, *right*: `Value` ⇒ `Bool`.
+
+**readable?** *value*: `Value` ⇒ `Bool`.
+
+**value-hash** *value*: `Value` ⇒ `Int`.
+
+---
+
+> Numbers are exactly the int and float values.
+
+∀ *value*: `Value` · **numeric-value?** *value* ↔ **value-type** *value* = **int-type** ∨ **value-type** *value* = **float-type**.
+
+> An int's payload is a signed 64-bit integer.
+
+∀ *value*: `Value`, **value-type** *value* = **int-type** · **int-payload** *value* ≥ 0 - 2147483648 · 4294967296 ∧ **int-payload** *value* ≤ 2147483648 · 4294967296 - 1.
+
+> A char's payload is one Unicode scalar value.
+
+∀ *value*: `Value`, **value-type** *value* = **char-type** · **char-codepoint** *value* ≤ 1114111 ∧ ¬(**char-codepoint** *value* ≥ 55296 ∧ **char-codepoint** *value* ≤ 57343).
+
+> Scalar payloads determine value identity within each scalar kind.
+
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **int-type**, **value-type** *right* = **int-type**, **int-payload** *left* = **int-payload** *right* · *left* = *right*.
+
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **float-type**, **value-type** *right* = **float-type**, **float-payload** *left* = **float-payload** *right* · *left* = *right*.
+
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **char-type**, **value-type** *right* = **char-type**, **char-codepoint** *left* = **char-codepoint** *right* · *left* = *right*.
+
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **symbol-type**, **value-type** *right* = **symbol-type**, **symbol-spelling** *left* = **symbol-spelling** *right* · *left* = *right*.
+
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **word-type**, **value-type** *right* = **word-type**, **word-spelling** *left* = **word-spelling** *right* · *left* = *right*.
+
+> A list is a finite ordered sequence. Its length and positional elements determine its value identity.
+
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **list-type**, **value-type** *right* = **list-type**, **list-length** *left* = **list-length** *right*, (∀ *index*: `Nat`, *index* ≤ **list-length** *left* · **list-element** *left* *index* = **list-element** *right* *index*) · *left* = *right*.
+
+> A dictionary is insertion ordered. Its length and positional key-value entries determine its value identity, including insertion order.
+
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **dict-type**, **value-type** *right* = **dict-type**, **dict-length** *left* = **dict-length** *right*, (∀ *index*: `Nat`, *index* ≤ **dict-length** *left* · **dict-key-at-index** *left* *index* = **dict-key-at-index** *right* *index* ∧ **dict-value-at-index** *left* *index* = **dict-value-at-index** *right* *index*) · *left* = *right*.
+
+> Booleans are exactly the int values 0 and 1.
+
+∀ *value*: `Value` · **boolean-value?** *value* ↔ **value-type** *value* = **int-type** ∧ (**int-payload** *value* = 0 ∨ **int-payload** *value* = 1).
+
+> A string is exactly a list whose elements are all chars. The empty list is therefore both a string and any other role compatible with empty list data.
+
+∀ *value*: `Value` · **string-value?** *value* ↔ **value-type** *value* = **list-type** ∧ (∀ *index*: `Nat`, *index* ≤ **list-length** *value* · **value-type** (**list-element** *value* *index*) = **char-type**).
+
+> Whole-value matching is reflexive.
+
+∀ *value*: `Value` · **matches?** *value* *value*.
+
+> Whole-value matching is symmetric.
+
+∀ *left*: `Value`, *right*: `Value`, **matches?** *left* *right* · **matches?** *right* *left*.
+
+> Whole-value matching is transitive.
+
+∀ *first*: `Value`, *second*: `Value`, *third*: `Value`, **matches?** *first* *second*, **matches?** *second* *third* · **matches?** *first* *third*.
+
+> Values match only as numbers across the two numeric kinds, or within the same non-numeric kind.
+
+∀ *left*: `Value`, *right*: `Value`, **matches?** *left* *right* · **numeric-value?** *left* ∧ **numeric-value?** *right* ∨ **value-type** *left* = **char-type** ∧ **value-type** *right* = **char-type** ∨ **value-type** *left* = **symbol-type** ∧ **value-type** *right* = **symbol-type** ∨ **value-type** *left* = **word-type** ∧ **value-type** *right* = **word-type** ∨ **value-type** *left* = **list-type** ∧ **value-type** *right* = **list-type** ∨ **value-type** *left* = **dict-type** ∧ **value-type** *right* = **dict-type** ∨ **value-type** *left* = **task-type** ∧ **value-type** *right* = **task-type** ∨ **value-type** *left* = **module-type** ∧ **value-type** *right* = **module-type**.
+
+> Numeric matching is exact mathematical-value equality across int and float.
+
+∀ *left*: `Value`, *right*: `Value`, **numeric-value?** *left*, **numeric-value?** *right* · **matches?** *left* *right* ↔ **numeric-magnitude** *left* = **numeric-magnitude** *right*.
+
+> Equal int magnitudes are exactly equal int payloads.
+
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **int-type**, **value-type** *right* = **int-type** · **numeric-magnitude** *left* = **numeric-magnitude** *right* ↔ **int-payload** *left* = **int-payload** *right*.
+
+> Chars, symbols, and words match exactly when their scalar contents match.
+
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **char-type**, **value-type** *right* = **char-type** · **matches?** *left* *right* ↔ **char-codepoint** *left* = **char-codepoint** *right*.
+
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **symbol-type**, **value-type** *right* = **symbol-type** · **matches?** *left* *right* ↔ **symbol-spelling** *left* = **symbol-spelling** *right*.
+
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **word-type**, **value-type** *right* = **word-type** · **matches?** *left* *right* ↔ **word-spelling** *left* = **word-spelling** *right*.
+
+> Lists match recursively and positionally.
+
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **list-type**, **value-type** *right* = **list-type** · **matches?** *left* *right* ↔ **list-length** *left* = **list-length** *right* ∧ (∀ *index*: `Nat`, *index* ≤ **list-length** *left* · **matches?** (**list-element** *left* *index*) (**list-element** *right* *index*)).
+
+> Dictionary keys are unique under whole-value matching.
+
+∀ *dictionary*: `Value`, *left-index*: `Nat`, *right-index*: `Nat`, **value-type** *dictionary* = **dict-type**, *left-index* ≤ **dict-length** *dictionary*, *right-index* ≤ **dict-length** *dictionary*, **matches?** (**dict-key-at-index** *dictionary* *left-index*) (**dict-key-at-index** *dictionary* *right-index*) · *left-index* = *right-index*.
+
+> A dictionary has a key exactly when one insertion position carries a matching key.
+
+∀ *dictionary*: `Value`, *key*: `Value`, **value-type** *dictionary* = **dict-type** · **dict-has-key?** *dictionary* *key* ↔ (∃ *index*: `Nat`, *index* ≤ **dict-length** *dictionary* · **matches?** *key* (**dict-key-at-index** *dictionary* *index*)).
+
+> Lookup by a present key returns the value at its unique matching position.
+
+∀ *dictionary*: `Value`, *key*: `Value`, *index*: `Nat`, **value-type** *dictionary* = **dict-type**, **dict-has-key?** *dictionary* *key*, *index* ≤ **dict-length** *dictionary*, **matches?** *key* (**dict-key-at-index** *dictionary* *index*) · **dict-value-for-key** *dictionary* *key* = **dict-value-at-index** *dictionary* *index*.
+
+> Dictionaries match recursively by key-value pairs, irrespective of insertion order.
+
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **dict-type**, **value-type** *right* = **dict-type** · **matches?** *left* *right* ↔ **dict-length** *left* = **dict-length** *right* ∧ (∀ *left-index*: `Nat`, *left-index* ≤ **dict-length** *left* · ∃ *right-index*: `Nat`, *right-index* ≤ **dict-length** *right* · **matches?** (**dict-key-at-index** *left* *left-index*) (**dict-key-at-index** *right* *right-index*) ∧ **matches?** (**dict-value-at-index** *left* *left-index*) (**dict-value-at-index** *right* *right-index*)).
+
+> Task values match only by capability identity.
+
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **task-type**, **value-type** *right* = **task-type** · **matches?** *left* *right* ↔ *left* = *right*.
+
+> Module values match only by image identity.
+
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **module-type**, **value-type** *right* = **module-type** · **matches?** *left* *right* ↔ *left* = *right*.
+
+> Scalar source kinds have readable representations.
+
+∀ *value*: `Value`, (**value-type** *value* = **int-type** ∨ **value-type** *value* = **float-type** ∨ **value-type** *value* = **char-type** ∨ **value-type** *value* = **symbol-type** ∨ **value-type** *value* = **word-type**) · **readable?** *value*.
+
+> Task and module values have diagnostic displays but no readable representations.
+
+∀ *value*: `Value`, (**value-type** *value* = **task-type** ∨ **value-type** *value* = **module-type**) · ¬**readable?** *value*.
+
+> A list is readable exactly when all its elements are readable.
+
+∀ *value*: `Value`, **value-type** *value* = **list-type** · **readable?** *value* ↔ (∀ *index*: `Nat`, *index* ≤ **list-length** *value* · **readable?** (**list-element** *value* *index*)).
+
+> A dictionary is readable exactly when all its keys and values are readable.
+
+∀ *value*: `Value`, **value-type** *value* = **dict-type** · **readable?** *value* ↔ (∀ *index*: `Nat`, *index* ≤ **dict-length** *value* · **readable?** (**dict-key-at-index** *value* *index*) ∧ **readable?** (**dict-value-at-index** *value* *index*)).
+
+> Hashing is congruent with whole-value matching.
+
+∀ *left*: `Value`, *right*: `Value`, **matches?** *left*
+*right* · **value-hash** *left* = **value-hash** *right*.
+
+
+
+### Representation and language roles
+
+A conforming implementation may choose any representation for values but must
+not expose an additional kind through `type`, matching, hashing, ordering,
 printing, or an ECL-facing native interface. Adding a first-class kind is a
-language extension. Booleans are restricted integer values; strings,
-quotations, vectors, matrices, and arrays are roles played by lists; errors
-and results are dictionaries; and bindings are not values.
+language extension. Bindings are not values.
 
-Values are observationally immutable: a value's kind and content never
-change. Operations on lists and dictionaries produce values; storage reuse is
-not observable language behavior. `def` and `set` replace bindings rather than
-mutating values. A task is an immutable capability identifying an externally
-evolving task, and module images are immutable. Storage
-specialization, copy-on-write strategies, and amortized bounds are
-implementation or performance concerns.
+Operations on lists and dictionaries produce values; storage reuse is not
+observable language behavior. `def` and `set` replace bindings rather than
+mutating values. Storage specialization, copy-on-write strategies, and
+amortized bounds are implementation or performance concerns.
 
-- **int** — a 64-bit signed integer. Overflow is an error, never wrapping
-  or promotion.
-- **float** — an IEEE 754 binary64 value, excluding NaN. `inf` and `-inf`
-  are ordinary values. See Numbers.
-- **char** — a Unicode codepoint. A char is a distinct atom, not an
-  integer.
-- **symbol** — an interned name, written quoted: `'mean`, `'stats.mean`.
-- **word** — a name in executable position. A bare word in code and a
-  quoted symbol are distinct atoms: `(dup) first` yields the word `dup`,
-  `'dup` yields the symbol, and they do not `match?`. Words print bare,
-  symbols print quoted. A word value's entire identity is its kind and
-  spelling. Resolution and provenance metadata belong to a stored occurrence,
-  not to the word value.
-- **list** — the one aggregate: a finite ordered sequence of values. A
-  quotation, a vector, and a row of a matrix are all lists. A homogeneous
-  list of atoms *is* a vector — `(1 2 3)` and `[1 2 3]` are the same
-  value. There is no rank-carrying array type: a matrix is a list of
-  equal-length lists, and rank is depth, not an intrinsic property.
-  Ragged data (a list of lists of unequal length) is legal. A string is a
-  list of chars.
-- **dict** — an insertion-ordered map. Any value is a legal key (immutability
-  makes every value hashable). Key identity is whole-value `match?` identity.
-  Insertion order is preserved by storage, iteration, and printing, but ignored
-  by equality: two dicts with the same key–value pairs in different orders are
-  equal.
-- **task** — a handle to a concurrent unit of work (see Concurrency).
-  Tasks are runtime capabilities bound to their session: `match?` and
-  hashing use handle identity, and a task prints as `<task:N>`, which the
-  reader rejects.
-- **module** — an opaque immutable module image (see Modules). Module values
-  compare and hash by image identity. A module prints diagnostically as
-  `<module>`, which the reader rejects.
+Float values use IEEE 754 binary64, excluding NaN; `inf` and `-inf` are
+ordinary values. Integer overflow is an error, never wrapping or promotion.
+See Numbers.
+
+A bare word in code and a quoted symbol are distinct source atoms: `(dup)
+first` yields the word `dup`, while `'dup` yields the symbol. Words print bare
+and symbols print quoted. Resolution and provenance metadata belong to stored
+word occurrences rather than their values.
+
+A quotation, vector, and matrix row are list roles. A homogeneous list of
+atoms *is* a vector—`(1 2 3)` and `[1 2 3]` are the same value. There is no
+rank-carrying array type: a matrix is a list of equal-length lists, rank is
+depth rather than intrinsic data, and ragged lists remain legal.
+
+Dictionary insertion order is preserved by storage, iteration, and printing.
+A task is a runtime capability bound to its session and prints as `<task:N>`.
+A module is an opaque immutable image and prints as `<module>`. Those task and
+module displays are rejected by the reader.
 
 ### Readable representations and display
 
-A **readable representation** is source text which reads to a structurally
-matching value. Integers, floats, characters, symbols, words, lists, and
-dictionaries are source-denotable. A list or dictionary has a readable
-representation only when every value it contains does. Reader provenance,
-resolution metadata, and reader lineage need not be reproduced: they do not
-participate in structural matching.
-
 A **diagnostic display** is human-facing text without a read-back guarantee.
-The displays for tasks and modules are diagnostic displays, not
-external representations. An aggregate containing any such value is likewise
-not round-trippable. An operation may produce display text for every value,
-but any print/read guarantee applies only to the readable subset.
+An operation may produce display text for every value, but any print/read
+guarantee applies only to the formally defined readable subset. Reader
+provenance, resolution metadata, and reader lineage need not be reproduced by
+that round trip.
 
 ### Equality and ordering
 
-ECL defines whole-value equivalence independently of the operation exposing
-it. `match?` returns its boolean result, dictionary keys use it as key
-identity, and hashing must be congruent with it.
-
-- Lists are equivalent recursively and positionally.
-- Dictionaries are equivalent when they contain equivalent key–value pairs,
-  irrespective of insertion order.
-- Numbers are equivalent by mathematical value across `int` and `float`:
-  `2` and `2.0` are equivalent, as are `0.0` and `-0.0`. Mixed numeric
-  comparison is exact; it does not first round an integer to binary64.
-- Tasks and modules are equivalent only when they have the same
-  capability identity.
-- Resolution context, reader lineage, and provenance do not participate in
-  equivalence or hashing. Consequently, two matching quotations may behave
-  differently when applied. Matching is structural data equivalence, not
-  behavioral equivalence.
+`match?` exposes the model's whole-value equivalence. Numeric magnitude maps
+binary64 values to their exact mathematical values: `2` matches `2.0`, and
+`0.0` matches `-0.0`; a mixed comparison does not first round an integer to
+binary64. Matching specifies structural data equivalence, so two matching
+quotations may nevertheless behave differently when applied.
 
 `=` is instead pervasive equality: it descends aggregate structure and
 produces a scalar boolean or boolean mask (see Pervasion). For example,
@@ -336,8 +521,8 @@ produces a scalar boolean or boolean mask (see Pervasion). For example,
   codepoint), and strings (codepoint-lexicographic). Anything else,
   including cross-kind pairs, is a `'type` error. `grade` orders by
   exactly this ordering.
-- Booleans are the ints 0 and 1. Words that require a boolean reject
-  every other value, including other ints.
+- Words that require a boolean reject every value outside the formally defined
+  Boolean role, including other ints.
 
 ## Core evaluation
 
@@ -358,9 +543,9 @@ Resolution does not produce a binding or callable value on the operand stack.
 Bindings are not first-class, and ordinary word reference always invokes.
 Reflection operations inspect binding metadata through separate mechanisms.
 
-Lookup is late. A word occurrence's resolution metadata selects a scope, not
-a binding, body, value, or module generation. The binding is looked up each
-time the occurrence executes, so replacing a binding in a mutable selected
+Lookup is late. A word occurrence's resolution metadata selects only a scope.
+Each execution looks up the binding in that scope; the occurrence retains no
+binding, body, value, or module generation. Replacing a binding in a mutable selected
 scope affects existing code. A module image's scope is immutable after
 construction; replacing an image in a registration does not retarget words
 belonging to the former image. Attempting to resolve through a retired selected
@@ -391,25 +576,350 @@ Tail calls are guaranteed: through word calls, `if`, and every
 combinator's tail position, iteration and tail recursion run in constant
 space and never exhaust a host call stack.
 
+### Errors
+
+Errors are crash-only. There is no try/catch or handler quotation: an error
+propagates until the enclosing unit dies. `raise` initiates that propagation
+from an error value, and `fail` is sugar for raising an error whose kind is
+`'user` and whose message is the supplied string.
+
+Failure is observed as data only outside an explicit boundary: `@attempt`, or
+the concurrent `@spawn`/`await` path, returns `{'ok (values)}` after success or
+`{'err error}` after failure. Each envelope is an ordinary dictionary and is
+the boundary's only result value. The REPL is the implicit top-level boundary;
+a script's boundary is the process.
+
+Source-position and other diagnostic fields appear when known. Absence is
+represented by an absent field, never by a nil value. Runtime-assembled code
+has no source position by construction, and no host exception or host stack
+frame is exposed as ECL error data.
+
+#### Formal error model
+
+The Pantagruel source is
+[`formal/errors.pant`](formal/errors.pant). Its documentation and checked
+formulae define the error dictionary schema and core error-kind taxonomy.
+Error propagation and diagnostic attribution remain governed by prose.
+
+##### Checked model
+
+**Imports:** ECL_VALUES
+
+#### Chapter 1
+
+##### Rules
+
+> ECL errors are ordinary values with the dictionary kind. An error has a required symbol at `'kind`; when present, `'msg` is a string, `'word` is a symbol, `'trace` is a list of symbols, and `'data` is a dictionary. Other diagnostic and kind-specific fields are permitted. The predicates here classify immutable values independently of execution state.
+
+**error-value?** *value*: `Value` ⇒ `Bool`.
+
+**kind-field-valid?** *value*: `Value` ⇒ `Bool`.
+
+**message-field-valid?** *value*: `Value` ⇒ `Bool`.
+
+**word-field-valid?** *value*: `Value` ⇒ `Bool`.
+
+**trace-field-valid?** *value*: `Value` ⇒ `Bool`.
+
+**data-field-valid?** *value*: `Value` ⇒ `Bool`.
+
+**symbol-list-value?** *value*: `Value` ⇒ `Bool`.
+
+**kind-field** ⇒ `Value`.
+
+**message-field** ⇒ `Value`.
+
+**word-field** ⇒ `Value`.
+
+**trace-field** ⇒ `Value`.
+
+**data-field** ⇒ `Value`.
+
+---
+
+> The five schema keys are symbols with these exact spellings.
+
+**value-type** **kind-field** = **symbol-type** ∧ **symbol-spelling** **kind-field** = "kind" ∧ **value-type** **message-field** = **symbol-type** ∧ **symbol-spelling** **message-field** = "msg" ∧ **value-type** **word-field** = **symbol-type** ∧ **symbol-spelling** **word-field** = "word" ∧ **value-type** **trace-field** = **symbol-type** ∧ **symbol-spelling** **trace-field** = "trace" ∧ **value-type** **data-field** = **symbol-type** ∧ **symbol-spelling** **data-field** = "data".
+
+> A trace is a list containing only symbols. The empty list is a valid trace.
+
+∀ *value*: `Value` · **symbol-list-value?** *value* ↔ **value-type** *value* = **list-type** ∧ (∀ *index*: `Nat`, *index* ≤ **list-length** *value* · **value-type** (**list-element** *value* *index*) = **symbol-type**).
+
+> Non-dictionaries cannot satisfy any error-schema field predicate.
+
+∀ *value*: `Value`, **value-type** *value* ≠ **dict-type** · ¬**kind-field-valid?** *value* ∧ ¬**message-field-valid?** *value* ∧ ¬**word-field-valid?** *value* ∧ ¬**trace-field-valid?** *value* ∧ ¬**data-field-valid?** *value*.
+
+> The `'kind` field is required and its value is a symbol.
+
+∀ *value*: `Value`, **value-type** *value* = **dict-type**, ¬**dict-has-key?** *value* **kind-field** · ¬**kind-field-valid?** *value*.
+
+∀ *value*: `Value`, **value-type** *value* = **dict-type**, **dict-has-key?** *value* **kind-field** · **kind-field-valid?** *value* ↔ **value-type** (**dict-value-for-key** *value* **kind-field**) = **symbol-type**.
+
+> The `'msg` field is optional and, when present, is a string.
+
+∀ *value*: `Value`, **value-type** *value* = **dict-type**, ¬**dict-has-key?** *value* **message-field** · **message-field-valid?** *value*.
+
+∀ *value*: `Value`, **value-type** *value* = **dict-type**, **dict-has-key?** *value* **message-field** · **message-field-valid?** *value* ↔ **string-value?** (**dict-value-for-key** *value* **message-field**).
+
+> The `'word` field is optional and, when present, is a symbol.
+
+∀ *value*: `Value`, **value-type** *value* = **dict-type**, ¬**dict-has-key?** *value* **word-field** · **word-field-valid?** *value*.
+
+∀ *value*: `Value`, **value-type** *value* = **dict-type**, **dict-has-key?** *value* **word-field** · **word-field-valid?** *value* ↔ **value-type** (**dict-value-for-key** *value* **word-field**) = **symbol-type**.
+
+> The `'trace` field is optional and, when present, is a list of symbols.
+
+∀ *value*: `Value`, **value-type** *value* = **dict-type**, ¬**dict-has-key?** *value* **trace-field** · **trace-field-valid?** *value*.
+
+∀ *value*: `Value`, **value-type** *value* = **dict-type**, **dict-has-key?** *value* **trace-field** · **trace-field-valid?** *value* ↔ **symbol-list-value?** (**dict-value-for-key** *value* **trace-field**).
+
+> The `'data` field is optional and, when present, is a dictionary.
+
+∀ *value*: `Value`, **value-type** *value* = **dict-type**, ¬**dict-has-key?** *value* **data-field** · **data-field-valid?** *value*.
+
+∀ *value*: `Value`, **value-type** *value* = **dict-type**, **dict-has-key?** *value* **data-field** · **data-field-valid?** *value* ↔ **value-type** (**dict-value-for-key** *value* **data-field**) = **dict-type**.
+
+> A value is an error exactly when it is a dictionary satisfying every field rule above. Fields outside this schema do not affect validity.
+
+∀ *value*: `Value` · **error-value?** *value* ↔ **value-type** *value* = **dict-type** ∧ **kind-field-valid?** *value* ∧ **message-field-valid?** *value* ∧ **word-field-valid?** *value* ∧ **trace-field-valid?** *value* ∧ **data-field-valid?** *value*.
+
+#### Chapter 2
+
+##### Rules
+
+> The core error-kind taxonomy is closed. Every other symbol remains available as a user-defined error kind; being outside this predicate does not make a symbol invalid in an error's `'kind` field.
+
+**core-error-kind?** *value*: `Value` ⇒ `Bool`.
+
+**underflow-error-kind** ⇒ `Value`.
+
+**undefined-word-error-kind** ⇒ `Value`.
+
+**type-error-kind** ⇒ `Value`.
+
+**shape-error-kind** ⇒ `Value`.
+
+**conform-error-kind** ⇒ `Value`.
+
+**overflow-error-kind** ⇒ `Value`.
+
+**domain-error-kind** ⇒ `Value`.
+
+**contract-error-kind** ⇒ `Value`.
+
+**parse-error-kind** ⇒ `Value`.
+
+**io-error-kind** ⇒ `Value`.
+
+**cancelled-error-kind** ⇒ `Value`.
+
+**timeout-error-kind** ⇒ `Value`.
+
+**user-error-kind** ⇒ `Value`.
+
+---
+
+> Each core error kind is the symbol with the corresponding source spelling.
+
+**value-type** **underflow-error-kind** = **symbol-type** ∧ **symbol-spelling** **underflow-error-kind** = "underflow" ∧ **value-type** **undefined-word-error-kind** = **symbol-type** ∧ **symbol-spelling** **undefined-word-error-kind** = "undefined-word" ∧ **value-type** **type-error-kind** = **symbol-type** ∧ **symbol-spelling** **type-error-kind** = "type" ∧ **value-type** **shape-error-kind** = **symbol-type** ∧ **symbol-spelling** **shape-error-kind** = "shape" ∧ **value-type** **conform-error-kind** = **symbol-type** ∧ **symbol-spelling** **conform-error-kind** = "conform" ∧ **value-type** **overflow-error-kind** = **symbol-type** ∧ **symbol-spelling** **overflow-error-kind** = "overflow" ∧ **value-type** **domain-error-kind** = **symbol-type** ∧ **symbol-spelling** **domain-error-kind** = "domain" ∧ **value-type** **contract-error-kind** = **symbol-type** ∧ **symbol-spelling** **contract-error-kind** = "contract" ∧ **value-type** **parse-error-kind** = **symbol-type** ∧ **symbol-spelling** **parse-error-kind** = "parse" ∧ **value-type** **io-error-kind** = **symbol-type** ∧ **symbol-spelling** **io-error-kind** = "io" ∧ **value-type** **cancelled-error-kind** = **symbol-type** ∧ **symbol-spelling** **cancelled-error-kind** = "cancelled" ∧ **value-type** **timeout-error-kind** = **symbol-type** ∧ **symbol-spelling** **timeout-error-kind** = "timeout" ∧ **value-type** **user-error-kind** = **symbol-type** ∧ **symbol-spelling** **user-error-kind** = "user".
+
+> No other value is a core error kind.
+
+∀ *value*: `Value` · **core-error-kind?** *value* ↔ *value* = **underflow-error-kind** ∨ *value* = **undefined-word-error-kind** ∨ *value* = **type-error-kind** ∨ *value* = **shape-error-kind** ∨ *value* = **conform-error-kind** ∨ *value* = **overflow-error-kind** ∨ *value* = **domain-error-kind** ∨ *value* = **contract-error-kind** ∨ *value* = **parse-error-kind** ∨ *value* = **io-error-kind** ∨ *value* = **cancelled-error-kind** ∨ *value* = **timeout-error-kind** ∨ *value* = **user-error-kind**.
+
+#### Chapter 3
+
+##### Rules
+
+> Results are ordinary values with the dictionary kind. A successful result has exactly one `'ok` entry carrying the ordered values left on the successful unit stack. A failed result has exactly one `'err` entry carrying an error value. No value is both forms.
+
+**result-value?** *value*: `Value` ⇒ `Bool`.
+
+**successful-result-value?** *value*: `Value` ⇒ `Bool`.
+
+**failed-result-value?** *value*: `Value` ⇒ `Bool`.
+
+**ok-field** ⇒ `Value`.
+
+**err-field** ⇒ `Value`.
+
+---
+
+> Result tags are symbols with the source spellings `ok` and `err`.
+
+**value-type** **ok-field** = **symbol-type** ∧ **symbol-spelling** **ok-field** = "ok" ∧ **value-type** **err-field** = **symbol-type** ∧ **symbol-spelling** **err-field** = "err".
+
+> A successful result is exactly a one-entry dictionary tagged `'ok` whose payload is a list of successful stack values.
+
+∀ *value*: `Value` · **successful-result-value?** *value* ↔ **value-type** *value* = **dict-type** ∧ **dict-length** *value* = 1 ∧ **dict-has-key?** *value* **ok-field** ∧ **value-type** (**dict-value-for-key** *value* **ok-field**) = **list-type**.
+
+> A failed result is exactly a one-entry dictionary tagged `'err` whose payload satisfies the error schema.
+
+∀ *value*: `Value` · **failed-result-value?** *value* ↔ **value-type** *value* = **dict-type** ∧ **dict-length** *value* = 1 ∧ **dict-has-key?** *value* **err-field** ∧ **error-value?** (**dict-value-for-key** *value*
+**err-field**).
+
+> Results are exactly the successful and failed forms.
+
+∀ *value*: `Value` · **result-value?** *value* ↔ **successful-result-value?** *value* ∨ **failed-result-value?** *value*.
+
+> The two result forms are disjoint.
+
+∀ *value*: `Value`, **successful-result-value?** *value* · ¬**failed-result-value?** *value*.
+
+
+
 ### Units and the transactional stack
 
 Ordinary evaluation may consume operands and perform effects before it fails;
 its failure outcome therefore includes the partial operand stack and the
 surviving execution state at the point of failure.
 
-The *unit* is the granularity of operand-stack rollback. If `S_entry` is its
-entry stack, unit execution has the relation:
+#### Formal unit model
 
-```text
-run-unit(P, S_entry, σ) = success(S_result, σ′)
-run-unit(P, S_entry, σ) = failure(error, S_entry, σ′)
-```
+The Pantagruel source is
+[`formal/units.pant`](formal/units.pant). Its documentation and checked
+formulae define the general unit lifecycle and operand-stack rollback.
+Launch, observation, and structured-concurrency policy remain outside its
+declared abstraction boundary.
 
-On failure, the evaluator's partial stack is discarded and the entry stack is
-restored. Environment writes, I/O, and other permitted non-stack effects
-performed before failure survive. A unit boundary may additionally cancel
-child tasks as specified by the concurrency semantics. The unit is not a
-transaction over the whole execution state.
+##### Checked model
+
+**Imports:** ECL_ERRORS
+
+##### Contexts
+
+**`Units`**
+
+#### Chapter 1
+
+##### Action
+
+> This model is normative for the lifecycle of a general ECL unit; its ordered entry and body values; successful completion with an ordered result stack; and failure with an error and restoration of the entry stack.  It deliberately abstracts over evaluation steps, name resolution, concrete values and error dictionaries, environment writes, I/O, randomness, and all other non-stack effects. The surrounding language specification governs those subjects and requires that unit failure does not roll back effects already performed. The model also omits launch and observation policy, task identity, task trees, scheduling, awaiting, deadlines, cancellation causes, and reclamation. In particular, cancellation reaches this model only as an evaluator-supplied failure error, while a waiting operation's timeout does not alter the target unit.  `@attempt` begins a unit, waits synchronously for one terminal transition, and reifies that outcome. `@spawn` begins the same kind of unit and returns a task capability immediately; `await` later reifies the attached unit's terminal outcome through the same mapping. Thus `@attempt` is observationally equivalent to `@spawn await`, while task lifetime and waiting behavior remain outside this model.  `Begin unit` receives the complete entry stack and exact body as separate ordered inputs. It selects one never-before-created unit identity, records those inputs unchanged, and makes that unit active. Reader-delimited units, `load`, and isolated unit constructors differ in how they supply these inputs and expose the eventual outcome; those policies do not change unit execution semantics.
+
+**`Units`** ↝ Begin unit *entry*: [`Value`], *body*: [`Value`].
+
+---
+
+> Beginning a unit selects one never-before-created identity, records its exact entry stack and body, and makes it active with the entry stack installed.
+
+∃ *unit*: `Unit`, ¬**unit-created?** *unit* · **unit-created?**′ *unit* ∧ **unit-active?**′ *unit* ∧ ¬**unit-succeeded?**′ *unit* ∧ ¬**unit-failed?**′ *unit* ∧ **unit-entry**′ *unit* = *entry* ∧ **unit-body**′ *unit* = *body* ∧ **unit-stack**′ *unit* = *entry* ∧ **unit-error**′ *unit* = **unit-error** *unit* ∧ (∀ *other*: `Unit`, *other* ≠ *unit* · **unit-created?**′ *other* = **unit-created?** *other* ∧ **unit-active?**′ *other* = **unit-active?** *other* ∧ **unit-succeeded?**′ *other* = **unit-succeeded?** *other* ∧ **unit-failed?**′ *other* = **unit-failed?** *other* ∧ **unit-entry**′ *other* = **unit-entry** *other* ∧ **unit-body**′ *other* = **unit-body** *other* ∧ **unit-stack**′ *other* = **unit-stack** *other* ∧ **unit-error**′ *other* = **unit-error** *other*).
+
+#### Chapter 2
+
+##### Domains
+
+> A created unit is in exactly one phase: active, successfully completed, or failed. Entry and body remain fixed after creation. `unit-stack` denotes the stack at the modeled boundary: it begins as the entry stack and becomes the evaluator-supplied result on success. Intermediate evaluator stacks are outside the abstraction.
+
+`Unit`.
+
+##### Rules
+
+{**`Units`**} **unit-created?** *unit*: `Unit` ⇒ `Bool`.
+
+{**`Units`**} **unit-active?** *unit*: `Unit` ⇒ `Bool`.
+
+{**`Units`**} **unit-succeeded?** *unit*: `Unit` ⇒ `Bool`.
+
+{**`Units`**} **unit-failed?** *unit*: `Unit` ⇒ `Bool`.
+
+{**`Units`**} **unit-entry** *unit*: `Unit` ⇒ [`Value`].
+
+{**`Units`**} **unit-body** *unit*: `Unit` ⇒ [`Value`].
+
+{**`Units`**} **unit-stack** *unit*: `Unit` ⇒ [`Value`].
+
+{**`Units`**} **unit-error** *unit*: `Unit` ⇒ `Value`.
+
+---
+
+> An active unit is created and is neither successful nor failed.
+
+∀ *candidate*: `Unit`, **unit-active?** *candidate* · **unit-created?** *candidate* ∧ ¬**unit-succeeded?** *candidate* ∧ ¬**unit-failed?** *candidate*.
+
+> A successfully completed unit is created and is no longer active or failed.
+
+∀ *candidate*: `Unit`, **unit-succeeded?** *candidate* · **unit-created?** *candidate* ∧ ¬**unit-active?** *candidate* ∧ ¬**unit-failed?** *candidate*.
+
+> A failed unit is created and terminal, carries an error value, and exposes its restored entry stack rather than the evaluator's partial stack.
+
+∀ *candidate*: `Unit`, **unit-failed?** *candidate* · **unit-created?** *candidate* ∧ ¬**unit-active?** *candidate* ∧ ¬**unit-succeeded?** *candidate* ∧ **unit-stack** *candidate* = **unit-entry** *candidate* ∧ **error-value?** (**unit-error** *candidate*).
+
+> Every created unit is in exactly one of the three lifecycle phases.
+
+∀ *candidate*: `Unit`, **unit-created?** *candidate* · **unit-active?** *candidate* ∨ **unit-succeeded?** *candidate* ∨ **unit-failed?** *candidate*.
+
+> Initially no unit identity has been created or entered a lifecycle phase.
+
+initially ∀ *candidate*: `Unit` · ¬**unit-created?** *candidate* ∧ ¬**unit-active?** *candidate* ∧ ¬**unit-succeeded?** *candidate* ∧ ¬**unit-failed?** *candidate*.
+
+#### Chapter 3
+
+##### Action
+
+> `Complete unit successfully` accepts the result produced by the omitted evaluator, makes the active unit terminal, and retains that result as the unit's terminal stack. The evaluator supplies the result; it is not chosen by the ECL operation that launched the unit.
+
+**`Units`** ↝ Complete unit successfully *unit*: `Unit`, *result*: [`Value`], **unit-created?** *unit*, **unit-active?** *unit*.
+
+---
+
+> Successful completion makes the unit terminal and exposes the evaluator's complete result stack without changing its entry stack or body.
+
+**unit-created?**′ *unit*.
+
+¬**unit-active?**′ *unit*.
+
+**unit-succeeded?**′ *unit*.
+
+¬**unit-failed?**′ *unit*.
+
+**unit-entry**′ *unit* = **unit-entry** *unit*.
+
+**unit-body**′ *unit* = **unit-body** *unit*.
+
+**unit-stack**′ *unit* = *result*.
+
+**unit-error**′ *unit* = **unit-error** *unit*.
+
+∀ *other*: `Unit`, *other* ≠ *unit* · **unit-created?**′ *other* = **unit-created?** *other* ∧ **unit-active?**′ *other* = **unit-active?** *other* ∧ **unit-succeeded?**′ *other* = **unit-succeeded?** *other* ∧ **unit-failed?**′ *other* = **unit-failed?** *other* ∧ **unit-entry**′ *other* = **unit-entry** *other* ∧ **unit-body**′ *other* = **unit-body** *other* ∧ **unit-stack**′ *other* = **unit-stack** *other* ∧ **unit-error**′ *other* = **unit-error** *other*.
+
+#### Chapter 4
+
+##### Action
+
+> `Complete unit with failure` accepts the error produced by the evaluator or by a facility such as concurrency cancellation. Errors are ordinary ECL values satisfying the imported `error-value?` schema. Completion makes the active unit terminal, records the error value, and restores the complete entry stack. The evaluator's partial stack is neither retained nor exposed. Every error kind follows this same unit transition; causes and concrete error data are outside the model.
+
+**`Units`** ↝ Complete unit with failure *unit*: `Unit`, *error*: `Value`, **unit-created?** *unit*, **unit-active?** *unit*, **error-value?** *error*.
+
+---
+
+> Failure makes the unit terminal, records the evaluator-supplied error, and restores the complete entry stack. The partial evaluator stack is not retained or exposed.
+
+**unit-created?**′ *unit*.
+
+¬**unit-active?**′ *unit*.
+
+¬**unit-succeeded?**′ *unit*.
+
+**unit-failed?**′ *unit*.
+
+**unit-entry**′ *unit* = **unit-entry** *unit*.
+
+**unit-body**′ *unit* = **unit-body** *unit*.
+
+**unit-stack**′ *unit* = **unit-entry** *unit*.
+
+**unit-error**′ *unit* = *error*.
+
+∀ *other*: `Unit`, *other* ≠ *unit* · **unit-created?**′ *other* = **unit-created?** *other* ∧ **unit-active?**′ *other* = **unit-active?** *other* ∧ **unit-succeeded?**′ *other* = **unit-succeeded?** *other* ∧ **unit-failed?**′ *other* = **unit-failed?** *other* ∧ **unit-entry**′ *other* = **unit-entry** *other* ∧ **unit-body**′ *other* = **unit-body** *other* ∧ **unit-stack**′ *other* = **unit-stack** *other* ∧ **unit-error**′ *other* = **unit-error** *other*.
+
+
+
+Environment writes, I/O, and other permitted non-stack effects performed
+before unit failure survive. A unit boundary may additionally cancel child
+tasks as specified by the concurrency semantics. A unit is not a transaction
+over the whole execution state.
+
+#### Unit delimiters
 
 Units are delimited by the reader or by semantic unit constructors:
 
@@ -502,8 +1012,8 @@ Words that are isolated but *not* marked, with their reasons:
 - `await`, `await-all`, `await-any`, `await-for`, `cancel`, `tasks` —
   they consume tasks rather than making them.
 
-`@` is an ordinary word character, not reader-reserved: a user's `@retry`
-lexes and defines normally. The convention is enforced for first-party
+`@` is an ordinary word character that the reader does not reserve: a user's
+`@retry` lexes and defines normally. The convention is enforced for first-party
 vocabulary by the source audit and is the recommended spelling for any
 user-defined word that wraps its quotation in a unit.
 
@@ -516,9 +1026,9 @@ occurrence; a definition therefore keeps reporting the file that authored its
 body when another file calls it. Runtime-assembled code has no source
 provenance, so `*file*` is `'domain` there rather than falling back to its
 caller. `*module*` returns the canonical registration selected by the current
-module activation. The stars are ordinary word characters, not reader syntax,
-and the convention applies to shipped vocabulary rather than reserving the
-spelling from user definitions.
+module activation. The stars are ordinary word characters with no reader
+meaning, and the convention applies to shipped vocabulary without reserving
+the spelling from user definitions.
 
 #### Seeding a unit
 
@@ -532,8 +1042,9 @@ Every unit constructor receives its seed values and exact body separately:
 
 Both `values` and the body must be lists. The new unit's operand stack is
 initialized from the values list in list order, and then the body runs. `[]`
-is the explicit no-seed operand. Seeds are values, not code contributed to the
-body: even when a seed is itself a reader-built quotation, none of its contents
+is the explicit no-seed operand. Seeds are inert stack values and contribute no
+code to the body: even when a seed is itself a reader-built quotation, none of
+its contents
 is part of the construction body's text. `@each` puts the iterated element
 deepest in each child stack, beneath the shared seeds.
 
@@ -600,8 +1111,8 @@ representations but expose the same binding model.
   `def` to consume. `which` reports the resulting public `def`, while `see`
   prints its literal-capture body, preceded by the annotation when one is
   present; an unannotated `set` has no effect or documentation, and nothing
-  distinguishes it from the corresponding `literal` plus `def` spelling. `set` is
-  environment assignment, not a lexical binding form. For ordinary local
+  distinguishes it from the corresponding `literal` plus `def` spelling. `set`
+  assigns the environment and introduces no lexical binding. For ordinary local
   values, prefer stack flow or binder locals.
 - Redefinition (`def` or `set` over an existing name) replaces the
   complete binding snapshot: omitting an effect or docstring clears the
@@ -676,7 +1187,7 @@ the token `...`:
 `...` declares a **fixed before row and a variable after row**: how many
 values the word consumes is known, how many it leaves is not. The before
 slots are checked at boundaries exactly as today; the after check is
-skipped. This is a genuine partial contract, not the absence of one — a
+skipped. This remains a genuine partial contract: a
 word that would otherwise carry a documentation-only annotation regains
 input checking and honest reflection, and `which` and `see` render the effect
 with `-- ...`.
@@ -833,6 +1344,8 @@ formulae are rendered here as one normative text.
 
 #### Checked model
 
+**Imports:** ECL_VALUES
+
 ##### Contexts
 
 **`Calls`**, **`Images`**, **`Registry`**, **`Transactions`**, **`WithinCommit`**
@@ -876,8 +1389,6 @@ formulae are rendered here as one normative text.
 `Definition`.
 
 `Transaction`.
-
-`Value`.
 
 `WordOccurrence`.
 
@@ -1037,7 +1548,7 @@ initially ∀ *transaction*: `Transaction` · ¬**transaction-created?** *transa
 
 ##### Action
 
-> Image availability follows semantic ownership rather than reclamation mechanics. `value-held?` records that at least one reachable module value owns the image, not a reference count. `Release last value owner` clears that fact only when the final such owner disappears. The action models reachability and is not an ECL operation. Current generations and active calls are the other image owners; scoped words and quotations are not.
+> Image availability follows semantic ownership rather than reclamation mechanics. `value-held?` records the Boolean fact that at least one reachable module value owns the image; the model contains no reference count. `Release last value owner` clears that fact only when the final such owner disappears. The action models reachability and is not an ECL operation. Current generations and active calls are the other image owners; scoped words and quotations are not.
 
 **`Images`** ↝ Release last value owner *image*: `Image`, **constructed?** *image*, **value-held?** *image*.
 
@@ -1191,8 +1702,8 @@ initially ∀ *transaction*: `Transaction` · ¬**transaction-created?** *transa
   bindings carry the same optional annotations as top-level ones, so a
   module word may be unannotated, documentation-only, effect-only, or
   both; `set`/`setp` publish the bare literal capture. Privacy is
-  subtractive — privates are
-  absent from the module's public face, not access-checked. Definitions
+  subtractive: private definitions are omitted entirely from the module's
+  public face. Definitions
   made inside the module body's isolated child units (e.g. inside an
   `@attempt`) are dynamic and are never exported.
 - **Tests are a distinct module-owned namespace.**
@@ -1313,8 +1824,8 @@ initially ∀ *transaction*: `Transaction` · ¬**transaction-created?** *transa
                ( -- n ) (4 scale) 'go def) 'm @defm
       m.go                                          -- 40
 
-- **A word resolves in the scope its text was written in.** The scope is
-  carried by the word itself, not by the quotation containing it, so it
+- **A word resolves in the scope its text was written in.** The word itself
+  carries the scope, so it
   survives every operation that moves code around: `cat` and `compose` splice
   tokens from two sources into one list and each token keeps the scope it was
   written in. A module word may hand `(private-helper)` to `each` and the
@@ -1448,5 +1959,5 @@ The rewritten report currently ends here. Unreviewed core-language material is
 preserved verbatim in [`LEGACY_LANGUAGE.md`](LEGACY_LANGUAGE.md). Material
 already identified as belonging to the standard environment, host, packages,
 CLI, or formatter is preserved verbatim in
-[`LEGACY_ENVIRONMENT.md`](LEGACY_ENVIRONMENT.md). These files are migration
-inputs, not hidden continuations of this specification.
+[`LEGACY_ENVIRONMENT.md`](LEGACY_ENVIRONMENT.md). These files supply migration
+inputs; this specification is complete without treating them as continuations.

@@ -201,8 +201,9 @@ rows and non-string cells are `'type`, and a zero-field row is `'shape`.
 `json.parse` `( string -- value )` and `json.emit` `( value -- string )` per
 RFC 8259. Integral in-range numbers become ints and everything else numeric
 becomes a float; objects become dicts with string keys and arrays become
-lists. **`null`, `true`, and `false` become the ordinary symbols `'null`,
-`'true`, and `'false`** — data, not language nil and not language booleans,
+lists. **`null`, `true`, and `false` become the ordinary data symbols `'null`,
+`'true`, and `'false`**; the conversion introduces neither language nil nor
+language booleans,
 which is what lets a document round-trip. Emission requires string or symbol
 dict keys (`'type` otherwise) and rejects any other symbol.
 
@@ -250,16 +251,18 @@ Client only. `http.get` `( url headers -- response )`, `http.get-bytes`
 header, status, and content-decoding rules but materializes the resulting
 octets directly as an ordinary integer byte list; it never passes them through
 Unicode conversion. "Bytes" here means the representation after HTTP content
-decoding, not transfer framing or a compressed wire representation. A refused
+decoding and excludes transfer framing or compressed wire representation. A refused
 connection, TLS failure, unparseable url, or protocol error is `'io` carrying
-the url in `'path`; a non-2xx status is an ordinary value, not an error.
+the url in `'path`; a non-2xx status is returned as an ordinary value without
+raising an error.
 
 A `Session.Host` may carry an optional TLS trust override consisting of an
 absolute CA-file path plus a fixed verification timestamp. In that mode the
 HTTP client loads only that CA file and verifies at that timestamp; it does not
 scan system roots or read the wall clock. A null override preserves system
-roots and current-time verification. This is explicit host configuration for
-hermetic HTTPS tests, not an ECL value or a process environment switch.
+roots and current-time verification. This explicit host configuration serves
+hermetic HTTPS tests and is inaccessible as either an ECL value or a process
+environment switch.
 
 **The request blocks the calling unit's worker thread.** That is the one
 documented first-party exception to cooperative scheduling: a `@each`
@@ -398,8 +401,8 @@ over what the grammar admits:
 - When every shared identifier is equal, the shorter prerelease is below the
   longer one.
 
-Anything outside the grammar is an error, not an incomparable value, so there
-is no partial order to reason about.
+Anything outside the grammar raises an error, so comparison never produces an
+incomparable value or partial order.
 
 Minimal version selection takes the maximum of *declared* minimums and never
 enumerates available versions, so every selected version is one some manifest
@@ -447,7 +450,7 @@ no lock at all.
 - `#` comments are permitted, and nothing that rewrites the file preserves
   them.
 
-**Inertness is a property of the format, not of the reader.** A manifest may
+**The format itself guarantees inertness.** A manifest may
 hold ints, floats, chars, symbols, strings, lists, and dicts; a **word** value
 anywhere in it is `'domain`. A quotation is an ordinary list and is legal as
 data — what is forbidden is the executable reference, which is the thing an
@@ -508,8 +511,8 @@ validation as `pkg.lock.read` and `pkg.lock.write`.
 Traversal and diagnostics do not depend on dict insertion order. Requirements
 are considered in canonical name/version/requirer order. If equal
 name/version declarations have the same hash but different URLs, the
-lexicographically least URL is recorded; the content hash, not its mirror, is
-the artifact identity. Different hashes for one name/version are a hard
+lexicographically least URL is recorded; the content hash defines artifact
+identity independently of its mirror. Different hashes for one name/version are a hard
 conflict. Selected prefix-collision pairs and conflicting declarations are
 reported in package-name order. A cycle reports the sorted distinct package
 names in the cycle. When more than one malformed or missing edge exists, the
@@ -710,8 +713,9 @@ unknown child name. A real directory whose basename is a canonical store key
 and is absent from the union is renamed within the cache to a private
 `.ecl-gc-*` name, then walked and deleted one entry per bounded scheduler
 advance without following links. Interrupted private names are recognized and
-finished by the next collection. The reported count is the number of live
-store entries detached during this invocation, not recovered private names.
+finished by the next collection. The reported count includes exactly the live
+store entries detached during this invocation and excludes recovered private
+names.
 
 ### Package archives
 

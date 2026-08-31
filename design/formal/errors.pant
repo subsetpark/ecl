@@ -1,0 +1,231 @@
+module ECL_ERRORS.
+
+import ECL_VALUES.
+
+> ECL errors are ordinary values with the dictionary kind. An
+> error has a required symbol at `'kind`; when present, `'msg` is a string,
+> `'word` is a symbol, `'trace` is a list of symbols, and `'data` is a
+> dictionary. Other diagnostic and kind-specific fields are permitted. The
+> predicates here classify immutable values independently of execution state.
+error-value? value: Value => Bool.
+kind-field-valid? value: Value => Bool.
+message-field-valid? value: Value => Bool.
+word-field-valid? value: Value => Bool.
+trace-field-valid? value: Value => Bool.
+data-field-valid? value: Value => Bool.
+symbol-list-value? value: Value => Bool.
+
+kind-field => Value.
+message-field => Value.
+word-field => Value.
+trace-field => Value.
+data-field => Value.
+---
+> The five schema keys are symbols with these exact spellings.
+value-type kind-field = symbol-type and
+symbol-spelling kind-field = "kind" and
+value-type message-field = symbol-type and
+symbol-spelling message-field = "msg" and
+value-type word-field = symbol-type and
+symbol-spelling word-field = "word" and
+value-type trace-field = symbol-type and
+symbol-spelling trace-field = "trace" and
+value-type data-field = symbol-type and
+symbol-spelling data-field = "data".
+
+> A trace is a list containing only symbols. The empty list is a valid trace.
+all value: Value |
+  symbol-list-value? value <->
+    (value-type value = list-type and
+     (all index: Nat, index <= list-length value |
+       value-type (list-element value index) = symbol-type)).
+
+> Non-dictionaries cannot satisfy any error-schema field predicate.
+all value: Value, value-type value != dict-type |
+  ~kind-field-valid? value and
+  ~message-field-valid? value and
+  ~word-field-valid? value and
+  ~trace-field-valid? value and
+  ~data-field-valid? value.
+
+> The `'kind` field is required and its value is a symbol.
+all value: Value,
+    value-type value = dict-type,
+    ~dict-has-key? value kind-field |
+  ~kind-field-valid? value.
+
+all value: Value,
+    value-type value = dict-type,
+    dict-has-key? value kind-field |
+  kind-field-valid? value <->
+    value-type (dict-value-for-key value kind-field) = symbol-type.
+
+> The `'msg` field is optional and, when present, is a string.
+all value: Value,
+    value-type value = dict-type,
+    ~dict-has-key? value message-field |
+  message-field-valid? value.
+
+all value: Value,
+    value-type value = dict-type,
+    dict-has-key? value message-field |
+  message-field-valid? value <->
+    string-value? (dict-value-for-key value message-field).
+
+> The `'word` field is optional and, when present, is a symbol.
+all value: Value,
+    value-type value = dict-type,
+    ~dict-has-key? value word-field |
+  word-field-valid? value.
+
+all value: Value,
+    value-type value = dict-type,
+    dict-has-key? value word-field |
+  word-field-valid? value <->
+    value-type (dict-value-for-key value word-field) = symbol-type.
+
+> The `'trace` field is optional and, when present, is a list of symbols.
+all value: Value,
+    value-type value = dict-type,
+    ~dict-has-key? value trace-field |
+  trace-field-valid? value.
+
+all value: Value,
+    value-type value = dict-type,
+    dict-has-key? value trace-field |
+  trace-field-valid? value <->
+    symbol-list-value? (dict-value-for-key value trace-field).
+
+> The `'data` field is optional and, when present, is a dictionary.
+all value: Value,
+    value-type value = dict-type,
+    ~dict-has-key? value data-field |
+  data-field-valid? value.
+
+all value: Value,
+    value-type value = dict-type,
+    dict-has-key? value data-field |
+  data-field-valid? value <->
+    value-type (dict-value-for-key value data-field) = dict-type.
+
+> A value is an error exactly when it is a dictionary satisfying every field
+> rule above. Fields outside this schema do not affect validity.
+all value: Value |
+  error-value? value <->
+    (value-type value = dict-type and
+     kind-field-valid? value and
+     message-field-valid? value and
+     word-field-valid? value and
+     trace-field-valid? value and
+     data-field-valid? value).
+
+where
+
+> The core error-kind taxonomy is closed. Every other symbol remains available
+> as a user-defined error kind; being outside this predicate does not make a
+> symbol invalid in an error's `'kind` field.
+core-error-kind? value: Value => Bool.
+
+underflow-error-kind => Value.
+undefined-word-error-kind => Value.
+type-error-kind => Value.
+shape-error-kind => Value.
+conform-error-kind => Value.
+overflow-error-kind => Value.
+domain-error-kind => Value.
+contract-error-kind => Value.
+parse-error-kind => Value.
+io-error-kind => Value.
+cancelled-error-kind => Value.
+timeout-error-kind => Value.
+user-error-kind => Value.
+---
+> Each core error kind is the symbol with the corresponding source spelling.
+value-type underflow-error-kind = symbol-type and
+symbol-spelling underflow-error-kind = "underflow" and
+value-type undefined-word-error-kind = symbol-type and
+symbol-spelling undefined-word-error-kind = "undefined-word" and
+value-type type-error-kind = symbol-type and
+symbol-spelling type-error-kind = "type" and
+value-type shape-error-kind = symbol-type and
+symbol-spelling shape-error-kind = "shape" and
+value-type conform-error-kind = symbol-type and
+symbol-spelling conform-error-kind = "conform" and
+value-type overflow-error-kind = symbol-type and
+symbol-spelling overflow-error-kind = "overflow" and
+value-type domain-error-kind = symbol-type and
+symbol-spelling domain-error-kind = "domain" and
+value-type contract-error-kind = symbol-type and
+symbol-spelling contract-error-kind = "contract" and
+value-type parse-error-kind = symbol-type and
+symbol-spelling parse-error-kind = "parse" and
+value-type io-error-kind = symbol-type and
+symbol-spelling io-error-kind = "io" and
+value-type cancelled-error-kind = symbol-type and
+symbol-spelling cancelled-error-kind = "cancelled" and
+value-type timeout-error-kind = symbol-type and
+symbol-spelling timeout-error-kind = "timeout" and
+value-type user-error-kind = symbol-type and
+symbol-spelling user-error-kind = "user".
+
+> No other value is a core error kind.
+all value: Value |
+  core-error-kind? value <->
+    (value = underflow-error-kind or
+     value = undefined-word-error-kind or
+     value = type-error-kind or
+     value = shape-error-kind or
+     value = conform-error-kind or
+     value = overflow-error-kind or
+     value = domain-error-kind or
+     value = contract-error-kind or
+     value = parse-error-kind or
+     value = io-error-kind or
+     value = cancelled-error-kind or
+     value = timeout-error-kind or
+     value = user-error-kind).
+
+where
+
+> Results are ordinary values with the dictionary kind. A successful
+> result has exactly one `'ok` entry carrying the ordered values left on the
+> successful unit stack. A failed result has exactly one `'err` entry carrying
+> an error value. No value is both forms.
+result-value? value: Value => Bool.
+successful-result-value? value: Value => Bool.
+failed-result-value? value: Value => Bool.
+ok-field => Value.
+err-field => Value.
+---
+> Result tags are symbols with the source spellings `ok` and `err`.
+value-type ok-field = symbol-type and
+symbol-spelling ok-field = "ok" and
+value-type err-field = symbol-type and
+symbol-spelling err-field = "err".
+
+> A successful result is exactly a one-entry dictionary tagged `'ok` whose
+> payload is a list of successful stack values.
+all value: Value |
+  successful-result-value? value <->
+    (value-type value = dict-type and
+     dict-length value = 1 and
+     dict-has-key? value ok-field and
+     value-type (dict-value-for-key value ok-field) = list-type).
+
+> A failed result is exactly a one-entry dictionary tagged `'err` whose
+> payload satisfies the error schema.
+all value: Value |
+  failed-result-value? value <->
+    (value-type value = dict-type and
+     dict-length value = 1 and
+     dict-has-key? value err-field and
+     error-value? (dict-value-for-key value err-field)).
+
+> Results are exactly the successful and failed forms.
+all value: Value |
+  result-value? value <->
+    (successful-result-value? value or failed-result-value? value).
+
+> The two result forms are disjoint.
+all value: Value, successful-result-value? value |
+  ~failed-result-value? value.

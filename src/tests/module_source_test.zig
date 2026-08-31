@@ -418,8 +418,8 @@ test "loader: a failing multi-module artifact publishes no usable module" {
 
     try expectErrorContains(&runtime, "broken.first.answer", &.{"missing-during-artifact-load"});
     // The first @defm ran before the failure, but the artifact commit did not.
-    // A second request must retry and fail at the artifact, not observe that
-    // partial registry generation as a usable module.
+    // A second request must retry and fail at the artifact; the partial
+    // registry generation never becomes a usable module.
     try expectErrorContains(&runtime, "broken.first.answer", &.{"missing-during-artifact-load"});
 }
 
@@ -961,7 +961,7 @@ test "module: privacy module-body contract top-level private and qualified trace
     try expectErrorContains(&runtime, "private-word.g", &.{ "'kind 'undefined-word", "'word 'private-word.g" });
     try expectErrorContains(&runtime, "1 'x setp", &.{ "'kind 'domain", "defp/setp" });
     // A body that leaves values behind registers: they become the slot's
-    // durable stack, not bindings, so no name appears for them.
+    // durable stack. They create no bindings, so no name appears for them.
     try expectOk(&runtime, "[] (1) 'bad @defm");
     try expectErrorContains(&runtime, "bad.x", &.{"'kind 'undefined-word"});
     try expectOk(&runtime, "[] ([] (1 'hidden set) @attempt pop) 'temporary @defm");
@@ -1156,7 +1156,7 @@ test "module: import inside a module body binds module-locally" {
     // publication method. It now takes the same module sink `def` takes there.
     try expectOk(&runtime, "[] ((1) 'x def) 'src @defm [] ('src ('x) import) 'holder @defm holder.x");
     try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
-    // The binding landed in the image, not in the session that ran `@defm`.
+    // The binding landed exclusively in the image built by `@defm`.
     try expectErrorContains(&runtime, "x", &.{ "'kind 'undefined-word", "'word 'x" });
 }
 
@@ -1186,7 +1186,7 @@ test "scope: an undefined word names the chain it searched" {
         "'scope 'module",
         "'word 'base",
     });
-    // A dotted reference searched the registry, not any lexical chain.
+    // A dotted reference searched only the registry.
     try expectErrorContains(&runtime, "[] ((7) 'answer def) 'named @defm named.nope", &.{"'scope 'qualified"});
     try expectErrorContains(&runtime, "no.such.word", &.{"'scope 'qualified"});
     // A missing export of a module *value* is not a scope miss at all.
@@ -1232,7 +1232,7 @@ test "module: a parameterized behavior dependency is a quotation the caller wrot
     // and a session name of the same spelling is not in its chain.
     try expectOk(&runtime, "(99) 'double def w.go");
     try std.testing.expectEqual(@as(i64, 8), runtime.stackItems()[1].int);
-    // Purity is the unit-constructor boundary, not transitivity: `@defm` runs
+    // Purity comes from the unit-constructor boundary itself: `@defm` runs
     // the construction body in the image's chain whatever scope its text was
     // written in, so a bare `k` inside the body is undefined however recently
     // the session defined one.
@@ -1543,8 +1543,8 @@ test "module: an undefined word names the chain its own scope searched" {
     defer test_heap.retire(&backing);
     var runtime = try session.Session.init(backing.allocator(), &.{});
     defer runtime.deinit();
-    // The reported chain comes from the word's scope, not from the running
-    // activation. A caller's quotation applied by a module word searched the
+    // The reported chain comes from the word's own scope independently of the
+    // running activation. A caller's quotation applied by a module word searched the
     // caller, and saying `'module` there would name the one place it did not
     // look.
     try expectOk(&runtime, "[] ((|q| q call) 'apply def) 'm @defm");

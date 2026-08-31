@@ -195,8 +195,8 @@ pub fn InfallibleFamily(comptime Left: type, comptime Right: type, comptime Out:
             block.len = range.len();
         }
 
-        /// leaf x scalar. The scalar operand is a value, not a materialized
-        /// broadcast: the loop reads it from a register, stride zero.
+        /// leaf x scalar. The scalar operand remains one value; the loop reads
+        /// it from a register at stride zero without materializing a broadcast.
         pub fn binaryScalarRight(
             comptime body: fn (Left, Right) Out,
             left: []const Left,
@@ -537,7 +537,7 @@ test "range planning bounds by budget quantum and remaining length" {
     try std.testing.expectEqual(Chunk{ .start = 0, .end = 3 }, planRange(0, 3, 100, 100).?);
     try std.testing.expectEqual(Chunk{ .start = 0, .end = 8 }, planRange(0, 100, 8, 100).?);
     try std.testing.expectEqual(Chunk{ .start = 0, .end = 5 }, planRange(0, 100, 8, 5).?);
-    // Absolute positions, not per-chunk ones.
+    // Positions are absolute across the full input.
     try std.testing.expectEqual(Chunk{ .start = 90, .end = 100 }, planRange(90, 100, 32, 32).?);
     // An exhausted interval still makes progress; the charge resets it.
     try std.testing.expectEqual(Chunk{ .start = 0, .end = 1 }, planRange(0, 100, 0, 32).?);

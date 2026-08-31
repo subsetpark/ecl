@@ -253,7 +253,7 @@ test "embedded definitions retain provenance and deferred words stay absent" {
     });
 }
 
-test "embedded definitions resolve against core, not the session" {
+test "embedded definitions retain core resolution under session shadowing" {
     // `wrap` is `(() cons)`. It was published against core alone, so a session
     // redefinition of `cons` shadows the name for session code without
     // rewriting what an already-evaluated definition mentioning `wrap` means.
@@ -272,7 +272,7 @@ test "embedded definitions resolve against core, not the session" {
     try support.expectStack("(7) 'mine def [1 2] (pop mine) each", "[7 7]");
 }
 
-test "embedded quotation literals resolve against core, not the session" {
+test "embedded quotation literals retain core resolution under session shadowing" {
     // `all?` is `(|l q| l q each 1 (and) fold)`. Its own `(and)` was written
     // in the prelude, so a session `and` cannot reach it.
     try support.expectStack("(pop pop 42) 'and def [1 1] (1 =) all?", "1");

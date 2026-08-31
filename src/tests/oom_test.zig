@@ -19,7 +19,7 @@
 //!
 //! `checkAllAllocationFailures` re-runs the whole probe once per allocation
 //! ordinal, so a snippet's cost is multiplied by the total allocation count.
-//! Keep additions short and reaching, not exhaustive — one line through a
+//! Keep additions short and reaching: one line through a
 //! path is coverage; a hundred lines through it is the same coverage, slower.
 //! Snippets must leave the stack clean (`pop` what they push) and propagate
 //! errors, or the sweep silently stops testing what follows. The core and
@@ -783,8 +783,8 @@ fn stdlibSessionAllocationProbe(
     var scratch = try PackageScratch.init();
     defer scratch.deinit();
     if (surface == .package_sync) try scratch.installPackageA();
-    // Paths and source strings are borrowed test scaffolding, not values the
-    // Session owns. Keep their construction outside the injected allocator so
+    // Paths and source strings are borrowed test scaffolding outside Session
+    // ownership. Keep their construction outside the injected allocator so
     // the sweep enumerates live Session paths rather than this helper's writer.
     const scaffold_allocator = std.testing.allocator;
     const scratch_path = scratch.path;

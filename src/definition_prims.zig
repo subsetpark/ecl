@@ -1052,7 +1052,7 @@ const SeeDriver = struct {
                     // The reflection plan emits only reader-valid canonical
                     // values and fixed binding descriptors. Failure here is an
                     // internal disagreement between those two production
-                    // boundaries, not a user program error.
+                    // boundaries and is unreachable from a user program.
                     error.InvalidUtf8, error.InvalidSource => unreachable,
                 };
                 const context = format_state.context;

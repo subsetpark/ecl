@@ -1,7 +1,7 @@
 //! Per-element allocation budgets for the dispatch path.
 //!
 //! Every fast path in the interpreter is invisible to a behavioural test: when
-//! one stops firing, nothing produces a wrong answer, the runtime just starts
+//! one stops firing, answers remain correct while the runtime starts
 //! allocating again. That is how a leaked inline driver slot survived until a
 //! benchmark caught it, and how a cursor built to fetch one element went
 //! unnoticed for as long as it did. These budgets make the absence of an
@@ -14,7 +14,7 @@
 //! runtime spends per element, which is the quantity a fast path exists to
 //! keep at zero.
 //!
-//! A budget is a ceiling, not a record. Lowering one belongs to the change that
+//! A budget sets a ceiling; it does not record historical usage. Lowering one belongs to the change that
 //! earns it, and raising one is a decision to spend memory that needs saying
 //! out loud in a diff rather than being absorbed silently.
 const std = @import("std");
@@ -521,7 +521,7 @@ test "allocation: generic membership holds its recorded cost" {
 }
 
 /// Operations that build something. These allocate because there is a value to
-/// construct, not because reaching the construction cost anything.
+/// construct; merely reaching the operation has zero construction cost.
 ///
 /// One of them has since been looked at, and the answer is worth keeping. `del`
 /// spending eight allocations to produce an empty dict read as the most

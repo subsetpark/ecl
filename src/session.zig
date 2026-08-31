@@ -910,8 +910,8 @@ pub const Session = enum(usize) {
 };
 
 /// Observation surface present only in a separately compiled counter artifact.
-/// Ordinary runtime and test modules receive an empty namespace, not a
-/// representation-inspection method on Session.
+/// Ordinary runtime and test modules receive an empty namespace, leaving
+/// Session representation inspection unavailable.
 pub const RootExecutionObservation = if (machine.root_execution_metrics_enabled) struct {
     pub fn last(runtime: *const Session) machine.RootExecutionMetrics {
         return runtime.coreState().last_root_execution_metrics;

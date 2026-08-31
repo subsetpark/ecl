@@ -153,8 +153,8 @@ test "stdlib: embedded resolution precedence against ECL_PATH follows the ruling
     var diagnostics = std.Io.Writer.Allocating.init(allocator);
     defer diagnostics.deinit();
 
-    // Import precedence is proved from a cold registry, not after another
-    // spelling has already selected and published the embedded module.
+    // A cold registry proves import precedence without a prior spelling having
+    // selected and published the embedded module.
     {
         var imported_output = std.Io.Writer.Allocating.init(allocator);
         defer imported_output.deinit();

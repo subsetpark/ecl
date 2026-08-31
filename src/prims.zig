@@ -55,8 +55,8 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
 /// Head-binder backend: `_ll` loads locals, `_gl` gets one, `_dl` drops them.
 /// The reader lowers `|a b|` into these three, and they are reserved binding
 /// names so a session definition cannot change what a local read means. The
-/// underscore marks them as the reader's, not a vocabulary anyone writes by
-/// hand, and keeps three ordinary words out of the reservation. They move values between the operand stack and the unit's
+/// underscore marks them as reader-internal vocabulary and keeps three ordinary
+/// words out of the reservation. They move values between the operand stack and the unit's
 /// locals, which is storage the reader alone addresses: every index the three
 /// ever see was computed by the binder from names it had already resolved.
 fn bindLocals(evaluator: *Machine) MachineError!void {
@@ -763,7 +763,7 @@ const SpitDriver = struct {
 };
 
 /// Reads one variable from the immutable session environ snapshot. An unset
-/// variable is an error, not an empty string: absence is absence, and
+/// variable raises an error because absence has no empty-string representation;
 /// `@attempt`/`result.or-else` is the defaulting idiom.
 fn getenv(evaluator: *Machine) MachineError!void {
     var name_value = try evaluator.popValue();

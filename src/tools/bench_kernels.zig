@@ -134,7 +134,7 @@ const cases = [_]Case{
     .{ .class = "copy and gather", .name = "take cyclic", .setup = "1000 range", .workload = "1000000 take len" },
     .{ .class = "copy and gather", .name = "gather", .setup = "1000000 range", .workload = "dup at len" },
     .{ .class = "copy and gather", .name = "boxed spine floor", .setup = "50000 range (wrap) each", .workload = "reverse len" },
-    // A mask, not arbitrary counts: `where` repeats each index by its count, so
+    // A mask permits only Boolean counts: `where` repeats each index by its count, so
     // a count vector of 1..n would ask for a result of quadratic size.
     .{ .class = "index vectors", .name = "where mask", .setup = "1000000 range 2 mod", .workload = "where len" },
     .{ .class = "index vectors", .name = "range", .setup = "0", .workload = "pop 1000000 range len" },

@@ -343,7 +343,7 @@ test "modules: a conditional acquire refuses a dead owner and never disturbs its
 /// One image's authoritative reference count, allocated with the image and
 /// outliving it whenever a scope cell still names it.
 ///
-/// Allocated at the image's birth, not at its first stamp: a refcount cannot
+/// Allocated at the image's birth so a refcount never has to
 /// migrate mid-life without briefly existing twice, and two counts have a
 /// window in which they disagree. One count, one retain/release path.
 ///
@@ -362,7 +362,7 @@ const RefAnchor = struct {
     /// The image pointer and the parked-list link share one word, because a
     /// dead anchor's image pointer is never read again.
     ///
-    /// That is a proof, not a hope. `image` is read only after a successful CAS
+    /// The proof is structural: `image` is read only after a successful CAS
     /// off a nonzero count; `refs == 0` is permanent once reached; and `next` is
     /// stored on the release path strictly after zero. So a `tryRetain` racing
     /// the overlay fails its CAS and touches nothing else.
@@ -375,7 +375,7 @@ const RefAnchor = struct {
     /// invariant becomes a flaky test and then a weakened one.
     /// `extern` so it carries no safety tag. A plain untagged union is 16
     /// bytes in Debug and ReleaseSafe because Zig adds one, which alone would
-    /// blow the 16-byte anchor budget -- measured, not assumed. Both members are
+    /// blow the 16-byte anchor budget, as direct measurement confirms. Both members are
     /// plain pointers, so extern layout is exact and the link is the node: a
     /// `TombstoneNode` is nothing but its `next`, so a pointer to this union
     /// *is* a pointer to the node.
@@ -506,7 +506,7 @@ const ModuleImage = struct {
     /// neither owns a slot. It embeds a pointer to its own owner, so `create`
     /// fills it in after the allocation rather than defaulting it.
     construction_home: ExecutionHome,
-    /// The authoritative count lives here, not inline, so it can outlive this
+    /// The authoritative count lives in this separately owned cell, so it can outlive this
     /// struct for the images a scope cell names.
     anchor: *RefAnchor,
     /// Whether ECL source was ever stamped against this image, recorded where
@@ -980,8 +980,8 @@ pub const StateTurn = struct {
         self.authority = .detached;
     }
 
-    /// Whether this turn holds the slot. The grant lives in the arbiter, not
-    /// in the node, so this is the only place it is read — under the mutex
+    /// Whether this turn holds the slot. The arbiter owns the grant, so this is
+    /// the only node field read under the mutex
     /// that is also the happens-before edge between the previous holder's
     /// publication and this holder's read of the durable stack.
     pub fn granted(self: *StateTurn) bool {
@@ -1235,9 +1235,10 @@ const DirectoryLease = struct {
 pub const ExecutionAccess = opaque {};
 
 const TestAuthorityState = struct {
-    // Keep the opaque registry value itself, not the address of the caller's
-    // movable enum wrapper. Session construction moves that wrapper into its
-    // core after minting this seal; the backing identity remains stable.
+    // Keep the opaque registry value itself. The caller's movable enum wrapper
+    // has no stable address.
+    // Session construction moves that wrapper into its core after minting this
+    // seal; the backing identity remains stable.
     registry: Registry,
 };
 
@@ -1393,8 +1394,8 @@ pub const GenerationPin = enum(usize) {
 /// reached through it therefore owns no slot, so `within` is `'domain` rather
 /// than a write to whichever slot the caller happened to be running.
 ///
-/// Takes no `ExecutionAccess`: the token gates `ModuleHome`'s methods, not the
-/// pointer, and the audit rejects one function that both holds a token and
+/// Takes no `ExecutionAccess`: the token gates `ModuleHome`'s methods while the
+/// pointer alone grants nothing, and the audit rejects one function that both holds a token and
 /// casts a pointer.
 pub fn homeForModuleRootScope(scope: *env.Scope) ?*ModuleHome {
     if (!scope.isModuleRoot()) return null;
@@ -1433,7 +1434,7 @@ test "modules: a stamped retired image leaves one anchor and an unstamped one le
     // Registry-level rather than Session-level, and every sample is taken after
     // an explicit drain to quiescence. A Session-level version of this measured
     // 52KB per cycle against an expected 40 bytes: it was sampling deferred
-    // retirement backlog, not settled memory. Absolute settled-memory bounds
+    // retirement backlog rather than settled memory. Absolute settled-memory bounds
     // are only assertable where the drains are controllable.
     var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
     const allocator = counting.allocator();
@@ -1506,7 +1507,7 @@ test "modules: a borrow holds an image's contents across a full drain" {
         _ = try container.scopeIdForOwned(&image.scope, owner);
         const cell = try container.scopeCell(&image.scope, owner);
 
-        // Through the real primitive, not a hand-rolled retain.
+        // Exercise the real primitive directly.
         var borrowed = tryPinAnchorInternal(owner) orelse
             return error.ExpectedLiveBorrow;
 
@@ -1522,7 +1523,7 @@ test "modules: a borrow holds an image's contents across a full drain" {
         // Verified by building the misplaced-pin variant: with the acquire
         // removed the tier does not pass, though it *hangs* rather than failing
         // here, because the later `deinit` releases a count already at zero.
-        // Expect a timeout, not a red assertion, if this ever regresses.
+        // A regression must surface as a timeout before any assertion fires.
         try std.testing.expectEqual(before_drop, counting.total_requested_bytes);
         // And the scope is still reachable through its proof arm, which is what
         // resolution does with it.
@@ -1871,8 +1872,8 @@ pub const OwnedImage = enum(usize) {
     }
     pub fn deinit(self: *OwnedImage) void {
         if (self.* == .consumed) return;
-        // The construction owner is one lifetime guard, not a uniqueness
-        // assertion. Tasks spawned during construction hold independent pins,
+        // The construction owner supplies one lifetime guard. Tasks spawned
+        // during construction may hold independent pins,
         // so rollback drops only this capability and the image remains alive
         // until those tasks and their child scopes quiesce.
         self.borrow().release();

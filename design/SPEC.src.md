@@ -5,9 +5,9 @@
 
 This document defines the syntax and semantics of the ECL language. The
 language is defined independently of any implementation representation,
-interpreter architecture, host interface, or distribution. The shipped ECL
-interpreter is the reference implementation, not the definition of the
-language.
+interpreter architecture, host interface, or distribution. This document
+defines the language; the shipped ECL interpreter is its reference
+implementation.
 
 This is a staged rewrite of the language report. Only material incorporated
 into this document has been reviewed under its present structure. Untouched
@@ -50,8 +50,8 @@ non-normative unless explicitly identified as normative.
 A linked Pantagruel model is normative only within the abstraction boundary
 declared by that model. Its domains, rules, actions, invariants, and initial
 state are normative within that boundary; behavior it deliberately omits is
-governed by this prose. A finite model-checking bound is verification
-machinery, not an ECL implementation limit. A contradiction between prose and
+governed by this prose. A finite model-checking bound serves only the
+verification machinery and imposes no ECL implementation limit. A contradiction between prose and
 a formal model is a specification defect and must not be resolved by silently
 preferring either account.
 
@@ -89,8 +89,8 @@ interpretation.
 Values are immutable. Bindings associate names with executable bodies and may
 be replaced without mutating either the old body or values that refer to its
 name. Reader-authored word occurrences retain where their names are to be
-looked up, but lookup remains late: they retain a scope, not a resolved
-binding.
+looked up, while lookup remains late: they retain a scope and resolve the
+binding at execution time.
 
 A unit is the boundary of failure and operand-stack rollback. Modules separate
 immutable code images from named registrations; a registration owns the
@@ -100,7 +100,7 @@ isolated units under structured concurrency.
 ## Notation and terminology
 
 In a stack effect `( before -- after )`, the top of the operand stack is at
-the right. Names in an effect describe positions, not runtime variables. `S`
+the right. Names in an effect describe positions and introduce no runtime variables. `S`
 denotes an operand-stack sequence, `P` and `Q` denote program sequences, and
 σ denotes the execution state other than the operand stack.
 
@@ -171,7 +171,7 @@ characters. An atom is classified whole-token, in this order:
      the int64 range is a parse error.
    - float64: `digits . digits` with an optional exponent (`e`/`E`,
      optional sign), or `digits` followed by an exponent. Digits are
-     required on both sides of `.` — `.5` and `5.` are words, not numbers.
+     required on both sides of `.` — `.5` and `5.` therefore lex as words.
      `_` is not permitted in float literals. A literal that overflows
      float64 is a parse error.
    - The whole tokens `inf`, `+inf`, and `-inf` are float literals (they
@@ -195,8 +195,8 @@ Segment characters are anything except whitespace, the six delimiters,
 and blank lines inside the quotes are literal; there is no triple-quoted,
 dedented, or margin-stripped form. The escapes are exactly `\\`, `\"`,
 `\n`, `\t`, and `\u{...}` (one to six hex digits, Unicode scalar values
-only); any other escape is a parse error. A string is a rank-1 char
-vector, not a distinct type.
+only); any other escape is a parse error. A string uses the rank-1 char-vector
+role of a list.
 
 The exact form `<...>` is reserved as an unparseable runtime display marker
 wherever an atom may occur. The same bytes inside a string literal are ordinary
@@ -238,94 +238,64 @@ binder   :=  "|" name+ "|"           # names: distinct unqualified symbols
 
 ## Values and external representations
 
-The value-kind universe is closed. Every ECL value has exactly one of these
-nine kinds:
+### Formal value model
 
-```text
-int  float  char  symbol  word  list  dict  task  module
-```
+The Pantagruel source is
+[`formal/values.pant`](formal/values.pant). Its documentation and checked
+formulae are rendered here as one normative text. Concrete representation,
+source grammar, printing, pervasion, and value-consuming operations remain
+governed by the prose outside the model.
 
-A conforming implementation may choose any representation for these kinds but
-must not expose another kind through `type`, matching, hashing, ordering,
+#### Checked model
+
+<!-- include:value-model -->
+
+### Representation and language roles
+
+A conforming implementation may choose any representation for values but must
+not expose an additional kind through `type`, matching, hashing, ordering,
 printing, or an ECL-facing native interface. Adding a first-class kind is a
-language extension. Booleans are restricted integer values; strings,
-quotations, vectors, matrices, and arrays are roles played by lists; errors
-and results are dictionaries; and bindings are not values.
+language extension. Bindings are not values.
 
-Values are observationally immutable: a value's kind and content never
-change. Operations on lists and dictionaries produce values; storage reuse is
-not observable language behavior. `def` and `set` replace bindings rather than
-mutating values. A task is an immutable capability identifying an externally
-evolving task, and module images are immutable. Storage
-specialization, copy-on-write strategies, and amortized bounds are
-implementation or performance concerns.
+Operations on lists and dictionaries produce values; storage reuse is not
+observable language behavior. `def` and `set` replace bindings rather than
+mutating values. Storage specialization, copy-on-write strategies, and
+amortized bounds are implementation or performance concerns.
 
-- **int** — a 64-bit signed integer. Overflow is an error, never wrapping
-  or promotion.
-- **float** — an IEEE 754 binary64 value, excluding NaN. `inf` and `-inf`
-  are ordinary values. See Numbers.
-- **char** — a Unicode codepoint. A char is a distinct atom, not an
-  integer.
-- **symbol** — an interned name, written quoted: `'mean`, `'stats.mean`.
-- **word** — a name in executable position. A bare word in code and a
-  quoted symbol are distinct atoms: `(dup) first` yields the word `dup`,
-  `'dup` yields the symbol, and they do not `match?`. Words print bare,
-  symbols print quoted. A word value's entire identity is its kind and
-  spelling. Resolution and provenance metadata belong to a stored occurrence,
-  not to the word value.
-- **list** — the one aggregate: a finite ordered sequence of values. A
-  quotation, a vector, and a row of a matrix are all lists. A homogeneous
-  list of atoms *is* a vector — `(1 2 3)` and `[1 2 3]` are the same
-  value. There is no rank-carrying array type: a matrix is a list of
-  equal-length lists, and rank is depth, not an intrinsic property.
-  Ragged data (a list of lists of unequal length) is legal. A string is a
-  list of chars.
-- **dict** — an insertion-ordered map. Any value is a legal key (immutability
-  makes every value hashable). Key identity is whole-value `match?` identity.
-  Insertion order is preserved by storage, iteration, and printing, but ignored
-  by equality: two dicts with the same key–value pairs in different orders are
-  equal.
-- **task** — a handle to a concurrent unit of work (see Concurrency).
-  Tasks are runtime capabilities bound to their session: `match?` and
-  hashing use handle identity, and a task prints as `<task:N>`, which the
-  reader rejects.
-- **module** — an opaque immutable module image (see Modules). Module values
-  compare and hash by image identity. A module prints diagnostically as
-  `<module>`, which the reader rejects.
+Float values use IEEE 754 binary64, excluding NaN; `inf` and `-inf` are
+ordinary values. Integer overflow is an error, never wrapping or promotion.
+See Numbers.
+
+A bare word in code and a quoted symbol are distinct source atoms: `(dup)
+first` yields the word `dup`, while `'dup` yields the symbol. Words print bare
+and symbols print quoted. Resolution and provenance metadata belong to stored
+word occurrences rather than their values.
+
+A quotation, vector, and matrix row are list roles. A homogeneous list of
+atoms *is* a vector—`(1 2 3)` and `[1 2 3]` are the same value. There is no
+rank-carrying array type: a matrix is a list of equal-length lists, rank is
+depth rather than intrinsic data, and ragged lists remain legal.
+
+Dictionary insertion order is preserved by storage, iteration, and printing.
+A task is a runtime capability bound to its session and prints as `<task:N>`.
+A module is an opaque immutable image and prints as `<module>`. Those task and
+module displays are rejected by the reader.
 
 ### Readable representations and display
 
-A **readable representation** is source text which reads to a structurally
-matching value. Integers, floats, characters, symbols, words, lists, and
-dictionaries are source-denotable. A list or dictionary has a readable
-representation only when every value it contains does. Reader provenance,
-resolution metadata, and reader lineage need not be reproduced: they do not
-participate in structural matching.
-
 A **diagnostic display** is human-facing text without a read-back guarantee.
-The displays for tasks and modules are diagnostic displays, not
-external representations. An aggregate containing any such value is likewise
-not round-trippable. An operation may produce display text for every value,
-but any print/read guarantee applies only to the readable subset.
+An operation may produce display text for every value, but any print/read
+guarantee applies only to the formally defined readable subset. Reader
+provenance, resolution metadata, and reader lineage need not be reproduced by
+that round trip.
 
 ### Equality and ordering
 
-ECL defines whole-value equivalence independently of the operation exposing
-it. `match?` returns its boolean result, dictionary keys use it as key
-identity, and hashing must be congruent with it.
-
-- Lists are equivalent recursively and positionally.
-- Dictionaries are equivalent when they contain equivalent key–value pairs,
-  irrespective of insertion order.
-- Numbers are equivalent by mathematical value across `int` and `float`:
-  `2` and `2.0` are equivalent, as are `0.0` and `-0.0`. Mixed numeric
-  comparison is exact; it does not first round an integer to binary64.
-- Tasks and modules are equivalent only when they have the same
-  capability identity.
-- Resolution context, reader lineage, and provenance do not participate in
-  equivalence or hashing. Consequently, two matching quotations may behave
-  differently when applied. Matching is structural data equivalence, not
-  behavioral equivalence.
+`match?` exposes the model's whole-value equivalence. Numeric magnitude maps
+binary64 values to their exact mathematical values: `2` matches `2.0`, and
+`0.0` matches `-0.0`; a mixed comparison does not first round an integer to
+binary64. Matching specifies structural data equivalence, so two matching
+quotations may nevertheless behave differently when applied.
 
 `=` is instead pervasive equality: it descends aggregate structure and
 produces a scalar boolean or boolean mask (see Pervasion). For example,
@@ -335,8 +305,8 @@ produces a scalar boolean or boolean mask (see Pervasion). For example,
   codepoint), and strings (codepoint-lexicographic). Anything else,
   including cross-kind pairs, is a `'type` error. `grade` orders by
   exactly this ordering.
-- Booleans are the ints 0 and 1. Words that require a boolean reject
-  every other value, including other ints.
+- Words that require a boolean reject every value outside the formally defined
+  Boolean role, including other ints.
 
 ## Core evaluation
 
@@ -357,9 +327,9 @@ Resolution does not produce a binding or callable value on the operand stack.
 Bindings are not first-class, and ordinary word reference always invokes.
 Reflection operations inspect binding metadata through separate mechanisms.
 
-Lookup is late. A word occurrence's resolution metadata selects a scope, not
-a binding, body, value, or module generation. The binding is looked up each
-time the occurrence executes, so replacing a binding in a mutable selected
+Lookup is late. A word occurrence's resolution metadata selects only a scope.
+Each execution looks up the binding in that scope; the occurrence retains no
+binding, body, value, or module generation. Replacing a binding in a mutable selected
 scope affects existing code. A module image's scope is immutable after
 construction; replacing an image in a registration does not retarget words
 belonging to the former image. Attempting to resolve through a retired selected
@@ -390,25 +360,59 @@ Tail calls are guaranteed: through word calls, `if`, and every
 combinator's tail position, iteration and tail recursion run in constant
 space and never exhaust a host call stack.
 
+### Errors
+
+Errors are crash-only. There is no try/catch or handler quotation: an error
+propagates until the enclosing unit dies. `raise` initiates that propagation
+from an error value, and `fail` is sugar for raising an error whose kind is
+`'user` and whose message is the supplied string.
+
+Failure is observed as data only outside an explicit boundary: `@attempt`, or
+the concurrent `@spawn`/`await` path, returns `{'ok (values)}` after success or
+`{'err error}` after failure. Each envelope is an ordinary dictionary and is
+the boundary's only result value. The REPL is the implicit top-level boundary;
+a script's boundary is the process.
+
+Source-position and other diagnostic fields appear when known. Absence is
+represented by an absent field, never by a nil value. Runtime-assembled code
+has no source position by construction, and no host exception or host stack
+frame is exposed as ECL error data.
+
+#### Formal error model
+
+The Pantagruel source is
+[`formal/errors.pant`](formal/errors.pant). Its documentation and checked
+formulae define the error dictionary schema and core error-kind taxonomy.
+Error propagation and diagnostic attribution remain governed by prose.
+
+##### Checked model
+
+<!-- include:error-model -->
+
 ### Units and the transactional stack
 
 Ordinary evaluation may consume operands and perform effects before it fails;
 its failure outcome therefore includes the partial operand stack and the
 surviving execution state at the point of failure.
 
-The *unit* is the granularity of operand-stack rollback. If `S_entry` is its
-entry stack, unit execution has the relation:
+#### Formal unit model
 
-```text
-run-unit(P, S_entry, σ) = success(S_result, σ′)
-run-unit(P, S_entry, σ) = failure(error, S_entry, σ′)
-```
+The Pantagruel source is
+[`formal/units.pant`](formal/units.pant). Its documentation and checked
+formulae define the general unit lifecycle and operand-stack rollback.
+Launch, observation, and structured-concurrency policy remain outside its
+declared abstraction boundary.
 
-On failure, the evaluator's partial stack is discarded and the entry stack is
-restored. Environment writes, I/O, and other permitted non-stack effects
-performed before failure survive. A unit boundary may additionally cancel
-child tasks as specified by the concurrency semantics. The unit is not a
-transaction over the whole execution state.
+##### Checked model
+
+<!-- include:unit-model -->
+
+Environment writes, I/O, and other permitted non-stack effects performed
+before unit failure survive. A unit boundary may additionally cancel child
+tasks as specified by the concurrency semantics. A unit is not a transaction
+over the whole execution state.
+
+#### Unit delimiters
 
 Units are delimited by the reader or by semantic unit constructors:
 
@@ -501,8 +505,8 @@ Words that are isolated but *not* marked, with their reasons:
 - `await`, `await-all`, `await-any`, `await-for`, `cancel`, `tasks` —
   they consume tasks rather than making them.
 
-`@` is an ordinary word character, not reader-reserved: a user's `@retry`
-lexes and defines normally. The convention is enforced for first-party
+`@` is an ordinary word character that the reader does not reserve: a user's
+`@retry` lexes and defines normally. The convention is enforced for first-party
 vocabulary by the source audit and is the recommended spelling for any
 user-defined word that wraps its quotation in a unit.
 
@@ -515,9 +519,9 @@ occurrence; a definition therefore keeps reporting the file that authored its
 body when another file calls it. Runtime-assembled code has no source
 provenance, so `*file*` is `'domain` there rather than falling back to its
 caller. `*module*` returns the canonical registration selected by the current
-module activation. The stars are ordinary word characters, not reader syntax,
-and the convention applies to shipped vocabulary rather than reserving the
-spelling from user definitions.
+module activation. The stars are ordinary word characters with no reader
+meaning, and the convention applies to shipped vocabulary without reserving
+the spelling from user definitions.
 
 #### Seeding a unit
 
@@ -531,8 +535,9 @@ Every unit constructor receives its seed values and exact body separately:
 
 Both `values` and the body must be lists. The new unit's operand stack is
 initialized from the values list in list order, and then the body runs. `[]`
-is the explicit no-seed operand. Seeds are values, not code contributed to the
-body: even when a seed is itself a reader-built quotation, none of its contents
+is the explicit no-seed operand. Seeds are inert stack values and contribute no
+code to the body: even when a seed is itself a reader-built quotation, none of
+its contents
 is part of the construction body's text. `@each` puts the iterated element
 deepest in each child stack, beneath the shared seeds.
 
@@ -599,8 +604,8 @@ representations but expose the same binding model.
   `def` to consume. `which` reports the resulting public `def`, while `see`
   prints its literal-capture body, preceded by the annotation when one is
   present; an unannotated `set` has no effect or documentation, and nothing
-  distinguishes it from the corresponding `literal` plus `def` spelling. `set` is
-  environment assignment, not a lexical binding form. For ordinary local
+  distinguishes it from the corresponding `literal` plus `def` spelling. `set`
+  assigns the environment and introduces no lexical binding. For ordinary local
   values, prefer stack flow or binder locals.
 - Redefinition (`def` or `set` over an existing name) replaces the
   complete binding snapshot: omitting an effect or docstring clears the
@@ -675,7 +680,7 @@ the token `...`:
 `...` declares a **fixed before row and a variable after row**: how many
 values the word consumes is known, how many it leaves is not. The before
 slots are checked at boundaries exactly as today; the after check is
-skipped. This is a genuine partial contract, not the absence of one — a
+skipped. This remains a genuine partial contract: a
 word that would otherwise carry a documentation-only annotation regains
 input checking and honest reflection, and `which` and `see` render the effect
 with `-- ...`.
@@ -853,8 +858,8 @@ formulae are rendered here as one normative text.
   bindings carry the same optional annotations as top-level ones, so a
   module word may be unannotated, documentation-only, effect-only, or
   both; `set`/`setp` publish the bare literal capture. Privacy is
-  subtractive — privates are
-  absent from the module's public face, not access-checked. Definitions
+  subtractive: private definitions are omitted entirely from the module's
+  public face. Definitions
   made inside the module body's isolated child units (e.g. inside an
   `@attempt`) are dynamic and are never exported.
 - **Tests are a distinct module-owned namespace.**
@@ -975,8 +980,8 @@ formulae are rendered here as one normative text.
                ( -- n ) (4 scale) 'go def) 'm @defm
       m.go                                          -- 40
 
-- **A word resolves in the scope its text was written in.** The scope is
-  carried by the word itself, not by the quotation containing it, so it
+- **A word resolves in the scope its text was written in.** The word itself
+  carries the scope, so it
   survives every operation that moves code around: `cat` and `compose` splice
   tokens from two sources into one list and each token keeps the scope it was
   written in. A module word may hand `(private-helper)` to `each` and the
@@ -1110,5 +1115,5 @@ The rewritten report currently ends here. Unreviewed core-language material is
 preserved verbatim in [`LEGACY_LANGUAGE.md`](LEGACY_LANGUAGE.md). Material
 already identified as belonging to the standard environment, host, packages,
 CLI, or formatter is preserved verbatim in
-[`LEGACY_ENVIRONMENT.md`](LEGACY_ENVIRONMENT.md). These files are migration
-inputs, not hidden continuations of this specification.
+[`LEGACY_ENVIRONMENT.md`](LEGACY_ENVIRONMENT.md). These files supply migration
+inputs; this specification is complete without treating them as continuations.

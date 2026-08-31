@@ -106,7 +106,7 @@ test "module values: type display identity and capability boundaries are opaque"
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
 
-    // Identity is the image, not its content: one construction duplicated
+    // Image identity determines matching independently of content: one construction duplicated
     // matches itself, and two constructions of the same body never match.
     try expectStack(&runtime, "[] (1) @module dup match?", "1");
     try expectStack(&runtime, "[] (1) @module [] (1) @module match?", "0");
@@ -170,7 +170,7 @@ test "module registration: reload preserves slot state and discards the image te
     try expectOk(&runtime, "[] (99 ((10 + dup without) within) 'bump def) @module 'counter register");
     try expectStack(&runtime, "counter.bump", "12");
 
-    // The template is the image's property, not the slot's: the same image
+    // The template belongs to the image independently of any slot: the same image
     // still seeds a *fresh* registration from 99.
     try expectOk(&runtime, "[] (99 ((10 + dup without) within) 'bump def) @module 'fresh register");
     try expectStack(&runtime, "fresh.bump", "109");
@@ -274,7 +274,7 @@ test "module registration: invocation context comes from the registration" {
     try expectEmptyStack(&runtime);
 
     // A private word reached through a public one sees the state of the
-    // registration the call entered through, not of the last one registered.
+    // registration the call entered through, regardless of which was registered last.
     try expectStack(&runtime, "left.bump left.bump right.bump", "1 2 1");
 
     // Reflection reports the invoking registration's spelling and generation.
@@ -352,7 +352,7 @@ test "module registration: failures leave prior registrations atomic and ownersh
     try expectOk(&runtime, "retained 'accepted register");
     try expectStack(&runtime, "accepted.v", "5");
 
-    // A non-module operand is a type error, not a registry mutation.
+    // A non-module operand raises a type error before any registry mutation.
     try expectErrorContains(&runtime, "1 'rejected register", &.{ "'kind 'type", "'word 'register" });
     try expectEmptyStack(&runtime);
     try expectErrorContains(&runtime, "rejected.v", &.{"'kind 'undefined-word"});
@@ -600,8 +600,8 @@ test "module values: an escaped quotation names the image it was written in" {
     defer runtime.deinit();
     // A word written in a module body names that image. A quotation that
     // escaped it goes on meaning what it meant, for as long as anything still
-    // holds the image -- redefinition reaches future calls, not code that
-    // already exists.
+    // holds the image -- redefinition reaches only future calls; existing code
+    // retains its meaning.
     try expectOk(&runtime, "[] ((1) 'k def ((k)) 'q def) 'held-name @defm held-name.q 'held set");
     try expectStack(&runtime, "held call", "1");
 

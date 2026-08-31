@@ -238,7 +238,7 @@ pub const RandomOp = enum {
 /// asserts the charge stays within the kernel quantum and polls at the
 /// boundary. A kernel that calls bare `pollKernel` with a private budget
 /// instead is invisible to that accounting, which is what this type exists to
-/// prevent: typed cursors take a `Context`, not a `*Machine`.
+/// prevent: typed cursors accept only the narrow `Context` capability.
 pub const Context = struct {
     evaluator: *Machine,
 

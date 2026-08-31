@@ -1777,7 +1777,8 @@ pub const Scheduler = enum(usize) {
         return self.worker().runInitializedRoot(unit);
     }
 
-    /// A blocking mutation turn is a settlement barrier, not merely a wakeup.
+    /// A blocking mutation turn is a settlement barrier with stronger semantics
+    /// than a wakeup.
     /// It waits behind an active worker retirement slice, then drains every
     /// causally enqueued successor before returning to the host.
     pub fn settleRootRetirement(self: *Scheduler) void {

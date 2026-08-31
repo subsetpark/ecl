@@ -401,7 +401,7 @@ test "definitions: set distinguishes binding annotations from captured data" {
             "annotated-data 'annotated-data doc",
         "(: \"Captured data.\") \"Binding documentation.\"",
     );
-    // The captured annotation is data, not metadata: it never becomes the
+    // The captured annotation remains ordinary data and never becomes the
     // binding's own documentation or effect.
     try support.expectErrors(&.{
         .{ .name = "captured doc is not documentation", .source = "(: \"doc\") 'ann set 'ann doc", .kind = "domain", .word = "doc" },
@@ -422,7 +422,7 @@ test "definitions: top-level setp fails through defp's module-root check" {
         .{
             // An isolated child scope is not a module root either, even
             // inside a module body — the check is against the unit's current
-            // scope, not the enclosing registration.
+            // current scope independently of the enclosing registration.
             .name = "setp inside an isolated child",
             .source = "[] ([1] (pop 1 'x setp) each) 'm @defm",
             .kind = "domain",

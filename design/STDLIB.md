@@ -22,8 +22,7 @@ Conventions:
   required of its quotation, enforced at each application.
 - An effect ending in `...` declares a fixed before row and a variable
   after row (see [Definition annotations](SPEC.md#definition-annotations)) and is the word's real declared
-  effect. A typographic `…` *inside* an effect is an informal picture, not
-  a declaration.
+  effect. A typographic `…` *inside* an effect is only an informal picture.
 - Indexing is 0-based throughout: `range` counts from 0, `at` indexes
   from 0, `where` and `grade` produce 0-based indices, and `find` returns
   the length on a miss.
@@ -251,8 +250,8 @@ places, truncating bits shifted off the top rather than raising
 
 ### bsr
 `( x count -- y )` — **Pervasive.** Shift the bit pattern right by
-`count` places, filling zeros from the top. The shift is logical, not
-arithmetic: `-1 1 bsr` is `maxint`, not `-1`. A `count` outside `0..63`
+`count` places, filling zeros from the top. The logical shift makes `-1 1 bsr`
+produce `maxint`. A `count` outside `0..63`
 is `'domain`.
 
 ### bxor
@@ -470,8 +469,8 @@ tested by whole-value `match?` against the list's top-level elements, so
 the result takes the sought value's shape: `[2 5] [1 2 3] in?` is
 `[1 0]`. The list is only ever read one level deep, and a list operand
 is decomposed before any comparison, so `in?` cannot ask whether a
-sublist is an element: `[1 1] [[0 0] [1 1]] in?` is `[0 0]`, two atom
-searches, not a `0` answer about `[1 1]`. Use `([1 1] match?) any?` for
+sublist is an element: `[1 1] [[0 0] [1 1]] in?` is `[0 0]`, the results of
+two atom searches. Use `([1 1] match?) any?` for
 that.
 
 ### import
@@ -707,7 +706,7 @@ accumulators from reducing its remainder. Defined in ecl over `scan`.
 followed by its body through the standard source formatter, with its
 width-aware layout and no navigation header, name, or `def`/`defp` terminator.
 What prints is what is stored: a name bound by `set` prints its annotation and
-literal-capture body, not the `set` spelling that produced it.
+literal-capture body; the producing `set` spelling is discarded.
 Reader-built bodies retain a shared slice of their source unit, so head binders
 print with their authored local names even though execution uses the lowered
 `_ll`/`_gl`/`_dl` quotation. Runtime-constructed bodies without source
@@ -936,8 +935,7 @@ sequences. Equivalent to `(pair) zip-with`.
 ### zip-with
 `( left right quotation -- list )` — *Isolated*, contract `( a b -- c )`.
 Zip two lists with broadcast conformability (an atom on either side
-extends). Each-left/each-right are `partial` compositions, not separate
-words.
+extends). Each-left/each-right are `partial` compositions.
 
 ## archive
 
@@ -1061,7 +1059,8 @@ dictionary order in both results.
 
 ### take
 `( dict keys -- dict )` — Keep entries named by a key list, ignoring absent
-keys. Output follows dictionary order, not the requested key-list order.
+keys. Output follows dictionary order independently of the requested key-list
+order.
 
 ### update
 `( dict keys quotation -- dict )` — Apply an isolated `( value -- value )`

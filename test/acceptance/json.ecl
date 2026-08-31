@@ -15,8 +15,8 @@ value "scores" at "b" at type io.pp
 value "neg" at type io.pp
 value "big" at type io.pp
 
-# null, true, and false are ordinary symbols: data, not language nil or
-# language booleans, which is what lets them round-trip.
+# null, true, and false are ordinary data symbols. They introduce neither
+# language nil nor language booleans, which lets them round-trip.
 value "note" at io.pp
 value "note" at type io.pp
 value "active" at io.pp

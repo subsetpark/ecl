@@ -777,7 +777,7 @@ pub fn build(b: *std.Build) void {
             "tests.value_test.",
             "tests.reader_test.",
             "tests.machine_test.",
-            // Both module suites whole, not by family: selecting families is
+            // Select both module suites whole. Family selection is
             // what left this file's unprefixed tests invisible until CI found
             // one, and the registry and module-lifetime area is where a
             // CI-only miss costs the most.
@@ -859,10 +859,33 @@ pub fn build(b: *std.Build) void {
     // SPEC.md is a checked-in rendering assembled by ECL. The build graph
     // supplies paths and generated fragments; language-level ordering and
     // inclusion remain ordinary ECL behavior in assemble.ecl.
-    const render_module_spec = b.addSystemCommand(&.{ "pant", "--markdown" });
+    const render_module_spec = b.addSystemCommand(&.{
+        "pant", "--markdown", "--module-path", "design/formal",
+    });
     render_module_spec.addFileArg(b.path("design/formal/modules.pant"));
     const rendered_module_spec = render_module_spec.captureStdOut(.{
         .basename = "modules.md",
+    });
+    const render_value_spec = b.addSystemCommand(&.{
+        "pant", "--markdown", "--module-path", "design/formal",
+    });
+    render_value_spec.addFileArg(b.path("design/formal/values.pant"));
+    const rendered_value_spec = render_value_spec.captureStdOut(.{
+        .basename = "values.md",
+    });
+    const render_error_spec = b.addSystemCommand(&.{
+        "pant", "--markdown", "--module-path", "design/formal",
+    });
+    render_error_spec.addFileArg(b.path("design/formal/errors.pant"));
+    const rendered_error_spec = render_error_spec.captureStdOut(.{
+        .basename = "errors.md",
+    });
+    const render_unit_spec = b.addSystemCommand(&.{
+        "pant", "--markdown", "--module-path", "design/formal",
+    });
+    render_unit_spec.addFileArg(b.path("design/formal/units.pant"));
+    const rendered_unit_spec = render_unit_spec.captureStdOut(.{
+        .basename = "units.md",
     });
 
     const assemble_spec = b.addRunArtifact(exe);
@@ -871,6 +894,12 @@ pub fn build(b: *std.Build) void {
     assemble_spec.addFileArg(b.path("design/SPEC.src.md"));
     assemble_spec.addArg("generated-preamble");
     assemble_spec.addFileArg(b.path("design/spec/generated-preamble.md"));
+    assemble_spec.addArg("value-model");
+    assemble_spec.addFileArg(rendered_value_spec);
+    assemble_spec.addArg("error-model");
+    assemble_spec.addFileArg(rendered_error_spec);
+    assemble_spec.addArg("unit-model");
+    assemble_spec.addFileArg(rendered_unit_spec);
     assemble_spec.addArg("module-model");
     assemble_spec.addFileArg(rendered_module_spec);
     const update_spec = b.addUpdateSourceFiles();
@@ -885,6 +914,12 @@ pub fn build(b: *std.Build) void {
     check_spec_run.addFileArg(b.path("design/SPEC.src.md"));
     check_spec_run.addArg("generated-preamble");
     check_spec_run.addFileArg(b.path("design/spec/generated-preamble.md"));
+    check_spec_run.addArg("value-model");
+    check_spec_run.addFileArg(rendered_value_spec);
+    check_spec_run.addArg("error-model");
+    check_spec_run.addFileArg(rendered_error_spec);
+    check_spec_run.addArg("unit-model");
+    check_spec_run.addFileArg(rendered_unit_spec);
     check_spec_run.addArg("module-model");
     check_spec_run.addFileArg(rendered_module_spec);
     const check_spec_step = b.step(
@@ -894,14 +929,33 @@ pub fn build(b: *std.Build) void {
     check_spec_step.dependOn(&check_spec_run.step);
 
     const check_formal_run = b.addSystemCommand(&.{
-        "pant", "--check", "--bound", "2", "--steps", "2", "--timeout", "8",
+        "pant", "--check",   "--bound", "2",             "--steps",
+        "2",    "--timeout", "8",       "--module-path", "design/formal",
     });
     check_formal_run.addFileArg(b.path("design/formal/modules.pant"));
+    const check_units_formal_run = b.addSystemCommand(&.{
+        "pant", "--check",   "--bound", "2",             "--steps",
+        "2",    "--timeout", "8",       "--module-path", "design/formal",
+    });
+    check_units_formal_run.addFileArg(b.path("design/formal/units.pant"));
+    const check_values_formal_run = b.addSystemCommand(&.{
+        "pant", "--check",   "--bound", "2",             "--steps",
+        "0",    "--timeout", "8",       "--module-path", "design/formal",
+    });
+    check_values_formal_run.addFileArg(b.path("design/formal/values.pant"));
+    const check_errors_formal_run = b.addSystemCommand(&.{
+        "pant", "--check",   "--bound", "2",             "--steps",
+        "0",    "--timeout", "8",       "--module-path", "design/formal",
+    });
+    check_errors_formal_run.addFileArg(b.path("design/formal/errors.pant"));
     const check_formal_step = b.step(
         "check-formal",
         "Check the bounded Pantagruel language models (needs pant and z3)",
     );
     check_formal_step.dependOn(&check_formal_run.step);
+    check_formal_step.dependOn(&check_units_formal_run.step);
+    check_formal_step.dependOn(&check_values_formal_run.step);
+    check_formal_step.dependOn(&check_errors_formal_run.step);
 
     // zlint is a downloaded binary rather than a Zig dependency, so it is
     // optional here and blocking in CI. It is wired in when it is on PATH
@@ -932,7 +986,7 @@ pub fn build(b: *std.Build) void {
     precommit_step.dependOn(&run_audit.step);
     precommit_step.dependOn(&run_ecl_source.step);
     precommit_step.dependOn(&check_spec_run.step);
-    precommit_step.dependOn(&check_formal_run.step);
+    precommit_step.dependOn(check_formal_step);
     precommit_step.dependOn(b.getInstallStep());
     precommit_step.dependOn(analysis_step);
     precommit_step.dependOn(&run_precommit_tests.step);

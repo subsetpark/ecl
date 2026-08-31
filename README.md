@@ -16,8 +16,8 @@ As the name suggests, ECL represents the attempt to evolve an old
 project---[ec](https://ec-calc.com/) into a proper programming language.
 Like ECL, ec attempted to combine the two above attributes in a single
 computing environment; both both the semantics and implementation of the
-older project made it suitable only as a desk calculator, not as a programming
-language.
+older project limited it to desk-calculator use and omitted capabilities needed
+by a programming language.
 
 ECL is intended to attain some of the usefulness for live data exploration and
 command-line use of K, some of the elegance and functional character of Joy,
@@ -210,7 +210,7 @@ workflow.
 
 ### Tests
 
-Tests are module declarations, not exported words. They may call private
+Tests use module declarations and do not require exported words. They may call private
 definitions and may use the same name as an ordinary definition. Ordinary
 application loading validates and then discards them, so test bodies and test
 catalog indexes are not retained in shipped module images:

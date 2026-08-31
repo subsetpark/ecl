@@ -9,7 +9,8 @@
 //! Value mapping. Objects become dicts with string keys, arrays become lists,
 //! and integral in-range numbers become ints while everything else numeric
 //! becomes a float. JSON's three literals become the ordinary symbols `'null`,
-//! `'true`, and `'false`: data, not language nil or language booleans, so a
+//! `'true`, and `'false` as data symbols. They introduce neither language nil
+//! nor language booleans, so a
 //! document round-trips instead of collapsing into 0 and 1.
 const std = @import("std");
 const value = @import("../value.zig");

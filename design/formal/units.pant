@@ -1,0 +1,169 @@
+module ECL_UNITS.
+
+import ECL_ERRORS.
+
+context Units.
+
+> This model is normative for the lifecycle of a general ECL unit; its ordered
+> entry and body values; successful completion with an ordered result stack;
+> and failure with an error and restoration of the entry stack.
+>
+> It deliberately abstracts over evaluation steps, name resolution, concrete
+> values and error dictionaries, environment writes, I/O, randomness, and all
+> other non-stack effects. The surrounding language specification governs
+> those subjects and requires that unit failure does not roll back effects
+> already performed. The model also omits launch and observation policy, task
+> identity, task trees, scheduling, awaiting, deadlines, cancellation causes,
+> and reclamation. In particular, cancellation reaches this model only as an
+> evaluator-supplied failure error, while a waiting operation's timeout does
+> not alter the target unit.
+>
+> `@attempt` begins a unit, waits synchronously for one terminal transition,
+> and reifies that outcome. `@spawn` begins the same kind of unit and returns a
+> task capability immediately; `await` later reifies the attached unit's
+> terminal outcome through the same mapping. Thus `@attempt` is observationally
+> equivalent to `@spawn await`, while task lifetime and waiting behavior remain
+> outside this model.
+>
+> `Begin unit` receives the complete entry stack and exact body as separate
+> ordered inputs. It selects one never-before-created unit identity, records
+> those inputs unchanged, and makes that unit active. Reader-delimited units,
+> `load`, and isolated unit constructors differ in how they supply these inputs
+> and expose the eventual outcome; those policies do not change unit execution
+> semantics.
+Units ~> Begin unit @ entry: [Value], body: [Value].
+---
+> Beginning a unit selects one never-before-created identity, records its exact
+> entry stack and body, and makes it active with the entry stack installed.
+some unit: Unit, ~unit-created? unit |
+  unit-created?' unit and
+  unit-active?' unit and
+  ~unit-succeeded?' unit and
+  ~unit-failed?' unit and
+  unit-entry' unit = entry and
+  unit-body' unit = body and
+  unit-stack' unit = entry and
+  unit-error' unit = unit-error unit and
+  (all other: Unit, other != unit |
+    unit-created?' other = unit-created? other and
+    unit-active?' other = unit-active? other and
+    unit-succeeded?' other = unit-succeeded? other and
+    unit-failed?' other = unit-failed? other and
+    unit-entry' other = unit-entry other and
+    unit-body' other = unit-body other and
+    unit-stack' other = unit-stack other and
+    unit-error' other = unit-error other).
+
+where
+
+> A created unit is in exactly one phase: active, successfully completed, or
+> failed. Entry and body remain fixed after creation. `unit-stack` denotes the
+> stack at the modeled boundary: it begins as the entry stack and becomes the
+> evaluator-supplied result on success. Intermediate evaluator stacks are
+> outside the abstraction.
+Unit.
+{Units} unit-created? unit: Unit => Bool.
+{Units} unit-active? unit: Unit => Bool.
+{Units} unit-succeeded? unit: Unit => Bool.
+{Units} unit-failed? unit: Unit => Bool.
+{Units} unit-entry unit: Unit => [Value].
+{Units} unit-body unit: Unit => [Value].
+{Units} unit-stack unit: Unit => [Value].
+{Units} unit-error unit: Unit => Value.
+---
+> An active unit is created and is neither successful nor failed.
+all candidate: Unit, unit-active? candidate |
+  unit-created? candidate and
+  ~unit-succeeded? candidate and
+  ~unit-failed? candidate.
+
+> A successfully completed unit is created and is no longer active or failed.
+all candidate: Unit, unit-succeeded? candidate |
+  unit-created? candidate and
+  ~unit-active? candidate and
+  ~unit-failed? candidate.
+
+> A failed unit is created and terminal, carries an error value, and exposes
+> its restored entry stack rather than the evaluator's partial stack.
+all candidate: Unit, unit-failed? candidate |
+  unit-created? candidate and
+  ~unit-active? candidate and
+  ~unit-succeeded? candidate and
+  unit-stack candidate = unit-entry candidate and
+  error-value? (unit-error candidate).
+
+> Every created unit is in exactly one of the three lifecycle phases.
+all candidate: Unit, unit-created? candidate |
+  unit-active? candidate or
+  unit-succeeded? candidate or
+  unit-failed? candidate.
+
+> Initially no unit identity has been created or entered a lifecycle phase.
+initially all candidate: Unit |
+  ~unit-created? candidate and
+  ~unit-active? candidate and
+  ~unit-succeeded? candidate and
+  ~unit-failed? candidate.
+
+where
+
+> `Complete unit successfully` accepts the result produced by the omitted
+> evaluator, makes the active unit terminal, and retains that result as the
+> unit's terminal stack. The evaluator supplies the result; it is not chosen by
+> the ECL operation that launched the unit.
+Units ~> Complete unit successfully @ unit: Unit, result: [Value], unit-created? unit, unit-active? unit.
+---
+> Successful completion makes the unit terminal and exposes the evaluator's
+> complete result stack without changing its entry stack or body.
+unit-created?' unit.
+~unit-active?' unit.
+unit-succeeded?' unit.
+~unit-failed?' unit.
+unit-entry' unit = unit-entry unit.
+unit-body' unit = unit-body unit.
+unit-stack' unit = result.
+unit-error' unit = unit-error unit.
+
+all other: Unit, other != unit |
+  unit-created?' other = unit-created? other and
+  unit-active?' other = unit-active? other and
+  unit-succeeded?' other = unit-succeeded? other and
+  unit-failed?' other = unit-failed? other and
+  unit-entry' other = unit-entry other and
+  unit-body' other = unit-body other and
+  unit-stack' other = unit-stack other and
+  unit-error' other = unit-error other.
+
+where
+
+> `Complete unit with failure` accepts the error produced by the evaluator or
+> by a facility such as concurrency cancellation. Errors are ordinary ECL
+> values satisfying the imported `error-value?` schema. Completion makes
+> the active unit terminal, records the error value, and restores the complete
+> entry stack. The
+> evaluator's partial stack is neither retained nor exposed. Every error kind
+> follows this same unit transition; causes and concrete error data are outside
+> the model.
+Units ~> Complete unit with failure @ unit: Unit, error: Value, unit-created? unit, unit-active? unit, error-value? error.
+---
+> Failure makes the unit terminal, records the evaluator-supplied error, and
+> restores the complete entry stack. The partial evaluator stack is not
+> retained or exposed.
+unit-created?' unit.
+~unit-active?' unit.
+~unit-succeeded?' unit.
+unit-failed?' unit.
+unit-entry' unit = unit-entry unit.
+unit-body' unit = unit-body unit.
+unit-stack' unit = unit-entry unit.
+unit-error' unit = error.
+
+all other: Unit, other != unit |
+  unit-created?' other = unit-created? other and
+  unit-active?' other = unit-active? other and
+  unit-succeeded?' other = unit-succeeded? other and
+  unit-failed?' other = unit-failed? other and
+  unit-entry' other = unit-entry other and
+  unit-body' other = unit-body other and
+  unit-stack' other = unit-stack other and
+  unit-error' other = unit-error other.

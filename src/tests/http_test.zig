@@ -227,7 +227,7 @@ test "http: get returns a response dict from the fixture server" {
             "dup 'status at swap dup 'body at swap 'headers at \"x-fixture\" at",
         "200 \"hello, world\\n\" \"hello\"",
     );
-    // A non-2xx status is an ordinary value, not an error.
+    // A non-2xx status returns as an ordinary value without raising an error.
     try expectStack(
         fixture.port,
         "\"http://127.0.0.1:{d}/nope\" {{}} http.get 'status at",

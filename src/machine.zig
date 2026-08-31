@@ -599,7 +599,7 @@ const OrdinaryErrorCursor = struct {
 const RaisedErrorCursor = struct {
     /// Replacement fields are independently optional because a raised dict
     /// may already supply any subset of them. Their presence is semantic
-    /// input-dependent state, not an execution phase.
+    /// input-dependent state independently of the execution phase.
     const BuiltValues = struct {
         message: ?Value = null,
         trace: ?Value = null,
@@ -2448,7 +2448,7 @@ pub const Unit = struct {
             .cancelled = cancelled,
             .entry_base = stack.items.len,
             .stack_base = 0,
-            // SAFETY: storage, not state. `driver_slot_busy` is the only
+            // SAFETY: this field supplies storage only. `driver_slot_busy` is the only
             // thing that says a driver lives here, and every read of the slot
             // goes through `acquireInlineDriver`, which writes the whole
             // driver before the pointer escapes.
@@ -5129,7 +5129,7 @@ pub const Machine = struct {
         if (self.unit.stack_base > 0) {
             const boundary = self.unit.boundary_index orelse return null;
             // During an unwind the index momentarily names the frame that was
-            // just popped, so this is a bounds question, not an invariant.
+            // just popped, so only bounds determine whether it may be read.
             const index: usize = @intFromEnum(boundary);
             if (index >= self.unit.frames.items.len) return null;
             const frame = self.unit.frames.items[index];
@@ -5570,8 +5570,8 @@ pub const Machine = struct {
         };
     }
 
-    /// A completion contract follows authored tail control, not application
-    /// machinery. Generic applications deliberately do not call this helper:
+    /// A completion contract follows authored tail control. Generic application
+    /// machinery deliberately does not call this helper:
     /// their continuation restarts once per element and must not add a pair of
     /// code-header atomics to that hot path.
     fn replaceTailEffectCandidate(self: *Machine, code: *Header) ?EffectCheckIndex {
@@ -6001,7 +6001,7 @@ pub const Machine = struct {
         // pin taken here is the one `scheduleWord` consumes.
         var borrow_pin: ?modules.GenerationPin = null;
         errdefer if (borrow_pin) |*owned| owned.deinit();
-        // Held by the activation this dispatch enters, not by the unit: unlike
+        // Held by the activation this dispatch enters. Unlike
         // an image pin, a scope borrow ends when the chain walk does.
         var borrowed_cell: ?*env.ScopeCell = null;
         errdefer if (borrowed_cell) |cell| cell.releaseBorrow();
@@ -6122,8 +6122,8 @@ pub const Machine = struct {
             },
             // A fallback here would change what the word means, so the failure
             // is definite instead. The traced word is set first: this failure
-            // belongs to the word being dispatched, not to whichever word was
-            // traced before it.
+            // belongs to the word being dispatched and must replace whichever
+            // word was traced before it.
             .retired => {
                 self.unit.active_word = .plain(word.name);
                 return self.fail(
@@ -7082,7 +7082,7 @@ const QualifiedLoadPreparationDriver = struct {
 
 /// Dispatches one export of an image reached as a value.
 ///
-/// It is a second *resolution source*, not a second dispatch path: the
+/// It is a second *resolution source* feeding the same dispatch path: the
 /// resolved binding goes through the same `executeResolved` tail as a name-
 /// dispatched word, so home, privacy, annotation checks, trace metadata,
 /// builtin/native behavior, and cancellation are the tail's business exactly
@@ -7629,8 +7629,8 @@ const ModuleCallSiteCache = struct {
 /// different reasons, and saying which one applied is the difference
 /// between a puzzling failure and an obvious one.
 ///
-/// It is derived from the word's own scope, not from the running
-/// activation: since resolution moved onto the word, the two differ in
+/// It is derived from the word's own scope independently of the running
+/// activation. Since resolution moved onto the word, the two differ in
 /// exactly the interesting cases — a caller's quotation applied by a module
 /// word searches the caller, and reporting the activation's chain there
 /// would name the one place the lookup did not look.
@@ -8750,7 +8750,7 @@ const StateAcquireDriver = struct {
             self.copied += 1;
         }
         if (self.copied != durable.len) return .yielded;
-        // One move, not a shared pointer: `enterStateApplication` owns the
+        // One move transfers exclusive ownership: `enterStateApplication` owns the
         // application on every exit path from here.
         try evaluator.enterStateApplication(
             self.application.borrowMut().move(),

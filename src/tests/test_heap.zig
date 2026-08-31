@@ -66,9 +66,9 @@
 //! `module_source_test`). Suites that mix host-built values into a session
 //! (`definition_test`, `module_test`) stay on `std.testing.allocator`, where
 //! the value and the session already agree. If you move a test here and it
-//! aborts on a free, that is this rule, not a bug in the code under test.
+//! aborts on a free, this allocator rule caused it; the code under test may be sound.
 //!
-//! The rule cuts *files*, not tests, so a file that needs both is two files.
+//! The rule divides whole *files*, so tests needing both homes must live in two files.
 //! `module_test.zig` was one file until the same-home TCO walk was measured:
 //! twenty thousand activations under a tracing allocator cost 15.4s against
 //! 4.2s untraced, and none of that file's source-only tests read a stack

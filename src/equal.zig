@@ -69,7 +69,7 @@ pub fn matchWithoutStructure(a: Value, b: Value) ?bool {
         .char => |codepoint| codepoint == b.char,
         .symbol => |id| id == b.symbol,
         // Two words match when they name the same thing. A word's scope is
-        // resolution metadata, not part of its identity as a value: `(dup)`
+        // resolution metadata outside its identity as a value: `(dup)`
         // written in a module and `(dup)` written at the session are the same
         // datum, and `match?` has always said so.
         .word => |reference| reference.name == b.word.name,
@@ -612,7 +612,7 @@ fn allocationFailureProbe(allocator: std.mem.Allocator) !void {
     _ = try hashWithAllocator(allocator, left);
 }
 
-// A word's scope is resolution metadata, not part of its identity, and both
+// A word's scope is resolution metadata outside its identity, and both
 // equality and hashing must keep ignoring it. Construction re-scoping relies on
 // exactly this: it shares the source dict's hash list rather than rehashing a
 // single key, which is only sound while a re-scoped key hashes and compares

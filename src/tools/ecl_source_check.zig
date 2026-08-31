@@ -77,7 +77,7 @@ fn checkFormatting(init: std.process.Init) !bool {
     return failed;
 }
 
-/// A standard module's terminal form is `@defm`, not `@module` plus `register`.
+/// A standard module's terminal form must use the single `@defm` form.
 /// The two are observably equivalent, so nothing at runtime can hold this rule;
 /// what it buys is one spelling for one thing across the checked-in corpus, and
 /// a navigable `### module` header, which the formatter synthesizes only for the

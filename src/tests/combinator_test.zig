@@ -705,7 +705,7 @@ test "idioms: a foreign stamp keeps recognition off" {
     try std.testing.expect(native.lastIdiomHits() > 0);
 
     // And a quotation stamped in one module applied inside another resolves in
-    // the chain it was written in, not the one shadowing around it.
+    // the chain it was written in independently of the surrounding shadow.
     var across_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&across_heap);
     var across = try session.Session.init(across_heap.allocator(), &.{});
@@ -764,7 +764,7 @@ test "idioms: a rebound name keeps recognition off" {
     defer test_heap.retire(&rebound_dependency_heap);
     var rebound_dependency = try session.Session.init(rebound_dependency_heap.allocator(), &.{});
     defer rebound_dependency.deinit();
-    // `neg` is `(-1 *)` in the prelude, so its `*` is core's, not this one.
+    // `neg` is `(-1 *)` in the prelude, so its `*` retains core resolution.
     try expectStack(&rebound_dependency, "(pop pop 42) '* def 2 neg", "-2");
     try std.testing.expectEqual(@as(u64, 0), rebound_dependency.lastIdiomHits());
 
