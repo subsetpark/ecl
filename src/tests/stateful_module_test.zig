@@ -701,8 +701,8 @@ test "concurrency: a cancelled unmodule leaves nothing stranded" {
         // after `unmodule`, so cancellation is issued after that edge rather
         // than pre-armed. Each batch is one Unit and the source differs only
         // in its count, excluding per-Unit archive/task costs from the bound.
-        const cancellation_cycle = "(8192 (0) times " ++
-            "[] ((dup without) within) 'peek def (1) 'alive def) 'doomed @defm" ++
+        const cancellation_cycle = "[] (8192 (0) times " ++
+            "((dup without) within) 'peek def (1) 'alive def) 'doomed @defm" ++
             " [] (([] ('doomed.alive execute) @attempt result.ok?) () while) @spawn 'close-watcher set" ++
             " [] ('doomed unmodule (1) () while) @spawn 'removal-task set" ++
             " close-watcher await pop removal-task cancel" ++
