@@ -59,7 +59,8 @@ The main components are these:
 | Names and modules | Late binding, scopes, immutable module images, generations, and durable module state | `env.zig`, `modules.zig` |
 | Frame machine | Dispatch quotations, represent continuations, enforce application boundaries, and construct errors | `machine.zig` |
 | Bulk execution | Pervasive scalar semantics, typed flat loops, and guarded source-phrase recognition | `kernel_*.zig`, `kernels.zig`, `idioms.zig` |
-| Scheduler | Green units, structured task scopes, waits, cancellation, timers, and retirement service | `scheduler_core.zig`, `scheduler.zig`, `task_prims.zig` |
+| Scheduler | Green units, structured task scopes, task and external waits, cancellation, timers, external membership, and retirement service | `scheduler_core.zig`, `scheduler.zig`, `external.zig`, `task_prims.zig` |
+| Process ports | Process policy, POSIX process-group ownership, bounded pipe queues, and terminal publication | `process_port.zig`, `stdlib/proc.zig` |
 | Boundary layers | Embedded modules, native extensions, rendering, terminal safety, the REPL, and the CLI | `prelude.zig`, `stdlib.zig`, `native_*.zig`, `print.zig`, `console.zig`, `line_editor.zig`, `main.zig` |
 
 ### Position in the design space
@@ -99,7 +100,8 @@ That state owns:
 - the scheduler and root task scope; and
 - immutable or explicitly synchronized views of host services such as
   arguments, environment variables, standard input, output, diagnostics, TLS
-  trust, project configuration, and module search paths.
+  trust, project configuration, module search paths, and optional process
+  authority.
 
 Grouping these objects under one owner correlates every dependent lifetime.
 Values, module pins, source cursors, task cells, and deferred destruction all
@@ -139,12 +141,22 @@ use immutable host configuration. It cannot reach the raw Session, allocator,
 registry, scheduler lifecycle, or reclamation root. Observation, execution,
 mutation, and teardown are distinct authorities.
 
+Process execution follows the same rule. A Host may omit it, allow an exact
+set of absolute executables, or grant an explicit unrestricted policy together
+with cwd, environment, live-count, queue, and capture limits. Session
+construction copies that policy and mints one narrow `ProcessAccess`; having
+`std.Io` or filesystem access does not imply it. Units may ask Machine to
+perform a process operation, but cannot obtain the owner, scheduler scope,
+process cell, group identifier, or PID.
+
 ### Shutdown follows the ownership graph
 
-Session teardown first stops execution and closes task creation. It then
-retires root scopes, stacks, module generations, source provenance, and native
-pins in dependency order, draining bounded retirement while the owners needed
-by that work are still alive. The allocator is destroyed last.
+Session teardown first stops execution and closes task and external-resource
+creation. It then retires root scopes, including cancellation and direct-child
+reap for every process member, before destroying the process owner. Stacks,
+module generations, source provenance, and native pins follow in dependency
+order, with bounded retirement drained while the owners needed by that work
+are still alive. The allocator is destroyed last.
 
 That order is an architectural invariant. A pin, cursor, lease, callback, or
 task that releases through a domain cannot outlive the domain. Teardown must
@@ -250,8 +262,8 @@ provenance stays focused on diagnostics.
 
 The evaluator moves one closed `Value` union. The layout is fixed at 16 bytes:
 integers, floats, Unicode scalars, symbols, and word references are inline;
-lists, dictionaries, tasks, and module values carry kind-specific opaque
-handles. External code inspects handles through their public semantic surfaces.
+lists, dictionaries, tasks, module values, and ports carry kind-specific
+opaque handles. External code inspects handles through their public semantic surfaces.
 Allocation and mutation require capabilities issued by `heap.zig`.
 
 ### Lists have semantic unity and physical specialization
@@ -343,6 +355,14 @@ destruction in bounded slices.
 Executing Units receive a facade that can release, enqueue, and advance bounded
 retirement, but cannot blockingly destroy the Session's graph. This keeps a
 nominally constant scheduler turn from hiding an unbounded recursive free.
+
+Port reference lifetime is intentionally distinct from external-resource
+lifetime. A port heap object retains a process cell so terminal observations
+remain safe. The spawning `TaskScope` separately owns one external membership
+until the controller has stopped the process group, settled its pipe tasks,
+published terminal state, and reaped the direct child. Dropping the last port
+value cannot orphan a live child, and retaining a port cannot detach it from
+scope closure.
 
 ## 4. Words, environments, and modules
 
@@ -730,6 +750,24 @@ Setup publishes the wait only after all registrations are ready. Completion,
 cancellation, and timeout contend through one arbitration state, so exactly one
 result owns delivery and cleanup.
 
+External readiness uses the same arbitration rather than a parallel scheduler.
+`external.zig` supplies nominal type-erased readiness and scope-membership
+handles whose callbacks state ownership on registration, failed registration,
+wake loss, cancellation, and detach. A process pipe or terminal event may wake
+a Unit, but scheduler code never imports process backend types.
+
+A native work driver that must wait carries its driver and park request in one
+exhaustive continuation variant. This is the external equivalent of the task
+join/work cleanup states: no side-band pointer can outlive the stack window or
+be deinitialized twice when readiness races cancellation.
+
+Process cells own exhaustive constructing, running, closing, terminal, and
+reaped phases. Separate bounded stdin, stdout, and stderr queues let each pipe
+advance independently. A full queue pauses only its producer; a background
+wait publishes one immutable `Child.Term`. POSIX children are created as
+process-group leaders, and scope cancellation closes input, signals the group,
+escalates when needed, reaps the direct child, and then detaches membership.
+
 ### Absolute deadlines govern timer races
 
 Timeouts capture an absolute deadline before lazy timer startup. Every
@@ -835,6 +873,12 @@ Their manifest, documentation, effects, provenance, and package requirements
 are validated before publication. Package discovery and synchronization are
 described in `ENVIRONMENT.md`; they enter the evaluator through the same module
 loader and bounded-driver conventions as other sources.
+
+`proc` is a builtin for the same reason as other host-backed modules: process
+creation and pipe readiness require authority and representation ECL source
+cannot possess. Its public values remain ordinary dictionaries, byte lists,
+and opaque ports. The convenience `run` word is a client of the same controller
+as streaming ports; it is not a blocking second implementation.
 
 ### The native ABI is narrow and transactional
 

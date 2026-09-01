@@ -76,6 +76,7 @@ test {
     _ = @import("tests/module_test.zig");
     _ = @import("tests/module_source_test.zig");
     _ = @import("tests/test_language_test.zig");
+    _ = @import("tests/process_test.zig");
     _ = @import("tests/allocation_budget_test.zig");
     _ = @import("tests/kernel_numeric_test.zig");
     _ = @import("tests/kernel_sequence_test.zig");

@@ -287,3 +287,7 @@ test "scheduler shell property: generated public waits always quiesce" {
         .max_shrink_attempts = 12,
     });
 }
+
+test "scheduler shell property: process waits cancel and quiesce" {
+    return error.SkipZigTest; // PENDING: Patch 4
+}

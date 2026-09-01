@@ -1520,6 +1520,96 @@ become floats. JSON null and booleans become the ordinary symbols `'null`,
 # => {"a" (1 'null)}
 ```
 
+## proc
+
+Host-backed subprocess ports. The module is present in every standard image,
+but process creation is `'domain` unless the Session host supplied process
+authority. The CLI supplies an explicit unrestricted policy; embedding hosts
+default to none and may restrict exact executable paths, working directories,
+environment inheritance, live ports, queue sizes, and run-capture sizes.
+
+A spawn specification is a dictionary with exactly these fields:
+
+- required `'executable`: an absolute string path;
+- optional `'args`: a list of strings, default `[]`;
+- optional `'cwd`: an absolute string path, defaulting to the Session's
+  captured starting directory; and
+- optional `'env`: a string-to-string dictionary overlaid on the policy's
+  captured or empty environment base.
+
+There is no shell-command form and no `PATH` search. Unknown fields are
+`'domain`; malformed field values are `'type` or `'domain`. The host policy is
+checked before the operating system is reached.
+
+Bytes are ordinary integer lists whose elements are all in `0...255`. Process
+streams do not decode Unicode. A port is an opaque identity capability that
+prints `<port:N>` and has type `'port`; it exposes no PID and cannot be passed
+through JSON or the native value ABI.
+
+### close-input
+`( port -- )` — Close the process's stdin after queued bytes have been written.
+Idempotent. A concurrent or later `write` is `'io`.
+
+### kill
+`( port -- )` — Force termination of the port's process group and arrange for
+direct-child reap. Idempotent and safe after natural exit.
+
+### read-stderr
+`( port max -- bytes )` — Read at most positive `max` exact bytes from stderr,
+parking when no data is ready. Return `[]` only at stable EOF; later reads also
+return `[]`. At most one stderr read may be pending; overlap is `'contract`.
+
+### read-stdout
+`( port max -- bytes )` — Read at most positive `max` exact bytes from stdout
+with the same readiness, EOF, and single-reader contract as `read-stderr`.
+
+### run
+`( spec -- result )` — Spawn through the ordinary port controller, supply all
+stdin while draining stdout and stderr concurrently, wait for direct-child
+reap, and return
+`{'term termination 'stdout stdout-bytes 'stderr stderr-bytes}`. In addition to
+the spawn fields, `spec` accepts:
+
+- optional `'stdin`: a byte list, default `[]`;
+- optional `'stdout-limit` and `'stderr-limit`: nonnegative integer capture
+  limits no larger than the Host policy; and
+- optional `'timeout-ms`: a nonnegative integer deadline. Absence means no
+  process deadline; scheduler cancellation remains effective.
+
+Capture overflow kills and cleans the process before raising `'overflow`.
+Deadline expiry does the same before raising `'timeout`; task cancellation is
+`'cancelled`. Spawn, pipe, broken-input, and reap failures are `'io`. These
+run-only fields are rejected by `spawn`.
+
+### spawn
+`( spec -- port )` — Start the directly named executable with stdin, stdout,
+and stderr pipes. The child and its process group, pipe tasks, and spawning
+task-scope membership commit before the port becomes visible. The scope owns
+the live child: scope closure cancels the process group and waits for reap even
+if a port value remains stored elsewhere. There is no detach or ownership
+transfer.
+
+### terminate
+`( port -- )` — Request ordinary termination of the process group, escalating
+to force termination during cleanup when needed. Idempotent and safe after
+natural exit.
+
+### wait
+`( port -- termination )` — Park until the immutable terminal result is
+available. Any number of waiters and later calls receive the same dictionary:
+
+- `{'kind 'exited 'code n}`;
+- `{'kind 'signaled 'signal n}`;
+- `{'kind 'stopped 'signal n}`; or
+- `{'kind 'unknown 'status n}`.
+
+A nonzero exit code is ordinary termination data, not an ECL error.
+
+### write
+`( port bytes -- )` — Queue exact stdin bytes, parking under bounded pressure.
+Calls are serialized in scheduler-arrival order and each call's bytes remain
+contiguous. A closed or broken stdin is `'io`.
+
 ## pkg.data
 
 Pure structural helpers shared by the package-format modules.

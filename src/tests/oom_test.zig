@@ -1304,3 +1304,6 @@ test "oom: standard-library and host: package: CLI operation propagates every al
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.package_cli);
 }
+test "oom: standard-library and host: process port lifecycle" {
+    return error.SkipZigTest; // PENDING: Patch 4
+}

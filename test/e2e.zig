@@ -28,6 +28,26 @@ const pkg_runtime_vendor_lock =
 const test_project_lock =
     "{'format 1 'root \"app\" 'packages {} 'requires {\"app\" {}}}\n";
 
+test "e2e: proc direct execution preserves argv cwd environment and policy" {
+    return error.SkipZigTest; // PENDING: Patch 4
+}
+
+test "e2e: proc ports stream binary data with backpressure and EOF" {
+    return error.SkipZigTest; // PENDING: Patch 4
+}
+
+test "e2e: proc wait returns stable tagged termination and idempotent lifecycle" {
+    return error.SkipZigTest; // PENDING: Patch 4
+}
+
+test "e2e: proc run captures split output termination timeout and overflow" {
+    return error.SkipZigTest; // PENDING: Patch 4
+}
+
+test "e2e: proc scope cancellation kills and reaps the process group" {
+    return error.SkipZigTest; // PENDING: Patch 4
+}
+
 fn writeTestProject(
     directory: std.Io.Dir,
     manifest: []const u8,

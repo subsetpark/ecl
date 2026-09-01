@@ -475,8 +475,12 @@ depth rather than intrinsic data, and ragged lists remain legal.
 
 Dictionary insertion order is preserved by storage, iteration, and printing.
 A task is a runtime capability bound to its session and prints as `<task:N>`.
-A module is an opaque immutable image and prints as `<module>`. Those task and
-module displays are rejected by the reader.
+A module is an opaque immutable image and prints as `<module>`. A port is an
+opaque, identity-bearing capability for a host endpoint and prints as
+`<port:N>`. Task, module, and port displays are rejected by the reader. Port
+identity is observable only through ordinary whole-value matching and hashing;
+no conforming operation may recover an operating-system descriptor, process
+identifier, or implementation pointer from one.
 
 ### Readable representations and display
 
@@ -2343,6 +2347,45 @@ left to right.
 `exit` is available only to the root unit outside `@attempt`. Elsewhere it
 raises `'domain`. An allowed exit first cancels and quiesces the root task
 scope, then terminates the process with the supplied status.
+
+### External ports and processes
+
+An external port created by a unit belongs to that unit's task scope. The
+scope, not the number or location of port values, owns the live external
+resource. Closing a scope stops new operations, requests cancellation, and
+does not complete until each owned resource has published a terminal state and
+released its scope membership. Returning or storing a port cannot detach it or
+transfer ownership; a port that outlives its creating scope remains an opaque
+handle to terminal state.
+
+Port operations may suspend the current unit on external readiness. Such a
+suspension is an ordinary scheduler park: it consumes no worker while waiting,
+participates in the same cancellation and deadline arbitration as task waits,
+and resumes a bounded continuation. Input and output queues are bounded, so a
+producer waits under pressure rather than causing unbounded allocation.
+
+The shipped `proc` module is a host capability, not ambient language power. A
+Session without process authority rejects process creation before reaching the
+operating system. A process specification names one absolute executable path,
+an argument vector, an optional absolute working directory, and an explicit
+environment overlay. It never denotes a shell command and never searches
+`PATH`. Process streams are byte lists; text encoding, stream merging, and
+line framing are user policy.
+
+A process port has stdin, stdout, stderr, and one immutable terminal result.
+The output streams remain independent and return an empty byte list only after
+stable EOF. Termination is tagged as exited-with-code, signaled, stopped, or an
+unknown host status. A nonzero exit code is result data, not an ECL error;
+spawn, pipe, policy, timeout, cancellation, allocation, and cleanup failures
+remain errors of their corresponding ordinary kinds.
+
+The reference distribution initially provides process ports on POSIX hosts.
+Each child starts in a dedicated process group; scope cancellation signals the
+group and reaps the direct child before completing. Descendants that inherit
+that group are covered, while a hostile child that creates a new session is
+outside this portable process-group guarantee. A host without an equivalent
+tree-owning backend rejects process authority rather than silently weakening
+cleanup to one PID.
 
 ## Standard environment
 

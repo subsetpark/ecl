@@ -186,6 +186,7 @@ const test_files = [_][]const u8{
     "tests/unit_input_test.zig",
     "tests/module_source_test.zig",
     "tests/test_language_test.zig",
+    "tests/process_test.zig",
 };
 const repository_verification_files = [_][]const u8{
     "build.zig",
@@ -208,6 +209,7 @@ const repository_verification_files = [_][]const u8{
     "test/native/negative/empty_doc.zig",
     "test/http_fixture_server.zig",
     "test/pkg_lock_fixture.zig",
+    "test/process_fixture.zig",
 };
 pub fn main(init: std.process.Init) !void {
     var failed = false;

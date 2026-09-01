@@ -259,6 +259,7 @@ cannot be replaced accidentally by a file with the same name.
 | `csv`, `json` | External data formats |
 | `table` | Column-oriented tables represented as ordinary dictionaries |
 | `http` | HTTP GET and POST |
+| `proc` | Capability-gated subprocess ports and bounded process execution |
 | `rand` | Explicit-state random draws and host entropy |
 | `rng` | Durable module-state random generation |
 | `archive` | SHA-256 and atomic validated `.tgz` extraction |
@@ -272,6 +273,17 @@ ecl "[['a 1] ['b 2]] dict.from-pairs"     # {'a 1 'b 2}
 ecl '"a,b\nc,d" csv.parse'                 # (("a" "b") ("c" "d"))
 ecl '"{\"a\":[1,null]}" json.parse'       # {"a" (1 'null)}
 ```
+
+Subprocesses use BEAM-style opaque ports rather than PIDs. The CLI grants an
+explicit process capability; library Sessions deny it unless their Host opts
+in with a `ProcessPolicy`. `proc.spawn` accepts an absolute executable path,
+argv/cwd/environment data, and no shell string or `PATH` lookup. Stdin,
+stdout, and stderr are exact byte lists with bounded scheduler backpressure;
+the spawning task scope owns termination and reap, so retaining a port cannot
+detach a child. `proc.run` is the bounded capture convenience over the same
+controller. The initial backend supports POSIX hosts; other targets fail
+closed until they can provide equivalent process-tree ownership. Child side
+effects are external effects and are not rolled back when an ECL unit fails.
 
 `import` gives selected public module words bare names in the current
 environment. Every requested word must be public.
