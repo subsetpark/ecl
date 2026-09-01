@@ -291,8 +291,16 @@ fn processIsZombie(pid: std.posix.pid_t) bool {
     if (builtin.os.tag != .linux) return false;
     var path_buffer: [64]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buffer, "/proc/{d}/stat", .{pid}) catch return false;
-    const stat = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(4096)) catch return false;
-    defer allocator.free(stat);
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return false;
+    defer file.close(io);
+    var stat_buffer: [4096]u8 = undefined;
+    var stat_len: usize = 0;
+    while (stat_len != stat_buffer.len) {
+        const amount = file.readStreaming(io, &.{stat_buffer[stat_len..]}) catch return false;
+        if (amount == 0) break;
+        stat_len += amount;
+    }
+    const stat = stat_buffer[0..stat_len];
     const command_end = std.mem.lastIndexOfScalar(u8, stat, ')') orelse return false;
     if (command_end + 2 >= stat.len or stat[command_end + 1] != ' ')
         return false;
