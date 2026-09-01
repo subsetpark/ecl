@@ -543,6 +543,7 @@ some image: Image,
      binding-present? image binding-name,
      definition: Definition,
      definition = definition-at image binding-name,
+     (public? definition or call-image caller = definition-image definition),
      callee: Call,
      ~call-created? callee |
   call-created?' callee and

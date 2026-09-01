@@ -158,7 +158,7 @@ const cases = [_]Case{
     .{ .name = "seeded attempt", .source = "[3] (1 +) @attempt" },
     .{ .name = "seeded module", .source = "[7] ('base set) 'm @defm m.base" },
     // Anonymous construction, opaque identity, and one image under two names.
-    .{ .name = "anonymous module", .source = "[] (1 'x set) @module type" },
+    .{ .name = "anonymous module", .source = "[] () @module type" },
     .{ .name = "module identity", .source = "[] (1) @module dup match? [] (1) @module [] (1) @module match?" },
     .{
         .name = "one image two registrations",
@@ -1162,7 +1162,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stderr:
         \\<empty>
         \\=== anonymous module ===
-        \\source: [] (1 'x set) @module type
+        \\source: [] () @module type
         \\exit: 0
         \\stdout:
         \\'module

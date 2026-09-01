@@ -905,18 +905,49 @@ fn fuzzNativeTransactions(_: void, smith: *std.testing.Smith) !void {
     try environment.put("ECL_WORKERS", "1");
     var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
     defer threaded.deinit();
-    const result = try std.process.run(std.testing.allocator, threaded.io(), .{
+    const io = threaded.io();
+    var child = try std.process.spawn(io, .{
         .argv = &.{ native_runtime.ecl_exe, "-e", source.written() },
         .environ_map = &environment,
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .pipe,
     });
-    defer std.testing.allocator.free(result.stdout);
-    defer std.testing.allocator.free(result.stderr);
-    switch (result.term) {
+    // `kill` is idempotent after `wait`; on timeout it also reaps the child.
+    defer child.kill(io);
+
+    // SAFETY: `MultiReader.init` initializes every stream slot before use.
+    var multi_reader_buffer: std.Io.File.MultiReader.Buffer(2) = undefined;
+    // SAFETY: `MultiReader.init` initializes the complete reader before use.
+    var multi_reader: std.Io.File.MultiReader = undefined;
+    multi_reader.init(
+        std.testing.allocator,
+        io,
+        multi_reader_buffer.toStreams(),
+        &.{ child.stdout.?, child.stderr.? },
+    );
+    defer multi_reader.deinit();
+    const deadline: std.Io.Clock.Timestamp = .fromNow(io, .{
+        .raw = .fromSeconds(10),
+        .clock = .awake,
+    });
+    while (multi_reader.fill(64, .{ .deadline = deadline })) |_| {} else |err| switch (err) {
+        error.EndOfStream => {},
+        else => |other| return other,
+    }
+    try multi_reader.checkAnyError();
+
+    const term = try child.wait(io);
+    const stdout = try multi_reader.toOwnedSlice(0);
+    defer std.testing.allocator.free(stdout);
+    const stderr = try multi_reader.toOwnedSlice(1);
+    defer std.testing.allocator.free(stderr);
+    switch (term) {
         .exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
         .signal, .stopped, .unknown => return error.UnexpectedTermination,
     }
-    try std.testing.expectEqualStrings("", result.stdout);
-    try std.testing.expectEqualStrings("", result.stderr);
+    try std.testing.expectEqualStrings("", stdout);
+    try std.testing.expectEqualStrings("", stderr);
 }
 
 test "fuzz: native call transactions stay atomic under yield and cancellation" {

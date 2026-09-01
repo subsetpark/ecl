@@ -544,9 +544,9 @@ Recorded target-specific results and their current disposition live in
   environment to retire, and no context to propagate through calls,
   applications, or images. A construction receives what it needs through its
   explicit seed-values operand, and those values are inert data on the
-  construction stack like any other. Seeding appends values as bounded work
-  without reserving them:
-  fixed slices by the driver that opened the boundary — for a child Unit, by
+  construction stack like any other. Seeding reserves each granted fixed slice
+  before appending its values as bounded work by the driver that opened the
+  boundary — for a child Unit, by
   that Unit's own first slices, since the evaluator services a driver before the
   activation's code — and any prefix already on the stack is owned by the
   ordinary boundary or Unit teardown, exactly as any other operand is.

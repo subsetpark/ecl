@@ -115,10 +115,12 @@ jobs:
             --volume "$ZIG_GLOBAL_CACHE_HOST:/root/.cache/zig" \
             --volume "$ZIG_LOCAL_CACHE_HOST:/build/.zig-cache" \
             ubuntu:24.04 tail -f /dev/null
-          docker exec --env OPTIMIZE="$OPTIMIZE" --env PANT_VERSION="$PANT_VERSION" ecl-ci sh -euxc '
+          # PANT_VERSION is intentionally expanded inside the container.
+          # shellcheck disable=SC2016
+          timeout 15m docker exec --env OPTIMIZE="$OPTIMIZE" --env PANT_VERSION="$PANT_VERSION" ecl-ci sh -euxc '
             export DEBIAN_FRONTEND=noninteractive
-            apt-get update
-            apt-get install -y --no-install-recommends \
+            timeout 5m apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3 update
+            timeout 5m apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3 install -y --no-install-recommends \
               ca-certificates curl expect git libc6-dev python3 xz-utils z3
             curl -fsSLo /tmp/zig.tar.xz https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
             echo "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00  /tmp/zig.tar.xz" | sha256sum -c -
@@ -131,7 +133,7 @@ jobs:
             pant --version
             cp -a /work/. /build/
             git config --global --add safe.directory /build
-          '
+          ' < /dev/null
 
       - name: ThreadSanitizer
         if: inputs.run_tsan

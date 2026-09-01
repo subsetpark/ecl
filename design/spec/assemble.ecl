@@ -51,7 +51,11 @@
    assert
    current marker fragment str.replace)
   call)
- fold)
+ fold
+ dup "<!-- include:" str.contains? not
+ 'domain error.new
+ "assembled specification contains an unresolved include directive" error.with-message
+ assert)
 'assemble-spec def
 
 args dup first "--check" match?

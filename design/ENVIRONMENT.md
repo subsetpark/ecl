@@ -271,9 +271,9 @@ manifest has the same name and version. The root manifest is supplied
 separately.
 
 Resolution visits every exact `(package, version)` node reachable from the
-root requirements. It selects the greatest reachable version for each package
-and rejects an active-path requirement cycle. Unreachable catalog entries are
-ignored.
+root requirements. It selects the greatest reachable declared minimum for each
+package and rejects an active-path requirement cycle. Unreachable catalog
+entries are ignored.
 
 The lock records the selected packages and every requirement edge from the
 root and selected manifests. Each selected version satisfies every recorded

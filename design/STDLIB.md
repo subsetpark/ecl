@@ -762,7 +762,7 @@ returning 0. Defined in ecl.
 
 ```ecl
 [1 2 3 4] (2 mod 0 =) partition pair
-# => ([2 4] [1 3])
+# => [[2 4] [1 3]]
 ```
 
 ### pop
@@ -830,7 +830,7 @@ shape; a zero axis must be final.
 
 ```ecl
 [1 2 3 4] [2 3] reshape
-# => ([1 2 3] [4 1 2])
+# => [[1 2 3] [4 1 2]]
 ```
 
 ### rest
@@ -1031,7 +1031,7 @@ quotations to the same pair of inputs in left-to-right order. Equivalent to
 
 ### type
 `( value -- type )` — Return the value's kind as a symbol: one of `'int`,
-`'float`, `'char`, `'symbol`, `'word`, `'list`, `'dict`, or `'task`.
+`'float`, `'char`, `'symbol`, `'word`, `'list`, `'dict`, `'module`, or `'task`.
 
 #### Examples
 
@@ -1154,7 +1154,7 @@ width. Equivalent to `() stencil`.
 
 ```ecl
 [1 2 3 4] 3 windows
-# => ([1 2 3] [2 3 4])
+# => [[1 2 3] [2 3 4]]
 ```
 
 ### with

@@ -196,7 +196,7 @@ character data.
 
 ### Forms
 
-```
+```ebnf
 program  :=  form*
 form     :=  list | dict | atom
 list     :=  "(" binder? form* ")"  |  "[" binder? form* "]"
@@ -1155,11 +1155,13 @@ the spelling from user definitions.
 
 Every unit constructor receives its seed values and exact body separately:
 
-    values (q) @attempt
-    values (q) @spawn
-    list values (q) @each          ( element deepest in each child )
-    values (body) @module
-    values (body) 'name @defm
+```ecl
+values (q) @attempt
+values (q) @spawn
+list values (q) @each          ( element deepest in each child )
+values (body) @module
+values (body) 'name @defm
+```
 
 Both `values` and the body must be lists. The new unit's operand stack is
 initialized from the values list in list order, and then the body runs. `[]`
@@ -1258,7 +1260,7 @@ representations but expose the same binding model.
 
 A definition may place one annotation quotation immediately before its body:
 
-```
+```ecl
 (body) 'name def
 (before -- after) (body) 'name def
 (: "Documentation.") (body) 'name def
@@ -1301,7 +1303,7 @@ codepoints.
 The after portion of an effect is either **all named slots** or exactly
 the token `...`:
 
-```
+```ecl
 (result on-ok on-err -- ...) (body) 'case def
 ```
 
@@ -1738,7 +1740,7 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
 
 ---
 
-∃ *image*: `Image`, *definition*: `Definition`, *callee*: `Call`, *image* = **occurrence-image** *occurrence*, **constructed?** *image*, (**value-held?** *image* ∨ #(each *slot*: `Slot`, **slot-live?** *slot* ∧ **generation-image** (**current-generation** *slot*) = *image* · *slot*) > 0 ∨ #(each *owner*: `Call`, **call-active?** *owner* ∧ **call-image** *owner* = *image* · *owner*) > 0), **binding-present?** *image* *binding-name*, *definition* = **definition-at** *image* *binding-name*, ¬**call-created?** *callee* · **call-created?**′ *callee* ∧ **call-active?**′ *callee* ∧ **registered-call?**′ *callee* = (**registered-call?** *caller* ∧ **call-image** *caller* = *image*) ∧ (**registered-call?** *caller* ∧ **call-image** *caller* = *image* → **call-generation**′ *callee* = **call-generation** *caller* ∧ **call-slot**′ *callee* = **call-slot** *caller*) ∧ (¬(**registered-call?** *caller* ∧ **call-image** *caller* = *image*) → **call-generation**′ *callee* = **call-generation** *callee* ∧ **call-slot**′ *callee* = **call-slot** *callee*) ∧ **call-image**′ *callee* = *image* ∧ **call-definition**′ *callee* = *definition* ∧ (∀ *other*: `Call`, *other* ≠ *callee* · **call-created?**′ *other* = **call-created?** *other* ∧ **call-active?**′ *other* = **call-active?** *other* ∧ **registered-call?**′ *other* = **registered-call?** *other* ∧ **call-generation**′ *other* = **call-generation** *other* ∧ **call-slot**′ *other* = **call-slot** *other* ∧ **call-image**′ *other* = **call-image** *other* ∧ **call-definition**′ *other* = **call-definition** *other*) ∧ (∀ *call*: `Call` · **ambient-depth**′ *call* = **ambient-depth** *call* ∧ (∀ *position*: `Nat` · **ambient-value**′ *call* *position* = **ambient-value** *call* *position*)).
+∃ *image*: `Image`, *definition*: `Definition`, *callee*: `Call`, *image* = **occurrence-image** *occurrence*, **constructed?** *image*, (**value-held?** *image* ∨ #(each *slot*: `Slot`, **slot-live?** *slot* ∧ **generation-image** (**current-generation** *slot*) = *image* · *slot*) > 0 ∨ #(each *owner*: `Call`, **call-active?** *owner* ∧ **call-image** *owner* = *image* · *owner*) > 0), **binding-present?** *image* *binding-name*, *definition* = **definition-at** *image* *binding-name*, (**public?** *definition* ∨ **call-image** *caller* = **definition-image** *definition*), ¬**call-created?** *callee* · **call-created?**′ *callee* ∧ **call-active?**′ *callee* ∧ **registered-call?**′ *callee* = (**registered-call?** *caller* ∧ **call-image** *caller* = *image*) ∧ (**registered-call?** *caller* ∧ **call-image** *caller* = *image* → **call-generation**′ *callee* = **call-generation** *caller* ∧ **call-slot**′ *callee* = **call-slot** *caller*) ∧ (¬(**registered-call?** *caller* ∧ **call-image** *caller* = *image*) → **call-generation**′ *callee* = **call-generation** *callee* ∧ **call-slot**′ *callee* = **call-slot** *callee*) ∧ **call-image**′ *callee* = *image* ∧ **call-definition**′ *callee* = *definition* ∧ (∀ *other*: `Call`, *other* ≠ *callee* · **call-created?**′ *other* = **call-created?** *other* ∧ **call-active?**′ *other* = **call-active?** *other* ∧ **registered-call?**′ *other* = **registered-call?** *other* ∧ **call-generation**′ *other* = **call-generation** *other* ∧ **call-slot**′ *other* = **call-slot** *other* ∧ **call-image**′ *other* = **call-image** *other* ∧ **call-definition**′ *other* = **call-definition** *other*) ∧ (∀ *call*: `Call` · **ambient-depth**′ *call* = **ambient-depth** *call* ∧ (∀ *position*: `Nat` · **ambient-value**′ *call* *position* = **ambient-value** *call* *position*)).
 
 #### Chapter 10
 
@@ -1895,10 +1897,12 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   `where` in its own spelling), even inside of the `table` module. The same
   holds for the session, which is what makes shadowing predictable:
 
-      1 wrap                                  -- [1], reaching core's `cons`
-      (pop pop 42) 'cons def   1 wrap          -- still [1]
-      (pop pop 42) 'cons def   1 [] cons       -- 42, the session's own `cons`
-      (pop pop 42) 'cons def   (() cons) 'wrap def   1 wrap    -- 42
+  ```ecl
+  1 wrap                                  -- [1], reaching core's `cons`
+  (pop pop 42) 'cons def   1 wrap          -- still [1]
+  (pop pop 42) 'cons def   1 [] cons       -- 42, the session's own `cons`
+  (pop pop 42) 'cons def   (() cons) 'wrap def   1 wrap    -- 42
+  ```
 
   A session `def` shadows a name *for session code*. Adopting new behavior
   inside a prelude word is redefining that word: the replacement is a session
@@ -1910,8 +1914,10 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   `(|l q| l q each 1 (and) fold)` and `over` is `(swap dup (swap) dip)`, but a
   session `and` or `swap` leaves both alone:
 
-      (pop pop 42) 'and def   [1 1] (1 =) all?      -- 1
-      (pop pop 99) 'swap def  1 2 over              -- 1 2 1
+  ```ecl
+  (pop pop 42) 'and def   [1 1] (1 =) all?      -- 1
+  (pop pop 99) 'swap def  1 2 over              -- 1 2 1
+  ```
 
   Splicing or rearranging quotations preserves the
   annotations on their existing word occurrences. Only a word created without
@@ -1940,11 +1946,13 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   A quotation parameter carries the scope it was written in, so it preserves
   its references on injection into a module. Given:
 
-      10 'k set
-      [(k *)] (
-               'scale def
-               ( -- n ) (4 scale) 'go def) 'm @defm
-      m.go                                          -- 40
+  ```ecl
+  10 'k set
+  [(k *)] (
+           'scale def
+           ( -- n ) (4 scale) 'go def) 'm @defm
+  m.go                                          -- 40
+  ```
 
 - **A word resolves in the scope its text was written in.** The word itself
   carries the scope, so it
