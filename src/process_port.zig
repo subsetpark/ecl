@@ -332,8 +332,12 @@ pub const ProcessOwner = struct {
         var initial_owned = true;
         errdefer if (initial_owned) cell.releasePort();
         live_reserved = false;
-        var started = false;
-        errdefer if (!started) cell.failBeforeStart();
+        var supervisor_lease = cell.controllers.initialLease();
+        var supervisor_lease_owned = true;
+        errdefer if (supervisor_lease_owned) {
+            cell.failBeforeStart();
+            supervisor_lease.release();
+        };
 
         const member = external.scopeMember(ProcessCell, cell);
         const membership = scheduler.attachExternal(scope, member) catch |err| switch (err) {
@@ -342,8 +346,8 @@ pub const ProcessOwner = struct {
         };
         cell.controllers.membership = membership;
 
-        cell.start() catch return error.Io;
-        started = true;
+        cell.start(supervisor_lease) catch return error.Io;
+        supervisor_lease_owned = false;
 
         const port = heap.createPort(ProcessCell, self.allocator, cell.identity, cell) catch {
             cell.kill();
@@ -557,12 +561,16 @@ pub const InputTerminal = enum {
 /// lease detaches membership. Port/readiness refs use the independent cell
 /// refcount.
 const ControllerGroup = struct {
-    leases: std.atomic.Value(usize) = .init(1),
+    leases: std.atomic.Value(usize) = .init(0),
     membership: ?external.ScopeMembership = null,
     cell: *ProcessCell,
 
     fn initialLease(self: *ControllerGroup) ControllerLease {
-        return .{ .group = self };
+        const cell = self.cell;
+        cell.retainRef();
+        if (self.leases.fetchAdd(1, .monotonic) != 0)
+            @panic("initial controller lease already issued");
+        return .{ .group = self, .cell = cell };
     }
 
     fn tryLease(self: *ControllerGroup) ?ControllerLease {
@@ -570,9 +578,10 @@ const ControllerGroup = struct {
         std.Io.Threaded.mutexLock(&cell.mutex);
         defer std.Io.Threaded.mutexUnlock(&cell.mutex);
         if (cell.group_state == .retired) return null;
+        cell.retainRef();
         const old = self.leases.fetchAdd(1, .monotonic);
         if (old == 0 or old == std.math.maxInt(usize)) @panic("invalid controller lease count");
-        return .{ .group = self };
+        return .{ .group = self, .cell = cell };
     }
 
     fn release(self: *ControllerGroup) void {
@@ -594,11 +603,15 @@ const ControllerGroup = struct {
 
 const ControllerLease = struct {
     group: ?*ControllerGroup,
+    cell: ?*ProcessCell,
 
     fn release(self: *ControllerLease) void {
         const group = self.group orelse return;
+        const cell = self.cell orelse @panic("controller lease lost its cell reference");
         self.group = null;
+        self.cell = null;
         group.release();
+        cell.releaseRef();
     }
 };
 
@@ -722,14 +735,9 @@ pub const ProcessCell = struct {
         return cell;
     }
 
-    fn start(self: *ProcessCell) error{Io}!void {
+    fn start(self: *ProcessCell, lease: ControllerLease) error{Io}!void {
         self.phase = .running;
-        self.retainRef();
-        const lease = self.controllers.initialLease();
-        const thread = std.Thread.spawn(.{}, supervisorThreadMain, .{ self, lease }) catch {
-            self.releaseRef();
-            return error.Io;
-        };
+        const thread = std.Thread.spawn(.{}, supervisorThreadMain, .{ self, lease }) catch return error.Io;
         thread.detach();
     }
 
@@ -746,7 +754,6 @@ pub const ProcessCell = struct {
         self.group_state = .{ .retired = .{ .unknown = 0 } };
         self.allocator.destroy(group);
         self.owner.releaseLive();
-        self.controllers.release();
     }
 
     fn retainRef(self: *ProcessCell) void {
@@ -817,10 +824,8 @@ pub const ProcessCell = struct {
         lease_value: ControllerLease,
     ) void {
         var lease = lease_value;
-        self.retainRef();
         const thread = std.Thread.spawn(.{}, escalationMain, .{ self, escalation, lease }) catch {
             self.escalateKill(escalation);
-            self.releaseRef();
             lease.release();
             return;
         };
@@ -915,9 +920,10 @@ pub const ProcessCell = struct {
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
         const edges = self.runEdgesLocked();
+        const new_edges = edges.differenceWith(observation.observed);
         observation.observed = observation.observed.unionWith(edges);
         return .{
-            .edges = edges,
+            .edges = new_edges,
             .input = switch (self.input) {
                 .open, .closing => .pending,
                 .closed_cleanly => .closed_cleanly,
@@ -1083,9 +1089,7 @@ pub const ProcessCell = struct {
             return;
         }
         var lease = self.controllers.tryLease() orelse return;
-        self.retainRef();
         const thread = std.Thread.spawn(.{}, timeoutThreadMain, .{ self, milliseconds, lease }) catch {
-            self.releaseRef();
             lease.release();
             return error.Io;
         };
@@ -1371,9 +1375,7 @@ pub const ProcessCell = struct {
     ) error{Io}!void {
         _ = kind;
         var lease = self.controllers.tryLease().?;
-        self.retainRef();
         const thread = std.Thread.spawn(.{}, function, .{ self, file, lease }) catch {
-            self.releaseRef();
             lease.release();
             return error.Io;
         };
@@ -1477,7 +1479,6 @@ pub const ProcessCell = struct {
 fn timeoutThreadMain(cell: *ProcessCell, milliseconds: u64, lease_value: ControllerLease) void {
     var lease = lease_value;
     defer lease.release();
-    defer cell.releaseRef();
     const duration: std.Io.Clock.Duration = .{
         .raw = .fromMilliseconds(@intCast(milliseconds)),
         .clock = .awake,
@@ -1504,7 +1505,6 @@ fn escalationMain(
 ) void {
     var lease = lease_value;
     defer lease.release();
-    defer cell.releaseRef();
     const duration: std.Io.Clock.Duration = .{
         .raw = .fromMilliseconds(250),
         .clock = .awake,
@@ -1523,28 +1523,24 @@ fn detachMembership(membership: external.ScopeMembership) void {
 fn supervisorThreadMain(cell: *ProcessCell, lease_value: ControllerLease) void {
     var lease = lease_value;
     defer lease.release();
-    defer cell.releaseRef();
     cell.supervisorMain();
 }
 
 fn stdinThreadMain(cell: *ProcessCell, file: std.Io.File, lease_value: ControllerLease) void {
     var lease = lease_value;
     defer lease.release();
-    defer cell.releaseRef();
     cell.stdinMain(file);
 }
 
 fn stdoutThreadMain(cell: *ProcessCell, file: std.Io.File, lease_value: ControllerLease) void {
     var lease = lease_value;
     defer lease.release();
-    defer cell.releaseRef();
     cell.stdoutMain(file);
 }
 
 fn stderrThreadMain(cell: *ProcessCell, file: std.Io.File, lease_value: ControllerLease) void {
     var lease = lease_value;
     defer lease.release();
-    defer cell.releaseRef();
     cell.stderrMain(file);
 }
 

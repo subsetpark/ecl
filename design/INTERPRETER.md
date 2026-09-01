@@ -788,16 +788,20 @@ process-group leaders. The supervisor observes leader termination with
 the leader only afterward. The waitable leader pins its PID slot, so the PGID
 cannot be reused while cleanup retains it. The controller group stops issuing
 leases at retirement and its final lease may detach scope membership only
-after the group state contains no process identity. Reaping the group leader
-therefore cannot suppress group cleanup or publish scope quiescence while
-cleanup still owns process-group authority. Stdin independently transitions
+after the group state contains no process identity. Every controller lease
+owns a process-cell reference and releases it only after its controller-count
+transition and any quiescence notification complete, so observing the final
+count cannot expose freed cell storage. Reaping the group leader therefore
+cannot suppress group cleanup or publish scope quiescence while cleanup still
+owns process-group authority. Stdin independently transitions
 through `open`, `closing`, `closed_cleanly`, or `broken`; `proc.run` cannot
 publish success until it observes a terminal stdin state, so a late background
 EPIPE remains observable even after all input entered the bounded queue.
 Compound `proc.run` readiness uses an opaque process-owned cursor over an
 exhaustive set of stdout-terminal, stderr-terminal, input-terminal,
-I/O-failure, and reap edges. Polling consumes visible edges under the process
-lock, while registration compares newly published edges with that cursor.
+I/O-failure, and reap edges. Polling returns only previously unobserved edges
+and consumes them under the process lock, while registration compares newly
+published edges with that cursor.
 Buffered bytes and writable queue capacity remain level-triggered. A failure
 published after polling still wakes the driver, while an observed failure
 cannot turn later pipe or reap readiness into a scheduler hot loop.
