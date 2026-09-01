@@ -74,6 +74,7 @@ pub fn matchWithoutStructure(a: Value, b: Value) ?bool {
         // datum, and `match?` has always said so.
         .word => |reference| reference.name == b.word.name,
         .task => |header| header == b.task,
+        .port => |header| header == b.port,
         // Image identity, never structural traversal: two references to one
         // image match and two constructions never do, and no comparison
         // enters the frozen environment or initial-state template.
@@ -180,7 +181,7 @@ pub const MatchCursor = struct {
                     return null;
                 }
                 switch (pair.a) {
-                    .int, .float, .char, .symbol, .word, .task, .module => unreachable,
+                    .int, .float, .char, .symbol, .word, .task, .port, .module => unreachable,
                     .list => |a_header| {
                         const b_header = pair.b.list;
                         if (a_header == b_header) {
@@ -304,7 +305,7 @@ pub fn compareScalars(a: Value, b: Value) error{NotComparable}!std.math.Order {
             .int => |b_int| orderInt(a_int, b_int),
             .float => |b_float| intFloatOrder(a_int, b_float) orelse
                 error.NotComparable,
-            .char, .symbol, .word, .list, .dict, .task, .module => error.NotComparable,
+            .char, .symbol, .word, .list, .dict, .task, .port, .module => error.NotComparable,
         },
         .float => |a_float| switch (b) {
             .int => |b_int| reverseOrder(intFloatOrder(b_int, a_float) orelse
@@ -315,13 +316,13 @@ pub fn compareScalars(a: Value, b: Value) error{NotComparable}!std.math.Order {
                 }
                 return orderFloat(a_float, b_float);
             },
-            .char, .symbol, .word, .list, .dict, .task, .module => error.NotComparable,
+            .char, .symbol, .word, .list, .dict, .task, .port, .module => error.NotComparable,
         },
         .char => |a_char| switch (b) {
             .char => |b_char| orderInt(a_char, b_char),
-            .int, .float, .symbol, .word, .list, .dict, .task, .module => error.NotComparable,
+            .int, .float, .symbol, .word, .list, .dict, .task, .port, .module => error.NotComparable,
         },
-        .symbol, .word, .list, .dict, .task, .module => error.NotComparable,
+        .symbol, .word, .list, .dict, .task, .port, .module => error.NotComparable,
     };
 }
 
@@ -459,7 +460,7 @@ pub const HashCursor = struct {
                             try self.actions.push(.{ .visit = dictItem(header, true, 0) });
                         }
                     },
-                    .int, .float, .char, .symbol, .word, .task, .module => unreachable,
+                    .int, .float, .char, .symbol, .word, .task, .port, .module => unreachable,
                 }
             },
             .list_after => |continuation| {
@@ -513,11 +514,11 @@ pub const HashCursor = struct {
 fn numericPair(a: Value, b: Value) bool {
     const a_numeric = switch (a) {
         .int, .float => true,
-        .char, .symbol, .word, .list, .dict, .task, .module => false,
+        .char, .symbol, .word, .list, .dict, .task, .port, .module => false,
     };
     const b_numeric = switch (b) {
         .int, .float => true,
-        .char, .symbol, .word, .list, .dict, .task, .module => false,
+        .char, .symbol, .word, .list, .dict, .task, .port, .module => false,
     };
     return a_numeric and b_numeric;
 }
@@ -530,14 +531,14 @@ fn numberEqual(a: Value, b: Value) bool {
         .int => |a_int| switch (b) {
             .int => |b_int| a_int == b_int,
             .float => |b_float| intFloatEqual(a_int, b_float),
-            .char, .symbol, .word, .list, .dict, .task, .module => unreachable,
+            .char, .symbol, .word, .list, .dict, .task, .port, .module => unreachable,
         },
         .float => |a_float| switch (b) {
             .int => |b_int| intFloatEqual(b_int, a_float),
             .float => |b_float| a_float == b_float,
-            .char, .symbol, .word, .list, .dict, .task, .module => unreachable,
+            .char, .symbol, .word, .list, .dict, .task, .port, .module => unreachable,
         },
-        .char, .symbol, .word, .list, .dict, .task, .module => unreachable,
+        .char, .symbol, .word, .list, .dict, .task, .port, .module => unreachable,
     };
 }
 
@@ -574,6 +575,7 @@ pub fn scalarHash(item: Value) ?u64 {
         .symbol => |id| mix(0x5359_4d42, id),
         .word => |id| mix(0x574f_5244, id.name),
         .task => |header| mix(0x5441_534b, @intFromPtr(header)),
+        .port => |header| mix(0x504f_5254, @intFromPtr(header)),
         .module => |header| mix(0x4d4f_4455, @intFromPtr(header)),
         .list, .dict => null,
     };

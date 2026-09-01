@@ -430,6 +430,28 @@ test "reader bounds long classification and post-growth materialization" {
         };
         if (progress == .complete) return error.TestExpectedError;
     }
+
+    const port_marker = try repeatedSource(allocator, "<port:", "0", 70_000, ">");
+    defer allocator.free(port_marker);
+    var port_diag: lexer.Diag = .{};
+    var port_cursor = reader.ReadCursor.init(
+        allocator,
+        releases,
+        "<port-marker>",
+        port_marker,
+        &port_diag,
+    );
+    defer retireReadCursor(&port_cursor, releases);
+    for (0..port_marker.len * 2) |_|
+        try std.testing.expect((try port_cursor.advance()) == .pending);
+    while (true) {
+        const progress = port_cursor.advance() catch |err| {
+            try std.testing.expectEqual(error.Parse, err);
+            try std.testing.expect(std.mem.indexOf(u8, port_diag.text(), "port display markers") != null);
+            break;
+        };
+        if (progress == .complete) return error.TestExpectedError;
+    }
 }
 
 fn readFailureProbe(allocator: std.mem.Allocator) !void {

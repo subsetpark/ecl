@@ -20,12 +20,14 @@ pub const WakeReason = union(enum) {
     cancellation,
     io,
     out_of_memory,
+    external_ready,
+    external_io,
 
     pub fn eql(a: WakeReason, b: WakeReason) bool {
         if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
         return switch (a) {
             .task => |index| index == b.task,
-            .timeout, .cancellation, .io, .out_of_memory => true,
+            .timeout, .cancellation, .io, .out_of_memory, .external_ready, .external_io => true,
         };
     }
 };
@@ -367,4 +369,16 @@ pub fn decideScope(before: Scope, event: ScopeEvent) TransitionError!ScopeDecisi
             .child_terminal => error.InvalidTransition,
         },
     };
+}
+
+test "external readiness and cancellation still publish one wait winner" {
+    const selected = try decideWait(.registering, .{ .candidate = .external_ready });
+    try std.testing.expectEqual(Wait{ .selected = .external_ready }, selected.next);
+    try std.testing.expectEqual(WaitCommand.none, selected.command);
+    const loser = try decideWait(selected.next, .{ .candidate = .cancellation });
+    try std.testing.expectEqual(selected.next, loser.next);
+    try std.testing.expectEqual(WaitCommand.none, loser.command);
+    const delivered = try decideWait(loser.next, .activate);
+    try std.testing.expectEqual(Wait{ .delivered = .external_ready }, delivered.next);
+    try std.testing.expectEqual(WaitCommand{ .deliver = .external_ready }, delivered.command);
 }

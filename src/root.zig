@@ -33,6 +33,9 @@ pub const kernel_random = @import("kernel_random.zig");
 pub const session = @import("session.zig");
 pub const console = @import("console.zig");
 pub const scheduler = @import("scheduler.zig");
+const external = @import("external.zig");
+const process_port = @import("process_port.zig");
+pub const ProcessPolicy = process_port.ProcessPolicy;
 pub const task_prims = @import("task_prims.zig");
 pub const test_prims = @import("test_prims.zig");
 test {
@@ -68,6 +71,8 @@ test {
     _ = session;
     _ = console;
     _ = scheduler;
+    _ = external;
+    _ = process_port;
     _ = task_prims;
     _ = test_prims;
     _ = @import("tests/value_test.zig");
@@ -76,6 +81,7 @@ test {
     _ = @import("tests/module_test.zig");
     _ = @import("tests/module_source_test.zig");
     _ = @import("tests/test_language_test.zig");
+    _ = @import("tests/process_test.zig");
     _ = @import("tests/allocation_budget_test.zig");
     _ = @import("tests/kernel_numeric_test.zig");
     _ = @import("tests/kernel_sequence_test.zig");

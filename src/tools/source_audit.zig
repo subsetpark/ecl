@@ -1,5 +1,7 @@
 //! Build-time source architecture audit.
 const std = @import("std");
+const source_audit_options = @import("source_audit_options");
+const ValueTag = @import("../value.zig").Tag;
 
 const SourceGroup = struct {
     production: bool,
@@ -79,11 +81,12 @@ const source_groups = [_]SourceGroup{
     // Builtin-backed stdlib modules hold host authority the SDK withholds, so
     // they are ordinary production sources under the bounded-traversal rules.
     .{ .production = true, .files = &.{
-        "stdlib/dict.zig", "stdlib/rand.zig", "stdlib/json.zig", "stdlib/http.zig", "stdlib/archive.zig", "stdlib/pkg_store.zig",
+        "stdlib/dict.zig", "stdlib/rand.zig", "stdlib/json.zig", "stdlib/http.zig", "stdlib/proc.zig", "stdlib/archive.zig", "stdlib/pkg_store.zig",
     }, .sources = &.{
-        @embedFile("../stdlib/dict.zig"),    @embedFile("../stdlib/rand.zig"),
-        @embedFile("../stdlib/json.zig"),    @embedFile("../stdlib/http.zig"),
-        @embedFile("../stdlib/archive.zig"), @embedFile("../stdlib/pkg_store.zig"),
+        @embedFile("../stdlib/dict.zig"),      @embedFile("../stdlib/rand.zig"),
+        @embedFile("../stdlib/json.zig"),      @embedFile("../stdlib/http.zig"),
+        @embedFile("../stdlib/proc.zig"),      @embedFile("../stdlib/archive.zig"),
+        @embedFile("../stdlib/pkg_store.zig"),
     } },
     .{ .production = true, .files = &.{
         "combinators.zig",
@@ -131,9 +134,10 @@ const source_groups = [_]SourceGroup{
         @embedFile("bench_workdrivers.zig"),    @embedFile("ecl_source_check.zig"),
     } },
     .{ .production = true, .files = &.{
-        "scheduler.zig", "scheduler_core.zig", "console.zig", "task_prims.zig",
+        "scheduler.zig", "scheduler_core.zig", "external.zig", "process_port.zig", "console.zig", "task_prims.zig",
     }, .sources = &.{
         @embedFile("../scheduler.zig"), @embedFile("../scheduler_core.zig"),
+        @embedFile("../external.zig"),  @embedFile("../process_port.zig"),
         @embedFile("../console.zig"),   @embedFile("../task_prims.zig"),
     } },
     // The installed author SDK, its sized ABI records, validation, loader,
@@ -186,6 +190,7 @@ const test_files = [_][]const u8{
     "tests/unit_input_test.zig",
     "tests/module_source_test.zig",
     "tests/test_language_test.zig",
+    "tests/process_test.zig",
 };
 const repository_verification_files = [_][]const u8{
     "build.zig",
@@ -208,6 +213,7 @@ const repository_verification_files = [_][]const u8{
     "test/native/negative/empty_doc.zig",
     "test/http_fixture_server.zig",
     "test/pkg_lock_fixture.zig",
+    "test/process_fixture.zig",
 };
 pub fn main(init: std.process.Init) !void {
     var failed = false;
@@ -220,7 +226,59 @@ pub fn main(init: std.process.Init) !void {
     failed = auditPreludeLayout() or failed;
     failed = auditUnitConstructorSpelling() or failed;
     failed = auditDynamicContextSpelling() or failed;
+    failed = auditFormalValueKinds() or failed;
     if (failed) return error.SourceAuditFailed;
+}
+
+fn auditFormalValueKinds() bool {
+    const source = source_audit_options.formal_values;
+    const head_end = std.mem.indexOf(u8, source, "\n---") orelse {
+        std.log.err("formal value kinds: first chapter has no body separator", .{});
+        return true;
+    };
+    const fields = @typeInfo(ValueTag).@"enum".fields;
+    var seen = [_]bool{false} ** fields.len;
+    var declaration_count: usize = 0;
+    var lines = std.mem.splitScalar(u8, source[0..head_end], '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        const suffix = " => ValueType.";
+        if (!std.mem.endsWith(u8, line, suffix)) continue;
+        const declaration = line[0 .. line.len - suffix.len];
+        if (std.mem.indexOfAny(u8, declaration, " \t") != null or
+            !std.mem.endsWith(u8, declaration, "-type"))
+            continue;
+        declaration_count += 1;
+        var matched = false;
+        inline for (fields, 0..) |field, index| {
+            const expected = field.name ++ "-type";
+            if (std.mem.eql(u8, declaration, expected)) {
+                if (seen[index]) {
+                    std.log.err("formal value kinds: duplicate declaration `{s}`", .{declaration});
+                    return true;
+                }
+                seen[index] = true;
+                matched = true;
+            }
+        }
+        if (!matched) {
+            std.log.err("formal value kinds: `{s}` has no value.Tag member", .{declaration});
+            return true;
+        }
+    }
+    var failed = declaration_count != fields.len;
+    inline for (fields, 0..) |field, index| if (!seen[index]) {
+        std.log.err("formal value kinds: value.Tag.{s} has no `{s}-type` declaration", .{
+            field.name,
+            field.name,
+        });
+        failed = true;
+    };
+    if (declaration_count != fields.len) std.log.err(
+        "formal value kinds: found {d} declarations for {d} value.Tag members",
+        .{ declaration_count, fields.len },
+    );
+    return failed;
 }
 
 fn auditSourceCoverage(init: std.process.Init) bool {
@@ -704,9 +762,20 @@ fn auditUnsafeCasts() bool {
         "capability payload erasure",
         @embedFile("../heap.zig"),
         &.{
-            "TaskDestroyAdapter",     "ModuleReleaseAdapter",
-            "RetirementAdapters",     "RetirementWakeAdapters",
-            "CodeRetirementAdapters",
+            "TaskDestroyAdapter",     "PortReleaseAdapter",
+            "ModuleReleaseAdapter",   "RetirementAdapters",
+            "RetirementWakeAdapters", "CodeRetirementAdapters",
+        },
+    ) or failed;
+    failed = auditErasedCasts(
+        "external capability erasure",
+        @embedFile("../external.zig"),
+        &.{
+            "WakeTargetAdapters",
+            "ReadinessRegistrationAdapters",
+            "ReadinessSourceAdapters",
+            "ScopeMemberAdapters",
+            "ScopeMembershipAdapters",
         },
     ) or failed;
     return failed;

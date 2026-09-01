@@ -7,6 +7,7 @@ const machine = @import("machine.zig");
 const env = @import("env.zig");
 const modules = @import("modules.zig");
 const core = @import("scheduler_core.zig");
+const external = @import("external.zig");
 
 const Value = value.Value;
 const ListHandle = value.ListHandle;
@@ -57,7 +58,7 @@ const TerminalState = union(enum) {
     oom,
 };
 
-const WaitKind = enum { one, any, deadline };
+const WaitKind = enum { one, any, deadline, external };
 const Finish = enum { success, language_error, oom };
 
 const FinishingWork = union(enum) {
@@ -285,6 +286,7 @@ const WaitSet = struct {
     registrations: []WaitRegistration,
     canonical: []CanonicalSlot,
     wake_handles: usize = 0,
+    external_registration: ?external.ReadinessRegistration = null,
     state: State,
     timer: TimerNode,
     absolute_deadline: ?std.Io.Timestamp = null,
@@ -313,6 +315,7 @@ const WaitSet = struct {
             request: machine.ParkRequest,
             index: usize,
         },
+        registering_external: machine.ParkRequest,
         timer: machine.ParkRequest,
         release_request: machine.ParkRequest,
         activating,
@@ -530,12 +533,15 @@ const WaitSet = struct {
                 break :outcome switch (self.kind) {
                     .one, .deadline => .{ .outcome = outcome_value },
                     .any => .{ .indexed = .{ .index = index, .outcome = outcome_value } },
+                    .external => unreachable,
                 };
             },
             .timeout => .timeout,
             .cancellation => .cancelled,
             .io => .io,
             .out_of_memory => .out_of_memory,
+            .external_ready => .{ .external = .ready },
+            .external_io => .{ .external = .io },
         };
     }
 
@@ -558,6 +564,7 @@ const WaitSet = struct {
                 }
                 const request = initializing.request;
                 self.state = switch (request) {
+                    .external => .{ .registering_external = request },
                     .join => |join| if (join.cancel_from) |start|
                         .{ .cancelling = .{ .join = join, .index = start } }
                     else
@@ -643,6 +650,24 @@ const WaitSet = struct {
                 } };
                 budget -= 1;
             },
+            .registering_external => |request| {
+                const target = external.wakeTarget(WaitSet, self);
+                const registered = request.external.register(target) catch {
+                    self.select(.out_of_memory);
+                    self.state = .{ .release_request = request };
+                    budget -= 1;
+                    continue;
+                };
+                switch (registered) {
+                    .ready => |reason| self.select(switch (reason) {
+                        .ready => .external_ready,
+                        .io => .external_io,
+                    }),
+                    .registered => |registration| self.external_registration = registration,
+                }
+                self.state = .{ .release_request = request };
+                budget -= 1;
+            },
             .timer => |request| {
                 if (request == .deadline) {
                     self.addTimer(request.deadline.milliseconds) catch |err| switch (err) {
@@ -653,7 +678,7 @@ const WaitSet = struct {
                 self.state = .{ .release_request = request };
             },
             .release_request => |request| {
-                self.scheduler.releaseDomain().releaseValue(request.ownedValue().?);
+                request.deinit(self.scheduler.releaseDomain());
                 self.state = .activating;
                 budget -= 1;
             },
@@ -721,6 +746,7 @@ const WaitSet = struct {
             .cancelling,
             .finding_duplicate,
             .registering,
+            .registering_external,
             .timer,
             .release_request,
             .activating,
@@ -730,6 +756,12 @@ const WaitSet = struct {
         const reason = self.deliveredReason();
         const delivery = &self.state.delivering;
         var budget: usize = machine.kernel_poll_quantum;
+        if (self.external_registration) |registration| {
+            var owned = registration;
+            self.external_registration = null;
+            owned.cancel();
+            budget -= 1;
+        }
         while (delivery.cleanup_index != self.registrations.len and budget != 0) : (budget -= 1) {
             const registration = &self.registrations[delivery.cleanup_index];
             const command = if (registration.cell) |cell| command: {
@@ -787,7 +819,7 @@ const WaitSet = struct {
     }
 
     fn advanceDiscard(self: *WaitSet, request: machine.ParkRequest) DeliveryProgress {
-        self.scheduler.releaseDomain().releaseValue(request.ownedValue().?);
+        request.deinit(self.scheduler.releaseDomain());
         self.allocator.free(self.registrations);
         self.registrations = &.{};
         self.allocator.free(self.canonical);
@@ -843,6 +875,37 @@ const WaitSet = struct {
             },
         }
     }
+
+    pub fn retainExternalWake(self: *WaitSet) void {
+        self.retain();
+        std.Io.Threaded.mutexLock(&self.mutex);
+        self.wake_handles += 1;
+        std.Io.Threaded.mutexUnlock(&self.mutex);
+    }
+
+    pub fn releaseExternalWake(self: *WaitSet) void {
+        var enqueue = false;
+        std.Io.Threaded.mutexLock(&self.mutex);
+        std.debug.assert(self.wake_handles != 0);
+        self.wake_handles -= 1;
+        if (self.wake_handles == 0) switch (self.state) {
+            .delivering => |*delivery| if (delivery.awaiting_handles) {
+                delivery.awaiting_handles = false;
+                enqueue = true;
+            },
+            else => {},
+        };
+        std.Io.Threaded.mutexUnlock(&self.mutex);
+        if (enqueue) self.scheduler.enqueueWait(self);
+        self.release();
+    }
+
+    pub fn wakeExternal(self: *WaitSet, reason: external.Wake) void {
+        self.select(switch (reason) {
+            .ready => .external_ready,
+            .io => .external_io,
+        });
+    }
 };
 
 pub const TaskScope = struct {
@@ -851,6 +914,9 @@ pub const TaskScope = struct {
     quiescent: std.Io.Condition = .init,
     first: ?*TaskCell = null,
     last: ?*TaskCell = null,
+    external_first: ?*ExternalNode = null,
+    external_last: ?*ExternalNode = null,
+    external_cancel_next: ?*ExternalNode = null,
     policy: core.Scope = .{ .open = 0 },
     closing_owner: ?*TaskCell = null,
     cancellation_walk_active: bool = false,
@@ -867,10 +933,47 @@ pub const TaskScope = struct {
     }
 };
 
+const ExternalNode = struct {
+    allocator: std.mem.Allocator,
+    scope: *TaskScope,
+    member: external.ScopeMember,
+    refs: std.atomic.Value(usize) = .init(2),
+    previous: ?*ExternalNode = null,
+    next: ?*ExternalNode = null,
+    linked: bool = true,
+    cancellation_sent: bool = false,
+
+    fn retain(self: *ExternalNode) void {
+        const old = self.refs.fetchAdd(1, .monotonic);
+        std.debug.assert(old != 0 and old != std.math.maxInt(usize));
+    }
+
+    fn release(self: *ExternalNode) void {
+        const old = self.refs.fetchSub(1, .release);
+        std.debug.assert(old != 0);
+        if (old != 1) return;
+        _ = self.refs.load(.acquire);
+        std.debug.assert(!self.linked);
+        const scheduler = self.scope.scheduler;
+        const scope = self.scope;
+        const allocator = self.allocator;
+        self.member.deinit();
+        allocator.destroy(self);
+        scheduler.finishExternalDetach(scope);
+    }
+
+    pub fn detachExternalMembership(self: *ExternalNode) void {
+        self.scope.scheduler.detachExternal(self);
+        // The membership token owns the second reference allocated with the
+        // node; list unlink consumed the first one.
+        self.release();
+    }
+};
+
 const CancellationWork = union(enum) {
     none,
-    task: CancellationCursor,
-    external: CancellationCursor,
+    task: ScopeCancellationCursor,
+    external: ScopeCancellationCursor,
 };
 
 const TaskCell = struct {
@@ -981,6 +1084,40 @@ const CancellationCursor = struct {
     }
 };
 
+const ScopeCancellationCursor = struct {
+    tasks: ?CancellationCursor,
+    scope: *TaskScope,
+
+    fn initLocked(scope: *TaskScope) ScopeCancellationCursor {
+        beginExternalCancellationLocked(scope);
+        return .{ .tasks = .{ .root = scope }, .scope = scope };
+    }
+
+    fn advance(self: *ScopeCancellationCursor) bool {
+        if (self.tasks) |*tasks| {
+            if (!tasks.advance()) return false;
+            tasks.deinit();
+            self.tasks = null;
+        }
+        var visited: usize = 0;
+        while (visited != cancellation_tree_quantum) : (visited += 1) {
+            const node = takeExternalCancellationNode(self.scope) orelse return true;
+            if (!node.cancellation_sent) {
+                node.cancellation_sent = true;
+                node.member.cancel();
+            }
+            node.release();
+        }
+        return false;
+    }
+
+    fn deinit(self: *ScopeCancellationCursor) void {
+        if (self.tasks) |*tasks| tasks.deinit();
+        self.tasks = null;
+        clearExternalCancellationCursor(self.scope);
+    }
+};
+
 pub const SpawnSite = union(enum) {
     inherited: struct {
         scope: *env.Scope,
@@ -1000,6 +1137,7 @@ pub const SpawnRequest = struct {
 };
 
 pub const SpawnError = error{ OutOfMemory, Io };
+pub const ExternalAttachError = error{ OutOfMemory, ScopeClosing };
 
 const WorkerState = struct {
     allocator: std.mem.Allocator,
@@ -1196,6 +1334,80 @@ pub const WorkerScheduler = enum(usize) {
         return .{ .task = header };
     }
 
+    /// Consumes `member` on success and failure. Publication of the returned
+    /// detach token occurs only after the member is linked and counted in the
+    /// scope; a closing scope refuses the attachment instead of accepting a
+    /// resource that could escape its cancellation walk.
+    pub fn attachExternal(
+        self: *const WorkerScheduler,
+        scope: *TaskScope,
+        incoming: external.ScopeMember,
+    ) ExternalAttachError!external.ScopeMembership {
+        var member = incoming;
+        errdefer member.deinit();
+        const node = try self.allocator().create(ExternalNode);
+        errdefer self.allocator().destroy(node);
+        node.* = .{
+            .allocator = self.allocator(),
+            .scope = scope,
+            .member = member.take(),
+        };
+        errdefer node.member.deinit();
+
+        std.Io.Threaded.mutexLock(&scope.mutex);
+        defer std.Io.Threaded.mutexUnlock(&scope.mutex);
+        if (scope.policy != .open) return error.ScopeClosing;
+        const decision = scopeDecision(scope.policy, .register_child);
+        std.debug.assert(decision.command == .none);
+        scope.policy = decision.next;
+        if (scope.external_last) |last| {
+            last.next = node;
+            node.previous = last;
+        } else scope.external_first = node;
+        scope.external_last = node;
+        return external.scopeMembership(ExternalNode, node);
+    }
+
+    fn detachExternal(self: *const WorkerScheduler, node: *ExternalNode) void {
+        const scope = node.scope;
+        std.debug.assert(scope.scheduler == self);
+        var cursor_release: ?*ExternalNode = null;
+        std.Io.Threaded.mutexLock(&scope.mutex);
+        if (node.linked) {
+            if (scope.external_cancel_next == node) {
+                if (node.next) |next| next.retain();
+                scope.external_cancel_next = node.next;
+                cursor_release = node;
+            }
+            if (node.previous) |previous| previous.next = node.next else scope.external_first = node.next;
+            if (node.next) |next| next.previous = node.previous else scope.external_last = node.previous;
+            node.previous = null;
+            node.next = null;
+            node.linked = false;
+        }
+        std.Io.Threaded.mutexUnlock(&scope.mutex);
+        if (cursor_release) |cursor| cursor.release();
+        // Consume the list's reference. The membership-token reference is
+        // consumed by `ExternalNode.detachExternalMembership` after return.
+        node.release();
+    }
+
+    fn finishExternalDetach(self: *const WorkerScheduler, scope: *TaskScope) void {
+        var closing_owner: ?*TaskCell = null;
+        std.Io.Threaded.mutexLock(&scope.mutex);
+        const decision = scopeDecision(scope.policy, .child_terminal);
+        scope.policy = decision.next;
+        if (decision.command == .notify_quiescent) {
+            scope.quiescent.broadcast(blockingIo());
+            if (!scope.cancellation_walk_active) {
+                closing_owner = scope.closing_owner;
+                scope.closing_owner = null;
+            }
+        }
+        std.Io.Threaded.mutexUnlock(&scope.mutex);
+        if (closing_owner) |owner| self.enqueueTask(owner);
+    }
+
     pub fn runRoot(
         self: *const WorkerScheduler,
         unit: *machine.Unit,
@@ -1254,6 +1466,20 @@ pub const WorkerScheduler = enum(usize) {
             unit.installParkResume(.{ .scope_closed = status });
             return;
         }
+        // External readiness can be the first operation that needs a queue
+        // executor: unlike a task wait, it does not imply that `spawn` has
+        // already started the worker pool. Start it before publishing the
+        // WaitSet, or a root-only process wait could enqueue its wake with no
+        // thread capable of delivering it.
+        self.ensureStarted() catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Io => {
+                _ = unit.takeParkRequest();
+                request.deinit(self.releaseDomain());
+                unit.installParkResume(.io);
+                return;
+            },
+        };
         var root = RootWaiter{ .scheduler = self, .unit = unit };
         const wait = try WaitSet.create(
             self,
@@ -1269,11 +1495,19 @@ pub const WorkerScheduler = enum(usize) {
                     std.Thread.yield() catch @panic("cooperative scheduler yield failed");
                 continue;
             }
+            var queued = false;
             std.Io.Threaded.mutexLock(&state_.queue_mutex);
             if (!root.ready.load(.acquire) and state_.queue_first == null and !state_.stopping) {
                 state_.queue_condition.waitUncancelable(blockingIo(), &state_.queue_mutex);
+            } else if (state_.queue_first != null) {
+                // The root is not an executor in worker-pool mode. Do not let
+                // its observation loop repeatedly reacquire the queue mutex
+                // ahead of the one worker that can deliver this wait.
+                state_.queue_condition.signal(blockingIo());
+                queued = true;
             }
             std.Io.Threaded.mutexUnlock(&state_.queue_mutex);
+            if (queued) std.Thread.yield() catch @panic("root wait queue yield failed");
         }
     }
 
@@ -1483,7 +1717,7 @@ pub const WorkerScheduler = enum(usize) {
             std.debug.assert(!cell.scope.cancellation_walk_active);
             cell.scope.cancellation_walk_active = true;
             std.debug.assert(cell.cancellation == .none);
-            cell.cancellation = .{ .task = .{ .root = &cell.scope } };
+            cell.cancellation = .{ .task = ScopeCancellationCursor.initLocked(&cell.scope) };
         }
         std.Io.Threaded.mutexUnlock(&cell.scope.mutex);
         std.Io.Threaded.mutexUnlock(&state_.tree_mutex);
@@ -1811,6 +2045,7 @@ fn requestKind(request: machine.ParkRequest) WaitKind {
         .task, .join => .one,
         .any => .any,
         .deadline => .deadline,
+        .external => .external,
         .close_scope => unreachable,
     };
 }
@@ -2000,7 +2235,7 @@ fn beginExternalCancellation(cell: *TaskCell) bool {
         if (!cell.scope.cancellation_walk_active) {
             cell.scope.cancellation_walk_active = true;
             std.debug.assert(cell.cancellation == .none);
-            cell.cancellation = .{ .external = .{ .root = &cell.scope } };
+            cell.cancellation = .{ .external = ScopeCancellationCursor.initLocked(&cell.scope) };
             heap.incRef(cell.handle());
             enqueue = true;
         }
@@ -2011,10 +2246,36 @@ fn beginExternalCancellation(cell: *TaskCell) bool {
 }
 
 fn cancelScopeTree(scope: *TaskScope) void {
-    var cursor = CancellationCursor{ .root = scope };
+    std.Io.Threaded.mutexLock(&scope.mutex);
+    var cursor = ScopeCancellationCursor.initLocked(scope);
+    std.Io.Threaded.mutexUnlock(&scope.mutex);
     defer cursor.deinit();
     while (!cursor.advance()) std.Thread.yield() catch
         @panic("scheduler cancellation yield failed");
+}
+
+fn beginExternalCancellationLocked(scope: *TaskScope) void {
+    std.debug.assert(scope.external_cancel_next == null);
+    if (scope.external_first) |first| first.retain();
+    scope.external_cancel_next = scope.external_first;
+}
+
+fn takeExternalCancellationNode(scope: *TaskScope) ?*ExternalNode {
+    std.Io.Threaded.mutexLock(&scope.mutex);
+    defer std.Io.Threaded.mutexUnlock(&scope.mutex);
+    const node = scope.external_cancel_next orelse return null;
+    std.debug.assert(node.linked);
+    if (node.next) |next| next.retain();
+    scope.external_cancel_next = node.next;
+    return node;
+}
+
+fn clearExternalCancellationCursor(scope: *TaskScope) void {
+    std.Io.Threaded.mutexLock(&scope.mutex);
+    const node = scope.external_cancel_next;
+    scope.external_cancel_next = null;
+    std.Io.Threaded.mutexUnlock(&scope.mutex);
+    if (node) |pending| pending.release();
 }
 
 fn cancelOne(cell: *TaskCell) core.ScopeCommand {

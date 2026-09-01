@@ -20,6 +20,7 @@ const console_api = @import("console.zig");
 const task_join_core = @import("task_join_core.zig");
 const resolution_core = @import("resolution_core.zig");
 const pkg_lock = @import("pkg_lock.zig");
+const external = @import("external.zig");
 const pkg_catalog = @import("pkg_catalog.zig");
 pub const Value = value.Value;
 pub const Header = value.ListHandle;
@@ -1751,6 +1752,7 @@ pub const InheritedContext = struct {
     standard_input: ?*StandardInput = null,
     idiom_mode: IdiomMode = .automatic,
     phrase_recognizer: ?PhraseRecognizer = null,
+    process_access: ?*external.ProcessAccess = null,
 };
 
 /// Immutable HTTPS verification inputs inherited by every Unit. The CA path
@@ -1865,6 +1867,7 @@ pub const ParkRequest = union(enum) {
         index: u32,
         cancel_from: ?u32 = null,
     },
+    external: external.ReadinessSource,
 
     /// The one value graph owned by every parking request that carries one.
     /// Scheduler setup, abandonment, and ordinary deinit all use this mapping.
@@ -1873,7 +1876,7 @@ pub const ParkRequest = union(enum) {
             .task, .any => |item| item,
             .deadline => |deadline| deadline.task,
             .join => |join| join.tasks,
-            .close_scope => null,
+            .close_scope, .external => null,
         };
     }
 
@@ -1881,7 +1884,7 @@ pub const ParkRequest = union(enum) {
         return switch (self) {
             .task, .deadline, .join => 1,
             .any => |tasks| @intCast(tasks.list.length()),
-            .close_scope => 0,
+            .close_scope, .external => 0,
         };
     }
 
@@ -1900,12 +1903,19 @@ pub const ParkRequest = union(enum) {
                 std.debug.assert(index == 0);
                 break :single list.atUnchecked(join.tasks, join.index);
             },
-            .close_scope => unreachable,
+            .close_scope, .external => unreachable,
         };
     }
 
     pub fn deinit(self: ParkRequest, releases: *heap.ReleaseDomain) void {
         if (self.ownedValue()) |item| releases.releaseValue(item);
+        switch (self) {
+            .external => |source| {
+                var owned = source;
+                owned.deinit();
+            },
+            else => {},
+        }
     }
 };
 
@@ -1917,12 +1927,13 @@ pub const ParkResume = union(enum) {
     io,
     out_of_memory,
     scope_closed: u8,
+    external: external.Wake,
 
     pub fn ownedValue(self: ParkResume) ?Value {
         return switch (self) {
             .outcome => |outcome| outcome,
             .indexed => |indexed| indexed.outcome,
-            .timeout, .cancelled, .io, .out_of_memory, .scope_closed => null,
+            .timeout, .cancelled, .io, .out_of_memory, .scope_closed, .external => null,
         };
     }
 
@@ -2133,6 +2144,8 @@ pub const NativeContinuation = union(enum) {
     idle,
     yielded,
     work: WorkDriver,
+    work_park_request: struct { driver: WorkDriver, request: ParkRequest },
+    work_park_resume: struct { driver: WorkDriver, result: ParkResume },
     park_request: ParkRequest,
     park_resume: ParkResume,
     task_join: TaskJoinState,
@@ -2567,11 +2580,12 @@ pub const Unit = struct {
         self.terminal = .{ .exit = status };
     }
     pub fn hasParkRequest(self: *const Unit) bool {
-        return self.native == .park_request or self.native == .task_join_request;
+        return self.native == .park_request or self.native == .work_park_request or self.native == .task_join_request;
     }
     pub fn parkRequest(self: *const Unit) ?ParkRequest {
         return switch (self.native) {
             .park_request => |request| request,
+            .work_park_request => |state| state.request,
             .task_join_request => |state| state.request,
             else => null,
         };
@@ -2581,6 +2595,10 @@ pub const Unit = struct {
             .park_request => |request| result: {
                 self.native = .idle;
                 break :result request;
+            },
+            .work_park_request => |state| result: {
+                self.native = .{ .work = state.driver };
+                break :result state.request;
             },
             .task_join_request => |state| result: {
                 self.native = .{ .task_join = state.join };
@@ -2592,6 +2610,7 @@ pub const Unit = struct {
     fn installParkRequest(self: *Unit, request: ParkRequest) void {
         self.native = switch (self.native) {
             .idle => .{ .park_request = request },
+            .work => |driver| .{ .work_park_request = .{ .driver = driver, .request = request } },
             .task_join => |join| .{ .task_join_request = .{ .join = join, .request = request } },
             else => unreachable,
         };
@@ -2599,6 +2618,7 @@ pub const Unit = struct {
     pub fn installParkResume(self: *Unit, result: ParkResume) void {
         self.native = switch (self.native) {
             .idle => .{ .park_resume = result },
+            .work => |driver| .{ .work_park_resume = .{ .driver = driver, .result = result } },
             .task_join => |join| .{ .task_join_resume = .{ .join = join, .result = result } },
             else => unreachable,
         };
@@ -2609,6 +2629,10 @@ pub const Unit = struct {
             .park_resume => |result| delivery: {
                 self.native = .idle;
                 break :delivery .{ .result = result, .task_join = false };
+            },
+            .work_park_resume => |state| delivery: {
+                self.native = .{ .work = state.driver };
+                break :delivery .{ .result = state.result, .task_join = false };
             },
             .task_join_resume => |state| delivery: {
                 self.native = .{ .task_join = state.join };
@@ -2645,6 +2669,8 @@ pub const Unit = struct {
     pub fn workDriver(self: *Unit) ?*WorkDriver {
         return switch (self.native) {
             .work => |*driver| driver,
+            .work_park_request => |*state| &state.driver,
+            .work_park_resume => |*state| &state.driver,
             .work_join_cleanup => |*state| &state.driver,
             else => null,
         };
@@ -2655,6 +2681,16 @@ pub const Unit = struct {
                 self.native = .idle;
                 break :result driver;
             },
+            .work_park_request => |state| result: {
+                state.request.deinit(self.releases);
+                self.native = .idle;
+                break :result state.driver;
+            },
+            .work_park_resume => |state| result: {
+                state.result.deinit(self.releases);
+                self.native = .idle;
+                break :result state.driver;
+            },
             .work_join_cleanup => |state| result: {
                 self.native = .{ .task_join_cleanup = state.cleanup };
                 break :result state.driver;
@@ -2663,7 +2699,8 @@ pub const Unit = struct {
         };
     }
     pub fn hasWorkDriver(self: *const Unit) bool {
-        return self.native == .work or self.native == .work_join_cleanup;
+        return self.native == .work or self.native == .work_park_request or
+            self.native == .work_park_resume or self.native == .work_join_cleanup;
     }
     fn installTaskJoinCleanup(self: *Unit, cleanup: TaskJoinCleanup) void {
         self.native = switch (self.native) {
@@ -2740,7 +2777,7 @@ pub const Unit = struct {
                 continue;
             }
             switch (self.native) {
-                .work => {
+                .work, .work_park_request, .work_park_resume => {
                     const driver = self.takeWorkDriver().?;
                     driver.deinit(self.releases, self.allocator);
                     consumed += 1;
@@ -2872,6 +2909,14 @@ pub const Unit = struct {
         switch (self.native) {
             .idle, .yielded => {},
             .work => |driver| driver.deinit(self.releases, self.allocator),
+            .work_park_request => |state| {
+                state.request.deinit(self.releases);
+                state.driver.deinit(self.releases, self.allocator);
+            },
+            .work_park_resume => |state| {
+                state.result.deinit(self.releases);
+                state.driver.deinit(self.releases, self.allocator);
+            },
             .park_request => |request| request.deinit(self.releases),
             .park_resume => |result| result.deinit(self.releases),
             .task_join, .task_join_request, .task_join_resume, .task_join_cleanup, .work_join_cleanup => @panic("task join must be retired resumably before unit teardown"),
@@ -6597,7 +6642,9 @@ fn loop(self: *Machine) MachineError!RunStatus {
             if (cleanup.disposition.? == .out_of_memory) return error.OutOfMemory;
             continue;
         }
-        if (self.unit.native == .park_resume or self.unit.native == .task_join_resume) {
+        if (self.unit.native == .park_resume or self.unit.native == .work_park_resume or
+            self.unit.native == .task_join_resume)
+        {
             resumePark(self) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.Ecl => {
@@ -6628,7 +6675,7 @@ fn loop(self: *Machine) MachineError!RunStatus {
                 }
             };
             switch (progress) {
-                .yielded => return .yielded,
+                .yielded => return if (self.unit.hasParkRequest()) .parked else .yielded,
                 .completed => {
                     clearWorkDriver(self.unit);
                     continue;
@@ -6746,6 +6793,7 @@ fn resumePark(self: *Machine) MachineError!void {
             window.pushOwned(indexed.outcome);
         },
         .timeout => {
+            clearWorkDriver(self.unit);
             var timeout = EclErr.init(.timeout, "task wait timed out");
             defer timeout.retire(self.releaseDomain());
             const failure = try errorValue(
@@ -6764,17 +6812,26 @@ fn resumePark(self: *Machine) MachineError!void {
         },
         .cancelled => {
             abandonTaskJoin(self);
+            // A work-driver park owns backend state across the wait. Move its
+            // cleanup through the ordinary driver destructor before raising;
+            // the failure unwinder requires that no native continuation still
+            // owns the operands or external registration it is abandoning.
+            clearWorkDriver(self.unit);
             return self.fail(.cancelled, "unit cancelled while awaiting a task");
         },
         .io => {
             abandonTaskJoin(self);
-            return self.fail(.io, "could not start the scheduler timer thread");
+            clearWorkDriver(self.unit);
+            return self.fail(.io, "could not start a scheduler wait service");
         },
         .out_of_memory => if (delivery.task_join)
             try resumeTaskJoinOutOfMemory(self)
-        else
-            return error.OutOfMemory,
+        else {
+            clearWorkDriver(self.unit);
+            return error.OutOfMemory;
+        },
         .scope_closed => |status| self.unit.requestExit(status),
+        .external => {},
     }
 }
 
@@ -6942,7 +6999,7 @@ fn poll(self: *Machine) MachineError!void {
 fn dispatch(self: *Machine, form: Value) MachineError!void {
     const word = switch (form) {
         .word => |reference| reference,
-        .int, .float, .char, .symbol, .list, .dict, .task, .module => return self.pushBorrowed(form),
+        .int, .float, .char, .symbol, .list, .dict, .task, .module, .port => return self.pushBorrowed(form),
     };
     try self.executeWord(word);
 }

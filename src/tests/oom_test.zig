@@ -32,6 +32,7 @@ const std = @import("std");
 const session = @import("../session.zig");
 const native_fixture = @import("native_fixture_options");
 const archive_fixtures = @import("archive_fixture_options");
+const process_fixture = @import("process_fixture_options");
 
 /// Keep every OOM test in one compiled artifact while letting build and CI
 /// runners select independent families at execution time. `@src().fn_name`
@@ -284,6 +285,13 @@ fn runOk(runtime: *session.Session, name: []const u8, source: []const u8) !void 
         .ok => {},
         .incomplete => return error.UnexpectedIncomplete,
         .err => |failure| return reportUnexpectedFailure(runtime, name, failure),
+    }
+}
+
+fn runExpectedLanguageError(runtime: *session.Session, name: []const u8, source: []const u8) !void {
+    switch (try runtime.runUnit(name, source)) {
+        .ok, .incomplete => return error.ExpectedLanguageError,
+        .err => |failure| runtime.release(failure),
     }
 }
 
@@ -767,6 +775,7 @@ const StdlibSurface = enum {
     package_store_gc,
     host_io,
     http,
+    process,
     package_sync_module,
     package_sync,
     package_cli_module,
@@ -789,6 +798,11 @@ fn stdlibSessionAllocationProbe(
     // the sweep enumerates live Session paths rather than this helper's writer.
     const scaffold_allocator = std.testing.allocator;
     const scratch_path = scratch.path;
+    const process_path = if (surface == .process)
+        try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, process_fixture.process_exe, scaffold_allocator)
+    else
+        null;
+    defer if (surface == .process) scaffold_allocator.free(process_path);
     var output_buffer: [16384]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
     var diagnostics_buffer: [1024]u8 = undefined;
@@ -806,6 +820,12 @@ fn stdlibSessionAllocationProbe(
                 .{ .name = "ECL_CACHE", .value = scratch_path },
             },
             .standard_input = .program_source,
+            .process_policy = if (surface == .process) .{
+                .executables = .{ .exact = &.{process_path} },
+                .stdin_capacity = 16,
+                .stdout_capacity = 16,
+                .stderr_capacity = 16,
+            } else null,
         },
         .cooperative,
     );
@@ -967,6 +987,25 @@ fn stdlibSessionAllocationProbe(
             "[] (\"http://127.0.0.1:1/x\" {} http.get) @attempt pop " ++
                 "[] (\"http://127.0.0.1:1/x\" {} http.get-bytes) @attempt pop",
         ),
+        .process => {
+            // A successful live capture has scheduling-dependent readiness
+            // cardinality and therefore cannot be an oracle for allocation
+            // ordinals. Exercise controller construction and scope teardown
+            // with one allowed spawn, then drive every run-only parser and
+            // launch allocation deterministically up to policy rejection.
+            const process_source = try std.fmt.allocPrint(
+                scaffold_allocator,
+                "'proc ('spawn 'run) import " ++
+                    "{{'executable \"{s}\" 'args (\"block\")}} spawn pop " ++
+                    "{{'executable \"/definitely/not/allowed\" " ++
+                    "'args (\"one\" \"two\") 'cwd \"/\" " ++
+                    "'env {{\"ECL_OOM_PROCESS\" \"probe\"}} 'stdin [0 1 255 2] " ++
+                    "'stdout-limit 8 'stderr-limit 8 'timeout-ms 1}} run",
+                .{process_path},
+            );
+            defer scaffold_allocator.free(process_source);
+            try runExpectedLanguageError(&runtime, "oom-process.ecl", process_source);
+        },
         .package_sync_module => try runOk(
             &runtime,
             "oom-pkg-sync-module.ecl",
@@ -1303,4 +1342,8 @@ test "oom: standard-library and host: package: CLI module propagates every alloc
 test "oom: standard-library and host: package: CLI operation propagates every allocation failure" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.package_cli);
+}
+test "oom: standard-library and host: process port lifecycle" {
+    try requireSelectedOomTest(@src());
+    try checkStdlibSurface(.process);
 }

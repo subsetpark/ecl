@@ -28,6 +28,348 @@ const pkg_runtime_vendor_lock =
 const test_project_lock =
     "{'format 1 'root \"app\" 'packages {} 'requires {\"app\" {}}}\n";
 
+test "e2e: proc direct execution preserves argv cwd environment and policy" {
+    const ecl_exe = try absoluteExe();
+    defer allocator.free(ecl_exe);
+    const process_exe = try absoluteProcessExe();
+    defer allocator.free(process_exe);
+    var scratch = std.testing.tmpDir(.{});
+    defer scratch.cleanup();
+    const cwd = try scratch.dir.realPathFileAlloc(std.testing.io, ".", allocator);
+    defer allocator.free(cwd);
+    const expected = try std.fmt.allocPrint(
+        allocator,
+        "cwd={s}\nprobe=overlay\narg[0]=alpha\narg[1]=beta\n",
+        .{cwd},
+    );
+    defer allocator.free(expected);
+    var program = std.Io.Writer.Allocating.init(allocator);
+    defer program.deinit();
+    try program.writer.print(
+        "'proc ('run) import {{'executable \"{s}\" " ++
+            "'args (\"inspect\" \"alpha\" \"beta\") " ++
+            "'env {{\"ECL_PROCESS_PROBE\" \"overlay\"}}}} run " ++
+            "dup 'stdout at ",
+        .{process_exe},
+    );
+    try appendByteList(&program.writer, expected);
+    try program.writer.writeAll(
+        " match? swap dup 'stderr at [] match? swap " ++
+            "'term at {'kind 'exited 'code 0} match?",
+    );
+    var environment = std.process.Environ.Map.init(allocator);
+    defer environment.deinit();
+    try environment.put("ECL_PROCESS_PROBE", "base");
+    var result = try cli.runOptions(.{
+        .argv = &.{ ecl_exe, program.written() },
+        .cwd = .{ .dir = scratch.dir },
+        .environ_map = &environment,
+    });
+    defer result.deinit();
+    try result.expect(.{ .exit_code = 0, .stdout = "1 1 1\n", .stderr = "" });
+}
+
+test "e2e: proc ports stream binary data with backpressure and EOF" {
+    const process_exe = try absoluteProcessExe();
+    defer allocator.free(process_exe);
+    const program = try std.fmt.allocPrint(
+        allocator,
+        "'proc ('run) import {{'executable \"{s}\" " ++
+            "'args (\"echo\") 'stdin [0 1 255 2]}} run " ++
+            "dup 'stdout at [0 1 255 2] match? swap 'stderr at [] match?",
+        .{process_exe},
+    );
+    defer allocator.free(program);
+    var result = try cli.run(&.{ build_options.ecl_exe, program });
+    defer result.deinit();
+    try result.expect(.{ .exit_code = 0, .stdout = "1 1\n", .stderr = "" });
+
+    const large = try std.fmt.allocPrint(
+        allocator,
+        "'proc ('run) import {{'executable \"{s}\" " ++
+            "'args (\"large\" \"100000\" \"90000\")}} run " ++
+            "dup 'stdout at len swap 'stderr at len",
+        .{process_exe},
+    );
+    defer allocator.free(large);
+    var large_result = try cli.run(&.{ build_options.ecl_exe, large });
+    defer large_result.deinit();
+    try large_result.expect(.{ .exit_code = 0, .stdout = "100000 90000\n", .stderr = "" });
+
+    // A child may fill stderr before it ever makes stdout readable. Capture
+    // must wait on both pipes after stdin closes or this shape deadlocks.
+    const stderr_first = try std.fmt.allocPrint(
+        allocator,
+        "'proc ('run) import {{'executable \"{s}\" " ++
+            "'args (\"large\" \"0\" \"90000\")}} run " ++
+            "dup 'stdout at len swap 'stderr at len",
+        .{process_exe},
+    );
+    defer allocator.free(stderr_first);
+    var stderr_first_result = try cli.runOptions(.{
+        .argv = &.{ build_options.ecl_exe, stderr_first },
+        .timeout = .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(5) } },
+    });
+    defer stderr_first_result.deinit();
+    try stderr_first_result.expect(.{ .exit_code = 0, .stdout = "0 90000\n", .stderr = "" });
+}
+
+test "e2e: proc wait returns stable tagged termination and idempotent lifecycle" {
+    const process_exe = try absoluteProcessExe();
+    defer allocator.free(process_exe);
+    const program = try std.fmt.allocPrint(
+        allocator,
+        "'proc ('spawn 'wait 'terminate 'kill) import " ++
+            "{{'executable \"{s}\" 'args (\"exit\" \"7\")}} spawn 'p set " ++
+            "p wait {{'kind 'exited 'code 7}} match? " ++
+            "p terminate p kill p wait {{'kind 'exited 'code 7}} match?",
+        .{process_exe},
+    );
+    defer allocator.free(program);
+    var result = try cli.run(&.{ build_options.ecl_exe, program });
+    defer result.deinit();
+    try result.expect(.{ .exit_code = 0, .stdout = "1 1\n", .stderr = "" });
+}
+
+test "e2e: proc run captures split output termination timeout and overflow" {
+    const process_exe = try absoluteProcessExe();
+    defer allocator.free(process_exe);
+    const capture = try std.fmt.allocPrint(
+        allocator,
+        "'proc ('run) import {{'executable \"{s}\" " ++
+            "'args (\"split\" \"abc\" \"de\")}} run " ++
+            "dup 'term at {{'kind 'exited 'code 0}} match? " ++
+            "swap dup 'stdout at [97 98 99] match? swap 'stderr at [100 101] match?",
+        .{process_exe},
+    );
+    defer allocator.free(capture);
+    var captured = try cli.run(&.{ build_options.ecl_exe, capture });
+    defer captured.deinit();
+    try captured.expect(.{ .exit_code = 0, .stdout = "1 1 1\n", .stderr = "" });
+
+    const deadline = try std.fmt.allocPrint(
+        allocator,
+        "'proc ('run) import {{'executable \"{s}\" " ++
+            "'args (\"block\") 'timeout-ms 25}} run",
+        .{process_exe},
+    );
+    defer allocator.free(deadline);
+    var timed_out = try cli.run(&.{ build_options.ecl_exe, deadline });
+    defer timed_out.deinit();
+    try timed_out.expect(.{
+        .exit_code = 1,
+        .stderr_contains = &.{ "'kind 'timeout", "process deadline expired" },
+    });
+
+    const immediate_deadline = try std.fmt.allocPrint(
+        allocator,
+        "'proc ('run) import {{'executable \"{s}\" " ++
+            "'args (\"block\") 'timeout-ms 0}} run",
+        .{process_exe},
+    );
+    defer allocator.free(immediate_deadline);
+    var immediately_timed_out = try cli.run(&.{ build_options.ecl_exe, immediate_deadline });
+    defer immediately_timed_out.deinit();
+    try immediately_timed_out.expect(.{
+        .exit_code = 1,
+        .stderr_contains = &.{ "'kind 'timeout", "process deadline expired" },
+    });
+
+    const broken_stdin = try std.fmt.allocPrint(
+        allocator,
+        "'proc ('run) import {{'executable \"{s}\" " ++
+            "'args (\"close-stdin\")}} 'stdin [1] 200000 take pair " ++
+            "dict.from-flat dict.merge run",
+        .{process_exe},
+    );
+    defer allocator.free(broken_stdin);
+    var broken = try cli.run(&.{ build_options.ecl_exe, broken_stdin });
+    defer broken.deinit();
+    try broken.expect(.{
+        .exit_code = 1,
+        .stderr_contains = &.{ "'kind 'io", "process pipe operation failed" },
+    });
+
+    const limited = try std.fmt.allocPrint(
+        allocator,
+        "'proc ('run) import {{'executable \"{s}\" " ++
+            "'args (\"large\" \"16\" \"0\") 'stdout-limit 8}} run",
+        .{process_exe},
+    );
+    defer allocator.free(limited);
+    var overflowed = try cli.run(&.{ build_options.ecl_exe, limited });
+    defer overflowed.deinit();
+    try overflowed.expect(.{
+        .exit_code = 1,
+        .stderr_contains = &.{ "'kind 'overflow", "capture limit exceeded" },
+    });
+}
+
+test "e2e: proc write serializes at scheduler call arrival" {
+    const process_exe = try absoluteProcessExe();
+    defer allocator.free(process_exe);
+    const program = try std.fmt.allocPrint(
+        allocator,
+        "'proc ('spawn 'write 'close-input 'read-stdout 'wait) import " ++
+            "{{'executable \"{s}\" 'args (\"first-byte\")}} spawn 'p set " ++
+            "[1] 200000 take 'bytes set " ++
+            "[] (p bytes write) @spawn 'first set [] () @spawn await pop " ++
+            "p [2] write first await pop p close-input p 1 read-stdout [1] match? p wait pop",
+        .{process_exe},
+    );
+    defer allocator.free(program);
+    var result = try runWithWorkers(&.{ build_options.ecl_exe, program }, "1");
+    defer result.deinit();
+    try result.expect(.{ .exit_code = 0, .stdout = "1\n", .stderr = "" });
+}
+
+test "e2e: proc scope cancellation kills and reaps the process group" {
+    const process_exe = try absoluteProcessExe();
+    defer allocator.free(process_exe);
+    const program = try std.fmt.allocPrint(
+        allocator,
+        "'proc ('spawn 'read-stdout) import 'io ('pp) import " ++
+            "{{'executable \"{s}\" 'args (\"descendant\")}} spawn " ++
+            "dup 128 read-stdout pp",
+        .{process_exe},
+    );
+    defer allocator.free(program);
+    var result = try cli.runOptions(.{
+        .argv = &.{ build_options.ecl_exe, program },
+        .timeout = .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(5) } },
+    });
+    defer result.deinit();
+    try result.expect(.{
+        .exit_code = 0,
+        .stdout_contains = &.{ "[100 101 115 99 101 110 100 97 110 116 61", "<port:1>" },
+        .stderr = "",
+    });
+    const processes = try descendantProcesses(result.stdout);
+    try expectProcessGone(processes.descendant, processes.leader);
+}
+
+test "e2e: proc leader exit cleans retained and redirected descendants" {
+    const process_exe = try absoluteProcessExe();
+    defer allocator.free(process_exe);
+    for ([_][]const u8{ "retained", "redirected" }) |mode| {
+        const program = try std.fmt.allocPrint(
+            allocator,
+            "'proc ('run) import 'io ('pp) import " ++
+                "{{'executable \"{s}\" 'args (\"orphan-descendant\" \"{s}\")}} run " ++
+                "'stdout at pp",
+            .{ process_exe, mode },
+        );
+        defer allocator.free(program);
+        var result = try cli.runOptions(.{
+            .argv = &.{ build_options.ecl_exe, program },
+            .timeout = .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(5) } },
+        });
+        defer result.deinit();
+        try result.expect(.{ .exit_code = 0, .stderr = "" });
+        const processes = try descendantProcesses(result.stdout);
+        try expectProcessGone(processes.descendant, processes.leader);
+    }
+}
+
+fn appendByteList(writer: *std.Io.Writer, bytes: []const u8) !void {
+    try writer.writeByte('[');
+    for (bytes, 0..) |byte, index| {
+        if (index != 0) try writer.writeByte(' ');
+        try writer.print("{d}", .{byte});
+    }
+    try writer.writeByte(']');
+}
+
+const DescendantProcesses = struct {
+    descendant: std.posix.pid_t,
+    leader: std.posix.pid_t,
+};
+
+fn descendantProcesses(output: []const u8) !DescendantProcesses {
+    if (output.len == 0 or output[0] != '[') return error.InvalidDescendantOutput;
+    const close = std.mem.indexOfScalar(u8, output, ']') orelse return error.InvalidDescendantOutput;
+    var decoded: [128]u8 = undefined;
+    var count: usize = 0;
+    var encoded = std.mem.tokenizeScalar(u8, output[1..close], ' ');
+    while (encoded.next()) |item| {
+        if (count == decoded.len) return error.InvalidDescendantOutput;
+        decoded[count] = try std.fmt.parseInt(u8, item, 10);
+        count += 1;
+    }
+    const prefix = "descendant=";
+    const line = std.mem.trim(u8, decoded[0..count], "\r\n");
+    if (!std.mem.startsWith(u8, line, prefix)) return error.InvalidDescendantOutput;
+    const leader_separator = " leader=";
+    const separator = std.mem.indexOf(u8, line, leader_separator) orelse
+        return error.InvalidDescendantOutput;
+    return .{
+        .descendant = try std.fmt.parseInt(std.posix.pid_t, line[prefix.len..separator], 10),
+        .leader = try std.fmt.parseInt(
+            std.posix.pid_t,
+            line[separator + leader_separator.len ..],
+            10,
+        ),
+    };
+}
+
+fn expectProcessGone(pid: std.posix.pid_t, expected_group: std.posix.pid_t) !void {
+    for (0..200) |_| {
+        std.posix.kill(pid, @enumFromInt(0)) catch |err| switch (err) {
+            error.ProcessNotFound => return,
+            error.PermissionDenied => return error.ProcessProbePermissionDenied,
+            else => |unexpected| return unexpected,
+        };
+        if (processStatus(pid)) |status| {
+            if (status.state == 'Z' or status.state == 'X') return;
+        }
+        const pause: std.Io.Clock.Duration = .{
+            .clock = .awake,
+            .raw = .fromMilliseconds(5),
+        };
+        try pause.sleep(io);
+    }
+    const status = processStatus(pid) orelse return error.DescendantStatusUnavailable;
+    if (status.group != expected_group) return error.DescendantLeftProcessGroup;
+    return switch (status.state) {
+        'R' => error.DescendantRunning,
+        'S' => error.DescendantSleeping,
+        'D' => error.DescendantUninterruptible,
+        'T', 't' => error.DescendantStopped,
+        else => error.DescendantStillRunning,
+    };
+}
+
+const ProcessStatus = struct {
+    state: u8,
+    group: std.posix.pid_t,
+};
+
+fn processStatus(pid: std.posix.pid_t) ?ProcessStatus {
+    if (builtin.os.tag != .linux) return null;
+    var path_buffer: [64]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buffer, "/proc/{d}/stat", .{pid}) catch return null;
+    const file = std.posix.openat(std.posix.AT.FDCWD, path, .{}, 0) catch return null;
+    defer _ = std.posix.system.close(file);
+    var stat_buffer: [4096]u8 = undefined;
+    var stat_len: usize = 0;
+    while (stat_len != stat_buffer.len) {
+        const amount = std.posix.read(file, stat_buffer[stat_len..]) catch return null;
+        if (amount == 0) break;
+        stat_len += amount;
+    }
+    const stat = stat_buffer[0..stat_len];
+    const command_end = std.mem.lastIndexOfScalar(u8, stat, ')') orelse return null;
+    if (command_end + 2 >= stat.len or stat[command_end + 1] != ' ')
+        return null;
+    var fields = std.mem.tokenizeScalar(u8, stat[command_end + 2 ..], ' ');
+    const state = fields.next() orelse return null;
+    if (state.len != 1) return null;
+    _ = fields.next() orelse return null;
+    const group = std.fmt.parseInt(std.posix.pid_t, fields.next() orelse return null, 10) catch
+        return null;
+    return .{ .state = state[0], .group = group };
+}
+
 fn writeTestProject(
     directory: std.Io.Dir,
     manifest: []const u8,
@@ -733,6 +1075,14 @@ fn absoluteExe() ![:0]u8 {
     return std.Io.Dir.cwd().realPathFileAlloc(
         io,
         build_options.ecl_exe,
+        allocator,
+    );
+}
+
+fn absoluteProcessExe() ![:0]u8 {
+    return std.Io.Dir.cwd().realPathFileAlloc(
+        io,
+        build_options.process_exe,
         allocator,
     );
 }

@@ -234,7 +234,7 @@ binder   :=  "|" name+ "|"           # names: distinct unqualified symbols
 
 ##### Domains
 
-> This model is normative for the closed value-kind universe; immutable scalar and aggregate content; whole-value matching; dictionary key uniqueness; recursive readability; and hash congruence. It abstracts over concrete storage, float encoding, source grammar, printing, pervasion, and the operations that construct or consume values.  Every ECL value has exactly one of the language's nine kinds. Its kind is an immutable fact: it does not belong to an action context. Boolean, string, quotation, vector, matrix, array, error, and result are roles played by these values rather than additional kinds.
+> This model is normative for the closed value-kind universe; immutable scalar and aggregate content; whole-value matching; dictionary key uniqueness; recursive readability; and hash congruence. It abstracts over concrete storage, float encoding, source grammar, printing, pervasion, and the operations that construct or consume values.  Every ECL value has exactly one of the language's ten kinds. Its kind is an immutable fact: it does not belong to an action context. Boolean, string, quotation, vector, matrix, array, error, and result are roles played by these values rather than additional kinds.
 
 `Value`.
 
@@ -260,23 +260,25 @@ binder   :=  "|" name+ "|"           # names: distinct unqualified symbols
 
 **task-type** ⇒ `ValueType`.
 
+**port-type** ⇒ `ValueType`.
+
 **module-type** ⇒ `ValueType`.
 
 ---
 
-> The value-kind universe is closed: every value has one of these nine kinds.
+> The value-kind universe is closed: every value has one of these ten kinds.
 
-∀ *value*: `Value` · **value-type** *value* = **int-type** ∨ **value-type** *value* = **float-type** ∨ **value-type** *value* = **char-type** ∨ **value-type** *value* = **symbol-type** ∨ **value-type** *value* = **word-type** ∨ **value-type** *value* = **list-type** ∨ **value-type** *value* = **dict-type** ∨ **value-type** *value* = **task-type** ∨ **value-type** *value* = **module-type**.
+∀ *value*: `Value` · **value-type** *value* = **int-type** ∨ **value-type** *value* = **float-type** ∨ **value-type** *value* = **char-type** ∨ **value-type** *value* = **symbol-type** ∨ **value-type** *value* = **word-type** ∨ **value-type** *value* = **list-type** ∨ **value-type** *value* = **dict-type** ∨ **value-type** *value* = **task-type** ∨ **value-type** *value* = **port-type** ∨ **value-type** *value* = **module-type**.
 
-> The nine kind names are distinct, so the total `value-type` rule assigns exactly one kind to every value.
+> The ten kind names are distinct, so the total `value-type` rule assigns exactly one kind to every value.
 
-**int-type** ≠ **float-type** ∧ **int-type** ≠ **char-type** ∧ **int-type** ≠ **symbol-type** ∧ **int-type** ≠ **word-type** ∧ **int-type** ≠ **list-type** ∧ **int-type** ≠ **dict-type** ∧ **int-type** ≠ **task-type** ∧ **int-type** ≠ **module-type** ∧ **float-type** ≠ **char-type** ∧ **float-type** ≠ **symbol-type** ∧ **float-type** ≠ **word-type** ∧ **float-type** ≠ **list-type** ∧ **float-type** ≠ **dict-type** ∧ **float-type** ≠ **task-type** ∧ **float-type** ≠ **module-type** ∧ **char-type** ≠ **symbol-type** ∧ **char-type** ≠ **word-type** ∧ **char-type** ≠ **list-type** ∧ **char-type** ≠ **dict-type** ∧ **char-type** ≠ **task-type** ∧ **char-type** ≠ **module-type** ∧ **symbol-type** ≠ **word-type** ∧ **symbol-type** ≠ **list-type** ∧ **symbol-type** ≠ **dict-type** ∧ **symbol-type** ≠ **task-type** ∧ **symbol-type** ≠ **module-type** ∧ **word-type** ≠ **list-type** ∧ **word-type** ≠ **dict-type** ∧ **word-type** ≠ **task-type** ∧ **word-type** ≠ **module-type** ∧ **list-type** ≠ **dict-type** ∧ **list-type** ≠ **task-type** ∧ **list-type** ≠ **module-type** ∧ **dict-type** ≠ **task-type** ∧ **dict-type** ≠ **module-type** ∧ **task-type** ≠ **module-type**.
+**int-type** ≠ **float-type** ∧ **int-type** ≠ **char-type** ∧ **int-type** ≠ **symbol-type** ∧ **int-type** ≠ **word-type** ∧ **int-type** ≠ **list-type** ∧ **int-type** ≠ **dict-type** ∧ **int-type** ≠ **task-type** ∧ **int-type** ≠ **port-type** ∧ **int-type** ≠ **module-type** ∧ **float-type** ≠ **char-type** ∧ **float-type** ≠ **symbol-type** ∧ **float-type** ≠ **word-type** ∧ **float-type** ≠ **list-type** ∧ **float-type** ≠ **dict-type** ∧ **float-type** ≠ **task-type** ∧ **float-type** ≠ **port-type** ∧ **float-type** ≠ **module-type** ∧ **char-type** ≠ **symbol-type** ∧ **char-type** ≠ **word-type** ∧ **char-type** ≠ **list-type** ∧ **char-type** ≠ **dict-type** ∧ **char-type** ≠ **task-type** ∧ **char-type** ≠ **port-type** ∧ **char-type** ≠ **module-type** ∧ **symbol-type** ≠ **word-type** ∧ **symbol-type** ≠ **list-type** ∧ **symbol-type** ≠ **dict-type** ∧ **symbol-type** ≠ **task-type** ∧ **symbol-type** ≠ **port-type** ∧ **symbol-type** ≠ **module-type** ∧ **word-type** ≠ **list-type** ∧ **word-type** ≠ **dict-type** ∧ **word-type** ≠ **task-type** ∧ **word-type** ≠ **port-type** ∧ **word-type** ≠ **module-type** ∧ **list-type** ≠ **dict-type** ∧ **list-type** ≠ **task-type** ∧ **list-type** ≠ **port-type** ∧ **list-type** ≠ **module-type** ∧ **dict-type** ≠ **task-type** ∧ **dict-type** ≠ **port-type** ∧ **dict-type** ≠ **module-type** ∧ **task-type** ≠ **port-type** ∧ **task-type** ≠ **module-type** ∧ **port-type** ≠ **module-type**.
 
 #### Chapter 2
 
 ##### Domains
 
-> Scalar payloads and aggregate contents determine value identity within their respective kinds. Numeric magnitude separately determines mathematical matching across int and float, so distinct float payloads such as positive and negative zero may still match. A list's contents are finite and ordered. A dictionary's entries are finite and insertion-ordered, while its keys are unique under whole-value matching.  `matches?` is the equivalence exposed by `match?` and used for dictionary-key identity. Lists match recursively by position. Dictionaries match by their key-value pairs regardless of insertion order. Task and module values match only themselves. Resolution context, reader lineage, provenance, and storage identity are absent from these rules and therefore cannot affect matching or hashing.
+> Scalar payloads and aggregate contents determine value identity within their respective kinds. Numeric magnitude separately determines mathematical matching across int and float, so distinct float payloads such as positive and negative zero may still match. A list's contents are finite and ordered. A dictionary's entries are finite and insertion-ordered, while its keys are unique under whole-value matching.  `matches?` is the equivalence exposed by `match?` and used for dictionary-key identity. Lists match recursively by position. Dictionaries match by their key-value pairs regardless of insertion order. Task, port, and module values match only themselves. Resolution context, reader lineage, provenance, and storage identity are absent from these rules and therefore cannot affect matching or hashing.
 
 `NumericMagnitude`.
 
@@ -378,7 +380,7 @@ binder   :=  "|" name+ "|"           # names: distinct unqualified symbols
 
 > Values match only as numbers across the two numeric kinds, or within the same non-numeric kind.
 
-∀ *left*: `Value`, *right*: `Value`, **matches?** *left* *right* · **numeric-value?** *left* ∧ **numeric-value?** *right* ∨ **value-type** *left* = **char-type** ∧ **value-type** *right* = **char-type** ∨ **value-type** *left* = **symbol-type** ∧ **value-type** *right* = **symbol-type** ∨ **value-type** *left* = **word-type** ∧ **value-type** *right* = **word-type** ∨ **value-type** *left* = **list-type** ∧ **value-type** *right* = **list-type** ∨ **value-type** *left* = **dict-type** ∧ **value-type** *right* = **dict-type** ∨ **value-type** *left* = **task-type** ∧ **value-type** *right* = **task-type** ∨ **value-type** *left* = **module-type** ∧ **value-type** *right* = **module-type**.
+∀ *left*: `Value`, *right*: `Value`, **matches?** *left* *right* · **numeric-value?** *left* ∧ **numeric-value?** *right* ∨ **value-type** *left* = **char-type** ∧ **value-type** *right* = **char-type** ∨ **value-type** *left* = **symbol-type** ∧ **value-type** *right* = **symbol-type** ∨ **value-type** *left* = **word-type** ∧ **value-type** *right* = **word-type** ∨ **value-type** *left* = **list-type** ∧ **value-type** *right* = **list-type** ∨ **value-type** *left* = **dict-type** ∧ **value-type** *right* = **dict-type** ∨ **value-type** *left* = **task-type** ∧ **value-type** *right* = **task-type** ∨ **value-type** *left* = **port-type** ∧ **value-type** *right* = **port-type** ∨ **value-type** *left* = **module-type** ∧ **value-type** *right* = **module-type**.
 
 > Numeric matching is exact mathematical-value equality across int and float.
 
@@ -420,6 +422,10 @@ binder   :=  "|" name+ "|"           # names: distinct unqualified symbols
 
 ∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **task-type**, **value-type** *right* = **task-type** · **matches?** *left* *right* ↔ *left* = *right*.
 
+> Port values match only by endpoint identity.
+
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **port-type**, **value-type** *right* = **port-type** · **matches?** *left* *right* ↔ *left* = *right*.
+
 > Module values match only by image identity.
 
 ∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **module-type**, **value-type** *right* = **module-type** · **matches?** *left* *right* ↔ *left* = *right*.
@@ -428,9 +434,9 @@ binder   :=  "|" name+ "|"           # names: distinct unqualified symbols
 
 ∀ *value*: `Value`, (**value-type** *value* = **int-type** ∨ **value-type** *value* = **float-type** ∨ **value-type** *value* = **char-type** ∨ **value-type** *value* = **symbol-type** ∨ **value-type** *value* = **word-type**) · **readable?** *value*.
 
-> Task and module values have diagnostic displays but no readable representations.
+> Task, port, and module values have diagnostic displays but no readable representations.
 
-∀ *value*: `Value`, (**value-type** *value* = **task-type** ∨ **value-type** *value* = **module-type**) · ¬**readable?** *value*.
+∀ *value*: `Value`, (**value-type** *value* = **task-type** ∨ **value-type** *value* = **port-type** ∨ **value-type** *value* = **module-type**) · ¬**readable?** *value*.
 
 > A list is readable exactly when all its elements are readable.
 
@@ -475,8 +481,12 @@ depth rather than intrinsic data, and ragged lists remain legal.
 
 Dictionary insertion order is preserved by storage, iteration, and printing.
 A task is a runtime capability bound to its session and prints as `<task:N>`.
-A module is an opaque immutable image and prints as `<module>`. Those task and
-module displays are rejected by the reader.
+A module is an opaque immutable image and prints as `<module>`. A port is an
+opaque, identity-bearing capability for a host endpoint and prints as
+`<port:N>`. Task, module, and port displays are rejected by the reader. Port
+identity is observable only through ordinary whole-value matching and hashing;
+no conforming operation may recover an operating-system descriptor, process
+identifier, or implementation pointer from one.
 
 ### Readable representations and display
 
@@ -2343,6 +2353,45 @@ left to right.
 `exit` is available only to the root unit outside `@attempt`. Elsewhere it
 raises `'domain`. An allowed exit first cancels and quiesces the root task
 scope, then terminates the process with the supplied status.
+
+### External ports and processes
+
+An external port created by a unit belongs to that unit's task scope. The
+scope, not the number or location of port values, owns the live external
+resource. Closing a scope stops new operations, requests cancellation, and
+does not complete until each owned resource has published a terminal state and
+released its scope membership. Returning or storing a port cannot detach it or
+transfer ownership; a port that outlives its creating scope remains an opaque
+handle to terminal state.
+
+Port operations may suspend the current unit on external readiness. Such a
+suspension is an ordinary scheduler park: it consumes no worker while waiting,
+participates in the same cancellation and deadline arbitration as task waits,
+and resumes a bounded continuation. Input and output queues are bounded, so a
+producer waits under pressure rather than causing unbounded allocation.
+
+The shipped `proc` module is a host capability, not ambient language power. A
+Session without process authority rejects process creation before reaching the
+operating system. A process specification names one absolute executable path,
+an argument vector, an optional absolute working directory, and an explicit
+environment overlay. It never denotes a shell command and never searches
+`PATH`. Process streams are byte lists; text encoding, stream merging, and
+line framing are user policy.
+
+A process port has stdin, stdout, stderr, and one immutable terminal result.
+The output streams remain independent and return an empty byte list only after
+stable EOF. Termination is tagged as exited-with-code, signaled, stopped, or an
+unknown host status. A nonzero exit code is result data, not an ECL error;
+spawn, pipe, policy, timeout, cancellation, allocation, and cleanup failures
+remain errors of their corresponding ordinary kinds.
+
+The reference distribution initially provides process ports on POSIX hosts.
+Each child starts in a dedicated process group; scope cancellation signals the
+group and reaps the direct child before completing. Descendants that inherit
+that group are covered, while a hostile child that creates a new session is
+outside this portable process-group guarantee. A host without an equivalent
+tree-owning backend rejects process authority rather than silently weakening
+cleanup to one PID.
 
 ## Standard environment
 

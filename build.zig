@@ -198,6 +198,21 @@ pub fn build(b: *std.Build) void {
     const http_fixture_options = b.addOptions();
     http_fixture_options.addOptionPath("server_exe", http_fixture.getEmittedBin());
 
+    // Hermetic child executable for process-port tests. Every caller receives
+    // the emitted absolute path through build options; no test searches PATH
+    // or invokes a shell.
+    const process_fixture_mod = b.createModule(.{
+        .root_source_file = b.path("test/process_fixture.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const process_fixture = b.addExecutable(.{
+        .name = "ecl-process-fixture",
+        .root_module = process_fixture_mod,
+    });
+    const process_fixture_options = b.addOptions();
+    process_fixture_options.addOptionPath("process_exe", process_fixture.getEmittedBin());
+
     // Hermetic HTTPS/package fixture. The test process receives every path
     // explicitly; it binds loopback only and generates its deterministic
     // package graph after learning the OS-selected port.
@@ -241,6 +256,7 @@ pub fn build(b: *std.Build) void {
     test_mod.addOptions("http_fixture_options", http_fixture_options);
     test_mod.addOptions("pkg_fixture_options", pkg_fixture_options);
     test_mod.addOptions("archive_fixture_options", archive_fixture_options);
+    test_mod.addOptions("process_fixture_options", process_fixture_options);
     test_mod.link_libc = true;
     const tests = b.addTest(.{ .root_module = test_mod });
     tests.linkage = runtime_linkage;
@@ -391,6 +407,7 @@ pub fn build(b: *std.Build) void {
     oom_mod.addImport("ecl-native", native_sdk);
     oom_mod.addOptions("native_fixture_options", native_fixture_options);
     oom_mod.addOptions("archive_fixture_options", archive_fixture_options);
+    oom_mod.addOptions("process_fixture_options", process_fixture_options);
     oom_mod.link_libc = true;
     const oom_tests = b.addTest(.{
         .root_module = oom_mod,
@@ -441,6 +458,13 @@ pub fn build(b: *std.Build) void {
         .target = b.graph.host,
         .optimize = .Debug,
     });
+    const audit_options = b.addOptions();
+    audit_options.addOption(
+        []const u8,
+        "formal_values",
+        @embedFile("design/formal/values.pant"),
+    );
+    audit_mod.addOptions("source_audit_options", audit_options);
     const audit_exe = b.addExecutable(.{ .name = "ecl-source-audit", .root_module = audit_mod });
     const run_audit = b.addRunArtifact(audit_exe);
     const bench_mod = b.createModule(.{
@@ -526,6 +550,7 @@ pub fn build(b: *std.Build) void {
 
     const e2e_options = b.addOptions();
     e2e_options.addOptionPath("ecl_exe", exe.getEmittedBin());
+    e2e_options.addOptionPath("process_exe", process_fixture.getEmittedBin());
     e2e_options.addOption(std.builtin.OptimizeMode, "optimize", optimize);
     e2e_options.addOptionPath(
         "native_fixture_dir",
@@ -550,6 +575,26 @@ pub fn build(b: *std.Build) void {
     // own without building the whole suite.
     const e2e_step = b.step("test-e2e", "Run the CLI acceptance tests");
     e2e_step.dependOn(&run_e2e_tests.step);
+
+    const scheduler_shell_mod = b.createModule(.{
+        .root_source_file = b.path("test/scheduler_shell_property.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    scheduler_shell_mod.addOptions("build_options", e2e_options);
+    scheduler_shell_mod.addImport("minish", minish);
+    const scheduler_shell_tests = b.addTest(.{ .root_module = scheduler_shell_mod });
+    const run_scheduler_shell_tests = addCapturedTestRun(
+        b,
+        captured_test_runner,
+        scheduler_shell_tests,
+    );
+    const scheduler_shell_step = b.step(
+        "test-scheduler-shell",
+        "Run public executable scheduler properties",
+    );
+    scheduler_shell_step.dependOn(&run_scheduler_shell_tests.step);
+    test_step.dependOn(&run_scheduler_shell_tests.step);
     // A filtered slice of the same suite, for iterating on one area without
     // paying for the whole run. Name fragments select tests by their fully
     // qualified name: `zig build test-kernels` covers the kernel, capability,
@@ -595,6 +640,7 @@ pub fn build(b: *std.Build) void {
         worker_test_mod.addOptions("http_fixture_options", http_fixture_options);
         worker_test_mod.addOptions("pkg_fixture_options", pkg_fixture_options);
         worker_test_mod.addOptions("archive_fixture_options", archive_fixture_options);
+        worker_test_mod.addOptions("process_fixture_options", process_fixture_options);
         worker_test_mod.link_libc = true;
         const worker_tests = b.addTest(.{
             .root_module = worker_test_mod,
@@ -628,6 +674,7 @@ pub fn build(b: *std.Build) void {
     tsan_mod.addOptions("http_fixture_options", http_fixture_options);
     tsan_mod.addOptions("pkg_fixture_options", pkg_fixture_options);
     tsan_mod.addOptions("archive_fixture_options", archive_fixture_options);
+    tsan_mod.addOptions("process_fixture_options", process_fixture_options);
     tsan_mod.link_libc = true;
     const tsan_tests = b.addTest(.{
         .root_module = tsan_mod,
@@ -639,6 +686,7 @@ pub fn build(b: *std.Build) void {
             "native:",
             "archive: unpack-tgz preserves existing destinations and has one concurrent winner",
             "pkg store: existing immutable entry wins concurrent install",
+            "process:",
         },
     });
     tsan_tests.linkage = runtime_linkage;
@@ -739,6 +787,7 @@ pub fn build(b: *std.Build) void {
         differential_mod,
         reference_mod,
         oom_mod,
+        scheduler_shell_mod,
     };
     const analysis_step = b.step(
         "check",
@@ -757,9 +806,10 @@ pub fn build(b: *std.Build) void {
     // source or family joins the tier automatically. Excluded by measured cost
     // or by ambient resource: `concurrency:`, `typed differential:`,
     // `dict-text:`, `module:`, `native:`, `fuzz:`, `acceptance:`,
-    // `line editor:` (PTY), `http:` (sockets), and `pkg sync:` / `pkg store:`
-    // (a Python TLS process). The package cases still compile through the
-    // analyzed root; process startup would exceed the measured fast budget.
+    // `line editor:` (PTY), `http:` (sockets), `process:` (child processes),
+    // and `pkg sync:` / `pkg store:` (a Python TLS process). Those cases still
+    // compile through the analyzed roots; process startup would exceed the
+    // measured fast budget.
     const precommit_tests = b.addTest(.{
         .root_module = test_mod,
         .filters = &.{

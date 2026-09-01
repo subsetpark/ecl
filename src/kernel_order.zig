@@ -172,7 +172,7 @@ fn typedOrder(comptime kind: value.HeapKind, left: heap.LeafElement(kind), right
             .eq,
         .leaf_f64 => if (left < right) .lt else if (left > right) .gt else .eq,
         .leaf_symbol => unreachable,
-        .generic_spine, .dict, .task, .module, .reserved_mask => unreachable,
+        .generic_spine, .dict, .task, .module, .port, .reserved_mask => unreachable,
     };
 }
 
@@ -728,7 +728,7 @@ fn typedValue(comptime kind: value.HeapKind, item: heap.LeafElement(kind)) Value
         .leaf_f64 => .{ .float = item },
         .leaf_char1, .leaf_char2, .leaf_char4 => .{ .char = @intCast(item) },
         .leaf_symbol => .{ .symbol = item },
-        .generic_spine, .dict, .task, .module, .reserved_mask => unreachable,
+        .generic_spine, .dict, .task, .module, .port, .reserved_mask => unreachable,
     };
 }
 

@@ -19,6 +19,7 @@ const pkg_store_module = @import("stdlib/pkg_store.zig");
 const io_module = @import("stdlib/io.zig");
 const dict_module = @import("stdlib/dict.zig");
 const rand_module = @import("stdlib/rand.zig");
+const proc_module = @import("stdlib/proc.zig");
 
 /// One complete transport for one embedded module. Each arm carries
 //  everything its publication path needs, so no loader has to repair a
@@ -70,6 +71,7 @@ const modules = [_]Module{
         .text = @embedFile("stdlib/table.ecl"),
     } } },
     .{ .name = "http", .entry = .{ .builtin = &http_module.words } },
+    .{ .name = "proc", .entry = .{ .builtin = &proc_module.words } },
     .{ .name = "archive", .entry = .{ .builtin = &archive_module.words } },
     .{ .name = "pkg.store", .entry = .{ .builtin = &pkg_store_module.words } },
     .{ .name = "rng", .entry = .{ .source = .{

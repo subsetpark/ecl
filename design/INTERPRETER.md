@@ -59,7 +59,8 @@ The main components are these:
 | Names and modules | Late binding, scopes, immutable module images, generations, and durable module state | `env.zig`, `modules.zig` |
 | Frame machine | Dispatch quotations, represent continuations, enforce application boundaries, and construct errors | `machine.zig` |
 | Bulk execution | Pervasive scalar semantics, typed flat loops, and guarded source-phrase recognition | `kernel_*.zig`, `kernels.zig`, `idioms.zig` |
-| Scheduler | Green units, structured task scopes, waits, cancellation, timers, and retirement service | `scheduler_core.zig`, `scheduler.zig`, `task_prims.zig` |
+| Scheduler | Green units, structured task scopes, task and external waits, cancellation, timers, external membership, and retirement service | `scheduler_core.zig`, `scheduler.zig`, `external.zig`, `task_prims.zig` |
+| Process ports | Process policy, POSIX process-group ownership, bounded pipe queues, and terminal publication | `process_port.zig`, `stdlib/proc.zig` |
 | Boundary layers | Embedded modules, native extensions, rendering, terminal safety, the REPL, and the CLI | `prelude.zig`, `stdlib.zig`, `native_*.zig`, `print.zig`, `console.zig`, `line_editor.zig`, `main.zig` |
 
 ### Position in the design space
@@ -99,7 +100,8 @@ That state owns:
 - the scheduler and root task scope; and
 - immutable or explicitly synchronized views of host services such as
   arguments, environment variables, standard input, output, diagnostics, TLS
-  trust, project configuration, and module search paths.
+  trust, project configuration, module search paths, and optional process
+  authority.
 
 Grouping these objects under one owner correlates every dependent lifetime.
 Values, module pins, source cursors, task cells, and deferred destruction all
@@ -139,12 +141,22 @@ use immutable host configuration. It cannot reach the raw Session, allocator,
 registry, scheduler lifecycle, or reclamation root. Observation, execution,
 mutation, and teardown are distinct authorities.
 
+Process execution follows the same rule. A Host may omit it, allow an exact
+set of absolute executables, or grant an explicit unrestricted policy together
+with cwd, environment, live-count, queue, and capture limits. Session
+construction copies that policy and mints one narrow `ProcessAccess`; having
+`std.Io` or filesystem access does not imply it. Units may ask Machine to
+perform a process operation, but cannot obtain the owner, scheduler scope,
+process cell, group identifier, or PID.
+
 ### Shutdown follows the ownership graph
 
-Session teardown first stops execution and closes task creation. It then
-retires root scopes, stacks, module generations, source provenance, and native
-pins in dependency order, draining bounded retirement while the owners needed
-by that work are still alive. The allocator is destroyed last.
+Session teardown first stops execution and closes task and external-resource
+creation. It then retires root scopes, including cancellation and direct-child
+reap for every process member, before destroying the process owner. Stacks,
+module generations, source provenance, and native pins follow in dependency
+order, with bounded retirement drained while the owners needed by that work
+are still alive. The allocator is destroyed last.
 
 That order is an architectural invariant. A pin, cursor, lease, callback, or
 task that releases through a domain cannot outlive the domain. Teardown must
@@ -250,9 +262,13 @@ provenance stays focused on diagnostics.
 
 The evaluator moves one closed `Value` union. The layout is fixed at 16 bytes:
 integers, floats, Unicode scalars, symbols, and word references are inline;
-lists, dictionaries, tasks, and module values carry kind-specific opaque
-handles. External code inspects handles through their public semantic surfaces.
+lists, dictionaries, tasks, module values, and ports carry kind-specific
+opaque handles. External code inspects handles through their public semantic surfaces.
 Allocation and mutation require capabilities issued by `heap.zig`.
+The precommit source audit compares this closed Zig tag universe exactly with
+the `ValueType` declarations in `design/formal/values.pant`; a kind added to
+either side without the other is rejected before the generated specification
+can drift.
 
 ### Lists have semantic unity and physical specialization
 
@@ -343,6 +359,17 @@ destruction in bounded slices.
 Executing Units receive a facade that can release, enqueue, and advance bounded
 retirement, but cannot blockingly destroy the Session's graph. This keeps a
 nominally constant scheduler turn from hiding an unbounded recursive free.
+
+Port reference lifetime is intentionally distinct from external-resource
+lifetime. A port heap object retains a process cell so terminal observations
+remain safe. A separate `ControllerGroup` issues one lease to every detached
+supervisor, pipe, timeout, and escalation thread and owns the spawning
+`TaskScope` membership. The final controller lease is released only after its
+thread's process-cell reference, and only that final release detaches scope
+membership. The process-cell reference count therefore describes value and
+readiness observation, never controller quiescence. Dropping the last port
+value cannot orphan a live child, retaining a port cannot detach it from scope
+closure, and Session teardown cannot overtake a detached controller thread.
 
 ## 4. Words, environments, and modules
 
@@ -730,6 +757,70 @@ Setup publishes the wait only after all registrations are ready. Completion,
 cancellation, and timeout contend through one arbitration state, so exactly one
 result owns delivery and cleanup.
 
+External readiness uses the same arbitration rather than a parallel scheduler.
+`external.zig` supplies nominal type-erased readiness and scope-membership
+handles whose callbacks state ownership on registration, failed registration,
+wake loss, cancellation, and detach. A process pipe or terminal event may wake
+a Unit, but scheduler code never imports process backend types. Detaching an
+external member first unlinks it, then releases every list, token, and
+cancellation-cursor reference and the member capability itself; only that
+node's final release decrements the scope's child count and publishes
+quiescence. Scheduler and allocator teardown therefore cannot overtake the
+cleanup performed by a membership callback.
+
+A native work driver that must wait carries its driver and park request in one
+exhaustive continuation variant. This is the external equivalent of the task
+join/work cleanup states: no side-band pointer can outlive the stack window or
+be deinitialized twice when readiness races cancellation. A deadline timeout
+clears any attached work driver before publishing its result.
+
+Process cells own exhaustive constructing, running, closing, terminal, and
+reaped phases, independently from a private process-group authority with
+`running`, `grace`, `kill_issued`, and `retired` variants. Only its nominal
+`OwnedGroup` payload contains the child handle and PGID. A transition consumes
+that payload before signaling; the grace timer carries only the matching
+escalation identity, and `kill_issued` and `retired` permit no further signal.
+Separate bounded stdin, stdout, and stderr queues let each pipe advance
+independently. A full queue pauses only its producer; a background wait
+publishes one immutable `Child.Term`. POSIX children are created as
+process-group leaders. The supervisor observes leader termination with
+`waitid(..., WNOWAIT)`, performs the consuming TERM-to-KILL cleanup, and reaps
+the leader only afterward. The waitable leader pins its PID slot, so the PGID
+cannot be reused while cleanup retains it. The controller group stops issuing
+leases at retirement and its final lease may detach scope membership only
+after the group state contains no process identity. Every controller lease
+owns a process-cell reference. Lease creation and release-count transitions
+are serialized by the process-cell mutex; a nonfinal lease drops its cell pin
+before publishing the smaller count, so the supervisor can observe the final
+count only after every other release completes. The final lease takes the
+membership token, drops its cell reference while the external-member reference
+still pins the cell, and only then detaches membership, so scope quiescence
+cannot race any controller release. Each cell owns a nominal live-process
+reservation; after every nonfinal controller has drained, the supervisor
+consumes that reservation under the cell lock before publishing the public
+reaped state. Observing termination therefore also closes the process owner's
+lifetime use. Reaping the group leader therefore
+cannot suppress group cleanup or publish scope quiescence while cleanup still
+owns process-group authority. Stdin independently transitions
+through `open`, `closing`, `closed_cleanly`, or `broken`; `proc.run` cannot
+publish success until it observes a terminal stdin state, so a late background
+EPIPE remains observable even after all input entered the bounded queue.
+Compound `proc.run` readiness uses an opaque process-owned cursor over an
+exhaustive set of stdout-terminal, stderr-terminal, input-terminal,
+I/O-failure, and reap edges. Polling returns only previously unobserved edges
+and consumes them under the process lock, while registration compares newly
+published edges with that cursor.
+Buffered bytes and writable queue capacity remain level-triggered. A failure
+published after polling still wakes the driver, while an observed failure
+cannot turn later pipe or reap readiness into a scheduler hot loop.
+
+Every `proc.write` call acquires its nominal write ticket when the call reaches
+the primitive, before resumable byte validation and encoding. A driver owns
+exactly that ticket until completion or abandonment, so later calls cannot
+overtake an earlier call while it yields. An optional process deadline stores
+presence separately from its duration: absence is unlimited, while a present
+zero duration expires immediately.
+
 ### Absolute deadlines govern timer races
 
 Timeouts capture an absolute deadline before lazy timer startup. Every
@@ -835,6 +926,12 @@ Their manifest, documentation, effects, provenance, and package requirements
 are validated before publication. Package discovery and synchronization are
 described in `ENVIRONMENT.md`; they enter the evaluator through the same module
 loader and bounded-driver conventions as other sources.
+
+`proc` is a builtin for the same reason as other host-backed modules: process
+creation and pipe readiness require authority and representation ECL source
+cannot possess. Its public values remain ordinary dictionaries, byte lists,
+and opaque ports. The convenience `run` word is a client of the same controller
+as streaming ports; it is not a blocking second implementation.
 
 ### The native ABI is narrow and transactional
 

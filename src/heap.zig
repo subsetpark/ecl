@@ -9,6 +9,7 @@ pub const Header = value.Header;
 pub const ListHandle = value.ListHandle;
 pub const DictHandle = value.DictHandle;
 pub const TaskHandle = value.TaskHandle;
+pub const PortHandle = value.PortHandle;
 pub const ModuleHandle = value.ModuleHandle;
 pub const HeapKind = value.HeapKind;
 /// A read capability over one list's unboxed payload.
@@ -357,6 +358,53 @@ test "module capability exhausts allocation failures" {
     );
 }
 
+/// A stand-in for one scheduler-owned external cell. The heap observes only
+/// the final reference release; it cannot reach process state or OS handles.
+const ProbePort = struct {
+    releases: usize = 0,
+
+    fn releasePort(self: *ProbePort) void {
+        self.releases += 1;
+    }
+};
+
+fn portCapabilityFailureProbe(allocator: std.mem.Allocator) !void {
+    var cleanup = testing.Cleanup.init(allocator);
+    defer cleanup.deinit();
+    var external: ProbePort = .{};
+    const item = try createPort(ProbePort, allocator, 41, &external);
+    try std.testing.expectEqual(HeapKind.port, kind(item.heapHeader().?));
+    try std.testing.expectEqual(@as(u64, 41), portStorage(item.port).identity);
+    try std.testing.expectEqual(&external, portPayload(ProbePort, item.port).?);
+    retainValue(item);
+    cleanup.releaseValue(item);
+    cleanup.capability().drain();
+    try std.testing.expectEqual(@as(usize, 0), external.releases);
+    cleanup.releaseValue(item);
+    cleanup.capability().drain();
+    try std.testing.expectEqual(@as(usize, 1), external.releases);
+}
+
+test "port payload projection rejects a foreign backend" {
+    const ForeignPort = struct {
+        fn releasePort(_: *@This()) void {}
+    };
+    var cleanup = testing.Cleanup.init(std.testing.allocator);
+    defer cleanup.deinit();
+    var foreign: ForeignPort = .{};
+    const item = try createPort(ForeignPort, std.testing.allocator, 1, &foreign);
+    defer cleanup.releaseValue(item);
+    try std.testing.expect(portPayload(ProbePort, item.port) == null);
+}
+
+test "port capability exhausts allocation failures" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        portCapabilityFailureProbe,
+        .{},
+    );
+}
+
 pub const DictPayload = value.DictPayload;
 
 /// Capabilities are nominal opaque pointers with the same address as Header.
@@ -364,6 +412,7 @@ pub const DictPayload = value.DictPayload;
 const InitializingList = opaque {};
 const InitializingDict = opaque {};
 const InitializingTask = opaque {};
+const InitializingPort = opaque {};
 const InitializingModule = opaque {};
 const UniqueHeader = opaque {};
 pub const UniqueList = opaque {};
@@ -450,6 +499,15 @@ pub const TaskStorage = struct {
     identity: u64,
     payload: *anyopaque,
     destroy: *const fn (std.mem.Allocator, *anyopaque) ?Value,
+};
+
+/// A port value owns one reference to an opaque external cell. The cell's
+/// semantic owner supplies `releasePort`; the heap never observes its backend
+/// state or confuses value-reference lifetime with live-resource lifetime.
+const PortStorage = struct {
+    identity: u64,
+    payload: *anyopaque,
+    release: *const fn (*anyopaque) void,
 };
 
 /// A module value owns exactly one release of an opaque semantic payload.
@@ -626,6 +684,10 @@ pub fn headerFromTask(handle: *TaskHandle) *Header {
     return @ptrCast(@alignCast(handle));
 }
 
+pub fn headerFromPort(handle: *PortHandle) *Header {
+    return @ptrCast(@alignCast(handle));
+}
+
 pub fn headerFromModule(handle: *ModuleHandle) *Header {
     return @ptrCast(@alignCast(handle));
 }
@@ -638,7 +700,7 @@ pub fn listKind(handle: *ListHandle) HeapKind {
     const result = kind(headerFromList(handle));
     std.debug.assert(switch (result) {
         .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => true,
-        .dict, .task, .module, .reserved_mask => false,
+        .dict, .task, .port, .module, .reserved_mask => false,
     });
     return result;
 }
@@ -668,6 +730,10 @@ fn publishDict(header: *InitializingDict) *DictHandle {
 }
 
 fn publishTask(header: *InitializingTask) *TaskHandle {
+    return @ptrCast(@alignCast(header));
+}
+
+fn publishPort(header: *InitializingPort) *PortHandle {
     return @ptrCast(@alignCast(header));
 }
 
@@ -736,7 +802,7 @@ fn allocObject(
         .leaf_char4 => try allocPayload(u32, allocator, capacity_value),
         .leaf_symbol => try allocPayload(u32, allocator, capacity_value),
         .dict => @ptrCast(try allocator.create(DictStorage)),
-        .task, .module => unreachable,
+        .task, .port, .module => unreachable,
         .reserved_mask => null,
     };
     return @ptrCast(@alignCast(&obj.header));
@@ -751,7 +817,7 @@ fn allocListHeader(
 ) error{OutOfMemory}!*InitializingList {
     std.debug.assert(switch (kind_value) {
         .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => true,
-        .dict, .task, .module, .reserved_mask => false,
+        .dict, .task, .port, .module, .reserved_mask => false,
     });
     const header = try allocObject(allocator, kind_value, len_value, capacity_value);
     object(header).provenance_namespace = provenance_namespace;
@@ -771,7 +837,7 @@ pub fn LeafElement(comptime kind_value: HeapKind) type {
         .leaf_char1 => u8,
         .leaf_char2 => u16,
         .leaf_char4, .leaf_symbol => u32,
-        .dict, .task, .module, .reserved_mask => @compileError("a list representation is required"),
+        .dict, .task, .port, .module, .reserved_mask => @compileError("a list representation is required"),
     };
 }
 
@@ -789,7 +855,7 @@ pub fn leafElementSize(kind_value: HeapKind) usize {
         .leaf_char1 => @sizeOf(u8),
         .leaf_char2 => @sizeOf(u16),
         .leaf_char4, .leaf_symbol => @sizeOf(u32),
-        .dict, .task, .module, .reserved_mask => 0,
+        .dict, .task, .port, .module, .reserved_mask => 0,
     };
 }
 
@@ -902,7 +968,7 @@ pub const AnyListBuilder = union(enum) {
             .leaf_char2 => .{ .char2 = try .initCode(allocator, len_value, capacity_value, provenance_namespace) },
             .leaf_char4 => .{ .char4 = try .initCode(allocator, len_value, capacity_value, provenance_namespace) },
             .leaf_symbol => .{ .symbol = try .initCode(allocator, len_value, capacity_value, provenance_namespace) },
-            .dict, .task, .module, .reserved_mask => unreachable,
+            .dict, .task, .port, .module, .reserved_mask => unreachable,
         };
     }
 
@@ -1033,6 +1099,71 @@ pub fn taskStorage(header: *const TaskHandle) *const TaskStorage {
     return @ptrCast(@alignCast(objectConst(headerFromTask(@constCast(header))).payload.?));
 }
 
+fn allocPortHeader(
+    allocator: std.mem.Allocator,
+    identity: u64,
+    payload: *anyopaque,
+    release: *const fn (*anyopaque) void,
+) error{OutOfMemory}!*InitializingPort {
+    const obj = try allocator.create(Object);
+    errdefer allocator.destroy(obj);
+    const storage = try allocator.create(PortStorage);
+    storage.* = .{ .identity = identity, .payload = payload, .release = release };
+    obj.* = .{
+        .header = HeaderImpl.init(.port, identity),
+        .capacity = 0,
+        .payload = @ptrCast(storage),
+        .provenance_namespace = .none,
+        .next_destroy = null,
+        .destroy_index = 0,
+    };
+    return @ptrCast(@alignCast(&obj.header));
+}
+
+fn PortReleaseAdapter(comptime Payload: type) type {
+    return struct {
+        fn release(raw: *anyopaque) void {
+            const payload: *Payload = @ptrCast(@alignCast(raw));
+            Payload.releasePort(payload);
+        }
+    };
+}
+
+/// Wraps one already-owned external-cell reference in an opaque port value.
+/// On failure the caller retains the reference; on success final value release
+/// calls `releasePort` exactly once.
+pub fn createPort(
+    comptime Payload: type,
+    allocator: std.mem.Allocator,
+    identity: u64,
+    payload: *Payload,
+) error{OutOfMemory}!Value {
+    const initializing = try allocPortHeader(
+        allocator,
+        identity,
+        @ptrCast(payload),
+        PortReleaseAdapter(Payload).release,
+    );
+    return .{ .port = publishPort(initializing) };
+}
+
+fn portStorage(header: *const PortHandle) *const PortStorage {
+    return @ptrCast(@alignCast(objectConst(headerFromPort(@constCast(header))).payload.?));
+}
+
+pub fn portIdentity(header: *const PortHandle) u64 {
+    return portStorage(header).identity;
+}
+
+/// Validated typed projection for the backend that created a port. Matching
+/// the release adapter prevents an unrelated opaque port kind from being
+/// reinterpreted merely because both payloads erase to `anyopaque`.
+pub fn portPayload(comptime Payload: type, header: *const PortHandle) ?*Payload {
+    const storage = portStorage(header);
+    if (storage.release != PortReleaseAdapter(Payload).release) return null;
+    return @ptrCast(@alignCast(storage.payload));
+}
+
 fn allocModuleHeader(
     allocator: std.mem.Allocator,
     payload: *anyopaque,
@@ -1153,7 +1284,7 @@ pub fn writeUniqueList(list_header: *UniqueList, index: usize, item: Value) void
         .leaf_char2 => payloadItems(u16, raw)[index] = @intCast(item.char),
         .leaf_char4 => payloadItems(u32, raw)[index] = item.char,
         .leaf_symbol => payloadItems(u32, raw)[index] = item.symbol,
-        .dict, .task, .module, .reserved_mask => unreachable,
+        .dict, .task, .port, .module, .reserved_mask => unreachable,
     }
 }
 
@@ -1182,6 +1313,7 @@ pub fn retainValue(item: Value) void {
         .list => |header| incRef(header),
         .dict => |header| incRef(header),
         .task => |header| incRef(header),
+        .port => |header| incRef(header),
         .module => |header| incRef(header),
     }
 }
@@ -1689,6 +1821,13 @@ pub const ReleaseDomain = struct {
                 obj.destroy_index = 1;
                 const storage: *TaskStorage = @constCast(taskStorage(@ptrCast(@alignCast(header))));
                 if (storage.destroy(self.allocator, storage.payload)) |child| self.releaseValue(child);
+                return true;
+            },
+            .port => {
+                if (obj.destroy_index != 0) return false;
+                obj.destroy_index = 1;
+                const storage: *PortStorage = @constCast(portStorage(@ptrCast(@alignCast(header))));
+                storage.release(storage.payload);
                 return true;
             },
             // The image's own graph is user-sized, so the callback only drops
@@ -2306,6 +2445,10 @@ fn freePayload(allocator: std.mem.Allocator, header: *Header) void {
             const storage: *TaskStorage = @constCast(taskStorage(@ptrCast(@alignCast(header))));
             allocator.destroy(storage);
         },
+        .port => {
+            const storage: *PortStorage = @constCast(portStorage(@ptrCast(@alignCast(header))));
+            allocator.destroy(storage);
+        },
         .module => {
             const storage: *ModuleStorage = @constCast(moduleStorage(@ptrCast(@alignCast(header))));
             allocator.destroy(storage);
@@ -2361,7 +2504,7 @@ pub fn replaceBuffer(
         .leaf_char1 => resizePayload(u8, allocator, raw, new_capacity),
         .leaf_char2 => resizePayload(u16, allocator, raw, new_capacity),
         .leaf_char4, .leaf_symbol => resizePayload(u32, allocator, raw, new_capacity),
-        .dict, .task, .module, .reserved_mask => unreachable,
+        .dict, .task, .port, .module, .reserved_mask => unreachable,
     };
 }
 

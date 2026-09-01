@@ -422,6 +422,7 @@ fn expectValueEquivalent(left: ecl.value.Value, right: ecl.value.Value) !void {
         .word => |item| try std.testing.expectEqual(item, right.word),
         .task => |header| try std.testing.expectEqual(header, right.task),
         .module => |header| try std.testing.expectEqual(header, right.module),
+        .port => |header| try std.testing.expectEqual(header, right.port),
         .list => |header| {
             try std.testing.expectEqual(header.length(), right.list.length());
             for (0..@as(usize, @intCast(header.length()))) |index| {

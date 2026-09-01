@@ -287,3 +287,40 @@ test "scheduler shell property: generated public waits always quiesce" {
         .max_shrink_attempts = 12,
     });
 }
+
+test "scheduler shell property: process waits cancel and quiesce" {
+    const process_exe = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        build_options.process_exe,
+        allocator,
+    );
+    defer allocator.free(process_exe);
+    const source = try std.fmt.allocPrint(
+        allocator,
+        "'proc ('spawn 'wait) import " ++
+            "[] ({{'executable \"{s}\" 'args (\"block\")}} spawn wait) @spawn " ++
+            "dup 20 await-for pop dup cancel await pop",
+        .{process_exe},
+    );
+    defer allocator.free(source);
+    for ([_][]const u8{ "1", "8" }) |workers| {
+        var environment = std.process.Environ.Map.init(allocator);
+        defer environment.deinit();
+        try environment.put("ECL_WORKERS", workers);
+        var result = cli.runOptions(.{
+            .argv = &.{ build_options.ecl_exe, source },
+            .environ_map = &environment,
+            .timeout = .{
+                .duration = .{
+                    .clock = .awake,
+                    .raw = .fromSeconds(scenario_timeout_seconds),
+                },
+            },
+        }) catch |err| switch (err) {
+            error.Timeout => return error.SchedulerLivenessFailure,
+            else => |other| return other,
+        };
+        defer result.deinit();
+        try result.expect(.{ .exit_code = 0, .stdout = "", .stderr = "" });
+    }
+}

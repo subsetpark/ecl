@@ -515,7 +515,7 @@ const EmitDriver = struct {
                 try self.out.append(self.allocator, '{');
                 try self.frames.append(self.allocator, .{ .object = .{ .item = item, .index = 0 } });
             },
-            .char, .word, .task, .module => return evaluator.fail(
+            .char, .word, .task, .module, .port => return evaluator.fail(
                 .type,
                 "json.emit expects numbers, strings, lists, dicts, and the JSON literal symbols",
             ),

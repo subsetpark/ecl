@@ -408,12 +408,12 @@ const AtomBuilder = struct {
     classification: ?lexer.Classification = null,
     symbol: ?lexer.SymbolCursor = null,
     inserter: ?intern.InternInsertionCursor = null,
-    task_index: usize = 0,
+    marker_index: usize = 0,
     /// Runtime capabilities print an unreadable marker, and this is the one
     /// place source recognizes them so every capability rejects identically.
     /// `<module>` is one exact spelling; `<task:N>` needs its digits scanned,
     /// which is why recognition is a cursor step rather than a comparison.
-    marker: enum { none, module, task_digits },
+    marker: enum { none, module, task_digits, port_digits },
 
     fn init(token: Token, quoted: bool, word_scope: u32) AtomBuilder {
         return .{
@@ -427,6 +427,9 @@ const AtomBuilder = struct {
             else if (std.mem.startsWith(u8, token.bytes, "<task:") and
                 token.bytes.len >= "<task:0>".len and token.bytes[token.bytes.len - 1] == '>')
                 .task_digits
+            else if (std.mem.startsWith(u8, token.bytes, "<port:") and
+                token.bytes.len >= "<port:0>".len and token.bytes[token.bytes.len - 1] == '>')
+                .port_digits
             else
                 .none,
         };
@@ -438,18 +441,14 @@ const AtomBuilder = struct {
                 diag.set(self.token.span, "module display markers are runtime-only and cannot be parsed");
                 return error.Parse;
             },
-            .task_digits => {
-                const end = self.token.bytes.len - 1;
-                if (self.task_index == 0) self.task_index = 6;
-                if (self.task_index != end) {
-                    if (!std.ascii.isDigit(self.token.bytes[self.task_index])) {
-                        self.marker = .none;
-                    } else self.task_index += 1;
-                    return .pending;
-                }
-                diag.set(self.token.span, "task display markers are runtime-only and cannot be parsed");
-                return error.Parse;
-            },
+            .task_digits => return self.advanceMarkerDigits(
+                diag,
+                "task display markers are runtime-only and cannot be parsed",
+            ),
+            .port_digits => return self.advanceMarkerDigits(
+                diag,
+                "port display markers are runtime-only and cannot be parsed",
+            ),
         }
         if (!self.quoted and self.classification == null) {
             if (self.classifier == null) self.classifier = .init(self.token.bytes);
@@ -518,6 +517,23 @@ const AtomBuilder = struct {
                     .{ .word = .{ .name = id, .scope = self.word_scope } },
             },
         };
+    }
+
+    fn advanceMarkerDigits(
+        self: *AtomBuilder,
+        diag: *reader.Diag,
+        message: []const u8,
+    ) error{Parse}!ScalarProgress {
+        const end = self.token.bytes.len - 1;
+        if (self.marker_index == 0) self.marker_index = 6;
+        if (self.marker_index != end) {
+            if (!std.ascii.isDigit(self.token.bytes[self.marker_index])) {
+                self.marker = .none;
+            } else self.marker_index += 1;
+            return .pending;
+        }
+        diag.set(self.token.span, message);
+        return error.Parse;
     }
 };
 
