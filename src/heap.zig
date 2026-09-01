@@ -375,6 +375,7 @@ fn portCapabilityFailureProbe(allocator: std.mem.Allocator) !void {
     const item = try createPort(ProbePort, allocator, 41, &external);
     try std.testing.expectEqual(HeapKind.port, kind(item.heapHeader().?));
     try std.testing.expectEqual(@as(u64, 41), portStorage(item.port).identity);
+    try std.testing.expectEqual(&external, portPayload(ProbePort, item.port).?);
     retainValue(item);
     cleanup.releaseValue(item);
     cleanup.capability().drain();
@@ -382,6 +383,18 @@ fn portCapabilityFailureProbe(allocator: std.mem.Allocator) !void {
     cleanup.releaseValue(item);
     cleanup.capability().drain();
     try std.testing.expectEqual(@as(usize, 1), external.releases);
+}
+
+test "port payload projection rejects a foreign backend" {
+    const ForeignPort = struct {
+        fn releasePort(_: *@This()) void {}
+    };
+    var cleanup = testing.Cleanup.init(std.testing.allocator);
+    defer cleanup.deinit();
+    var foreign: ForeignPort = .{};
+    const item = try createPort(ForeignPort, std.testing.allocator, 1, &foreign);
+    defer cleanup.releaseValue(item);
+    try std.testing.expect(portPayload(ProbePort, item.port) == null);
 }
 
 test "port capability exhausts allocation failures" {
@@ -1141,9 +1154,9 @@ pub fn portStorage(header: *const PortHandle) *const PortStorage {
 /// Validated typed projection for the backend that created a port. Matching
 /// the release adapter prevents an unrelated opaque port kind from being
 /// reinterpreted merely because both payloads erase to `anyopaque`.
-pub fn portPayload(comptime Payload: type, header: *const PortHandle) *Payload {
+pub fn portPayload(comptime Payload: type, header: *const PortHandle) ?*Payload {
     const storage = portStorage(header);
-    std.debug.assert(storage.release == PortReleaseAdapter(Payload).release);
+    if (storage.release != PortReleaseAdapter(Payload).release) return null;
     return @ptrCast(@alignCast(storage.payload));
 }
 

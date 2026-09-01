@@ -340,7 +340,7 @@ pub const ProcessOwner = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.ScopeClosing => return error.ScopeClosing,
         };
-        cell.membership = membership;
+        cell.controllers.membership = membership;
 
         cell.start() catch return error.Io;
         started = true;
@@ -465,6 +465,69 @@ const WriteNode = struct {
     active: bool = false,
 };
 
+const InputState = enum {
+    open,
+    closing,
+    closed_cleanly,
+    broken,
+
+    fn terminal(self: InputState) bool {
+        return switch (self) {
+            .open, .closing => false,
+            .closed_cleanly, .broken => true,
+        };
+    }
+};
+
+pub const InputTerminal = enum {
+    pending,
+    closed_cleanly,
+    broken,
+};
+
+/// Controller leases cover detached threads only. The embedded group owns the
+/// scope membership until its last lease is released; port/readiness refs use
+/// the independent ProcessCell refcount.
+const ControllerGroup = struct {
+    leases: std.atomic.Value(usize) = .init(1),
+    membership: ?external.ScopeMembership = null,
+
+    fn initialLease(self: *ControllerGroup) ControllerLease {
+        return .{ .group = self };
+    }
+
+    fn tryLease(self: *ControllerGroup) ?ControllerLease {
+        var observed = self.leases.load(.acquire);
+        while (observed != 0) {
+            if (observed == std.math.maxInt(usize)) @panic("controller lease overflow");
+            if (self.leases.cmpxchgWeak(observed, observed + 1, .acquire, .acquire)) |actual| {
+                observed = actual;
+            } else return .{ .group = self };
+        }
+        return null;
+    }
+
+    fn release(self: *ControllerGroup) void {
+        const old = self.leases.fetchSub(1, .release);
+        std.debug.assert(old != 0);
+        if (old != 1) return;
+        _ = self.leases.load(.acquire);
+        const membership = self.membership;
+        self.membership = null;
+        if (membership) |token| detachMembership(token);
+    }
+};
+
+const ControllerLease = struct {
+    group: ?*ControllerGroup,
+
+    fn release(self: *ControllerLease) void {
+        const group = self.group orelse return;
+        self.group = null;
+        group.release();
+    }
+};
+
 pub const WritePermit = opaque {};
 
 fn writeNode(permit: *WritePermit) *WriteNode {
@@ -514,12 +577,11 @@ pub const ProcessCell = struct {
     child: ?std.process.Child,
     pgid: std.posix.pid_t,
     phase: ProcessPhase = .constructing,
-    membership: ?external.ScopeMembership = null,
+    controllers: ControllerGroup = .{},
     stdin: Ring,
     stdout: Ring,
     stderr: Ring,
-    input_closed: bool = false,
-    input_broken: bool = false,
+    input: InputState = .open,
     stdin_done: bool = false,
     stdout_done: bool = false,
     stderr_done: bool = false,
@@ -533,7 +595,6 @@ pub const ProcessCell = struct {
     ready_last: ?*ReadyWait = null,
     timeout_done: std.Io.Event = .unset,
     timed_out: bool = false,
-    escalation_active: bool = false,
 
     fn create(
         owner: *ProcessOwner,
@@ -564,7 +625,8 @@ pub const ProcessCell = struct {
     fn start(self: *ProcessCell) error{Io}!void {
         self.phase = .running;
         self.retainRef();
-        const thread = std.Thread.spawn(.{}, supervisorThreadMain, .{self}) catch {
+        const lease = self.controllers.initialLease();
+        const thread = std.Thread.spawn(.{}, supervisorThreadMain, .{ self, lease }) catch {
             self.releaseRef();
             return error.Io;
         };
@@ -577,11 +639,7 @@ pub const ProcessCell = struct {
         child.kill(self.io);
         self.phase = .{ .reaped = .{ .unknown = 0 } };
         self.owner.releaseLive();
-        if (self.membership) |membership| {
-            var owned = membership;
-            self.membership = null;
-            owned.detach();
-        }
+        self.controllers.release();
     }
 
     fn retainRef(self: *ProcessCell) void {
@@ -623,21 +681,17 @@ pub const ProcessCell = struct {
     }
 
     pub fn cancelExternalMember(self: *ProcessCell) void {
+        var lease = self.controllers.tryLease() orelse return;
         std.Io.Threaded.mutexLock(&self.mutex);
         self.discard_outputs = true;
-        self.escalation_active = true;
         self.changed.broadcast(blockingIo());
         std.Io.Threaded.mutexUnlock(&self.mutex);
         self.terminate();
         self.retainRef();
-        const thread = std.Thread.spawn(.{}, escalationMain, .{self}) catch {
-            std.Io.Threaded.mutexLock(&self.mutex);
-            self.escalation_active = false;
-            const detached_membership = if (self.phase == .reaped) self.takeMembershipLocked() else null;
-            std.Io.Threaded.mutexUnlock(&self.mutex);
+        const thread = std.Thread.spawn(.{}, escalationMain, .{ self, lease }) catch {
             self.kill();
-            if (detached_membership) |membership| detachMembership(membership);
             self.releaseRef();
+            lease.release();
             return;
         };
         thread.detach();
@@ -695,7 +749,7 @@ pub const ProcessCell = struct {
         std.debug.assert(node.cell == self and node.linked);
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        if (self.input_closed or self.input_broken or self.io_failed) return .io;
+        if (self.input != .open or self.io_failed) return .io;
         if (!node.active or self.stdin.free() == 0) return .pending;
         const count = @min(bytes.len, self.stdin.free());
         self.stdin.push(bytes[0..count]);
@@ -800,10 +854,20 @@ pub const ProcessCell = struct {
 
     pub fn closeInput(self: *ProcessCell) void {
         std.Io.Threaded.mutexLock(&self.mutex);
-        self.input_closed = true;
+        if (self.input == .open) self.input = .closing;
         self.changed.broadcast(blockingIo());
         self.notifyReadyLocked();
         std.Io.Threaded.mutexUnlock(&self.mutex);
+    }
+
+    pub fn inputTerminal(self: *ProcessCell) InputTerminal {
+        std.Io.Threaded.mutexLock(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        return switch (self.input) {
+            .open, .closing => .pending,
+            .closed_cleanly => .closed_cleanly,
+            .broken => .broken,
+        };
     }
 
     pub fn terminate(self: *ProcessCell) void {
@@ -815,10 +879,22 @@ pub const ProcessCell = struct {
     }
 
     pub fn armTimeout(self: *ProcessCell, milliseconds: u64) error{Io}!void {
-        std.debug.assert(milliseconds != 0);
+        if (milliseconds == 0) {
+            std.Io.Threaded.mutexLock(&self.mutex);
+            switch (self.phase) {
+                .constructing, .running => self.timed_out = true,
+                .closing, .terminal, .reaped => {},
+            }
+            const expired = self.timed_out;
+            std.Io.Threaded.mutexUnlock(&self.mutex);
+            if (expired) self.kill();
+            return;
+        }
+        var lease = self.controllers.tryLease() orelse return;
         self.retainRef();
-        const thread = std.Thread.spawn(.{}, timeoutThreadMain, .{ self, milliseconds }) catch {
+        const thread = std.Thread.spawn(.{}, timeoutThreadMain, .{ self, milliseconds, lease }) catch {
             self.releaseRef();
+            lease.release();
             return error.Io;
         };
         thread.detach();
@@ -844,7 +920,7 @@ pub const ProcessCell = struct {
             },
             .terminal, .reaped => {},
         }
-        self.input_closed = true;
+        if (self.input == .open) self.input = .closing;
         self.discard_outputs = true;
         self.changed.broadcast(blockingIo());
         self.notifyReadyLocked();
@@ -868,12 +944,11 @@ pub const ProcessCell = struct {
             const pointer = key & readiness_pointer_mask;
             const write_ready = if (pointer != 0) ready: {
                 const node: *WriteNode = @ptrFromInt(pointer);
-                break :ready !node.linked or node.active or self.input_closed or
-                    self.input_broken or self.io_failed;
+                break :ready !node.linked or node.active or self.input != .open or self.io_failed;
             } else false;
             return self.stdout.len != 0 or self.stderr.len != 0 or
                 self.stdout_done or self.stderr_done or self.phase == .reaped or
-                write_ready;
+                self.input.terminal() or write_ready;
         }
         return switch (key) {
             readiness_stdout => self.stdout.len != 0 or self.stdout_done,
@@ -881,7 +956,7 @@ pub const ProcessCell = struct {
             readiness_terminal => self.phase == .reaped,
             else => {
                 const node: *WriteNode = @ptrFromInt(key);
-                return !node.linked or node.active or self.input_closed or self.input_broken or self.io_failed;
+                return !node.linked or node.active or self.input != .open or self.io_failed;
             },
         };
     }
@@ -922,7 +997,6 @@ pub const ProcessCell = struct {
     }
 
     fn supervisorMain(self: *ProcessCell) void {
-        defer self.releaseRef();
         var child = self.child.?;
         self.child = null;
         const stdin_file = child.stdin.?;
@@ -949,7 +1023,7 @@ pub const ProcessCell = struct {
 
         std.Io.Threaded.mutexLock(&self.mutex);
         self.phase = .{ .terminal = translated };
-        self.input_closed = true;
+        if (self.input == .open) self.input = .closing;
         self.changed.broadcast(blockingIo());
         self.notifyReadyLocked();
         while (!self.stdin_done or !self.stdout_done or !self.stderr_done)
@@ -957,17 +1031,9 @@ pub const ProcessCell = struct {
         self.phase = .{ .reaped = translated };
         self.timeout_done.set(blockingIo());
         self.notifyReadyLocked();
-        const detached_membership = if (!self.escalation_active) self.takeMembershipLocked() else null;
         std.Io.Threaded.mutexUnlock(&self.mutex);
 
         self.owner.releaseLive();
-        if (detached_membership) |membership| detachMembership(membership);
-    }
-
-    fn takeMembershipLocked(self: *ProcessCell) ?external.ScopeMembership {
-        const membership = self.membership;
-        self.membership = null;
-        return membership;
     }
 
     const IoThread = enum { stdin, stdout, stderr };
@@ -979,9 +1045,11 @@ pub const ProcessCell = struct {
         kind: IoThread,
     ) error{Io}!void {
         _ = kind;
+        var lease = self.controllers.tryLease().?;
         self.retainRef();
-        const thread = std.Thread.spawn(.{}, function, .{ self, file }) catch {
+        const thread = std.Thread.spawn(.{}, function, .{ self, file, lease }) catch {
             self.releaseRef();
+            lease.release();
             return error.Io;
         };
         thread.detach();
@@ -992,7 +1060,10 @@ pub const ProcessCell = struct {
         std.Io.Threaded.mutexLock(&self.mutex);
         self.io_failed = true;
         switch (kind) {
-            .stdin => self.stdin_done = true,
+            .stdin => {
+                self.stdin_done = true;
+                self.input = .broken;
+            },
             .stdout => self.stdout_done = true,
             .stderr => self.stderr_done = true,
         }
@@ -1003,14 +1074,14 @@ pub const ProcessCell = struct {
     }
 
     fn stdinMain(self: *ProcessCell, file: std.Io.File) void {
-        defer self.releaseRef();
         defer file.close(self.io);
+        var broken = false;
         var block: [4096]u8 = undefined;
         while (true) {
             std.Io.Threaded.mutexLock(&self.mutex);
-            while (self.stdin.len == 0 and !self.input_closed and !self.input_broken)
+            while (self.stdin.len == 0 and self.input == .open)
                 self.changed.waitUncancelable(blockingIo(), &self.mutex);
-            if (self.stdin.len == 0 and (self.input_closed or self.input_broken)) {
+            if (self.stdin.len == 0 and self.input != .open) {
                 std.Io.Threaded.mutexUnlock(&self.mutex);
                 break;
             }
@@ -1018,14 +1089,12 @@ pub const ProcessCell = struct {
             self.notifyReadyLocked();
             std.Io.Threaded.mutexUnlock(&self.mutex);
             writeFileAll(file, self.io, block[0..count]) catch {
-                std.Io.Threaded.mutexLock(&self.mutex);
-                self.input_broken = true;
-                self.notifyReadyLocked();
-                std.Io.Threaded.mutexUnlock(&self.mutex);
+                broken = true;
                 break;
             };
         }
         std.Io.Threaded.mutexLock(&self.mutex);
+        self.input = if (broken) .broken else .closed_cleanly;
         self.stdin_done = true;
         self.changed.broadcast(blockingIo());
         self.notifyReadyLocked();
@@ -1041,7 +1110,6 @@ pub const ProcessCell = struct {
     }
 
     fn outputMain(self: *ProcessCell, file: std.Io.File, stream: Stream) void {
-        defer self.releaseRef();
         defer file.close(self.io);
         var block: [4096]u8 = undefined;
         while (true) {
@@ -1081,7 +1149,9 @@ pub const ProcessCell = struct {
     }
 };
 
-fn timeoutThreadMain(cell: *ProcessCell, milliseconds: u64) void {
+fn timeoutThreadMain(cell: *ProcessCell, milliseconds: u64, lease_value: ControllerLease) void {
+    var lease = lease_value;
+    defer lease.release();
     defer cell.releaseRef();
     const duration: std.Io.Clock.Duration = .{
         .raw = .fromMilliseconds(@intCast(milliseconds)),
@@ -1102,7 +1172,9 @@ fn timeoutThreadMain(cell: *ProcessCell, milliseconds: u64) void {
     };
 }
 
-fn escalationMain(cell: *ProcessCell) void {
+fn escalationMain(cell: *ProcessCell, lease_value: ControllerLease) void {
+    var lease = lease_value;
+    defer lease.release();
     defer cell.releaseRef();
     const duration: std.Io.Clock.Duration = .{
         .raw = .fromMilliseconds(250),
@@ -1112,11 +1184,6 @@ fn escalationMain(cell: *ProcessCell) void {
         error.Canceled => {},
     };
     cell.kill();
-    std.Io.Threaded.mutexLock(&cell.mutex);
-    cell.escalation_active = false;
-    const detached_membership = if (cell.phase == .reaped) cell.takeMembershipLocked() else null;
-    std.Io.Threaded.mutexUnlock(&cell.mutex);
-    if (detached_membership) |membership| detachMembership(membership);
 }
 
 fn detachMembership(membership: external.ScopeMembership) void {
@@ -1124,19 +1191,31 @@ fn detachMembership(membership: external.ScopeMembership) void {
     owned.detach();
 }
 
-fn supervisorThreadMain(cell: *ProcessCell) void {
+fn supervisorThreadMain(cell: *ProcessCell, lease_value: ControllerLease) void {
+    var lease = lease_value;
+    defer lease.release();
+    defer cell.releaseRef();
     cell.supervisorMain();
 }
 
-fn stdinThreadMain(cell: *ProcessCell, file: std.Io.File) void {
+fn stdinThreadMain(cell: *ProcessCell, file: std.Io.File, lease_value: ControllerLease) void {
+    var lease = lease_value;
+    defer lease.release();
+    defer cell.releaseRef();
     cell.stdinMain(file);
 }
 
-fn stdoutThreadMain(cell: *ProcessCell, file: std.Io.File) void {
+fn stdoutThreadMain(cell: *ProcessCell, file: std.Io.File, lease_value: ControllerLease) void {
+    var lease = lease_value;
+    defer lease.release();
+    defer cell.releaseRef();
     cell.stdoutMain(file);
 }
 
-fn stderrThreadMain(cell: *ProcessCell, file: std.Io.File) void {
+fn stderrThreadMain(cell: *ProcessCell, file: std.Io.File, lease_value: ControllerLease) void {
+    var lease = lease_value;
+    defer lease.release();
+    defer cell.releaseRef();
     cell.stderrMain(file);
 }
 

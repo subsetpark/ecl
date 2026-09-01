@@ -1,5 +1,7 @@
 //! Build-time source architecture audit.
 const std = @import("std");
+const source_audit_options = @import("source_audit_options");
+const ValueTag = @import("../value.zig").Tag;
 
 const SourceGroup = struct {
     production: bool,
@@ -224,7 +226,59 @@ pub fn main(init: std.process.Init) !void {
     failed = auditPreludeLayout() or failed;
     failed = auditUnitConstructorSpelling() or failed;
     failed = auditDynamicContextSpelling() or failed;
+    failed = auditFormalValueKinds() or failed;
     if (failed) return error.SourceAuditFailed;
+}
+
+fn auditFormalValueKinds() bool {
+    const source = source_audit_options.formal_values;
+    const head_end = std.mem.indexOf(u8, source, "\n---") orelse {
+        std.log.err("formal value kinds: first chapter has no body separator", .{});
+        return true;
+    };
+    const fields = @typeInfo(ValueTag).@"enum".fields;
+    var seen = [_]bool{false} ** fields.len;
+    var declaration_count: usize = 0;
+    var lines = std.mem.splitScalar(u8, source[0..head_end], '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        const suffix = " => ValueType.";
+        if (!std.mem.endsWith(u8, line, suffix)) continue;
+        const declaration = line[0 .. line.len - suffix.len];
+        if (std.mem.indexOfAny(u8, declaration, " \t") != null or
+            !std.mem.endsWith(u8, declaration, "-type"))
+            continue;
+        declaration_count += 1;
+        var matched = false;
+        inline for (fields, 0..) |field, index| {
+            const expected = field.name ++ "-type";
+            if (std.mem.eql(u8, declaration, expected)) {
+                if (seen[index]) {
+                    std.log.err("formal value kinds: duplicate declaration `{s}`", .{declaration});
+                    return true;
+                }
+                seen[index] = true;
+                matched = true;
+            }
+        }
+        if (!matched) {
+            std.log.err("formal value kinds: `{s}` has no value.Tag member", .{declaration});
+            return true;
+        }
+    }
+    var failed = declaration_count != fields.len;
+    inline for (fields, 0..) |field, index| if (!seen[index]) {
+        std.log.err("formal value kinds: value.Tag.{s} has no `{s}-type` declaration", .{
+            field.name,
+            field.name,
+        });
+        failed = true;
+    };
+    if (declaration_count != fields.len) std.log.err(
+        "formal value kinds: found {d} declarations for {d} value.Tag members",
+        .{ declaration_count, fields.len },
+    );
+    return failed;
 }
 
 fn auditSourceCoverage(init: std.process.Init) bool {

@@ -158,6 +158,35 @@ test "e2e: proc run captures split output termination timeout and overflow" {
         .stderr_contains = &.{ "'kind 'timeout", "process deadline expired" },
     });
 
+    const immediate_deadline = try std.fmt.allocPrint(
+        allocator,
+        "'proc ('run) import {{'executable \"{s}\" " ++
+            "'args (\"block\") 'timeout-ms 0}} run",
+        .{process_exe},
+    );
+    defer allocator.free(immediate_deadline);
+    var immediately_timed_out = try cli.run(&.{ build_options.ecl_exe, immediate_deadline });
+    defer immediately_timed_out.deinit();
+    try immediately_timed_out.expect(.{
+        .exit_code = 1,
+        .stderr_contains = &.{ "'kind 'timeout", "process deadline expired" },
+    });
+
+    const broken_stdin = try std.fmt.allocPrint(
+        allocator,
+        "'proc ('run) import {{'executable \"{s}\" " ++
+            "'args (\"close-stdin\")}} 'stdin [1] 200000 take pair " ++
+            "dict.from-flat dict.merge run",
+        .{process_exe},
+    );
+    defer allocator.free(broken_stdin);
+    var broken = try cli.run(&.{ build_options.ecl_exe, broken_stdin });
+    defer broken.deinit();
+    try broken.expect(.{
+        .exit_code = 1,
+        .stderr_contains = &.{ "'kind 'io", "process pipe operation failed" },
+    });
+
     const limited = try std.fmt.allocPrint(
         allocator,
         "'proc ('run) import {{'executable \"{s}\" " ++
@@ -171,6 +200,24 @@ test "e2e: proc run captures split output termination timeout and overflow" {
         .exit_code = 1,
         .stderr_contains = &.{ "'kind 'overflow", "capture limit exceeded" },
     });
+}
+
+test "e2e: proc write serializes at scheduler call arrival" {
+    const process_exe = try absoluteProcessExe();
+    defer allocator.free(process_exe);
+    const program = try std.fmt.allocPrint(
+        allocator,
+        "'proc ('spawn 'write 'close-input 'read-stdout 'wait) import " ++
+            "{{'executable \"{s}\" 'args (\"first-byte\")}} spawn 'p set " ++
+            "[] (p [1] 200000 take write) @spawn 'first set " ++
+            "[] ((1) () while) @spawn dup 1 await-for pop dup cancel await pop " ++
+            "p [2] write first await pop p close-input p 1 read-stdout [1] match? p wait pop",
+        .{process_exe},
+    );
+    defer allocator.free(program);
+    var result = try cli.run(&.{ build_options.ecl_exe, program });
+    defer result.deinit();
+    try result.expect(.{ .exit_code = 0, .stdout = "1\n", .stderr = "" });
 }
 
 test "e2e: proc scope cancellation kills and reaps the process group" {
@@ -230,6 +277,7 @@ fn expectProcessGone(pid: std.posix.pid_t) !void {
             error.PermissionDenied => {},
             else => |unexpected| return unexpected,
         };
+        if (try processIsZombie(pid)) return;
         const pause: std.Io.Clock.Duration = .{
             .clock = .awake,
             .raw = .fromMilliseconds(5),
@@ -237,6 +285,21 @@ fn expectProcessGone(pid: std.posix.pid_t) !void {
         try pause.sleep(io);
     }
     return error.DescendantStillRunning;
+}
+
+fn processIsZombie(pid: std.posix.pid_t) !bool {
+    if (builtin.os.tag != .linux) return false;
+    var path_buffer: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "/proc/{d}/stat", .{pid});
+    const stat = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(4096)) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    defer allocator.free(stat);
+    const command_end = std.mem.lastIndexOfScalar(u8, stat, ')') orelse return error.InvalidProcessStat;
+    if (command_end + 2 >= stat.len or stat[command_end + 1] != ' ')
+        return error.InvalidProcessStat;
+    return stat[command_end + 2] == 'Z';
 }
 
 fn writeTestProject(

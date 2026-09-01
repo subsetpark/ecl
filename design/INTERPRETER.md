@@ -265,6 +265,10 @@ integers, floats, Unicode scalars, symbols, and word references are inline;
 lists, dictionaries, tasks, module values, and ports carry kind-specific
 opaque handles. External code inspects handles through their public semantic surfaces.
 Allocation and mutation require capabilities issued by `heap.zig`.
+The precommit source audit compares this closed Zig tag universe exactly with
+the `ValueType` declarations in `design/formal/values.pant`; a kind added to
+either side without the other is rejected before the generated specification
+can drift.
 
 ### Lists have semantic unity and physical specialization
 
@@ -358,11 +362,14 @@ nominally constant scheduler turn from hiding an unbounded recursive free.
 
 Port reference lifetime is intentionally distinct from external-resource
 lifetime. A port heap object retains a process cell so terminal observations
-remain safe. The spawning `TaskScope` separately owns one external membership
-until the controller has stopped the process group, settled its pipe tasks,
-published terminal state, and reaped the direct child. Dropping the last port
-value cannot orphan a live child, and retaining a port cannot detach it from
-scope closure.
+remain safe. A separate `ControllerGroup` issues one lease to every detached
+supervisor, pipe, timeout, and escalation thread and owns the spawning
+`TaskScope` membership. The final controller lease is released only after its
+thread's process-cell reference, and only that final release detaches scope
+membership. The process-cell reference count therefore describes value and
+readiness observation, never controller quiescence. Dropping the last port
+value cannot orphan a live child, retaining a port cannot detach it from scope
+closure, and Session teardown cannot overtake a detached controller thread.
 
 ## 4. Words, environments, and modules
 
@@ -766,7 +773,18 @@ reaped phases. Separate bounded stdin, stdout, and stderr queues let each pipe
 advance independently. A full queue pauses only its producer; a background
 wait publishes one immutable `Child.Term`. POSIX children are created as
 process-group leaders, and scope cancellation closes input, signals the group,
-escalates when needed, reaps the direct child, and then detaches membership.
+escalates when needed, reaps the direct child, and then lets the final
+controller lease detach membership. Stdin independently transitions through
+`open`, `closing`, `closed_cleanly`, or `broken`; `proc.run` cannot publish
+success until it observes a terminal stdin state, so a late background EPIPE
+remains observable even after all input entered the bounded queue.
+
+Every `proc.write` call acquires its nominal write ticket when the call reaches
+the primitive, before resumable byte validation and encoding. A driver owns
+exactly that ticket until completion or abandonment, so later calls cannot
+overtake an earlier call while it yields. An optional process deadline stores
+presence separately from its duration: absence is unlimited, while a present
+zero duration expires immediately.
 
 ### Absolute deadlines govern timer races
 

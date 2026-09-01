@@ -14,6 +14,8 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, mode, "exit")) return exitWith(arguments[2..]);
     if (std.mem.eql(u8, mode, "large")) return large(init, arguments[2..]);
     if (std.mem.eql(u8, mode, "block")) return block(init);
+    if (std.mem.eql(u8, mode, "close-stdin")) return closeStdin(init);
+    if (std.mem.eql(u8, mode, "first-byte")) return firstByte(init);
     if (std.mem.eql(u8, mode, "descendant")) return descendant(init, arguments[0]);
     return error.UnknownMode;
 }
@@ -107,6 +109,28 @@ fn block(init: std.process.Init) !void {
     // its required close-input step; TERM/KILL still stop the process.
     var forever: std.Io.Event = .unset;
     forever.waitUncancelable(init.io);
+}
+
+fn closeStdin(init: std.process.Init) !void {
+    std.Io.File.stdin().close(init.io);
+    var forever: std.Io.Event = .unset;
+    forever.waitUncancelable(init.io);
+}
+
+fn firstByte(init: std.process.Init) !void {
+    var input_buffer: [8192]u8 = undefined;
+    var input = std.Io.File.stdin().reader(init.io, &input_buffer);
+    var first: ?u8 = null;
+    var chunk: [4096]u8 = undefined;
+    while (true) {
+        const amount = try input.interface.readSliceShort(&chunk);
+        if (amount == 0) break;
+        if (first == null) first = chunk[0];
+    }
+    var output_buffer: [1]u8 = undefined;
+    var output = stdoutWriter(init.io, &output_buffer);
+    try output.interface.writeByte(first orelse return error.MissingInput);
+    try output.interface.flush();
 }
 
 fn descendant(init: std.process.Init, executable: []const u8) !void {

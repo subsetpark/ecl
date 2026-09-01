@@ -6,7 +6,7 @@ module ECL_VALUES.
 > storage, float encoding, source grammar, printing, pervasion, and the
 > operations that construct or consume values.
 >
-> Every ECL value has exactly one of the language's nine kinds. Its kind is an
+> Every ECL value has exactly one of the language's ten kinds. Its kind is an
 > immutable fact: it does not belong to an action context. Boolean, string,
 > quotation, vector, matrix, array, error, and result are roles played by these
 > values rather than additional kinds.
@@ -22,9 +22,10 @@ word-type => ValueType.
 list-type => ValueType.
 dict-type => ValueType.
 task-type => ValueType.
+port-type => ValueType.
 module-type => ValueType.
 ---
-> The value-kind universe is closed: every value has one of these nine kinds.
+> The value-kind universe is closed: every value has one of these ten kinds.
 all value: Value |
   value-type value = int-type or
   value-type value = float-type or
@@ -34,9 +35,10 @@ all value: Value |
   value-type value = list-type or
   value-type value = dict-type or
   value-type value = task-type or
-    value-type value = module-type.
+  value-type value = port-type or
+  value-type value = module-type.
 
-> The nine kind names are distinct, so the total `value-type` rule assigns
+> The ten kind names are distinct, so the total `value-type` rule assigns
 > exactly one kind to every value.
 int-type ~= float-type and
 int-type ~= char-type and
@@ -45,6 +47,7 @@ int-type ~= word-type and
 int-type ~= list-type and
 int-type ~= dict-type and
 int-type ~= task-type and
+int-type ~= port-type and
 int-type ~= module-type and
 float-type ~= char-type and
 float-type ~= symbol-type and
@@ -52,28 +55,36 @@ float-type ~= word-type and
 float-type ~= list-type and
 float-type ~= dict-type and
 float-type ~= task-type and
+float-type ~= port-type and
 float-type ~= module-type and
 char-type ~= symbol-type and
 char-type ~= word-type and
 char-type ~= list-type and
 char-type ~= dict-type and
 char-type ~= task-type and
+char-type ~= port-type and
 char-type ~= module-type and
 symbol-type ~= word-type and
 symbol-type ~= list-type and
 symbol-type ~= dict-type and
 symbol-type ~= task-type and
+symbol-type ~= port-type and
 symbol-type ~= module-type and
 word-type ~= list-type and
 word-type ~= dict-type and
 word-type ~= task-type and
+word-type ~= port-type and
 word-type ~= module-type and
 list-type ~= dict-type and
 list-type ~= task-type and
+list-type ~= port-type and
 list-type ~= module-type and
 dict-type ~= task-type and
+dict-type ~= port-type and
 dict-type ~= module-type and
-task-type ~= module-type.
+task-type ~= port-type and
+task-type ~= module-type and
+port-type ~= module-type.
 
 where
 
@@ -86,10 +97,10 @@ where
 >
 > `matches?` is the equivalence exposed by `match?` and used for dictionary-key
 > identity. Lists match recursively by position. Dictionaries match by their
-> key-value pairs regardless of insertion order. Task and module values match
-> only themselves. Resolution context, reader lineage, provenance, and storage
-> identity are absent from these rules and therefore cannot affect matching or
-> hashing.
+> key-value pairs regardless of insertion order. Task, port, and module values
+> match only themselves. Resolution context, reader lineage, provenance, and
+> storage identity are absent from these rules and therefore cannot affect
+> matching or hashing.
 NumericMagnitude.
 FloatPayload.
 
@@ -228,6 +239,7 @@ all left: Value, right: Value, matches? left right |
   (value-type left = list-type and value-type right = list-type) or
   (value-type left = dict-type and value-type right = dict-type) or
   (value-type left = task-type and value-type right = task-type) or
+  (value-type left = port-type and value-type right = port-type) or
   (value-type left = module-type and value-type right = module-type).
 
 > Numeric matching is exact mathematical-value equality across int and float.
@@ -323,6 +335,12 @@ all left: Value, right: Value,
     value-type right = task-type |
   matches? left right <-> left = right.
 
+> Port values match only by endpoint identity.
+all left: Value, right: Value,
+    value-type left = port-type,
+    value-type right = port-type |
+  matches? left right <-> left = right.
+
 > Module values match only by image identity.
 all left: Value, right: Value,
     value-type left = module-type,
@@ -338,10 +356,12 @@ all value: Value,
     value-type value = word-type |
   readable? value.
 
-> Task and module values have diagnostic displays but no readable
+> Task, port, and module values have diagnostic displays but no readable
 > representations.
 all value: Value,
-    value-type value = task-type or value-type value = module-type |
+    value-type value = task-type or
+    value-type value = port-type or
+    value-type value = module-type |
   ~readable? value.
 
 > A list is readable exactly when all its elements are readable.

@@ -130,6 +130,10 @@ const SpecDriver = struct {
     const StringTarget = enum { executable, cwd, arg, env_name, env_value };
     const RunFailure = enum { overflow, timeout, io };
 
+    const TimeoutDuration = struct {
+        milliseconds: u64,
+    };
+
     allocator: std.mem.Allocator,
     releases: *heap.ReleaseDomain,
     access: *@import("../external.zig").ProcessAccess,
@@ -156,7 +160,7 @@ const SpecDriver = struct {
     stderr_limit: usize = 0,
     stdout_limit_set: bool = false,
     stderr_limit_set: bool = false,
-    timeout_ms: u64 = 0,
+    timeout: ?TimeoutDuration = null,
     port_value: ?Value = null,
     write_permit: ?*process.WritePermit = null,
     stdin_offset: usize = 0,
@@ -261,7 +265,7 @@ const SpecDriver = struct {
             self.stderr_limit = try captureLimit(evaluator, item, "'stderr-limit");
             self.stderr_limit_set = true;
         } else if (key.symbol == self.keys.timeout_ms) {
-            self.timeout_ms = try timeoutValue(evaluator, item);
+            self.timeout = .{ .milliseconds = try timeoutValue(evaluator, item) };
         } else {
             return evaluator.fail(.domain, "unknown process specification field");
         }
@@ -437,7 +441,7 @@ const SpecDriver = struct {
         self.stdout_reader = true;
         cell.beginRead(.stderr) catch return evaluator.fail(.contract, "stderr already has a pending reader");
         self.stderr_reader = true;
-        if (self.timeout_ms != 0) cell.armTimeout(self.timeout_ms) catch
+        if (self.timeout) |timeout| cell.armTimeout(timeout.milliseconds) catch
             return evaluator.fail(.io, "could not start process deadline");
         self.phase = .run_io;
         return .yielded;
@@ -446,6 +450,7 @@ const SpecDriver = struct {
     fn advanceRun(self: *SpecDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
         const cell = process.fromValue(self.port_value.?).?;
         var progressed = false;
+        if (cell.timedOut()) self.failed = .timeout;
         if (self.write_permit) |permit| {
             const input = if (self.stdin_bytes) |*bytes| bytes.bytes() else &.{};
             if (self.stdin_offset == input.len) {
@@ -464,7 +469,9 @@ const SpecDriver = struct {
         }
         if (!self.stdout_eof) progressed = (try self.drain(evaluator, cell, .stdout)) or progressed;
         if (!self.stderr_eof) progressed = (try self.drain(evaluator, cell, .stderr)) or progressed;
-        if (cell.timedOut()) self.noteFailure(.timeout);
+        const input_terminal = cell.inputTerminal();
+        if (input_terminal == .broken) self.noteFailure(.io);
+        if (cell.timedOut()) self.failed = .timeout;
         if (self.failed != null) {
             if (self.write_permit) |permit| {
                 cell.abandonWrite(permit);
@@ -473,7 +480,9 @@ const SpecDriver = struct {
             cell.kill();
         }
         if (cell.termination()) |termination| self.termination = termination;
-        if (self.termination != null and self.stdout_eof and self.stderr_eof) {
+        if (self.termination != null and self.stdout_eof and self.stderr_eof and
+            input_terminal != .pending)
+        {
             if (self.write_permit) |permit| {
                 cell.abandonWrite(permit);
                 self.write_permit = null;
@@ -506,13 +515,11 @@ const SpecDriver = struct {
         return switch (cell.read(stream, &buffer)) {
             .pending => false,
             .eof => eof: {
-                switch (stream) {
-                    .stdout => self.stdout_eof = true,
-                    .stderr => self.stderr_eof = true,
-                }
+                self.noteStreamTerminal(stream);
                 break :eof true;
             },
             .io => {
+                self.noteStreamTerminal(stream);
                 self.noteFailure(.io);
                 return true;
             },
@@ -530,6 +537,13 @@ const SpecDriver = struct {
                 break :data true;
             },
         };
+    }
+
+    fn noteStreamTerminal(self: *SpecDriver, stream: process.Stream) void {
+        switch (stream) {
+            .stdout => self.stdout_eof = true,
+            .stderr => self.stderr_eof = true,
+        }
     }
 
     fn noteFailure(self: *SpecDriver, failure: RunFailure) void {
@@ -635,6 +649,8 @@ fn write(evaluator: *Machine) MachineError!void {
     var port = try evaluator.popValue();
     errdefer port.deinit();
     const cell = try portCell(evaluator, port.borrow());
+    const permit = try cell.beginWrite();
+    errdefer cell.abandonWrite(permit);
     const bytes_borrowed = bytes.borrow();
     const driver = try evaluator.allocator().create(WriteDriver);
     driver.* = .{
@@ -642,6 +658,7 @@ fn write(evaluator: *Machine) MachineError!void {
         .bytes_value = bytes.take(),
         .encoder = .init(evaluator.allocator(), bytes_borrowed),
         .cell = cell,
+        .permit = permit,
     };
     evaluator.adoptDriver(driver);
 }
@@ -676,7 +693,6 @@ const WriteDriver = struct {
                 self.encoder.?.deinit();
                 self.encoder = null;
                 self.bytes = bytes;
-                self.permit = try self.cell.beginWrite();
             },
         };
         const source = self.bytes.?.bytes();

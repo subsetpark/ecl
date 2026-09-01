@@ -458,6 +458,13 @@ pub fn build(b: *std.Build) void {
         .target = b.graph.host,
         .optimize = .Debug,
     });
+    const audit_options = b.addOptions();
+    audit_options.addOption(
+        []const u8,
+        "formal_values",
+        @embedFile("design/formal/values.pant"),
+    );
+    audit_mod.addOptions("source_audit_options", audit_options);
     const audit_exe = b.addExecutable(.{ .name = "ecl-source-audit", .root_module = audit_mod });
     const run_audit = b.addRunArtifact(audit_exe);
     const bench_mod = b.createModule(.{
