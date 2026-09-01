@@ -322,12 +322,12 @@ fn processStatus(pid: std.posix.pid_t) ?ProcessStatus {
     if (builtin.os.tag != .linux) return null;
     var path_buffer: [64]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buffer, "/proc/{d}/stat", .{pid}) catch return null;
-    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;
-    defer file.close(io);
+    const file = std.posix.openat(std.posix.AT.FDCWD, path, .{}, 0) catch return null;
+    defer _ = std.posix.system.close(file);
     var stat_buffer: [4096]u8 = undefined;
     var stat_len: usize = 0;
     while (stat_len != stat_buffer.len) {
-        const amount = file.readStreaming(io, &.{stat_buffer[stat_len..]}) catch return null;
+        const amount = std.posix.read(file, stat_buffer[stat_len..]) catch return null;
         if (amount == 0) break;
         stat_len += amount;
     }
