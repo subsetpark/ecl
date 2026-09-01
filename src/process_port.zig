@@ -31,6 +31,7 @@ pub const ExecutablePolicy = union(enum) {
 /// Borrowed host policy. `ProcessOwner.init` validates and copies every slice.
 pub const ProcessPolicy = struct {
     executables: ExecutablePolicy,
+    initial_cwd: ?[]const u8 = null,
     cwd_root: ?[]const u8 = null,
     inherit_environment: bool = false,
     max_live_ports: usize = 32,
@@ -91,6 +92,7 @@ const OwnedPolicy = struct {
         unrestricted,
     },
     cwd_root: ?[]u8,
+    initial_cwd: ?[]u8,
     max_live_ports: usize,
     stdin_capacity: usize,
     stdout_capacity: usize,
@@ -104,6 +106,9 @@ const OwnedPolicy = struct {
             policy.max_stdout_capture == 0 or policy.max_stderr_capture == 0)
             return error.InvalidPolicy;
         if (policy.cwd_root) |root| if (!cleanAbsolutePath(root)) return error.InvalidPolicy;
+        if (policy.initial_cwd) |cwd| if (!cleanAbsolutePath(cwd)) return error.InvalidPolicy;
+        if (policy.cwd_root) |root| if (policy.initial_cwd) |cwd|
+            if (!pathWithin(root, cwd)) return error.InvalidPolicy;
         switch (policy.executables) {
             .exact => |paths| for (paths) |path| {
                 if (!cleanAbsolutePath(path)) return error.InvalidPolicy;
@@ -113,6 +118,7 @@ const OwnedPolicy = struct {
         var result: OwnedPolicy = .{
             .executables = .unrestricted,
             .cwd_root = null,
+            .initial_cwd = null,
             .max_live_ports = policy.max_live_ports,
             .stdin_capacity = policy.stdin_capacity,
             .stdout_capacity = policy.stdout_capacity,
@@ -138,6 +144,7 @@ const OwnedPolicy = struct {
             },
         };
         if (policy.cwd_root) |root| result.cwd_root = try allocator.dupe(u8, root);
+        if (policy.initial_cwd) |cwd| result.initial_cwd = try allocator.dupe(u8, cwd);
         return result;
     }
 
@@ -150,6 +157,7 @@ const OwnedPolicy = struct {
             .unrestricted => {},
         }
         if (self.cwd_root) |root| allocator.free(root);
+        if (self.initial_cwd) |cwd| allocator.free(cwd);
         self.* = undefined;
     }
 
@@ -220,7 +228,17 @@ pub const ProcessOwner = struct {
         policy: ProcessPolicy,
         environment: []const EnvironmentEntry,
     ) PolicyError!ProcessOwner {
-        var owned_policy = try OwnedPolicy.init(allocator, policy);
+        var effective_policy = policy;
+        const captured_cwd = if (policy.initial_cwd == null)
+            std.process.currentPathAlloc(io, allocator) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.InvalidPolicy,
+            }
+        else
+            null;
+        defer if (captured_cwd) |cwd| allocator.free(cwd);
+        if (captured_cwd) |cwd| effective_policy.initial_cwd = cwd;
+        var owned_policy = try OwnedPolicy.init(allocator, effective_policy);
         errdefer owned_policy.deinit(allocator);
         const owned_environment = try OwnedEnvironment.init(
             allocator,
@@ -244,6 +262,10 @@ pub const ProcessOwner = struct {
 
     pub fn stdoutCaptureLimit(self: *const ProcessOwner) usize {
         return self.policy.max_stdout_capture;
+    }
+
+    pub fn access(self: *ProcessOwner) *external.ProcessAccess {
+        return @ptrCast(self);
     }
 
     pub fn stderrCaptureLimit(self: *const ProcessOwner) usize {
@@ -292,7 +314,7 @@ pub const ProcessOwner = struct {
 
         var child: ?std.process.Child = std.process.spawn(self.io, .{
             .argv = argv,
-            .cwd = if (spec.cwd) |cwd| .{ .path = cwd } else .inherit,
+            .cwd = if (spec.cwd orelse self.policy.initial_cwd) |cwd| .{ .path = cwd } else .inherit,
             .environ_map = &environment,
             .stdin = .pipe,
             .stdout = .pipe,
@@ -350,6 +372,29 @@ pub const ProcessOwner = struct {
         }
     }
 };
+
+fn ownerFromAccess(access_value: *external.ProcessAccess) *ProcessOwner {
+    return @ptrCast(@alignCast(access_value));
+}
+
+pub fn spawnFromUnit(
+    access_value: *external.ProcessAccess,
+    scheduler_erased: *const anyopaque,
+    scope_erased: *anyopaque,
+    spec: ProcessSpec,
+) SpawnError!Value {
+    const runtime_scheduler: *const scheduler_api.WorkerScheduler = @ptrCast(@alignCast(scheduler_erased));
+    const scope: *scheduler_api.TaskScope = @ptrCast(@alignCast(scope_erased));
+    return ownerFromAccess(access_value).spawn(runtime_scheduler, scope, spec);
+}
+
+pub fn stdoutCaptureLimit(access_value: *external.ProcessAccess) usize {
+    return ownerFromAccess(access_value).stdoutCaptureLimit();
+}
+
+pub fn stderrCaptureLimit(access_value: *external.ProcessAccess) usize {
+    return ownerFromAccess(access_value).stderrCaptureLimit();
+}
 
 fn pathWithin(root: []const u8, candidate: []const u8) bool {
     if (!std.mem.startsWith(u8, candidate, root)) return false;
@@ -433,6 +478,8 @@ fn writePermit(node: *WriteNode) *WritePermit {
 const readiness_stdout: u64 = 1;
 const readiness_stderr: u64 = 2;
 const readiness_terminal: u64 = 3;
+const readiness_run_tag: u64 = 4;
+const readiness_pointer_mask: u64 = ~@as(u64, 7);
 
 const ReadyWait = struct {
     allocator: std.mem.Allocator,
@@ -441,13 +488,15 @@ const ReadyWait = struct {
     target: external.WakeTarget,
     previous: ?*ReadyWait = null,
     next: ?*ReadyWait = null,
-    linked: bool = false,
+    linked: std.atomic.Value(bool) = .init(false),
 
     pub fn cancelReadiness(self: *ReadyWait) void {
         const cell = self.cell;
-        std.Io.Threaded.mutexLock(&cell.mutex);
-        if (self.linked) cell.unlinkReadyLocked(self);
-        std.Io.Threaded.mutexUnlock(&cell.mutex);
+        if (self.linked.load(.acquire)) {
+            std.Io.Threaded.mutexLock(&cell.mutex);
+            if (self.linked.load(.monotonic)) cell.unlinkReadyLocked(self);
+            std.Io.Threaded.mutexUnlock(&cell.mutex);
+        }
         self.target.release();
         cell.releaseRef();
         self.allocator.destroy(self);
@@ -482,6 +531,9 @@ pub const ProcessCell = struct {
     write_last: ?*WriteNode = null,
     ready_first: ?*ReadyWait = null,
     ready_last: ?*ReadyWait = null,
+    timeout_done: std.Io.Event = .unset,
+    timed_out: bool = false,
+    escalation_active: bool = false,
 
     fn create(
         owner: *ProcessOwner,
@@ -573,12 +625,18 @@ pub const ProcessCell = struct {
     pub fn cancelExternalMember(self: *ProcessCell) void {
         std.Io.Threaded.mutexLock(&self.mutex);
         self.discard_outputs = true;
+        self.escalation_active = true;
         self.changed.broadcast(blockingIo());
         std.Io.Threaded.mutexUnlock(&self.mutex);
         self.terminate();
         self.retainRef();
         const thread = std.Thread.spawn(.{}, escalationMain, .{self}) catch {
+            std.Io.Threaded.mutexLock(&self.mutex);
+            self.escalation_active = false;
+            const detached_membership = if (self.phase == .reaped) self.takeMembershipLocked() else null;
+            std.Io.Threaded.mutexUnlock(&self.mutex);
             self.kill();
+            if (detached_membership) |membership| detachMembership(membership);
             self.releaseRef();
             return;
         };
@@ -647,6 +705,15 @@ pub const ProcessCell = struct {
 
     pub fn writeSource(self: *ProcessCell, permit: *WritePermit) external.ReadinessSource {
         return external.readinessSource(ProcessCell, self, @intFromPtr(writeNode(permit)));
+    }
+
+    /// Readiness for `proc.run`, which must drain both output streams while it
+    /// feeds stdin. The tagged write node makes that compound predicate one
+    /// scheduler registration without introducing an unbounded polling loop.
+    pub fn runSource(self: *ProcessCell, permit: ?*WritePermit) external.ReadinessSource {
+        const pointer: u64 = if (permit) |active| @intFromPtr(writeNode(active)) else 0;
+        std.debug.assert(pointer & ~readiness_pointer_mask == 0);
+        return external.readinessSource(ProcessCell, self, pointer | readiness_run_tag);
     }
 
     pub fn finishWrite(self: *ProcessCell, permit: *WritePermit) void {
@@ -747,6 +814,22 @@ pub const ProcessCell = struct {
         self.signal(.KILL, .kill);
     }
 
+    pub fn armTimeout(self: *ProcessCell, milliseconds: u64) error{Io}!void {
+        std.debug.assert(milliseconds != 0);
+        self.retainRef();
+        const thread = std.Thread.spawn(.{}, timeoutThreadMain, .{ self, milliseconds }) catch {
+            self.releaseRef();
+            return error.Io;
+        };
+        thread.detach();
+    }
+
+    pub fn timedOut(self: *ProcessCell) bool {
+        std.Io.Threaded.mutexLock(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        return self.timed_out;
+    }
+
     fn signal(self: *ProcessCell, signal_value: std.posix.SIG, reason: @FieldType(ProcessPhase, "closing")) void {
         var should_signal = false;
         std.Io.Threaded.mutexLock(&self.mutex);
@@ -781,6 +864,17 @@ pub const ProcessCell = struct {
     }
 
     fn readyLocked(self: *ProcessCell, key: u64) bool {
+        if (key & ~readiness_pointer_mask == readiness_run_tag) {
+            const pointer = key & readiness_pointer_mask;
+            const write_ready = if (pointer != 0) ready: {
+                const node: *WriteNode = @ptrFromInt(pointer);
+                break :ready !node.linked or node.active or self.input_closed or
+                    self.input_broken or self.io_failed;
+            } else false;
+            return self.stdout.len != 0 or self.stderr.len != 0 or
+                self.stdout_done or self.stderr_done or self.phase == .reaped or
+                write_ready;
+        }
         return switch (key) {
             readiness_stdout => self.stdout.len != 0 or self.stdout_done,
             readiness_stderr => self.stderr.len != 0 or self.stderr_done,
@@ -793,22 +887,22 @@ pub const ProcessCell = struct {
     }
 
     fn linkReadyLocked(self: *ProcessCell, wait: *ReadyWait) void {
-        std.debug.assert(!wait.linked);
+        std.debug.assert(!wait.linked.load(.monotonic));
         if (self.ready_last) |last| {
             last.next = wait;
             wait.previous = last;
         } else self.ready_first = wait;
         self.ready_last = wait;
-        wait.linked = true;
+        wait.linked.store(true, .release);
     }
 
     fn unlinkReadyLocked(self: *ProcessCell, wait: *ReadyWait) void {
-        std.debug.assert(wait.linked);
+        std.debug.assert(wait.linked.load(.monotonic));
         if (wait.previous) |previous| previous.next = wait.next else self.ready_first = wait.next;
         if (wait.next) |next| next.previous = wait.previous else self.ready_last = wait.previous;
         wait.previous = null;
         wait.next = null;
-        wait.linked = false;
+        wait.linked.store(false, .release);
     }
 
     /// Called with the cell lock held. Targets remain retained until their
@@ -861,15 +955,19 @@ pub const ProcessCell = struct {
         while (!self.stdin_done or !self.stdout_done or !self.stderr_done)
             self.changed.waitUncancelable(blockingIo(), &self.mutex);
         self.phase = .{ .reaped = translated };
+        self.timeout_done.set(blockingIo());
         self.notifyReadyLocked();
+        const detached_membership = if (!self.escalation_active) self.takeMembershipLocked() else null;
         std.Io.Threaded.mutexUnlock(&self.mutex);
 
         self.owner.releaseLive();
-        if (self.membership) |membership| {
-            var owned = membership;
-            self.membership = null;
-            owned.detach();
-        }
+        if (detached_membership) |membership| detachMembership(membership);
+    }
+
+    fn takeMembershipLocked(self: *ProcessCell) ?external.ScopeMembership {
+        const membership = self.membership;
+        self.membership = null;
+        return membership;
     }
 
     const IoThread = enum { stdin, stdout, stderr };
@@ -983,6 +1081,27 @@ pub const ProcessCell = struct {
     }
 };
 
+fn timeoutThreadMain(cell: *ProcessCell, milliseconds: u64) void {
+    defer cell.releaseRef();
+    const duration: std.Io.Clock.Duration = .{
+        .raw = .fromMilliseconds(@intCast(milliseconds)),
+        .clock = .awake,
+    };
+    cell.timeout_done.waitTimeout(cell.io, .{ .duration = duration }) catch |err| switch (err) {
+        error.Timeout => {
+            std.Io.Threaded.mutexLock(&cell.mutex);
+            switch (cell.phase) {
+                .constructing, .running => cell.timed_out = true,
+                .closing, .terminal, .reaped => {},
+            }
+            const expired = cell.timed_out;
+            std.Io.Threaded.mutexUnlock(&cell.mutex);
+            if (expired) cell.kill();
+        },
+        error.Canceled => {},
+    };
+}
+
 fn escalationMain(cell: *ProcessCell) void {
     defer cell.releaseRef();
     const duration: std.Io.Clock.Duration = .{
@@ -993,6 +1112,16 @@ fn escalationMain(cell: *ProcessCell) void {
         error.Canceled => {},
     };
     cell.kill();
+    std.Io.Threaded.mutexLock(&cell.mutex);
+    cell.escalation_active = false;
+    const detached_membership = if (cell.phase == .reaped) cell.takeMembershipLocked() else null;
+    std.Io.Threaded.mutexUnlock(&cell.mutex);
+    if (detached_membership) |membership| detachMembership(membership);
+}
+
+fn detachMembership(membership: external.ScopeMembership) void {
+    var owned = membership;
+    owned.detach();
 }
 
 fn supervisorThreadMain(cell: *ProcessCell) void {
@@ -1055,6 +1184,12 @@ test "bounded ring preserves exact binary order across wrap" {
 
 test "dormant controller reaps a direct child before scope detachment" {
     const fixture_options = @import("process_fixture_options");
+    const fixture_path = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        fixture_options.process_exe,
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(fixture_path);
     const Target = struct {
         event: std.Io.Event = .unset,
         refs: std.atomic.Value(usize) = .init(0),
@@ -1087,7 +1222,7 @@ test "dormant controller reaps a direct child before scope detachment" {
     const port = try owner.spawn(
         runtime_scheduler.worker(),
         &root_scope,
-        .{ .executable = fixture_options.process_exe, .args = &.{ "exit", "7" } },
+        .{ .executable = fixture_path, .args = &.{ "exit", "7" } },
     );
     defer host.domain().releaseValue(port);
     const process = fromValue(port).?;
@@ -1112,6 +1247,12 @@ test "dormant controller reaps a direct child before scope detachment" {
 
 test "scope shutdown cancels a blocked controller independently of port references" {
     const fixture_options = @import("process_fixture_options");
+    const fixture_path = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        fixture_options.process_exe,
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(fixture_path);
     var host = heap.HostOwner.init(std.testing.allocator);
     defer host.cleanup().drain();
     var runtime_scheduler = try scheduler_api.Scheduler.init(host.cleanup(), .cooperative);
@@ -1127,7 +1268,7 @@ test "scope shutdown cancels a blocked controller independently of port referenc
     const port = try owner.spawn(
         runtime_scheduler.worker(),
         &root_scope,
-        .{ .executable = fixture_options.process_exe, .args = &.{"block"} },
+        .{ .executable = fixture_path, .args = &.{"block"} },
     );
     host.domain().releaseValue(port);
     runtime_scheduler.deinit(&root_scope);

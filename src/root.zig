@@ -35,6 +35,7 @@ pub const console = @import("console.zig");
 pub const scheduler = @import("scheduler.zig");
 const external = @import("external.zig");
 const process_port = @import("process_port.zig");
+pub const ProcessPolicy = process_port.ProcessPolicy;
 pub const task_prims = @import("task_prims.zig");
 pub const test_prims = @import("test_prims.zig");
 test {

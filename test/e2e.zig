@@ -29,23 +29,214 @@ const test_project_lock =
     "{'format 1 'root \"app\" 'packages {} 'requires {\"app\" {}}}\n";
 
 test "e2e: proc direct execution preserves argv cwd environment and policy" {
-    return error.SkipZigTest; // PENDING: Patch 4
+    const ecl_exe = try absoluteExe();
+    defer allocator.free(ecl_exe);
+    const process_exe = try absoluteProcessExe();
+    defer allocator.free(process_exe);
+    var scratch = std.testing.tmpDir(.{});
+    defer scratch.cleanup();
+    const cwd = try scratch.dir.realPathFileAlloc(std.testing.io, ".", allocator);
+    defer allocator.free(cwd);
+    const expected = try std.fmt.allocPrint(
+        allocator,
+        "cwd={s}\nprobe=overlay\narg[0]=alpha\narg[1]=beta\n",
+        .{cwd},
+    );
+    defer allocator.free(expected);
+    var program = std.Io.Writer.Allocating.init(allocator);
+    defer program.deinit();
+    try program.writer.print(
+        "'proc ('run) import {{'executable \"{s}\" " ++
+            "'args (\"inspect\" \"alpha\" \"beta\") " ++
+            "'env {{\"ECL_PROCESS_PROBE\" \"overlay\"}}}} run " ++
+            "dup 'stdout at ",
+        .{process_exe},
+    );
+    try appendByteList(&program.writer, expected);
+    try program.writer.writeAll(
+        " match? swap dup 'stderr at [] match? swap " ++
+            "'term at {'kind 'exited 'code 0} match?",
+    );
+    var environment = std.process.Environ.Map.init(allocator);
+    defer environment.deinit();
+    try environment.put("ECL_PROCESS_PROBE", "base");
+    var result = try cli.runOptions(.{
+        .argv = &.{ ecl_exe, program.written() },
+        .cwd = .{ .dir = scratch.dir },
+        .environ_map = &environment,
+    });
+    defer result.deinit();
+    try result.expect(.{ .exit_code = 0, .stdout = "1 1 1\n", .stderr = "" });
 }
 
 test "e2e: proc ports stream binary data with backpressure and EOF" {
-    return error.SkipZigTest; // PENDING: Patch 4
+    const process_exe = try absoluteProcessExe();
+    defer allocator.free(process_exe);
+    const program = try std.fmt.allocPrint(
+        allocator,
+        "'proc ('run) import {{'executable \"{s}\" " ++
+            "'args (\"echo\") 'stdin [0 1 255 2]}} run " ++
+            "dup 'stdout at [0 1 255 2] match? swap 'stderr at [] match?",
+        .{process_exe},
+    );
+    defer allocator.free(program);
+    var result = try cli.run(&.{ build_options.ecl_exe, program });
+    defer result.deinit();
+    try result.expect(.{ .exit_code = 0, .stdout = "1 1\n", .stderr = "" });
+
+    const large = try std.fmt.allocPrint(
+        allocator,
+        "'proc ('run) import {{'executable \"{s}\" " ++
+            "'args (\"large\" \"100000\" \"90000\")}} run " ++
+            "dup 'stdout at len swap 'stderr at len",
+        .{process_exe},
+    );
+    defer allocator.free(large);
+    var large_result = try cli.run(&.{ build_options.ecl_exe, large });
+    defer large_result.deinit();
+    try large_result.expect(.{ .exit_code = 0, .stdout = "100000 90000\n", .stderr = "" });
+
+    // A child may fill stderr before it ever makes stdout readable. Capture
+    // must wait on both pipes after stdin closes or this shape deadlocks.
+    const stderr_first = try std.fmt.allocPrint(
+        allocator,
+        "'proc ('run) import {{'executable \"{s}\" " ++
+            "'args (\"large\" \"0\" \"90000\")}} run " ++
+            "dup 'stdout at len swap 'stderr at len",
+        .{process_exe},
+    );
+    defer allocator.free(stderr_first);
+    var stderr_first_result = try cli.run(&.{ build_options.ecl_exe, stderr_first });
+    defer stderr_first_result.deinit();
+    try stderr_first_result.expect(.{ .exit_code = 0, .stdout = "0 90000\n", .stderr = "" });
 }
 
 test "e2e: proc wait returns stable tagged termination and idempotent lifecycle" {
-    return error.SkipZigTest; // PENDING: Patch 4
+    const process_exe = try absoluteProcessExe();
+    defer allocator.free(process_exe);
+    const program = try std.fmt.allocPrint(
+        allocator,
+        "'proc ('spawn 'wait 'terminate 'kill) import " ++
+            "{{'executable \"{s}\" 'args (\"exit\" \"7\")}} spawn 'p set " ++
+            "p wait {{'kind 'exited 'code 7}} match? " ++
+            "p terminate p kill p wait {{'kind 'exited 'code 7}} match?",
+        .{process_exe},
+    );
+    defer allocator.free(program);
+    var result = try cli.run(&.{ build_options.ecl_exe, program });
+    defer result.deinit();
+    try result.expect(.{ .exit_code = 0, .stdout = "1 1\n", .stderr = "" });
 }
 
 test "e2e: proc run captures split output termination timeout and overflow" {
-    return error.SkipZigTest; // PENDING: Patch 4
+    const process_exe = try absoluteProcessExe();
+    defer allocator.free(process_exe);
+    const capture = try std.fmt.allocPrint(
+        allocator,
+        "'proc ('run) import {{'executable \"{s}\" " ++
+            "'args (\"split\" \"abc\" \"de\")}} run " ++
+            "dup 'term at {{'kind 'exited 'code 0}} match? " ++
+            "swap dup 'stdout at [97 98 99] match? swap 'stderr at [100 101] match?",
+        .{process_exe},
+    );
+    defer allocator.free(capture);
+    var captured = try cli.run(&.{ build_options.ecl_exe, capture });
+    defer captured.deinit();
+    try captured.expect(.{ .exit_code = 0, .stdout = "1 1 1\n", .stderr = "" });
+
+    const deadline = try std.fmt.allocPrint(
+        allocator,
+        "'proc ('run) import {{'executable \"{s}\" " ++
+            "'args (\"block\") 'timeout-ms 25}} run",
+        .{process_exe},
+    );
+    defer allocator.free(deadline);
+    var timed_out = try cli.run(&.{ build_options.ecl_exe, deadline });
+    defer timed_out.deinit();
+    try timed_out.expect(.{
+        .exit_code = 1,
+        .stderr_contains = &.{ "'kind 'timeout", "process deadline expired" },
+    });
+
+    const limited = try std.fmt.allocPrint(
+        allocator,
+        "'proc ('run) import {{'executable \"{s}\" " ++
+            "'args (\"large\" \"16\" \"0\") 'stdout-limit 8}} run",
+        .{process_exe},
+    );
+    defer allocator.free(limited);
+    var overflowed = try cli.run(&.{ build_options.ecl_exe, limited });
+    defer overflowed.deinit();
+    try overflowed.expect(.{
+        .exit_code = 1,
+        .stderr_contains = &.{ "'kind 'overflow", "capture limit exceeded" },
+    });
 }
 
 test "e2e: proc scope cancellation kills and reaps the process group" {
-    return error.SkipZigTest; // PENDING: Patch 4
+    const process_exe = try absoluteProcessExe();
+    defer allocator.free(process_exe);
+    const program = try std.fmt.allocPrint(
+        allocator,
+        "'proc ('spawn 'read-stdout) import 'io ('pp) import " ++
+            "{{'executable \"{s}\" 'args (\"descendant\")}} spawn " ++
+            "dup 128 read-stdout pp",
+        .{process_exe},
+    );
+    defer allocator.free(program);
+    var result = try cli.runOptions(.{
+        .argv = &.{ build_options.ecl_exe, program },
+        .timeout = .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(5) } },
+    });
+    defer result.deinit();
+    try result.expect(.{
+        .exit_code = 0,
+        .stdout_contains = &.{ "[100 101 115 99 101 110 100 97 110 116 61", "<port:1>" },
+        .stderr = "",
+    });
+    try expectProcessGone(try descendantPid(result.stdout));
+}
+
+fn appendByteList(writer: *std.Io.Writer, bytes: []const u8) !void {
+    try writer.writeByte('[');
+    for (bytes, 0..) |byte, index| {
+        if (index != 0) try writer.writeByte(' ');
+        try writer.print("{d}", .{byte});
+    }
+    try writer.writeByte(']');
+}
+
+fn descendantPid(output: []const u8) !std.posix.pid_t {
+    if (output.len == 0 or output[0] != '[') return error.InvalidDescendantOutput;
+    const close = std.mem.indexOfScalar(u8, output, ']') orelse return error.InvalidDescendantOutput;
+    var decoded: [128]u8 = undefined;
+    var count: usize = 0;
+    var encoded = std.mem.tokenizeScalar(u8, output[1..close], ' ');
+    while (encoded.next()) |item| {
+        if (count == decoded.len) return error.InvalidDescendantOutput;
+        decoded[count] = try std.fmt.parseInt(u8, item, 10);
+        count += 1;
+    }
+    const prefix = "descendant=";
+    const line = std.mem.trim(u8, decoded[0..count], "\r\n");
+    if (!std.mem.startsWith(u8, line, prefix)) return error.InvalidDescendantOutput;
+    return std.fmt.parseInt(std.posix.pid_t, line[prefix.len..], 10);
+}
+
+fn expectProcessGone(pid: std.posix.pid_t) !void {
+    for (0..200) |_| {
+        std.posix.kill(pid, @enumFromInt(0)) catch |err| switch (err) {
+            error.ProcessNotFound => return,
+            error.PermissionDenied => {},
+            else => |unexpected| return unexpected,
+        };
+        const pause: std.Io.Clock.Duration = .{
+            .clock = .awake,
+            .raw = .fromMilliseconds(5),
+        };
+        try pause.sleep(io);
+    }
+    return error.DescendantStillRunning;
 }
 
 fn writeTestProject(
@@ -753,6 +944,14 @@ fn absoluteExe() ![:0]u8 {
     return std.Io.Dir.cwd().realPathFileAlloc(
         io,
         build_options.ecl_exe,
+        allocator,
+    );
+}
+
+fn absoluteProcessExe() ![:0]u8 {
+    return std.Io.Dir.cwd().realPathFileAlloc(
+        io,
+        build_options.process_exe,
         allocator,
     );
 }

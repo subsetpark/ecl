@@ -158,6 +158,9 @@ fn testCommand(init: std.process.Init, arguments: []const []const u8) AppError!u
     var output_writer = std.Io.File.stdout().writerStreaming(init.io, &output_buffer);
     var diagnostic_buffer: [4096]u8 = undefined;
     var diagnostic_writer = std.Io.File.stderr().writerStreaming(init.io, &diagnostic_buffer);
+    const initial_cwd = std.Io.Dir.cwd().realPathFileAlloc(init.io, ".", init.gpa) catch |err|
+        return emitIoError(init, "cannot resolve process working directory", err);
+    defer init.gpa.free(initial_cwd);
     var runtime = try ecl.session.Session.initTestWithHostConfig(
         init.gpa,
         trailing,
@@ -169,6 +172,11 @@ fn testCommand(init: std.process.Init, arguments: []const []const u8) AppError!u
             .project_start = ".",
             .environ = try environSnapshot(init),
             .standard_input = .data,
+            .process_policy = .{
+                .executables = .unrestricted,
+                .initial_cwd = initial_cwd,
+                .inherit_environment = true,
+            },
         },
         .{ .worker_pool = worker_count },
     );
@@ -493,6 +501,9 @@ fn executeSource(
     var output_writer = std.Io.File.stdout().writerStreaming(init.io, &output_buffer);
     var diagnostic_buffer: [4096]u8 = undefined;
     var diagnostic_writer = std.Io.File.stderr().writerStreaming(init.io, &diagnostic_buffer);
+    const initial_cwd = std.Io.Dir.cwd().realPathFileAlloc(init.io, ".", init.gpa) catch |err|
+        return emitIoError(init, "cannot resolve process working directory", err);
+    defer init.gpa.free(initial_cwd);
     var session = try ecl.session.Session.initWithHostConfig(
         init.gpa,
         arguments,
@@ -504,6 +515,11 @@ fn executeSource(
             .project_start = ".",
             .environ = try environSnapshot(init),
             .standard_input = standard_input,
+            .process_policy = .{
+                .executables = .unrestricted,
+                .initial_cwd = initial_cwd,
+                .inherit_environment = true,
+            },
         },
         .{ .worker_pool = worker_count },
     );
@@ -534,6 +550,9 @@ fn repl(init: std.process.Init, worker_count: usize) AppError!u8 {
     var output_writer = std.Io.File.stdout().writerStreaming(init.io, &output_buffer);
     var diagnostic_buffer: [4096]u8 = undefined;
     var diagnostic_writer = std.Io.File.stderr().writerStreaming(init.io, &diagnostic_buffer);
+    const initial_cwd = std.Io.Dir.cwd().realPathFileAlloc(init.io, ".", init.gpa) catch |err|
+        return emitIoError(init, "cannot resolve process working directory", err);
+    defer init.gpa.free(initial_cwd);
     var session = try ecl.session.Session.initWithHostConfig(
         init.gpa,
         &.{},
@@ -545,6 +564,11 @@ fn repl(init: std.process.Init, worker_count: usize) AppError!u8 {
             .project_start = ".",
             .environ = try environSnapshot(init),
             .standard_input = .program_source,
+            .process_policy = .{
+                .executables = .unrestricted,
+                .initial_cwd = initial_cwd,
+                .inherit_environment = true,
+            },
         },
         .{ .worker_pool = worker_count },
     );

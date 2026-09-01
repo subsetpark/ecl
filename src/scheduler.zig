@@ -1456,6 +1456,20 @@ pub const WorkerScheduler = enum(usize) {
             unit.installParkResume(.{ .scope_closed = status });
             return;
         }
+        // External readiness can be the first operation that needs a queue
+        // executor: unlike a task wait, it does not imply that `spawn` has
+        // already started the worker pool. Start it before publishing the
+        // WaitSet, or a root-only process wait could enqueue its wake with no
+        // thread capable of delivering it.
+        self.ensureStarted() catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Io => {
+                _ = unit.takeParkRequest();
+                request.deinit(self.releaseDomain());
+                unit.installParkResume(.io);
+                return;
+            },
+        };
         var root = RootWaiter{ .scheduler = self, .unit = unit };
         const wait = try WaitSet.create(
             self,
@@ -1471,11 +1485,19 @@ pub const WorkerScheduler = enum(usize) {
                     std.Thread.yield() catch @panic("cooperative scheduler yield failed");
                 continue;
             }
+            var queued = false;
             std.Io.Threaded.mutexLock(&state_.queue_mutex);
             if (!root.ready.load(.acquire) and state_.queue_first == null and !state_.stopping) {
                 state_.queue_condition.waitUncancelable(blockingIo(), &state_.queue_mutex);
+            } else if (state_.queue_first != null) {
+                // The root is not an executor in worker-pool mode. Do not let
+                // its observation loop repeatedly reacquire the queue mutex
+                // ahead of the one worker that can deliver this wait.
+                state_.queue_condition.signal(blockingIo());
+                queued = true;
             }
             std.Io.Threaded.mutexUnlock(&state_.queue_mutex);
+            if (queued) std.Thread.yield() catch @panic("root wait queue yield failed");
         }
     }
 

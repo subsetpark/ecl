@@ -1752,6 +1752,7 @@ pub const InheritedContext = struct {
     standard_input: ?*StandardInput = null,
     idiom_mode: IdiomMode = .automatic,
     phrase_recognizer: ?PhraseRecognizer = null,
+    process_access: ?*external.ProcessAccess = null,
 };
 
 /// Immutable HTTPS verification inputs inherited by every Unit. The CA path
@@ -6641,7 +6642,9 @@ fn loop(self: *Machine) MachineError!RunStatus {
             if (cleanup.disposition.? == .out_of_memory) return error.OutOfMemory;
             continue;
         }
-        if (self.unit.native == .park_resume or self.unit.native == .task_join_resume) {
+        if (self.unit.native == .park_resume or self.unit.native == .work_park_resume or
+            self.unit.native == .task_join_resume)
+        {
             resumePark(self) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.Ecl => {
@@ -6808,16 +6811,24 @@ fn resumePark(self: *Machine) MachineError!void {
         },
         .cancelled => {
             abandonTaskJoin(self);
+            // A work-driver park owns backend state across the wait. Move its
+            // cleanup through the ordinary driver destructor before raising;
+            // the failure unwinder requires that no native continuation still
+            // owns the operands or external registration it is abandoning.
+            clearWorkDriver(self.unit);
             return self.fail(.cancelled, "unit cancelled while awaiting a task");
         },
         .io => {
             abandonTaskJoin(self);
-            return self.fail(.io, "could not start the scheduler timer thread");
+            clearWorkDriver(self.unit);
+            return self.fail(.io, "could not start a scheduler wait service");
         },
         .out_of_memory => if (delivery.task_join)
             try resumeTaskJoinOutOfMemory(self)
-        else
-            return error.OutOfMemory,
+        else {
+            clearWorkDriver(self.unit);
+            return error.OutOfMemory;
+        },
         .scope_closed => |status| self.unit.requestExit(status),
         .external => {},
     }

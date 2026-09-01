@@ -21,6 +21,7 @@ const console_api = @import("console.zig");
 const pkg_lock = @import("pkg_lock.zig");
 const session_options = @import("session_options");
 const stdlib = @import("stdlib.zig");
+const process_port = @import("process_port.zig");
 pub const Value = value.Value;
 pub const UnitOutcome = union(enum) {
     ok,
@@ -66,6 +67,8 @@ pub const Host = struct {
     environ: []const machine.Environ.Entry = &.{},
     /// Whether the process has already claimed stdin as the program source.
     standard_input: machine.StandardInput.Availability = .data,
+    /// Absent by default: host I/O alone never grants executable authority.
+    process_policy: ?process_port.ProcessPolicy = null,
 };
 
 const CompletionBacking = struct {
@@ -220,6 +223,7 @@ const SessionCore = struct {
     registry: modules.Registry,
     test_authority: ?modules.TestAuthority,
     native_owner: *native_module.Owner,
+    process_owner: ?*process_port.ProcessOwner,
     stack: std.ArrayList(Value) = .empty,
     archive_owner: spans.SpanArchiveOwner,
     archive: spans.SpanArchive,
@@ -439,6 +443,27 @@ pub const Session = enum(usize) {
             if (host) |services| services.environ else &.{},
         );
         errdefer snapshot.deinit(allocator);
+        const process_owner = if (host) |services| if (services.process_policy) |policy| owner: {
+            const entries = try allocator.alloc(process_port.EnvironmentEntry, snapshot.entries.len);
+            defer allocator.free(entries);
+            for (snapshot.entries, entries) |entry, *copy|
+                copy.* = .{ .name = entry.name, .value = entry.value };
+            const owned = try allocator.create(process_port.ProcessOwner);
+            errdefer allocator.destroy(owned);
+            owned.* = process_port.ProcessOwner.init(
+                allocator,
+                services.io,
+                policy,
+                entries,
+            ) catch |err| switch (err) {
+                error.OutOfMemory, error.InvalidPolicy => return error.OutOfMemory,
+            };
+            break :owner owned;
+        } else null else null;
+        errdefer if (process_owner) |owner| {
+            owner.deinit();
+            allocator.destroy(owner);
+        };
         var argv = heap.OwnedValue.init(
             release_domain,
             try argumentsValue(allocator, release_domain, arguments),
@@ -454,6 +479,7 @@ pub const Session = enum(usize) {
             .registry = registry,
             .test_authority = test_authority,
             .native_owner = native_owner,
+            .process_owner = process_owner,
             .archive_owner = archive_owner,
             .archive = archive,
             .output = output,
@@ -489,6 +515,10 @@ pub const Session = enum(usize) {
         for (core.stack.items) |item| core.releaseDomain().releaseValue(item);
         core.stack.deinit(core.allocator());
         core.releaseDomain().releaseValue(core.arguments);
+        if (core.process_owner) |owner| {
+            owner.deinit();
+            core.allocator().destroy(owner);
+        }
         if (core.ecl_path) |path| core.allocator().free(path);
         if (core.tls_trust) |trust| core.allocator().free(trust.ca_file);
         core.root_preload.deinit();
@@ -585,6 +615,7 @@ pub const Session = enum(usize) {
             .standard_input = &core.standard_input,
             .idiom_mode = core.idiom_mode,
             .phrase_recognizer = idioms.tryApply,
+            .process_access = if (core.process_owner) |owner| owner.access() else null,
         };
         unit.scheduler = core.scheduler.worker();
         unit.task_scope = &core.root_tasks;

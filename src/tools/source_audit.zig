@@ -79,11 +79,12 @@ const source_groups = [_]SourceGroup{
     // Builtin-backed stdlib modules hold host authority the SDK withholds, so
     // they are ordinary production sources under the bounded-traversal rules.
     .{ .production = true, .files = &.{
-        "stdlib/dict.zig", "stdlib/rand.zig", "stdlib/json.zig", "stdlib/http.zig", "stdlib/archive.zig", "stdlib/pkg_store.zig",
+        "stdlib/dict.zig", "stdlib/rand.zig", "stdlib/json.zig", "stdlib/http.zig", "stdlib/proc.zig", "stdlib/archive.zig", "stdlib/pkg_store.zig",
     }, .sources = &.{
-        @embedFile("../stdlib/dict.zig"),    @embedFile("../stdlib/rand.zig"),
-        @embedFile("../stdlib/json.zig"),    @embedFile("../stdlib/http.zig"),
-        @embedFile("../stdlib/archive.zig"), @embedFile("../stdlib/pkg_store.zig"),
+        @embedFile("../stdlib/dict.zig"),      @embedFile("../stdlib/rand.zig"),
+        @embedFile("../stdlib/json.zig"),      @embedFile("../stdlib/http.zig"),
+        @embedFile("../stdlib/proc.zig"),      @embedFile("../stdlib/archive.zig"),
+        @embedFile("../stdlib/pkg_store.zig"),
     } },
     .{ .production = true, .files = &.{
         "combinators.zig",

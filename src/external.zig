@@ -7,6 +7,10 @@
 
 const std = @import("std");
 
+/// Nominal proof that a Session granted process creation authority. Concrete
+/// controller ownership and policy remain private to `process_port.zig`.
+pub const ProcessAccess = opaque {};
+
 pub const Wake = enum {
     ready,
     io,

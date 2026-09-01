@@ -102,6 +102,11 @@ fn block(init: std.process.Init) !void {
     var input = std.Io.File.stdin().reader(init.io, &input_buffer);
     var discarded: [256]u8 = undefined;
     while (try input.interface.readSliceShort(&discarded) != 0) {}
+    // EOF is an input event, not permission to make the blocking fixture
+    // terminate. This keeps proc.run deadline tests hermetic after it performs
+    // its required close-input step; TERM/KILL still stop the process.
+    var forever: std.Io.Event = .unset;
+    forever.waitUncancelable(init.io);
 }
 
 fn descendant(init: std.process.Init, executable: []const u8) !void {
