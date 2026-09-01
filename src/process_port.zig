@@ -296,9 +296,8 @@ pub const ProcessOwner = struct {
     ) SpawnError!Value {
         if (comptime !backendSupported()) return error.Unsupported;
         try self.validateSpec(spec);
-        if (!self.reserveLive()) return error.LiveLimit;
-        var live_reserved = true;
-        errdefer if (live_reserved) self.releaseLive();
+        var live_reservation = LiveReservation.acquire(self) orelse return error.LiveLimit;
+        errdefer live_reservation.release();
 
         var environment = std.process.Environ.Map.init(self.allocator);
         defer environment.deinit();
@@ -324,14 +323,13 @@ pub const ProcessOwner = struct {
         errdefer if (child) |*owned_child| killChildGroup(owned_child, self.io);
 
         const cell = ProcessCell.create(
-            self,
+            &live_reservation,
             child.?,
             self.next_identity.fetchAdd(1, .monotonic),
         ) catch return error.OutOfMemory;
         child = null;
         var initial_owned = true;
         errdefer if (initial_owned) cell.releasePort();
-        live_reserved = false;
         var supervisor_lease = cell.controllers.initialLease();
         var supervisor_lease_owned = true;
         errdefer if (supervisor_lease_owned) {
@@ -374,6 +372,40 @@ pub const ProcessOwner = struct {
                 return error.InvalidSpec;
             if (self.policy.cwd_root) |root| if (!pathWithin(root, cwd)) return error.Denied;
         }
+    }
+};
+
+/// A live-process slot is a consuming capability. Before publication the
+/// spawning call owns it; after `take`, the process cell is its sole owner.
+const LiveReservation = union(enum) {
+    held: *ProcessOwner,
+    consumed,
+
+    fn acquire(process_owner: *ProcessOwner) ?LiveReservation {
+        if (!process_owner.reserveLive()) return null;
+        return .{ .held = process_owner };
+    }
+
+    fn processOwner(self: *const LiveReservation) *ProcessOwner {
+        return switch (self.*) {
+            .held => |process_owner| process_owner,
+            .consumed => @panic("live-process reservation already consumed"),
+        };
+    }
+
+    fn take(self: *LiveReservation) LiveReservation {
+        const held_owner = self.processOwner();
+        self.* = .consumed;
+        return .{ .held = held_owner };
+    }
+
+    fn release(self: *LiveReservation) void {
+        const held_owner = switch (self.*) {
+            .held => |process_owner| process_owner,
+            .consumed => return,
+        };
+        self.* = .consumed;
+        held_owner.releaseLive();
     }
 };
 
@@ -688,7 +720,7 @@ const ReadyWait = struct {
 pub const ProcessCell = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    owner: *ProcessOwner,
+    live_reservation: LiveReservation,
     identity: u64,
     refs: std.atomic.Value(usize) = .init(1),
     mutex: std.Io.Mutex = .init,
@@ -717,10 +749,11 @@ pub const ProcessCell = struct {
     run_observation: RunObservation = .{},
 
     fn create(
-        owner: *ProcessOwner,
+        live_reservation: *LiveReservation,
         child: std.process.Child,
         identity: u64,
     ) error{OutOfMemory}!*ProcessCell {
+        const owner = live_reservation.processOwner();
         const group = try owner.allocator.create(OwnedGroup);
         errdefer owner.allocator.destroy(group);
         group.* = .{ .child = child, .pgid = child.id.? };
@@ -734,7 +767,7 @@ pub const ProcessCell = struct {
         cell.* = .{
             .allocator = owner.allocator,
             .io = owner.io,
-            .owner = owner,
+            .live_reservation = live_reservation.take(),
             .identity = identity,
             .group_state = .{ .running = group },
             .controllers = .{ .cell = cell },
@@ -760,10 +793,10 @@ pub const ProcessCell = struct {
             .retired => unreachable,
         };
         group.child.kill(self.io);
-        self.phase = .{ .reaped = .{ .unknown = 0 } };
         self.group_state = .{ .retired = .{ .unknown = 0 } };
         self.allocator.destroy(group);
-        self.owner.releaseLive();
+        self.live_reservation.release();
+        self.phase = .{ .reaped = .{ .unknown = 0 } };
     }
 
     fn retainRef(self: *ProcessCell) void {
@@ -1355,15 +1388,18 @@ pub const ProcessCell = struct {
         std.Io.Threaded.mutexLock(&self.mutex);
         while (!self.stdin_done or !self.stdout_done or !self.stderr_done)
             self.changed.waitUncancelable(blockingIo(), &self.mutex);
-        self.phase = .{ .reaped = translated };
         self.group_state = .{ .retired = translated };
         self.timeout_done.set(blockingIo());
-        self.notifyReadyLocked();
         std.Io.Threaded.mutexUnlock(&self.mutex);
 
         self.allocator.destroy(group);
         self.waitForOtherControllers();
-        self.owner.releaseLive();
+
+        std.Io.Threaded.mutexLock(&self.mutex);
+        self.live_reservation.release();
+        self.phase = .{ .reaped = translated };
+        self.notifyReadyLocked();
+        std.Io.Threaded.mutexUnlock(&self.mutex);
     }
 
     const IoThread = enum { stdin, stdout, stderr };

@@ -795,7 +795,11 @@ before publishing the smaller count, so the supervisor can observe the final
 count only after every other release completes. The final lease takes the
 membership token, drops its cell reference while the external-member reference
 still pins the cell, and only then detaches membership, so scope quiescence
-cannot race any controller release. Reaping the group leader therefore
+cannot race any controller release. Each cell owns a nominal live-process
+reservation; after every nonfinal controller has drained, the supervisor
+consumes that reservation under the cell lock before publishing the public
+reaped state. Observing termination therefore also closes the process owner's
+lifetime use. Reaping the group leader therefore
 cannot suppress group cleanup or publish scope quiescence while cleanup still
 owns process-group authority. Stdin independently transitions
 through `open`, `closing`, `closed_cleanly`, or `broken`; `proc.run` cannot
