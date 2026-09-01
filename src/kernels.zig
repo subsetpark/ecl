@@ -142,10 +142,10 @@ pub const Row = struct {
 };
 
 const numbers = OperandSet{ .atoms = &.{ .int, .float } };
-const non_numeric_atoms = OperandSet{ .atoms = &.{ .char, .symbol, .word, .task, .module } };
+const non_numeric_atoms = OperandSet{ .atoms = &.{ .char, .symbol, .word, .task, .module, .port } };
 const char_atom = OperandSet{ .atoms = &.{.char} };
 const rejected_numeric_atoms = without(non_numeric_atoms, char_atom);
-const any_atom = OperandSet{ .atoms = &.{ .int, .float, .char, .symbol, .word, .task, .module } };
+const any_atom = OperandSet{ .atoms = &.{ .int, .float, .char, .symbol, .word, .task, .module, .port } };
 const integers = OperandSet{ .atoms = &.{.int} };
 const numeric_leaves = OperandSet{ .aggregates = &.{ .leaf_i64, .leaf_f64 } };
 const byte_leaf = OperandSet{ .aggregates = &.{.leaf_u8} };
@@ -792,7 +792,7 @@ const random_rows = [_]Row{
 /// scalar semantics without a loop. `reserved_mask` is excluded because no live
 /// list ever carries it, and the `task` and `module` capabilities appear only
 /// as atoms.
-const atom_domain = [_]AtomTag{ .int, .float, .char, .symbol, .word, .task, .module };
+const atom_domain = [_]AtomTag{ .int, .float, .char, .symbol, .word, .task, .module, .port };
 const aggregate_domain = [_]HeapKind{
     .generic_spine,
     .leaf_u8,

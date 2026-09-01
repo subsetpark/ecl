@@ -132,7 +132,7 @@ pub const RenderCursor = struct {
                         try self.writeByte(writer, '[');
                         try self.pushSequence(render.item, render.indent + 1, false);
                     },
-                    .dict, .task, .module, .reserved_mask => unreachable,
+                    .dict, .task, .port, .module, .reserved_mask => unreachable,
                 },
                 .dict => |header| {
                     try self.writeByte(writer, '{');
@@ -145,6 +145,7 @@ pub const RenderCursor = struct {
                     } });
                 },
                 .task => |header| try self.writeFmt(writer, "<task:{d}>", .{heap.taskStorage(header).identity}),
+                .port => |header| try self.writeFmt(writer, "<port:{d}>", .{heap.portStorage(header).identity}),
                 // An anonymous image has no name and no stable display
                 // number to report, so the marker carries identity nowhere:
                 // `match?` is the only identity observation.
@@ -764,7 +765,7 @@ fn isDisplayStructure(item: Value) bool {
     return switch (item) {
         .dict => true,
         .list => displayListIsMatrix(item),
-        .int, .float, .char, .symbol, .word, .task, .module => false,
+        .int, .float, .char, .symbol, .word, .task, .port, .module => false,
     };
 }
 
@@ -789,7 +790,7 @@ fn isFlatRow(item: Value) bool {
     if (item != .list) return false;
     return switch (item.list.kind()) {
         .leaf_u8, .leaf_i64, .leaf_f64, .leaf_symbol => true,
-        .leaf_char1, .leaf_char2, .leaf_char4, .generic_spine, .dict, .task, .module, .reserved_mask => false,
+        .leaf_char1, .leaf_char2, .leaf_char4, .generic_spine, .dict, .task, .port, .module, .reserved_mask => false,
     };
 }
 

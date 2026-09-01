@@ -6942,7 +6942,7 @@ fn poll(self: *Machine) MachineError!void {
 fn dispatch(self: *Machine, form: Value) MachineError!void {
     const word = switch (form) {
         .word => |reference| reference,
-        .int, .float, .char, .symbol, .list, .dict, .task, .module => return self.pushBorrowed(form),
+        .int, .float, .char, .symbol, .list, .dict, .task, .module, .port => return self.pushBorrowed(form),
     };
     try self.executeWord(word);
 }

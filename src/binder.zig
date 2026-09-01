@@ -264,7 +264,7 @@ pub const LowerCursor = struct {
                         body_state.work = .nested;
                         break :result false;
                     },
-                    .int, .float, .char, .symbol, .task, .module => result: {
+                    .int, .float, .char, .symbol, .task, .module, .port => result: {
                         self.local_indices[body_state.index] = null;
                         body_state.index += 1;
                         break :result false;
@@ -318,7 +318,7 @@ pub const LowerCursor = struct {
                         dict.valueAt(header, entry) });
                     break :result false;
                 },
-                .int, .float, .char, .symbol, .task, .module => result: {
+                .int, .float, .char, .symbol, .task, .module, .port => result: {
                     _ = body_state.walk.pop().?;
                     break :result false;
                 },

@@ -706,9 +706,9 @@ fn auditUnsafeCasts() bool {
         "capability payload erasure",
         @embedFile("../heap.zig"),
         &.{
-            "TaskDestroyAdapter",     "ModuleReleaseAdapter",
-            "RetirementAdapters",     "RetirementWakeAdapters",
-            "CodeRetirementAdapters",
+            "TaskDestroyAdapter",     "PortReleaseAdapter",
+            "ModuleReleaseAdapter",   "RetirementAdapters",
+            "RetirementWakeAdapters", "CodeRetirementAdapters",
         },
     ) or failed;
     return failed;
