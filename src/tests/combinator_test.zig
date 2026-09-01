@@ -509,7 +509,7 @@ test "linrec: failures in every quotation roll back the enclosing unit" {
     }
 }
 
-test "linrec: deep recursion uses explicit frames and cancellation reaches guard restore" {
+test "linrec: empty post retains explicit depth frames and cancellation reaches guard restore" {
     var depth_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&depth_heap);
     var depth_runtime = try session.Session.init(depth_heap.allocator(), &.{});

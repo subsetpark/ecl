@@ -150,7 +150,7 @@ where
 > general unit success transition. The evaluator supplies the final stack.
 > The attached unit can become terminal only after its own task scope has
 > quiesced.
-Units ~> Complete spawned task successfully @ task: Task, result: Value, task-created? task, unit-active? (task-unit task), value-type result = list-type, (all child: Task, task-created? child, task-owner-unit child = task-unit task | unit-succeeded? (task-unit child) or unit-failed? (task-unit child)).
+Units, Concurrency ~> Complete spawned task successfully @ task: Task, result: Value, task-created? task, unit-active? (task-unit task), value-type result = list-type, (all child: Task, task-created? child, task-owner-unit child = task-unit task | unit-succeeded? (task-unit child) or unit-failed? (task-unit child)).
 ---
 unit-created?' (task-unit task).
 ~unit-active?' (task-unit task).
@@ -173,13 +173,18 @@ all other: Unit, other != task-unit task |
   unit-stack' other = unit-stack other and
   unit-error' other = unit-error other.
 
+all candidate: Task |
+  task-created?' candidate = task-created? candidate and
+  task-unit' candidate = task-unit candidate and
+  task-owner-unit' candidate = task-owner-unit candidate.
+
 where
 
 > `Complete spawned task with failure` is the concurrency-layer use of the
 > general unit failure transition. The evaluator supplies the error. The
 > attached unit restores its entry stack and becomes terminal after its own
 > task scope has quiesced.
-Units ~> Complete spawned task with failure @ task: Task, error: Value, task-created? task, unit-active? (task-unit task), error-value? error, (all child: Task, task-created? child, task-owner-unit child = task-unit task | unit-succeeded? (task-unit child) or unit-failed? (task-unit child)).
+Units, Concurrency ~> Complete spawned task with failure @ task: Task, error: Value, task-created? task, unit-active? (task-unit task), error-value? error, (all child: Task, task-created? child, task-owner-unit child = task-unit task | unit-succeeded? (task-unit child) or unit-failed? (task-unit child)).
 ---
 unit-created?' (task-unit task).
 ~unit-active?' (task-unit task).
@@ -201,6 +206,11 @@ all other: Unit, other != task-unit task |
   unit-body' other = unit-body other and
   unit-stack' other = unit-stack other and
   unit-error' other = unit-error other.
+
+all candidate: Task |
+  task-created?' candidate = task-created? candidate and
+  task-unit' candidate = task-unit candidate and
+  task-owner-unit' candidate = task-owner-unit candidate.
 
 where
 
@@ -234,7 +244,7 @@ where
 > `Cancel active task` is ordinary unit failure with a cancellation error. It
 > restores the unit's entry stack and becomes terminal only after the task's
 > own descendants are quiescent.
-Units ~> Cancel active task @ task: Task, error: Value, task-created? task, unit-active? (task-unit task), cancelled-error? error, (all child: Task, task-created? child, task-owner-unit child = task-unit task | unit-succeeded? (task-unit child) or unit-failed? (task-unit child)).
+Units, Concurrency ~> Cancel active task @ task: Task, error: Value, task-created? task, unit-active? (task-unit task), cancelled-error? error, (all child: Task, task-created? child, task-owner-unit child = task-unit task | unit-succeeded? (task-unit child) or unit-failed? (task-unit child)).
 ---
 unit-created?' (task-unit task).
 ~unit-active?' (task-unit task).
@@ -257,10 +267,15 @@ all other: Unit, other != task-unit task |
   unit-stack' other = unit-stack other and
   unit-error' other = unit-error other.
 
+all candidate: Task |
+  task-created?' candidate = task-created? candidate and
+  task-unit' candidate = task-unit candidate and
+  task-owner-unit' candidate = task-owner-unit candidate.
+
 where
 
 > Cancelling a terminal task is a no-op. Its cached result remains unchanged.
-Units ~> Cancel terminal task @ task: Task, task-created? task, unit-succeeded? (task-unit task) or unit-failed? (task-unit task).
+Units, Concurrency ~> Cancel terminal task @ task: Task, task-created? task, unit-succeeded? (task-unit task) or unit-failed? (task-unit task).
 ---
 all candidate: Unit |
   unit-created?' candidate = unit-created? candidate and
@@ -271,3 +286,8 @@ all candidate: Unit |
   unit-body' candidate = unit-body candidate and
   unit-stack' candidate = unit-stack candidate and
   unit-error' candidate = unit-error candidate.
+
+all candidate: Task |
+  task-created?' candidate = task-created? candidate and
+  task-unit' candidate = task-unit candidate and
+  task-owner-unit' candidate = task-owner-unit candidate.

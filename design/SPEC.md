@@ -651,9 +651,11 @@ identifiers retain their lookup scopes, while quotation values capture no
 bindings or ordinary values. An unannotated runtime-created word retains the
 dynamic behavior described above.
 
-Tail calls are guaranteed: through word calls, `if`, and every
-combinator's tail position, iteration and tail recursion run in constant
-space and never exhaust a host call stack.
+Tail calls are guaranteed: through word calls, `if`, and every combinator's
+documented tail position, iteration and tail recursion run in constant space
+and never exhaust a host call stack. General `linrec` retains one explicit
+recursion level per nonterminal descent, even when `post` is empty, so its live
+storage is proportional to recursion depth rather than constant.
 
 ### Errors
 
@@ -1292,8 +1294,8 @@ keeps its stronger repository policy requiring meaningful documentation.
 
 Documentation has canonical form. Publication trims source-only
 indentation, folds physical line breaks within prose to spaces, collapses
-a paragraph boundary to one blank line, and preserves each Markdown `- `
-item on its own logical line with its continuations folded in. `doc`
+a paragraph boundary to one blank line, and preserves each `-`-prefixed
+Markdown item on its own logical line with its continuations folded in. `doc`
 returns this canonical string, so source formatting cannot change
 reflective documentation. Strings anywhere else retain their exact decoded
 codepoints.
@@ -1941,7 +1943,7 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   @module`, `values (body) 'name @defm` — and nothing else crosses the
   boundary. There is no ambient environment between a module's own definitions
   and core.
-  Modules can be parameterized with anaonymous module handles, enabling a
+  Modules can be parameterized with anonymous module handles, enabling a
   simple kind of dependency injection.
   A quotation parameter carries the scope it was written in, so it preserves
   its references on injection into a module. Given:
@@ -1963,22 +1965,21 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   a module word may accept `(bump)` from its caller and that `bump` resolves in
   the caller, because the caller wrote it; and both hold when the stdlib passes
   the caller's quotation as ordinary data.
-- **Only a reader-authored body becomes module text.** The constructor identifies
-  the body by its operand position; the values operand never participates. The
-  body must also carry reader lineage: it came either directly from the reader
-  or from construction's own scope-only copy of reader text. Construction then
-  copies that body and gives every word in its reader-built subtree the new
-  image's scope, including words nested in quotation, list, and dict literals.
-  The copy retains its lineage, so a construction nested inside it can scope its
-  own body to its own image.
+- **Only a reader-authored body becomes module text.** The constructor accepts
+  any list in the body operand position; the values operand never participates.
+  A body carrying lineage from either the reader or construction's own
+  scope-only copy of reader text is copied, and every word in its reader-built
+  subtree receives the new image's scope, including words nested in quotation,
+  list, and dict literals. The copy retains its lineage, so a construction
+  nested inside it can scope its own body to its own image.
 
   Generic runtime list operations do not create lineage. A body produced by
   `cat`, `compose`, `cons`, `append`, `raze`, slicing, reversal, `with`, or a
   similar operation keeps the scopes already carried by its parts, but module
-  construction does not traverse or re-scope it. Reader-authored fragments do
-  not make their runtime-built container reader-authored. For example,
-  `7 'k set [] ((k) 'geta) (def) cat 'm @defm` builds the module body at
-  runtime. The `k` inside `(k)` keeps its session scope, so `m.geta` resolves
+  construction accepts it without traversing or re-scoping it. Reader-authored
+  fragments do not make their runtime-built container reader-authored. For
+  example, `7 'k set [] ((k) 'geta) (def) cat 'm @defm` builds the module body
+  at runtime. The `k` inside `(k)` keeps its session scope, so `m.geta` resolves
   the session's `k` and returns `7`.
 
   Seed values only initialize the construction stack. They are never traversed
@@ -2175,7 +2176,7 @@ initially ∀ *task*: `Task` · ¬**task-created?** *task*.
 
 > `Complete spawned task successfully` is the concurrency-layer use of the general unit success transition. The evaluator supplies the final stack. The attached unit can become terminal only after its own task scope has quiesced.
 
-**`Units`** ↝ Complete spawned task successfully *task*: `Task`, *result*: `Value`, **task-created?** *task*, **unit-active?** (**task-unit** *task*), **value-type** *result* = **list-type**, (∀ *child*: `Task`, **task-created?** *child*, **task-owner-unit** *child* = **task-unit** *task* · **unit-succeeded?** (**task-unit** *child*) ∨ **unit-failed?** (**task-unit** *child*)).
+**`Units`**, **`Concurrency`** ↝ Complete spawned task successfully *task*: `Task`, *result*: `Value`, **task-created?** *task*, **unit-active?** (**task-unit** *task*), **value-type** *result* = **list-type**, (∀ *child*: `Task`, **task-created?** *child*, **task-owner-unit** *child* = **task-unit** *task* · **unit-succeeded?** (**task-unit** *child*) ∨ **unit-failed?** (**task-unit** *child*)).
 
 ---
 
@@ -2201,13 +2202,15 @@ initially ∀ *task*: `Task` · ¬**task-created?** *task*.
 
 ∀ *other*: `Unit`, *other* ≠ **task-unit** *task* · **unit-created?**′ *other* = **unit-created?** *other* ∧ **unit-active?**′ *other* = **unit-active?** *other* ∧ **unit-succeeded?**′ *other* = **unit-succeeded?** *other* ∧ **unit-failed?**′ *other* = **unit-failed?** *other* ∧ **unit-entry**′ *other* = **unit-entry** *other* ∧ **unit-body**′ *other* = **unit-body** *other* ∧ **unit-stack**′ *other* = **unit-stack** *other* ∧ **unit-error**′ *other* = **unit-error** *other*.
 
+∀ *candidate*: `Task` · **task-created?**′ *candidate* = **task-created?** *candidate* ∧ **task-unit**′ *candidate* = **task-unit** *candidate* ∧ **task-owner-unit**′ *candidate* = **task-owner-unit** *candidate*.
+
 #### Chapter 5
 
 ##### Action
 
 > `Complete spawned task with failure` is the concurrency-layer use of the general unit failure transition. The evaluator supplies the error. The attached unit restores its entry stack and becomes terminal after its own task scope has quiesced.
 
-**`Units`** ↝ Complete spawned task with failure *task*: `Task`, *error*: `Value`, **task-created?** *task*, **unit-active?** (**task-unit** *task*), **error-value?** *error*, (∀ *child*: `Task`, **task-created?** *child*, **task-owner-unit** *child* = **task-unit** *task* · **unit-succeeded?** (**task-unit** *child*) ∨ **unit-failed?** (**task-unit** *child*)).
+**`Units`**, **`Concurrency`** ↝ Complete spawned task with failure *task*: `Task`, *error*: `Value`, **task-created?** *task*, **unit-active?** (**task-unit** *task*), **error-value?** *error*, (∀ *child*: `Task`, **task-created?** *child*, **task-owner-unit** *child* = **task-unit** *task* · **unit-succeeded?** (**task-unit** *child*) ∨ **unit-failed?** (**task-unit** *child*)).
 
 ---
 
@@ -2232,6 +2235,8 @@ initially ∀ *task*: `Task` · ¬**task-created?** *task*.
 **failed-result-error** (**task-result** *task*) = *error*.
 
 ∀ *other*: `Unit`, *other* ≠ **task-unit** *task* · **unit-created?**′ *other* = **unit-created?** *other* ∧ **unit-active?**′ *other* = **unit-active?** *other* ∧ **unit-succeeded?**′ *other* = **unit-succeeded?** *other* ∧ **unit-failed?**′ *other* = **unit-failed?** *other* ∧ **unit-entry**′ *other* = **unit-entry** *other* ∧ **unit-body**′ *other* = **unit-body** *other* ∧ **unit-stack**′ *other* = **unit-stack** *other* ∧ **unit-error**′ *other* = **unit-error** *other*.
+
+∀ *candidate*: `Task` · **task-created?**′ *candidate* = **task-created?** *candidate* ∧ **task-unit**′ *candidate* = **task-unit** *candidate* ∧ **task-owner-unit**′ *candidate* = **task-owner-unit** *candidate*.
 
 #### Chapter 6
 
@@ -2263,7 +2268,7 @@ initially ∀ *task*: `Task` · ¬**task-created?** *task*.
 
 > `Cancel active task` is ordinary unit failure with a cancellation error. It restores the unit's entry stack and becomes terminal only after the task's own descendants are quiescent.
 
-**`Units`** ↝ Cancel active task *task*: `Task`, *error*: `Value`, **task-created?** *task*, **unit-active?** (**task-unit** *task*), **cancelled-error?** *error*, (∀ *child*: `Task`, **task-created?** *child*, **task-owner-unit** *child* = **task-unit** *task* · **unit-succeeded?** (**task-unit** *child*) ∨ **unit-failed?** (**task-unit** *child*)).
+**`Units`**, **`Concurrency`** ↝ Cancel active task *task*: `Task`, *error*: `Value`, **task-created?** *task*, **unit-active?** (**task-unit** *task*), **cancelled-error?** *error*, (∀ *child*: `Task`, **task-created?** *child*, **task-owner-unit** *child* = **task-unit** *task* · **unit-succeeded?** (**task-unit** *child*) ∨ **unit-failed?** (**task-unit** *child*)).
 
 ---
 
@@ -2289,17 +2294,21 @@ initially ∀ *task*: `Task` · ¬**task-created?** *task*.
 
 ∀ *other*: `Unit`, *other* ≠ **task-unit** *task* · **unit-created?**′ *other* = **unit-created?** *other* ∧ **unit-active?**′ *other* = **unit-active?** *other* ∧ **unit-succeeded?**′ *other* = **unit-succeeded?** *other* ∧ **unit-failed?**′ *other* = **unit-failed?** *other* ∧ **unit-entry**′ *other* = **unit-entry** *other* ∧ **unit-body**′ *other* = **unit-body** *other* ∧ **unit-stack**′ *other* = **unit-stack** *other* ∧ **unit-error**′ *other* = **unit-error** *other*.
 
+∀ *candidate*: `Task` · **task-created?**′ *candidate* = **task-created?** *candidate* ∧ **task-unit**′ *candidate* = **task-unit** *candidate* ∧ **task-owner-unit**′ *candidate* = **task-owner-unit** *candidate*.
+
 #### Chapter 9
 
 ##### Action
 
 > Cancelling a terminal task is a no-op. Its cached result remains unchanged.
 
-**`Units`** ↝ Cancel terminal task *task*: `Task`, **task-created?** *task*, (**unit-succeeded?** (**task-unit** *task*) ∨ **unit-failed?** (**task-unit** *task*)).
+**`Units`**, **`Concurrency`** ↝ Cancel terminal task *task*: `Task`, **task-created?** *task*, (**unit-succeeded?** (**task-unit** *task*) ∨ **unit-failed?** (**task-unit** *task*)).
 
 ---
 
 ∀ *candidate*: `Unit` · **unit-created?**′ *candidate* = **unit-created?** *candidate* ∧ **unit-active?**′ *candidate* = **unit-active?** *candidate* ∧ **unit-succeeded?**′ *candidate* = **unit-succeeded?** *candidate* ∧ **unit-failed?**′ *candidate* = **unit-failed?** *candidate* ∧ **unit-entry**′ *candidate* = **unit-entry** *candidate* ∧ **unit-body**′ *candidate* = **unit-body** *candidate* ∧ **unit-stack**′ *candidate* = **unit-stack** *candidate* ∧ **unit-error**′ *candidate* = **unit-error** *candidate*.
+
+∀ *candidate*: `Task` · **task-created?**′ *candidate* = **task-created?** *candidate* ∧ **task-unit**′ *candidate* = **task-unit** *candidate* ∧ **task-owner-unit**′ *candidate* = **task-owner-unit** *candidate*.
 
 
 

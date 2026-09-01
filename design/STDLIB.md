@@ -623,6 +623,7 @@ Equivalent to `dup len 1 - at`.
 
 ### len
 `( list -- count )` — Top-level list element count. Lists may be ragged.
+Dictionary entry count is provided by `dict.size`.
 
 ### lex-cmp
 `( left right -- order )` — Lexicographically compare two sequences using
@@ -651,6 +652,7 @@ restoration. All four quotations run in the invoking application context and
 communicate through ambient stack state. Non-tail recursion retains one
 explicit continuation per descent rather than using the host stack; its live
 storage is proportional to recursion depth.
+An empty `post` quotation does not eliminate the retained recursion level.
 
 ### load
 `( path -- )` — Read and evaluate a source file as one transactional unit
