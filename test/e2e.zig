@@ -277,7 +277,7 @@ fn expectProcessGone(pid: std.posix.pid_t) !void {
             error.PermissionDenied => {},
             else => |unexpected| return unexpected,
         };
-        if (try processIsZombie(pid)) return;
+        if (processIsZombie(pid)) return;
         const pause: std.Io.Clock.Duration = .{
             .clock = .awake,
             .raw = .fromMilliseconds(5),
@@ -287,18 +287,15 @@ fn expectProcessGone(pid: std.posix.pid_t) !void {
     return error.DescendantStillRunning;
 }
 
-fn processIsZombie(pid: std.posix.pid_t) !bool {
+fn processIsZombie(pid: std.posix.pid_t) bool {
     if (builtin.os.tag != .linux) return false;
     var path_buffer: [64]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buffer, "/proc/{d}/stat", .{pid});
-    const stat = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(4096)) catch |err| switch (err) {
-        error.FileNotFound => return false,
-        else => return err,
-    };
+    const path = std.fmt.bufPrint(&path_buffer, "/proc/{d}/stat", .{pid}) catch return false;
+    const stat = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(4096)) catch return false;
     defer allocator.free(stat);
-    const command_end = std.mem.lastIndexOfScalar(u8, stat, ')') orelse return error.InvalidProcessStat;
+    const command_end = std.mem.lastIndexOfScalar(u8, stat, ')') orelse return false;
     if (command_end + 2 >= stat.len or stat[command_end + 1] != ' ')
-        return error.InvalidProcessStat;
+        return false;
     return stat[command_end + 2] == 'Z';
 }
 

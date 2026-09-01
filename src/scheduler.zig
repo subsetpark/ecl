@@ -954,8 +954,12 @@ const ExternalNode = struct {
         if (old != 1) return;
         _ = self.refs.load(.acquire);
         std.debug.assert(!self.linked);
+        const scheduler = self.scope.scheduler;
+        const scope = self.scope;
+        const allocator = self.allocator;
         self.member.deinit();
-        self.allocator.destroy(self);
+        allocator.destroy(self);
+        scheduler.finishExternalDetach(scope);
     }
 
     pub fn detachExternalMembership(self: *ExternalNode) void {
@@ -1366,8 +1370,8 @@ pub const WorkerScheduler = enum(usize) {
 
     fn detachExternal(self: *const WorkerScheduler, node: *ExternalNode) void {
         const scope = node.scope;
+        std.debug.assert(scope.scheduler == self);
         var cursor_release: ?*ExternalNode = null;
-        var closing_owner: ?*TaskCell = null;
         std.Io.Threaded.mutexLock(&scope.mutex);
         if (node.linked) {
             if (scope.external_cancel_next == node) {
@@ -1380,21 +1384,27 @@ pub const WorkerScheduler = enum(usize) {
             node.previous = null;
             node.next = null;
             node.linked = false;
-            const decision = scopeDecision(scope.policy, .child_terminal);
-            scope.policy = decision.next;
-            if (decision.command == .notify_quiescent) {
-                scope.quiescent.broadcast(blockingIo());
-                if (!scope.cancellation_walk_active) {
-                    closing_owner = scope.closing_owner;
-                    scope.closing_owner = null;
-                }
-            }
         }
         std.Io.Threaded.mutexUnlock(&scope.mutex);
         if (cursor_release) |cursor| cursor.release();
         // Consume the list's reference. The membership-token reference is
         // consumed by `ExternalNode.detachExternalMembership` after return.
         node.release();
+    }
+
+    fn finishExternalDetach(self: *const WorkerScheduler, scope: *TaskScope) void {
+        var closing_owner: ?*TaskCell = null;
+        std.Io.Threaded.mutexLock(&scope.mutex);
+        const decision = scopeDecision(scope.policy, .child_terminal);
+        scope.policy = decision.next;
+        if (decision.command == .notify_quiescent) {
+            scope.quiescent.broadcast(blockingIo());
+            if (!scope.cancellation_walk_active) {
+                closing_owner = scope.closing_owner;
+                scope.closing_owner = null;
+            }
+        }
+        std.Io.Threaded.mutexUnlock(&scope.mutex);
         if (closing_owner) |owner| self.enqueueTask(owner);
     }
 

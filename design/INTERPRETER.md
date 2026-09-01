@@ -761,7 +761,12 @@ External readiness uses the same arbitration rather than a parallel scheduler.
 `external.zig` supplies nominal type-erased readiness and scope-membership
 handles whose callbacks state ownership on registration, failed registration,
 wake loss, cancellation, and detach. A process pipe or terminal event may wake
-a Unit, but scheduler code never imports process backend types.
+a Unit, but scheduler code never imports process backend types. Detaching an
+external member first unlinks it, then releases every list, token, and
+cancellation-cursor reference and the member capability itself; only that
+node's final release decrements the scope's child count and publishes
+quiescence. Scheduler and allocator teardown therefore cannot overtake the
+cleanup performed by a membership callback.
 
 A native work driver that must wait carries its driver and park request in one
 exhaustive continuation variant. This is the external equivalent of the task
