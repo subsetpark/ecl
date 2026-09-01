@@ -131,9 +131,10 @@ const source_groups = [_]SourceGroup{
         @embedFile("bench_workdrivers.zig"),    @embedFile("ecl_source_check.zig"),
     } },
     .{ .production = true, .files = &.{
-        "scheduler.zig", "scheduler_core.zig", "console.zig", "task_prims.zig",
+        "scheduler.zig", "scheduler_core.zig", "external.zig", "process_port.zig", "console.zig", "task_prims.zig",
     }, .sources = &.{
         @embedFile("../scheduler.zig"), @embedFile("../scheduler_core.zig"),
+        @embedFile("../external.zig"),  @embedFile("../process_port.zig"),
         @embedFile("../console.zig"),   @embedFile("../task_prims.zig"),
     } },
     // The installed author SDK, its sized ABI records, validation, loader,
@@ -709,6 +710,17 @@ fn auditUnsafeCasts() bool {
             "TaskDestroyAdapter",     "PortReleaseAdapter",
             "ModuleReleaseAdapter",   "RetirementAdapters",
             "RetirementWakeAdapters", "CodeRetirementAdapters",
+        },
+    ) or failed;
+    failed = auditErasedCasts(
+        "external capability erasure",
+        @embedFile("../external.zig"),
+        &.{
+            "WakeTargetAdapters",
+            "ReadinessRegistrationAdapters",
+            "ReadinessSourceAdapters",
+            "ScopeMemberAdapters",
+            "ScopeMembershipAdapters",
         },
     ) or failed;
     return failed;

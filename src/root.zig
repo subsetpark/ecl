@@ -33,6 +33,8 @@ pub const kernel_random = @import("kernel_random.zig");
 pub const session = @import("session.zig");
 pub const console = @import("console.zig");
 pub const scheduler = @import("scheduler.zig");
+const external = @import("external.zig");
+const process_port = @import("process_port.zig");
 pub const task_prims = @import("task_prims.zig");
 pub const test_prims = @import("test_prims.zig");
 test {
@@ -68,6 +70,8 @@ test {
     _ = session;
     _ = console;
     _ = scheduler;
+    _ = external;
+    _ = process_port;
     _ = task_prims;
     _ = test_prims;
     _ = @import("tests/value_test.zig");

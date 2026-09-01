@@ -1138,6 +1138,15 @@ pub fn portStorage(header: *const PortHandle) *const PortStorage {
     return @ptrCast(@alignCast(objectConst(headerFromPort(@constCast(header))).payload.?));
 }
 
+/// Validated typed projection for the backend that created a port. Matching
+/// the release adapter prevents an unrelated opaque port kind from being
+/// reinterpreted merely because both payloads erase to `anyopaque`.
+pub fn portPayload(comptime Payload: type, header: *const PortHandle) *Payload {
+    const storage = portStorage(header);
+    std.debug.assert(storage.release == PortReleaseAdapter(Payload).release);
+    return @ptrCast(@alignCast(storage.payload));
+}
+
 fn allocModuleHeader(
     allocator: std.mem.Allocator,
     payload: *anyopaque,
