@@ -16,8 +16,8 @@ As the name suggests, ECL represents the attempt to evolve an old
 project---[ec](https://ec-calc.com/) into a proper programming language.
 Like ECL, ec attempted to combine the two above attributes in a single
 computing environment; both both the semantics and implementation of the
-older project made it suitable only as a desk calculator, not as a programming
-language.
+older project limited it to desk-calculator use and omitted capabilities needed
+by a programming language.
 
 ECL is intended to attain some of the usefulness for live data exploration and
 command-line use of K, some of the elegance and functional character of Joy,
@@ -128,7 +128,7 @@ constructs a module and registers it globally, namespacing its exposed
 definitions and (optionally) encapsulating private state.
 
 ```sh
-ecl> (((1 +) within) 'inc def
+ecl> [] (((1 +) within) 'inc def
 ..    ((1 -) within) 'dec def
 ..    ((dup without) within) 'get def 0) 'counter @defm
 ecl> counter.get
@@ -210,13 +210,14 @@ workflow.
 
 ### Tests
 
-Tests are module declarations, not exported words. They may call private
+Tests use module declarations and do not require exported words. They may call private
 definitions and may use the same name as an ordinary definition. Ordinary
 application loading validates and then discards them, so test bodies and test
 catalog indexes are not retained in shipped module images:
 
 ```ecl
 ### module app.math
+[]
 (
  ### defp double
  (n -- n : "Double a number.")
@@ -289,6 +290,7 @@ can then be looked up for any ECL file in `ECL_PATH`. For example, save this as
 ```ecl
 ### module stats
 # Small statistical helpers.
+[]
 (
  ### def twice
  (value -- doubled : "Double a number.")
@@ -326,6 +328,8 @@ native modules.
   semantics, errors, and modules.
 - [`design/STDLIB.md`](design/STDLIB.md) is the exhaustive reference for the
   shipped core, prelude, and standard-library vocabulary.
+- [`design/ENVIRONMENT.md`](design/ENVIRONMENT.md) defines module loading,
+  packages, command-line behavior, and source formatting.
 - [`design/ECL_STYLE.md`](design/ECL_STYLE.md) is the authoring guide for
   first-party ECL source.
 - [`design/INTERPRETER.md`](design/INTERPRETER.md) describes the runtime

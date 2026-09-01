@@ -48,7 +48,7 @@ pub const Columns = enum(u16) {
     }
 };
 
-/// A row that could not be measured is a distinct state, not a number. There
+/// A row that could not be measured has its own nonnumeric state. There
 /// is no fallback width: guessing eighty columns on a narrower terminal wraps
 /// the row and moves the cursor the redraw places by rewriting its prefix, so
 /// an unmeasurable terminal selects the canonical line reader instead.

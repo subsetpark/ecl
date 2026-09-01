@@ -670,7 +670,7 @@ const WhichDriver = struct {
             3 => try self.add(.{ .bytes = " " }),
             4 => try self.add(.{ .bytes = switch (resolved.lease.binding) {
                 .word => "def",
-                .builtin, .seed => "primitive",
+                .builtin => "primitive",
                 .native => "native",
             } }),
             5 => try self.add(.{ .bytes = " " }),
@@ -906,7 +906,7 @@ const SeeDriver = struct {
                     try self.add(.{ .bytes = source.bytes() })
                 else
                     try self.add(.{ .value = .{ .list = env.quotationHeader(word_body) } }),
-                .builtin, .seed => try self.add(.{ .bytes = "<primitive>" }),
+                .builtin => try self.add(.{ .bytes = "<primitive>" }),
                 .native => try self.add(.{ .bytes = "<native:" }),
             },
             3 => switch (resolved.lease.binding) {
@@ -1052,7 +1052,7 @@ const SeeDriver = struct {
                     // The reflection plan emits only reader-valid canonical
                     // values and fixed binding descriptors. Failure here is an
                     // internal disagreement between those two production
-                    // boundaries, not a user program error.
+                    // boundaries and is unreachable from a user program.
                     error.InvalidUtf8, error.InvalidSource => unreachable,
                 };
                 const context = format_state.context;

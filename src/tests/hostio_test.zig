@@ -3,8 +3,8 @@
 //! Every case drives a whole Session over source strings only, so the
 //! traceless session heap is the right allocator (see `test_heap.zig`). The
 //! host services these words need — an `std.Io`, an environment snapshot, a
-//! standard-input mode — arrive through `session.Host`, not a test-only
-//! accessor.
+//! standard-input mode—arrive through `session.Host`. No test-only accessor
+//! bypasses that boundary.
 const std = @import("std");
 const machine = @import("../machine.zig");
 const session = @import("../session.zig");
@@ -224,7 +224,7 @@ test "hostio: getenv returns the snapshot value and unset is an error" {
     });
     // Absence is absence: defaulting is the caller's explicit idiom.
     try expectStack(.{
-        .source = "(\"ECL_TEST_ABSENT\" getenv) @attempt \"fallback\" result.or-else",
+        .source = "[] (\"ECL_TEST_ABSENT\" getenv) @attempt \"fallback\" result.or-else",
         .environ = environ,
     }, "\"fallback\"");
     try expectError(.{ .source = "42 getenv", .environ = environ }, .{
@@ -233,7 +233,7 @@ test "hostio: getenv returns the snapshot value and unset is an error" {
         .kind = "type",
         .word = "getenv",
     });
-    // A session with no snapshot has no variables, not empty ones.
+    // A session with no snapshot has no variables at all.
     try expectError(.{ .source = "\"ECL_TEST_ONE\" getenv" }, .{
         .name = "no snapshot",
         .source = "\"ECL_TEST_ONE\" getenv",

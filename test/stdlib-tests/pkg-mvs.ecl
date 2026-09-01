@@ -1,4 +1,5 @@
 ### module stdlib.test.pkg-mvs
+[]
 (
  'stdlib.test.support
  ('equal 'raises-containing 'raises-data 'documented)
@@ -80,7 +81,7 @@
  ### test resolution
  (-- : "Select every reachable maximum and record all declared minimums.")
  (root catalog pkg.mvs.resolve
-  dup 'packages at dup dict.keys len 2 equal
+  dup 'packages at dup dict.size 2 equal
   ["c" 'version] at-path "1.5.0" equal
   root catalog pkg.mvs.resolve
   dup 'requires at dict.vals (dict.pairs) each raze
@@ -166,7 +167,7 @@
   "b" "1.0.0"
   {} "a" "a" "1.0.0" "https://e.com/a.tgz" hash-a requirement put
   manifest put put
-  2 pack (pkg.mvs.resolve) seed @attempt
+  2 pack (pkg.mvs.resolve) @attempt
   'err at
   dup 'kind at 'domain equal
   'data at 'packages at ("a" "b") equal)

@@ -39,8 +39,9 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     };
     try core.installBuiltins(definitions);
 }
-/// Construction alone: the body builds an anonymous immutable image and the
-/// program decides later whether, and under what name, to register it.
+/// Construction alone: seeds initialize the construction stack, the body
+/// builds an anonymous immutable image, and the program decides later whether,
+/// and under what name, to register it.
 fn moduleWord(evaluator: *Machine) MachineError!void {
     var input = try evaluator.popUnitInput();
     defer input.deinit(evaluator.releaseDomain());
@@ -62,10 +63,9 @@ fn registerWord(evaluator: *Machine) MachineError!void {
 }
 /// The source-module spelling: construction followed immediately by
 /// registration, with the same all-or-nothing outcome as writing the two
-/// words. Name-last, matching `def` and `set`, so a seeded definition needs no
-/// shuffle above the binder.
+/// words. Name-last matches `def` and `set`.
 fn defmWord(evaluator: *Machine) MachineError!void {
-    try evaluator.require(2);
+    try evaluator.require(3);
     const name = try evaluator.popSymbol();
     var input = try evaluator.popUnitInput();
     defer input.deinit(evaluator.releaseDomain());

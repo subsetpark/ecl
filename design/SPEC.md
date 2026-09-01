@@ -1,20 +1,141 @@
+<!-- Generated from design/SPEC.src.md; make changes in the source fragments. -->
+
 # ecl — language specification
 
-This document is the authority on ecl's syntax and semantics. It describes
-the language as implemented, completely and only: a construct appears here
-exactly when the shipped interpreter provides it. The companion
-[`STDLIB.md`](STDLIB.md) is the exhaustive shipped-vocabulary reference, and
-[`INTERPRETER.md`](INTERPRETER.md) describes how the implementation delivers
-these semantics; neither may change an observable behavior specified here.
+## Status, scope, and conformance
 
-ecl is a homoiconic concatenative array language. Programs are postfix:
-evaluation pushes values onto a stack, and words consume and produce stack
-values. Code and arrays are the same substance — lists — so programs can be
-built, inspected, and transformed with the same vocabulary used on data.
-Values are immutable. Errors are crash-only, observed as data at explicit
-boundaries. Concurrency is structured tasks over immutable values.
+This document defines the syntax and semantics of the ECL language. The
+language is defined independently of any implementation representation,
+interpreter architecture, host interface, or distribution. This document
+defines the language; the shipped ECL interpreter is its reference
+implementation.
 
-## Source text
+ECL has three distinct fields of conformance:
+
+- An **ECL language implementation** conforms to this document. It provides
+  the source language, values, evaluation, bindings, units and errors,
+  modules, and tasks specified here.
+- An **ECL standard environment** is a conforming language implementation
+  that also provides the vocabulary specified by [`STDLIB.md`](STDLIB.md).
+  When a named word is a semantic primitive of the language, this document is
+  the authority for its spelling and behavior and `STDLIB.md` indexes that
+  definition rather than restating it.
+- An **ECL distribution or toolchain** may additionally provide a command,
+  module transports, native extensions, packages, a formatter, and other host
+  facilities. Those facilities are not language semantics unless this
+  document explicitly says otherwise.
+
+[`INTERPRETER.md`](INTERPRETER.md) describes one implementation of these
+semantics, and [`PERFORMANCE.md`](PERFORMANCE.md) states implementation and
+distribution guarantees. Neither document may alter language behavior defined
+here.
+
+The key words **must**, **must not**, **should**, **should not**, and **may**
+are normative. An implementation limit is a documented finite bound permitted
+by this specification. Unspecified behavior is behavior for which this
+specification deliberately imposes no choice; it is not permission to violate
+any otherwise applicable rule. Examples and the language overview are
+non-normative unless explicitly identified as normative.
+
+### Formal models
+
+A linked Pantagruel model is normative only within the abstraction boundary
+declared by that model. Its domains, rules, actions, invariants, and initial
+state are normative within that boundary; behavior it deliberately omits is
+governed by this prose. A finite model-checking bound serves only the
+verification machinery and imposes no ECL implementation limit. A contradiction between prose and
+a formal model is a specification defect and must not be resolved by silently
+preferring either account.
+
+Formal actions use guards to define the states and inputs for which their
+transitions are valid. Models do not enumerate every invalid invocation as an
+error-labelled no-op; error kinds and unchanged-state requirements outside an
+action's guard remain specified in prose. A failure is modeled as an explicit
+action when failure itself changes modeled state, such as aborting an active
+transaction while preserving its durable and caller stacks.
+
+Action parameters identify either inputs supplied by ECL execution or existing
+semantic entities whose transition the action records; they need not denote
+first-class ECL values. A fact derived from modeled state is expressed as the
+product of a rule rather than repeated as an independent parameter. Fresh
+runtime identities such as slots, generations, calls, and transactions are
+selected existentially from unused domain atoms by the transition that creates
+them. A later action that changes one of those existing entities takes that
+entity as a parameter.
+
+## Language overview
+
+ECL is a homoiconic concatenative array language. A program is a sequence of
+values evaluated from left to right against an operand stack. Evaluating a
+word resolves and invokes its binding; evaluating any other value pushes that
+value. Words consume operands from the right-hand, top end of the stack and
+append their results there.
+
+A quotation is a list used as a program. Lists are also ECL's general ordered
+aggregate, so code and data have the same value representation and can be
+built, inspected, and transformed by the same operations. Concatenating two
+programs composes their stack transformations. Many scalar operations pervade
+lists and dictionaries recursively, giving the same language an array
+interpretation.
+
+Values are immutable. Bindings associate names with executable bodies and may
+be replaced without mutating either the old body or values that refer to its
+name. Reader-authored word occurrences retain where their names are to be
+looked up, while lookup remains late: they retain a scope and resolve the
+binding at execution time.
+
+A unit is the boundary of failure and operand-stack rollback. Modules separate
+immutable code images from named registrations; a registration owns the
+durable operand stack used by stateful module operations. Tasks execute
+isolated units under structured concurrency.
+
+## Notation and terminology
+
+In a stack effect `( before -- after )`, the top of the operand stack is at
+the right. Names in an effect describe positions and introduce no runtime variables. `S`
+denotes an operand-stack sequence, `P` and `Q` denote program sequences, and
+σ denotes the execution state other than the operand stack.
+
+The primary evaluation judgment is big-step:
+
+```text
+⟨P, S, σ⟩ ⇓ success(S′, σ′)
+⟨P, S, σ⟩ ⇓ failure(error, S_partial, σ′)
+```
+
+Evaluation therefore takes a program, an operand stack, and execution state
+and produces either a new stack and state or an error with the partial stack
+and surviving state at the point of failure. A unit applies the separate
+rollback rule in [Units and the transactional stack](#units-and-the-transactional-stack).
+Small-step rules may use the term *configuration* for a tuple containing
+remaining control and execution state, but configuration is not an additional
+ECL value or source-language concept.
+
+If `P Q` denotes sequence concatenation, sequential evaluation obeys the Joy
+composition law wherever the left side succeeds:
+
+```text
+⟦P Q⟧ = ⟦Q⟧ ∘ ⟦P⟧
+```
+
+A **form** is a grammatical source construct. Reading a form produces an ECL
+**value**, possibly with semantic metadata. A **word** is an executable value
+whose identity is its kind and spelling. A **word occurrence** is a stored
+word together with any resolution and provenance metadata assigned to that
+occurrence. A **quotation** is a list applied as a program. A **binding**
+associates a name with an executable body and metadata; it is not a value. A
+**scope** is a binding map with a fixed parent. An **activation** is one
+invocation of a binding. A **module image** is an immutable module value; a
+**registration** is the durable named slot through which an image may be
+published and invoked.
+
+## Source language
+
+The grammar in this chapter is the single authoritative grammar for ECL
+source. Later sections may quote productions for explanation but do not define
+a second grammar.
+
+### Source text
 
 - Source is UTF-8, mandatorily. Invalid UTF-8 is a `'parse` error.
 - `#` begins a comment that runs to end of line, outside strings. Shebang
@@ -28,7 +149,7 @@ boundaries. Concurrency is structured tasks over immutable values.
 - Every reader-produced token carries provenance (source name, line,
   column), which surfaces in error dicts when known.
 
-## Tokens
+### Tokens
 
 The token kinds are the six delimiters `( ) [ ] { }`, string literals, and
 *atoms*: maximal runs of non-whitespace, non-delimiter, non-reserved
@@ -42,7 +163,7 @@ characters. An atom is classified whole-token, in this order:
      the int64 range is a parse error.
    - float64: `digits . digits` with an optional exponent (`e`/`E`,
      optional sign), or `digits` followed by an exponent. Digits are
-     required on both sides of `.` — `.5` and `5.` are words, not numbers.
+     required on both sides of `.` — `.5` and `5.` therefore lex as words.
      `_` is not permitted in float literals. A literal that overflows
      float64 is a parse error.
    - The whole tokens `inf`, `+inf`, and `-inf` are float literals (they
@@ -66,16 +187,16 @@ Segment characters are anything except whitespace, the six delimiters,
 and blank lines inside the quotes are literal; there is no triple-quoted,
 dedented, or margin-stripped form. The escapes are exactly `\\`, `\"`,
 `\n`, `\t`, and `\u{...}` (one to six hex digits, Unicode scalar values
-only); any other escape is a parse error. A string is a rank-1 char
-vector, not a distinct type.
+only); any other escape is a parse error. A string uses the rank-1 char-vector
+role of a list.
 
-The exact decimal form `<task:N>` (ASCII digits, no sign) is reserved as an
-unparseable runtime display marker wherever an atom may occur. The same bytes
-inside a string literal are ordinary character data.
+The exact form `<...>` is reserved as an unparseable runtime display marker
+wherever an atom may occur. The same bytes inside a string literal are ordinary
+character data.
 
-## Forms
+### Forms
 
-```
+```ebnf
 program  :=  form*
 form     :=  list | dict | atom
 list     :=  "(" binder? form* ")"  |  "[" binder? form* "]"
@@ -87,7 +208,7 @@ binder   :=  "|" name+ "|"           # names: distinct unqualified symbols
   enclosed forms, unevaluated. Brackets quote; nothing inside runs at read
   time. The pair choice is free per pair, and **pairs must match**:
   `[1 2 3)` is a parse error. (Printing chooses brackets by
-  representation; see Printing.)
+  canonical value shape; see Printing.)
 - `{ k v ... }` constructs one dict value at read time. Adjacent top-level
   forms are paired as key and value; neither is evaluated, so bare words
   are stored as word values — `{foo bar}` stores the word `bar` under the
@@ -103,106 +224,827 @@ binder   :=  "|" name+ "|"           # names: distinct unqualified symbols
   unqualified symbols; the empty binder `(||)` is a parse error; the exact
   names `--` and `:` are parse errors in a binder. A local name is not
   visible inside a nested quotation within the binder body; referencing
-  one there is an error whose message suggests `partial`. The sugar does
-  not involve `set`; locals and environment assignment are unrelated
-  mechanisms.
+  one there is an error whose message identifies `partial` as construction of
+  a reusable capturing quotation. The sugar does not involve `set`; locals and
+  environment assignment are unrelated mechanisms.
 
-## Values
+## Values and external representations
 
-Every value is one of eight readable kinds, as reported by `type`: `'int`,
-`'float`, `'char`, `'symbol`, `'word`, `'list`, `'dict`, or `'task`. Two
-further kinds are opaque runtime capabilities that no source text can
-denote: `'module` (see Modules) and `'unit-plan` (see Seeding a unit).
+#### Chapter 1
 
-All values are immutable. Mutation exists only as environment rebinding
-(`def`/`set`). Performance is a documented guarantee, not a semantic:
-appending to or updating a value that is not shared updates in place in
-amortized constant time; a shared value is copied once, after which
-updates are cheap again. No operation can observe the difference except
-through timing.
+##### Domains
 
-- **int** — a 64-bit signed integer. Overflow is an error, never wrapping
-  or promotion.
-- **float** — an IEEE 754 binary64 value, excluding NaN. `inf` and `-inf`
-  are ordinary values. See Numbers.
-- **char** — a Unicode codepoint. A char is a distinct atom, not an
-  integer.
-- **symbol** — an interned name, written quoted: `'mean`, `'stats.mean`.
-- **word** — a name in executable position. A bare word in code and a
-  quoted symbol are distinct atoms: `(dup) first` yields the word `dup`,
-  `'dup` yields the symbol, and they do not `match?`. Words print bare,
-  symbols print quoted.
-- **list** — the one aggregate: a finite ordered sequence of values. A
-  quotation, a vector, and a row of a matrix are all lists. A homogeneous
-  list of atoms *is* a vector — `(1 2 3)` and `[1 2 3]` are the same
-  value. There is no rank-carrying array type: a matrix is a list of
-  equal-length lists, and rank is depth, not an intrinsic property.
-  Ragged data (a list of lists of unequal length) is legal. A string is a
-  list of chars. Homogeneous lists are stored specialized (flat typed
-  buffers); specialization is representation, never semantics, and is
-  observable only through printing.
-- **dict** — an insertion-ordered map. Any value is a legal key
-  (immutability makes every value hashable); symbols are the idiom. Key
-  identity is whole-value `match?` identity. Insertion order is preserved
-  by storage, iteration, and printing, but ignored by equality: two dicts
-  with the same key–value pairs in different orders are equal.
-- **task** — a handle to a concurrent unit of work (see Concurrency).
-  Tasks are runtime capabilities bound to their session: `match?` and
-  hashing use handle identity, and a task prints as `<task:N>`, which the
-  reader rejects. A task value cannot be forged from text.
-- **unit-plan** — a sealed pair of seed values and a construction body,
-  built only by `seed` and consumed only by a unit constructor. Like a
-  task it is opaque: `match?` and hashing use plan identity, it prints as
-  `<unit-plan>`, which the reader rejects, and it cannot be called,
-  concatenated, indexed, serialized, or passed to a native word. It is an
-  ordinary first-class value for everything else — `dup`, `pop`, storage,
-  selection, and passage between words.
+> This model is normative for the closed value-kind universe; immutable scalar and aggregate content; whole-value matching; dictionary key uniqueness; recursive readability; and hash congruence. It abstracts over concrete storage, float encoding, source grammar, printing, pervasion, and the operations that construct or consume values.  Every ECL value has exactly one of the language's nine kinds. Its kind is an immutable fact: it does not belong to an action context. Boolean, string, quotation, vector, matrix, array, error, and result are roles played by these values rather than additional kinds.
+
+`Value`.
+
+`ValueType`.
+
+##### Rules
+
+**value-type** *value*: `Value` ⇒ `ValueType`.
+
+**int-type** ⇒ `ValueType`.
+
+**float-type** ⇒ `ValueType`.
+
+**char-type** ⇒ `ValueType`.
+
+**symbol-type** ⇒ `ValueType`.
+
+**word-type** ⇒ `ValueType`.
+
+**list-type** ⇒ `ValueType`.
+
+**dict-type** ⇒ `ValueType`.
+
+**task-type** ⇒ `ValueType`.
+
+**module-type** ⇒ `ValueType`.
+
+---
+
+> The value-kind universe is closed: every value has one of these nine kinds.
+
+∀ *value*: `Value` · **value-type** *value* = **int-type** ∨ **value-type** *value* = **float-type** ∨ **value-type** *value* = **char-type** ∨ **value-type** *value* = **symbol-type** ∨ **value-type** *value* = **word-type** ∨ **value-type** *value* = **list-type** ∨ **value-type** *value* = **dict-type** ∨ **value-type** *value* = **task-type** ∨ **value-type** *value* = **module-type**.
+
+> The nine kind names are distinct, so the total `value-type` rule assigns exactly one kind to every value.
+
+**int-type** ≠ **float-type** ∧ **int-type** ≠ **char-type** ∧ **int-type** ≠ **symbol-type** ∧ **int-type** ≠ **word-type** ∧ **int-type** ≠ **list-type** ∧ **int-type** ≠ **dict-type** ∧ **int-type** ≠ **task-type** ∧ **int-type** ≠ **module-type** ∧ **float-type** ≠ **char-type** ∧ **float-type** ≠ **symbol-type** ∧ **float-type** ≠ **word-type** ∧ **float-type** ≠ **list-type** ∧ **float-type** ≠ **dict-type** ∧ **float-type** ≠ **task-type** ∧ **float-type** ≠ **module-type** ∧ **char-type** ≠ **symbol-type** ∧ **char-type** ≠ **word-type** ∧ **char-type** ≠ **list-type** ∧ **char-type** ≠ **dict-type** ∧ **char-type** ≠ **task-type** ∧ **char-type** ≠ **module-type** ∧ **symbol-type** ≠ **word-type** ∧ **symbol-type** ≠ **list-type** ∧ **symbol-type** ≠ **dict-type** ∧ **symbol-type** ≠ **task-type** ∧ **symbol-type** ≠ **module-type** ∧ **word-type** ≠ **list-type** ∧ **word-type** ≠ **dict-type** ∧ **word-type** ≠ **task-type** ∧ **word-type** ≠ **module-type** ∧ **list-type** ≠ **dict-type** ∧ **list-type** ≠ **task-type** ∧ **list-type** ≠ **module-type** ∧ **dict-type** ≠ **task-type** ∧ **dict-type** ≠ **module-type** ∧ **task-type** ≠ **module-type**.
+
+#### Chapter 2
+
+##### Domains
+
+> Scalar payloads and aggregate contents determine value identity within their respective kinds. Numeric magnitude separately determines mathematical matching across int and float, so distinct float payloads such as positive and negative zero may still match. A list's contents are finite and ordered. A dictionary's entries are finite and insertion-ordered, while its keys are unique under whole-value matching.  `matches?` is the equivalence exposed by `match?` and used for dictionary-key identity. Lists match recursively by position. Dictionaries match by their key-value pairs regardless of insertion order. Task and module values match only themselves. Resolution context, reader lineage, provenance, and storage identity are absent from these rules and therefore cannot affect matching or hashing.
+
+`NumericMagnitude`.
+
+`FloatPayload`.
+
+##### Rules
+
+**int-payload** *value*: `Value`, **value-type** *value* = **int-type** ⇒ `Int`.
+
+**float-payload** *value*: `Value`, **value-type** *value* = **float-type** ⇒ `FloatPayload`.
+
+**char-codepoint** *value*: `Value`, **value-type** *value* = **char-type** ⇒ `Nat0`.
+
+**symbol-spelling** *value*: `Value`, **value-type** *value* = **symbol-type** ⇒ `String`.
+
+**word-spelling** *value*: `Value`, **value-type** *value* = **word-type** ⇒ `String`.
+
+**list-length** *value*: `Value`, **value-type** *value* = **list-type** ⇒ `Nat0`.
+
+**list-element** *value*: `Value`, *index*: `Nat`, **value-type** *value* = **list-type**, *index* ≤ **list-length** *value* ⇒ `Value`.
+
+**dict-length** *value*: `Value`, **value-type** *value* = **dict-type** ⇒ `Nat0`.
+
+**dict-key-at-index** *value*: `Value`, *index*: `Nat`, **value-type** *value* = **dict-type**, *index* ≤ **dict-length** *value* ⇒ `Value`.
+
+**dict-value-at-index** *value*: `Value`, *index*: `Nat`, **value-type** *value* = **dict-type**, *index* ≤ **dict-length** *value* ⇒ `Value`.
+
+**dict-has-key?** *dictionary*: `Value`, *key*: `Value`, **value-type** *dictionary* = **dict-type** ⇒ `Bool`.
+
+**dict-value-for-key** *dictionary*: `Value`, *key*: `Value`, **value-type** *dictionary* = **dict-type**, **dict-has-key?** *dictionary* *key* ⇒ `Value`.
+
+**numeric-value?** *value*: `Value` ⇒ `Bool`.
+
+**numeric-magnitude** *value*: `Value`, **numeric-value?** *value* ⇒ `NumericMagnitude`.
+
+**boolean-value?** *value*: `Value` ⇒ `Bool`.
+
+**string-value?** *value*: `Value` ⇒ `Bool`.
+
+**matches?** *left*: `Value`, *right*: `Value` ⇒ `Bool`.
+
+**readable?** *value*: `Value` ⇒ `Bool`.
+
+**value-hash** *value*: `Value` ⇒ `Int`.
+
+---
+
+> Numbers are exactly the int and float values.
+
+∀ *value*: `Value` · **numeric-value?** *value* ↔ **value-type** *value* = **int-type** ∨ **value-type** *value* = **float-type**.
+
+> An int's payload is a signed 64-bit integer.
+
+∀ *value*: `Value`, **value-type** *value* = **int-type** · **int-payload** *value* ≥ 0 - 2147483648 · 4294967296 ∧ **int-payload** *value* ≤ 2147483648 · 4294967296 - 1.
+
+> A char's payload is one Unicode scalar value.
+
+∀ *value*: `Value`, **value-type** *value* = **char-type** · **char-codepoint** *value* ≤ 1114111 ∧ ¬(**char-codepoint** *value* ≥ 55296 ∧ **char-codepoint** *value* ≤ 57343).
+
+> Scalar payloads determine value identity within each scalar kind.
+
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **int-type**, **value-type** *right* = **int-type**, **int-payload** *left* = **int-payload** *right* · *left* = *right*.
+
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **float-type**, **value-type** *right* = **float-type**, **float-payload** *left* = **float-payload** *right* · *left* = *right*.
+
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **char-type**, **value-type** *right* = **char-type**, **char-codepoint** *left* = **char-codepoint** *right* · *left* = *right*.
+
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **symbol-type**, **value-type** *right* = **symbol-type**, **symbol-spelling** *left* = **symbol-spelling** *right* · *left* = *right*.
+
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **word-type**, **value-type** *right* = **word-type**, **word-spelling** *left* = **word-spelling** *right* · *left* = *right*.
+
+> A list is a finite ordered sequence. Its length and positional elements determine its value identity.
+
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **list-type**, **value-type** *right* = **list-type**, **list-length** *left* = **list-length** *right*, (∀ *index*: `Nat`, *index* ≤ **list-length** *left* · **list-element** *left* *index* = **list-element** *right* *index*) · *left* = *right*.
+
+> A dictionary is insertion ordered. Its length and positional key-value entries determine its value identity, including insertion order.
+
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **dict-type**, **value-type** *right* = **dict-type**, **dict-length** *left* = **dict-length** *right*, (∀ *index*: `Nat`, *index* ≤ **dict-length** *left* · **dict-key-at-index** *left* *index* = **dict-key-at-index** *right* *index* ∧ **dict-value-at-index** *left* *index* = **dict-value-at-index** *right* *index*) · *left* = *right*.
+
+> Booleans are exactly the int values 0 and 1.
+
+∀ *value*: `Value` · **boolean-value?** *value* ↔ **value-type** *value* = **int-type** ∧ (**int-payload** *value* = 0 ∨ **int-payload** *value* = 1).
+
+> A string is exactly a list whose elements are all chars. The empty list is therefore both a string and any other role compatible with empty list data.
+
+∀ *value*: `Value` · **string-value?** *value* ↔ **value-type** *value* = **list-type** ∧ (∀ *index*: `Nat`, *index* ≤ **list-length** *value* · **value-type** (**list-element** *value* *index*) = **char-type**).
+
+> Whole-value matching is reflexive.
+
+∀ *value*: `Value` · **matches?** *value* *value*.
+
+> Whole-value matching is symmetric.
+
+∀ *left*: `Value`, *right*: `Value`, **matches?** *left* *right* · **matches?** *right* *left*.
+
+> Whole-value matching is transitive.
+
+∀ *first*: `Value`, *second*: `Value`, *third*: `Value`, **matches?** *first* *second*, **matches?** *second* *third* · **matches?** *first* *third*.
+
+> Values match only as numbers across the two numeric kinds, or within the same non-numeric kind.
+
+∀ *left*: `Value`, *right*: `Value`, **matches?** *left* *right* · **numeric-value?** *left* ∧ **numeric-value?** *right* ∨ **value-type** *left* = **char-type** ∧ **value-type** *right* = **char-type** ∨ **value-type** *left* = **symbol-type** ∧ **value-type** *right* = **symbol-type** ∨ **value-type** *left* = **word-type** ∧ **value-type** *right* = **word-type** ∨ **value-type** *left* = **list-type** ∧ **value-type** *right* = **list-type** ∨ **value-type** *left* = **dict-type** ∧ **value-type** *right* = **dict-type** ∨ **value-type** *left* = **task-type** ∧ **value-type** *right* = **task-type** ∨ **value-type** *left* = **module-type** ∧ **value-type** *right* = **module-type**.
+
+> Numeric matching is exact mathematical-value equality across int and float.
+
+∀ *left*: `Value`, *right*: `Value`, **numeric-value?** *left*, **numeric-value?** *right* · **matches?** *left* *right* ↔ **numeric-magnitude** *left* = **numeric-magnitude** *right*.
+
+> Equal int magnitudes are exactly equal int payloads.
+
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **int-type**, **value-type** *right* = **int-type** · **numeric-magnitude** *left* = **numeric-magnitude** *right* ↔ **int-payload** *left* = **int-payload** *right*.
+
+> Chars, symbols, and words match exactly when their scalar contents match.
+
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **char-type**, **value-type** *right* = **char-type** · **matches?** *left* *right* ↔ **char-codepoint** *left* = **char-codepoint** *right*.
+
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **symbol-type**, **value-type** *right* = **symbol-type** · **matches?** *left* *right* ↔ **symbol-spelling** *left* = **symbol-spelling** *right*.
+
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **word-type**, **value-type** *right* = **word-type** · **matches?** *left* *right* ↔ **word-spelling** *left* = **word-spelling** *right*.
+
+> Lists match recursively and positionally.
+
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **list-type**, **value-type** *right* = **list-type** · **matches?** *left* *right* ↔ **list-length** *left* = **list-length** *right* ∧ (∀ *index*: `Nat`, *index* ≤ **list-length** *left* · **matches?** (**list-element** *left* *index*) (**list-element** *right* *index*)).
+
+> Dictionary keys are unique under whole-value matching.
+
+∀ *dictionary*: `Value`, *left-index*: `Nat`, *right-index*: `Nat`, **value-type** *dictionary* = **dict-type**, *left-index* ≤ **dict-length** *dictionary*, *right-index* ≤ **dict-length** *dictionary*, **matches?** (**dict-key-at-index** *dictionary* *left-index*) (**dict-key-at-index** *dictionary* *right-index*) · *left-index* = *right-index*.
+
+> A dictionary has a key exactly when one insertion position carries a matching key.
+
+∀ *dictionary*: `Value`, *key*: `Value`, **value-type** *dictionary* = **dict-type** · **dict-has-key?** *dictionary* *key* ↔ (∃ *index*: `Nat`, *index* ≤ **dict-length** *dictionary* · **matches?** *key* (**dict-key-at-index** *dictionary* *index*)).
+
+> Lookup by a present key returns the value at its unique matching position.
+
+∀ *dictionary*: `Value`, *key*: `Value`, *index*: `Nat`, **value-type** *dictionary* = **dict-type**, **dict-has-key?** *dictionary* *key*, *index* ≤ **dict-length** *dictionary*, **matches?** *key* (**dict-key-at-index** *dictionary* *index*) · **dict-value-for-key** *dictionary* *key* = **dict-value-at-index** *dictionary* *index*.
+
+> Dictionaries match recursively by key-value pairs, irrespective of insertion order.
+
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **dict-type**, **value-type** *right* = **dict-type** · **matches?** *left* *right* ↔ **dict-length** *left* = **dict-length** *right* ∧ (∀ *left-index*: `Nat`, *left-index* ≤ **dict-length** *left* · ∃ *right-index*: `Nat`, *right-index* ≤ **dict-length** *right* · **matches?** (**dict-key-at-index** *left* *left-index*) (**dict-key-at-index** *right* *right-index*) ∧ **matches?** (**dict-value-at-index** *left* *left-index*) (**dict-value-at-index** *right* *right-index*)).
+
+> Task values match only by capability identity.
+
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **task-type**, **value-type** *right* = **task-type** · **matches?** *left* *right* ↔ *left* = *right*.
+
+> Module values match only by image identity.
+
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **module-type**, **value-type** *right* = **module-type** · **matches?** *left* *right* ↔ *left* = *right*.
+
+> Scalar source kinds have readable representations.
+
+∀ *value*: `Value`, (**value-type** *value* = **int-type** ∨ **value-type** *value* = **float-type** ∨ **value-type** *value* = **char-type** ∨ **value-type** *value* = **symbol-type** ∨ **value-type** *value* = **word-type**) · **readable?** *value*.
+
+> Task and module values have diagnostic displays but no readable representations.
+
+∀ *value*: `Value`, (**value-type** *value* = **task-type** ∨ **value-type** *value* = **module-type**) · ¬**readable?** *value*.
+
+> A list is readable exactly when all its elements are readable.
+
+∀ *value*: `Value`, **value-type** *value* = **list-type** · **readable?** *value* ↔ (∀ *index*: `Nat`, *index* ≤ **list-length** *value* · **readable?** (**list-element** *value* *index*)).
+
+> A dictionary is readable exactly when all its keys and values are readable.
+
+∀ *value*: `Value`, **value-type** *value* = **dict-type** · **readable?** *value* ↔ (∀ *index*: `Nat`, *index* ≤ **dict-length** *value* · **readable?** (**dict-key-at-index** *value* *index*) ∧ **readable?** (**dict-value-at-index** *value* *index*)).
+
+> Hashing is congruent with whole-value matching.
+
+∀ *left*: `Value`, *right*: `Value`, **matches?** *left*
+*right* · **value-hash** *left* = **value-hash** *right*.
+
+
+
+### Representation and language roles
+
+A conforming implementation may choose any representation for values but must
+not expose an additional kind through `type`, matching, hashing, ordering,
+printing, or an ECL-facing native interface. Adding a first-class kind is a
+language extension. Bindings are not values.
+
+Operations on lists and dictionaries produce values; storage reuse is not
+observable language behavior. `def` and `set` replace bindings rather than
+mutating values. Storage specialization, copy-on-write strategies, and
+amortized bounds are implementation or performance concerns.
+
+Float values use IEEE 754 binary64, excluding NaN; `inf` and `-inf` are
+ordinary values. Integer overflow is an error, never wrapping or promotion.
+See Numbers.
+
+A bare word in code and a quoted symbol are distinct source atoms: `(dup)
+first` yields the word `dup`, while `'dup` yields the symbol. Words print bare
+and symbols print quoted. Resolution and provenance metadata belong to stored
+word occurrences rather than their values.
+
+A quotation, vector, and matrix row are list roles. A homogeneous list of
+atoms *is* a vector—`(1 2 3)` and `[1 2 3]` are the same value. There is no
+rank-carrying array type: a matrix is a list of equal-length lists, rank is
+depth rather than intrinsic data, and ragged lists remain legal.
+
+Dictionary insertion order is preserved by storage, iteration, and printing.
+A task is a runtime capability bound to its session and prints as `<task:N>`.
+A module is an opaque immutable image and prints as `<module>`. Those task and
+module displays are rejected by the reader.
+
+### Readable representations and display
+
+A **diagnostic display** is human-facing text without a read-back guarantee.
+An operation may produce display text for every value, but any print/read
+guarantee applies only to the formally defined readable subset. Reader
+provenance, resolution metadata, and reader lineage need not be reproduced by
+that round trip.
+
+Printing never exposes storage specialization. A non-string list uses `[...]`
+when its value has canonical array shape—a homogeneous flat vector or a
+rectangular nesting of such vectors—and `(...)` otherwise. Both delimiters
+read as the same list kind. Thus `(1 2 3)` prints as `[1 2 3]`, while the
+ragged result of `[[1 2] [3]] 10 *` prints as `([10 20] [30])`. Strings use
+quoted string syntax.
+
+**Imports:** ECL_VALUES
+
+#### Chapter 1
+
+##### Rules
+
+> This model is normative for canonical rendering, its read-back guarantee, and display elision. It abstracts over concrete atom spellings, escapes, delimiters, whitespace, indentation, stack layout, terminal width, and the reader's treatment of source containing more or less than one value. The surrounding language specification governs those subjects.  `canonical-render` is the string produced by `str` for one value. Canonical output is always a compact single line and never contains a display-elision marker. For every recursively readable value, that string is readable as one value and the result matches the original value. Task and module values, and aggregates containing them, retain diagnostic canonical displays without a read-back guarantee.
+
+**canonical-render** *value*: `Value` ⇒ `String`.
+
+**source-readable-as-one?** *source*: `String` ⇒ `Bool`.
+
+**read-one** *source*: `String`, **source-readable-as-one?** *source* ⇒ `Value`.
+
+**single-line?** *text*: `String` ⇒ `Bool`.
+
+**contains-elision-marker?** *text*: `String` ⇒ `Bool`.
+
+---
+
+> Every canonical rendering is single-line and free of display elision.
+
+∀ *value*: `Value` · **single-line?** (**canonical-render** *value*) ∧ ¬**contains-elision-marker?** (**canonical-render** *value*).
+
+> Canonical rendering of every readable value is readable as one value.
+
+∀ *value*: `Value`, **readable?** *value* · **source-readable-as-one?** (**canonical-render** *value*).
+
+> Reading a readable value's canonical rendering produces a structurally matching value.
+
+∀ *value*: `Value`, **readable?** *value*, **source-readable-as-one?** (**canonical-render** *value*) · **matches?** (**read-one** (**canonical-render** *value*)) *value*.
+
+> Dictionary rendering preserves insertion order across canonical read-back: each read entry matches the original key and value at the same position.
+
+∀ *value*: `Value`, **value-type** *value* = **dict-type**, **readable?** *value*, **source-readable-as-one?** (**canonical-render** *value*) · **value-type** (**read-one** (**canonical-render** *value*)) = **dict-type** ∧ **dict-length** (**read-one** (**canonical-render** *value*)) = **dict-length** *value*.
+
+∀ *value*: `Value`, *index*: `Nat`, **value-type** *value* = **dict-type**, **readable?** *value*, **source-readable-as-one?** (**canonical-render** *value*), **value-type** (**read-one** (**canonical-render** *value*)) = **dict-type**, *index* ≤ **dict-length** *value* · **matches?** (**dict-key-at-index** (**read-one** (**canonical-render** *value*)) *index*) (**dict-key-at-index** *value* *index*) ∧ **matches?** (**dict-value-at-index** (**read-one** (**canonical-render** *value*)) *index*) (**dict-value-at-index** *value* *index*).
+
+#### Chapter 2
+
+##### Rules
+
+> `display-render` is the best-effort text used for a single value by `io.pp` and by stack displays. A list longer than 256 elements is replaced as a whole by a count-bearing marker before its children are rendered. The same rule applies recursively inside lists and dictionaries. Canonical rendering remains unaffected.
+
+**display-render** *value*: `Value` ⇒ `String`.
+
+**display-contains-elision?** *value*: `Value` ⇒ `Bool`.
+
+---
+
+> Scalar and capability values contain no nested display elision.
+
+∀ *value*: `Value`, (**value-type** *value* = **int-type** ∨ **value-type** *value* = **float-type** ∨ **value-type** *value* = **char-type** ∨ **value-type** *value* = **symbol-type** ∨ **value-type** *value* = **word-type** ∨ **value-type** *value* = **task-type** ∨ **value-type** *value* = **module-type**) · ¬**display-contains-elision?** *value*.
+
+> A displayed list contains elision exactly when it exceeds 256 elements, or when an unelided child recursively contains elision.
+
+∀ *value*: `Value`, **value-type** *value* = **list-type** · **display-contains-elision?** *value* ↔ **list-length** *value* > 256 ∨ **list-length** *value* ≤ 256 ∧ (∃ *index*: `Nat`, *index* ≤ **list-length** *value* · **display-contains-elision?** (**list-element** *value* *index*)).
+
+> A displayed dictionary contains elision exactly when one of its rendered keys or values recursively contains elision.
+
+∀ *value*: `Value`, **value-type** *value* = **dict-type** · **display-contains-elision?** *value* ↔ (∃ *index*: `Nat`, *index* ≤ **dict-length** *value* · **display-contains-elision?** (**dict-key-at-index** *value* *index*) ∨ **display-contains-elision?** (**dict-value-at-index** *value*
+*index*)).
+
+> Display text contains an elision marker exactly when recursive value rendering elides some list.
+
+∀ *value*: `Value` · **contains-elision-marker?** (**display-render** *value*) ↔ **display-contains-elision?** *value*.
+
+
+
+`io.pp` and the REPL use a best-effort display layout with canonical atom
+spellings and delimiters. Rows of rectangular matrices, plus one enclosing
+group axis, are separated by newline and indentation. A displayed non-string
+list longer than 256 elements becomes `[<N-values-elided>]` or
+`(<N-values-elided>)` according to its delimiter. A displayed string longer
+than 256 characters becomes `"<N-characters-elided>"`. Elision occurs before
+matrix-shape scanning or child rendering. Canonical `str` output never elides.
+
+A displayed dictionary remains compact when it has at most three pairs and
+contains no nested dictionary or matrix-valued key or value. Every other
+dictionary uses one pair per indented line, applying the same choice
+recursively. Flat vector fields remain compact. Canonical `str` output is
+always compact.
+
+`io.stack` applies the same per-value display layout and emits each visible
+operand slot as a bottom-up indexed block. `[0]` is the bottom of the visible
+window and the largest index is its top; continuation lines align after the
+index prefix. The denser REPL layout instead keeps stack order from left to
+right and places each value's rectangle beside its neighbors on a shared
+bottom row. Padding is measured in bytes and ends with each row's last value.
+Neither layout wraps to terminal width.
 
 ### Equality and ordering
 
-- `=` is pervasive equality: it descends structure to atoms and produces
-  0/1 masks (see Pervasion).
-- `match?` is whole-value structural equality: `[1 2] [1 2] =` is `[1 1]`;
-  `[1 2] [1 2] match?` is `1`.
-- Numbers compare numerically everywhere, across int and float: `2` and
-  `2.0` are equal under `=`, `match?`, and `cmp`, are the same dict key,
-  and `0.0` equals `-0.0`. Mixed int/float comparison is exact; no
-  rounding occurs through 2^53.
+`match?` exposes the model's whole-value equivalence. Numeric magnitude maps
+binary64 values to their exact mathematical values: `2` matches `2.0`, and
+`0.0` matches `-0.0`; a mixed comparison does not first round an integer to
+binary64. Matching specifies structural data equivalence, so two matching
+quotations may nevertheless behave differently when applied.
+
+`=` is instead pervasive equality: it descends aggregate structure and
+produces a scalar boolean or boolean mask (see Pervasion). For example,
+`[1 2] [1 2] =` is `[1 1]`, while `[1 2] [1 2] match?` is `1`.
+
 - `cmp` is a three-way total ordering (−1/0/1) on numbers, chars (by
   codepoint), and strings (codepoint-lexicographic). Anything else,
   including cross-kind pairs, is a `'type` error. `grade` orders by
   exactly this ordering.
-- Booleans are the ints 0 and 1. Words that require a boolean reject
-  every other value, including other ints.
+- Words that require a boolean reject every value outside the formally defined
+  Boolean role, including other ints.
 
-## Evaluation
+## Core evaluation
 
-Evaluation walks a list of forms left to right:
+Evaluation processes a program sequence from left to right. Evaluating a word
+occurrence resolves and invokes it. Evaluating any other value appends that
+value to the operand stack. Applying a quotation evaluates the quotation's
+values as a program; a quotation containing no words therefore pushes its
+elements in order.
 
-- A literal (number, char, string, quoted symbol, list, dict) pushes
-  itself.
-- A word resolves in the current environment and applies, running its
-  stored body. There is one kind of binding; reference always applies.
+Ordinary word evaluation is one observable operation:
 
-Applying a quotation evaluates its forms on some stack; a quotation
-containing only data therefore pushes its elements. All binding is late:
-an unqualified reference resolves when it executes, so words observe
-re-`def`s and re-`set`s of their dependencies immediately. There are no
-closures: a quotation captures no values. It carries one thing — the scope
-its text was written in, which is where its words resolve — and that is
-resolution context, not a captured environment.
+1. Determine the occurrence's effective resolution scope.
+2. Resolve its spelling to a binding in that scope.
+3. Establish the binding's activation context.
+4. Evaluate the binding's executable body.
 
-Tail calls are guaranteed: through word calls, `if`, and every
-combinator's tail position, iteration and tail recursion run in constant
-space and never exhaust a host call stack.
+Resolution does not produce a binding or callable value on the operand stack.
+Bindings are not first-class, and ordinary word reference always invokes.
+Reflection operations inspect binding metadata through separate mechanisms.
+
+Lookup is late. A word occurrence's resolution metadata selects only a scope.
+Each execution looks up the binding in that scope; the occurrence retains no
+binding, body, value, or module generation. Replacing a binding in a mutable selected
+scope affects existing code. A module image's scope is immutable after
+construction; replacing an image in a registration does not retarget words
+belonging to the former image. Attempting to resolve through a retired selected
+scope is a `'domain` error, never a fallback to another scope.
+
+The reader annotates each word occurrence with its current scope. Moving,
+copying, concatenating, or splicing values preserves each occurrence's own
+annotation, so one quotation may contain words from several scopes. A
+quotation consequently has no single resolution scope. A word occurrence
+created without reader context has no scope annotation and resolves in the
+invoking activation's resolution context.
+
+A reader-produced aggregate may separately retain **reader lineage**, which
+records that the aggregate and its reader-built descendants came from a
+particular source construction. Reader lineage supports attribution and the
+module-body re-scoping rule; it is not an AST, a captured environment, or a
+quotation-wide resolution scope. Runtime aggregate reconstruction does not
+acquire reader lineage. Resolution context, reader lineage, and provenance are
+semantic metadata on stored occurrences and aggregates, but none is part of
+value identity.
+
+ECL therefore has syntactic closure without value capture: reader-authored
+identifiers retain their lookup scopes, while quotation values capture no
+bindings or ordinary values. An unannotated runtime-created word retains the
+dynamic behavior described above.
+
+Tail calls are guaranteed: through word calls, `if`, and every combinator's
+documented tail position, iteration and tail recursion run in constant space
+and never exhaust a host call stack. General `linrec` retains one explicit
+recursion level per nonterminal descent, even when `post` is empty, so its live
+storage is proportional to recursion depth rather than constant.
+
+### Errors
+
+Errors are crash-only. There is no try/catch or handler quotation: an error
+propagates until the enclosing unit dies. `raise` initiates that propagation
+from an error value, and `fail` is sugar for raising an error whose kind is
+`'user` and whose message is the supplied string.
+
+Failure is observed as data only outside an explicit boundary: `@attempt`, or
+the concurrent `@spawn`/`await` path, returns `{'ok (values)}` after success or
+`{'err error}` after failure. Each envelope is an ordinary dictionary and is
+the boundary's only result value. The REPL is the implicit top-level boundary;
+a script's boundary is the process.
+
+Source-position and other diagnostic fields appear when known. Absence is
+represented by an absent field, never by a nil value. Runtime-assembled code
+has no source position by construction, and no host exception or host stack
+frame is exposed as ECL error data.
+
+A completion-time source-word effect violation identifies the opening
+delimiter of the deepest reader-built quotation selected by ordinary tail
+control in that checked activation. The checked body supplies the initial
+location. An empty selected quotation identifies its opening `(`.
+
+Non-tail helper calls and isolated or inline application iterations preserve
+that location. An application's own contract failure retains its separate
+application boundary; dynamically applied tail-control quotations within the
+application may replace that boundary's selected location. Guard predicates
+are disposable observations. After guard restoration, the selected `cond`
+action or true `while` body replaces the enclosing selection, and tail control
+inside that action may refine it. Each iteration starts with a fresh boundary.
+
+The error reports the deepest selected quotation's opening delimiter and
+preserves its element index, falling back to the application quotation when
+no dynamic selection occurred. When that quotation was assembled at runtime,
+all source fields are absent; attribution never falls back to a less-specific
+location or invents one.
+
+**Imports:** ECL_VALUES
+
+#### Chapter 1
+
+##### Rules
+
+> ECL errors are ordinary values with the dictionary kind. An error has a required symbol at `'kind`; when present, `'msg` is a string, `'word` is a symbol, `'trace` is a list of symbols, and `'data` is a dictionary. Other diagnostic and kind-specific fields are permitted. The predicates here classify immutable values independently of execution state.
+
+**error-value?** *value*: `Value` ⇒ `Bool`.
+
+**kind-field-valid?** *value*: `Value` ⇒ `Bool`.
+
+**message-field-valid?** *value*: `Value` ⇒ `Bool`.
+
+**word-field-valid?** *value*: `Value` ⇒ `Bool`.
+
+**trace-field-valid?** *value*: `Value` ⇒ `Bool`.
+
+**data-field-valid?** *value*: `Value` ⇒ `Bool`.
+
+**symbol-list-value?** *value*: `Value` ⇒ `Bool`.
+
+**kind-field** ⇒ `Value`.
+
+**message-field** ⇒ `Value`.
+
+**word-field** ⇒ `Value`.
+
+**trace-field** ⇒ `Value`.
+
+**data-field** ⇒ `Value`.
+
+---
+
+> The five schema keys are symbols with these exact spellings.
+
+**value-type** **kind-field** = **symbol-type** ∧ **symbol-spelling** **kind-field** = "kind" ∧ **value-type** **message-field** = **symbol-type** ∧ **symbol-spelling** **message-field** = "msg" ∧ **value-type** **word-field** = **symbol-type** ∧ **symbol-spelling** **word-field** = "word" ∧ **value-type** **trace-field** = **symbol-type** ∧ **symbol-spelling** **trace-field** = "trace" ∧ **value-type** **data-field** = **symbol-type** ∧ **symbol-spelling** **data-field** = "data".
+
+> A trace is a list containing only symbols. The empty list is a valid trace.
+
+∀ *value*: `Value` · **symbol-list-value?** *value* ↔ **value-type** *value* = **list-type** ∧ (∀ *index*: `Nat`, *index* ≤ **list-length** *value* · **value-type** (**list-element** *value* *index*) = **symbol-type**).
+
+> Non-dictionaries cannot satisfy any error-schema field predicate.
+
+∀ *value*: `Value`, **value-type** *value* ≠ **dict-type** · ¬**kind-field-valid?** *value* ∧ ¬**message-field-valid?** *value* ∧ ¬**word-field-valid?** *value* ∧ ¬**trace-field-valid?** *value* ∧ ¬**data-field-valid?** *value*.
+
+> The `'kind` field is required and its value is a symbol.
+
+∀ *value*: `Value`, **value-type** *value* = **dict-type**, ¬**dict-has-key?** *value* **kind-field** · ¬**kind-field-valid?** *value*.
+
+∀ *value*: `Value`, **value-type** *value* = **dict-type**, **dict-has-key?** *value* **kind-field** · **kind-field-valid?** *value* ↔ **value-type** (**dict-value-for-key** *value* **kind-field**) = **symbol-type**.
+
+> The `'msg` field is optional and, when present, is a string.
+
+∀ *value*: `Value`, **value-type** *value* = **dict-type**, ¬**dict-has-key?** *value* **message-field** · **message-field-valid?** *value*.
+
+∀ *value*: `Value`, **value-type** *value* = **dict-type**, **dict-has-key?** *value* **message-field** · **message-field-valid?** *value* ↔ **string-value?** (**dict-value-for-key** *value* **message-field**).
+
+> The `'word` field is optional and, when present, is a symbol.
+
+∀ *value*: `Value`, **value-type** *value* = **dict-type**, ¬**dict-has-key?** *value* **word-field** · **word-field-valid?** *value*.
+
+∀ *value*: `Value`, **value-type** *value* = **dict-type**, **dict-has-key?** *value* **word-field** · **word-field-valid?** *value* ↔ **value-type** (**dict-value-for-key** *value* **word-field**) = **symbol-type**.
+
+> The `'trace` field is optional and, when present, is a list of symbols.
+
+∀ *value*: `Value`, **value-type** *value* = **dict-type**, ¬**dict-has-key?** *value* **trace-field** · **trace-field-valid?** *value*.
+
+∀ *value*: `Value`, **value-type** *value* = **dict-type**, **dict-has-key?** *value* **trace-field** · **trace-field-valid?** *value* ↔ **symbol-list-value?** (**dict-value-for-key** *value* **trace-field**).
+
+> The `'data` field is optional and, when present, is a dictionary.
+
+∀ *value*: `Value`, **value-type** *value* = **dict-type**, ¬**dict-has-key?** *value* **data-field** · **data-field-valid?** *value*.
+
+∀ *value*: `Value`, **value-type** *value* = **dict-type**, **dict-has-key?** *value* **data-field** · **data-field-valid?** *value* ↔ **value-type** (**dict-value-for-key** *value* **data-field**) = **dict-type**.
+
+> A value is an error exactly when it is a dictionary satisfying every field rule above. Fields outside this schema do not affect validity.
+
+∀ *value*: `Value` · **error-value?** *value* ↔ **value-type** *value* = **dict-type** ∧ **kind-field-valid?** *value* ∧ **message-field-valid?** *value* ∧ **word-field-valid?** *value* ∧ **trace-field-valid?** *value* ∧ **data-field-valid?** *value*.
+
+#### Chapter 2
+
+##### Rules
+
+> The core error-kind taxonomy is closed. Every other symbol remains available as a user-defined error kind; being outside this predicate does not make a symbol invalid in an error's `'kind` field.
+
+**core-error-kind?** *value*: `Value` ⇒ `Bool`.
+
+**underflow-error-kind** ⇒ `Value`.
+
+**undefined-word-error-kind** ⇒ `Value`.
+
+**type-error-kind** ⇒ `Value`.
+
+**shape-error-kind** ⇒ `Value`.
+
+**conform-error-kind** ⇒ `Value`.
+
+**overflow-error-kind** ⇒ `Value`.
+
+**domain-error-kind** ⇒ `Value`.
+
+**contract-error-kind** ⇒ `Value`.
+
+**parse-error-kind** ⇒ `Value`.
+
+**io-error-kind** ⇒ `Value`.
+
+**cancelled-error-kind** ⇒ `Value`.
+
+**timeout-error-kind** ⇒ `Value`.
+
+**user-error-kind** ⇒ `Value`.
+
+---
+
+> Each core error kind is the symbol with the corresponding source spelling.
+
+**value-type** **underflow-error-kind** = **symbol-type** ∧ **symbol-spelling** **underflow-error-kind** = "underflow" ∧ **value-type** **undefined-word-error-kind** = **symbol-type** ∧ **symbol-spelling** **undefined-word-error-kind** = "undefined-word" ∧ **value-type** **type-error-kind** = **symbol-type** ∧ **symbol-spelling** **type-error-kind** = "type" ∧ **value-type** **shape-error-kind** = **symbol-type** ∧ **symbol-spelling** **shape-error-kind** = "shape" ∧ **value-type** **conform-error-kind** = **symbol-type** ∧ **symbol-spelling** **conform-error-kind** = "conform" ∧ **value-type** **overflow-error-kind** = **symbol-type** ∧ **symbol-spelling** **overflow-error-kind** = "overflow" ∧ **value-type** **domain-error-kind** = **symbol-type** ∧ **symbol-spelling** **domain-error-kind** = "domain" ∧ **value-type** **contract-error-kind** = **symbol-type** ∧ **symbol-spelling** **contract-error-kind** = "contract" ∧ **value-type** **parse-error-kind** = **symbol-type** ∧ **symbol-spelling** **parse-error-kind** = "parse" ∧ **value-type** **io-error-kind** = **symbol-type** ∧ **symbol-spelling** **io-error-kind** = "io" ∧ **value-type** **cancelled-error-kind** = **symbol-type** ∧ **symbol-spelling** **cancelled-error-kind** = "cancelled" ∧ **value-type** **timeout-error-kind** = **symbol-type** ∧ **symbol-spelling** **timeout-error-kind** = "timeout" ∧ **value-type** **user-error-kind** = **symbol-type** ∧ **symbol-spelling** **user-error-kind** = "user".
+
+> No other value is a core error kind.
+
+∀ *value*: `Value` · **core-error-kind?** *value* ↔ *value* = **underflow-error-kind** ∨ *value* = **undefined-word-error-kind** ∨ *value* = **type-error-kind** ∨ *value* = **shape-error-kind** ∨ *value* = **conform-error-kind** ∨ *value* = **overflow-error-kind** ∨ *value* = **domain-error-kind** ∨ *value* = **contract-error-kind** ∨ *value* = **parse-error-kind** ∨ *value* = **io-error-kind** ∨ *value* = **cancelled-error-kind** ∨ *value* = **timeout-error-kind** ∨ *value* = **user-error-kind**.
+
+#### Chapter 3
+
+##### Rules
+
+> Results are ordinary values with the dictionary kind. A successful result has exactly one `'ok` entry carrying the ordered values left on the successful unit stack. A failed result has exactly one `'err` entry carrying an error value. No value is both forms.
+
+**result-value?** *value*: `Value` ⇒ `Bool`.
+
+**successful-result-value?** *value*: `Value` ⇒ `Bool`.
+
+**failed-result-value?** *value*: `Value` ⇒ `Bool`.
+
+**successful-result-values** *value*: `Value` ⇒ `Value`.
+
+**failed-result-error** *value*: `Value` ⇒ `Value`.
+
+**ok-field** ⇒ `Value`.
+
+**err-field** ⇒ `Value`.
+
+---
+
+> Result tags are symbols with the source spellings `ok` and `err`.
+
+**value-type** **ok-field** = **symbol-type** ∧ **symbol-spelling** **ok-field** = "ok" ∧ **value-type** **err-field** = **symbol-type** ∧ **symbol-spelling** **err-field** = "err".
+
+> A successful result is exactly a one-entry dictionary tagged `'ok` whose payload is a list of successful stack values.
+
+∀ *value*: `Value` · **successful-result-value?** *value* ↔ **value-type** *value* = **dict-type** ∧ **dict-length** *value* = 1 ∧ **dict-has-key?** *value* **ok-field** ∧ **value-type** (**dict-value-for-key** *value* **ok-field**) = **list-type**.
+
+> A failed result is exactly a one-entry dictionary tagged `'err` whose payload satisfies the error schema.
+
+∀ *value*: `Value` · **failed-result-value?** *value* ↔ **value-type** *value* = **dict-type** ∧ **dict-length** *value* = 1 ∧ **dict-has-key?** *value* **err-field** ∧ **error-value?** (**dict-value-for-key** *value* **err-field**).
+
+> The payload accessors expose the successful values list or failed error after the corresponding result form has been established.
+
+∀ *value*: `Value`, **successful-result-value?** *value* · **successful-result-values** *value* = **dict-value-for-key** *value* **ok-field**.
+
+∀ *value*: `Value`, **failed-result-value?** *value* · **failed-result-error** *value* = **dict-value-for-key** *value* **err-field**.
+
+> Results are exactly the successful and failed forms.
+
+∀ *value*: `Value` · **result-value?** *value* ↔ **successful-result-value?** *value* ∨ **failed-result-value?** *value*.
+
+> The two result forms are disjoint.
+
+∀ *value*: `Value`, **successful-result-value?** *value* · ¬**failed-result-value?** *value*.
+
+#### Chapter 4
+
+##### Rules
+
+> Cancellation and timeout errors are classified by their required `'kind` field. They retain the ordinary error schema, including any optional or kind-specific diagnostic fields. Their result forms are ordinary failed result envelopes. A timeout result is an observation only; it is not the target task's terminal result.
+
+**cancelled-error?** *value*: `Value` ⇒ `Bool`.
+
+**timeout-error?** *value*: `Value` ⇒ `Bool`.
+
+**cancelled-result?** *value*: `Value` ⇒ `Bool`.
+
+**timeout-result?** *value*: `Value` ⇒ `Bool`.
+
+---
+
+> Cancellation and timeout errors have the corresponding core kind.
+
+∀ *value*: `Value` · **cancelled-error?** *value* ↔ **error-value?** *value* ∧ **dict-value-for-key** *value* **kind-field** = **cancelled-error-kind**.
+
+∀ *value*: `Value` · **timeout-error?** *value* ↔ **error-value?** *value* ∧ **dict-value-for-key** *value*
+**kind-field** = **timeout-error-kind**.
+
+> Cancellation and timeout results contain errors of the corresponding kind.
+
+∀ *value*: `Value` · **cancelled-result?** *value* ↔ **failed-result-value?** *value* ∧ **cancelled-error?** (**failed-result-error** *value*).
+
+∀ *value*: `Value` · **timeout-result?** *value* ↔ **failed-result-value?** *value* ∧ **timeout-error?** (**failed-result-error** *value*).
+
+
 
 ### Units and the transactional stack
 
-The *unit* is the granularity of failure. A unit that fails dies whole:
-its stack is rolled back to its entry state, so a failed unit leaves
-nothing on the stack — no partial results, no torn state. The guarantee is
-stack-only: environment writes and IO performed before the failure
-survive. Units are delimited by the reader:
+Ordinary evaluation may consume operands and perform effects before it fails;
+its failure outcome therefore includes the partial operand stack and the
+surviving execution state at the point of failure.
+
+**Imports:** ECL_ERRORS
+
+##### Contexts
+
+**`Units`**
+
+#### Chapter 1
+
+##### Action
+
+> This model is normative for the lifecycle of a general ECL unit; its ordered entry and body values; successful completion with an ordered result stack; and failure with an error and restoration of the entry stack.  It deliberately abstracts over evaluation steps, name resolution, concrete values and error dictionaries, environment writes, I/O, randomness, and all other non-stack effects. The surrounding language specification governs those subjects and requires that unit failure does not roll back effects already performed. The model also omits launch and observation policy, task identity, task trees, scheduling, awaiting, deadlines, cancellation causes, and reclamation. In particular, cancellation reaches this model only as an evaluator-supplied failure error, while a waiting operation's timeout does not alter the target unit.  `@attempt` begins a unit, waits synchronously for one terminal transition, and reifies that outcome. `@spawn` begins the same kind of unit and returns a task capability immediately; `await` later reifies the attached unit's terminal outcome through the same mapping. Thus `@attempt` is observationally equivalent to `@spawn await`, while task lifetime and waiting behavior remain outside this model.  `Begin unit` receives the complete entry-stack list and exact quotation body as separate ECL list values. It selects one never-before-created unit identity, records those inputs unchanged, and makes that unit active. Reader-delimited units, `load`, and isolated unit constructors differ in how they supply these inputs and expose the eventual outcome; those policies do not change unit execution semantics.
+
+**`Units`** ↝ Begin unit *entry*: `Value`, *body*: `Value`, **value-type** *entry* = **list-type**, **value-type** *body* = **list-type**.
+
+---
+
+> Beginning a unit selects one never-before-created identity, records its exact entry stack and body, and makes it active with the entry stack installed.
+
+∃ *unit*: `Unit`, ¬**unit-created?** *unit* · **unit-created?**′ *unit* ∧ **unit-active?**′ *unit* ∧ ¬**unit-succeeded?**′ *unit* ∧ ¬**unit-failed?**′ *unit* ∧ **unit-entry**′ *unit* = *entry* ∧ **unit-body**′ *unit* = *body* ∧ **unit-stack**′ *unit* = *entry* ∧ **unit-error**′ *unit* = **unit-error** *unit* ∧ (∀ *other*: `Unit`, *other* ≠ *unit* · **unit-created?**′ *other* = **unit-created?** *other* ∧ **unit-active?**′ *other* = **unit-active?** *other* ∧ **unit-succeeded?**′ *other* = **unit-succeeded?** *other* ∧ **unit-failed?**′ *other* = **unit-failed?** *other* ∧ **unit-entry**′ *other* = **unit-entry** *other* ∧ **unit-body**′ *other* = **unit-body** *other* ∧ **unit-stack**′ *other* = **unit-stack** *other* ∧ **unit-error**′ *other* = **unit-error** *other*).
+
+#### Chapter 2
+
+##### Domains
+
+> A created unit is in exactly one phase: active, successfully completed, or failed. Entry and body remain fixed after creation. `unit-stack` denotes the stack at the modeled boundary: it begins as the entry stack and becomes the evaluator-supplied result on success. Intermediate evaluator stacks are outside the abstraction.
+
+`Unit`.
+
+##### Rules
+
+{**`Units`**} **unit-created?** *unit*: `Unit` ⇒ `Bool`.
+
+{**`Units`**} **unit-active?** *unit*: `Unit` ⇒ `Bool`.
+
+{**`Units`**} **unit-succeeded?** *unit*: `Unit` ⇒ `Bool`.
+
+{**`Units`**} **unit-failed?** *unit*: `Unit` ⇒ `Bool`.
+
+{**`Units`**} **unit-entry** *unit*: `Unit` ⇒ `Value`.
+
+{**`Units`**} **unit-body** *unit*: `Unit` ⇒ `Value`.
+
+{**`Units`**} **unit-stack** *unit*: `Unit` ⇒ `Value`.
+
+{**`Units`**} **unit-error** *unit*: `Unit` ⇒ `Value`.
+
+---
+
+> An active unit is created and is neither successful nor failed.
+
+∀ *candidate*: `Unit`, **unit-active?** *candidate* · **unit-created?** *candidate* ∧ ¬**unit-succeeded?** *candidate* ∧ ¬**unit-failed?** *candidate*.
+
+> A successfully completed unit is created and is no longer active or failed.
+
+∀ *candidate*: `Unit`, **unit-succeeded?** *candidate* · **unit-created?** *candidate* ∧ ¬**unit-active?** *candidate* ∧ ¬**unit-failed?** *candidate*.
+
+> A failed unit is created and terminal, carries an error value, and exposes its restored entry stack rather than the evaluator's partial stack.
+
+∀ *candidate*: `Unit`, **unit-failed?** *candidate* · **unit-created?** *candidate* ∧ ¬**unit-active?** *candidate* ∧ ¬**unit-succeeded?** *candidate* ∧ **unit-stack** *candidate* = **unit-entry** *candidate* ∧ **error-value?** (**unit-error** *candidate*).
+
+> Every created unit is in exactly one of the three lifecycle phases.
+
+∀ *candidate*: `Unit`, **unit-created?** *candidate* · **unit-active?** *candidate* ∨ **unit-succeeded?** *candidate* ∨ **unit-failed?** *candidate*.
+
+> Every created unit retains list values for its entry stack, quotation body, and exposed stack.
+
+∀ *candidate*: `Unit`, **unit-created?** *candidate* · **value-type** (**unit-entry** *candidate*) = **list-type** ∧ **value-type** (**unit-body** *candidate*) = **list-type** ∧ **value-type** (**unit-stack** *candidate*) = **list-type**.
+
+> Initially no unit identity has been created or entered a lifecycle phase.
+
+initially ∀ *candidate*: `Unit` · ¬**unit-created?** *candidate* ∧ ¬**unit-active?** *candidate* ∧ ¬**unit-succeeded?** *candidate* ∧ ¬**unit-failed?** *candidate*.
+
+#### Chapter 3
+
+##### Action
+
+> `Complete unit successfully` accepts the result produced by the omitted evaluator, makes the active unit terminal, and retains that result as the unit's terminal stack. The evaluator supplies the result; it is not chosen by the ECL operation that launched the unit.
+
+**`Units`** ↝ Complete unit successfully *unit*: `Unit`, *result*: `Value`, **unit-created?** *unit*, **unit-active?** *unit*, **value-type** *result* = **list-type**.
+
+---
+
+> Successful completion makes the unit terminal and exposes the evaluator's complete result stack without changing its entry stack or body.
+
+**unit-created?**′ *unit*.
+
+¬**unit-active?**′ *unit*.
+
+**unit-succeeded?**′ *unit*.
+
+¬**unit-failed?**′ *unit*.
+
+**unit-entry**′ *unit* = **unit-entry** *unit*.
+
+**unit-body**′ *unit* = **unit-body** *unit*.
+
+**unit-stack**′ *unit* = *result*.
+
+**unit-error**′ *unit* = **unit-error** *unit*.
+
+∀ *other*: `Unit`, *other* ≠ *unit* · **unit-created?**′ *other* = **unit-created?** *other* ∧ **unit-active?**′ *other* = **unit-active?** *other* ∧ **unit-succeeded?**′ *other* = **unit-succeeded?** *other* ∧ **unit-failed?**′ *other* = **unit-failed?** *other* ∧ **unit-entry**′ *other* = **unit-entry** *other* ∧ **unit-body**′ *other* = **unit-body** *other* ∧ **unit-stack**′ *other* = **unit-stack** *other* ∧ **unit-error**′ *other* = **unit-error** *other*.
+
+#### Chapter 4
+
+##### Action
+
+> `Complete unit with failure` accepts the error produced by the evaluator or by a facility such as concurrency cancellation. Errors are ordinary ECL values satisfying the imported `error-value?` schema. Completion makes the active unit terminal, records the error value, and restores the complete entry stack. The evaluator's partial stack is neither retained nor exposed. Every error kind follows this same unit transition; causes and concrete error data are outside the model.
+
+**`Units`** ↝ Complete unit with failure *unit*: `Unit`, *error*: `Value`, **unit-created?** *unit*, **unit-active?** *unit*, **error-value?** *error*.
+
+---
+
+> Failure makes the unit terminal, records the evaluator-supplied error, and restores the complete entry stack. The partial evaluator stack is not retained or exposed.
+
+**unit-created?**′ *unit*.
+
+¬**unit-active?**′ *unit*.
+
+¬**unit-succeeded?**′ *unit*.
+
+**unit-failed?**′ *unit*.
+
+**unit-entry**′ *unit* = **unit-entry** *unit*.
+
+**unit-body**′ *unit* = **unit-body** *unit*.
+
+**unit-stack**′ *unit* = **unit-entry** *unit*.
+
+**unit-error**′ *unit* = *error*.
+
+∀ *other*: `Unit`, *other* ≠ *unit* · **unit-created?**′ *other* = **unit-created?** *other* ∧ **unit-active?**′ *other* = **unit-active?** *other* ∧ **unit-succeeded?**′ *other* = **unit-succeeded?** *other* ∧ **unit-failed?**′ *other* = **unit-failed?** *other* ∧ **unit-entry**′ *other* = **unit-entry** *other* ∧ **unit-body**′ *other* = **unit-body** *other* ∧ **unit-stack**′ *other* = **unit-stack** *other* ∧ **unit-error**′ *other* = **unit-error** *other*.
+
+
+
+Environment writes, I/O, and other permitted non-stack effects performed
+before unit failure survive. A unit boundary may additionally cancel child
+tasks as specified by the concurrency semantics. A unit is not a transaction
+over the whole execution state.
+
+#### Unit delimiters
+
+Units are delimited by the reader or by semantic unit constructors:
 
 - **REPL**: one logical line is one unit. The reader continues the line
   (continuation prompt) while a delimiter or string is open, so a unit is
@@ -273,16 +1115,13 @@ constant-continuation choices for iterative and tail-recursive shapes.
 
 #### The `@` spelling convention
 
-A leading `@` marks exactly the words that apply their quotation **in a
-fresh unit** — one unit per application for `@each`. There are five:
-`@attempt`, `@spawn`, `@each`, `@module`, and `@defm`. Unit construction is
-the whole of the class invariant; the marked word may or may not seed the
-unit it makes. Handed a bare quotation, `@attempt`, `@spawn`,
-`@module`, and `@defm` seed nothing, so that quotation must be
-self-contained: its effect is `( -- ... )` and inputs arrive through a plan's
-seeds, or via `literal`/`partial`/`compose`, or through environment names,
-never the ambient stack. `@each` seeds each child with exactly its element.
-Handed a plan, every one of the five seeds the unit it makes. `register` is not marked: it publishes an already-constructed
+A leading `@` marks those words that apply their quotation **in a fresh unit**
+— one unit per application for `@each`. There are five: `@attempt`, `@spawn`,
+`@each`, `@module`, and `@defm`. Each takes an explicit seed-values list and a
+body quotation as separate operands. An empty seed list is written `[]`; no
+constructor reads the ambient stack across its unit boundary. `@each` also
+places the iterated element deepest in each child stack, beneath the shared
+seed values. `register` is not marked: it publishes an already-constructed
 module value and takes no quotation.
 
 Words that are isolated but *not* marked, with their reasons:
@@ -290,18 +1129,14 @@ Words that are isolated but *not* marked, with their reasons:
 - `each`, `zip-with`, `fold`, `scan`, `stencil`, `unfold`, `for` — they
   apply in the **same** unit, on a substack, and are implicitly fed their
   elements, windows, or states.
-- `infra` and `within` — they apply on an explicitly named *other* stack;
-  the substitution is the word's meaning, not a new unit.
+- `infra` and `within` — they apply on an explicitly named *other* stack.
 - `import`, `load`, `unmodule`, `register` — they construct, publish, or retire
   without taking a quotation.
 - `await`, `await-all`, `await-any`, `await-for`, `cancel`, `tasks` —
   they consume tasks rather than making them.
-- `with` — pure composition; it constructs nothing.
-- `seed`, `unseed` — a unit constructor's *input*, sealed and unsealed. A
-  plan is not a unit and running one is not a thing you can do.
 
-`@` is an ordinary word character, not reader-reserved: a user's `@retry`
-lexes and defines normally. The convention is enforced for first-party
+`@` is an ordinary word character that the reader does not reserve: a user's
+`@retry` lexes and defines normally. The convention is enforced for first-party
 vocabulary by the source audit and is the recommended spelling for any
 user-defined word that wraps its quotation in a unit.
 
@@ -314,62 +1149,79 @@ occurrence; a definition therefore keeps reporting the file that authored its
 body when another file calls it. Runtime-assembled code has no source
 provenance, so `*file*` is `'domain` there rather than falling back to its
 caller. `*module*` returns the canonical registration selected by the current
-module activation. The stars are ordinary word characters, not reader syntax,
-and the convention applies to shipped vocabulary rather than reserving the
-spelling from user definitions.
+module activation. The stars are ordinary word characters with no reader
+meaning, and the convention applies to shipped vocabulary without reserving
+the spelling from user definitions.
 
 #### Seeding a unit
 
-There are no `-with` words. Every unit constructor takes one input, the
-tagged sum
+Every unit constructor receives its seed values and exact body separately:
 
-    UnitInput = unseeded quotation | unit-plan
+```ecl
+values (q) @attempt
+values (q) @spawn
+list values (q) @each          ( element deepest in each child )
+values (body) @module
+values (body) 'name @defm
+```
 
-A bare quotation seeds nothing, which is why the concise spellings are
-unchanged. A plan supplies seeds, and `seed` is the only word that builds
-one:
+Both `values` and the body must be lists. The new unit's operand stack is
+initialized from the values list in list order, and then the body runs. `[]`
+is the explicit no-seed operand. Seeds are inert stack values and contribute no
+code to the body: even when a seed is itself a reader-built quotation, none of
+its contents
+is part of the construction body's text. `@each` puts the iterated element
+deepest in each child stack, beneath the shared seeds.
 
-    values (q) seed @attempt
-    values (q) seed @spawn
-    list values (q) seed @each          ( element deepest in each child )
-    values (body) seed @module
-    values (body) seed 'name @defm
-
-`seed` is `( values quotation -- unit-plan )`. It consumes a values list
-and a quotation and returns an immutable opaque plan owning the two
-*separately*. It does not execute, stamp, copy, parse, or otherwise
-transform either input, and it is not itself a unit constructor: a plan
-is an input protocol, not a unit.
-
-`unseed` is `( unit-plan -- values quotation )`, the metaprogramming
-escape hatch: it returns the exact two values a plan holds, so a program
-may unpack a plan, transform either ordinary value, and seal the result
-into another plan.
-
-The new unit's operand stack is initialized from the seed list in list
-order, and then the body runs. Seeds are values, not code contributed to
-the body: even when a seed is itself a reader-built quotation, none of its
-contents is part of the construction body's text. `@each` puts the
-iterated element deepest in each child stack, beneath the plan's shared
-seeds.
-
-Keeping the two apart is what makes seeding compatible with module text.
-`with` also produces something a constructor accepts, because its result
-is an ordinary quotation, but the flattened value it returns can no longer
-say which part was the body — and `@module` and `@defm` must know. A
-`with`-seeded construction is therefore a runtime-built body and takes no
-module attribution; see Modules.
+Keeping the two operands separate is what makes seeding compatible with module
+text: `@module` and `@defm` know exactly which list is the construction body.
+Generic quotation-building operations such as `with` may still produce a body,
+but a runtime-built body has no reader lineage and therefore takes no module
+attribution; see Modules.
 
 Underflow against the floor of a constructed unit is reported specially:
-the message names the isolation and the seeding remedy, and the error
-dict carries `'isolation` naming the constructor. It is the one underflow
+the message names the isolation and the constructor's values operand, and the
+error dict carries `'isolation` naming the constructor. It does not prescribe
+`partial` or `with`: those construct a different, reusable quotation rather
+than pass arguments through this boundary. It is the one underflow
 whose cause is invisible — the values the caller meant to pass are on
 screen and out of reach.
 
-### Bindings
+## Bindings and scope
 
-One namespace, one kind of binding: a name binds a body, and reference
-always applies it. Values are bound by capturing them in a body.
+### Scope chains
+
+A scope is a local binding map with a fixed parent. Unqualified resolution
+searches locally and then follows that parent chain. The complete scope shapes
+are:
+
+```text
+core           (no parent)
+session      → core
+child        → enclosing scope
+module image → core
+```
+
+Session-authored code may therefore shadow core definitions. A child unit may
+define names visible to code authored or dynamically resolved in that child.
+A module image sees its own public and private bindings followed by core and
+never sees the invoking session. Core and prelude definitions resolve in core.
+Parentage does not change after scope creation.
+
+Resolution scope and module home are independent parts of an activation.
+Resolution scope determines where a word's spelling is looked up. Module home
+determines privacy and registration-owned authority. Homeless helpers preserve
+their caller's module home; dispatch into a module changes home according to
+the module rules without changing the resolution annotation carried by
+caller-supplied words.
+
+### Binding model
+
+There is one namespace and one binding kind. A name binds an executable body
+plus metadata, and reference always invokes the body. Values are bound by
+capturing them in bodies. Public and private definitions differ in visibility,
+not invocation semantics. Native and builtin definitions may have different
+representations but expose the same binding model.
 
 - `(body) 'name def` binds a word: reference applies the body. The body
   must be a list (a non-list is an error directing to `set`); a list of
@@ -379,13 +1231,13 @@ always applies it. Values are bound by capturing them in a body.
   published body is `((value) first)`. Reference applies that body and
   pushes exactly the captured value, quotations included — the capture is
   inert, so nothing in it executes or resolves. `v 'name set` is therefore
-  observationally `v literal 'name def`, exactly: the sugar synthesizes no
+  observationally `v literal 'name def`: the sugar synthesizes no
   annotation of its own, while an annotation beneath `v` is preserved for
   `def` to consume. `which` reports the resulting public `def`, while `see`
   prints its literal-capture body, preceded by the annotation when one is
   present; an unannotated `set` has no effect or documentation, and nothing
-  distinguishes it from the corresponding `literal` plus `def` spelling. `set` is
-  environment assignment, not a lexical binding form. For ordinary local
+  distinguishes it from the corresponding `literal` plus `def` spelling. `set`
+  assigns the environment and introduces no lexical binding. For ordinary local
   values, prefer stack flow or binder locals.
 - Redefinition (`def` or `set` over an existing name) replaces the
   complete binding snapshot: omitting an effect or docstring clears the
@@ -410,7 +1262,7 @@ always applies it. Values are bound by capturing them in a body.
 
 A definition may place one annotation quotation immediately before its body:
 
-```
+```ecl
 (body) 'name def
 (before -- after) (body) 'name def
 (: "Documentation.") (body) 'name def
@@ -435,16 +1287,15 @@ four forms as top-level `def`: no annotation, effect only, documentation
 only, or both. A top-level effect is reflective metadata only; a module
 word's declared effect is a live contract, checked dynamically against the
 observed effect when application crosses a module boundary (violation:
-`'contract`). An omitted module effect means there is no such check, not
-an inferred one, and reflection preserves whether each portion is absent.
+`'contract`). An omitted module effect means there is no such check.
 This source-language relaxation does not weaken the native ABI, whose
 `Call` effect and documentation remain mandatory; the shipped prelude
 keeps its stronger repository policy requiring meaningful documentation.
 
 Documentation has canonical form. Publication trims source-only
 indentation, folds physical line breaks within prose to spaces, collapses
-a paragraph boundary to one blank line, and preserves each Markdown `- `
-item on its own logical line with its continuations folded in. `doc`
+a paragraph boundary to one blank line, and preserves each `-`-prefixed
+Markdown item on its own logical line with its continuations folded in. `doc`
 returns this canonical string, so source formatting cannot change
 reflective documentation. Strings anywhere else retain their exact decoded
 codepoints.
@@ -454,14 +1305,14 @@ codepoints.
 The after portion of an effect is either **all named slots** or exactly
 the token `...`:
 
-```
+```ecl
 (result on-ok on-err -- ...) (body) 'case def
 ```
 
 `...` declares a **fixed before row and a variable after row**: how many
 values the word consumes is known, how many it leaves is not. The before
 slots are checked at boundaries exactly as today; the after check is
-skipped. This is a genuine partial contract, not the absence of one — a
+skipped. This remains a genuine partial contract: a
 word that would otherwise carry a documentation-only annotation regains
 input checking and honest reflection, and `which` and `see` render the effect
 with `-- ...`.
@@ -479,18 +1330,6 @@ annotations at runtime, but cannot be introduced as definitions, values,
 locals, module names, aliases, exports, or native entries. Binding attempts are `'domain`;
 binder use is a parse error. Longer names containing the same punctuation
 remain legal.
-
-### Metaprogramming
-
-There is no macro system. Runtime quotation construction — `literal`,
-`compose`, `cons`, and the list words — plus `def` is the metaprogramming
-system: a quotation you wrote or `parse` produced is a list, list surgery
-builds a new one, `def` rebinds. `parse` turns source text into a quotation.
-Parse-time transforms are capped at the binder desugaring and the literal
-readers. The material is code you hold, never code a binding holds: no
-operation extracts a published body, so metaprogramming cannot reach inside
-an existing definition. A quotation built this way has no written-in scope
-and so resolves where it is invoked.
 
 ## Pervasion and conformability
 
@@ -510,88 +1349,79 @@ descent:
 - Chars participate ordinally: `char int +` is a char, `char char -` is an
   int, `char char +` is an error; comparison is by codepoint.
 
-There is a unified-value dividend: an all-numeric quotation *is* a vector,
-so `(1 2 3) 10 *` is simply `[10 20 30]`.
-
 Selection operations use the same recursive shape rule on their selector
 rather than on the collection value. For a list collection, `at`, `put`, and
 `update` descend a nested list selector to integer leaves. `at` preserves the
 selector shape, `put` conforms a replacement value to it with atom extension,
 and `update` applies its unary quotation at each leaf in left-to-right order.
+
 For a dictionary, the selector is always one atomic whole-value key, even when
 that key is a list. The `dict.at` and `dict.update` adapters supply the distinct
 operation of traversing an outer list of such whole keys.
 
 ## Numbers
 
-- Arithmetic on int64 that overflows is an `'overflow` error — no
-  wrapping, no promotion to float or bignum. Scalar and array arithmetic
-  behave identically.
-- `/` is float division. `div` is checked integer division. Division by
-  zero is `'domain`.
-- `inf` and `-inf` are values and propagate through arithmetic IEEE-style
-  when an *operand* is non-finite. Producing a non-finite result from
-  finite inputs is `'overflow` (e.g. `0 log`, float overflow). Any
-  operation whose IEEE result would be NaN is `'domain` (e.g. `-1 log`,
-  `inf -inf +`). NaN therefore never exists.
+- Arithmetic on int64 that overflows is an `'overflow` error — no wrapping, no
+  promotion to float or bignum. Scalar and array arithmetic behave identically.
+- `/` is float division. `div` is checked integer division. Division by zero is
+  `'domain`.
+- `inf` and `-inf` are values and propagate through arithmetic IEEE-style when
+  an *operand* is non-finite. Producing a non-finite result from finite inputs
+  is `'overflow` (e.g. `0 log`, float overflow). Any operation whose IEEE
+  result would be NaN is `'domain` (e.g. `-1 log`, `inf -inf +`). NaN therefore
+  never exists.
 - `floor`, `ceil`, and `round` return int64 (`'overflow` when the result
-  exceeds the range): their results are indices and mask material, and
-  int-ness keeps integer pipelines integer. `pow` returns float.
+  exceeds the range): their results are indices and mask material, and int-ness
+  keeps integer pipelines integer. `pow` returns float.
 - `str` output for numbers round-trips (see Printing); float equality is
   numeric everywhere (see Equality).
-- The bitwise words `band`, `bor`, `bxor`, `bnot`, `bsl`, and `bsr` are
-  *pattern* words, not arithmetic: they read an int as its 64-bit
-  two's-complement pattern and are int-only, so a float or a char is
-  `'type` rather than a coercion. Because a pattern has no magnitude,
-  they never overflow — `bsl` truncates bits off the top where `*` would
-  raise. Their `count` operand is the one place they can fail on a value:
-  a shift outside `0..63` is `'domain`. They pervade and align dicts like
-  every other pervasive word.
+- The bitwise words `band`, `bor`, `bxor`, `bnot`, `bsl`, and `bsr` read an int
+  as its 64-bit two's-complement pattern and are int-only, so a float or a char
+  is `'type` rather than a coercion. They never overflow — `bsl` truncates bits
+  off the top where `*` would raise. Their `count` operand is the one place
+  they can fail on a value: a shift outside `0..63` is `'domain`. They pervade
+  and align dicts like every other pervasive word.
 
 ## Randomness
 
-Randomness is *counter-based*, not stateful: a generator state is a
-two-element list `[key counter]`, and every draw is a pure function of
-it. `rand.int`, `rand.ints`, and `rand.float` each take a state and
-return the advanced state alongside the result, so a program's draws are
-reproducible by construction — running it twice from the same key
-produces the same values, and nothing hidden accumulates between units,
-tasks, or module loads.
+Randomness is *counter-based*: a generator state is a two-element list `[key
+counter]`, and every draw is a pure function of it. `rand.int`, `rand.ints`,
+and `rand.float` each take a state and return the advanced state alongside the
+result, so a program's draws are reproducible by construction — running it
+twice from the same key produces the same values, and nothing hidden
+accumulates between units, tasks, or module loads.
 
-- The mixer is SplitMix64 applied to `key + counter * gamma`. Each draw
-  addresses its own counter position rather than stepping a register, so
-  `rand.ints` produces the same list whatever order its elements are
-  materialized in, and two states that share a key but differ in counter
-  do not correlate.
 - `rand.entropy` is the only word that reads the host, and the only
   nondeterministic word in the language. A program is reproducible unless
   it explicitly seeds from `rand.entropy`; there is no ambient default seed
   drawn at startup, and no word silently reaches a CSPRNG.
 - The `rng` module carries a state so ordinary code need not thread one
-  by hand (see The standard library). It is threaded state, not global
-  state: the module's own binding holds it, `rng.seed` replaces it, and a
-  fresh process starts from the same fixed key.
+  by hand (see The standard library).
 
 ## Chars and strings
 
 A string is a rank-1 char vector; there is no separate string type. `len`,
-`at`, `reverse`, `each`, and every other list word operate on codepoints.
-UTF-8 exists only at IO boundaries: source files and `io.prin`/`io.pp` encode
-and decode UTF-8, and invalid UTF-8 on input is an error. Char semantics
-are codepoint semantics, stated honestly: grapheme segmentation,
-normalization, non-ASCII case mapping, and locale collation are not
-provided, so composed and decomposed `"café"` have lengths 4 and 5.
-Symbols are interned at parse; strings are plain uninterned vectors.
+`at`, `reverse`, and list applications of `each` and `for` operate on
+codepoints. UTF-8
+exists only at IO boundaries: source files and `io.prin`/`io.pp` encode and
+decode UTF-8, and invalid UTF-8 on input is an error. Char semantics are
+codepoint semantics: grapheme segmentation, normalization, non-ASCII case
+mapping, and locale collation are not provided, so composed and decomposed
+`"café"` have lengths 4 and 5. Symbols are interned at parse; strings are plain
+uninterned vectors.
 
 ## Modules
 
-A module is a value; a *registration* is a name that owns one. A per-session
-registry maps symbols to registrations; files are transport.
+A module is a value; a *registration* is the assignment of a module to a public
+name. A per-session registry maps symbols to registrations; files are
+transport.
 
 Construction and publication are separate operations, so a module can exist
 anonymously, be passed as data, and be registered more than once.
 
-- `@module` is `( body -- module )`. It runs the body on a fresh, isolated
+### Operations and values
+
+- `@module` is `( values body -- module )`. It runs the body on a fresh, isolated
   environment and returns an **anonymous immutable module image**: its frozen
   environment, its definitions, and the body's final operand stack as an
   *initial-state template*. It claims no registry name. The body runs
@@ -600,24 +1430,23 @@ anonymously, be passed as data, and be registered more than once.
   and publishes the image under it. Registration is an upsert: a missing name
   creates its registration, and an existing name installs the new image while
   keeping the durable state that registration already owns.
-- `@defm` is `( body 'module-name -- )` and is exactly `@module` followed by
-  `register`, including the ordering: the body is evaluated before the name is
-  validated. It is the source spelling for a module definition.
-- `values (body) seed @module` and `values (body) seed 'name @defm` supply
-  seeds without disturbing the same isolated construction. The values form the
-  body unit's initial stack, in list order; the body may consume, reorder, or
-  extend them. The plan keeps the seeds and the body apart, which is what lets
-  attribution below name the body exactly.
+- `@defm` is `( values body 'module-name -- )` and is exactly `@module` followed by
+  `register`, including failure and effect order. The body is evaluated before
+  the name is validated or publication is attempted. If construction fails,
+  registration is not attempted. If construction succeeds and registration
+  fails, completed external construction effects survive under ordinary unit
+  semantics. `@defm` introduces no transaction spanning both operations. It
+  is the source spelling for a module definition.
+- `values (body) @module` and `values (body) 'name @defm` initialize the same
+  isolated construction. The values form the body unit's initial stack, in list
+  order; the body may consume, reorder, or extend them. The separate operands
+  let attribution below name the body exactly.
 - **A module value is an opaque capability.** Its `type` is `'module`; it
   prints as the unreadable marker `<module>`; `match?` compares **image
   identity**, so one construction duplicated matches itself and two
   constructions of the same body never match. It cannot be read from source,
   emitted as JSON, or passed through a native word's value or view inputs.
   It exposes no name, address, environment, registration, or state.
-- **One image may back several registrations.** They share immutable code and
-  definitions and nothing else: each registration owns its own durable state,
-  generation currency, aliases, and removal lifetime. Reloading or removing
-  one cannot change or retire another.
 - Modules are first-class: enumerable, diffable, constructible by building
   the body quotation programmatically, and nameable at a distance — build
   once, choose the name later, or register the same image twice.
@@ -632,38 +1461,375 @@ anonymously, be passed as data, and be registered more than once.
   unreadable spellings do not become validated names. Reserved syntax markers
   are interned as syntax only and cannot be minted as binding names through a
   privileged validation mode.
-- **The registry slot is the singleton identity of a *name*.** The first
-  successful registration of a canonical module name creates its slot; later
-  registrations replace only its code generation. Distinct names own
-  independent slots even when they were registered from the *same* image.
-  A slot owns one immutable snapshot of a durable operand stack per
-  session, distinct from its replaceable code generation.
-- **The image carries the initial-state template; the slot owns live state.**
-  The isolated body's final operand stack becomes the image's initial-state
-  template — it is not required to be empty. A first registration of a name
-  *copies* that template into the new slot's durable stack, so the same image
-  can seed another registration later. A re-registration does not consult the
-  template at all and retains the slot's existing durable stack:
-  initialization happens once per slot identity, not once per code generation
-  and not once per image.
-- Construction commits nothing to the registry: a failing body publishes
-  neither a value nor a name. Registration commits atomically after the image
-  exists; a failed registration — invalid name, alias collision, allocation
-  failure, cancellation, or a conflicting state turn — leaves the previous
-  directory entry, current generation, and durable state exactly as they were,
-  and consumes the module reference it was handed.
+
+**Imports:** ECL_VALUES
+
+##### Contexts
+
+**`Calls`**, **`Images`**, **`Registry`**, **`Transactions`**, **`WithinCommit`**
+
+#### Chapter 1
+
+##### Domains
+
+`RegistryName`, `BindingName`
+
+##### Action
+
+> This model is normative for module-image availability; registry names, slots, aliases, generations, and publication; abstract definitions and visibility; call contexts and generation pins; the ordered durable, draft, pending-output, and ambient stacks; and atomic completion or abortion of `within` transactions.  It deliberately abstracts over source spelling and name validation, construction-body evaluation, concrete and nested values, error construction and propagation, task and unit ownership, scheduling and fairness, and storage reclamation. The surrounding language specification governs those subjects. Begin and complete actions expose semantic concurrency boundaries; they are not ECL words. Contexts, including `WithinCommit`, grant formal write authority and do not denote runtime values or additional language state. An `InvocationContext` is either the top-level evaluator or identifies the exact active call performing a registry mutation.  A qualified call resolves a registry name and public binding and pins the slot's current generation in one atomic action. Resolution before replacement or removal retains the selected generation; resolution afterward observes only the replacement or the absence of the registration. Explicit qualification always performs this fresh registry dispatch, including when it names the caller's own registration.
+
+**`Calls`** ↝ Begin qualified call *module-name*: `RegistryName`, *binding-name*: `BindingName`.
+
+---
+
+**canonical?** *module-name* ∨ **alias?** *module-name*.
+
+∃ *call*: `Call`, *slot*: `Slot`, *generation*: `Generation`, *image*: `Image`, *definition*: `Definition`, ¬**call-created?** *call*, *slot* = **slot-of** *module-name*, **slot-live?** *slot*, *generation* = **current-generation** *slot*, *image* = **generation-image** *generation*, **binding-present?** *image* *binding-name*, *definition* = **definition-at** *image* *binding-name*, **public?** *definition* · **call-created?**′ *call* ∧ **call-active?**′ *call* ∧ **registered-call?**′ *call* ∧ **call-generation**′ *call* = *generation* ∧ **call-slot**′ *call* = *slot* ∧ **call-image**′ *call* = *image* ∧ **call-definition**′ *call* = *definition* ∧ (∀ *other*: `Call`, *other* ≠ *call* · **call-created?**′ *other* = **call-created?** *other* ∧ **call-active?**′ *other* = **call-active?** *other* ∧ **registered-call?**′ *other* = **registered-call?** *other* ∧ **call-generation**′ *other* = **call-generation** *other* ∧ **call-slot**′ *other* = **call-slot** *other* ∧ **call-image**′ *other* = **call-image** *other* ∧ **call-definition**′ *other* = **call-definition** *other*).
+
+∀ *call*: `Call` · **ambient-depth**′ *call* = **ambient-depth** *call*.
+
+∀ *call*: `Call`, *position*: `Nat` · **ambient-value**′ *call* *position* = **ambient-value** *call* *position*.
+
+#### Chapter 2
+
+##### Domains
+
+> The model distinguishes immutable module images, durable registration slots, and publication generations. One image may be published into several slots; every successful publication creates a distinct generation. A live slot has exactly one canonical name, zero or more direct aliases, one current non-retired generation, and one durable stack. The image supplies only the initial stack template used when a fresh slot is created.  Definitions and initial templates are immutable background relations. Each definition belongs to one image and binding name, binding names are unique within an image, and visibility controls which call actions may select it. The model begins with no constructed or value-held images, created or live slots, occupied names, published generations, calls, or transactions. Domain atoms are possibilities rather than initially existing language values.  Retirement is monotonic: replacement or removal retires the former current generation and no retired generation becomes current again. Active calls retain their selected images and, for registered calls, their generations. An active transaction belongs to one active registered call and its still current live slot. At most one transaction may belong to a call or slot.
+
+`Call`.
+
+`Slot`.
+
+`Generation`.
+
+`Image`.
+
+`Definition`.
+
+`Transaction`.
+
+`WordOccurrence`.
+
+`InvocationContext`.
+
+##### Rules
+
+{**`Calls`**} **call-active?** *call*: `Call` ⇒ `Bool`.
+
+{**`Calls`**} **call-created?** *call*: `Call` ⇒ `Bool`.
+
+{**`Calls`**} **registered-call?** *call*: `Call` ⇒ `Bool`.
+
+{**`Calls`**} **call-generation** *call*: `Call` ⇒ `Generation`.
+
+{**`Calls`**} **call-slot** *call*: `Call` ⇒ `Slot`.
+
+{**`Calls`**} **call-image** *call*: `Call` ⇒ `Image`.
+
+{**`Calls`**} **call-definition** *call*: `Call` ⇒ `Definition`.
+
+{**`Calls`**, **`WithinCommit`**} **ambient-depth** *call*: `Call` ⇒ `Nat0`.
+
+{**`Calls`**, **`WithinCommit`**} **ambient-value** *call*: `Call`, *position*: `Nat` ⇒ `Value`.
+
+**occurrence-name** *occurrence*: `WordOccurrence` ⇒ `BindingName`.
+
+**occurrence-image** *occurrence*: `WordOccurrence` ⇒ `Image`.
+
+**call-invocation?** *invoker*: `InvocationContext` ⇒ `Bool`.
+
+**invocation-call** *invoker*: `InvocationContext` ⇒ `Call`.
+
+{**`Images`**} **constructed?** *image*: `Image` ⇒ `Bool`.
+
+{**`Images`**} **value-held?** *image*: `Image` ⇒ `Bool`.
+
+{**`Registry`**} **canonical?** *name*: `RegistryName` ⇒ `Bool`.
+
+{**`Registry`**} **alias?** *name*: `RegistryName` ⇒ `Bool`.
+
+{**`Registry`**} **slot-of** *name*: `RegistryName` ⇒ `Slot`.
+
+{**`Registry`**} **slot-created?** *slot*: `Slot` ⇒ `Bool`.
+
+{**`Registry`**} **slot-live?** *slot*: `Slot` ⇒ `Bool`.
+
+{**`Registry`**} **current-generation** *slot*: `Slot` ⇒ `Generation`.
+
+{**`Registry`**} **generation-published?** *generation*: `Generation` ⇒ `Bool`.
+
+{**`Registry`**} **generation-retired?** *generation*: `Generation` ⇒ `Bool`.
+
+{**`Registry`**} **generation-slot** *generation*: `Generation` ⇒ `Slot`.
+
+{**`Registry`**} **generation-image** *generation*: `Generation` ⇒ `Image`.
+
+{**`Registry`**, **`WithinCommit`**} **durable-depth** *slot*: `Slot` ⇒ `Nat0`.
+
+{**`Registry`**, **`WithinCommit`**} **durable-value** *slot*: `Slot`, *position*: `Nat` ⇒ `Value`.
+
+{**`Transactions`**, **`WithinCommit`**} **transaction-active?** *transaction*: `Transaction` ⇒ `Bool`.
+
+{**`Transactions`**} **transaction-created?** *transaction*: `Transaction` ⇒ `Bool`.
+
+{**`Transactions`**} **transaction-call** *transaction*: `Transaction` ⇒ `Call`.
+
+{**`Transactions`**} **transaction-slot** *transaction*: `Transaction` ⇒ `Slot`.
+
+{**`Transactions`**} **transaction-generation** *transaction*: `Transaction` ⇒ `Generation`.
+
+{**`Transactions`**, **`WithinCommit`**} **draft-depth** *transaction*: `Transaction` ⇒ `Nat0`.
+
+{**`Transactions`**} **draft-value** *transaction*: `Transaction`, *position*: `Nat` ⇒ `Value`.
+
+{**`Transactions`**, **`WithinCommit`**} **pending-depth** *transaction*: `Transaction` ⇒ `Nat0`.
+
+{**`Transactions`**} **pending-value** *transaction*: `Transaction`, *position*: `Nat` ⇒ `Value`.
+
+**binding-present?** *image*: `Image`, *name*: `BindingName` ⇒ `Bool`.
+
+**definition-at** *image*: `Image`, *name*: `BindingName` ⇒ `Definition`.
+
+**definition-image** *definition*: `Definition` ⇒ `Image`.
+
+**definition-name** *definition*: `Definition` ⇒ `BindingName`.
+
+**public?** *definition*: `Definition` ⇒ `Bool`.
+
+**initial-depth** *image*: `Image` ⇒ `Nat0`.
+
+**initial-value** *image*: `Image`, *position*: `Nat` ⇒ `Value`.
+
+---
+
+∀ *image*: `Image`, *name*: `BindingName`, **binding-present?** *image* *name* · **definition-image** (**definition-at** *image* *name*) = *image* ∧ **definition-name** (**definition-at** *image* *name*) = *name*.
+
+∀ *left*: `Definition`, *right*: `Definition`, **definition-image** *left* = **definition-image** *right*, **definition-name** *left* = **definition-name** *right* · *left* = *right*.
+
+initially ∀ *image*: `Image`, *name*: `BindingName`, **binding-present?** *image* *name* · **definition-image** (**definition-at** *image* *name*) = *image* ∧ **definition-name** (**definition-at** *image* *name*) = *name*.
+
+initially ∀ *left*: `Definition`, *right*: `Definition`, **definition-image** *left* = **definition-image** *right*, **definition-name** *left* = **definition-name** *right* · *left* = *right*.
+
+∀ *registry-name*: `RegistryName` · ¬(**canonical?** *registry-name* ∧ **alias?** *registry-name*).
+
+∀ *registry-name*: `RegistryName`, (**canonical?** *registry-name* ∨ **alias?** *registry-name*) · **slot-live?** (**slot-of** *registry-name*).
+
+∀ *slot*: `Slot`, **slot-live?** *slot* · **slot-created?** *slot*.
+
+∀ *slot*: `Slot`, **slot-live?** *slot* · #(each *registry-name*: `RegistryName`, **canonical?** *registry-name* ∧ **slot-of** *registry-name* = *slot* · *registry-name*) = 1.
+
+∀ *slot*: `Slot`, **slot-live?** *slot* · **generation-published?** (**current-generation** *slot*) ∧ ¬**generation-retired?** (**current-generation** *slot*) ∧ **generation-slot** (**current-generation** *slot*) = *slot*.
+
+∀ *generation*: `Generation`, **generation-published?** *generation* · **constructed?** (**generation-image** *generation*).
+
+∀ *image*: `Image`, **value-held?** *image* · **constructed?** *image*.
+
+∀ *generation*: `Generation`, **generation-retired?** *generation* · **generation-published?** *generation*.
+
+∀ *generation*: `Generation`, **generation-published?** *generation*, ¬**generation-retired?** *generation* · **slot-live?** (**generation-slot** *generation*) ∧ **current-generation** (**generation-slot** *generation*) = *generation*.
+
+∀ *call*: `Call`, **call-active?** *call* · **call-created?** *call*.
+
+∀ *call*: `Call`, **call-active?** *call* · **constructed?** (**call-image** *call*) ∧ **definition-image** (**call-definition** *call*) = **call-image** *call*.
+
+∀ *call*: `Call`, **call-active?** *call*, **registered-call?** *call* · **generation-published?** (**call-generation** *call*) ∧ **generation-slot** (**call-generation** *call*) = **call-slot** *call* ∧ **generation-image** (**call-generation** *call*) = **call-image** *call*.
+
+∀ *transaction*: `Transaction`, **transaction-active?** *transaction* · **transaction-created?** *transaction*.
+
+∀ *transaction*: `Transaction`, **transaction-active?** *transaction* · **call-active?** (**transaction-call** *transaction*) ∧ **registered-call?** (**transaction-call** *transaction*) ∧ **transaction-slot** *transaction* = **call-slot** (**transaction-call** *transaction*) ∧ **transaction-generation** *transaction* = **call-generation** (**transaction-call** *transaction*) ∧ **slot-live?** (**transaction-slot** *transaction*) ∧ **current-generation** (**transaction-slot** *transaction*) = **transaction-generation** *transaction*.
+
+∀ *left*: `Transaction`, *right*: `Transaction`, **transaction-active?** *left*, **transaction-active?** *right*, **transaction-call** *left* = **transaction-call** *right* · *left* = *right*.
+
+∀ *left*: `Transaction`, *right*: `Transaction`, **transaction-active?** *left*, **transaction-active?** *right*, **transaction-slot** *left* = **transaction-slot** *right* · *left* = *right*.
+
+initially ∀ *image*: `Image` · ¬**constructed?** *image* ∧ ¬**value-held?** *image*.
+
+initially ∀ *registry-name*: `RegistryName` · ¬**canonical?** *registry-name* ∧ ¬**alias?** *registry-name*.
+
+initially ∀ *slot*: `Slot` · ¬**slot-created?** *slot* ∧ ¬**slot-live?** *slot*.
+
+initially ∀ *generation*: `Generation` · ¬**generation-published?** *generation* ∧ ¬**generation-retired?** *generation*.
+
+initially ∀ *call*: `Call` · ¬**call-created?** *call* ∧ ¬**call-active?** *call*.
+
+initially ∀ *transaction*: `Transaction` · ¬**transaction-created?** *transaction* ∧ ¬**transaction-active?** *transaction*.
+
+∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*.
+
+initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*.
+
+#### Chapter 3
+
+##### Action
+
+> `Construct image` allocates a fresh image identity and establishes its first module-value owner. Its immutable definition map and initial stack template already exist as background relations. Construction creates no name, slot, alias, or generation. Failure before this transition changes no modeled state; evaluation of the body and any external effects are outside this abstraction.
+
+**`Images`** ↝ Construct image.
+
+---
+
+∃ *image*: `Image`, ¬**constructed?** *image* · **constructed?**′ *image* ∧ **value-held?**′ *image* ∧ (∀ *other*: `Image`, *other* ≠ *image* · **constructed?**′ *other* = **constructed?** *other* ∧ **value-held?**′ *other* = **value-held?** *other*).
+
+#### Chapter 4
+
+##### Action
+
+> Image availability follows semantic ownership rather than reclamation mechanics. `value-held?` records the Boolean fact that at least one reachable module value owns the image; the model contains no reference count. `Release last value owner` clears that fact only when the final such owner disappears. The action models reachability and is not an ECL operation. Current generations and active calls are the other image owners; scoped words and quotations are not.
+
+**`Images`** ↝ Release last value owner *image*: `Image`, **constructed?** *image*, **value-held?** *image*.
+
+---
+
+¬**value-held?**′ *image* ∧ (∀ *other*: `Image`, *other* ≠ *image* · **value-held?**′ *other* = **value-held?** *other*).
+
+∀ *image*: `Image` · **constructed?**′ *image* = **constructed?** *image*.
+
+#### Chapter 5
+
+##### Action
+
+> `Register` is an ordered upsert. Publishing under a missing canonical name creates a fresh slot initialized from the image's initial template. Publishing under an existing canonical name preserves that slot and its complete durable stack. Every successful registration publishes a fresh generation and retires the previous current generation, even when both generations contain the same image. It cannot interleave with an active transaction on the selected slot or be performed by a call that owns an active transaction. The supplied invocation context is the top-level evaluator or the exact call performing the mutation.
+
+**`Registry`** ↝ Register *invoker*: `InvocationContext`, *image*: `Image`, *module-name*: `RegistryName`, **constructed?** *image*, **value-held?** *image*, ¬**alias?** *module-name*.
+
+---
+
+(¬**call-invocation?** *invoker* ∨ **call-active?** (**invocation-call** *invoker*) ∧ #(each *transaction*: `Transaction`, **transaction-active?** *transaction* ∧ **transaction-call** *transaction* = **invocation-call** *invoker* · *transaction*) = 0) ∧ (∃ *slot*: `Slot`, *generation*: `Generation`, (**canonical?** *module-name* ∧ *slot* = **slot-of** *module-name* ∨ ¬**canonical?** *module-name* ∧ ¬**slot-created?** *slot*), #(each *transaction*: `Transaction`, **transaction-active?** *transaction* ∧ **transaction-slot** *transaction* = *slot* · *transaction*) = 0, ¬**generation-published?** *generation* · **canonical?**′ *module-name* ∧ ¬**alias?**′ *module-name* ∧ **slot-of**′ *module-name* = *slot* ∧ (∀ *other-name*: `RegistryName`, *other-name* ≠ *module-name* · **canonical?**′ *other-name* = **canonical?** *other-name* ∧ **alias?**′ *other-name* = **alias?** *other-name* ∧ **slot-of**′ *other-name* = **slot-of** *other-name*) ∧ **slot-created?**′ *slot* ∧ **slot-live?**′ *slot* ∧ **current-generation**′ *slot* = *generation* ∧ (∀ *other-slot*: `Slot`, *other-slot* ≠ *slot* · **slot-created?**′ *other-slot* = **slot-created?** *other-slot* ∧ **slot-live?**′ *other-slot* = **slot-live?** *other-slot* ∧ **current-generation**′ *other-slot* = **current-generation** *other-slot*) ∧ **generation-published?**′ *generation* ∧ ¬**generation-retired?**′ *generation* ∧ **generation-slot**′ *generation* = *slot* ∧ **generation-image**′ *generation* = *image* ∧ (∀ *other-generation*: `Generation`, *other-generation* ≠ *generation* · **generation-published?**′ *other-generation* = **generation-published?** *other-generation* ∧ **generation-retired?**′ *other-generation* = (**generation-retired?** *other-generation* ∨ **canonical?** *module-name* ∧ *other-generation* = **current-generation** *slot*) ∧ **generation-slot**′ *other-generation* = **generation-slot** *other-generation* ∧ **generation-image**′ *other-generation* = **generation-image** *other-generation*) ∧ (**canonical?** *module-name* → **durable-depth**′ *slot* = **durable-depth** *slot*) ∧ (¬**canonical?** *module-name* → **durable-depth**′ *slot* = **initial-depth** *image*) ∧ (∀ *position*: `Nat` · (**canonical?** *module-name* → **durable-value**′ *slot* *position* = **durable-value** *slot* *position*) ∧ (¬**canonical?** *module-name* → **durable-value**′ *slot* *position* = **initial-value** *image* *position*)) ∧ (∀ *other-slot*: `Slot`, *other-slot* ≠ *slot* · **durable-depth**′ *other-slot* = **durable-depth** *other-slot* ∧ (∀ *position*: `Nat` · **durable-value**′ *other-slot* *position* = **durable-value** *other-slot* *position*))).
+
+#### Chapter 6
+
+##### Action
+
+> `Add alias` resolves either kind of occupied target name and stores a direct reference to its live slot; semantic alias chains do not exist. The alias shares the slot's current generation, durable stack, serialization, and lifetime. Canonical and alias names form one disjoint namespace, and an occupied name cannot be repointed. Registry mutation is unavailable to a call that owns an active transaction. The supplied invocation context is the top-level evaluator or the exact call performing the mutation.
+
+**`Registry`** ↝ Add alias *invoker*: `InvocationContext`, *alias-name*: `RegistryName`, *target-name*: `RegistryName`, ¬**canonical?** *alias-name*, ¬**alias?** *alias-name*, (**canonical?** *target-name* ∨ **alias?** *target-name*).
+
+---
+
+(¬**call-invocation?** *invoker* ∨ **call-active?** (**invocation-call** *invoker*) ∧ #(each *transaction*: `Transaction`, **transaction-active?** *transaction* ∧ **transaction-call** *transaction* = **invocation-call** *invoker* · *transaction*) = 0) ∧ ¬**canonical?**′ *alias-name* ∧ **alias?**′ *alias-name* ∧ **slot-of**′ *alias-name* = **slot-of** *target-name* ∧ (∀ *other-name*: `RegistryName`, *other-name* ≠ *alias-name* · **canonical?**′ *other-name* = **canonical?** *other-name* ∧ **alias?**′ *other-name* = **alias?** *other-name* ∧ **slot-of**′ *other-name* = **slot-of** *other-name*) ∧ (∀ *slot*: `Slot` · **slot-created?**′ *slot* = **slot-created?** *slot* ∧ **slot-live?**′ *slot* = **slot-live?** *slot* ∧ **current-generation**′ *slot* = **current-generation** *slot* ∧ **durable-depth**′ *slot* = **durable-depth** *slot* ∧ (∀ *position*: `Nat` · **durable-value**′ *slot* *position* = **durable-value** *slot* *position*)) ∧ (∀ *generation*: `Generation` · **generation-published?**′ *generation* = **generation-published?** *generation* ∧ **generation-retired?**′ *generation* = **generation-retired?** *generation* ∧ **generation-slot**′ *generation* = **generation-slot** *generation* ∧ **generation-image**′ *generation* = **generation-image** *generation*).
+
+#### Chapter 7
+
+##### Action
+
+> `Remove` resolves a canonical name or alias to its slot, then atomically closes that slot, removes its canonical name and every alias, retires its current generation, and discards its durable stack. Removal does not end already active calls, whose pins remain valid, but those calls cannot start a new transaction after closure. A later registration of the same spelling must allocate a fresh slot. Removal cannot interleave with a transaction on the slot or be performed by a call that owns an active transaction. The supplied invocation context is the top-level evaluator or the exact call performing the mutation.
+
+**`Registry`** ↝ Remove *invoker*: `InvocationContext`, *module-name*: `RegistryName`, (**canonical?** *module-name* ∨ **alias?** *module-name*).
+
+---
+
+(¬**call-invocation?** *invoker* ∨ **call-active?** (**invocation-call** *invoker*) ∧ #(each *transaction*: `Transaction`, **transaction-active?** *transaction* ∧ **transaction-call** *transaction* = **invocation-call** *invoker* · *transaction*) = 0) ∧ (∃ *slot*: `Slot`, *slot* = **slot-of** *module-name*, #(each *transaction*: `Transaction`, **transaction-active?** *transaction* ∧ **transaction-slot** *transaction* = *slot* · *transaction*) = 0 · (∀ *registry-name*: `RegistryName` · **canonical?**′ *registry-name* = (**canonical?** *registry-name* ∧ **slot-of** *registry-name* ≠ *slot*) ∧ **alias?**′ *registry-name* = (**alias?** *registry-name* ∧ **slot-of** *registry-name* ≠ *slot*) ∧ **slot-of**′ *registry-name* = **slot-of** *registry-name*) ∧ **slot-created?**′ *slot* = **slot-created?** *slot* ∧ ¬**slot-live?**′ *slot* ∧ **current-generation**′ *slot* = **current-generation** *slot* ∧ **durable-depth**′ *slot* = 0 ∧ (∀ *position*: `Nat` · **durable-value**′ *slot* *position* = **durable-value** *slot* *position*) ∧ (∀ *other-slot*: `Slot`, *other-slot* ≠ *slot* · **slot-created?**′ *other-slot* = **slot-created?** *other-slot* ∧ **slot-live?**′ *other-slot* = **slot-live?** *other-slot* ∧ **current-generation**′ *other-slot* = **current-generation** *other-slot* ∧ **durable-depth**′ *other-slot* = **durable-depth** *other-slot* ∧ (∀ *position*: `Nat` · **durable-value**′ *other-slot* *position* = **durable-value** *other-slot* *position*)) ∧ (∀ *generation*: `Generation` · **generation-published?**′ *generation* = **generation-published?** *generation* ∧ **generation-retired?**′ *generation* = (**generation-retired?** *generation* ∨ *generation* = **current-generation** *slot*) ∧ **generation-slot**′ *generation* = **generation-slot** *generation* ∧ **generation-image**′ *generation* = **generation-image** *generation*)).
+
+#### Chapter 8
+
+##### Action
+
+> `Begin image call` invokes a public binding through a module value. The invocation pins the image directly and has no registration, slot, or generation context. The image must still have a module-value owner when the call begins.
+
+**`Calls`** ↝ Begin image call *image*: `Image`, *binding-name*: `BindingName`, **constructed?** *image*, **value-held?** *image*.
+
+---
+
+∃ *callee*: `Call`, *definition*: `Definition`, ¬**call-created?** *callee*, **binding-present?** *image* *binding-name*, *definition* = **definition-at** *image* *binding-name*, **public?** *definition* · **call-created?**′ *callee* ∧ **call-active?**′ *callee* ∧ ¬**registered-call?**′ *callee* ∧ **call-generation**′ *callee* = **call-generation** *callee* ∧ **call-slot**′ *callee* = **call-slot** *callee* ∧ **call-image**′ *callee* = *image* ∧ **call-definition**′ *callee* = *definition* ∧ (∀ *other*: `Call`, *other* ≠ *callee* · **call-created?**′ *other* = **call-created?** *other* ∧ **call-active?**′ *other* = **call-active?** *other* ∧ **registered-call?**′ *other* = **registered-call?** *other* ∧ **call-generation**′ *other* = **call-generation** *other* ∧ **call-slot**′ *other* = **call-slot** *other* ∧ **call-image**′ *other* = **call-image** *other* ∧ **call-definition**′ *other* = **call-definition** *other*) ∧ (∀ *call*: `Call` · **ambient-depth**′ *call* = **ambient-depth** *call* ∧ (∀ *position*: `Nat` · **ambient-value**′ *call* *position* = **ambient-value** *call* *position*)).
+
+#### Chapter 9
+
+##### Action
+
+> `Begin scoped call` resolves the name stored in a word occurrence against the image stored in that occurrence. A quotation or word occurrence owns this scope but does not cache a definition or generation. The image must still be available through a module value, a current generation, or another active call. Same-image dispatch from a registered caller preserves its pinned slot and generation; other scoped dispatch has no registration context. Private definitions are therefore available to same-image scoped resolution without becoming publicly invocable.
+
+**`Calls`** ↝ Begin scoped call *caller*: `Call`, *occurrence*: `WordOccurrence`, *binding-name*: `BindingName`, **call-active?** *caller*, **occurrence-name** *occurrence* = *binding-name*.
+
+---
+
+∃ *image*: `Image`, *definition*: `Definition`, *callee*: `Call`, *image* = **occurrence-image** *occurrence*, **constructed?** *image*, (**value-held?** *image* ∨ #(each *slot*: `Slot`, **slot-live?** *slot* ∧ **generation-image** (**current-generation** *slot*) = *image* · *slot*) > 0 ∨ #(each *owner*: `Call`, **call-active?** *owner* ∧ **call-image** *owner* = *image* · *owner*) > 0), **binding-present?** *image* *binding-name*, *definition* = **definition-at** *image* *binding-name*, (**public?** *definition* ∨ **call-image** *caller* = **definition-image** *definition*), ¬**call-created?** *callee* · **call-created?**′ *callee* ∧ **call-active?**′ *callee* ∧ **registered-call?**′ *callee* = (**registered-call?** *caller* ∧ **call-image** *caller* = *image*) ∧ (**registered-call?** *caller* ∧ **call-image** *caller* = *image* → **call-generation**′ *callee* = **call-generation** *caller* ∧ **call-slot**′ *callee* = **call-slot** *caller*) ∧ (¬(**registered-call?** *caller* ∧ **call-image** *caller* = *image*) → **call-generation**′ *callee* = **call-generation** *callee* ∧ **call-slot**′ *callee* = **call-slot** *callee*) ∧ **call-image**′ *callee* = *image* ∧ **call-definition**′ *callee* = *definition* ∧ (∀ *other*: `Call`, *other* ≠ *callee* · **call-created?**′ *other* = **call-created?** *other* ∧ **call-active?**′ *other* = **call-active?** *other* ∧ **registered-call?**′ *other* = **registered-call?** *other* ∧ **call-generation**′ *other* = **call-generation** *other* ∧ **call-slot**′ *other* = **call-slot** *other* ∧ **call-image**′ *other* = **call-image** *other* ∧ **call-definition**′ *other* = **call-definition** *other*) ∧ (∀ *call*: `Call` · **ambient-depth**′ *call* = **ambient-depth** *call* ∧ (∀ *position*: `Nat` · **ambient-value**′ *call* *position* = **ambient-value** *call* *position*)).
+
+#### Chapter 10
+
+##### Action
+
+> `Complete call` releases the call's image and generation pins after its invocation has completed and no transaction belongs to it. Calls are split into begin and complete actions only to express publication concurrency; the prose-level invocation remains one language operation.
+
+**`Calls`** ↝ Complete call *completed*: `Call`, **call-active?** *completed*, #(each *transaction*: `Transaction`, **transaction-active?** *transaction* ∧ **transaction-call** *transaction* = *completed* · *transaction*) = 0.
+
+---
+
+**call-created?**′ *completed* = **call-created?** *completed* ∧ ¬**call-active?**′ *completed* ∧ **registered-call?**′ *completed* = **registered-call?** *completed* ∧ **call-generation**′ *completed* = **call-generation** *completed* ∧ **call-slot**′ *completed* = **call-slot** *completed* ∧ **call-image**′ *completed* = **call-image** *completed* ∧ **call-definition**′ *completed* = **call-definition** *completed* ∧ **ambient-depth**′ *completed* = 0 ∧ (∀ *position*: `Nat` · **ambient-value**′ *completed* *position* = **ambient-value** *completed* *position*) ∧ (∀ *other*: `Call`, *other* ≠ *completed* · **call-created?**′ *other* = **call-created?** *other* ∧ **call-active?**′ *other* = **call-active?** *other* ∧ **registered-call?**′ *other* = **registered-call?** *other* ∧ **call-generation**′ *other* = **call-generation** *other* ∧ **call-slot**′ *other* = **call-slot** *other* ∧ **call-image**′ *other* = **call-image** *other* ∧ **call-definition**′ *other* = **call-definition** *other* ∧ **ambient-depth**′ *other* = **ambient-depth** *other* ∧ (∀ *position*: `Nat` · **ambient-value**′ *other* *position* = **ambient-value** *other* *position*)).
+
+#### Chapter 11
+
+##### Action
+
+> `Begin within` requires an active registered call whose pinned generation is still current in a live slot. It allocates one transaction, copies the slot's durable stack into a private ordered draft, and begins with no pending outputs. It is unavailable for anonymous or homeless calls, for a retired or closed registration, while the caller already owns a transaction, or while another transaction owns the slot. Thus transactions never nest and are serialized per slot.
+
+**`Transactions`** ↝ Begin within *caller*: `Call`, **call-active?** *caller*, **registered-call?** *caller*, **slot-live?** (**call-slot** *caller*), **current-generation** (**call-slot** *caller*) = **call-generation** *caller*, #(each *active*: `Transaction`, **transaction-active?** *active* ∧ **transaction-call** *active* = *caller* · *active*) = 0, #(each *active*: `Transaction`, **transaction-active?** *active* ∧ **transaction-slot** *active* = **call-slot** *caller* · *active*) = 0.
+
+---
+
+∃ *slot*: `Slot`, *generation*: `Generation`, *transaction*: `Transaction`, *slot* = **call-slot** *caller*, *generation* = **call-generation** *caller*, ¬**transaction-created?** *transaction* · **transaction-created?**′ *transaction* ∧ **transaction-active?**′ *transaction* ∧ **transaction-call**′ *transaction* = *caller* ∧ **transaction-slot**′ *transaction* = *slot* ∧ **transaction-generation**′ *transaction* = *generation* ∧ **draft-depth**′ *transaction* = **durable-depth** *slot* ∧ (∀ *position*: `Nat` · **draft-value**′ *transaction* *position* = **durable-value** *slot* *position*) ∧ **pending-depth**′ *transaction* = 0 ∧ (∀ *position*: `Nat` · **pending-value**′ *transaction* *position* = **pending-value** *transaction* *position*) ∧ (∀ *other*: `Transaction`, *other* ≠ *transaction* · **transaction-created?**′ *other* = **transaction-created?** *other* ∧ **transaction-active?**′ *other* = **transaction-active?** *other* ∧ **transaction-call**′ *other* = **transaction-call** *other* ∧ **transaction-slot**′ *other* = **transaction-slot** *other* ∧ **transaction-generation**′ *other* = **transaction-generation** *other* ∧ **draft-depth**′ *other* = **draft-depth** *other* ∧ **pending-depth**′ *other* = **pending-depth** *other* ∧ (∀ *position*: `Nat` · **draft-value**′ *other* *position* = **draft-value** *other* *position* ∧ **pending-value**′ *other* *position* = **pending-value** *other* *position*)).
+
+#### Chapter 12
+
+##### Action
+
+> `Without` removes the top value from a nonempty draft and appends it to the transaction's pending-output sequence. The sequence preserves invocation order. The guard makes the action unavailable outside an active transaction or on an empty draft; the prose specification assigns the corresponding ECL errors.
+
+**`Transactions`** ↝ Without *transaction*: `Transaction`, **transaction-active?** *transaction*, **draft-depth** *transaction* > 0.
+
+---
+
+∃ *top*: `Nat`, *destination*: `Nat`, *top* = **draft-depth** *transaction*, *destination* = **pending-depth** *transaction* + 1 · **transaction-created?**′ *transaction* = **transaction-created?** *transaction* ∧ **transaction-active?**′ *transaction* = **transaction-active?** *transaction* ∧ **transaction-call**′ *transaction* = **transaction-call** *transaction* ∧ **transaction-slot**′ *transaction* = **transaction-slot** *transaction* ∧ **transaction-generation**′ *transaction* = **transaction-generation** *transaction* ∧ **draft-depth**′ *transaction* = **draft-depth** *transaction* - 1 ∧ (∀ *position*: `Nat` · **draft-value**′ *transaction* *position* = **draft-value** *transaction* *position*) ∧ **pending-depth**′ *transaction* = **pending-depth** *transaction* + 1 ∧ **pending-value**′ *transaction* *destination* = **draft-value** *transaction* *top* ∧ (∀ *position*: `Nat`, *position* ≠ *destination* · **pending-value**′ *transaction* *position* = **pending-value** *transaction* *position*) ∧ (∀ *other*: `Transaction`, *other* ≠ *transaction* · **transaction-created?**′ *other* = **transaction-created?** *other* ∧ **transaction-active?**′ *other* = **transaction-active?** *other* ∧ **transaction-call**′ *other* = **transaction-call** *other* ∧ **transaction-slot**′ *other* = **transaction-slot** *other* ∧ **transaction-generation**′ *other* = **transaction-generation** *other* ∧ **draft-depth**′ *other* = **draft-depth** *other* ∧ **pending-depth**′ *other* = **pending-depth** *other* ∧ (∀ *position*: `Nat` · **draft-value**′ *other* *position* = **draft-value** *other* *position* ∧ **pending-value**′ *other* *position* = **pending-value** *other* *position*)).
+
+#### Chapter 13
+
+##### Action
+
+> `Commit within` is one atomic publication. The complete remaining draft replaces the slot's durable stack, and all pending outputs append to the caller's ambient stack in order. Neither stack exposes an intermediate state. The transaction then becomes inactive and relinquishes its private stacks.
+
+**`WithinCommit`** ↝ Commit within *transaction*: `Transaction`, **transaction-active?** *transaction*.
+
+---
+
+∃ *caller*: `Call`, *slot*: `Slot`, *caller* = **transaction-call** *transaction*, *slot* = **transaction-slot** *transaction* · ¬**transaction-active?**′ *transaction* ∧ **draft-depth**′ *transaction* = 0 ∧ **pending-depth**′ *transaction* = 0 ∧ (∀ *other*: `Transaction`, *other* ≠ *transaction* · **transaction-active?**′ *other* = **transaction-active?** *other* ∧ **draft-depth**′ *other* = **draft-depth** *other* ∧ **pending-depth**′ *other* = **pending-depth** *other*) ∧ **durable-depth**′ *slot* = **draft-depth** *transaction* ∧ (∀ *position*: `Nat` · **durable-value**′ *slot* *position* = **draft-value** *transaction* *position*) ∧ (∀ *other-slot*: `Slot`, *other-slot* ≠ *slot* · **durable-depth**′ *other-slot* = **durable-depth** *other-slot* ∧ (∀ *position*: `Nat` · **durable-value**′ *other-slot* *position* = **durable-value** *other-slot* *position*)) ∧ **ambient-depth**′ *caller* = **ambient-depth** *caller* + **pending-depth** *transaction* ∧ (∀ *position*: `Nat`, *position* ≤ **ambient-depth** *caller* · **ambient-value**′ *caller* *position* = **ambient-value** *caller* *position*) ∧ (∀ *source*: `Nat`, *source* ≤ **pending-depth** *transaction* · ∃ *destination*: `Nat`, *destination* = **ambient-depth** *caller* + *source* · **ambient-value**′ *caller* *destination* = **pending-value** *transaction* *source*) ∧ (∀ *position*: `Nat`, *position* > **ambient-depth** *caller* + **pending-depth** *transaction* · **ambient-value**′ *caller* *position* = **ambient-value** *caller* *position*) ∧ (∀ *other-call*: `Call`, *other-call* ≠ *caller* · **ambient-depth**′ *other-call* = **ambient-depth** *other-call* ∧ (∀ *position*: `Nat` · **ambient-value**′ *other-call* *position* = **ambient-value** *other-call* *position*)).
+
+#### Chapter 14
+
+##### Action
+
+> `Abort within` makes the transaction inactive and discards its draft and pending outputs without changing the durable or ambient stack. Effects not represented by those stacks lie outside the transaction and are not rolled back.
+
+**`Transactions`** ↝ Abort within *transaction*: `Transaction`, **transaction-active?** *transaction*.
+
+---
+
+¬**transaction-active?**′ *transaction* ∧ **transaction-created?**′ *transaction* = **transaction-created?** *transaction* ∧ **transaction-call**′ *transaction* = **transaction-call** *transaction* ∧ **transaction-slot**′ *transaction* = **transaction-slot** *transaction* ∧ **transaction-generation**′ *transaction* = **transaction-generation** *transaction* ∧ **draft-depth**′ *transaction* = 0 ∧ **pending-depth**′ *transaction* = 0 ∧ (∀ *position*: `Nat` · **draft-value**′ *transaction* *position* = **draft-value** *transaction* *position* ∧ **pending-value**′ *transaction* *position* = **pending-value** *transaction* *position*).
+
+∀ *other*: `Transaction`, *other* ≠ *transaction* · **transaction-active?**′ *other* = **transaction-active?** *other* ∧ **transaction-created?**′ *other* = **transaction-created?** *other* ∧ **transaction-call**′ *other* = **transaction-call** *other* ∧ **transaction-slot**′ *other* = **transaction-slot** *other* ∧ **transaction-generation**′ *other* = **transaction-generation** *other* ∧ **draft-depth**′ *other* = **draft-depth** *other* ∧ **pending-depth**′ *other* = **pending-depth** *other* ∧ (∀ *position*: `Nat` · **draft-value**′ *other* *position* = **draft-value** *other* *position* ∧ **pending-value**′ *other* *position* = **pending-value** *other*
+*position*).
+
+
+
+### Construction and definitions
+
+- **Construction uses ordinary unit rollback.** Its scope, bindings, and draft
+  initial-state stack are provisional. On failure they are discarded and no
+  module value is produced. I/O, completed registry publications, and other
+  external effects performed by the body are not rolled back; child tasks are
+  cancelled by the ordinary failing-unit rule. Registration commits atomically
+  only after an image exists. A failed registration leaves the previous
+  directory entry, current generation, and durable state exactly as they were.
 - The registry is flat. A module body may register another module, but that
   registration creates an independent module with its own canonical name
   and lifetime; it does not establish lexical nesting or parent ownership.
-  Registrations commit independently, so a completed inner registration is
-  not rolled back if the registering module's body later fails.
+  Registrations commit independently, so a completed inner registration
+  remains published if the outer construction body later fails.
 - **Privacy is set at the definition site**: inside a module body, `def`
   and `set` bind public (exported); `defp` and `setp` bind private. Module
   bindings carry the same optional annotations as top-level ones, so a
   module word may be unannotated, documentation-only, effect-only, or
   both; `set`/`setp` publish the bare literal capture. Privacy is
-  subtractive — privates are
-  absent from the module's public face, not access-checked. Definitions
+  subtractive: private definitions are omitted entirely from the module's
+  public face. Definitions
   made inside the module body's isolated child units (e.g. inside an
   `@attempt`) are dynamic and are never exported.
 - **Tests are a distinct module-owned namespace.**
@@ -706,26 +1872,12 @@ anonymously, be passed as data, and be registered more than once.
   status; project, load, resolve, or runner failures are command failures.
   The default runner is sequential and deterministic, reports every result,
   continues after ordinary failures, and exits 1 when any test failed.
-- **Resolution context comes from the registration a call was resolved
-  through**, never from anything recorded at definition time. A definition
-  records only its own module-local name; qualified lookup supplies the
-  registration, and the activation carries it for its whole lifetime. So an
-  image registered as both `left` and `right` executes against whichever name
-  the call named — private lookup, same-home dispatch, `within`'s slot,
-  diagnostic spelling, and `which` all follow the invoking registration.
-  A word reached through a quotation that escaped its module has no invoking
-  registration at all: it resolves against the image its words were written
-  in, so private lookup and same-home dispatch still hold, while `within` is
-  `'domain`, `*module*` is `'domain`, and diagnostic spelling is the
-  unqualified local name. `*module*` otherwise returns the canonical name
-  of the registration selected by the activation; the same image can therefore
-  report different names when reached through different registrations, while
-  an alias reports its target registration's canonical name. Such an
-  application *does* cross a module boundary, so a declared effect on that word
-  is checked like any other cross-boundary call. Crossing is decided by the home
-  the call resolves to differing from the caller's, not by whether the source
-  text spells a dotted name — which is why a bare word reached through an
-  escaped quotation crosses one and a module's own internal call does not. An
+- `*module*`, `within`, and every other slot-dependent operation use only the
+  registration context established by actual dispatch; they never infer one
+  from image identity. Missing authority becomes a `'domain` error only when
+  such an operation is reached, so anonymous stateless code and private calls
+  remain valid. An application through escaped module-authored code still
+  crosses a module boundary for effect checking, despite having no slot. An
   exported word's body resolves against its module's internal environment and
   then core — never the caller's environment. Publics therefore reach
   privates, and callers cannot perturb a module's behavior by shadowing.
@@ -742,256 +1894,144 @@ anonymously, be passed as data, and be registered more than once.
   child see each other. There is no case where a binding resolves against a
   chain it was not defined in. So a module exporting a word named like a core one shadows it
   for that module's own callers, never inside the prelude words the module
-  calls: `table.where` does not become the `where` that `filter` is written
-  against. The same holds for the session, which is what makes shadowing
-  predictable rather than retroactive:
+  calls: `table.where` will shadow bare references to `where` inside of
+  `table`, but it will not be invoked by calls to `filter` (which includes
+  `where` in its own spelling), even inside of the `table` module. The same
+  holds for the session, which is what makes shadowing predictable:
 
-      1 wrap                                  -- [1], reaching core's `cons`
-      (pop pop 42) 'cons def   1 wrap          -- still [1]
-      (pop pop 42) 'cons def   1 [] cons       -- 42, the session's own `cons`
-      (pop pop 42) 'cons def   (() cons) 'wrap def   1 wrap    -- 42
+  ```ecl
+  1 wrap                                  -- [1], reaching core's `cons`
+  (pop pop 42) 'cons def   1 wrap          -- still [1]
+  (pop pop 42) 'cons def   1 [] cons       -- 42, the session's own `cons`
+  (pop pop 42) 'cons def   (() cons) 'wrap def   1 wrap    -- 42
+  ```
 
-  A session `def` shadows a name *for session code*. It does not rewrite what
-  an already-evaluated definition means, because that definition's references
-  resolve where they were written. Adopting new behavior inside a prelude word
-  is redefining that word: the replacement is a session definition, so it
-  resolves in the session and shadows the prelude one for session callers.
-  Reaching further in is deliberately not available — changing what `filter`'s
-  own `where` means requires redefining `filter`.
-  Late binding is unaffected. The lookup still happens at call time; what is
-  fixed is which chain it happens in. **The sealing extends to quotation
-  literals, and it has to.** A quotation literal written inside a body is
-  sealed the way the body's own references are: it resolves in the scope its
-  text was written in, whoever ends up applying it. `all?` is
-  `(|l q| l q each 1 (and) fold)` and `over` is `(swap dup (swap) dip)`, so a
+  A session `def` shadows a name *for session code*. Adopting new behavior
+  inside a prelude word is redefining that word: the replacement is a session
+  definition, so it resolves in the session and shadows the prelude one for
+  session callers. Late binding is unaffected. The lookup still happens at call
+  time; what is fixed is which chain it happens in. A quotation literal written
+  inside a body is sealed the way the body's own references are: it resolves in
+  the scope its text was written in, whoever ends up applying it. `all?` is
+  `(|l q| l q each 1 (and) fold)` and `over` is `(swap dup (swap) dip)`, but a
   session `and` or `swap` leaves both alone:
 
-      (pop pop 42) 'and def   [1 1] (1 =) all?      -- 1
-      (pop pop 99) 'swap def  1 2 over              -- 1 2 1
+  ```ecl
+  (pop pop 42) 'and def   [1 1] (1 =) all?      -- 1
+  (pop pop 99) 'swap def  1 2 over              -- 1 2 1
+  ```
 
-  A quotation the session wrote is still session code, so a combinator does
-  see the definitions of whoever *wrote* the quotation it was handed:
-  `(pop pop 42) '+ def [1 2 3] 0 (+) fold` is 42. The two cases separate
-  because the scope travels with the quotation rather than with the
-  activation. `all?` hands `each` its caller's `q`, written in the session,
-  and hands `fold` its own `(and)`, written in the prelude; each resolves
-  where it was written, from the same activation. This is the
-  syntactic-closure construction — code paired with the scope its identifiers
-  resolve in — and it is why the no-closures rule is stated as *captures no
-  values*. Nothing is captured, the lookup still happens at call time, and a
-  quotation built at run time by `partial`, `cons`, or `compose` has no
-  written-in scope, so it resolves where it is invoked exactly as a plain list
-  always has.
-  A word written in a module body names *that image*. Reloading publishes a new
-  image under the name, so a fresh call through the name runs the new code —
-  which is the whole of what redefinition needs to do. Code that already
-  exists is not re-pointed: a running body keeps the image it entered, and a
-  quotation that escaped one goes on meaning what it meant. This is Forth's
-  rule rather than Erlang's, and deliberately: Erlang's version coexistence
-  exists to upgrade a live stateful system in place without losing state, and
-  ECL has no such need. Redefining at a prompt happens between units, with
-  nothing on the stack, so the cases that separate the two designs do not arise
-  in the workflow the feature is for.
-  An image lives as long as something holds it — a running activation, a
-  registration, or a unit that has dispatched a word written in it. That last
-  holder is what makes a quotation which escaped its module safe to apply: the
-  dispatch retains the image for the rest of the unit, so the scope its words
-  resolve against cannot be freed under them by a concurrent reload or
-  `unmodule`. Once nothing holds it, applying a quotation written in it is
-  `'domain`, never a fallback to core or to the invoking chain, because a
-  fallback would silently change what its words mean. Failing at the point of
-  use is the point: you learn that the code you are holding belongs to a
-  version that is gone, instead of watching it quietly acquire new behavior.
-  An *anonymous* image — one built by `@module` and never registered — is the
-  same rule with no name involved.
-  **Which text is the module's is decided by what the reader produced.** A
-  construction body's words name the image, and so do the words of everything
-  the reader built inside it, whatever container they sit in — a quotation, a
-  list literal, a dict literal. A value assembled at run time is not the
-  module's text: its parts already name the scopes they were written in, and
-  `@module` and `@defm` leave them alone. That is what makes a quotation
-  handed in as a parameter keep the caller's scope, since `with` captures each
-  seed with `literal` and a capture is built at run time.
-- **An undefined-word failure says which chain it searched.** Its `'data`
-  carries `'scope` alongside `'name`: `'session` for the activation's own
-  lexical chain over core, `'module` for a module image's definitions over
-  core, `'core` for a primitive or prelude definition, whose chain is core
-  alone, `'qualified` for a dotted reference resolved through the registry,
-  and `'module-value` for a missing public export of a module reached as a
-  value — which is not a scope miss at all. A session name being invisible to
-  a module and to a prelude word are different failures, and the field is what
-  distinguishes them.
-- **`invoke` is the only operation that runs a module value's code.**
-  `module 'name invoke` calls one public export of an image reached as a value
+  Splicing or rearranging quotations preserves the
+  annotations on their existing word occurrences. Only a word created without
+  reader context is unannotated and resolves dynamically in its invoking
+  activation. Re-registering a module publishes a new image under the module
+  name, so a fresh call through the name runs the new code. Already-executed
+  code is not re-pointed. Applying a word whose scoped image is no longer
+  available is `'domain`. Seed values passed to unit constructors are not part
+  of the construction body. Runtime-built captures retain their existing
+  word scopes.
+- `module 'name invoke` calls one public export of an image reached as a value
   rather than through a registered name. A module value is otherwise an
-  ordinary opaque value: `register` consumes one and `type` reports `'module`,
-  and those are the only other things that accept it. It is the same dispatch a qualified call performs — the
-  home is the image, so a public reaches its own privates, and lookup is
-  public-only, so a private is as absent as a missing name. What it cannot do
-  is open state: an image owns no slot, so `within` inside a handle-called word
-  is `'domain` exactly as it is in a construction root. **A nameless module is
-  stateless.** A module that needs state returns it — a `new` word handing back
-  a value the caller threads through later calls — rather than encapsulating
-  it; durable state and `within` remain the province of a registration, which
-  is what a canonical name buys.
-  The observation words take a *symbol*, so they remain registration-driven:
-  `which`, `see`, and `doc` look a name up, and a name is what a
-  registration is. A value has none to offer them.
-  A nameless image has no canonical spelling either, so a failure inside a
-  handle-called word traces its bare local name — `['missing 'boom]` where a
-  registered call would say `['missing 'named.boom]`. Borrowing the caller's
-  parameter name would read better and claim more than is true.
-  Two images exporting the same name may be held and invoked at once, which a
-  registry keyed by name cannot represent.
-  A stateless module is formally a record of functions, so it is worth saying
-  why it is not a dict of quotations. A dict would lose both halves of what a
-  module carries: its privates, which are absent from its public face but
-  reachable from it, and the home its bodies resolve against. A dict of
-  quotations hands out the code and keeps neither: the quotations would be
-  values a caller can index, reorder, and re-`def`, and a private would be
-  reachable by dissecting a public. The module kind exists to carry that
-  environment, and `invoke` is the operation that enters it.
-- **Capture is parameterization, and parameterization is the only capture.**
-  A construction receives everything it needs on its stack, seeded by a plan
-  — `values (body) seed @module`, `values (body) seed 'name @defm` — and
-  nothing else crosses the boundary.
-  There is no ambient environment between a module's own definitions and core,
-  and no construction-time snapshot of one.
-  To depend on a session value, pass the value. To depend on behavior, pass a
-  quotation you write at the call site — `[(2 *)] ('scale def …) seed 'm @defm`
-  — which is the functor discipline: the caller writes the structure it hands
-  in. To share a *word* between a session and a module, or between two
-  modules, make it a module both parties call. No operation lifts a published
-  body out of the home it resolves against, so a word is never the currency; a
-  quotation you wrote, or a module you both call, is. Both are ordinary values
-  on an ordinary stack, which is why this needs no construction-specific
-  mechanism and no new vocabulary.
-  Every consequence follows from having nothing to stale. A later top-level
-  definition cannot change an existing image, because the image never referred
-  to the session. Nested construction needs no special rule, because it
-  receives its parameters the same way. Registrations and aliases of one image
-  share its definitions, because that is all there is to share. Module text the
-  loader executes — an embedded standard module, a file found on `ECL_PATH`, a
-  locked package entry — behaves identically to text typed at the session,
-  because neither can see a session, so load order is not observable.
-  A whole module may be a parameter, which is how a substitutable dependency
-  is expressed: pass the image and call it with `invoke`. That keeps the choice
-  of implementation with the caller instead of making it a fact about the
-  global registry, which is what makes a test double local and two versions of
-  one package able to coexist.
-  A quotation parameter carries the scope it was written in, so its own
-  references are the caller's rather than the module's. With `10 'k set` in
-  scope, `[(k *)] ('scale def ( -- n ) (4 scale) 'go def) seed 'm @defm` makes
-  `m.scale` multiply by ten, and the module needs no parameter for `k`. That is
-  what a functor argument should do: the caller supplies the behavior, and the
-  behavior means what it meant where it was written.
-  Purity comes from the unit-constructor boundary, not from transitivity. The
-  *construction body* is not an ordinary application — `@module` and `@defm`
-  run it in the image's own chain whatever scope its text was written in, so a
-  bare `k` inside the body is undefined however recently the session defined
-  one. The module still cannot reach the session, and everything still arrives
-  as a parameter. A label decides one thing only: where a handed-in
-  quotation's own words resolve once the module applies it.
-- **A word resolves in the scope its text was written in.** The scope is
-  carried by the word itself, not by the quotation containing it, so it
+  ordinary opaque value: `register` consumes one and `type` reports `'module`.
+  It is the same dispatch a qualified call performs — the home is the image, so
+  a public reaches its own privates, and lookup is public-only, so a private is
+  as absent as a missing name. On the other hand, it can't access module
+  registration state: module stacks are associated with module names, *not*
+  with anonymous module values. `within` inside a handle-called word is
+  therefore `'domain` exactly as it is in a construction root.
+- Module constructors are parameterized by the seed operand — `values (body)
+  @module`, `values (body) 'name @defm` — and nothing else crosses the
+  boundary. There is no ambient environment between a module's own definitions
+  and core.
+  Modules can be parameterized with anonymous module handles, enabling a
+  simple kind of dependency injection.
+  A quotation parameter carries the scope it was written in, so it preserves
+  its references on injection into a module. Given:
+
+  ```ecl
+  10 'k set
+  [(k *)] (
+           'scale def
+           ( -- n ) (4 scale) 'go def) 'm @defm
+  m.go                                          -- 40
+  ```
+
+- **A word resolves in the scope its text was written in.** The word itself
+  carries the scope, so it
   survives every operation that moves code around: `cat` and `compose` splice
   tokens from two sources into one list and each token keeps the scope it was
   written in. A module word may hand `(private-helper)` to `each` and the
   private still resolves, because the literal was written inside the module;
   a module word may accept `(bump)` from its caller and that `bump` resolves in
-  the caller, because the caller wrote it; and both hold when the stdlib splices
-  the caller's quotation into a plan's seeds. Neither depends on which
-  activation launched the combinator. A word with no written-in scope — one a
-  host built, or one appearing in an error trace — resolves where it is invoked.
-  Reading is what assigns a scope, so `load` and `parse` both give the words
-  they produce the scope of the unit that asked for them: `"foo bar" parse call`
-  means what typing `(foo bar)` there would mean.
-  There is no exception for the `@` words. An `@attempt` child's parent is the
-  enclosing scope, so a word written outside still resolves through the chain
-  while one defined inside the child is found first. `@module` and `@defm`
-  differ only because an image's scope has no parent: they stamp the
-  construction body with the image's scope, which is why a bare session name
-  inside a construction body is undefined while a quotation handed in as a
-  *seed* — a separate value, never inside the body — keeps the caller's.
-  What a word *defines* — `def`, `set`, `setp` — still lands in the invoking
-  context, which is how `setp` inside a module body binds a module private.
-  `def`-ing a quotation therefore makes the *binding* local without re-siting
-  the quotation's *references*: they stay where the text was written.
-  Resolution moved; definition placement did not.
-- **Module text is exactly what the reader wrote inside the designated body.**
-  Two independent facts decide attribution, and both are required. First, the
-  constructor's input identifies the exact body value, separately from its
-  seeds — which is what `seed` preserves and `with` destroys. Second, the body
-  must carry reader-text lineage. Every word occurrence in the reader-built
-  subtree rooted at such a body is copied with the new image's scope, descending
-  through nested quotations, list literals, and dict literals alike.
-  Lineage survives only the interpreter's scope-only construction rewrite. That
-  rewrite copies, and the copy is the same reader text with different scopes on
-  its words, so a later constructor may re-stamp that exact rewritten body to
-  its own image — which is what makes a construction nested inside a
-  construction body resolve against its own image rather than the enclosing one.
-  Ordinary runtime reconstruction loses the lineage. `cat`, `compose`, `cons`,
-  `append`, `raze`, slicing, reversal, `with`, and every other generic
-  reconstruction produce values with none, so a body built that way is stamped
-  nowhere and is not descended into: it is not module text merely because its
-  parts came from the reader, and reader lineage carried by nested fragments
-  grants no admission through a root that has none. So `7 'k set ((k) 'geta)
-  (def) cat 'm @defm` leaves `k` naming the session, and `m.geta` is `7`;
-  wrapping that same runtime-built body in a plan changes only its initial
-  stack, never its attribution.
-  Seeds are never traversed or stamped, whatever they contain. Nothing about
-  archive-wide membership, a coinciding source range, or the operation history
-  of a runtime list is a substitute for lineage, and no operation grants lineage
-  to a value chosen by its caller.
+  the caller, because the caller wrote it; and both hold when the stdlib passes
+  the caller's quotation as ordinary data.
+- **Only a reader-authored body becomes module text.** The constructor accepts
+  any list in the body operand position; the values operand never participates.
+  A body carrying lineage from either the reader or construction's own
+  scope-only copy of reader text is copied, and every word in its reader-built
+  subtree receives the new image's scope, including words nested in quotation,
+  list, and dict literals. The copy retains its lineage, so a construction
+  nested inside it can scope its own body to its own image.
+
+  Generic runtime list operations do not create lineage. A body produced by
+  `cat`, `compose`, `cons`, `append`, `raze`, slicing, reversal, `with`, or a
+  similar operation keeps the scopes already carried by its parts, but module
+  construction accepts it without traversing or re-scoping it. Reader-authored
+  fragments do not make their runtime-built container reader-authored. For
+  example, `7 'k set [] ((k) 'geta) (def) cat 'm @defm` builds the module body
+  at runtime. The `k` inside `(k)` keeps its session scope, so `m.geta` resolves
+  the session's `k` and returns `7`.
+
+  Seed values only initialize the construction stack. They are never traversed
+  or re-scoped, and they cannot affect whether the body is module text.
 - **`within` is the explicit stack boundary.** `within` runs a quotation
-  against a private draft of the home module's durable stack rather than
-  the ambient caller stack. It is legal only while executing a published
-  word whose definition-site home is a live module: session top level, a
-  construction root (an image being built has no registration, and its body
-  operates on its construction stack directly), a word reached through
-  `invoke` (an image reached as a value has no registration either, so it owns
-  no slot), a word reached through a quotation that escaped its module (the
-  quotation carries the image its words were written in, not a registration a
-  call was resolved through, so there is no slot to target — and for an image
-  registered under several names there is no fact of the matter about which
-  slot it would be), and a body extracted and redefined elsewhere are all
-  `'domain`. Such a word never targets the *caller's* slot: `within`'s
-  authority comes from the definition-site home, so a module that hands out a
-  quotation over its own privates hands out no write at all.
-  There is no module-handle-targeted form. Inputs cross the boundary only because
-  the word body captures them explicitly with `partial` or `with`.
-  Semantically `within` is the module-scoped transactional counterpart of
-  `infra`: `infra` takes a supplied list as its temporary stack, `within`
-  selects the invoking word's durable home-module stack.
+  against the current registration's durable stack rather than the ambient
+  operand stack. It requires a
+  `registered(generation, slot, image)` invocation context. A construction root, anonymous
+  `invoke`, escaped module quotation, or session activation has no slot and
+  raises `'domain` if it reaches `within`. The operation never infers a slot
+  from an image or targets some caller's slot. Homeless helpers and same-image
+  calls preserve an existing registered context; dispatch into another image
+  replaces it according to the ordinary invocation rules. Semantically,
+  `within` is the module-state counterpart of `infra`: `infra` names a supplied
+  list as a temporary stack, while `within` selects the active registration's
+  durable stack.
 - **`without` is the explicit outward boundary.** Inside an active
-  `within` quotation, `without` pops the draft's top value and appends it
-  to a pending output sequence; elsewhere it is `'domain`, and on an empty
-  draft it is `'underflow`. Multiple outward values reach the caller in
-  invocation order. A value remains in the durable stack and is also
-  returned only when the quotation duplicates it before `without`; values
-  captured with `partial` or `with` stay in state unless the quotation
-  consumes or moves them outward.
-- **Each `within` application is the transaction.** Success publishes the
-  remaining draft as the new durable stack exactly once and then transfers
-  the pending outputs to the caller through a window reserved before
-  publication, so no allocation failure can commit state without
-  delivering every output. Error, cancellation, allocation failure,
-  contract failure, and `without` underflow discard both the draft and the
-  pending outputs and publish nothing. A later failure in the enclosing
-  word or unit does not roll back a `within` application that already
-  returned, matching the existing rule that unit stack rollback does not
-  undo completed environment or IO effects.
-- **`within` applications are serialized scheduler work.** One fair
-  per-slot arbiter orders them in arrival order, holding no lock while ECL
-  code runs and permitting ordinary bounded scheduler yields. Parking
-  (`await`, deadline waits, task joins, `exit`), a nested `within`, and an
-  application homed in another module are all `'domain` before parking or
-  acquiring a second slot, so no self- or cross-module deadlock shape is
-  reachable. Ordinary calls, including read-only calls into other modules,
-  remain available inside the quotation.
-- Re-registering a module heals all callers immediately: module words
-  resolve through the registry, and each application pins one registry
-  generation for the whole body — no mixed-generation execution.
+  `within` quotation, `without` moves its top value outward; elsewhere it is
+  `'domain`, and on an empty stack it is `'underflow`. A value remains in the
+  durable stack and is also returned only when the quotation duplicates it
+  before `without`; captured values stay in state unless the quotation consumes
+  or moves them outward.
+- I/O and other effects performed by a failing `within` quotation are not
+  rolled back. A later failure in the enclosing word or unit does not roll back
+  a transaction that already returned.
+- Concurrent `within` attempts have no specified FIFO order or fairness
+  policy. Transactions on distinct slots and activity unrelated to a
+  registration's durable stack may proceed concurrently.
+- **A `within` transaction cannot wait on another ECL task.** `await`,
+  `await-all`, `await-any`, `await-for`, and any other task-waiting operation
+  raise `'domain` while a `within` transaction is active, even if the requested
+  result is already available. The error occurs before consuming a task or
+  registering a wait. An implementation may preempt or internally suspend the
+  executing task for scheduling or I/O without changing the semantics: the
+  transaction retains exclusive use of its slot until it succeeds or fails,
+  while unrelated tasks and other registration slots may continue.
+- **`within` transactions do not nest.** If a `within` transaction is active,
+  reaching another `within` raises `'domain` before inspecting or acquiring
+  its target slot. This applies to the same slot, an alias of that slot, and a
+  different module's slot alike. Ordinary calls into the same or another
+  module remain legal; a call fails on this ground only if it reaches another
+  `within`.
+- **A `within` transaction cannot mutate the module registry.** `register`,
+  `unmodule`, `alias`, and any other primitive registry mutation raise
+  `'domain` while a transaction is active. The error occurs before that
+  operation consumes its operands, resolves a target registration, or
+  publishes any registry change. A derived sequence may perform earlier
+  operations before it reaches the prohibited mutation: in particular,
+  `@defm` may complete its `@module` phase before `register` raises. A
+  transaction therefore holds authority over exactly its already-selected
+  slot and cannot acquire registration authority over another slot as a side
+  effect.
 - **Slot lifetime is an owned capability.** Every published generation owns a
   non-retargetable slot lease for its whole lifetime. Resolution retains an
   operation lease before dropping the directory snapshot that supplied the
@@ -1001,39 +2041,15 @@ anonymously, be passed as data, and be registered more than once.
   not reusable until all such leases, the arbiter, and old directory snapshots
   have drained. A removed generation can therefore observe only its original
   closed slot, never an unrelated module that later reuses registry capacity.
-- **Hot reload preserves the stack.** Re-registration constructs a new code
-  generation while retaining the slot and its durable stack, taking an
-  ordinary place in the slot's arbiter order: every `within` application
-  queued before it runs against the old generation and finishes first, and
-  every later one runs against the new one, so no application straddles
-  the swap. A quiescent slot — the sequential common case — commits
-  immediately. Once a replacement representation is current, code from a
-  superseded generation may keep running but may no longer publish state:
-  its `within` is `'domain`. A re-registration initiated from inside *any*
-  state application is `'domain` before any wait: a unit holds at most one
-  slot's turn, and waiting for a second is the same deadlock shape a nested
-  `within` is. Failed
-  registration changes neither code nor state. Stack-layout evolution is
-  an explicit userland protocol: replacement code must understand the
-  retained representation and may migrate it with an ordinary first
-  `within`; the runtime neither inspects nor names positions in the stack.
-- **Removal completes the lifecycle.** `unmodule` accepts a module name; an
-  alias canonicalizes through the registry to the same slot. An unregistered name is
-  `'undefined-word`, and removal from inside any state application is
-  `'domain`, like re-registration. It
-  closes new resolution, calls, and `within` applications, waits for
-  queued and active drafts through the same arbiter order, removes every
-  alias targeting the slot in the same
-  publish, then retires the code generation and every value on the durable
-  stack through bounded work. Once the close is published, ownership of the
-  remaining retirement is transferred to scheduler work before cancellation
-  can unwind the initiating unit; post-close cancellation cannot strand a
-  closed slot. Concurrent resolution observes either the
-  live module or `'undefined-word` once close begins, never a half-removed
-  entry. Session shutdown consumes the same `live -> closing -> retired`
-  protocol, and settled memory across repeated construct/remove/name-reuse
-  cycles is bounded by peak simultaneously live state and slot leases rather
-  than by registration history.
+- Failed registration changes neither code nor state. Stack-layout evolution
+  is an explicit user protocol: replacement code must understand the retained
+  representation and may migrate it with an ordinary `within`; ECL neither
+  inspects nor names positions in the stack.
+- `unmodule` accepts a canonical name or alias. An unregistered name is
+  `'undefined-word`; attempting removal during a `within` transaction is
+  `'domain` under the general registry-mutation rule. An already-dispatched
+  call may finish after removal, but attempting a new `within` from its retired
+  generation is `'domain`.
 - Module state is process-local: there is no persistence across process
   restart, and the native ABI exposes no module-state capability, so an
   `.eclmod` word can neither observe an internal module home nor reach a durable
@@ -1054,1136 +2070,282 @@ anonymously, be passed as data, and be registered more than once.
   binding-name symbol and constructs the corresponding executable word;
   `execute` applies that word through ordinary late-bound dispatch, preserving
   its module home, private lookup, annotations, tracing, native/builtin path,
-  cancellation, and `within` authority. If the qualified word is cold, that
-  same dispatch loads its module and resumes the constructed word directly;
-  it never requires a prior import or literal qualified call. `alias` registers a short registry
+  cancellation, and `within` authority. `alias` registers a short registry
   name; aliases and module
   names may not collide in either direction. `which` shows any name's
   resolution.
-- **Loading**: the first qualified reference (`stats.mean`) to an unregistered
-  module — including the module named by `import` — consults the embedded
-  standard library first. A legacy session then searches each `ECL_PATH` entry
-  in order, trying `stats.ecl` and then `stats.eclmod`; a manifested session
-  instead performs exact catalog lookup and never consults `ECL_PATH`.
-  The selected candidate is authoritative, including its errors.
-  Embedded names therefore always win: a `csv.ecl` on the search path
-  cannot silently replace the stdlib `csv`, and in-session shadowing or
-  explicit `@defm` registration remain the way to override one. Every
-  module is addressable by qualified name with no ceremony; an explicit
-  `import` supplies the selected attributes' own bare spellings.
-  Every qualified-name operation triggers the same load when needed:
-  execution, `doc`, `see`, `which`, and qualified completion do not
-  depend on whether an earlier operation happened to register the module.
-  Completion loads only the module; it neither executes an export nor imports
-  one into session scope. A misspelled dotted word costs one bounded search
-  before raising `'undefined-word`. Two units racing the first
-  reference to one legacy module, or sibling modules from one package
-  artifact, converge on a single committed load; only a unit re-entering its
-  own in-progress load is a `'domain` cycle. A loaded
-  `.ecl` file registers a module as an ordinary side effect of running;
-  `load` replays any file as one unit in the calling session. Loading succeeds
-  only when the requested canonical name is actually registered, whichever
-  spelling the file used: a file that constructs an anonymous image and never
-  registers it fails with the ordinary loader error.
-
-### Native modules
-
-A `<name>.eclmod` is a precompiled native module: one artifact is one
-module, whose complete word table validates and publishes atomically — an
-artifact cannot partially register. Its canonical name must equal the
-requested name. Native words are ordinary module words: they carry a
-  mandatory effect and nonempty documentation, participate in `import`, dotted
-  access, `doc`, `which`, and `see` (which display the native origin), and
-their calls are transactional — a failing native call leaves the stack
-unchanged. A native word can raise only the kinds `'type`, `'shape`,
-`'conform`, `'overflow`, `'domain`, `'parse`, `'io`, or `'user`; the
-runtime alone raises the rest. Native modules are neither reloaded nor
-unloaded within a session.
-
-Opening a shared library executes arbitrary machine code before ecl can
-inspect it, so every directory on an `ECL_PATH` used for native loading is
-a trusted-code boundary.
-
-## The standard library
-
-The exhaustive core and module word list lives in
-[`STDLIB.md`](STDLIB.md). This section specifies the semantic conventions that
-tie those ordinary modules into the language.
-
-Twenty modules ship inside the binary. They are ordinary modules — registered,
-enumerable, shadowable — and they load lazily on the first qualified mention of
-their name, whether that is a bare `str.upper` or `'str ('upper) import`. Resolution consults
-the embedded manifest before `ECL_PATH`, so a stray `csv.ecl` on the search
-path cannot silently replace a stdlib name; in-session shadowing and explicit
-`@defm` registration remain the documented overrides. All twenty resolve with no
-`ECL_PATH` set and no filesystem access at all.
-
-Three transports back them, chosen per module rather than uniformly:
-embedded ECL source (`dict`, `error`, `result`, `str`, `table`, `rng`, and the
-eight `pkg.*` modules), a linked first-party
-native descriptor published through the same contract as an external
-extension (`csv`), and builtin word tables published under a module name
-(`io`, `json`, `http`, `archive`, `pkg.store`).
-The last is reserved for authority the native SDK deliberately withholds — an
-allocator, TLS, sockets — which is why `json` and `http` are not SDK modules
-and `csv` is.
-
-### error
-
-Errors remain ordinary immutable dictionaries. `error.new` starts one from its
-required kind symbol; `error.with-message` and `error.with-data` return updated
-values without raising. `error.valid?` recognizes the same typed fields as
-`raise`: required symbol `'kind`, optional string `'msg`, optional symbol
-`'word`, optional list-of-symbols `'trace`, and optional dict `'data`. Other
-diagnostic keys are permitted. `error.kind?` and `error.kind-in?` inspect a
-validated error without repeating raw dictionary plumbing.
-
-This module owns data construction and inspection only. `raise`, `fail`,
-`assert`, and `@attempt` remain core because they are control effects rather
-than error values.
-
-- `error.new` `( kind -- error )`
-- `error.with-message` `( error message -- error )`
-- `error.with-data` `( error data -- error )`
-- `error.valid?` `( value -- bool )`
-- `error.kind?` `( error kind -- bool )`
-- `error.kind-in?` `( error kinds -- bool )`
-
-### result
-
-Over the same `{'ok values}` / `{'err error}` shape `@attempt` produces. A
-success payload is always a list standing for a stack, never one privileged
-scalar. Every word rejects a malformed tagged result *before* invoking any
-quotation it was given.
-
-Every word that *interprets* an envelope lives here — that is the boundary.
-The words that *produce* an error — `raise`, `fail`, `assert` — stay core,
-because an error dict in flight is not a result: it becomes one only when
-`@attempt` or `await` reifies it.
-
-- `result.ok` `( values -- result )`, `result.err` `( error -- result )`
-- `result.ok?` / `result.err?` `( result -- bool )`
-- `result.or-raise` `( result -- values )` — the success payload, or the
-  captured error dict re-raised unchanged. (`result.or-raise call` unpacks
-  the values onto the stack.)
-- `result.or-else` `( result fallback -- value )` — the success payload, or
-  the fallback value.
-- `result.and-then` `( result quotation -- result )` — seeds the success
-  stack through `seed @attempt`; an existing failure is returned unchanged.
-  There is no separate `result.map`: `@attempt`'s automatic `{'ok [...]}`
-  wrapping collapses the functor map and the monadic bind into one word on
-  the success side. The distinction survives only on the failure side, which
-  is why that side carries both `map-err` and `recover`.
-- `result.map-err` `( result quotation -- result )` — replaces a failure's
-  error dict with what its `( error -- error )` quotation returns, never
-  leaving the failure arm.
-- `result.recover` `( result quotation -- result )` — seeds the error dict as
-  one value; `result.recover-kinds` `( result kinds quotation -- result )`
-  does so only for a listed kind and leaves every other result unchanged.
-- `result.either` `( result on-ok on-err -- ... )` — exhaustive eliminator;
-  neither branch is isolated.
-- `result.all` `( results -- result )` — the leftmost failure unchanged, or
-  one success holding every success stack in input order.
-- `result.partition` `( results -- successes errors )` — both in input order,
-  without re-raising.
-
-### str
-
-ASCII-only case mapping per the character model: a non-ASCII scalar passes
-through untouched, and codepoint count is preserved. Its exports are `str.upper`,
-`str.lower`, `str.trim`, `str.trim-left`, `str.trim-right`, `str.starts?`,
-`str.ends?`, `str.contains?`, `str.index-of` (`'domain` when absent),
-`str.replace`, `str.repeat`, `str.pad-left`, `str.pad-right`, and `str.str?`.
-
-`str.str?` is the recognizer every boundary that accepts text needs, and it
-lives here rather than in core because it is derived: a string is a rank-1 char
-vector, so the test is a `'list` whose every element is a `'char`. It answers 1
-for the empty string — which is also the empty list, the two being one value —
-and 0 rather than raising for every other kind. `type` reports `'list` for every
-list, specialized or not, so this is the honest form of the question.
-
-### archive
-
-Binary package archives cross the language boundary as **byte lists**: ordinary
-ECL lists whose items are integers in `0..255`. Strings are Unicode values and
-are never accepted or coerced at this boundary; hashing and extraction consume
-each integer as exactly one octet in list order.
-
-Byte lists have no distinct language-level type. List construction may store an
-all-`0..255` integer list in a packed one-byte leaf, and host producers may build
-that representation directly. Indexing, equality, printing, reflection, and
-all other language operations still observe ordinary integers. A mutation that
-introduces an integer outside `0..255` transparently widens the list to the
-ordinary integer representation. Whether packed storage is present is never
-observable program behavior.
-
-`archive.sha256` `( bytes -- lowercase-hex )` returns the standard SHA-256
-digest as exactly 64 lowercase hexadecimal characters. It is pure and does not
-require host I/O.
-
-`archive.unpack-tgz` `( bytes destination -- regular-file-paths )` validates a
-gzip-compressed tar archive and extracts it beneath a previously absent
-destination. It accepts ordinary ustar regular-file and directory entries,
-per-entry PAX `path` and `size` records, and GNU long-name records. Other PAX
-metadata may not change a member's path, size, or kind. The result lists only
-regular-file paths, normalized with `/` separators and in archive order;
-directory entries are omitted.
-
-Extraction is contained and fail-closed. Member names must be valid UTF-8,
-relative, nonempty after normalization, and contain no empty, `.` or `..`
-component. Absolute names, platform-rooted names, duplicate normalized paths,
-links, devices, FIFOs, unsupported member kinds, malformed gzip/tar/PAX data,
-and checksum or size disagreement are `'domain`. The uncompressed tar stream
-may contain at most 1,073,741,824 bytes and at most 100,000 regular-file or
-directory members; exceeding either ceiling is `'domain`.
-
-The destination must not exist. The extractor creates a unique
-`.ecl-unpack-*` sibling staging directory, creates files exclusively, records
-every created path, and removes that staging tree in bounded reverse-order work
-on every pre-commit failure or cancellation. Only after the complete archive
-has validated and all handles are closed does one same-parent rename publish
-the staging tree as the destination. Concurrent calls may perform independent
-staging work, but at most one can publish; the others raise `'io` reporting
-that the destination exists. An existing destination is never overwritten,
-merged, or inspected as though it were a completed cache entry.
-
-A non-list byte container or non-string destination is `'type`. A non-integer
-byte item or an integer outside `0..255` is `'domain` carrying its zero-based
-`'index`. Missing host I/O, filesystem denial, exclusive-create failure,
-staging cleanup failure, and commit failure are `'io` carrying the relevant
-`'path`. No failure publishes a partial destination or opens a member path
-outside the staging root.
-
-### io
-
-Observable text I/O lives here: `io.pp`, `io.prin`, `io.print`, `io.inspect`,
-`io.debug`, `io.stack`, `io.stdin`, `io.slurp`, `io.spit`, and `io.lines`. A qualified
-reference or an explicit import such as `'io ('print) import` makes the
-boundary explicit. Core `str` canonically renders any value *as a string
-value* without performing I/O.
-
-### csv
-
-`csv.parse` `( string -- rows )` and `csv.emit` `( rows -- string )`,
-RFC 4180 and text-preserving. Parsing accepts CRLF or LF record endings,
-quoted commas and newlines, and doubled-quote escapes; it preserves empty
-fields and record widths and returns every field as a string, with no header
-interpretation, delimiter sniffing, or scalar inference. Emission is
-canonical CRLF-terminated output quoting exactly the fields that require it.
-Empty input is an empty record list. Malformed quoting is `'parse`, non-list
-rows and non-string cells are `'type`, and a zero-field row is `'shape`.
-
-### json
-
-`json.parse` `( string -- value )` and `json.emit` `( value -- string )` per
-RFC 8259. Integral in-range numbers become ints and everything else numeric
-becomes a float; objects become dicts with string keys and arrays become
-lists. **`null`, `true`, and `false` become the ordinary symbols `'null`,
-`'true`, and `'false`** — data, not language nil and not language booleans,
-which is what lets a document round-trip. Emission requires string or symbol
-dict keys (`'type` otherwise) and rejects any other symbol.
-
-### table
-
-A table is a validated ordinary column dictionary, never a new runtime kind:
-a nonempty insertion-ordered dict whose keys are unique nonempty strings and
-whose values are lists sharing one length. Zero rows are legal; zero columns
-never. Core reflection stays honest — `type` reports `'dict`, and
-`dict.keys`/`at`/`put`/`match?` behave as they do for any dict — so a core
-operation can produce an invalid candidate, which the next `table.*` boundary
-rejects rather than repairing.
-
-- construction: `from-columns`, `from-rows`, `from-header-rows`,
-  `from-records`
-- conversion: `rows`, `header-rows` (schema-preserving, zero rows included),
-  `records` (necessarily schema-less when empty)
-- inspection: `valid?`, `names`, `height`, `column`
-- transformation: `cast`, `select`, `rename`, `with-column`, `where`
-- analysis: `group-by`, `aggregate`, `inner-join`, `left-join-with`
-
-`table.valid?` answers 0 only for a convention mismatch; cancellation and
-allocation failure still propagate. Failures follow the frozen kinds:
-non-dicts, non-string names, non-list columns, and invalid masks or spec
-members are `'type`; zero-column schemas, unequal column lengths, and
-width mismatches are `'shape`; missing, empty, or duplicate names, schema
-disagreement, join and rename collisions, and incomplete fills are
-`'domain`; an aggregation quotation of the wrong shape is `'contract`.
-
-Joins are stable equijoins on `[left-name right-name]` pairs. Duplicate keys
-expand to the full many-to-many product in left-row order and, within one
-left row, right-row order. Results carry every left column in its original
-order followed by the right non-key columns in right order.
-`table.left-join-with` emits one row for an unmatched left row and requires a
-fill dict covering exactly every appended right column — it never invents a
-value.
-
-### http
-
-Client only. `http.get` `( url headers -- response )`, `http.get-bytes`
-`( url headers -- response )`, and `http.post`
-`( url headers body -- response )`, with `{}` for no headers, return
-`{'status int, 'headers dict, 'body value}`. `get` and `post` materialize
-`'body` as a string. `get-bytes` follows the same request, redirect, response-
-header, status, and content-decoding rules but materializes the resulting
-octets directly as an ordinary integer byte list; it never passes them through
-Unicode conversion. "Bytes" here means the representation after HTTP content
-decoding, not transfer framing or a compressed wire representation. A refused
-connection, TLS failure, unparseable url, or protocol error is `'io` carrying
-the url in `'path`; a non-2xx status is an ordinary value, not an error.
-
-A `Session.Host` may carry an optional TLS trust override consisting of an
-absolute CA-file path plus a fixed verification timestamp. In that mode the
-HTTP client loads only that CA file and verifies at that timestamp; it does not
-scan system roots or read the wall clock. A null override preserves system
-roots and current-time verification. This is explicit host configuration for
-hermetic HTTPS tests, not an ECL value or a process environment switch.
-
-**The request blocks the calling unit's worker thread.** That is the one
-documented first-party exception to cooperative scheduling: a `@each`
-over N urls at N workers runs at most N concurrent requests, and at one
-worker it serializes. v1 imposes no request deadline, so an unresponsive
-server occupies its worker until the host gives up. Both change with the
-future `Offload` capability without changing this value-level API.
-
-### rng
-
-Threaded generator state over the counter-based kernels, so ordinary code
-draws without carrying a `[key counter]` list by hand (see Randomness).
-The module's binding holds one state; each word reads it, draws, and
-stores the advanced state back.
-
-- `rng.seed` `( key -- )` — rekey and reset the counter. Every later draw
-  is a function of this key.
-- `rng.int` `( bound -- result )`, `rng.ints` `( count bound -- results )`.
-- `rng.float` `( -- result )` — one uniform float in `[0, 1)`.
-- `rng.deal` `( count pool -- results )` — `count` distinct values below
-  `pool`, drawn without replacement. Selection sampling, so the sample is
-  unbiased rather than a filtered sequence of independent draws; `count`
-  above `pool` is `'domain`.
-- `rng.shuffle` `( values -- values )` — a uniform permutation, defined as
-  `deal` over the list's own length.
-
-A fresh process starts from a fixed key, so a program using `rng` and
-never calling `rng.seed` is fully reproducible. Seeding from `rand.entropy` is
-the explicit opt out.
-
-### Package modules
-
-The package formats are data (see Packages). Eight ordinary source modules
-divide value operations and orchestration by responsibility: `pkg.version`,
-`pkg.name`, `pkg.data`, `pkg.manifest`, `pkg.lock`, `pkg.mvs`, `pkg.sync`, and
-`pkg.cli`. There is no root `pkg` facade. The first six are pure: every word
-takes and returns text or values and none reaches a host capability. `pkg.sync`
-is the explicit network/filesystem orchestration boundary and composes those
-pure modules with `http`, `archive`, and the narrow builtin `pkg.store`
-capability. `pkg.cli` is the line-oriented command adapter invoked by `ecl pkg`.
-
-- versions: `pkg.version.less?` `( left right -- bool )`, `pkg.version.max`
-  `( versions -- version )`
-- manifest: `pkg.manifest.read` `( text -- manifest )`,
-  `pkg.manifest.validate` `( candidate -- manifest )`, `pkg.manifest.write`
-  `( manifest -- text )`
-- lock: `pkg.lock.read` `( text -- lock )`, `pkg.lock.write`
-  `( lock -- text )`, `pkg.lock.tree` `( lock -- text )`, and `pkg.lock.why`
-  `( lock module -- text )`; `pkg.lock.vendor` `( lock -- lock )` selects the
-  one project-local store mode
-- resolution: `pkg.mvs.resolve` `( root-manifest manifests -- lock )`
-- names: `pkg.name.owns?` `( package-name module-name -- bool )`
-- store derivation: `pkg.sync.cache-root` `( -- store-root )`,
-  `pkg.sync.store-key` `( package requirement -- key )`,
-  `pkg.sync.store-path` `( store package requirement -- path )`,
-  `pkg.sync.store-keys` `( lock -- keys )`, and `pkg.sync.store-root`
-  `( lock project-root -- store-root )`
-- synchronization: `pkg.sync.requirement`
-  `( package version url -- requirement )`, `pkg.sync.run`
-  `( root-manifest project-root -- lock )`, `pkg.sync.run-offline`
-  `( root-manifest project-root -- lock )`, and `pkg.sync.verify`
-  `( lock project-root -- count )`
-- CLI adapters: `pkg.cli.init`, `add`, `sync`, `sync-offline`, `tree`, `why`,
-  `verify`, `vendor`, and `gc`; `src/main.zig` supplies their validated argv
-  shapes and the nominal project root where required
-
-The builtin `pkg.store` module exposes only the package mutations ordinary ECL
-cannot express safely: `inspect`, `install`, `present?`, `verify`, `read-seal`,
-`write-lock`, and `gc`. `read-seal` returns bytes only after package-and-hash
-verification. `gc` derives the shared cache root from the Session environment
-and accepts store keys rather than a path. The module does not expose raw
-directories, handles, generic rename, recursive delete, or a caller-selected
-garbage-collection root.
-
-`pkg.manifest.validate` returns its argument unchanged or raises; it is not a
-`valid?`-style predicate. Failures follow the frozen kinds and introduce no
-user kind: unreadable text is `'parse`; text that is not exactly one form, and
-an empty `pkg.version.max` list, are `'shape`; a wrong value kind is `'type`; and
-everything inside a legal type but outside the grammar — an undeclared key, an
-unsupported `'format`, a malformed name, version, hash, or URL, a
-self-requirement, an ownership collision, a word value anywhere — is
-`'domain`.
-
-`resolve` returns a lock value directly. It raises the ordinary structured
-ECL error on failure; it does not return a `result` envelope. A wrong root or
-manifest-catalog container is `'type`. Malformed graph data, a missing
-manifest, a hash conflict, a selected-prefix collision, and a requirement
-cycle are `'domain`.
-
-## Packages
-
-A project declares its dependencies in `ecl.pkg`, and resolution derives
-`ecl.lock` from it. Both files are ECL data: read with `parse` and **never
-evaluated**, so resolving a dependency graph cannot run code from a
-dependency. Importing stays by module and attribute name —
-`'foo.bar ('baz) import`
-never mentions a file, a URL, or a version — and a checkout plus a lock reproduces the same module
-images on any machine.
-
-The `pkg.manifest`, `pkg.lock`, `pkg.version`, and `pkg.name` modules read,
-validate, order, and write these values (see The standard library). Those
-format operations are pure. `pkg.sync.run` is the explicit network and
-filesystem boundary that derives and publishes a lock; ordinary evaluation
-reads a lock and never fetches or writes one.
-
-### Versions
-
-A version is a **string**, always:
-
-```
-version     :=  core ( "-" prerelease )?
-core        :=  num "." num "." num
-num         :=  "0" | [1-9] [0-9]*
-prerelease  :=  ident ( "." ident )*
-ident       :=  [0-9A-Za-z-]+
-```
-
-A numeric `ident` — one whose every character is a digit — may not carry a
-leading zero. **Build metadata is not in the grammar**: a `+` anywhere makes
-the spelling malformed rather than being parsed and discarded.
-
-The string requirement is not a convention. A bare `1.2.3` reads as the
-*word* `1.2.3` — an executable reference — so an unquoted version in a
-manifest is malformed by construction rather than by rule.
-
-Precedence is Semantic Versioning 2.0.0 §11, and it is a strict total order
-over what the grammar admits:
-
-- Compare `major`, then `minor`, then `patch`, numerically.
-- On equal cores, a version carrying a prerelease is below the same core
-  without one.
-- Otherwise compare prereleases identifier by identifier from the left: a
-  numeric identifier is below an alphanumeric one, two numeric identifiers
-  compare numerically, and two alphanumeric identifiers compare in codepoint
-  order — the ordering `cmp` already gives strings.
-- When every shared identifier is equal, the shorter prerelease is below the
-  longer one.
-
-Anything outside the grammar is an error, not an incomparable value, so there
-is no partial order to reason about.
-
-Minimal version selection takes the maximum of *declared* minimums and never
-enumerates available versions, so every selected version is one some manifest
-wrote down. A prerelease is therefore selected only when it was declared; no
-separate rule is needed to prevent it.
-
-### The manifest
-
-`ecl.pkg` holds exactly one dict form. It is found by walking up from the
-process working directory toward the filesystem root: the first one found is
-the project root, and `ecl.lock` is read from beside it and never from a
-different directory. There is no repository-boundary stop and no environment
-override. The walk costs one directory probe per level — bounded by depth,
-paid once per session — and no `ecl.pkg` anywhere up the chain means there is
-no lock at all.
-
-```
-{'format 1
- 'name "my.proj"
- 'version "0.1.0"
- 'exports
- {"my.proj" ["src/**/*.ecl"]}
- 'requires
- {"statistics" {'package "foo"
-         'version "1.2.0"
-         'url "https://example.com/foo-1.2.0.tar.gz"
-         'hash "sha256-<64 lowercase hex digits>"}}}
-```
-
-- `'format` is the int 1. An unrecognized value is `'domain` rather than a
-  best-effort read: more than one reader consumes these files, so all of them
-  must agree on when to stop reading.
-- `'name` is this package's canonical name and `'version` is its own version.
-  `'exports` maps an owned module namespace to one or more portable source
-  globs. `'requires` maps a consumer-local alias to a requirement.
-- A requirement is exactly the target `'package`, `'version` — the declared
-  *minimum* — `'url`, and `'hash`. Aliases never rewrite ECL module names. The
-  URL must begin `https://`: a tarball over HTTPS is the only transport, and a
-  git dependency is a codeload tarball URL.
-- Every key is declared. An undeclared key at any level is `'domain`, so a
-  misspelling is an error rather than an entry that is silently ignored.
-- A requirement may not target the manifest's own `'name`; a consumer may not
-  target one package through two aliases; and selected package names may not
-  overlap under the ownership relation below.
-- `#` comments are permitted, and nothing that rewrites the file preserves
-  them.
-
-**Inertness is a property of the format, not of the reader.** A manifest may
-hold ints, floats, chars, symbols, strings, lists, and dicts; a **word** value
-anywhere in it is `'domain`. A quotation is an ordinary list and is legal as
-data — what is forbidden is the executable reference, which is the thing an
-evaluated manifest would run.
-
-### Canonical names and prefix ownership
-
-A canonical package name is one or more segments joined by `.`, each matching
-`[a-z] [a-z0-9-]*`. Every package name is therefore a legal module name by
-construction.
-
-Package `foo` may export namespaces `foo` and `foo.<rest>` and nothing else.
-Ownership continues only across a `.` boundary: `foo` owns `foo.bar` and does
-not own `foobar`. Each exported namespace maps to nonempty, distinct portable
-globs: relative `/`-separated paths with `*`, `?`, and whole-segment `**`, but
-no absolute path, backslash, empty segment, `.` segment, or `..` segment.
-
-The runtime derives an inert catalog from those globs and parsed source forms.
-Every matched `.ecl` artifact must declare one or more top-level modules as a
-literal symbol immediately followed by `@defm`; every declaration must equal
-its export namespace or be its dotted child. A file may declare several
-modules. Different export namespaces may not claim one file, every glob must
-match at least one source artifact, and every full module name maps to exactly
-one artifact across the selected graph. Filename and directory layout carry no
-module-name semantics.
-
-### Resolution
-
-`pkg.mvs.resolve` takes a validated root manifest and a catalog of already-read
-dependency manifests. The catalog is nested by exact package version:
-
-```
-{"foo" {"1.2.0" <foo 1.2.0 manifest>
-        "1.5.0" <foo 1.5.0 manifest>}
- "bar" {"2.0.0" <bar 2.0.0 manifest>}}
-```
-
-Each outer key is a canonical package name. Each inner key is a version, and
-the manifest stored there has that same `'name` and `'version`. The root is
-passed separately and does not appear in the lock's `'packages` map.
-
-Resolution implements minimal version selection over the exact
-package-version requirement graph. Starting from the root's requirements, it
-visits every reachable `(name, version)` node and its requirements. It then
-keeps the greatest reachable version of each package name under
-`pkg.version.less?`. Catalog entries that no reachable requirement names are not
-candidates, are not validated, and cannot affect either the lock or an error.
-An active-path repeat is a requirement cycle and is rejected; this is a
-deliberate restriction of the otherwise cycle-tolerant MVS graph traversal.
-
-The returned lock uses the format below. `'root` is the root manifest's name.
-`'packages` contains one selected requirement value per dependency name.
-`'requires` contains the root and every selected package as requirers, each
-mapped to the minimum versions in its manifest. Every selected version is at
-least every recorded minimum, and the complete value satisfies the same
-validation as `pkg.lock.read` and `pkg.lock.write`.
-
-Traversal and diagnostics do not depend on dict insertion order. Requirements
-are considered in canonical name/version/requirer order. If equal
-name/version declarations have the same hash but different URLs, the
-lexicographically least URL is recorded; the content hash, not its mirror, is
-the artifact identity. Different hashes for one name/version are a hard
-conflict. Selected prefix-collision pairs and conflicting declarations are
-reported in package-name order. A cycle reports the sorted distinct package
-names in the cycle. When more than one malformed or missing edge exists, the
-least edge in canonical order is reported.
-
-Resolver errors use the frozen kinds and carry the following `'data` fields:
-
-- malformed reachable version: exact message `a reachable package version is
-  malformed`; fields `'package`, `'required-package`, `'version`
-- missing manifest: exact message `pkg.mvs.resolve is missing a declared
-  manifest`; fields `'package`, `'required-package`, `'version`
-- hash conflict: exact message `one package version has conflicting hashes`;
-  fields `'package`, `'version`, `'left-package`, `'left-hash`,
-  `'right-package`, `'right-hash`
-- selected-prefix collision: exact message `selected packages have overlapping
-  prefixes`; fields `'left-package`, `'right-package`
-- requirement cycle: exact message `the package requirement graph has a
-  cycle`; field `'packages`
-
-Wrong root or catalog containers retain their exact type diagnostics: `a
-manifest is a dict` and `pkg.mvs.resolve expects a manifest catalog dict`.
-Catalog identity mismatch is `a catalog manifest must match its name and
-version keys`. Every graph diagnostic names the responsible package and, where
-an edge is responsible, the requiring package and conflicting requirement.
-
-Adding a requirement whose exact node is already reachable and whose minimum
-is already met does not change `'packages`. It does change `'requires`, which
-records the new declaration under its requirer; selection stability is not a
-claim that the whole lock value is byte-identical.
-
-### The lock
-
-`ecl.lock` holds exactly one dict form. It is derived rather than recorded:
-deleting it and resolving again reproduces it.
-
-```
-{'format 1
- 'root "my.proj"
- 'packages
- {"bar" {'version "0.3.0" 'url "https://…" 'hash "sha256-…"}
-  "foo" {'version "1.2.0" 'url "https://…" 'hash "sha256-…"}}
- 'requires
- {"foo" {"database" {'package "bar" 'version "0.3.0"}}
-  "my.proj" {"statistics" {'package "foo" 'version "1.2.0"}}}}
-```
-
-A cache-backed lock has exactly those four keys. A vendored lock adds exactly
-`'store 'vendor` between `'root` and `'packages` in canonical output. No other
-store value is legal, and the value is a symbol rather than a path: the mode
-derives the fixed `<project-root>/vendor` directory, so lock data cannot grant
-filesystem authority or escape the discovered project root.
-
-- `'packages` is the selection: one entry per canonical name, carrying the
-  selected version and the URL and hash it was declared with.
-- `'requires` is keyed by the **requiring** package — the root under its own
-  `'name` — and maps each local alias to an exact `{'package … 'version …}`
-  edge. Under minimal version selection every edge agrees with `'packages`.
-  Only one selected version of a package is supported in format 1. The root
-  always appears; a selected package that requires nothing may be omitted, and
-  an absent requirer is the empty edge set, so the visibility that `'requires`
-  masks is the package itself alone.
-- The version selected for a name is never below a minimum recorded for that
-  name. A lock that violates this is malformed.
-- Entries in `'packages`, in `'requires`, and in each inner requirement map
-  stand in ascending `cmp` order of their name keys.
-- Optional `'store` is exactly the symbol `'vendor`. Absence selects the shared
-  cache. No URL, absolute path, relative path, or environment variable may
-  appear in this field.
-
-The lock is machine-owned, so comments in it are not preserved and its layout
-is canonical rather than free: a newline precedes each top-level key and each
-entry of `'packages` and `'requires`, everything below an entry stays on one
-line, every scalar is in `str`'s canonical spelling, and the text ends with a
-newline because a lock is a file. A reader that ignores
-whitespace paired with a writer that is layout-exact is what makes the round
-trip a fixed point — reading a canonical lock and writing it back reproduces
-its bytes — and it keeps one dependency change a one-line diff.
-
-### Runtime lock tier
-
-Ordinary CLI evaluation opts a Session into project discovery from the
-process working directory. Embedders do so explicitly with the borrowed
-`Host.project_start` capability; its default is absent, so a library Session
-never reads ambient project state merely because its caller happens to run
-inside an ECL project. With host filesystem access and a start path, Session
-initialization walks upward once, stops at the first `ecl.pkg`, and reads only
-the sibling `ecl.lock`. No marker, no sibling lock, no host filesystem access,
-or no project-start capability means that the lock tier is absent.
-
-The Session owns one immutable result of that discovery for the complete
-lifetime of all its Units. A valid format-1 lock becomes an opaque observation
-capability carried in inherited context. A malformed or unreadable sibling
-lock is also remembered rather than reread: embedded modules remain usable,
-and the first non-embedded lookup reports the invalid project lock as a
-structured error before consulting `ECL_PATH`.
-
-Cold module resolution has two modes:
-
-1. With no discovered `ecl.pkg`, the embedded standard-library manifest is
-   followed by legacy filename lookup on `ECL_PATH`.
-2. With a discovered project, the embedded standard library is followed by
-   exact lookup in the Session's derived package catalog. `ECL_PATH` is never
-   consulted for a manifested project.
-
-A locked selection names the immutable `<name>-<version>-<hex>` directory
-below. A cache lock prefixes that key with the environment-selected shared
-cache. A vendored lock prefixes it with the fixed `<project-root>/vendor`
-directory and does not consult `ECL_CACHE`, `XDG_CACHE_HOME`, or `HOME`.
-The catalog supplies the source candidate's exact relative path. A request for
-`stats.regressions` may therefore load `src/stats/implementation.ecl`, and the
-same artifact may also declare `stats.distributions`.
-
-Catalog ownership is authoritative. A missing store directory reports the
-package and tells the user to run `ecl pkg sync`; an unexported module or a
-module hidden by the current package's direct-requirement mask is
-`'undefined-word`. No failure falls through to `ECL_PATH`. Runtime resolution never
-calls HTTP or TLS, fetches or installs an artifact, writes the lock, or admits
-an `.eclmod` package candidate. Synchronization remains the only network and
-package-mutation boundary.
-
-Runtime lock-resolution diagnostics have exact stable message templates:
-
-- absent selected entry: “locked package `<package>` is missing from the
-  package store; run `ecl pkg sync`”;
-- cache store unavailable: “locked package `<package>` has no package store;
-  set ECL_CACHE, XDG_CACHE_HOME, or HOME before running `ecl pkg sync`”;
-- failed selected-entry probe: “cannot inspect locked package `<package>` in
-  the package store: `<host-error>`; run `ecl pkg sync`”;
-- selected path is not a real directory: “locked package `<package>` is not a
-  real package-store directory; run `ecl pkg sync`”;
-- source absent within a present selected entry: “locked module `<module>` is
-  absent from package `<package>`”.
-
-The package and module placeholders are the canonical names from the validated
-lock and the original qualified request. The first four are `'io`; the last
-is `'undefined-word`. Invalid lock discovery is also `'io` and prefixes its
-owned detail with “invalid project lock `<path>`:”. None falls through to
-`ECL_PATH`.
-
-The lock and catalog snapshot is immutable across concurrent Units. Visibility
-is lexical: root and package code may resolve their own package plus only the
-packages in that consumer's direct lock edges; loading a transitive module into
-the shared registry does not grant access to it. `AutoLoadDriver` coordinates
-by artifact identity, evaluates one source file once, verifies every cataloged
-module registration and its package provenance, and marks the artifact
-committed only after all declarations exist. Qualified resolution ignores all
-registrations from an uncommitted artifact, so failure cannot expose a partial
-multi-module file. Catalog lookup, candidate construction, transfer, and the
-post-load registration walk remain poll-budgeted.
-
-### Hashes and the store
-
-A hash is the literal `sha256-` followed by exactly 64 lowercase hex digits.
-The store entry for a selection is the directory named
-`<name>-<version>-<hex>`, where `<hex>` is those digits without the prefix —
-the same `name-version-hash` shape a content-addressed package cache
-conventionally uses. A hash mismatch is a hard failure and never a warning: a
-moved tag changes the content hash and fails rather than silently changing
-what a build means.
-
-The store root is selected from the Session's immutable environment snapshot,
-never by reading the ambient process environment during evaluation:
-
-1. a present, nonempty `ECL_CACHE` is the complete store root;
-2. otherwise a present, nonempty `XDG_CACHE_HOME` selects
-   `$XDG_CACHE_HOME/ecl/pkg`;
-3. otherwise a present, nonempty `HOME` selects `$HOME/.cache/ecl/pkg`;
-4. if all three are absent or empty, synchronization fails with `'io` before
-   creating a path.
-
-An empty variable is treated as absent; it never names the current directory.
-Each canonical store-key path is immutable. `pkg.store.present?`
-`( destination -- bool )` returns 0 only when the path is absent and 1 only
-for a real directory. A symlink, non-directory node, access denial, or other
-probe failure is `'io` carrying `'path`. A present entry is read locally and
-is never re-fetched or overwritten by sync.
-
-### Vendoring and cache collection
-
-`ecl pkg vendor` requires a discovered project and a valid lock. For each
-selection it derives the source root from that lock, streams and rehashes the
-entry's reserved `.ecl-package.tgz`, and passes the resulting exact byte list
-through the ordinary package installer at
-`<project-root>/vendor/<store-key>`. An already-present vendor entry is
-verified and never overwritten. Only after every selected vendor entry is
-present does the command atomically rewrite the lock with `'store 'vendor`.
-Failure preserves the prior lock; a partially completed run may leave valid
-immutable vendor entries for the next run to reuse. Repeating the command is
-idempotent. A vendored lock makes ordinary resolution and `ecl pkg verify`
-independent of the network and shared cache.
-
-`ecl pkg gc <lock-file> [lock-file ...]` requires at least one explicitly
-named lock. It parses every file without evaluation, unions their canonical
-selected store keys, and invokes `pkg.store.gc` with keys rather than a path.
-The builtin derives the shared cache root from the same captured environment
-precedence above. It preserves every retained key, symlink, non-directory, and
-unknown child name. A real directory whose basename is a canonical store key
-and is absent from the union is renamed within the cache to a private
-`.ecl-gc-*` name, then walked and deleted one entry per bounded scheduler
-advance without following links. Interrupted private names are recognized and
-finished by the next collection. The reported count is the number of live
-store entries detached during this invocation, not recovered private names.
-
-### Package archives
-
-A package artifact is one gzip-compressed tar byte list whose normalized
-members obey M3's archive limits and hostile-input rules plus all of these
-package rules:
-
-- exactly one regular file named `ecl.pkg` occurs at the archive root;
-- `ecl.pkg` is valid UTF-8 and parses as a format-1 manifest;
-- directories and ordinary package-data files are permitted, but links and
-  special nodes remain forbidden by the archive contract;
-- a file ending in `.eclmod` anywhere is forbidden because v1 packages are
-  source-only;
-- source files may appear anywhere selected by an export glob; after staging,
-  the installer derives the same inert catalog used at Session startup and
-  refuses invalid globs, namespace declarations, duplicates, and parse errors
-  before publication.
-
-Thus package `foo` may place a module `foo.bar` in `src/internal/one.ecl`, and
-one source artifact may declare several owned modules. Installation parses but
-never evaluates either the manifest or package source.
-
-`pkg.store.inspect` `( bytes package-name -- manifest-text )` performs the
-complete bounded gzip/tar and package-layout scan without creating a
-destination. It returns the sole root manifest's exact UTF-8 text. The caller
-parses that text with `pkg.manifest.read` and checks its exact name/version
-identity before any installation.
-
-`pkg.store.install`
-`( bytes package-name destination -- regular-file-paths )` repeats the same
-archive and package-policy validation at the mutation sink, then extracts to a
-unique sibling staging directory and publishes only by an absent-destination
-rename. It returns normalized regular-file paths only after commit. The
-destination is never overwritten or merged. Concurrent installers may both
-stage, but at most one publishes. Both the pre-flight and commit conflict
-return `'io` with `'destination-exists 1` in error data; a caller may re-run
-`present?` and accept the immutable winner only for that condition. Cancellation,
-allocation failure, malformed input, and filesystem failure remove private
-staging and expose no partial destination.
-
-`pkg.store.verify` `( destination package-name hash -- )` streams the reserved
-archive seal and requires its SHA-256 to equal the lock hash.
-`pkg.store.read-seal` `( destination package-name hash -- bytes )` performs
-the identical package-named verification and then materializes the exact seal
-as an ordinary integer byte list. It is the only filesystem-to-archive-byte
-bridge and exists so vendoring can reuse `pkg.store.install`; it cannot read an
-arbitrary file beneath the entry.
-
-`pkg.store.write-lock` `( text path -- )` writes through a unique sibling
-temporary file and replaces the named regular file with one same-parent atomic
-rename. Encoding and writes are bounded scheduler work. On cancellation,
-allocation failure, or filesystem failure the temporary is removed and an
-existing lock remains byte-for-byte unchanged; when no lock existed, none is
-published. A symlink or non-regular existing target is refused rather than
-followed.
-
-`pkg.store.write-new` `( text path -- )` uses the same bounded temporary-file
-protocol but publishes with a non-replacing same-parent rename. It is the
-manifest-creation boundary: a destination created after the initial probe wins
-the race, the temporary is retired, and the existing bytes are untouched. Its
-diagnostics name the supplied project-file path rather than assuming a
-particular filename.
-
-The eight `pkg.store` words documented here are the complete package
-filesystem authority. ECL receives no generic recursive-delete, copy, rename,
-or caller-rooted garbage-collection word as a side effect of package support.
-
-### Synchronization
-
-`pkg.sync.run` `( root-manifest project-root -- lock )` validates its root and
-uses `project-root` only to place `ecl.lock`; walking upward to discover the
-root belongs to the CLI layer. It executes two deterministic passes.
-
-The discovery pass walks exact `(name, version)` requirements in canonical
-order and builds the complete catalog required by `pkg.mvs.resolve`. For each
-node it derives the store key from the declaration's name, version, and hash:
-
-- when that exact entry is present, it reads `<entry>/ecl.pkg`, validates the
-  manifest, and requires its name and version to equal the requested node;
-- otherwise it calls `http.get-bytes`, requires status in `200..299`, computes
-  `sha256-` plus `archive.sha256` of the returned body, and compares that value
-  with the declaration **before** calling `pkg.store.inspect`;
-- after a matching hash, it inspects and parses the archive manifest, requires
-  exact name/version identity, inserts the exact node into the catalog, and
-  traverses its requirements.
-
-A non-success HTTP response is `'io` carrying `'package`, `'url`, and
-`'status`. A hash mismatch is `'domain` carrying `'package`,
-`'declared-hash`, and `'actual-hash`. A manifest identity mismatch is
-`'domain` carrying the requested and actual names and versions. Archive-policy
-errors additionally carry the package and offending member when one exists.
-None of these discovery failures calls install or lock publication.
-
-After `pkg.mvs.resolve` returns a validated lock, the installation pass visits
-the selected package names in canonical order. It skips a present entry.
-Every missing selection is fetched again, status-checked, hashed, inspected,
-identity-checked, and passed to `pkg.store.install`; the repeated verification
-keeps the publication sink independent of discovery state. A racing
-destination-exists result is success only when `present?` immediately confirms
-a real immutable directory.
-
-The two passes are deliberate. MVS needs manifests from reachable exact
-versions it may not select, while the store contains only selected versions.
-Re-fetching a selected cold artifact bounds retained archive memory to one
-body and avoids adding a temporary spool plus deletion authority. On a later
-sync every exact node already present is read locally and never re-fetched,
-but an absent reachable candidate that remains unselected may be fetched again
-because its manifest can still contribute graph edges. Fully offline
-resolution is the separate `sync --offline` contract.
-
-Before discovery, sync reads only `<project-root>/ecl.lock`, where
-`project-root` is its explicit argument. A valid vendored lock selects that
-same project's fixed `vendor` store and retains `'store 'vendor` on the
-resolved lock. An absent or invalid current lock selects cache mode, preserving
-sync as the supported way to regenerate corrupt lock bytes. Ambient Session
-project discovery never selects the synchronization target or its mode.
-
-Only after every selected entry is present does sync render the lock once with
-`pkg.lock.write` and call `pkg.store.write-lock` for
-`<project-root>/ecl.lock`. It then returns the validated lock value. Deleting
-that lock and running sync against unchanged inputs reproduces its bytes.
-Failure preserves a prior lock and publishes no new lock. Verified immutable
-entries successfully installed before a later failure may remain: the lock is
-the project transaction boundary, while content-addressed cache population is
-safe and reusable.
-
-### Package CLI
-
-`ecl pkg` is a fixed CLI dispatcher over the ordinary `pkg.*` modules. It does
-not parse manifests, resolve graphs, hash archives, or render locks in Zig.
-Every command other than `init` uses the same upward `ecl.pkg` discovery seam
-as Session startup. `init` acts only on the working directory and refuses to
-replace an existing manifest.
-
-- `init [name]` derives the package name from the working-directory basename
-  when omitted, accepts an explicit canonical override, and atomically creates
-  a format-1 manifest at version `0.1.0` without replacing a racing file. An
-  invalid name diagnostic carries both the attempted name and project path and
-  explains the override form.
-- `add <name> <version> <url>` downloads and validates that exact package,
-  derives its `sha256-` declaration, and raises the root minimum to the given
-  version through an atomic manifest replacement. The manifest dictionary's
-  insertion order is retained. Comments cannot survive a rewrite because
-  `pkg.manifest.read` deliberately returns inert values rather than a concrete
-  syntax tree.
-- `sync` performs ordinary synchronization. `sync --offline` discovers every
-  exact manifest from immutable store entries and never opens a network
-  request; an absent entry is an error naming the package.
-- `tree` prints the lock root followed by dependency edges ordered first by
-  requirer and then by required package. `why <module>` applies the same
-  package-prefix ownership rule as runtime lookup and prints one deterministic
-  root-to-owner path.
-- `verify` streams the sealed archive retained inside every selected immutable
-  store entry and compares its SHA-256 with the lock declaration. It never
-  reaches the network. Missing seals and mismatches identify the package.
-
-Successful command output is stable, line-oriented text. Usage failures are
-ordinary CLI diagnostics; package and I/O failures remain structured ECL error
-values rendered by the existing process boundary.
-
-## Errors
-
-Errors are crash-only. There is no try/catch and no handler quotation: an
-error propagates until the enclosing unit dies, and the transactional
-stack makes that death clean. Failure is observed from outside, as data,
-at one explicit boundary word: `@attempt` (and its concurrent form,
-`@spawn`/`await`). The REPL is the implicit top-level boundary; a script's
-boundary is the process.
-
-Every error is a dict:
-
-| key | value |
-|---|---|
-| `'kind` | symbol — the dispatch taxonomy |
-| `'msg` | string, preformatted |
-| `'word` | qualified symbol of the innermost raising word, when known |
-| `'trace` | list of qualified word symbols, innermost first — ecl-level only |
-| `'data` | kind-specific payload dict (e.g. expected/got shapes, required vs observed effect and element index) |
-
-Source position fields appear when known. Absence is absence: fields not
-known are not present (test with `has?`), never nil — there is no nil.
-Code assembled at runtime has no source position by construction. No host
-exception or host stack frame ever leaks into an error.
-
-A completion-time source-word effect violation reports the opening delimiter
-of the deepest reader-built quotation selected by ordinary tail control in
-that checked activation. The checked body is the initial location, so a word
-with no such selection still points to its body. An empty quotation points to
-its opening `(`; it does not need a first token. Non-tail helper calls and
-isolated or inline application iterations do not replace this location, so an
-element quotation is not mistaken for a source branch and iteration cost does
-not acquire provenance allocation or reference-count traffic per element.
-This does not hide an application's own contract failure. Within one
-application, dynamically applied tail-control quotations replace that
-application's location. A guard predicate is disposable observation and does
-not replace the enclosing selection; after restoration, the selected `cond`
-action or true `while` body replaces it at the preserved boundary, and tail
-control inside that action may refine it further. A new iteration starts a
-fresh boundary. The error reports the deepest such quotation's opening
-delimiter and preserves its element index, falling back to the application
-quotation when no dynamic selection occurred. If the selected tail or failing
-application quotation was assembled at runtime, all three source fields remain
-absent rather than falling back to a less-specific or invented position.
-
-Resolving those source fields is strict O(1) in the number of sources archived
-after the selected quotation and in pointer-hash collisions. Diagnostic
-materialization uses the selected code header's direct session identity; it
-does not scan session history to discover which span table owns the header.
-That identity is session-local: the archive also verifies exact header
-membership and the archive-owned construction namespace before reading the
-indexed entry. Only the archive's opaque issuer can assign an identity to a
-header built in that namespace; a generic heap owner supplies no such
-authority. Absorption validates all candidate headers before reserving or
-assigning identities and rejects a namespace mismatch without consuming its
-inputs. Once validation and fallible index-page allocation complete, the
-archive adopts the root and source record before exposing any index slot; a
-cancelled partial assignment therefore retains stable location storage, and
-teardown reports whether the caller or archive owns the artifacts. A quotation
-transferred from a different Session therefore has no
-source fields when merely looked up in the receiving Session, even when its
-numeric identity collides with a local quotation; attempting to publish that
-foreign construction into the receiving archive is an invariant error.
-
-The core kinds are a closed set: `'underflow`, `'undefined-word`, `'type`,
-`'shape`, `'conform`, `'overflow`, `'domain`, `'contract`, `'parse`,
-`'io`, `'cancelled`, `'timeout`, `'user`. User kinds are any other symbol.
-`raise` throws a dict; `fail` is sugar for raising
-`{'kind 'user 'msg msg}`.
-
-`(q) @attempt` runs a self-contained quotation as a new unit on an isolated
-substack and always pushes exactly one result value: `{'ok (values)}`
-or `{'err <error dict>}`. Uniform arity is what makes reified failure safe
-in a stack language: a failure never shares a stack with the code
-observing it. A result is an ordinary dict, so raw `at`/`has?` reach into
-it directly; the named vocabulary that validates the envelope first —
-`result.ok?`, `result.or-raise`, `result.or-else` and the rest — is the
-`result` module (see The standard library). Errors are plain immutable data
-and cross task boundaries unchanged.
+- **Qualified resolution observes registrations only.** A qualified name
+  splits at its final dot into a module name and a public binding name. The
+  module name selects a canonical registration directly or through an alias.
+  A missing registration or public binding raises `'undefined-word`.
+  Filesystem search, embedded resources, package catalogs, native loading, and
+  eager or on-demand acquisition are host facilities outside the language
+  semantics. A host may obtain and register an image by any means, but ECL
+  programs observe only the resulting registration, never whether a module is
+  "loaded" or how it was transported.
 
 ## Concurrency
 
-Concurrency is structured tasks — futures with enforced lifetime — over
-share-nothing units. Immutability makes sharing safe without copying.
+**Imports:** ECL_UNITS
 
-- `@spawn` `( unit-input -- task )` runs a quotation, or a plan's body seeded
-  by its values (the `@attempt` contract: an unseeded quotation takes its inputs
-  via `seed`/`partial`/environment, never the ambient stack), on its own
-  isolated substack, concurrently.
-- `await` `( task -- result )` parks the current unit until the task
-  completes and delivers the same `{'ok …}`/`{'err …}` result shape as
-  `@attempt`. It is idempotent — the result is cached — so task handles
-  are observationally value-like. **`@attempt` is observationally
-  equivalent to `spawn await`.**
-- `await-for` adds a deadline in milliseconds: on expiry it returns
-  `{'err {'kind 'timeout}}` without cancelling the task. A task that is
-  already terminal beats even a zero deadline.
-- `await-any` races a nonempty list of tasks, returning the index and
-  result of the first to finish; among tasks already terminal at entry,
-  the lowest index wins.
-- `cancel` makes a task die with `{'err {'kind 'cancelled}}`; it is a
-  no-op on a finished task. Cancellation is unconditional and safe because
-  tasks are transactions: killing one discards an isolated substack.
-- `await-all` (defined as `(await) each`) waits for every task and
-  preserves each result as data, in input order; it never re-raises and
-  never cancels siblings.
-- `@each` `( l q -- l' )` applies the quotation to every element
-  concurrently, enforcing exactly one result per element, and returns
-  results in input order. After the leftmost failure it cancels the
-  remaining elements, waits for quiescence, and re-raises that failure —
-  parallel failure is deterministic. Elements are guaranteed no
-  cross-element rendezvous: they may run fully serially, so a program
-  whose elements must run concurrently to make progress is incorrect.
+##### Contexts
 
-**Structured lifetime.** A dying unit cancels its unawaited tasks — "a
-failed unit leaves nothing" extends to processes. Dropped handles are
-cancelled at scope end; there are no detached daemons. The session is the
-root scope. `tasks` lists pending descendant tasks in `@spawn` preorder.
+**`Concurrency`**
 
-**Determinism.** Await order is program order, so `await-all` results and
-`@each`'s leftmost-error rule are schedule-invariant. Nondeterminism
-enters only where chosen (`await-any`) and in IO interleaving across
-concurrent tasks; within one task IO is ordered. Sequential combinators
-(`each`, `for`, `fold`) guarantee left-to-right order, so IO inside them
-is well-defined.
+#### Chapter 1
 
-**Process exit.** `exit` belongs to the root unit outside `@attempt`: a
-call from a descendant task or inside `@attempt` raises a catchable
-`'domain` error. An allowed exit first cancels and quiesces the root task
-scope, then terminates the process with the given status.
+##### Action
 
-## Printing and round-trip
+> This model is normative for structured task identity, attachment to the general unit lifecycle, cached terminal results, observation by `await`, deadline expiry, cancellation, and the requirement that a unit quiesce its task scope before becoming terminal.  It abstracts over evaluator steps, scheduling policy, elapsed time, I/O interleaving, handle storage and lexical scope, and the selection algorithms used by `await-any`, `await-all`, and `@each`. The surrounding language specification governs those operations. A conforming scheduler may run runnable tasks serially; the model promises lifetime and result semantics, without promising simultaneous progress or fairness. Task capabilities are immutable ECL values and may be shared. The mutable evaluation state of each task remains confined to its attached unit.  `Spawn task` is the formal `@spawn` boundary. The explicit values list and quotation body become the attached unit's complete entry stack and body. Ambient operands are absent from the action, so they cannot cross the boundary. The action chooses both a fresh task identity and a fresh unit identity, attaches them permanently, and records the active unit that owns the new task's structured lifetime.
 
-Printing exposes representation. A list prints with `[...]` when
-specialized — a homogeneous flat vector, or rectangular nesting of
-specialized lists — and `(...)` when generic; both are the same kind of
-value, and either bracket pair is accepted on input. So `(1 2 3)` prints
-as `[1 2 3]`, and the ragged result of `[[1 2] [3]] 10 *` prints as
-`([10 20] [30])`. Specialization is visible at the prompt, not mysterious.
+**`Units`**, **`Concurrency`** ↝ Spawn task *owner*: `Unit`, *entry*: `Value`, *body*: `Value`, **unit-created?** *owner*, **unit-active?** *owner*, ¬**unit-succeeded?** *owner*, ¬**unit-failed?** *owner*, **value-type** *entry* = **list-type**, **value-type** *body* = **list-type**.
 
-- `str` produces the compact single-line canonical form and carries the
-  round-trip guarantee: reading `str` output yields the same value, with
-  one exception — a task prints as its stable per-session `<task:N>`
-  marker, which the reader deliberately rejects.
-- `io.pp` and the REPL stack display are best-effort human layout: the same
-  delimiters and atom spellings, with the rows of rectangular matrices
-  (and one enclosing group axis) separated by newline-plus-indentation.
-  Their output carries no round-trip guarantee. A specialized numeric or
-  symbol list longer than 256 elements displays as `[<N-values-elided>]`; a
-  generic list does so as `(<N-values-elided>)`; and a character list longer
-  than 256 elements displays as `"<N-characters-elided>"`. Elision happens
-  before matrix-shape scanning or child rendering, keeping ordinary terminal
-  probes bounded. Only `str` is canonical and never elides.
-- In display layout, a dictionary stays compact when it is a small scalar
-  record. A dictionary with more than three pairs, a nested dictionary, or a
-  matrix-valued key or value prints one pair per indented line. Nested
-  dictionaries apply the same rule recursively. Flat vector fields stay
-  compact. Canonical `str` output is always compact and unaffected by this
-  display choice.
-- `io.stack` uses that same per-value display layout but prints each visible
-  stack slot as its own bottom-up indexed block: `[0]` is the bottom of the
-  visible operand window and the largest index is its top. Continuation lines
-  align after the index prefix. This vertical diagnostic layout is distinct
-  from the denser side-by-side REPL display.
-- The stack display keeps stack order left to right whatever a value's
-  height. Each value occupies the rectangle its own layout needs, and the
-  rectangles sit side by side sharing a bottom row, so a matrix grows the
-  display upward instead of stacking its neighbours vertically. Padding is
-  counted in bytes, matching the column arithmetic of the row breaks above,
-  and no row is padded past its last value. The display is not wrapped to
-  the terminal: width is a measured fact the display has no access to.
-- Dictionaries preserve insertion order in both compact and multiline display.
+---
 
-Printing at unit end: script files and `load` print only explicitly
-(`io.pp`/`io.prin`); `-e`, stdin, and calculator invocations print the final
-stack; the REPL prints the stack after every unit.
+> Spawning creates one task and one attached active unit. Both identities are fresh, and all previously created task and unit state is preserved.
 
-## The ecl command
+∃ *task*: `Task`, *child*: `Unit`, ¬**task-created?** *task*, ¬**unit-created?** *child* · **task-created?**′ *task* ∧ **task-unit**′ *task* = *child* ∧ **task-owner-unit**′ *task* = *owner* ∧ **value-type** (**task-capability** *task*) = **task-type** ∧ (∀ *existing*: `Task`, **task-created?** *existing* · **task-capability** *task* ≠ **task-capability** *existing*) ∧ **unit-created?**′ *child* ∧ **unit-active?**′ *child* ∧ ¬**unit-succeeded?**′ *child* ∧ ¬**unit-failed?**′ *child* ∧ **unit-entry**′ *child* = *entry* ∧ **unit-body**′ *child* = *body* ∧ **unit-stack**′ *child* = *entry* ∧ **unit-error**′ *child* = **unit-error** *child* ∧ (∀ *other-task*: `Task`, *other-task* ≠ *task* · **task-created?**′ *other-task* = **task-created?** *other-task* ∧ **task-unit**′ *other-task* = **task-unit** *other-task* ∧ **task-owner-unit**′ *other-task* = **task-owner-unit** *other-task*) ∧ (∀ *other-unit*: `Unit`, *other-unit* ≠ *child* · **unit-created?**′ *other-unit* = **unit-created?** *other-unit* ∧ **unit-active?**′ *other-unit* = **unit-active?** *other-unit* ∧ **unit-succeeded?**′ *other-unit* = **unit-succeeded?** *other-unit* ∧ **unit-failed?**′ *other-unit* = **unit-failed?** *other-unit* ∧ **unit-entry**′ *other-unit* = **unit-entry** *other-unit* ∧ **unit-body**′ *other-unit* = **unit-body** *other-unit* ∧ **unit-stack**′ *other-unit* = **unit-stack** *other-unit* ∧ **unit-error**′ *other-unit* = **unit-error** *other-unit*).
 
-```
-ecl                      REPL on a terminal; otherwise read stdin as one unit
-ecl -e <SOURCE> [ARGS…]  evaluate source, print the final stack
-ecl <FILE> [ARGS…]       run a script file
-ecl <SOURCE> [ARGS…]     evaluate source when the argument is not a readable
-                         file (a missing file ending in .ecl is an error
-                         instead), print the final stack
-ecl - [ARGS…]            read stdin as one unit
-ecl fmt <FILE|->         format source to stdout
-ecl fmt -w <FILE>        format and atomically rewrite a regular file
-ecl -h | --help          usage
-ecl -V | --version       version
-```
+#### Chapter 2
 
-Trailing arguments are exposed to the program by `args`. Exit status: `0`
-on success; the status passed to `exit`; `1` when the unit fails (the
-error dict is printed to stderr); `2` on out-of-memory.
+##### Domains
 
-Environment variables: `ECL_PATH` is the module search path (see Modules).
-`ECL_WORKERS` sets the worker count (a positive integer; default is the
-CPU count). `ECL_NATIVE_DIAGNOSTICS`, when set, enables native-module
-loading diagnostics.
+> A created task permanently names one attached unit and its owning unit. Its capability is an ECL value of the task kind. No two task identities attach to the same unit or expose the same capability value.
 
-The REPL reads one unit per logical line, continuing while a delimiter or
-string is open. Ctrl-C discards the pending unit; Ctrl-D at an empty
-prompt exits (and mid-continuation submits the pending unit, whose
-incompleteness is then an error). Completion is available. History is kept
-in `~/.ecl_history` — the last 100 single-line, valid-UTF-8 entries,
-merged across concurrent sessions; history failures degrade to a warning,
-never disable the editor.
+`Task`.
 
-## Source formatting
+##### Rules
 
-`ecl fmt` reads valid source without evaluating it and writes canonical
-source. Formatting is idempotent, preserves program structure and every
-ordinary literal value byte-for-byte, and never applies layout rules based
-on a form's first word. `-w` formats completely before touching the source,
-preserves its permissions, and publishes with a same-directory atomic replace;
-it refuses standard input, symlinks, and non-regular files. Specifics:
+{**`Concurrency`**} **task-created?** *task*: `Task` ⇒ `Bool`.
 
-- Space-separated items pack into locally grouped runs up to 100 columns;
-  continuation lines begin immediately inside the opening delimiter.
-  A closing delimiter on its own line aligns with its opener. Existing
-  physical newlines remain hard boundaries. A comment or multiline child
-  breaks only its local run. An indivisible token or preserved comment may
-  exceed the target width.
-- Comments are preserved and force physical line boundaries while staying
-  attached to their neighboring forms.
-- Strings are indivisible and byte-preserved, with one exception: the
-  docstring of a structurally recognized definition annotation immediately
-  preceding a body and `'name def`/`defp` is refilled paragraph-aware (semantics
-  unchanged — `doc` canonicalization already ignores soft wrapping).
-- Every structurally literal definition block is introduced by a navigation
-  comment: `### def <name>` for `def`/`set`, and `### defp <name>` for
-  `defp`/`setp`. It is preceded by exactly one empty line (omitted at the start
-  of a file or container).
-  Existing `# def`/`### def`/`# defp`/`### defp` comments are canonicalized
-  from the structural terminator rather than trusted; recognition is purely
-  structural — never evaluation — and is disabled for words directly
-  contained by dict literals.
+{**`Concurrency`**} **task-unit** *task*: `Task` ⇒ `Unit`.
+
+{**`Concurrency`**} **task-owner-unit** *task*: `Task` ⇒ `Unit`.
+
+**task-capability** *task*: `Task` ⇒ `Value`.
+
+---
+
+> Every created task has a task-valued capability, attaches to a created unit, and was spawned by a distinct created unit.
+
+∀ *task*: `Task`, **task-created?** *task* · **value-type** (**task-capability** *task*) = **task-type** ∧ **unit-created?** (**task-unit** *task*) ∧ **unit-created?** (**task-owner-unit** *task*) ∧ **task-unit** *task* ≠ **task-owner-unit** *task*.
+
+> Attached units are unique to their task identities.
+
+∀ *left*: `Task`, *right*: `Task`, **task-created?** *left*, **task-created?** *right*, **task-unit** *left* = **task-unit** *right* · *left* = *right*.
+
+> Created tasks have distinct capability values.
+
+∀ *left*: `Task`, *right*: `Task`, **task-created?** *left*, **task-created?** *right*, **task-capability** *left* = **task-capability** *right* · *left* = *right*.
+
+> Initially no task identity has been created.
+
+initially ∀ *task*: `Task` · ¬**task-created?** *task*.
+
+#### Chapter 3
+
+##### Rules
+
+> A task's terminal result is a single immutable ECL value. A successful attached unit yields the exact ordered terminal stack in an `'ok` envelope; a failed attached unit yields its unchanged error value in an `'err` envelope. Because `task-result` is immutable, every observation of a terminal task produces the same value.
+
+**task-result** *task*: `Task` ⇒ `Value`.
+
+---
+
+> Successful tasks have successful result envelopes.
+
+∀ *task*: `Task`, **task-created?** *task*, **unit-succeeded?** (**task-unit** *task*) · **successful-result-value?** (**task-result** *task*).
+
+> The successful result payload is exactly the attached unit's terminal stack list value.
+
+∀ *task*: `Task`, **task-created?** *task*, **unit-succeeded?** (**task-unit** *task*) · **successful-result-values** (**task-result** *task*) = **unit-stack** (**task-unit** *task*).
+
+> Failed tasks have failed result envelopes containing the unit's exact error value.
+
+∀ *task*: `Task`, **task-created?** *task*, **unit-failed?** (**task-unit** *task*) · **failed-result-value?** (**task-result** *task*).
+
+∀ *task*: `Task`, **task-created?** *task*, **unit-failed?** (**task-unit** *task*) · **failed-result-error** (**task-result** *task*) = **unit-error** (**task-unit** *task*).
+
+> A unit may become terminal only after every directly owned task is terminal. Applying the same rule recursively gives structured quiescence for the complete descendant task tree. This is the task-scope part of the rule that a failed unit leaves nothing running.
+
+∀ *owner*: `Unit`, **unit-created?** *owner*, (**unit-succeeded?** *owner* ∨ **unit-failed?** *owner*) · ∀ *task*: `Task`, **task-created?** *task*, **task-owner-unit** *task* = *owner* · **unit-succeeded?** (**task-unit** *task*) ∨ **unit-failed?** (**task-unit** *task*).
+
+#### Chapter 4
+
+##### Action
+
+> `Complete spawned task successfully` is the concurrency-layer use of the general unit success transition. The evaluator supplies the final stack. The attached unit can become terminal only after its own task scope has quiesced.
+
+**`Units`**, **`Concurrency`** ↝ Complete spawned task successfully *task*: `Task`, *result*: `Value`, **task-created?** *task*, **unit-active?** (**task-unit** *task*), **value-type** *result* = **list-type**, (∀ *child*: `Task`, **task-created?** *child*, **task-owner-unit** *child* = **task-unit** *task* · **unit-succeeded?** (**task-unit** *child*) ∨ **unit-failed?** (**task-unit** *child*)).
+
+---
+
+**unit-created?**′ (**task-unit** *task*).
+
+¬**unit-active?**′ (**task-unit** *task*).
+
+**unit-succeeded?**′ (**task-unit** *task*).
+
+¬**unit-failed?**′ (**task-unit** *task*).
+
+**unit-entry**′ (**task-unit** *task*) = **unit-entry** (**task-unit** *task*).
+
+**unit-body**′ (**task-unit** *task*) = **unit-body** (**task-unit** *task*).
+
+**unit-stack**′ (**task-unit** *task*) = *result*.
+
+**unit-error**′ (**task-unit** *task*) = **unit-error** (**task-unit** *task*).
+
+**successful-result-value?** (**task-result** *task*).
+
+**successful-result-values** (**task-result** *task*) = *result*.
+
+∀ *other*: `Unit`, *other* ≠ **task-unit** *task* · **unit-created?**′ *other* = **unit-created?** *other* ∧ **unit-active?**′ *other* = **unit-active?** *other* ∧ **unit-succeeded?**′ *other* = **unit-succeeded?** *other* ∧ **unit-failed?**′ *other* = **unit-failed?** *other* ∧ **unit-entry**′ *other* = **unit-entry** *other* ∧ **unit-body**′ *other* = **unit-body** *other* ∧ **unit-stack**′ *other* = **unit-stack** *other* ∧ **unit-error**′ *other* = **unit-error** *other*.
+
+∀ *candidate*: `Task` · **task-created?**′ *candidate* = **task-created?** *candidate* ∧ **task-unit**′ *candidate* = **task-unit** *candidate* ∧ **task-owner-unit**′ *candidate* = **task-owner-unit** *candidate*.
+
+#### Chapter 5
+
+##### Action
+
+> `Complete spawned task with failure` is the concurrency-layer use of the general unit failure transition. The evaluator supplies the error. The attached unit restores its entry stack and becomes terminal after its own task scope has quiesced.
+
+**`Units`**, **`Concurrency`** ↝ Complete spawned task with failure *task*: `Task`, *error*: `Value`, **task-created?** *task*, **unit-active?** (**task-unit** *task*), **error-value?** *error*, (∀ *child*: `Task`, **task-created?** *child*, **task-owner-unit** *child* = **task-unit** *task* · **unit-succeeded?** (**task-unit** *child*) ∨ **unit-failed?** (**task-unit** *child*)).
+
+---
+
+**unit-created?**′ (**task-unit** *task*).
+
+¬**unit-active?**′ (**task-unit** *task*).
+
+¬**unit-succeeded?**′ (**task-unit** *task*).
+
+**unit-failed?**′ (**task-unit** *task*).
+
+**unit-entry**′ (**task-unit** *task*) = **unit-entry** (**task-unit** *task*).
+
+**unit-body**′ (**task-unit** *task*) = **unit-body** (**task-unit** *task*).
+
+**unit-stack**′ (**task-unit** *task*) = **unit-entry** (**task-unit** *task*).
+
+**unit-error**′ (**task-unit** *task*) = *error*.
+
+**failed-result-value?** (**task-result** *task*).
+
+**failed-result-error** (**task-result** *task*) = *error*.
+
+∀ *other*: `Unit`, *other* ≠ **task-unit** *task* · **unit-created?**′ *other* = **unit-created?** *other* ∧ **unit-active?**′ *other* = **unit-active?** *other* ∧ **unit-succeeded?**′ *other* = **unit-succeeded?** *other* ∧ **unit-failed?**′ *other* = **unit-failed?** *other* ∧ **unit-entry**′ *other* = **unit-entry** *other* ∧ **unit-body**′ *other* = **unit-body** *other* ∧ **unit-stack**′ *other* = **unit-stack** *other* ∧ **unit-error**′ *other* = **unit-error** *other*.
+
+∀ *candidate*: `Task` · **task-created?**′ *candidate* = **task-created?** *candidate* ∧ **task-unit**′ *candidate* = **task-unit** *candidate* ∧ **task-owner-unit**′ *candidate* = **task-owner-unit** *candidate*.
+
+#### Chapter 6
+
+##### Action
+
+> `Await task` observes only a terminal attached unit and leaves both unit and task state unchanged. It yields `task-result task`; repeating the action is therefore safe and produces the cached result again. Parking and resumption before the terminal observation are scheduling details outside the model.
+
+**`Concurrency`** ↝ Await task *observer*: `Unit`, *task*: `Task`, **unit-created?** *observer*, **unit-active?** *observer*, **task-created?** *task*, (**unit-succeeded?** (**task-unit** *task*) ∨ **unit-failed?** (**task-unit** *task*)).
+
+---
+
+∀ *candidate*: `Task` · **task-created?**′ *candidate* = **task-created?** *candidate* ∧ **task-unit**′ *candidate* = **task-unit** *candidate* ∧ **task-owner-unit**′ *candidate* = **task-owner-unit** *candidate*.
+
+#### Chapter 7
+
+##### Action
+
+> `Await task until deadline expires` is the timeout branch of `await-for`. It is available only while the attached unit is active, yields a value satisfying `timeout-result?`, and leaves the task and attached unit unchanged. A terminal task therefore wins over deadline expiry, including at a zero deadline. Deadline measurement and parking are outside the model.
+
+**`Concurrency`** ↝ Await task until deadline expires *observer*: `Unit`, *task*: `Task`, **unit-created?** *observer*, **unit-active?** *observer*, **task-created?** *task*, **unit-active?** (**task-unit** *task*).
+
+---
+
+∀ *candidate*: `Task` · **task-created?**′ *candidate* = **task-created?** *candidate* ∧ **task-unit**′ *candidate* = **task-unit** *candidate* ∧ **task-owner-unit**′ *candidate* = **task-owner-unit** *candidate*.
+
+#### Chapter 8
+
+##### Action
+
+> `Cancel active task` is ordinary unit failure with a cancellation error. It restores the unit's entry stack and becomes terminal only after the task's own descendants are quiescent.
+
+**`Units`**, **`Concurrency`** ↝ Cancel active task *task*: `Task`, *error*: `Value`, **task-created?** *task*, **unit-active?** (**task-unit** *task*), **cancelled-error?** *error*, (∀ *child*: `Task`, **task-created?** *child*, **task-owner-unit** *child* = **task-unit** *task* · **unit-succeeded?** (**task-unit** *child*) ∨ **unit-failed?** (**task-unit** *child*)).
+
+---
+
+**unit-created?**′ (**task-unit** *task*).
+
+¬**unit-active?**′ (**task-unit** *task*).
+
+¬**unit-succeeded?**′ (**task-unit** *task*).
+
+**unit-failed?**′ (**task-unit** *task*).
+
+**unit-entry**′ (**task-unit** *task*) = **unit-entry** (**task-unit** *task*).
+
+**unit-body**′ (**task-unit** *task*) = **unit-body** (**task-unit** *task*).
+
+**unit-stack**′ (**task-unit** *task*) = **unit-entry** (**task-unit** *task*).
+
+**unit-error**′ (**task-unit** *task*) = *error*.
+
+**failed-result-value?** (**task-result** *task*).
+
+**failed-result-error** (**task-result** *task*) = *error*.
+
+∀ *other*: `Unit`, *other* ≠ **task-unit** *task* · **unit-created?**′ *other* = **unit-created?** *other* ∧ **unit-active?**′ *other* = **unit-active?** *other* ∧ **unit-succeeded?**′ *other* = **unit-succeeded?** *other* ∧ **unit-failed?**′ *other* = **unit-failed?** *other* ∧ **unit-entry**′ *other* = **unit-entry** *other* ∧ **unit-body**′ *other* = **unit-body** *other* ∧ **unit-stack**′ *other* = **unit-stack** *other* ∧ **unit-error**′ *other* = **unit-error** *other*.
+
+∀ *candidate*: `Task` · **task-created?**′ *candidate* = **task-created?** *candidate* ∧ **task-unit**′ *candidate* = **task-unit** *candidate* ∧ **task-owner-unit**′ *candidate* = **task-owner-unit** *candidate*.
+
+#### Chapter 9
+
+##### Action
+
+> Cancelling a terminal task is a no-op. Its cached result remains unchanged.
+
+**`Units`**, **`Concurrency`** ↝ Cancel terminal task *task*: `Task`, **task-created?** *task*, (**unit-succeeded?** (**task-unit** *task*) ∨ **unit-failed?** (**task-unit** *task*)).
+
+---
+
+∀ *candidate*: `Unit` · **unit-created?**′ *candidate* = **unit-created?** *candidate* ∧ **unit-active?**′ *candidate* = **unit-active?** *candidate* ∧ **unit-succeeded?**′ *candidate* = **unit-succeeded?** *candidate* ∧ **unit-failed?**′ *candidate* = **unit-failed?** *candidate* ∧ **unit-entry**′ *candidate* = **unit-entry** *candidate* ∧ **unit-body**′ *candidate* = **unit-body** *candidate* ∧ **unit-stack**′ *candidate* = **unit-stack** *candidate* ∧ **unit-error**′ *candidate* = **unit-error** *candidate*.
+
+∀ *candidate*: `Task` · **task-created?**′ *candidate* = **task-created?** *candidate* ∧ **task-unit**′ *candidate* = **task-unit** *candidate* ∧ **task-owner-unit**′ *candidate* = **task-owner-unit** *candidate*.
+
+
+
+### Task scopes and observation
+
+The unit that spawns a task owns its structured lifetime. A unit cannot finish
+while an owned task remains active. Leaving a scope with an active unawaited
+task requests cancellation and waits for that task's complete descendant scope
+to quiesce. The session is the root task scope. `tasks` reports pending
+descendants in deterministic spawn preorder.
+
+`await-any` accepts a nonempty task list and returns the selected index and
+cached task result. Among tasks terminal when the operation begins, the lowest
+input index wins; otherwise the first subsequent completion wins.
+
+`await-all` is the derived composition `(await) each`. It awaits every input,
+returns cached results in input order, preserves failures as data, and does not
+cancel siblings.
+
+`@each` starts one isolated unit per element and enforces exactly one result
+value from each unit. It returns results in input order. After the leftmost
+failure it cancels the remaining element tasks, waits for quiescence, and
+re-raises that failure. Selection of the leftmost failure is independent of
+schedule order. Element tasks have no simultaneous-progress guarantee; a
+program that requires cross-element rendezvous to make progress is invalid.
+
+Await order is program order. Nondeterminism enters through `await-any` and
+through I/O interleaving among concurrent tasks. I/O remains ordered within
+one task. Sequential combinators including `each`, `for`, and `fold` execute
+left to right.
+
+`exit` is available only to the root unit outside `@attempt`. Elsewhere it
+raises `'domain`. An allowed exit first cancels and quiesces the root task
+scope, then terminates the process with the supplied status.
+
+## Standard environment
+
+[`ENVIRONMENT.md`](ENVIRONMENT.md) defines the shipped module transports,
+host-backed library contracts, project and package system, command-line
+interface, and source formatter.

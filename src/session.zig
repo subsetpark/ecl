@@ -385,7 +385,6 @@ pub const Session = enum(usize) {
         errdefer environment.deinit();
         var building = environment.beginCoreBuild();
         try prims.install(&building);
-        try building.installSeed("seed");
         var registry = try modules.Registry.init(host_owner.cleanup());
         errdefer registry.deinit();
         var test_authority = if (domain == .testing)
@@ -911,8 +910,8 @@ pub const Session = enum(usize) {
 };
 
 /// Observation surface present only in a separately compiled counter artifact.
-/// Ordinary runtime and test modules receive an empty namespace, not a
-/// representation-inspection method on Session.
+/// Ordinary runtime and test modules receive an empty namespace, leaving
+/// Session representation inspection unavailable.
 pub const RootExecutionObservation = if (machine.root_execution_metrics_enabled) struct {
     pub fn last(runtime: *const Session) machine.RootExecutionMetrics {
         return runtime.coreState().last_root_execution_metrics;

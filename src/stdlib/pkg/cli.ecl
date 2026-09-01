@@ -1,5 +1,6 @@
 ### module pkg.cli
 # User-facing package command orchestration over the ordinary package modules.
+[]
 (
  ### defp manifest-path
  (root -- path : "Return the root manifest path for a discovered project.")

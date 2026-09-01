@@ -1,6 +1,6 @@
 //! Post-terminal Step 15: anonymous module values.
 //!
-//! `@module` is `(body -- module)` and constructs an anonymous immutable
+//! `@module` is `(seeds body -- module)` and constructs an anonymous immutable
 //! module image; `register` gives an image a canonical name and owns that
 //! registration's durable live state; `@defm` is exactly their composition.
 //! Every test here pins one publicly observable clause of that contract
@@ -87,8 +87,8 @@ test "module values: @module constructs an anonymous value without registering a
     defer runtime.deinit();
 
     // One value, opaque, of type 'module.
-    try expectStack(&runtime, "(1 'x set) @module", "<module>");
-    try expectStack(&runtime, "(1 'x set) @module type", "'module");
+    try expectStack(&runtime, "[] (1 'x set) @module", "<module>");
+    try expectStack(&runtime, "[] (1 'x set) @module type", "'module");
 
     // Construction publishes nothing: the body's own names stay inside the
     // image rather than leaking into the caller's environment.
@@ -96,7 +96,7 @@ test "module values: @module constructs an anonymous value without registering a
 
     // Nor does it claim a registry name. The same retained image becomes
     // reachable under a canonical name only once `register` says so.
-    try expectOk(&runtime, "((7) 'v def) @module 'image set");
+    try expectOk(&runtime, "[] ((7) 'v def) @module 'image set");
     try expectErrorContains(&runtime, "later.v", &.{ "'kind 'undefined-word", "'name 'later.v" });
     try expectOk(&runtime, "image 'later register");
     try expectStack(&runtime, "later.v", "7");
@@ -106,26 +106,26 @@ test "module values: type display identity and capability boundaries are opaque"
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
 
-    // Identity is the image, not its content: one construction duplicated
+    // Image identity determines matching independently of content: one construction duplicated
     // matches itself, and two constructions of the same body never match.
-    try expectStack(&runtime, "(1) @module dup match?", "1");
-    try expectStack(&runtime, "(1) @module (1) @module match?", "0");
+    try expectStack(&runtime, "[] (1) @module dup match?", "1");
+    try expectStack(&runtime, "[] (1) @module [] (1) @module match?", "0");
 
     // Structural equality of a container carrying the value agrees, and never
     // traverses into the image's environment or state template.
-    try expectStack(&runtime, "(1) @module dup () cons swap () cons match?", "1");
-    try expectStack(&runtime, "(1) @module () cons (1) @module () cons match?", "0");
+    try expectStack(&runtime, "[] (1) @module dup () cons swap () cons match?", "1");
+    try expectStack(&runtime, "[] (1) @module () cons [] (1) @module () cons match?", "0");
 
     // The printed marker carries no address, name, or state, and it is not
     // readable source.
-    try expectStack(&runtime, "(1) @module str", "\"<module>\"");
+    try expectStack(&runtime, "[] (1) @module str", "\"<module>\"");
     try expectErrorContains(&runtime, "\"<module>\" parse", &.{
         "'kind 'parse",
         "runtime-only",
     });
 
     // Serialization refuses the capability with its ordinary total error.
-    try expectErrorContains(&runtime, "(1) @module json.emit", &.{
+    try expectErrorContains(&runtime, "[] (1) @module json.emit", &.{
         "'kind 'type",
         "'word 'json.emit",
     });
@@ -141,7 +141,7 @@ test "module registration: one image registered twice owns independent durable s
 
     try expectOk(
         &runtime,
-        "(0 ((1 + dup without) within) 'bump def) @module dup 'left register 'right register",
+        "[] (0 ((1 + dup without) within) 'bump def) @module dup 'left register 'right register",
     );
     try expectEmptyStack(&runtime);
 
@@ -154,7 +154,7 @@ test "module registration: one image registered twice owns independent durable s
     try expectErrorContains(&runtime, "left.bump", &.{ "'kind 'undefined-word", "'name 'left.bump" });
 
     // And reloading one does not disturb the other's state.
-    try expectOk(&runtime, "(0 ((100 + dup without) within) 'bump def) @module 'right register");
+    try expectOk(&runtime, "[] (0 ((100 + dup without) within) 'bump def) @module 'right register");
     try expectStack(&runtime, "right.bump", "102");
 }
 
@@ -162,17 +162,17 @@ test "module registration: reload preserves slot state and discards the image te
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
 
-    try expectOk(&runtime, "(0 ((1 + dup without) within) 'bump def) 'counter @defm");
+    try expectOk(&runtime, "[] (0 ((1 + dup without) within) 'bump def) 'counter @defm");
     try expectStack(&runtime, "counter.bump counter.bump", "1 2");
 
     // Replacement installs new code over the state the slot already owns, and
     // this image's own template is not consulted for that slot.
-    try expectOk(&runtime, "(99 ((10 + dup without) within) 'bump def) @module 'counter register");
+    try expectOk(&runtime, "[] (99 ((10 + dup without) within) 'bump def) @module 'counter register");
     try expectStack(&runtime, "counter.bump", "12");
 
-    // The template is the image's property, not the slot's: the same image
+    // The template belongs to the image independently of any slot: the same image
     // still seeds a *fresh* registration from 99.
-    try expectOk(&runtime, "(99 ((10 + dup without) within) 'bump def) @module 'fresh register");
+    try expectOk(&runtime, "[] (99 ((10 + dup without) within) 'bump def) @module 'fresh register");
     try expectStack(&runtime, "fresh.bump", "109");
 }
 
@@ -185,15 +185,15 @@ test "module registration: @defm is construction followed by registration" {
     defer right.deinit(std.testing.allocator);
 
     // Ordinary bodies: same definitions, same durable state, same stack.
-    try expectOk(&runtime, "(0 ((1 + dup without) within) 'bump def) 'combined @defm");
-    try expectOk(&runtime, "(0 ((1 + dup without) within) 'bump def) @module 'composed register");
+    try expectOk(&runtime, "[] (0 ((1 + dup without) within) 'bump def) 'combined @defm");
+    try expectOk(&runtime, "[] (0 ((1 + dup without) within) 'bump def) @module 'composed register");
     try expectEmptyStack(&runtime);
     try expectStack(&runtime, "combined.bump composed.bump", "1 1");
 
-    // A plan-seeded construction stack behaves identically under both
+    // An explicitly seeded construction stack behaves identically under both
     // spellings, including as the registration's initial durable state.
-    try expectOk(&runtime, "[4 5] (+ 'sum set) seed 'seeded-combined @defm");
-    try expectOk(&runtime, "[4 5] (+ 'sum set) seed @module 'seeded-composed register");
+    try expectOk(&runtime, "[4 5] (+ 'sum set) 'seeded-combined @defm");
+    try expectOk(&runtime, "[4 5] (+ 'sum set) @module 'seeded-composed register");
     try expectStack(&runtime, "seeded-combined.sum seeded-composed.sum", "9 9");
 
     // A failing body produces the same error and registers nothing either way.
@@ -202,13 +202,13 @@ test "module registration: @defm is construction followed by registration" {
     const combined_failure = try renderFailure(
         &runtime,
         &left,
-        "((1 0 /) call ((2) 'v def)) 'ghost-combined @defm",
+        "[] ((1 0 /) call ((2) 'v def)) 'ghost-combined @defm",
     );
     try std.testing.expect(std.mem.indexOf(u8, combined_failure, "'kind 'domain") != null);
     const composed_failure = try renderFailure(
         &runtime,
         &right,
-        "((1 0 /) call ((2) 'v def)) @module 'ghost-composed register",
+        "[] ((1 0 /) call ((2) 'v def)) @module 'ghost-composed register",
     );
     try std.testing.expectEqualStrings(combined_failure, composed_failure);
     try expectEmptyStack(&runtime);
@@ -217,24 +217,24 @@ test "module registration: @defm is construction followed by registration" {
 
     // An invalid name fails after the body has run in both spellings, so the
     // composition does not silently skip a body the two words would execute.
-    try expectErrorContains(&runtime, "((1) 'v def) '-- @defm", &.{
+    try expectErrorContains(&runtime, "[] ((1) 'v def) '-- @defm", &.{
         "'kind 'domain",
         "valid module name",
     });
     try expectEmptyStack(&runtime);
-    try expectErrorContains(&runtime, "((1) 'v def) @module '-- register", &.{
+    try expectErrorContains(&runtime, "[] ((1) 'v def) @module '-- register", &.{
         "'kind 'domain",
         "valid module name",
     });
     try expectEmptyStack(&runtime);
 
     // An alias collision is the same refusal in both spellings.
-    try expectOk(&runtime, "((1) 'v def) 'aliased @defm 'short 'aliased alias");
-    try expectErrorContains(&runtime, "((2) 'v def) 'short @defm", &.{
+    try expectOk(&runtime, "[] ((1) 'v def) 'aliased @defm 'short 'aliased alias");
+    try expectErrorContains(&runtime, "[] ((2) 'v def) 'short @defm", &.{
         "'kind 'domain",
         "collides with an alias",
     });
-    try expectErrorContains(&runtime, "((2) 'v def) @module 'short register", &.{
+    try expectErrorContains(&runtime, "[] ((2) 'v def) @module 'short register", &.{
         "'kind 'domain",
         "collides with an alias",
     });
@@ -243,15 +243,15 @@ test "module registration: @defm is construction followed by registration" {
 
     // Re-registration from inside a state application is refused identically:
     // the initiating unit already holds one slot's turn.
-    try expectOk(&runtime, "((0) 'v def) 'reloaded @defm");
+    try expectOk(&runtime, "[] ((0) 'v def) 'reloaded @defm");
     try expectErrorContains(
         &runtime,
-        "(0 ((((1) 'v def) 'reloaded @defm) within) 'go def) 'host-combined @defm host-combined.go",
+        "[] (0 (([] ((1) 'v def) 'reloaded @defm) within) 'go def) 'host-combined @defm host-combined.go",
         &.{ "'kind 'domain", "inside a state application" },
     );
     try expectErrorContains(
         &runtime,
-        "(0 ((((1) 'v def) @module 'reloaded register) within) 'go def) " ++
+        "[] (0 (([] ((1) 'v def) @module 'reloaded register) within) 'go def) " ++
             "'host-composed @defm host-composed.go",
         &.{ "'kind 'domain", "inside a state application" },
     );
@@ -264,7 +264,7 @@ test "module registration: invocation context comes from the registration" {
     var runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &output.writer);
     defer runtime.deinit();
 
-    try expectOk(&runtime, "(" ++
+    try expectOk(&runtime, "[] (" ++
         "0 ((1 + dup without) within) 'tick defp " ++
         "(tick) 'bump def " ++
         "('bump which) 'report def " ++
@@ -274,7 +274,7 @@ test "module registration: invocation context comes from the registration" {
     try expectEmptyStack(&runtime);
 
     // A private word reached through a public one sees the state of the
-    // registration the call entered through, not of the last one registered.
+    // registration the call entered through, regardless of which was registered last.
     try expectStack(&runtime, "left.bump left.bump right.bump", "1 2 1");
 
     // Reflection reports the invoking registration's spelling and generation.
@@ -307,7 +307,7 @@ test "module registration: a diagnostic spells the same word its failure reports
     // which registration failed. A name long enough to exhaust the scratch is
     // the case that used to substitute it.
     const long = "m" ** 330;
-    const source = "(( -- n ) (1 2) 'two def) '" ++ long ++ " @defm " ++ long ++ ".two";
+    const source = "[] (( -- n ) (1 2) 'two def) '" ++ long ++ " @defm " ++ long ++ ".two";
     const failure = switch (try runtime.runUnit("module-value-test.ecl", source)) {
         .err => |item| item,
         .ok, .incomplete => return error.ExpectedLanguageError,
@@ -327,16 +327,16 @@ test "module registration: failures leave prior registrations atomic and ownersh
     defer runtime.deinit();
 
     // A failing construction body publishes neither a value nor a name.
-    try expectErrorContains(&runtime, "((1 0 /) call) @module", &.{"'kind 'domain"});
+    try expectErrorContains(&runtime, "[] ((1 0 /) call) @module", &.{"'kind 'domain"});
     try expectEmptyStack(&runtime);
 
     // A failing registration leaves the prior directory entry, generation, and
     // durable state exactly as they were, and consumes the module reference it
     // was handed.
-    try expectOk(&runtime, "(0 ((1 + dup without) within) 'bump def) 'kept @defm");
+    try expectOk(&runtime, "[] (0 ((1 + dup without) within) 'bump def) 'kept @defm");
     try expectStack(&runtime, "kept.bump", "1");
     try expectOk(&runtime, "'kept-alias 'kept alias");
-    try expectErrorContains(&runtime, "((2) 'bump def) @module 'kept-alias register", &.{
+    try expectErrorContains(&runtime, "[] ((2) 'bump def) @module 'kept-alias register", &.{
         "'kind 'domain",
         "collides with an alias",
     });
@@ -344,7 +344,7 @@ test "module registration: failures leave prior registrations atomic and ownersh
     try expectStack(&runtime, "kept.bump", "2");
 
     // The retained image survives a failed registration and is still usable.
-    try expectOk(&runtime, "((5) 'v def) @module 'retained set");
+    try expectOk(&runtime, "[] ((5) 'v def) @module 'retained set");
     try expectErrorContains(&runtime, "retained 'kept-alias register", &.{
         "'kind 'domain",
         "collides with an alias",
@@ -352,7 +352,7 @@ test "module registration: failures leave prior registrations atomic and ownersh
     try expectOk(&runtime, "retained 'accepted register");
     try expectStack(&runtime, "accepted.v", "5");
 
-    // A non-module operand is a type error, not a registry mutation.
+    // A non-module operand raises a type error before any registry mutation.
     try expectErrorContains(&runtime, "1 'rejected register", &.{ "'kind 'type", "'word 'register" });
     try expectEmptyStack(&runtime);
     try expectErrorContains(&runtime, "rejected.v", &.{"'kind 'undefined-word"});
@@ -363,21 +363,21 @@ test "module values: invoke calls a public export of a nameless image" {
     defer runtime.deinit();
     // An image reached as a value supports exactly one operation, because it
     // has no name for anything else to key on.
-    try expectStack(&runtime, "((7) 'answer def) @module 'answer invoke", "7");
+    try expectStack(&runtime, "[] ((7) 'answer def) @module 'answer invoke", "7");
     // A public reaches its own privates, on the same terms as a registered
     // call: the home is the image either way.
-    try expectStack(&runtime, "((41) 'secret defp (secret 1 +) 'go def) @module 'go invoke", "42");
+    try expectStack(&runtime, "[] ((41) 'secret defp (secret 1 +) 'go def) @module 'go invoke", "42");
     // Lookup is public-only, so a private is as absent as a missing name.
-    try expectErrorContains(&runtime, "((7) 'hidden defp) @module 'hidden invoke", &.{
+    try expectErrorContains(&runtime, "[] ((7) 'hidden defp) @module 'hidden invoke", &.{
         "'kind 'undefined-word",
         "'word 'hidden",
     });
-    try expectErrorContains(&runtime, "((7) 'answer def) @module 'nope invoke", &.{
+    try expectErrorContains(&runtime, "[] ((7) 'answer def) @module 'nope invoke", &.{
         "'kind 'undefined-word",
         "'word 'nope",
     });
     try expectErrorContains(&runtime, "1 'answer invoke", &.{ "'kind 'type", "'word 'invoke" });
-    try expectErrorContains(&runtime, "((7) 'answer def) @module 'not.unqualified invoke", &.{
+    try expectErrorContains(&runtime, "[] ((7) 'answer def) @module 'not.unqualified invoke", &.{
         "'kind 'domain",
         "unqualified binding name",
     });
@@ -388,18 +388,18 @@ test "module values: a nameless image is stateless and traces its bare local" {
     defer runtime.deinit();
     // No registration means no slot, so `within` is refused exactly as it is
     // for a construction root. State belongs to a registration.
-    try expectErrorContains(&runtime, "(0 ((1 + dup without) within) 'bump def) @module 'bump invoke", &.{
+    try expectErrorContains(&runtime, "[] (0 ((1 + dup without) within) 'bump def) @module 'bump invoke", &.{
         "'kind 'domain",
         "within is legal only in a published module word",
     });
     // The same image registered has a slot and the same word works.
-    try expectStack(&runtime, "(0 ((1 + dup without) within) 'bump def) @module 'counter register counter.bump", "1");
+    try expectStack(&runtime, "[] (0 ((1 + dup without) within) 'bump def) @module 'counter register counter.bump", "1");
     // A nameless image has no canonical spelling, so a failure inside it
     // traces the bare local name rather than borrowing one it does not have.
-    try expectErrorContains(&runtime, "((missing) 'boom def) @module 'boom invoke", &.{
+    try expectErrorContains(&runtime, "[] ((missing) 'boom def) @module 'boom invoke", &.{
         "'trace ['missing 'boom]",
     });
-    try expectErrorContains(&runtime, "((missing) 'boom def) 'named @defm named.boom", &.{
+    try expectErrorContains(&runtime, "[] ((missing) 'boom def) 'named @defm named.boom", &.{
         "'trace ['missing 'named.boom]",
     });
 }
@@ -412,12 +412,12 @@ test "module values: a construction can be parameterized by another module" {
     // caller's decision rather than a global registry fact.
     try expectStack(
         &runtime,
-        "((2 *) 'scale def) @module wrap ('dep set (4 dep 'scale invoke) 'go def) seed 'doubling @defm doubling.go",
+        "[] ((2 *) 'scale def) @module wrap ('dep set (4 dep 'scale invoke) 'go def) 'doubling @defm doubling.go",
         "8",
     );
     try expectStack(
         &runtime,
-        "((10 *) 'scale def) @module wrap ('dep set (4 dep 'scale invoke) 'go def) seed 'tenfold @defm tenfold.go",
+        "[] ((10 *) 'scale def) @module wrap ('dep set (4 dep 'scale invoke) 'go def) 'tenfold @defm tenfold.go",
         "40",
     );
     // Two images exporting the same name coexist, which a registry keyed by
@@ -484,10 +484,10 @@ test "module registration: reuse reload removal and delayed calls reclaim bounde
         // both names. The repetition lives inside one unit, so the measurement
         // sees image and registration retention rather than the per-unit source
         // provenance every session accumulates.
-        const cycle = "(0 ((1 + dup without) within) 'bump def) @module " ++
+        const cycle = "[] (0 ((1 + dup without) within) 'bump def) @module " ++
             "dup 'reuse-left register " ++
             "dup 'reuse-right register " ++
-            "(reuse-left.bump) @spawn " ++
+            "[] (reuse-left.bump) @spawn " ++
             "swap 'reuse-left register " ++
             "await pop reuse-right.bump pop " ++
             "'reuse-left unmodule 'reuse-right unmodule";
@@ -521,24 +521,24 @@ test "module registration: reuse reload removal and delayed calls reclaim bounde
 test "module sources: formatter and standard modules use @defm" {
     // A registration earns a navigation header; anonymous construction, which
     // names nothing, is an ordinary expression.
-    const registration = try formatter.format(std.testing.allocator, "((1) 'x def) 'stats @defm\n");
+    const registration = try formatter.format(std.testing.allocator, "[] ((1) 'x def) 'stats @defm\n");
     defer std.testing.allocator.free(registration);
     try std.testing.expectEqualStrings(
-        "### module stats\n(\n ### def x\n (1) 'x def) 'stats @defm\n",
+        "### module stats\n[]\n(\n ### def x\n (1) 'x def) 'stats @defm\n",
         registration,
     );
     const seeded = try formatter.format(
         std.testing.allocator,
-        "[[0]] ((1 +) 'tick def) seed 'counter @defm\n",
+        "[[0]] ((1 +) 'tick def) 'counter @defm\n",
     );
     defer std.testing.allocator.free(seeded);
     try std.testing.expectEqualStrings(
-        "### module counter\n[[0]]\n(\n ### def tick\n (1 +) 'tick def) seed 'counter @defm\n",
+        "### module counter\n[[0]]\n(\n ### def tick\n (1 +) 'tick def) 'counter @defm\n",
         seeded,
     );
-    const anonymous = try formatter.format(std.testing.allocator, "((1) 'x def) @module\n");
+    const anonymous = try formatter.format(std.testing.allocator, "[] ((1) 'x def) @module\n");
     defer std.testing.allocator.free(anonymous);
-    try std.testing.expectEqualStrings("(\n ### def x\n (1) 'x def) @module\n", anonymous);
+    try std.testing.expectEqualStrings("[]\n(\n ### def x\n (1) 'x def) @module\n", anonymous);
 
     // Every embedded standard module is registration-driven, enumerated from
     // the manifest rather than by hand so a new module is covered the day it
@@ -591,7 +591,7 @@ test "module values: a pushed quotation resolves in the image it was written in"
     // `(k)` is written inside the module, so it resolves in that image's chain
     // rather than wherever the caller applies it. The session has no `k` at
     // all, which is what makes the label load-bearing here.
-    try expectOk(&runtime, "((1) 'k def ((k)) 'q def) 'holding @defm holding.q 'held set");
+    try expectOk(&runtime, "[] ((1) 'k def ((k)) 'q def) 'holding @defm holding.q 'held set");
     try expectStack(&runtime, "held call", "1");
 }
 
@@ -600,14 +600,14 @@ test "module values: an escaped quotation names the image it was written in" {
     defer runtime.deinit();
     // A word written in a module body names that image. A quotation that
     // escaped it goes on meaning what it meant, for as long as anything still
-    // holds the image -- redefinition reaches future calls, not code that
-    // already exists.
-    try expectOk(&runtime, "((1) 'k def ((k)) 'q def) 'held-name @defm held-name.q 'held set");
+    // holds the image -- redefinition reaches only future calls; existing code
+    // retains its meaning.
+    try expectOk(&runtime, "[] ((1) 'k def ((k)) 'q def) 'held-name @defm held-name.q 'held set");
     try expectStack(&runtime, "held call", "1");
 
     // Replacing the name publishes a new image. Fresh calls through the name
     // get the new code, which is the whole of what the REPL needs.
-    try expectOk(&runtime, "((2) 'k def ((k)) 'q def) 'held-name @defm");
+    try expectOk(&runtime, "[] ((2) 'k def ((k)) 'q def) 'held-name @defm");
     try expectStack(&runtime, "held-name.q call", "2");
 
     // The quotation held from the replaced generation is not re-pointed to the
@@ -616,7 +616,7 @@ test "module values: an escaped quotation names the image it was written in" {
     try expectErrorContains(&runtime, "held call", &.{ "'kind 'domain", "retired" });
 
     // Removal ends it the same way.
-    try expectOk(&runtime, "((1) 'k def ((k)) 'q def) 'going @defm going.q 'escaped set");
+    try expectOk(&runtime, "[] ((1) 'k def ((k)) 'q def) 'going @defm going.q 'escaped set");
     try expectStack(&runtime, "escaped call", "1");
     try expectOk(&runtime, "'going unmodule");
     try expectErrorContains(&runtime, "escaped call", &.{ "'kind 'domain", "retired" });
@@ -628,12 +628,12 @@ test "module values: local call sites do not grant an escaped quotation the call
 
     try expectStack(
         &runtime,
-        "(0 ((1 + dup without) within) 'tick defp " ++
+        "[] (0 ((1 + dup without) within) 'tick defp " ++
             "((tick)) 'q def (q call) 'warm def (q) 'escape def) " ++
             "'local-cache-owner @defm " ++
-            "((|q| q call) 'apply def) 'foreign-caller @defm " ++
+            "[] ((|q| q call) 'apply def) 'foreign-caller @defm " ++
             "local-cache-owner.warm local-cache-owner.escape 'held set " ++
-            "(held foreign-caller.apply) @attempt 'err at 'kind at",
+            "[] (held foreign-caller.apply) @attempt 'err at 'kind at",
         "1 'domain",
     );
 }

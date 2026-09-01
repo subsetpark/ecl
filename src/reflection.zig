@@ -201,7 +201,7 @@ pub const PlanCursor = struct {
     fn writeBytes(self: *PlanCursor, writer: *std.Io.Writer, bytes: []const u8) std.Io.Writer.Error!void {
         if (try self.writeSegment(writer, bytes)) self.action_index += 1;
     }
-    /// A qualified spelling is three segments, not one interned string: the
+    /// A qualified spelling retains three distinct segments: the
     /// registration's name, the separator, and the definition's own name.
     fn writeTraceWord(
         self: *PlanCursor,

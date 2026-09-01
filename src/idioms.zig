@@ -1173,7 +1173,7 @@ fn binaryPrimitive(operation: numeric.BinaryOp) env.PrimitiveImpl {
 /// somewhere the recognizer is not looking, and recognizing it ran the core
 /// builtin where the module's own shadow was the answer.
 ///
-/// The relation is membership, not equality, and three equality proxies each
+/// The relation is membership. Three equality proxies each
 /// failed on a different population before that was clear: the activation's own
 /// scope (a nested application runs in a descendant that minted no cell) and the
 /// unit root (prelude and stdlib idioms are stamped with neither) both

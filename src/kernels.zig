@@ -8,7 +8,7 @@
 //! a missing or duplicated classification a compile error rather than a silent
 //! fall-through to a boxed path.
 //!
-//! The operand vocabulary is deliberately borrowed, not invented: aggregates are
+//! The operand vocabulary comes directly from existing runtime types: aggregates are
 //! named by `value.HeapKind` and atoms by the `Value` tag. There is no second
 //! leaf-tag enum and no name list for an auditor to drift from — an operation
 //! that is not in one of the family enums cannot be installed, and one that is
@@ -230,8 +230,8 @@ pub const registry = binary_rows ++ unary_rows ++ sequence_rows ++ order_rows ++
 /// selects which monomorphic body that loop runs. Mixed `i64`/`f64` pairs and
 /// character-width pairs are inside the typed rows rather than beside them,
 /// because comparison and subtraction are meaningful on chars while arithmetic
-/// is not — and the difference is a fault the block mask reports, not a
-/// different dispatch.
+/// is not. The block mask reports that difference as a fault within the same
+/// dispatch.
 const binary_rows = [_]Row{
     .{
         .operations = all_binary,
@@ -738,7 +738,7 @@ const text_rows = [_]Row{
         .left = any_operand,
         .right = any_operand,
         .class = .generic_fallback,
-        // rendering and key-wise merging are value-shaped, not representation-shaped
+        // rendering and key-wise merging follow value shape independently of representation
     },
     .{
         .operations = only(.{Operation{ .text = .put }}),

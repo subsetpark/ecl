@@ -1,4 +1,5 @@
 ### module stdlib.test.pkg-version
+[]
 (
  'stdlib.test.support
  ('equal 'raises 'raises-containing 'documented)

@@ -44,7 +44,8 @@ root-Unit logical transitions, driver/application resumes, and scheduler
 handoffs. The counter branches compile out of every ordinary runtime and test
 module, and the atomic counting allocator is absent from the timing artifact.
 Both versioned CSV schemas identify their target, optimization mode, and Zig
-version; `-- --quick` is a smoke subset, not reportable performance evidence.
+version. `-- --quick` runs only a smoke subset; reportable performance evidence
+requires the full workload.
 Recorded target-specific results and their current disposition live in
 [`PERFORMANCE.md`](PERFORMANCE.md).
 
@@ -53,7 +54,7 @@ Recorded target-specific results and their current disposition live in
 - **Value = 16-byte two-word tagged cell** (a Zig tagged union). Word 0:
   payload (i64 / f64 / char codepoint / u32 symbol id / u32 word id / heap
   pointer). Word 1: tag. All atoms are inline; heap objects exist only for
-  lists, dicts, tasks, module images, and unit plans. NaN-boxing is impossible here: full-range int64
+  lists, dicts, tasks, and module images. NaN-boxing is impossible here: full-range int64
   with overflow-as-error cannot live in a 48-bit payload. The data stack
   is contiguous `Value` storage.
 - **Heap header (16 bytes):** `{ rc: AtomicU32, meta: u32, len: u64 }`;
@@ -166,7 +167,8 @@ Recorded target-specific results and their current disposition live in
   (PLDI 2021) is explicit that reference counting cannot release cyclic
   data, so keeping the owning edge outside the value heap is what keeps
   precise RC sufficient here. Sole exception: a task returning its own
-  handle into its result cell — a documented bounded leak, not machinery.
+  handle into its result cell creates one documented bounded self-cycle with
+  no reclamation mechanism.
 
 ## Code representation and dispatch
 
@@ -287,7 +289,7 @@ Recorded target-specific results and their current disposition live in
   exists so that no caller can reach a scope without having stated which of the
   three applies; the defect being fixed was precisely a pointer handed out with
   nobody holding it.
-  One pin per dispatch, not two. The borrow's reference rides the resolution
+  Each dispatch takes exactly one pin. The borrow's reference rides the resolution
   cursor into the resolution and is *consumed* by `scheduleWord`'s existing pin
   site rather than prompting a second acquire, so the count of pins per dispatch
   is what it was before this change and only the instruction differs — a
@@ -371,8 +373,8 @@ Recorded target-specific results and their current disposition live in
   make a second `@defm` of the same body re-site the first image's words.
   `@attempt` stamps nothing — its child's parent is the enclosing scope, so the
   chain already does the work.
-  **Construction stamping is gated on unforgeable reader-text lineage, not on
-  span identity.** The predicate is exact: the reader wrote this occurrence,
+  **Construction stamping requires unforgeable reader-text lineage.** Span
+  identity alone grants no authority. The predicate is exact: the reader wrote this occurrence,
   inside the exact designated body. The first half is `SpanArchive`'s business.
   Lineage has exactly two mints — absorbing a reader result, and the
   construction rewrite attesting the copy it just produced — because that copy
@@ -398,11 +400,11 @@ Recorded target-specific results and their current disposition live in
   and is shared too. Traversal and the index copy draw from one caller-supplied
   `poll.WorkBudget`, so a step cannot spend its slice and then begin a second
   pass. Once the exact root is admitted, every supported nested reader
-  container is traversed. Descendant directory access is diagnostic projection,
-  not another admission gate; a missing projection is `InvalidProvenance`, not
+  container is traversed. Descendant directory access performs diagnostic
+  projection only. A missing projection is `InvalidProvenance` and grants no
   permission to share that descendant unchanged. A rejected runtime-built root
   never begins traversal, so reader fragments inside it grant nothing. Lineage storage is
-  live-proportional, not history-proportional: a rewritten header's directory
+  proportional to live headers: a rewritten header's directory
   slot is cleared and its identity recycled when that header is destroyed,
   through an O(1) hook the archive attaches to the reclamation domain it shares.
   Recycling needs no generation counter, because an identity is offered for
@@ -411,33 +413,20 @@ Recorded target-specific results and their current disposition live in
   candidate is prepared and claimed once. A racing loser yields, retaining the
   absorption entry or completed re-scope header in an explicit pending stage,
   and retries on a later scheduler slice rather than looping locally.
-  The second half is decoded-input ownership. A constructor that received a
-  flattened quotation cannot say which part was the body, so the two halves
-  arrive separately: `heap.HeapKind.unit_plan` is a nominal kind whose private
-  `UnitPlanStorage` owns one reference to the seed list and one to the body,
-  and the typed slots make an invalid plan unrepresentable rather than asserted
-  against. Minting requires `heap.UnitPlanSeal`, an opaque authority issued by
-  one `HostOwner`: the raw constructor is private, so `root.heap` exposes no
-  allocator-plus-headers factory, and `seal` derives allocation from its issuing
-  root. `Env.init` takes that owner once and retains the derived seal privately;
-  the dedicated canonical installer therefore cannot correlate a foreign seal
-  with the Env's reclamation domain. The authority reaches execution only as the
-  payload of `env.Binding.seed`; the public generic core installer accepts a
-  quotation, not the full `Binding` union, and no ordinary handler holds the
-  seal. This is a compiler-enforced capability boundary, not a source-audit
-  call-site count. Its two owned values retire through the
-  ordinary release domain one bounded step each, exactly as a dict's payload
-  headers do, so live plan memory is bounded by simultaneously live plans rather
-  than by how many were ever made.
-  `Machine.popUnitInput` is the only tag decoder. It returns one non-struct
-  nominal owner whose empty-seed quotation representation allocates nothing.
-  Child launch borrows it until the new Unit retains its operands; fan-out moves
-  the same owner; boundary construction consumes its halves into the unchanged
-  body, root-bound rewrite, and seed materializer states. There is no public raw
-  body/seeds tuple or duplicate release helper. One `SeedMaterializer` owns the
-  retained seed list and next index for both construction boundaries and child
-  Units, reserves each granted slice before appending it, and is always serviced
-  before body code.
+  The second half is decoded-input ownership. Every constructor receives the
+  seed-values list and exact body list as separate operands; no flattened
+  quotation or tagged protocol value needs decoding. `Machine.popUnitInput`
+  validates and consumes those two lists in one place, then returns an internal
+  owner that correlates both references for transfer and cleanup. An empty seed
+  list is released immediately and represented internally without an
+  allocation. Child launch borrows the owner until the new Unit retains its
+  operands; fan-out moves the same owner; boundary construction consumes its
+  halves into the unchanged body, root-bound rewrite, and seed materializer
+  states. One `SeedMaterializer` owns the retained seed list and next index for
+  both construction boundaries and child Units, reserves each granted slice
+  before appending it, and is always serviced before body code. The exact body
+  is therefore known by operand position, while seed values remain outside the
+  lineage and re-scoping traversal.
   A candidate module image exists in both attribution branches, but
   `scopeIdForOwned` runs only after admission. Runtime-built bodies therefore
   execute with their existing word scopes and retain no attribution-only scope
@@ -454,8 +443,8 @@ Recorded target-specific results and their current disposition live in
   scope while the prelude bootstraps and becomes session-over-core the moment a
   Session exists, so all 70 prelude definitions were written and validated
   under core-only resolution and then silently acquired session visibility.
-  That transition was an artifact of the two phases using different scope
-  storage, not a design, and `(999) 'len def` breaking `table.from-rows`
+  That transition arose accidentally because the two phases used different
+  scope storage, and `(999) 'len def` breaking `table.from-rows`
   through `all?` was its observable form.
   Late binding is untouched — lookup is still performed at call time. What is
   fixed is which chain it happens in, and what went away is dynamic scope.
@@ -553,10 +542,11 @@ Recorded target-specific results and their current disposition live in
   module then core. Nothing is snapshotted at construction, so there is no
   mutation epoch to validate, no resumable copy pass to bound, no second
   environment to retire, and no context to propagate through calls,
-  applications, or images. A construction receives what it needs through a
-  `seed` plan, and those values are inert data on the construction stack like
-  any other. Seeding is bounded work, not a reservation: seeds are appended in
-  fixed slices by the driver that opened the boundary — for a child Unit, by
+  applications, or images. A construction receives what it needs through its
+  explicit seed-values operand, and those values are inert data on the
+  construction stack like any other. Seeding reserves each granted fixed slice
+  before appending its values as bounded work by the driver that opened the
+  boundary — for a child Unit, by
   that Unit's own first slices, since the evaluator services a driver before the
   activation's code — and any prefix already on the stack is owned by the
   ordinary boundary or Unit teardown, exactly as any other operand is.
@@ -582,8 +572,8 @@ Recorded target-specific results and their current disposition live in
   distinctions, trusted-source idiom recognition, and the handoff to
   `scheduleWord`. Every property worth protecting — home, private visibility,
   annotation checks, trace metadata, builtin/native behavior, cancellation,
-  state authority — lives there, so the invariant is that no *source* may reach
-  it having lost one, not that there be only one source.
+  state authority — lives there, so every *source* that can reach it must retain
+  one. Multiple such sources may coexist.
   `qualify` drives the validated module-name and binding-name cursors and
   materializes their `QualifiedName` as a word value without reparsing source;
   `execute` consumes only a word and enters the same resumable
@@ -634,9 +624,9 @@ Recorded target-specific results and their current disposition live in
   Module slots use the same handoff for generation leases; retired generation
   records form an intrusive FIFO serviced one record per maintenance step,
   so neither commit nor maintenance scans reload history. `GenerationLease`
-  is a narrow nominal observation capability: it exposes identity metadata and cursor
-  factories, not the mutable environment, scope, reference count, or
-  retirement operations. Session execution may consume it into a distinct
+  is a narrow nominal observation capability: it exposes only identity metadata
+  and cursor factories. The mutable environment, scope, reference count, and
+  retirement operations remain inaccessible. Session execution may consume it into a distinct
   `ExecutionGeneration` only with the Session-private `ExecutionAccess`
   capability; neither observation type returns a raw `ModuleHome`. Only a
   `Unit` lifetime guard can turn that execution home into an independent
@@ -766,8 +756,8 @@ Recorded target-specific results and their current disposition live in
   The existing application frame allocation is reused, and `Frame` remains
   below the 112-byte ceiling. Native and builtin checks likewise own
   no source candidate.
-- **Recursive combinator continuation is an application transition, not a
-  host call.** After a false `linrec` predicate, the level applies `pre`,
+- **Recursive combinator continuation is an application transition.** It never
+  consumes a host call frame. After a false `linrec` predicate, the level applies `pre`,
   installs the next level's bounded snapshot driver, and returns a nominal
   suspension minted from that exact installed driver. The machine validates
   the capability in every build and reinserts the current inline application
@@ -872,6 +862,14 @@ allocation failure interrupt it at bounded intervals.
   uses the same rule while owning its selector validation, isolated scalar
   applications, unpublished value buffer, and final list or dictionary
   materializer in one resumable state.
+- **Dictionary combinators iterate values, not entries.** `each` retains the
+  dictionary's own key list and enters the same scheduler-visible update state
+  used by `dict.update`; the update boundary preserves keys and insertion order
+  and owns empty-input, contract, cancellation, and materialization behavior.
+  `for` reads those values through the same insertion-order storage without
+  collecting a result. The list-only idiom recognizer declines dictionaries,
+  so optimized and generic dispatch cannot acquire different dictionary
+  semantics.
 - **Composite name work remains composite while suspended.** An unknown
   qualified module prefix installs one `InternModuleNameCursor` that owns both
   insertion and module-name validation, then transfers the validated brand to
@@ -882,7 +880,8 @@ allocation failure interrupt it at bounded intervals.
   inside a scheduler step. Reflection producers remain
   distinct, but both `words` and completion hand their collected chunks to
   `SortedUniqueNameCursor`, the one materialize/sort/deduplicate pipeline.
-- **Blocking drives are boundary-specific, not alternate production APIs.**
+- **Blocking drives exist only at designated boundaries.** Production code
+  continues through the scheduler APIs.
   Session completion and bootstrap/tool constructors may drive a production
   cursor to completion. Registry registration/alias blocking drives exist
   only in the test-only `modules.testing` namespace, where host tests genuinely
@@ -915,7 +914,7 @@ allocation failure interrupt it at bounded intervals.
   the scheduler. Frame unwinding therefore stops after a continuation that
   finished with a step recorded, exactly as it stops for one that installed
   a work driver; nested in-place applications completing in a single
-  unwind — `(q) dip` inside `bi` — are the ordinary case, not an exception.
+  unwind—`(q) dip` inside `bi`—are the ordinary case.
 - **Bounded probes are lazy.** Formatter group lookahead uses a
   fixed-capacity command stack and expands concatenations one child at a
   time; its step and stack ceilings apply before child expansion, and
@@ -965,8 +964,8 @@ Any change to this machinery must preserve:
   with shrinking scheduler scenarios and a process deadline; these cover
   the imperative registrations, handlers, publication, wake, structured
   children, and cancellation-drain behavior directly.
-- **Per-slot state arbitration.** `within` applications are serialized
-  scheduler work, not mutex-held evaluation: a unit whose turn is not yet
+- **Per-slot state arbitration.** `within` applications are serialized as
+  scheduler work. A unit whose turn is not yet
   granted yields as ordinary resumable work and is re-run until the FIFO
   reaches it, so no OS lock is held across `runSlice` and cancellation
   unlinks a waiting turn without waking anything. Deadlock is prevented
@@ -1024,12 +1023,13 @@ Any change to this machinery must preserve:
   cursor. No result-sized loop survives.
 - **`@each` owns construction and joining without dictionary
   authority.** Its public primitive installs a `WorkDriver` that owns the
-  input sequence, quotation, and exact task buffer. Each slice publishes
-  the unchanged quotation with an explicit borrowed seed; initialization
-  retains that seed as the child's sole initial stack value. Completion
-  transfers the task list into the evaluator's ordered join state — a
-  private tagged machine representation, not a private binding; name
-  resolution has no privileged core-access mode. `await-all` is the
+  input sequence, shared seed list, quotation, and exact task buffer. Each
+  slice publishes the unchanged quotation with the iterated element deepest
+  and the explicit shared seeds above it. Initialization retains those inputs
+  before body execution. Completion
+  transfers the task list into the evaluator's ordered join state, which is a
+  private tagged machine representation. Name resolution has no privileged
+  core-access mode or private binding. `await-all` is the
   source-defined `(await) each` fan-in; no internal join word exists.
 - **Runtime retirement has one allocator-scoped owner.** `ReleaseDomain`
   is the sole value-graph walker and bounded external-retirement
@@ -1142,8 +1142,8 @@ Any change to this machinery must preserve:
   represent directly, including unsafe casts that could forge
   `HostCleanup` or `ExecutionAccess` and casts at the owned erased
   callback seams.
-- **Resumable phase ownership is represented by typestate, not correlated
-  optionals.** Every continuation revised by the 2026-08-27 ingestion audit
+- **Resumable phase ownership is represented by typestate.** Every continuation
+  revised by the 2026-08-27 ingestion audit eliminates correlated optionals and
   keeps only genuinely persistent context outside an exhaustive `union(enum)`;
   each variant owns the cursors, leases, builders, provisional values, files,
   or rollback metadata valid in that phase, and every transition consumes the
@@ -1234,9 +1234,9 @@ Any change to this machinery must preserve:
   task snapshots retain a pass epoch independently of their optional
   next-cell cursor, including the yield between count and collection; any
   intervening spawn or unlink restarts the whole snapshot. The session
-  root environment scope is a lazily allocated stable handle, not inline
-  optional storage: child reference-count traffic never aliases the
-  session thread's write-once root-handle read, and moving the `Session`
+  root environment scope uses a lazily allocated stable handle, ensuring child
+  reference-count traffic never aliases the session thread's write-once
+  root-handle read, and moving the `Session`
   value cannot invalidate a child scope parent. Root teardown waits on a
   scope-owned condition using the same scope mutex as the child-count
   predicate, so final-child notification cannot be lost between the
@@ -1305,7 +1305,7 @@ operand shape, and rows that still run boxed say so.
   control. Both refuse `generic_spine` at comptime: per-cell boxing is not
   reachable from inside a typed loop, and `kernel_flat.zig` imports neither
   `list.zig` nor the materializers — the source audit enforces that boundary.
-- **Reuse is a claimed authority, not an optimization guess.**
+- **Reuse requires claimed authority backed by an ownership proof.**
   `heap.UniqueLeafAdoption(result_kind)` claims a list only when it is solely
   owned and its elements are the result's width, and it is consumed exactly
   once — by `finish`, which republishes that same list retagged, or by
@@ -1394,7 +1394,8 @@ operand shape, and rows that still run boxed say so.
 - **Representation parity is a tested invariant:** fused and generic paths
   must produce identical values *and* identical representations —
   printing makes brackets observable at the prompt.
-- **Bitwise kernels reuse the numeric cursor, not the numeric contract.**
+- **Bitwise kernels reuse the numeric cursor while enforcing their own integer
+  contract.**
   `band`/`bor`/`bxor`/`bnot`/`bsl`/`bsr` are ordinary pervasive entries in
   the same table, so pervasion, dict alignment, polling, and failing-index
   identification come for free. What they do not share is the fault
@@ -1402,7 +1403,7 @@ operand shape, and rows that still run boxed say so.
   test, and the shift words carry their own `ShiftCount` scalar fault so
   an out-of-range count reports as a shift problem rather than as
   arithmetic outside its domain.
-- **Random draws are addressed, not stepped.** The generator state is a
+- **Random draws are addressed by key and counter.** The generator state is a
   `[key counter]` pair, and the mixer is SplitMix64 over
   `key + counter * gamma`. Nothing in the kernel is mutable: element *i*
   of a vector draw is a function of `counter + i` alone, so the driver may
@@ -1490,7 +1491,7 @@ operand shape, and rows that still run boxed say so.
   canonical lock gains the tagged
   `'store 'vendor` state only after every entry is present.
 - **Cache collection owns its deletion root and bounds every traversal.**
-  `pkg.store.gc` accepts canonical retained keys, not a directory. It derives
+  `pkg.store.gc` accepts canonical retained keys and derives the directory
   the same shared cache root from the Session environment snapshot, enumerates
   one child per turn, and preserves unknown names, links, and non-directories.
   An unreferenced canonical real directory is detached by one same-parent
@@ -1662,8 +1663,8 @@ honest source with no public dual representation.
   ordinary ECL module; host code selects only its public qualified entry point
   and maps the normal runner outcome to process status. This Session boundary
   cannot compensate external side effects performed by tests.
-- **Invocation context is supplied by a registration lease, not stored in
-  binding metadata.** `BindingOrigin.module_local` records a definition's own
+- **A registration lease supplies invocation context.** Binding metadata does
+  not store it. `BindingOrigin.module_local` records a definition's own
   module-local name and nothing else. A qualified resolution acquires a
   registration generation and mints the opaque `ModuleHome` the activation
   carries for its whole lifetime; same-home resolution, private lookup,
@@ -1950,7 +1951,8 @@ honest source with no public dual representation.
   language spells for itself — and joins `--` and `:` in `isReservedBytes`.
   The native SDK rejects it at comptime: a native `complete` requires the
   exact output tuple, so there is nothing for a row to mean there.
-- **`rng` is source, not native, because its state has nowhere else to go.**
+- **`rng` is implemented in source because its state belongs in a module
+  binding.**
   A module's own binding is the only place a threaded generator state can
   live without becoming ambient — a native module holding a state would be
   process-global mutable data, which is precisely what the kernels are
@@ -1993,7 +1995,8 @@ honest source with no public dual representation.
   current capability set; changing any of those changes the contract
   rather than invoking a compatibility path, and the binary promise is not
   a supported C author API. Linux and macOS are the loader targets; the
-  `.eclmod` suffix is portable naming, not a portable binary.
+  `.eclmod` suffix is portable naming; binary compatibility remains
+  platform-specific.
 - **Loading is one consuming typestate.** A Session-owned native instance
   moves through `opened -> described -> validated -> initialized ->
   published`. Each variant owns exactly the library handle, copied
@@ -2069,7 +2072,7 @@ honest source with no public dual representation.
   its generated adapter maps complete/failure/yield/OOM to explicit wire
   tags and maps an SDK capability rejection to a language `domain` error
   rather than a process trap.
-- **Capability values are ephemeral authority, not a host object.** There
+- **Capability values carry ephemeral authority directly.** There
   is no public capability map, lookup by string, raw host-context pointer,
   or allocator. The loader mints each instance's host table from its
   validated requirements, leaving undeclared optional operations null, and
@@ -2080,9 +2083,10 @@ honest source with no public dual representation.
   durable for that owner may cross a turn. Runtime issuer/generation
   checks remain active in optimized builds. Native machine code is trusted
   and can deliberately escape Zig's safe surface, so these are strong
-  supported-API invariants, not a sandbox against malicious code.
-- **Rescheduling is a typed `WorkDriver`, not an execution class.** A
-  callback requests `Reschedule(ContinuationSpec)`, whose spec fixes its
+  supported-API invariants that prevent accidental misuse; they do not sandbox
+  malicious code.
+- **Rescheduling uses a typed `WorkDriver`.** It introduces no additional
+  execution class. A callback requests `Reschedule(ContinuationSpec)`, whose spec fixes its
   private Zig state and explicit bounded destructor. The host owns aligned
   opaque storage and a library pin for that continuation. From its first
   invocation the call advances as the ordinary scheduler-owned driver,
@@ -2130,7 +2134,7 @@ The governing rule: correlated facts never cross a boundary separately —
 an owner-issued value either contains them or exposes the only valid
 transition over them.
 
-**Terminal authority is a capability, not a Session.** `readLine` receives
+**Terminal authority is represented by narrow capabilities.** `readLine` receives
 an `EditorTerminal` and a `CompletionObserve`, both opaque handles
 carrying the heap-stable session core rather than the address of the
 movable `Session` value that minted them. Between them they offer a
@@ -2177,9 +2181,10 @@ replacement. Neither can allocate, so their signatures carry no impossible
 error.
 
 **Byte rewriting is one storage boundary owning the whole transition.**
-`EditBuffer` is an opaque handle, not a struct with a private field type,
-because Zig's inferred struct literals would let external code build the
-latter and hand itself a cursor no storage transition produced. Growth and
+`EditBuffer` is an opaque handle because a struct with a private field type
+would still admit construction through Zig's inferred struct literals.
+External code cannot build the opaque handle and hand itself a cursor no
+storage transition produced. Growth and
 arbitrary replacement route through `splice(range, source)`, which
 validates, stages, and commits in that order; deletion and scalar
 transposition use the total non-growing transitions. Validation belongs at

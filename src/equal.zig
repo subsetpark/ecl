@@ -69,7 +69,7 @@ pub fn matchWithoutStructure(a: Value, b: Value) ?bool {
         .char => |codepoint| codepoint == b.char,
         .symbol => |id| id == b.symbol,
         // Two words match when they name the same thing. A word's scope is
-        // resolution metadata, not part of its identity as a value: `(dup)`
+        // resolution metadata outside its identity as a value: `(dup)`
         // written in a module and `(dup)` written at the session are the same
         // datum, and `match?` has always said so.
         .word => |reference| reference.name == b.word.name,
@@ -78,10 +78,6 @@ pub fn matchWithoutStructure(a: Value, b: Value) ?bool {
         // image match and two constructions never do, and no comparison
         // enters the frozen environment or initial-state template.
         .module => |header| header == b.module,
-        // Plan identity, for the same reason: a plan is opaque, so the only
-        // question a comparison can answer about two of them is whether they
-        // are the same plan.
-        .unit_plan => |header| header == b.unit_plan,
         .list, .dict => null,
     };
 }
@@ -184,7 +180,7 @@ pub const MatchCursor = struct {
                     return null;
                 }
                 switch (pair.a) {
-                    .int, .float, .char, .symbol, .word, .task, .module, .unit_plan => unreachable,
+                    .int, .float, .char, .symbol, .word, .task, .module => unreachable,
                     .list => |a_header| {
                         const b_header = pair.b.list;
                         if (a_header == b_header) {
@@ -308,7 +304,7 @@ pub fn compareScalars(a: Value, b: Value) error{NotComparable}!std.math.Order {
             .int => |b_int| orderInt(a_int, b_int),
             .float => |b_float| intFloatOrder(a_int, b_float) orelse
                 error.NotComparable,
-            .char, .symbol, .word, .list, .dict, .task, .module, .unit_plan => error.NotComparable,
+            .char, .symbol, .word, .list, .dict, .task, .module => error.NotComparable,
         },
         .float => |a_float| switch (b) {
             .int => |b_int| reverseOrder(intFloatOrder(b_int, a_float) orelse
@@ -319,13 +315,13 @@ pub fn compareScalars(a: Value, b: Value) error{NotComparable}!std.math.Order {
                 }
                 return orderFloat(a_float, b_float);
             },
-            .char, .symbol, .word, .list, .dict, .task, .module, .unit_plan => error.NotComparable,
+            .char, .symbol, .word, .list, .dict, .task, .module => error.NotComparable,
         },
         .char => |a_char| switch (b) {
             .char => |b_char| orderInt(a_char, b_char),
-            .int, .float, .symbol, .word, .list, .dict, .task, .module, .unit_plan => error.NotComparable,
+            .int, .float, .symbol, .word, .list, .dict, .task, .module => error.NotComparable,
         },
-        .symbol, .word, .list, .dict, .task, .module, .unit_plan => error.NotComparable,
+        .symbol, .word, .list, .dict, .task, .module => error.NotComparable,
     };
 }
 
@@ -463,7 +459,7 @@ pub const HashCursor = struct {
                             try self.actions.push(.{ .visit = dictItem(header, true, 0) });
                         }
                     },
-                    .int, .float, .char, .symbol, .word, .task, .module, .unit_plan => unreachable,
+                    .int, .float, .char, .symbol, .word, .task, .module => unreachable,
                 }
             },
             .list_after => |continuation| {
@@ -517,11 +513,11 @@ pub const HashCursor = struct {
 fn numericPair(a: Value, b: Value) bool {
     const a_numeric = switch (a) {
         .int, .float => true,
-        .char, .symbol, .word, .list, .dict, .task, .module, .unit_plan => false,
+        .char, .symbol, .word, .list, .dict, .task, .module => false,
     };
     const b_numeric = switch (b) {
         .int, .float => true,
-        .char, .symbol, .word, .list, .dict, .task, .module, .unit_plan => false,
+        .char, .symbol, .word, .list, .dict, .task, .module => false,
     };
     return a_numeric and b_numeric;
 }
@@ -534,14 +530,14 @@ fn numberEqual(a: Value, b: Value) bool {
         .int => |a_int| switch (b) {
             .int => |b_int| a_int == b_int,
             .float => |b_float| intFloatEqual(a_int, b_float),
-            .char, .symbol, .word, .list, .dict, .task, .module, .unit_plan => unreachable,
+            .char, .symbol, .word, .list, .dict, .task, .module => unreachable,
         },
         .float => |a_float| switch (b) {
             .int => |b_int| intFloatEqual(b_int, a_float),
             .float => |b_float| a_float == b_float,
-            .char, .symbol, .word, .list, .dict, .task, .module, .unit_plan => unreachable,
+            .char, .symbol, .word, .list, .dict, .task, .module => unreachable,
         },
-        .char, .symbol, .word, .list, .dict, .task, .module, .unit_plan => unreachable,
+        .char, .symbol, .word, .list, .dict, .task, .module => unreachable,
     };
 }
 
@@ -579,7 +575,6 @@ pub fn scalarHash(item: Value) ?u64 {
         .word => |id| mix(0x574f_5244, id.name),
         .task => |header| mix(0x5441_534b, @intFromPtr(header)),
         .module => |header| mix(0x4d4f_4455, @intFromPtr(header)),
-        .unit_plan => |header| mix(0x504c_414e, @intFromPtr(header)),
         .list, .dict => null,
     };
 }
@@ -617,7 +612,7 @@ fn allocationFailureProbe(allocator: std.mem.Allocator) !void {
     _ = try hashWithAllocator(allocator, left);
 }
 
-// A word's scope is resolution metadata, not part of its identity, and both
+// A word's scope is resolution metadata outside its identity, and both
 // equality and hashing must keep ignoring it. Construction re-scoping relies on
 // exactly this: it shares the source dict's hash list rather than rehashing a
 // single key, which is only sound while a re-scoped key hashes and compares

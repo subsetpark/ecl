@@ -23,8 +23,8 @@ Read this guide for every source or test change. The short rules in
   Prove a capability that genuinely needs a real stream against the built binary
   through an explicit pipe in `test/e2e.zig`, and keep the in-process test on the
   part that needs no stream—the mode gate, the claim, the error kind.
-- A golden transcript asserts behavior, not the coordinates behavior happens to
-  carry. `test/reference_snapshots.zig` records errors raised inside
+- A golden transcript asserts behavior independently of incidental source
+  coordinates. `test/reference_snapshots.zig` records errors raised inside
   `src/prelude.ecl`, whose `'data` reports a prelude line number; pinning that
   number makes every unrelated prelude edit fail the snapshot while proving
   nothing about the edit. Those positions use `ohsnap`'s embedded-regex form
@@ -39,8 +39,8 @@ Read this guide for every source or test change. The short rules in
   first. Closing stdin turns an accidental blocking read into immediate EOF, and
   a timeout that fires later than its supervisor reports nothing about why the
   run died.
-- **Read the exit code of the run you care about, not the one the shell happened
-  to finish with.** Give that run its own invocation and capture its status
+- **Read the exit code of the run you care about.** Give that run its own
+  invocation and capture its status
   immediately: `timeout 500 zig build test < /dev/null > run.log 2>&1; code=$?`.
   Appending a `tail`, `head`, or `grep`—or piping into one—replaces the
   status with the helper's. `grep` is the worst of them, because it exits 1 when
@@ -105,8 +105,8 @@ tier.
 
 Run a single CI gate locally only when you have a specific reason to expect
 that gate to fail—a scheduler lifetime change wants `test-tsan`, a new
-allocation site in an initialized Session wants `test-oom`. Reach for the
-reason first, not the matrix.
+allocation site in an initialized Session wants `test-oom`. Start from the
+reason before selecting the matrix.
 
 - The precommit tier's fast-core filter list lives in `build.zig` beside its
   measured justification. A test that costs more than about a second belongs
@@ -155,7 +155,7 @@ reason first, not the matrix.
   - **An `oom_test` snippet must be the smallest program that reaches its paths.** The
     sweep replays a snippet once per allocation point, so its cost is quadratic in how
     much the snippet allocates and every snippet pays into one shared wall clock. Reach a
-    path with 2 elements, not 40: volume adds no new allocation sites. Note the gate's
+    path with 2 elements: additional volume adds no new allocation sites. Note the gate's
     own baseline is over ten minutes regardless—background it with a generous timeout,
     and do not read a timeout as evidence about any one snippet.
   - **Bounded-memory claims need `DebugAllocator{.enable_memory_limit}`**, the only
@@ -184,7 +184,7 @@ reason first, not the matrix.
   `test-oom`; it fired only once a module auto-load inside racing children widened the
   window. When TSan does crash, isolate with a counterfactual run—remove the suspected
   trigger with the fix still absent—before claiming a cause.
-- **Run Zig 0.16's bundled Linux TSan against glibc, not Alpine/musl.** On
+- **Run Zig 0.16's bundled Linux TSan against glibc.** Alpine/musl is unsupported. On
   GitHub-hosted runners the musl binary leaves multiple TSan libc interceptors
   unresolved and crashes before an ECL test body executes. Confirming
   backtraces reach address zero from `___interceptor_sigaltstack`,
@@ -233,8 +233,8 @@ reason first, not the matrix.
 
 ## Specialized proof surfaces
 
-- Treat a model-only property as specification evidence, not proof of the production
-  implementation. Concurrency and reclamation acceptance must exercise the real
+- Treat a model-only property as specification evidence. Proof of the production
+  implementation requires concurrency and reclamation acceptance against the real
   publisher, leases/cursors, mutation path, and retirement domain through public or
   production-connected interfaces.
 - For snapshot reclamation, run real readers that repeatedly acquire, resolve through,
@@ -246,8 +246,8 @@ reason first, not the matrix.
 - Keep gameplan proof traceability exact while executing an active gameplan: every
   `testMap` row names exactly one existing test in its declared file and exactly one
   introducing and implementing patch entry. Reject duplicate, stale, missing, or
-  mismatched ledger entries. A gameplan is a planning input, not a repository artifact
-  that implementation must add or maintain.
+  mismatched ledger entries. A gameplan remains a planning input and creates no
+  implementation requirement to add or maintain a repository artifact.
 - Exercise every operation of an opaque public capability through its real factory,
   registration, or runtime path so Zig analyzes lazily reached method bodies. A type
   declaration compiling without any caller is not proof that its public surface works.

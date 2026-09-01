@@ -49,8 +49,8 @@ publication, reclamation, or architectural enforcement. The short rules in
 - Separate observation, execution, and mutation into distinct nominal
   capabilities. Upgrading requires a distinct owner-issued authority and
   consumes the source capability. Observation APIs return metadata or pinned
-  cursors, not raw homes, mutable scopes, ownership factories, or an implicit
-  path to greater authority.
+  cursors. They never expose raw homes, mutable scopes, ownership factories, or
+  an implicit path to greater authority.
 - Give Session-facing and registered-native callers only opaque semantic
   facades. Do not expose raw `Env`, `Registry`, Unit, module-home,
   reclamation-domain, wake-control, queue, or manual-advancement aliases when a

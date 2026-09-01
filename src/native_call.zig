@@ -379,6 +379,18 @@ const Transaction = struct {
             @as(u32, @intCast(self.candidates.items.len));
     }
 
+    fn rejectCapability(self: *Transaction, message: []const u8) abi.HostStatus {
+        if (self.terminal != .idle) return .invalid;
+        var failure: Terminal = .{ .fail = .{
+            .kind = .type,
+            .message = [_]u8{0} ** abi.max_error_message_bytes,
+            .message_len = message.len,
+        } };
+        @memcpy(failure.fail.message[0..message.len], message);
+        self.terminal = failure;
+        return .invalid;
+    }
+
     fn clearCandidates(self: *Transaction) void {
         for (self.candidates.items) |entry| self.releases.releaseValue(entry.value);
         self.candidates.clearRetainingCapacity();
@@ -513,7 +525,6 @@ pub fn begin(
     )) {
         .task => return evaluator.fail(.type, "native words cannot observe task capabilities"),
         .module => return evaluator.fail(.type, "native words cannot observe module capabilities"),
-        .unit_plan => return evaluator.fail(.type, "native words cannot observe unit plans"),
         else => {},
     };
     const transferred = owned_check;
@@ -550,7 +561,7 @@ fn transactionFrom(context: *anyopaque) *Transaction {
     return @ptrCast(@alignCast(context));
 }
 
-fn writeView(item: Value, output: *abi.ValueView) abi.HostStatus {
+fn writeView(call: *Transaction, item: Value, output: *abi.ValueView) abi.HostStatus {
     output.* = switch (item) {
         .int => |number| .{ .kind = .int, .scalar_bits = @bitCast(number) },
         .float => |number| .{ .kind = .float, .scalar_bits = @bitCast(number) },
@@ -567,7 +578,8 @@ fn writeView(item: Value, output: *abi.ValueView) abi.HostStatus {
         },
         .list => |header| .{ .kind = .list, .aggregate_len = header.length() },
         .dict => |header| .{ .kind = .dict, .aggregate_len = header.length() },
-        .task, .module, .unit_plan => return .invalid,
+        .task => return call.rejectCapability("native words cannot observe task capabilities"),
+        .module => return call.rejectCapability("native words cannot observe module capabilities"),
     };
     return .ok;
 }
@@ -590,7 +602,7 @@ fn hostInput(
     const call = transactionFrom(context);
     if (index >= call.definition.effect.inputs) return .invalid;
     const item = call.activeEvaluator().nativeInputBorrowed(call.definition.effect.inputs, index);
-    return writeView(item, output);
+    return writeView(call, item, output);
 }
 
 fn hostListAt(
@@ -613,7 +625,7 @@ fn hostListAt(
     };
     if (item_index >= header.length()) return .invalid;
     if (charge(call, 1) != .ok) return .yield_required;
-    return writeView(list.atUnchecked(source, @intCast(item_index)), output);
+    return writeView(call, list.atUnchecked(source, @intCast(item_index)), output);
 }
 
 /// Walks a declared input down one bounded path. Charging one unit per step
@@ -650,9 +662,9 @@ fn hostReadPath(
             else
                 dict.valueAt(header, @intCast(entry));
         },
-        .int, .float, .char, .symbol, .word, .task, .module, .unit_plan => return .invalid,
+        .int, .float, .char, .symbol, .word, .task, .module => return .invalid,
     };
-    return writeView(current, output);
+    return writeView(call, current, output);
 }
 
 fn hostDictAt(
@@ -675,9 +687,9 @@ fn hostDictAt(
     };
     if (item_index >= header.length()) return .invalid;
     if (charge(call, 1) != .ok) return .yield_required;
-    if (writeView(dict.keyAt(header, @intCast(item_index)), key_output) != .ok)
+    if (writeView(call, dict.keyAt(header, @intCast(item_index)), key_output) != .ok)
         return .invalid;
-    return writeView(dict.valueAt(header, @intCast(item_index)), value_output);
+    return writeView(call, dict.valueAt(header, @intCast(item_index)), value_output);
 }
 
 fn hostForward(

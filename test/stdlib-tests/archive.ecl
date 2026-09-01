@@ -1,11 +1,12 @@
 ### module stdlib.test.archive
+[]
 (
  'stdlib.test.support ('equal 'raises-word 'documented) import
 
  ### defp raises-at-index
  (quotation kind index -- : "Assert an archive byte failure identifies its item index.")
  (|quotation kind index|
-  quotation @attempt
+  [] quotation @attempt
   dup result.err? 1 equal
   'err at
   dup 'kind at kind equal

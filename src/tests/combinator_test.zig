@@ -56,6 +56,10 @@ fn expectCancelledAfterSetup(
 test "combinators: isolated iteration broadcast reduction and infra" {
     try support.expectStacks(&.{
         .{ .name = "each", .source = "[1 2 3] (dup *) each", .expected = "[1 4 9]" },
+        .{ .name = "each dict values", .source = "{'a 1 'b 2} (1 +) each", .expected = "{'a 2 'b 3}" },
+        .{ .name = "each empty dict", .source = "{} (missing) each", .expected = "{}" },
+        .{ .name = "for dict values", .source = "{'a 1 'b 2} (1 + pop) for 42", .expected = "42" },
+        .{ .name = "for empty dict", .source = "{} (missing) for 42", .expected = "42" },
         .{ .name = "zip-with right broadcast", .source = "[1 2 3] 10 (pair) zip-with", .expected = "([1 10]\n [2 10]\n [3 10])" },
         .{ .name = "zip-with left broadcast", .source = "10 [1 2 3] (pair) zip-with", .expected = "([10 1]\n [10 2]\n [10 3])" },
         .{ .name = "fold", .source = "[1 2 3] 0 (+) fold", .expected = "6" },
@@ -168,7 +172,20 @@ test "combinators: contracts and conformability are structural errors" {
             },
         },
         .{ .name = "each no result", .source = "[10] (pop) each", .kind = "contract", .word = "each" },
+        .{ .name = "dict each no result", .source = "{'a 10} (pop) each", .kind = "contract", .word = "each" },
         .{ .name = "for result", .source = "[10] (dup) for", .kind = "contract", .word = "for" },
+        .{ .name = "dict for result", .source = "{'a 10} (dup) for", .kind = "contract", .word = "for" },
+        .{
+            .name = "dict for follows insertion order",
+            .source = "{'first 10 'second 20} (dup 20 = (pop 1) (pop) if) for",
+            .kind = "contract",
+            .word = "for",
+            .data = &.{
+                .{ .name = "index", .expected = .{ .int = 1 } },
+                .{ .name = "seeded", .expected = .{ .int = 1 } },
+                .{ .name = "observed", .expected = .{ .int = 1 } },
+            },
+        },
         .{ .name = "fold extra result", .source = "[10] 0 (dup) fold", .kind = "contract", .word = "fold" },
         .{ .name = "scan extra result", .source = "[10] 0 (dup) scan", .kind = "contract", .word = "scan" },
         .{ .name = "zip-with atoms", .source = "1 2 (+) zip-with", .kind = "type", .word = "zip-with" },
@@ -300,13 +317,13 @@ test "inline times checkpointed guards and case prevalidate and select" {
         .{ .name = "case prevalidation", .source = "1 [1 (10) 2 20 (30)] case", .kind = "type", .word = "len" },
         .{
             .name = "cond prevalidation precedes effects",
-            .source = "([(1 'k set 1) (10) 20] cond) @attempt pop k",
+            .source = "[] ([(1 'k set 1) (10) 20] cond) @attempt pop k",
             .kind = "undefined-word",
             .word = "k",
         },
         .{
             .name = "case prevalidation precedes actions",
-            .source = "(1 [1 (7 'k set) 2 20 (30)] case) @attempt pop k",
+            .source = "[] (1 [1 (7 'k set) 2 20 (30)] case) @attempt pop k",
             .kind = "undefined-word",
             .word = "k",
         },
@@ -378,7 +395,7 @@ test "linrec: quotations keep source scope module home and within authority" {
     try support.expectStacks(&.{
         .{
             .name = "all four escaped quotations stay source sealed",
-            .source = "((dup 0 =) 'terminal? defp (pop 10) 'base-op defp " ++
+            .source = "[] ((dup 0 =) 'terminal? defp (pop 10) 'base-op defp " ++
                 "(dup 1 -) 'pre-op defp (+) 'post-op defp " ++
                 "((terminal?)) 'predicate def ((base-op)) 'base def " ++
                 "((pre-op)) 'pre def ((post-op)) 'post def) 'linrec-quotes @defm " ++
@@ -392,14 +409,14 @@ test "linrec: quotations keep source scope module home and within authority" {
             .name = "same-home recursive descent retains private within authority",
             .source = "[2] ((dup 0 =) 'terminal? defp " ++
                 "(((terminal?) (pop 10) (dup 1 -) (+) linrec without) within) " ++
-                "'run def) seed 'linrec-state @defm linrec-state.run",
+                "'run def) 'linrec-state @defm linrec-state.run",
             .expected = "13",
         },
         .{
             .name = "cross-module quotations remain inside one caller effect boundary",
-            .source = "(((dup 0 =)) 'predicate def ((pop 10)) 'base def " ++
+            .source = "[] (((dup 0 =)) 'predicate def ((pop 10)) 'base def " ++
                 "((dup 1 -)) 'pre def ((+)) 'post def) 'linrec-source @defm " ++
-                "((n -- result) (linrec-source.predicate linrec-source.base " ++
+                "[] ((n -- result) (linrec-source.predicate linrec-source.base " ++
                 "linrec-source.pre linrec-source.post linrec) 'run def) " ++
                 "'linrec-runner @defm 2 linrec-runner.run",
             .expected = "13",
@@ -414,7 +431,7 @@ test "linrec: cross-module descent preserves the enclosing effect boundary and t
     defer runtime.deinit();
     switch (try runtime.runUnit(
         "linrec-source.ecl",
-        "(((dup 0 =)) 'predicate def (()) 'base def ((1 -)) 'pre def " ++
+        "[] (((dup 0 =)) 'predicate def (()) 'base def ((1 -)) 'pre def " ++
             "((dup)) 'post def) 'linrec-source @defm",
     )) {
         .ok => {},
@@ -426,7 +443,7 @@ test "linrec: cross-module descent preserves the enclosing effect boundary and t
     }
     switch (try runtime.runUnit(
         "linrec-runner.ecl",
-        "((n -- result) (linrec-source.predicate linrec-source.base " ++
+        "[] ((n -- result) (linrec-source.predicate linrec-source.base " ++
             "linrec-source.pre linrec-source.post linrec) 'run def) " ++
             "'linrec-runner @defm",
     )) {
@@ -492,7 +509,7 @@ test "linrec: failures in every quotation roll back the enclosing unit" {
     }
 }
 
-test "linrec: deep recursion uses explicit frames and cancellation reaches guard restore" {
+test "linrec: empty post retains explicit depth frames and cancellation reaches guard restore" {
     var depth_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&depth_heap);
     var depth_runtime = try session.Session.init(depth_heap.allocator(), &.{});
@@ -505,7 +522,7 @@ test "linrec: deep recursion uses explicit frames and cancellation reaches guard
     try std.testing.expect(depth_runtime.lastMaxFrames() >= 10_000);
 
     try support.expectStack(
-        "(200 (dup 100 = dup (victim cancel) () if pop dup 0 =) " ++
+        "[] (200 (dup 100 = dup (victim cancel) () if pop dup 0 =) " ++
             "(pop) (1 -) () linrec) @spawn dup 'victim set await 'err at 'kind at",
         "'cancelled",
     );
@@ -690,7 +707,7 @@ test "idioms: a foreign stamp keeps recognition off" {
     // Recognizing it substituted the core builtin and returned 6.
     try expectStack(
         &runtime,
-        "((pop pop 42) '+ def ((+)) 'q def) 'm @defm [1 2 3] 0 m.q fold",
+        "[] ((pop pop 42) '+ def ((+)) 'q def) 'm @defm [1 2 3] 0 m.q fold",
         "42",
     );
     try std.testing.expectEqual(@as(u64, 0), runtime.lastIdiomHits());
@@ -705,15 +722,15 @@ test "idioms: a foreign stamp keeps recognition off" {
     try std.testing.expect(native.lastIdiomHits() > 0);
 
     // And a quotation stamped in one module applied inside another resolves in
-    // the chain it was written in, not the one shadowing around it.
+    // the chain it was written in independently of the surrounding shadow.
     var across_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&across_heap);
     var across = try session.Session.init(across_heap.allocator(), &.{});
     defer across.deinit();
     try expectStack(
         &across,
-        "(((+)) 'q def) 'a @defm " ++
-            "((pop pop 42) '+ def (|l q| l 0 q fold) 'run def) 'b @defm " ++
+        "[] (((+)) 'q def) 'a @defm " ++
+            "[] ((pop pop 42) '+ def (|l q| l 0 q fold) 'run def) 'b @defm " ++
             "[1 2 3] a.q b.run",
         "6",
     );
@@ -764,7 +781,7 @@ test "idioms: a rebound name keeps recognition off" {
     defer test_heap.retire(&rebound_dependency_heap);
     var rebound_dependency = try session.Session.init(rebound_dependency_heap.allocator(), &.{});
     defer rebound_dependency.deinit();
-    // `neg` is `(-1 *)` in the prelude, so its `*` is core's, not this one.
+    // `neg` is `(-1 *)` in the prelude, so its `*` retains core resolution.
     try expectStack(&rebound_dependency, "(pop pop 42) '* def 2 neg", "-2");
     try std.testing.expectEqual(@as(u64, 0), rebound_dependency.lastIdiomHits());
 
@@ -782,7 +799,7 @@ test "idioms: a rebound name keeps recognition off" {
     defer used_sort.deinit();
     try expectStack(
         &used_sort,
-        "((a -- b) (pop [0]) 'grade def) 'm @defm 'm ('grade) import [3 1 2] sort",
+        "[] ((a -- b) (pop [0]) 'grade def) 'm @defm 'm ('grade) import [3 1 2] sort",
         "[1 2 3]",
     );
     try std.testing.expectEqual(@as(u64, 0), used_sort.lastIdiomHits());
@@ -793,7 +810,7 @@ test "idioms: a rebound name keeps recognition off" {
     defer between_applications.deinit();
     try expectStack(
         &between_applications,
-        "[1 2] (dup 1 = (((a -- b) (pop 42) 'f def) 'm @defm) () if m.f) each",
+        "[1 2] (dup 1 = ([] ((a -- b) (pop 42) 'f def) 'm @defm) () if m.f) each",
         "[42 42]",
     );
     try std.testing.expectEqual(@as(u64, 0), between_applications.lastIdiomHits());

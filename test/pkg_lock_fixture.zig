@@ -36,7 +36,7 @@ pub const Fixture = struct {
             );
             try directory.dir.writeFile(io, .{
                 .sub_path = "cache/smoke-1.0.0-" ++ package_hash[7..] ++ "/smoke.ecl",
-                .data = "((42) 'answer def) 'smoke @defm\n",
+                .data = "[] ((42) 'answer def) 'smoke @defm\n",
             });
             try directory.dir.writeFile(io, .{
                 .sub_path = "cache/smoke-1.0.0-" ++ package_hash[7..] ++ "/ecl.pkg",
@@ -49,7 +49,7 @@ pub const Fixture = struct {
         }
         try directory.dir.writeFile(io, .{
             .sub_path = "path/smoke.ecl",
-            .data = "((99) 'answer def) 'smoke @defm\n",
+            .data = "[] ((99) 'answer def) 'smoke @defm\n",
         });
         const cache = try std.fs.path.join(allocator, &.{ root, "cache" });
         errdefer allocator.free(cache);

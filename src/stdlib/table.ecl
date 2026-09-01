@@ -6,6 +6,7 @@
 # Tables remain ordinary dictionaries: `type`, `keys`, `at`, and `put` keep
 # their normal behavior. Exported table operations validate table arguments and
 # raise an error for invalid dictionaries.
+[]
 (
  ### defp text?
  (value -- bool : "Return 1 when every item in a list is a character.")
@@ -21,7 +22,7 @@
  (candidate -- table : "Validate and return a table candidate.")
  (dup type 'dict match?
   'type error.new "a table must be a dict of columns" error.with-message assert
-  dup dict.keys len 0 >
+  dup dict.size 0 >
   'shape error.new "a table must have at least one column" error.with-message assert
   dup dict.keys (string?) all?
   'type error.new "table column names must be strings" error.with-message assert
@@ -43,7 +44,7 @@
   "Return 1 when a candidate is a table and 0 when it is not.
 
    Cancellation, allocation failure, and other runtime errors propagate.")
- (wrap (checked pop) seed @attempt dup result.ok? (pop 1) (convention-miss?) if)
+ (wrap (checked pop) @attempt dup result.ok? (pop 1) (convention-miss?) if)
  'valid? def
 
  ### def names
@@ -552,7 +553,7 @@
  (|left right pairs fill extra|
   extra fill (swap dict.has?) partial all?
   'domain error.new "a fill must cover every appended right column" error.with-message assert
-  extra len fill dict.keys len =
+  extra len fill dict.size =
   'domain error.new "a fill must cover exactly the appended right columns" error.with-message assert
   left right pairs extra
   extra fill (swap at) partial each

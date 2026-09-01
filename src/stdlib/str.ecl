@@ -1,6 +1,7 @@
 ### module str
 # String operations use ASCII case and whitespace rules. Case conversion leaves
 # non-ASCII characters unchanged.
+[]
 (
  ### defp blanks
  (-- string : "Return the ASCII whitespace characters recognized by trimming operations.")

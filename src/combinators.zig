@@ -898,7 +898,11 @@ const IterationState = struct {
     }
 
     fn pushInputs(self: *IterationState, evaluator: *Machine) MachineError!void {
-        try evaluator.pushBorrowed(inputAt(self.left.borrow(), self.index));
+        const left = self.left.borrow();
+        try evaluator.pushBorrowed(if (self.kind == .for_word and left == .dict)
+            dict.valueAt(left.dict, self.index)
+        else
+            inputAt(left, self.index));
         if (self.kind == .zip_with) try evaluator.pushBorrowed(inputAt(
             self.right.?.borrow(),
             self.index,
@@ -1244,6 +1248,29 @@ fn startUpdate(evaluator: *Machine, policy: UpdatePolicy) MachineError!void {
     var selector = try evaluator.popValue();
     defer selector.deinit();
     var collection = try evaluator.popValue();
+    defer collection.deinit();
+
+    return startUpdateOwned(
+        evaluator,
+        policy,
+        collection.take(),
+        selector.take(),
+        quotation.take(),
+    );
+}
+
+fn startUpdateOwned(
+    evaluator: *Machine,
+    policy: UpdatePolicy,
+    collection_value: Value,
+    selector_value: Value,
+    quotation_value: Value,
+) MachineError!void {
+    var quotation = heap.OwnedValue.init(evaluator.releaseDomain(), quotation_value);
+    defer quotation.deinit();
+    var selector = heap.OwnedValue.init(evaluator.releaseDomain(), selector_value);
+    defer selector.deinit();
+    var collection = heap.OwnedValue.init(evaluator.releaseDomain(), collection_value);
     defer collection.deinit();
 
     const mode: UpdateMode = switch (collection.borrow()) {
@@ -1819,9 +1846,34 @@ fn startUnaryIteration(evaluator: *Machine, kind: IterationKind) MachineError!vo
     defer quotation.deinit();
     var input = try evaluator.popValue();
     defer input.deinit();
-    if (quotation.borrow() != .list or input.borrow() != .list)
-        return evaluator.typeError("a list and quotation");
-    const count: usize = @intCast(input.borrow().list.length());
+    if (quotation.borrow() != .list)
+        return evaluator.typeError(if (kind == .each or kind == .for_word)
+            "a list or dict and quotation"
+        else
+            "a list and quotation");
+    if (kind == .each and input.borrow() == .dict) {
+        const keys = dict.keysOf(input.borrow().dict);
+        heap.retainValue(keys);
+        var selector = heap.OwnedValue.init(evaluator.releaseDomain(), keys);
+        defer selector.deinit();
+        return startUpdateOwned(
+            evaluator,
+            .atomic_key_list,
+            input.take(),
+            selector.take(),
+            quotation.take(),
+        );
+    }
+    if (input.borrow() != .list and !(kind == .for_word and input.borrow() == .dict))
+        return evaluator.typeError(if (kind == .each or kind == .for_word)
+            "a list or dict and quotation"
+        else
+            "a list and quotation");
+    const count: usize = @intCast(switch (input.borrow()) {
+        .list => |header| header.length(),
+        .dict => |header| header.length(),
+        else => unreachable,
+    });
     if (count == 0) {
         if (kind == .each) try pushGenericEmpty(evaluator);
         return;
@@ -2029,6 +2081,6 @@ fn boolValue(evaluator: *Machine, item: *const heap.OwnedValue) MachineError!boo
             1 => true,
             else => evaluator.typeError("a 0/1 bool"),
         },
-        .float, .char, .symbol, .word, .list, .dict, .task, .module, .unit_plan => evaluator.typeError("a 0/1 bool"),
+        .float, .char, .symbol, .word, .list, .dict, .task, .module => evaluator.typeError("a 0/1 bool"),
     };
 }

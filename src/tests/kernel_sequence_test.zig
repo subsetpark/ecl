@@ -51,7 +51,16 @@ fn runDisplaySource(
 }
 
 test "sequence: len shape and ragged shape errors" {
-    try helper.expectStack("[[1 2] [3 4]] dup len swap shape", "2 [2 2]");
+    try helper.expectStack(
+        "[[1 2] [3 4]] dup len swap shape [] empty? [1] empty?",
+        "2 [2 2] 1 0",
+    );
+    try helper.expectError(.{
+        .name = "len rejects dictionaries",
+        .source = "{'a 1} len",
+        .kind = "type",
+        .word = "len",
+    });
     try helper.expectError(.{
         .name = "ragged shape",
         .source = "[[1 2] [3]] shape",

@@ -17,8 +17,8 @@
 //!
 //! The bounding and float conversion below are deliberately *ours* rather than
 //! `std.Random`'s helpers. std's bounded-int routine documents itself as
-//! "Lemire's (with an extra tweak from me)" — an implementation choice, not a
-//! stability contract — and these sequences are a language-level promise
+//! "Lemire's (with an extra tweak from me)," which is only an implementation
+//! choice. These sequences are a language-level stability promise
 //! pinned by the snapshot corpus.
 const std = @import("std");
 const value = @import("value.zig");

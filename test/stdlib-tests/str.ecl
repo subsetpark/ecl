@@ -1,4 +1,5 @@
 ### module stdlib.test.str
+[]
 (
  'stdlib.test.support
  ('equal 'raises-containing 'documented)

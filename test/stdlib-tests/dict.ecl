@@ -1,4 +1,5 @@
 ### module stdlib.test.dict
+[]
 (
  'stdlib.test.support
  ('equal 'raises-containing 'raises-word 'documented)
@@ -6,8 +7,8 @@
 
  ### test observations
  (-- : "Observe dictionary entries in insertion order and by whole-value key.")
- ({'a 1 'b 2} dict.keys ['a 'b] equal
-  {'a 1 'b 2} dict.size 2 equal
+ ({'a 1 'b 2} dict.size 2 equal
+  {'a 1 'b 2} dict.keys ['a 'b] equal
   {'a 1 'b 2} dict.vals [1 2] equal
   {'a 1 'b 2} dict.pairs (('a 1) ('b 2)) equal
   {'a 1} 'a dict.has? 1 equal
@@ -20,6 +21,8 @@
   {{'a 1} 9} {'a 1} dict.has? 1 equal
   {1 9} 1.0 dict.has? 1 equal
   {"ab" 9} "a" dict.has? 0 equal
+  ({'a 1} len) 'type 'len raises-word
+  ([] dict.size) 'type 'dict.size raises-word
   ([] 'a dict.has?) 'type 'dict.has? raises-word)
  'observations test
 
@@ -70,7 +73,7 @@
  ({'a 1 'b 2 'c 3} (nip 10 *) dict.map {'a 10 'b 20 'c 30} equal
   {} (missing) dict.map {} equal
   {'a 1 'b 2} (pair) dict.map {'a ('a 1) 'b ('b 2)} equal
-  {'a 1 'b 2} (str) dict.map-values {'a "1" 'b "2"} equal)
+  ((dict.map-values) first execute) 'undefined-word 'dict.map-values raises-word)
  'mapping test
 
  ### test selection
@@ -100,10 +103,10 @@
 
  ### test documentation
  (-- : "Expose documentation for every dict module export.")
- (['dict.keys 'dict.size 'dict.vals 'dict.pairs 'dict.has? 'dict.at
+ (['dict.size 'dict.keys 'dict.vals 'dict.pairs 'dict.has? 'dict.at
    'dict.merge 'dict.from-flat 'dict.from-lists 'dict.from-pairs
    'dict.from-keys 'dict.keys-exactly? 'dict.update 'dict.update-or
-   'dict.map 'dict.map-values 'dict.filter 'dict.reject 'dict.take
+   'dict.map 'dict.filter 'dict.reject 'dict.take
    'dict.drop 'dict.split 'dict.merge-with]
   documented)
  'documentation test

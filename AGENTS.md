@@ -2,8 +2,8 @@
 
 This file contains the evergreen rules for every change. Detailed guidance is
 split by subject; read each linked guide whose scope intersects the task before
-editing or running its specialized gates. The linked guides are normative, not
-optional background.
+editing or running its specialized gates. The linked guides are required
+normative guidance.
 
 ## Detailed guidance
 
@@ -31,7 +31,8 @@ in those guides rather than expanding this index with incident-specific history.
   not inspect implementation source text in a behavioral test, add test-only
   representation accessors, or use an implementation as its own oracle.
 - Enforce a repository rule in the type system first, then the source audit for
-  what types cannot express. Runtime tests prove behavior, not source shape.
+  what types cannot express. Runtime tests prove behavior through public
+  interfaces; source audits prove source shape.
 - Prefer nominal IDs, opaque handles, validated factories, capabilities,
   typestate, tagged unions, `comptime` validation, and exhaustive switches.
   Make invalid ownership, phase, publication, and continuation states

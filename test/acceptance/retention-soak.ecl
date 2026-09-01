@@ -4,6 +4,7 @@ range
 
  ### def hot-binding
  (1) 'hot-binding def
+ []
  (
   ### def value
   (1) 'value def)

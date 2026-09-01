@@ -48,8 +48,8 @@ test "testing: declaration is legal only at a module construction root" {
     defer runtime.deinit();
 
     try expectErr(&runtime, "(1) 'outside test");
-    try expectErr(&runtime, "(((1) 'nested test) call) 'nested.module @defm");
-    try expectOk(&runtime, "((1) 'direct test) 'direct.module @defm");
+    try expectErr(&runtime, "[] (((1) 'nested test) call) 'nested.module @defm");
+    try expectOk(&runtime, "[] ((1) 'direct test) 'direct.module @defm");
 }
 
 test "testing: test names are absent from application resolution and module invocation" {
@@ -60,7 +60,7 @@ test "testing: test names are absent from application resolution and module invo
 
     try expectOk(
         &runtime,
-        "((1) 'same def (2) 'same test (3) 'hidden test) @module " ++
+        "[] ((1) 'same def (2) 'same test (3) 'hidden test) @module " ++
             "dup 'visibility register " ++
             "visibility.same 1 = {'kind 'user} assert",
     );
@@ -76,8 +76,8 @@ test "testing: test mode discovers canonical registrations without aliases" {
 
     try expectOk(
         &runtime,
-        "((1) 'z test (2) 'a test) 'suite.two @defm " ++
-            "((3) 'only test) @module dup 'suite.one register 'suite.copy register " ++
+        "[] ((1) 'z test (2) 'a test) 'suite.two @defm " ++
+            "[] ((3) 'only test) @module dup 'suite.one register 'suite.copy register " ++
             "'short 'suite.one alias " ++
             "tests dup len 4 = {'kind 'user} assert " ++
             "first dup 'module at 'suite.copy match? {'kind 'user} assert " ++
@@ -106,7 +106,7 @@ test "testing: application sessions validate and discard test declarations" {
     // meaning and incurs no retained entry or name-index work.
     try expectOk(
         &application,
-        "((1) 'same test (2) 'same test (42) 'answer def) 'discarded @defm " ++
+        "[] ((1) 'same test (2) 'same test (42) 'answer def) 'discarded @defm " ++
             "discarded.answer 42 = {'kind 'user} assert",
     );
 
@@ -114,7 +114,7 @@ test "testing: application sessions validate and discard test declarations" {
     defer test_heap.retire(&test_backing);
     var testing = try session.Session.initTest(test_backing.allocator(), &.{});
     defer testing.deinit();
-    try expectErr(&testing, "((1) 'same test (2) 'same test) 'duplicate @defm");
+    try expectErr(&testing, "[] ((1) 'same test (2) 'same test) 'duplicate @defm");
 }
 
 test "testing: test execution reaches private definitions and reifies its isolated stack" {
@@ -125,7 +125,7 @@ test "testing: test execution reaches private definitions and reifies its isolat
 
     try expectOk(
         &runtime,
-        "((42) 'secret defp (stack len secret) 'private test) 'suite @defm " ++
+        "[] ((42) 'secret defp (stack len secret) 'private test) 'suite @defm " ++
             "99 tests first @test " ++
             "dup 'ok dict.has? {'kind 'user} assert " ++
             "'ok at [0 42] match? {'kind 'user} assert " ++
@@ -141,7 +141,7 @@ test "testing: test executions share durable module state" {
 
     try expectOk(
         &runtime,
-        "(0 ((1 + dup without) within) 'first test " ++
+        "[] (0 ((1 + dup without) within) 'first test " ++
             "((dup without) within) 'second test) 'stateful @defm " ++
             "tests first @test 'ok at first 1 = {'kind 'user} assert " ++
             "tests 1 at @test 'ok at first 1 = {'kind 'user} assert",
@@ -156,9 +156,9 @@ test "testing: reload and removal replace the discoverable test catalog coherent
 
     try expectOk(
         &runtime,
-        "((1) 'old test) 'changing @defm " ++
+        "[] ((1) 'old test) 'changing @defm " ++
             "tests first 'stale set " ++
-            "((2) 'new test) 'changing @defm " ++
+            "[] ((2) 'new test) 'changing @defm " ++
             "tests dup len 1 = {'kind 'user} assert " ++
             "first 'name at 'new match? {'kind 'user} assert " ++
             "stale @test 'err dict.has? {'kind 'user} assert " ++
@@ -174,14 +174,14 @@ test "testing: test discovery exposes metadata but not executable bodies" {
 
     try expectOk(
         &runtime,
-        "((x -- y : \"Documented test.\") (dup) 'metadata test) 'catalog @defm " ++
+        "[] ((x -- y : \"Documented test.\") (dup) 'metadata test) 'catalog @defm " ++
             "tests first " ++
             "dup 'module dict.has? {'kind 'user} assert " ++
             "dup 'name dict.has? {'kind 'user} assert " ++
             "dup 'effect dict.has? {'kind 'user} assert " ++
             "dup 'doc dict.has? {'kind 'user} assert " ++
             "dup 'body dict.has? not {'kind 'user} assert " ++
-            "dict.keys len 4 = {'kind 'user} assert",
+            "dict.size 4 = {'kind 'user} assert",
     );
 }
 
@@ -193,7 +193,7 @@ test "testing: large test catalogs remain cancellable" {
 
     var source: std.ArrayList(u8) = .empty;
     defer source.deinit(std.testing.allocator);
-    try source.append(std.testing.allocator, '(');
+    try source.appendSlice(std.testing.allocator, "[] (");
     for (0..300) |index| {
         const declaration = try std.fmt.allocPrint(
             std.testing.allocator,

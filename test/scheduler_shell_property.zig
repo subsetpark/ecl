@@ -75,7 +75,7 @@ fn appendValues(writer: *std.Io.Writer, width: usize, square: bool) !void {
 }
 
 fn appendTasks(writer: *std.Io.Writer, width: usize) !void {
-    for (0..width) |index| try writer.print("({d}) @spawn ", .{index});
+    for (0..width) |index| try writer.print("[] ({d}) @spawn ", .{index});
     try writer.print("{d} pack", .{width});
 }
 
@@ -90,87 +90,87 @@ fn runShellScenario(encoded: u16) !void {
     switch (scenario.operation) {
         .par_each => {
             try appendValues(&source_buffer.writer, scenario.width, false);
-            try source_buffer.writer.writeAll(" (dup *) @each");
+            try source_buffer.writer.writeAll(" [] (dup *) @each");
             try appendValues(&expected_buffer.writer, scenario.width, true);
             try expected_buffer.writer.writeByte('\n');
         },
         .task_join => {
             try appendTasks(&source_buffer.writer, scenario.width);
-            try source_buffer.writer.writeAll(" (await 'ok at first) @each");
+            try source_buffer.writer.writeAll(" [] (await 'ok at first) @each");
             try appendValues(&expected_buffer.writer, scenario.width, false);
             try expected_buffer.writer.writeByte('\n');
         },
         .await_one => {
-            try source_buffer.writer.writeAll("(42) @spawn await");
+            try source_buffer.writer.writeAll("[] (42) @spawn await");
             try expected_buffer.writer.writeAll("{'ok [42]}\n");
         },
         .await_any => {
-            try source_buffer.writer.writeAll("(42) @spawn ");
+            try source_buffer.writer.writeAll("[] (42) @spawn ");
             for (1..scenario.width) |_| try source_buffer.writer.writeAll("dup ");
             try source_buffer.writer.print("{d} pack await-any", .{scenario.width});
             try expected_buffer.writer.writeAll("0 {'ok [42]}\n");
         },
         .await_for => {
-            try source_buffer.writer.writeAll("(42) @spawn dup await pop 0 await-for");
+            try source_buffer.writer.writeAll("[] (42) @spawn dup await pop 0 await-for");
             try expected_buffer.writer.writeAll("{'ok [42]}\n");
         },
         .exit => {
             for (0..scenario.width) |_| {
-                try source_buffer.writer.writeAll("((1) () while) @spawn pop ");
+                try source_buffer.writer.writeAll("[] ((1) () while) @spawn pop ");
             }
             try source_buffer.writer.writeAll("7 exit");
             expected_exit = 7;
         },
         .wait_graph => {
-            try source_buffer.writer.writeAll("((1) () while) @spawn 'gate set ");
-            for (0..scenario.width) |_| try source_buffer.writer.writeAll("(gate await) @spawn ");
+            try source_buffer.writer.writeAll("[] ((1) () while) @spawn 'gate set ");
+            for (0..scenario.width) |_| try source_buffer.writer.writeAll("[] (gate await) @spawn ");
             try source_buffer.writer.print(
-                "{d} pack gate cancel (await) @each len",
+                "{d} pack gate cancel [] (await) @each len",
                 .{scenario.width},
             );
             try expected_buffer.writer.print("{d}\n", .{scenario.width});
         },
         .kernel_fairness => {
             try source_buffer.writer.writeAll(
-                "([1] 100000 take sum) @spawn pop " ++
-                    "([1] 100000 take sum) @spawn " ++
-                    "(7) @spawn pair await-any pop",
+                "[] ([1] 100000 take sum) @spawn pop " ++
+                    "[] ([1] 100000 take sum) @spawn " ++
+                    "[] (7) @spawn pair await-any pop",
             );
             try expected_buffer.writer.writeAll("1\n");
         },
         .result_fairness => {
             try source_buffer.writer.writeAll(
-                "([1] 200000 take call) @spawn " ++
-                    "(7) @spawn pair await-any pop",
+                "[] ([1] 200000 take call) @spawn " ++
+                    "[] (7) @spawn pair await-any pop",
             );
             try expected_buffer.writer.writeAll("1\n");
         },
         .raise_fairness => {
             try source_buffer.writer.writeAll(
                 "['x] 200000 take 'trace-value set " ++
-                    "(('kind 'custom 'trace trace-value 4 pack dict.from-flat raise) @attempt) @spawn " ++
-                    "(7) @spawn pair await-any pop",
+                    "[] ([] ('kind 'custom 'trace trace-value 4 pack dict.from-flat raise) @attempt) @spawn " ++
+                    "[] (7) @spawn pair await-any pop",
             );
             try expected_buffer.writer.writeAll("1\n");
         },
         .attempt_materialization => {
             try source_buffer.writer.writeAll(
                 "[1] 200000 take 'wide set " ++
-                    "((wide call) @attempt) @spawn await 'ok at call 'ok at len",
+                    "[] ([] (wide call) @attempt) @spawn await 'ok at call 'ok at len",
             );
             try expected_buffer.writer.writeAll("200000\n");
         },
         .wide_wait_setup => {
             try source_buffer.writer.writeAll(
-                "((1) () while) @spawn 'gate set " ++
-                    "(gate 1 pack 200000 take await-any) @spawn " ++
-                    "(7) @spawn pair await-any pop",
+                "[] ((1) () while) @spawn 'gate set " ++
+                    "[] (gate 1 pack 200000 take await-any) @spawn " ++
+                    "[] (7) @spawn pair await-any pop",
             );
             try expected_buffer.writer.writeAll("1\n");
         },
         .cancel_tree => {
             try source_buffer.writer.print(
-                "([1] {d} take (((1) () while) @spawn pop) each " ++
+                "[] ([1] {d} take ([] ((1) () while) @spawn pop) each " ++
                     "(1) () while) @spawn dup 20 await-for pop dup cancel await pop",
                 .{cancel_tree_width},
             );
@@ -178,15 +178,15 @@ fn runShellScenario(encoded: u16) !void {
         .tasks_mutation => {
             const width = 300 + scenario.width * 20;
             try source_buffer.writer.print(
-                "((1) () while) @spawn 'gate set [1] {d} take " ++
-                    "(pop (gate await pop) @spawn) each pop " ++
+                "[] ((1) () while) @spawn 'gate set [1] {d} take " ++
+                    "(pop [] (gate await pop) @spawn) each pop " ++
                     "gate cancel tasks len pop",
                 .{width},
             );
         },
         .root_quiescence => {
             for (0..scenario.width * 20) |_| {
-                try source_buffer.writer.writeAll("(1) @spawn pop ");
+                try source_buffer.writer.writeAll("[] (1) @spawn pop ");
             }
         },
         .infra_stack_handoff => {
@@ -201,8 +201,8 @@ fn runShellScenario(encoded: u16) !void {
         },
         .infra_fairness => {
             try source_buffer.writer.writeAll(
-                "([1] 200000 take () infra len) @spawn " ++
-                    "(7) @spawn pair await-any pop",
+                "[] ([1] 200000 take () infra len) @spawn " ++
+                    "[] (7) @spawn pair await-any pop",
             );
             try expected_buffer.writer.writeAll("1\n");
         },
@@ -212,7 +212,7 @@ fn runShellScenario(encoded: u16) !void {
                 if (index != 0) try source_buffer.writer.writeByte(' ');
                 try source_buffer.writer.print("{d}", .{index % 3});
             }
-            try source_buffer.writer.writeAll("] dup group dict.keys len swap 1 pack \"{}\" str.format pop");
+            try source_buffer.writer.writeAll("] dup group dict.size swap 1 pack \"{}\" str.format pop");
             try expected_buffer.writer.print("{d}\n", .{@min(scenario.width, 3)});
         },
     }

@@ -1,4 +1,5 @@
 ### module stdlib.test.pkg-manifest
+[]
 (
  'stdlib.test.support
  ('equal 'raises 'raises-containing 'raises-data 'documented)
@@ -20,7 +21,7 @@
  (-- : "Read canonical manifests and enforce their declared schema.")
  (manifest-text pkg.manifest.read 'name at "my.proj" equal
   "# a comment\n{'format 1 'name \"a\" 'version \"0.1.0\" 'exports {} 'requires {}}"
-  pkg.manifest.read 'requires at dict.keys len 0 equal
+  pkg.manifest.read 'requires at dict.size 0 equal
   manifest-text parse first dup pkg.manifest.validate match? 1 equal
   ("{'format 1" pkg.manifest.read) 'parse raises
   ("{} {}" pkg.manifest.read) 'shape "exactly one form" raises-containing

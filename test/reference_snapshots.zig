@@ -86,15 +86,15 @@ const cases = [_]Case{
     .{ .name = "bi", .source = "2 (1 +) (3 *) bi" },
     .{ .name = "tri", .source = "2 (1 +) (3 *) (4 -) tri" },
     .{ .name = "fail", .source = "\"bad\" fail" },
-    .{ .name = "result.ok?", .source = "(2 3 +) @attempt result.ok?" },
-    .{ .name = "result.or-raise", .source = "(2 3 +) @attempt result.or-raise" },
-    .{ .name = "result.or-else", .source = "(2 3 +) @attempt 9 result.or-else" },
+    .{ .name = "result.ok?", .source = "[] (2 3 +) @attempt result.ok?" },
+    .{ .name = "result.or-raise", .source = "[] (2 3 +) @attempt result.or-raise" },
+    .{ .name = "result.or-else", .source = "[] (2 3 +) @attempt 9 result.or-else" },
     .{ .name = "result.either", .source = "[7] result.ok (first) (pop 0) result.either" },
     .{ .name = "result.map-err", .source = "{'kind 'io} result.err (pop {'kind 'domain}) result.map-err" },
     // The prelude no longer carries these: the envelope interpreters live in
     // the module, and the old bare spellings resolve to nothing.
-    .{ .name = "bare or-raise", .source = "(2 3 +) @attempt or-raise" },
-    .{ .name = "bare ok?", .source = "(2 3 +) @attempt ok?" },
+    .{ .name = "bare or-raise", .source = "[] (2 3 +) @attempt or-raise" },
+    .{ .name = "bare ok?", .source = "[] (2 3 +) @attempt ok?" },
     .{ .name = "gone result.case", .source = "[7] result.ok (first) (pop 0) result.case" },
     .{ .name = "set", .source = "3 'x set x" },
     .{ .name = "set quotation", .source = "(dup *) 'q set q" },
@@ -102,7 +102,7 @@ const cases = [_]Case{
     .{ .name = "see", .source = "3 'x set 'x see" },
     .{ .name = "see set", .source = "'set see" },
     .{ .name = "setp", .source = "1 'x setp" },
-    .{ .name = "qualify execute", .source = "((41) 'f def) 'core.utils @defm 'core.utils 'f qualify execute" },
+    .{ .name = "qualify execute", .source = "[] ((41) 'f def) 'core.utils @defm 'core.utils 'f qualify execute" },
     .{ .name = "execute type", .source = "1 execute" },
     .{ .name = "doc qualify", .source = "'qualify doc" },
     .{ .name = "within top level", .source = "(1) within" },
@@ -110,7 +110,7 @@ const cases = [_]Case{
     .{ .name = "see within", .source = "'within see" },
     .{ .name = "doc without", .source = "'without doc" },
     .{ .name = "unmodule unknown", .source = "'nowhere unmodule" },
-    .{ .name = "unmodule then resolve", .source = "((1) 'x def) 'gone @defm 'gone unmodule gone.x" },
+    .{ .name = "unmodule then resolve", .source = "[] ((1) 'x def) 'gone @defm 'gone unmodule gone.x" },
     .{ .name = "doc unmodule", .source = "'unmodule doc" },
     // M12 stdlib and host scripting. Deterministic output only: no network,
     // and no environment dependence beyond an unset-variable error.
@@ -153,16 +153,16 @@ const cases = [_]Case{
     .{ .name = "rng deal", .source = "'rng ('deal) import 3 10 deal" },
     // The unit-constructor convention: the guided boundary error and the
     // seeding composition that replaced the `-with` family.
-    .{ .name = "isolated substack", .source = "3 (1 +) @attempt" },
-    .{ .name = "isolated child", .source = "3 [1 2] (+ +) @each" },
-    .{ .name = "seeded attempt", .source = "[3] (1 +) seed @attempt" },
-    .{ .name = "seeded module", .source = "[7] ('base set) seed 'm @defm m.base" },
+    .{ .name = "isolated substack", .source = "3 [1] (+) @attempt" },
+    .{ .name = "isolated child", .source = "3 [1 2] [] (+ +) @each" },
+    .{ .name = "seeded attempt", .source = "[3] (1 +) @attempt" },
+    .{ .name = "seeded module", .source = "[7] ('base set) 'm @defm m.base" },
     // Anonymous construction, opaque identity, and one image under two names.
-    .{ .name = "anonymous module", .source = "(1 'x set) @module type" },
-    .{ .name = "module identity", .source = "(1) @module dup match? (1) @module (1) @module match?" },
+    .{ .name = "anonymous module", .source = "[] () @module type" },
+    .{ .name = "module identity", .source = "[] (1) @module dup match? [] (1) @module [] (1) @module match?" },
     .{
         .name = "one image two registrations",
-        .source = "(0 ((1 + dup without) within) 'bump def) @module " ++
+        .source = "[] (0 ((1 + dup without) within) 'bump def) @module " ++
             "dup 'l register 'r register l.bump l.bump r.bump",
     },
     .{ .name = "module marker is unreadable", .source = "\"<module>\" parse" },
@@ -725,21 +725,21 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stderr:
         \\{'kind 'user 'msg "bad" 'word 'raise 'trace ['raise 'fail] 'data {'source "prelude.ecl" 'line <^\d+$> 'col 54}}
         \\=== result.ok? ===
-        \\source: (2 3 +) @attempt result.ok?
+        \\source: [] (2 3 +) @attempt result.ok?
         \\exit: 0
         \\stdout:
         \\1
         \\stderr:
         \\<empty>
         \\=== result.or-raise ===
-        \\source: (2 3 +) @attempt result.or-raise
+        \\source: [] (2 3 +) @attempt result.or-raise
         \\exit: 0
         \\stdout:
         \\[5]
         \\stderr:
         \\<empty>
         \\=== result.or-else ===
-        \\source: (2 3 +) @attempt 9 result.or-else
+        \\source: [] (2 3 +) @attempt 9 result.or-else
         \\exit: 0
         \\stdout:
         \\[5]
@@ -762,19 +762,19 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stderr:
         \\<empty>
         \\=== bare or-raise ===
-        \\source: (2 3 +) @attempt or-raise
+        \\source: [] (2 3 +) @attempt or-raise
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'undefined-word 'msg "undefined word `or-raise`" 'word 'or-raise 'trace ['or-raise] 'data {'name 'or-raise 'scope 'session 'source "<command>" 'line 1 'col 18}}
+        \\{'kind 'undefined-word 'msg "undefined word `or-raise`" 'word 'or-raise 'trace ['or-raise] 'data {'name 'or-raise 'scope 'session 'source "<command>" 'line 1 'col 21}}
         \\=== bare ok? ===
-        \\source: (2 3 +) @attempt ok?
+        \\source: [] (2 3 +) @attempt ok?
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'undefined-word 'msg "undefined word `ok?`" 'word 'ok? 'trace ['ok?] 'data {'name 'ok? 'scope 'session 'source "<command>" 'line 1 'col 18}}
+        \\{'kind 'undefined-word 'msg "undefined word `ok?`" 'word 'ok? 'trace ['ok?] 'data {'name 'ok? 'scope 'session 'source "<command>" 'line 1 'col 21}}
         \\=== gone result.case ===
         \\source: [7] result.ok (first) (pop 0) result.case
         \\exit: 1
@@ -827,7 +827,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stderr:
         \\{'kind 'domain 'msg "defp/setp are legal only in a module root" 'word 'defp 'trace ['defp 'setp] 'data {'source "prelude.ecl" 'line <^\d+$> 'col 20}}
         \\=== qualify execute ===
-        \\source: ((41) 'f def) 'core.utils @defm 'core.utils 'f qualify execute
+        \\source: [] ((41) 'f def) 'core.utils @defm 'core.utils 'f qualify execute
         \\exit: 0
         \\stdout:
         \\41
@@ -885,12 +885,12 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stderr:
         \\{'kind 'undefined-word 'msg "undefined word `nowhere`" 'word 'nowhere 'trace ['nowhere] 'data {'name 'nowhere 'scope 'qualified 'source "<command>" 'line 1 'col 10}}
         \\=== unmodule then resolve ===
-        \\source: ((1) 'x def) 'gone @defm 'gone unmodule gone.x
+        \\source: [] ((1) 'x def) 'gone @defm 'gone unmodule gone.x
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'undefined-word 'msg "undefined word `gone.x`" 'word 'gone.x 'trace ['gone.x] 'data {'name 'gone.x 'scope 'qualified 'source "<command>" 'line 1 'col 41}}
+        \\{'kind 'undefined-word 'msg "undefined word `gone.x`" 'word 'gone.x 'trace ['gone.x] 'data {'name 'gone.x 'scope 'qualified 'source "<command>" 'line 1 'col 44}}
         \\=== doc unmodule ===
         \\source: 'unmodule doc
         \\exit: 0
@@ -1119,13 +1119,13 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stderr:
         \\<empty>
         \\=== isolated substack ===
-        \\source: 3 (1 +) @attempt
+        \\source: 3 [1] (+) @attempt
         \\exit: 0
         \\stdout:
         \\  {
         \\    'err {
         \\      'kind 'underflow
-        \\      'msg "+ needs 2 stack values, but found 1; the substack is isolated from the caller's stack — seed it with `values (q) seed @attempt` or capture with `partial`"
+        \\      'msg "+ needs 2 stack values, but found 1; the substack is isolated from the caller's stack — pass initial values in the constructor's values operand: `values (q) @attempt`"
         \\      'word '+
         \\      'trace ['+]
         \\      'data {
@@ -1134,49 +1134,49 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\        'isolation @attempt
         \\        'source "<command>"
         \\        'line 1
-        \\        'col 6
+        \\        'col 8
         \\      }
         \\    }
         \\3 }
         \\stderr:
         \\<empty>
         \\=== isolated child ===
-        \\source: 3 [1 2] (+ +) @each
+        \\source: 3 [1 2] [] (+ +) @each
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'underflow 'msg "+ needs 2 stack values, but found 1; the child unit's stack holds only its element — seed it with `list values (q) seed @each` or capture with `partial`" 'word '+ 'trace ['+] 'data {'needed 2 'available 1 'isolation @each 'source "<command>" 'line 1 'col 10}}
+        \\{'kind 'underflow 'msg "+ needs 2 stack values, but found 1; the child unit's stack is isolated from the caller's stack — pass shared initial values in the constructor's values operand: `list values (q) @each`" 'word '+ 'trace ['+] 'data {'needed 2 'available 1 'isolation @each 'source "<command>" 'line 1 'col 13}}
         \\=== seeded attempt ===
-        \\source: [3] (1 +) seed @attempt
+        \\source: [3] (1 +) @attempt
         \\exit: 0
         \\stdout:
         \\{'ok [4]}
         \\stderr:
         \\<empty>
         \\=== seeded module ===
-        \\source: [7] ('base set) seed 'm @defm m.base
+        \\source: [7] ('base set) 'm @defm m.base
         \\exit: 0
         \\stdout:
         \\7
         \\stderr:
         \\<empty>
         \\=== anonymous module ===
-        \\source: (1 'x set) @module type
+        \\source: [] () @module type
         \\exit: 0
         \\stdout:
         \\'module
         \\stderr:
         \\<empty>
         \\=== module identity ===
-        \\source: (1) @module dup match? (1) @module (1) @module match?
+        \\source: [] (1) @module dup match? [] (1) @module [] (1) @module match?
         \\exit: 0
         \\stdout:
         \\1 0
         \\stderr:
         \\<empty>
         \\=== one image two registrations ===
-        \\source: (0 ((1 + dup without) within) 'bump def) @module dup 'l register 'r register l.bump l.bump r.bump
+        \\source: [] (0 ((1 + dup without) within) 'bump def) @module dup 'l register 'r register l.bump l.bump r.bump
         \\exit: 0
         \\stdout:
         \\1 2 1

@@ -22,14 +22,14 @@ const MachineError = machine.MachineError;
 
 pub const words = [_]env.BuiltinWord{
     .{
+        .name = "size",
+        .doc = "( dict -- count ) Return a dictionary's entry count.",
+        .primitive = dict_kernels.sizeForModule,
+    },
+    .{
         .name = "keys",
         .doc = "( dict -- keys ) Return a dictionary's keys in insertion order.",
         .primitive = dict_kernels.keysForModule,
-    },
-    .{
-        .name = "size",
-        .doc = "( dict -- count ) Return the number of dictionary entries in constant time.",
-        .primitive = dict_kernels.sizeForModule,
     },
     .{
         .name = "vals",
@@ -95,11 +95,6 @@ pub const words = [_]env.BuiltinWord{
         .name = "map",
         .doc = "( dict quotation -- dict ) Map a ( key value -- value ) quotation while preserving keys and order.",
         .primitive = map,
-    },
-    .{
-        .name = "map-values",
-        .doc = "( dict quotation -- dict ) Map a unary quotation over values while preserving keys and order.",
-        .primitive = mapValues,
     },
     .{
         .name = "filter",
@@ -423,23 +418,6 @@ fn map(evaluator: *Machine) MachineError!void {
         dictionary.borrow(),
         try word("dict.pairs"),
         apply_entry.borrow(),
-        try word("each"),
-        try word("dict.from-lists"),
-    });
-}
-
-fn mapValues(evaluator: *Machine) MachineError!void {
-    try evaluator.require(2);
-    var transform = try evaluator.popQuotation();
-    defer transform.deinit();
-    var dictionary = try evaluator.popDict();
-    defer dictionary.deinit();
-    return call(evaluator, &.{
-        dictionary.borrow(),
-        try word("dict.keys"),
-        dictionary.borrow(),
-        try word("dict.vals"),
-        transform.borrow(),
         try word("each"),
         try word("dict.from-lists"),
     });

@@ -14,7 +14,7 @@ import
 {'kind 'io} err err? io.pp
 
 # `@attempt` results are ordinary results, so the vocabularies compose.
-(2 3 +) @attempt ok? io.pp
+[] (2 3 +) @attempt ok? io.pp
 
 # and-then seeds the success stack and short-circuits an existing failure.
 [2 3] ok (+) and-then io.pp
@@ -42,10 +42,10 @@ import
 
 # The envelope interpreters that moved out of the prelude: qualified and
 # explicitly imported.
-(2 3 +) @attempt or-raise io.pp
-(missing) @attempt 9 or-else io.pp
-(2 3 +) @attempt result.or-raise io.pp
-({'nope 1} result.or-raise) @attempt 'err at 'kind at io.pp
+[] (2 3 +) @attempt or-raise io.pp
+[] (missing) @attempt 9 or-else io.pp
+[] (2 3 +) @attempt result.or-raise io.pp
+[] ({'nope 1} result.or-raise) @attempt 'err at 'kind at io.pp
 
 # Aggregation preserves input order: leftmost error, or the per-result stacks.
 [1 2] ok [3] ok [] ok 3 pack all io.pp
@@ -56,11 +56,11 @@ import
 
 # Malformed results are rejected before any supplied quotation runs: each
 # probe below would fail loudly on its own if it were ever executed.
-(7 (missing) result.and-then) @attempt 'err at 'kind at io.pp
-({'nope [1]} (missing) result.and-then) @attempt 'err at 'kind at io.pp
-({'ok [1] 'err {'kind 'io}} (missing) result.and-then) @attempt 'err at 'kind at io.pp
-({'ok 5} (missing) result.and-then) @attempt 'err at 'kind at io.pp
-({'err 5} (missing) result.and-then) @attempt 'err at 'kind at io.pp
-(7 result.ok?) @attempt 'err at 'kind at io.pp
-({'ok 5} 1 pack result.all) @attempt 'err at 'kind at io.pp
-({'nope 1} (missing) (missing) result.either) @attempt 'err at 'kind at io.pp
+[] (7 (missing) result.and-then) @attempt 'err at 'kind at io.pp
+[] ({'nope [1]} (missing) result.and-then) @attempt 'err at 'kind at io.pp
+[] ({'ok [1] 'err {'kind 'io}} (missing) result.and-then) @attempt 'err at 'kind at io.pp
+[] ({'ok 5} (missing) result.and-then) @attempt 'err at 'kind at io.pp
+[] ({'err 5} (missing) result.and-then) @attempt 'err at 'kind at io.pp
+[] (7 result.ok?) @attempt 'err at 'kind at io.pp
+[] ({'ok 5} 1 pack result.all) @attempt 'err at 'kind at io.pp
+[] ({'nope 1} (missing) (missing) result.either) @attempt 'err at 'kind at io.pp

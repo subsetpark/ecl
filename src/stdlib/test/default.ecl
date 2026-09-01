@@ -1,6 +1,7 @@
 ### module test.default
 # The bundled test runner deliberately owns policy in ordinary ECL. The host
 # supplies only catalog discovery, protected invocation, and root dispatch.
+[]
 (
  ### defp report
  (descriptor -- failed :

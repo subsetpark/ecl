@@ -422,7 +422,6 @@ fn expectValueEquivalent(left: ecl.value.Value, right: ecl.value.Value) !void {
         .word => |item| try std.testing.expectEqual(item, right.word),
         .task => |header| try std.testing.expectEqual(header, right.task),
         .module => |header| try std.testing.expectEqual(header, right.module),
-        .unit_plan => |header| try std.testing.expectEqual(header, right.unit_plan),
         .list => |header| {
             try std.testing.expectEqual(header.length(), right.list.length());
             for (0..@as(usize, @intCast(header.length()))) |index| {
@@ -498,7 +497,7 @@ test "idioms: capture shapes preserve generic behavior" {
         "[1 2 3] ((3 4) first +) each",
         "[1 2 3] ((1) first pop 7 +) each",
         "[1 2 3] ((dup) first +) each",
-        // The `first` guard is load-bearing, not decorative: the pattern
+        // The `first` guard is load-bearing: the pattern
         // demands the core source binding, so a session definition of `first`
         // must send an otherwise perfectly capture-shaped phrase down the
         // generic path — where the shadow actually runs. Recognizing through
@@ -523,7 +522,7 @@ test "idioms: capture shapes preserve generic behavior" {
     try expectHits("[1 2 3] ((3 4) first +) each", 3);
     // Shadowing `first` takes the *capture* entry out of play -- which is why
     // this is three direct hits and not one fused hit -- but the three hits are
-    // core `first`, not the shadow. `partial` is `(swap literal swap compose)`
+    // core `first`; the shadow receives no hits. `partial` is `(swap literal swap compose)`
     // and `literal` is `(wrap (first) cons)`, so the `(first)` token lives in
     // prelude source and seals to core; `each` runs that captured quotation once
     // per element, and each execution earns its own direct recognition.
@@ -531,7 +530,7 @@ test "idioms: capture shapes preserve generic behavior" {
     // This expectation was 0 before scope-on-the-word, and the 0 was measuring
     // the leak the sealing rule exists to remove: a session `def` reaching into
     // prelude internals. What proves the shadow no longer runs there is the
-    // value, not the count -- `(pop 99)` in that position would destroy the
+    // captured value. A count there—such as `(pop 99)`—would destroy the
     // capture, yet the result is byte-identical to the unshadowed baseline:
     //
     //   (pop 99) 'first def [1 2 3] 3 (+) partial each   =>  [4 5 6]
@@ -546,7 +545,7 @@ test "idioms: capture shapes preserve generic behavior" {
 
 test "idioms: an ordinary replacement cannot inherit stdlib recognition" {
     const source =
-        "((pop pop \"ordinary\") 'format-valid defp " ++
+        "[] ((pop pop \"ordinary\") 'format-valid defp " ++
         "(format-valid) 'format def) 'str @defm " ++
         "[] \"\" str.format";
     var heap: SessionHeap = .init;

@@ -1,5 +1,6 @@
 ### module pkg.lock
 # Validate, read, and canonically render package locks.
+[]
 (
  ### defp lock-keys
  # Required cache-lock keys.

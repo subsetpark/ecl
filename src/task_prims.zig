@@ -115,7 +115,7 @@ fn awaitFor(evaluator: *Machine) MachineError!void {
 }
 
 fn parEach(evaluator: *Machine) MachineError!void {
-    try evaluator.require(2);
+    try evaluator.require(3);
     var input = try evaluator.popUnitInput();
     defer input.deinit(evaluator.releaseDomain());
     var sequence = try evaluator.popList();
@@ -134,7 +134,7 @@ fn parEach(evaluator: *Machine) MachineError!void {
 const ParEachDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     sequence: heap.Owned(Value),
-    /// One moved decoded owner supplies the quotation and shared seeds to
+    /// One moved decoded owner supplies the body and shared seeds to
     /// every immediate child launch; children retain their own references
     /// before this fan-out state advances.
     input: heap.Owned(machine.OwnedUnitInput),

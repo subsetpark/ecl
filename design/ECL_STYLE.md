@@ -41,8 +41,8 @@ computed value coexist on the stack. Do not shorten it by changing the order
 in which those operands are produced; a shorter spelling that updates the
 nested value instead of its parent is still wrong.
 
-Run the canonical formatter after editing. Formatting is a baseline, not a
-substitute for choosing readable phrase boundaries in the source.
+Run the canonical formatter after editing. Formatting establishes the
+baseline; authors still choose readable phrase boundaries in the source.
 
 ## Modules and definitions
 
@@ -54,6 +54,7 @@ or imply re-exports.
 ```ecl
 ### module example
 # Small collection helpers.
+[]
 (
  ### def singleton
  (value -- list : "Return a one-element list containing the value.")
@@ -77,7 +78,8 @@ The following rules are enforced for checked-in first-party source:
   `set`/`setp` accept the same annotation-before-value position; an
   intentionally undocumented literal constant instead puts its concise
   explanatory comment immediately beneath the navigation header.
-- The annotation, not the navigation comment, is reflective documentation.
+- Annotations carry reflective documentation; navigation comments only organize
+  the source.
 
 Keep tests at the direct module construction root, beside definitions. Use a
 meaningful annotation docstring for checked-in tests; the body may call private
@@ -154,9 +156,14 @@ state package version requirer 4 pack (catalog-manifest) with
 ```
 
 Do not build a chain of `partial` applications for the same quotation.
-Captures are explicit: a binder local may not cross a quotation boundary by
-name. Seed the quotation with `partial`, `with`, or the input contract of its
-combinator, then bind the value inside the quotation.
+Reusable captures are explicit: a binder local may not cross a quotation
+boundary by name. Construct a new quotation with `partial` or `with`, then bind
+the captured value inside it.
+
+An operator's declared input and a unit constructor's values operand pass
+parameters across the boundary without capture. Pass those values directly
+rather than constructing a different quotation merely to move them across the
+boundary.
 
 ### Nested and sibling lookup
 
@@ -205,8 +212,9 @@ computed region.
 Use `dict.from-lists` when keys and values already exist as parallel lists. Use
 `dict.from-flat` when the natural intermediate form is alternating key and value
 entries. Use `dict.from-pairs` when the natural form is a list of `[key value]`
-associations. Use literal dictionaries for inert fixed data, not for
-expressions that must execute. Dictionary observation and transformation words
+associations. Use literal dictionaries for inert fixed data. Construct
+dictionaries containing expressions with words that execute those expressions.
+Dictionary observation and transformation words
 such as `dict.keys`, `dict.has?`, and `dict.merge` stay qualified; `put` and
 `del` remain bare because both are polymorphic over lists and dictionaries.
 

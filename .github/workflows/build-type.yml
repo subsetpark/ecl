@@ -1,6 +1,6 @@
 # A reusable build-type lane. Host-mounted local and global Zig caches survive
-# its Alpine container, its separate glibc TSan container, and later workflow
-# jobs. Tiers in one invocation also keep one long-lived Alpine container.
+# its main glibc container, its separate TSan container, and later workflow
+# jobs. Tiers in one invocation also keep one long-lived Ubuntu container.
 name: Build type
 
 on:
@@ -107,16 +107,21 @@ jobs:
             ecl-zig-${{ runner.os }}-x86_64-${{ env.ZIG_VERSION }}-pant-${{ env.PANT_VERSION }}-${{ inputs.optimize }}-${{ inputs.cache_scope }}-
             ecl-zig-${{ runner.os }}-x86_64-${{ env.ZIG_VERSION }}-pant-${{ env.PANT_VERSION }}-${{ inputs.optimize }}-
 
-      - name: Set up Alpine and Zig
+      - name: Set up Ubuntu and Zig
         run: |
           mkdir -p "$ZIG_GLOBAL_CACHE_HOST/tmp" "$ZIG_LOCAL_CACHE_HOST"
           docker run --detach --name ecl-ci --platform linux/amd64 \
             --volume "$GITHUB_WORKSPACE:/work:ro" \
             --volume "$ZIG_GLOBAL_CACHE_HOST:/root/.cache/zig" \
             --volume "$ZIG_LOCAL_CACHE_HOST:/build/.zig-cache" \
-            alpine:latest tail -f /dev/null
-          docker exec --env OPTIMIZE="$OPTIMIZE" --env PANT_VERSION="$PANT_VERSION" ecl-ci sh -euxc '
-            apk add --no-cache curl xz linux-headers expect python3 git gcompat z3
+            ubuntu:24.04 tail -f /dev/null
+          # PANT_VERSION is intentionally expanded inside the container.
+          # shellcheck disable=SC2016
+          timeout 15m docker exec --env OPTIMIZE="$OPTIMIZE" --env PANT_VERSION="$PANT_VERSION" ecl-ci sh -euxc '
+            export DEBIAN_FRONTEND=noninteractive
+            timeout 5m apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3 update
+            timeout 5m apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3 install -y --no-install-recommends \
+              ca-certificates curl expect git libc6-dev python3 xz-utils z3
             curl -fsSLo /tmp/zig.tar.xz https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
             echo "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00  /tmp/zig.tar.xz" | sha256sum -c -
             mkdir -p /opt/zig /build /root/.cache/zig/tmp
@@ -128,7 +133,7 @@ jobs:
             pant --version
             cp -a /work/. /build/
             git config --global --add safe.directory /build
-          '
+          ' < /dev/null
 
       - name: ThreadSanitizer
         if: inputs.run_tsan
@@ -307,6 +312,6 @@ jobs:
               fi
             '
 
-      - name: Stop Alpine container
+      - name: Stop Ubuntu container
         if: always()
         run: docker rm --force ecl-ci || true

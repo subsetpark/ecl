@@ -70,7 +70,7 @@ test "fuzz: reader accepts arbitrary bounded input" {
         "\xff",
         "(1 2)",
         "\"unterminated",
-        "(1 'public set 2 'private setp) 'm @defm",
+        "[] (1 'public set 2 'private setp) 'm @defm",
     } });
 }
 
@@ -98,9 +98,9 @@ test "fuzz: formatter is idempotent for every accepted source" {
             "(value -- value : \"documentation\") (dup) 'same def",
             // The `### module` header path: bare, seeded, and with a stale header
             // the formatter must rewrite from the registration itself.
-            "((1) 'x def) 'stats @defm",
-            "[[0]] ((1 +) 'tick def) seed 'counter @defm",
-            "### module wrong\n# attached\n((1) 'x def) 'stats @defm",
+            "[] ((1) 'x def) 'stats @defm",
+            "[[0]] ((1 +) 'tick def) 'counter @defm",
+            "### module wrong\n# attached\n[] ((1) 'x def) 'stats @defm",
             "(a -- ...) (dup) 'row def",
         },
     });
@@ -655,7 +655,7 @@ fn fuzzPendingUnit(_: void, smith: *std.testing.Smith) !void {
         var probe: [64]u8 = undefined;
         const prefix = probe[0..smith.slice(&probe)];
         try std.testing.expectEqual(unit.contextAfter(prefix), single.contextAfter(prefix));
-        // Asking is a question, not a mutation.
+        // Asking observes without mutating.
         try std.testing.expectEqualSlices(u8, expected.items, unit.source());
     }
 }
@@ -683,7 +683,7 @@ test "fuzz: pending unit accumulates lines and lexical state" {
         "1 2 +",
         "\"unterminated",
         "# comment",
-        "(1 'x set) 'stats @defm",
+        "[] (1 'x set) 'stats @defm",
     } });
 }
 
@@ -724,14 +724,14 @@ fn fuzzCompletionMutation(_: void, smith: *std.testing.Smith) !void {
     try std.testing.expectEqualStrings("sqrt", initial.items()[0]);
     try runOk(
         &runtime,
-        "(1 'alpha set 2 'private setp) 'fuzzmod @defm " ++
+        "[] (1 'alpha set 2 'private setp) 'fuzzmod @defm " ++
             "'fm 'fuzzmod alias 'fuzzmod ('alpha) import 3 'fuzz-live set",
     );
     var steps: usize = 0;
     while (steps < max_session_steps and !smith.eosWeightedSimple(7, 1)) : (steps += 1) {
         switch (smith.value(u3)) {
-            0 => try runOk(&runtime, "(4 'alpha set 5 'private setp) 'fuzzmod @defm"),
-            1 => try runOk(&runtime, "(6 'beta set 7 'hidden setp) 'fuzzmod @defm"),
+            0 => try runOk(&runtime, "[] (4 'alpha set 5 'private setp) 'fuzzmod @defm"),
+            1 => try runOk(&runtime, "[] (6 'beta set 7 'hidden setp) 'fuzzmod @defm"),
             2 => try runOk(&runtime, "8 'fuzz-live set"),
             3 => try runOk(&runtime, "9 'fuzz-second set"),
             4, 5, 6, 7 => |action| {
@@ -854,13 +854,13 @@ test "fuzz: history parsing merging and corruption preservation" {
 
 fn fuzzSchedulerRuntime(_: void, smith: *std.testing.Smith) !void {
     const programs = [_][]const u8{
-        "(1) @spawn await pop",
-        "(1) @spawn dup cancel await pop",
-        "(1) @spawn dup await pop await pop",
-        "[] (missing) @each pop",
-        "[1 2 3] (dup *) @each pop",
-        "((1) () while) @spawn dup cancel await pop",
-        "(7) @spawn 'fuzz-task set fuzz-task await pop",
+        "[] (1) @spawn await pop",
+        "[] (1) @spawn dup cancel await pop",
+        "[] (1) @spawn dup await pop await pop",
+        "[] [] (missing) @each pop",
+        "[1 2 3] [] (dup *) @each pop",
+        "[] ((1) () while) @spawn dup cancel await pop",
+        "[] (7) @spawn 'fuzz-task set fuzz-task await pop",
     };
     var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .cooperative);
     defer runtime.deinit();
@@ -888,9 +888,9 @@ fn fuzzNativeTransactions(_: void, smith: *std.testing.Smith) !void {
         "7 sample.forward pop",
         "7 sample.split pop pop",
         "7 sample.singleton pop",
-        "(7 sample.draft-fail) @attempt pop",
+        "[] (7 sample.draft-fail) @attempt pop",
         "sample.cooperative pop",
-        "(9 sample.yield-forever) @spawn dup cancel await pop",
+        "[] (9 sample.yield-forever) @spawn dup cancel await pop",
     };
     var source = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer source.deinit();
@@ -905,18 +905,49 @@ fn fuzzNativeTransactions(_: void, smith: *std.testing.Smith) !void {
     try environment.put("ECL_WORKERS", "1");
     var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
     defer threaded.deinit();
-    const result = try std.process.run(std.testing.allocator, threaded.io(), .{
+    const io = threaded.io();
+    var child = try std.process.spawn(io, .{
         .argv = &.{ native_runtime.ecl_exe, "-e", source.written() },
         .environ_map = &environment,
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .pipe,
     });
-    defer std.testing.allocator.free(result.stdout);
-    defer std.testing.allocator.free(result.stderr);
-    switch (result.term) {
+    // `kill` is idempotent after `wait`; on timeout it also reaps the child.
+    defer child.kill(io);
+
+    // SAFETY: `MultiReader.init` initializes every stream slot before use.
+    var multi_reader_buffer: std.Io.File.MultiReader.Buffer(2) = undefined;
+    // SAFETY: `MultiReader.init` initializes the complete reader before use.
+    var multi_reader: std.Io.File.MultiReader = undefined;
+    multi_reader.init(
+        std.testing.allocator,
+        io,
+        multi_reader_buffer.toStreams(),
+        &.{ child.stdout.?, child.stderr.? },
+    );
+    defer multi_reader.deinit();
+    const deadline: std.Io.Clock.Timestamp = .fromNow(io, .{
+        .raw = .fromSeconds(10),
+        .clock = .awake,
+    });
+    while (multi_reader.fill(64, .{ .deadline = deadline })) |_| {} else |err| switch (err) {
+        error.EndOfStream => {},
+        else => |other| return other,
+    }
+    try multi_reader.checkAnyError();
+
+    const term = try child.wait(io);
+    const stdout = try multi_reader.toOwnedSlice(0);
+    defer std.testing.allocator.free(stdout);
+    const stderr = try multi_reader.toOwnedSlice(1);
+    defer std.testing.allocator.free(stderr);
+    switch (term) {
         .exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
         .signal, .stopped, .unknown => return error.UnexpectedTermination,
     }
-    try std.testing.expectEqualStrings("", result.stdout);
-    try std.testing.expectEqualStrings("", result.stderr);
+    try std.testing.expectEqualStrings("", stdout);
+    try std.testing.expectEqualStrings("", stderr);
 }
 
 test "fuzz: native call transactions stay atomic under yield and cancellation" {

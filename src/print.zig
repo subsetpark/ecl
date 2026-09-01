@@ -132,7 +132,7 @@ pub const RenderCursor = struct {
                         try self.writeByte(writer, '[');
                         try self.pushSequence(render.item, render.indent + 1, false);
                     },
-                    .dict, .task, .module, .unit_plan, .reserved_mask => unreachable,
+                    .dict, .task, .module, .reserved_mask => unreachable,
                 },
                 .dict => |header| {
                     try self.writeByte(writer, '{');
@@ -149,10 +149,6 @@ pub const RenderCursor = struct {
                 // number to report, so the marker carries identity nowhere:
                 // `match?` is the only identity observation.
                 .module => try self.pushBytes("<module>"),
-                // A plan is opaque and unreadable for the same reasons an
-                // image is: its marker carries no identity, and nothing about
-                // its seeds or body is a printable fact.
-                .unit_plan => try self.pushBytes("<unit-plan>"),
             },
             .sequence => |continuation| {
                 const count: usize = @intCast(continuation.collection.list.length());
@@ -768,7 +764,7 @@ fn isDisplayStructure(item: Value) bool {
     return switch (item) {
         .dict => true,
         .list => displayListIsMatrix(item),
-        .int, .float, .char, .symbol, .word, .task, .module, .unit_plan => false,
+        .int, .float, .char, .symbol, .word, .task, .module => false,
     };
 }
 
@@ -793,7 +789,7 @@ fn isFlatRow(item: Value) bool {
     if (item != .list) return false;
     return switch (item.list.kind()) {
         .leaf_u8, .leaf_i64, .leaf_f64, .leaf_symbol => true,
-        .leaf_char1, .leaf_char2, .leaf_char4, .generic_spine, .dict, .task, .module, .unit_plan, .reserved_mask => false,
+        .leaf_char1, .leaf_char2, .leaf_char4, .generic_spine, .dict, .task, .module, .reserved_mask => false,
     };
 }
 

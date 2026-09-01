@@ -49,9 +49,8 @@
  "Return a quotation that pushes every value from a list, in order and inertly, before running
   another quotation.
 
-  This is ordinary quotation composition and nothing more. It is not how a unit constructor is
-  seeded: the flattened quotation it returns is runtime-built, so a constructor can no longer tell
-  the body from the values. Write values (body) seed instead, which keeps the two apart.")
+  This is ordinary quotation composition and nothing more. Unit constructors instead take their
+  initial values and body as two separate operands, preserving the exact body for attribution.")
 (((literal) each) dip append raze)
 'with def
 

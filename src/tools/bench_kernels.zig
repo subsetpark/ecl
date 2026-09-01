@@ -134,12 +134,12 @@ const cases = [_]Case{
     .{ .class = "copy and gather", .name = "take cyclic", .setup = "1000 range", .workload = "1000000 take len" },
     .{ .class = "copy and gather", .name = "gather", .setup = "1000000 range", .workload = "dup at len" },
     .{ .class = "copy and gather", .name = "boxed spine floor", .setup = "50000 range (wrap) each", .workload = "reverse len" },
-    // A mask, not arbitrary counts: `where` repeats each index by its count, so
+    // A mask permits only Boolean counts: `where` repeats each index by its count, so
     // a count vector of 1..n would ask for a result of quadratic size.
     .{ .class = "index vectors", .name = "where mask", .setup = "1000000 range 2 mod", .workload = "where len" },
     .{ .class = "index vectors", .name = "range", .setup = "0", .workload = "pop 1000000 range len" },
     .{ .class = "order", .name = "grade", .setup = "100000 range reverse", .workload = "grade len" },
-    .{ .class = "order", .name = "group", .setup = "100000 range 100 mod", .workload = "group dict.keys len" },
+    .{ .class = "order", .name = "group", .setup = "100000 range 100 mod", .workload = "group dict.size" },
     .{ .class = "order", .name = "distinct", .setup = "5000 range 100 mod", .workload = "distinct len" },
     .{ .class = "text", .name = "split", .setup = "\"a,b,c,d,e,f,g,h\" 8000 take", .workload = "\",\" split len" },
     .{ .class = "text", .name = "join", .setup = "\"a,b,c,d,e,f,g,h\" 8000 take \",\" split", .workload = "\",\" join len" },

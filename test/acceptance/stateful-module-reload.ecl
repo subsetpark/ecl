@@ -8,7 +8,7 @@
 
  ### def peek
  ((dup without) within) 'peek def
-) seed 'counter @defm
+) 'counter @defm
 counter.tick
 counter.peek io.pp
 
@@ -27,7 +27,7 @@ counter.peek io.pp
 
  ### def doubled
  ((dup 2 * without) within) 'doubled def
-) seed 'counter @defm
+) 'counter @defm
 counter.peek io.pp
 counter.tick
 counter.peek io.pp
@@ -44,12 +44,15 @@ counter.doubled io.pp
 
  ### def peek
  ((dup without) within) 'peek def
-) seed 'counter @defm
+) 'counter @defm
 counter.migrate
 counter.peek io.pp
 
 ### A failed registration changes neither the code generation nor the state.
-((
+[]
+(
+ []
+ (
   ### def x
   (bad -- shape -- here)
   (1 2) 'x def)

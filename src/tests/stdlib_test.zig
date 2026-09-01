@@ -133,15 +133,15 @@ test "stdlib: embedded resolution precedence against ECL_PATH follows the ruling
     // A path module that would shadow a stdlib name, and one that would not.
     try directory.dir.writeFile(std.testing.io, .{
         .sub_path = "result.ecl",
-        .data = "((999) 'ok def) 'result @defm",
+        .data = "[] ((999) 'ok def) 'result @defm",
     });
     try directory.dir.writeFile(std.testing.io, .{
         .sub_path = "site-local.ecl",
-        .data = "((7) 'answer def) 'site-local @defm",
+        .data = "[] ((7) 'answer def) 'site-local @defm",
     });
     try directory.dir.writeFile(std.testing.io, .{
         .sub_path = "cold-local.ecl",
-        .data = "((8) 'answer def (9) 'also def) 'cold-local @defm",
+        .data = "[] ((8) 'answer def (9) 'also def) 'cold-local @defm",
     });
     const search = try directory.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(search);
@@ -153,8 +153,8 @@ test "stdlib: embedded resolution precedence against ECL_PATH follows the ruling
     var diagnostics = std.Io.Writer.Allocating.init(allocator);
     defer diagnostics.deinit();
 
-    // Import precedence is proved from a cold registry, not after another
-    // spelling has already selected and published the embedded module.
+    // A cold registry proves import precedence without a prior spelling having
+    // selected and published the embedded module.
     {
         var imported_output = std.Io.Writer.Allocating.init(allocator);
         defer imported_output.deinit();
@@ -206,8 +206,8 @@ test "stdlib: concurrent first references converge on one published module" {
         defer runtime.deinit();
         try expectDisplay(
             &runtime,
-            "[[1] [2] [3] [4] [5] [6] [7] [8]] (result.ok) @each " ++
-                "([1] result.ok) ('result ('ok) import [2] ok) 2 pack (@spawn) each await-all",
+            "[[1] [2] [3] [4] [5] [6] [7] [8]] [] (result.ok) @each " ++
+                "([1] result.ok) ('result ('ok) import [2] ok) 2 pack ([] swap @spawn) each await-all",
             "({'ok [1]} {'ok [2]} {'ok [3]} {'ok [4]} " ++
                 "{'ok [5]} {'ok [6]} {'ok [7]} {'ok [8]}) " ++
                 "({'ok ({'ok [1]})} {'ok ({'ok [2]})})",

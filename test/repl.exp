@@ -117,7 +117,8 @@ send "13x +\033\[H\033\[C \033\[C\033\[3~\r"
 expect_stack $name 4
 send "9 sq\t\r"
 expect_stack $name 3
-send "1 λ\177 2 +\r"
+# Keep this a byte-level PTY input independently of Tcl channel encoding.
+send_hex 3120cebb7f2032202b0d
 expect_stack $name 3
 clean_eof $name
 puts "PASS: $name"
@@ -264,7 +265,7 @@ puts "PASS: $name"
 
 set name "repl pty: dotted completion lists only public exports"
 start_repl $binary $temporary $name
-send "(1 'hidden setp 2 'mean set) 'stats @defm 'st 'stats alias\r"
+send "\[\] (1 'hidden setp 2 'mean set) 'stats @defm 'st 'stats alias\r"
 expect {
     -re {\r\n\recl> } {}
     timeout { fail_case $name "module setup did not finish" }

@@ -15,8 +15,8 @@ value "scores" at "b" at type io.pp
 value "neg" at type io.pp
 value "big" at type io.pp
 
-# null, true, and false are ordinary symbols: data, not language nil or
-# language booleans, which is what lets them round-trip.
+# null, true, and false are ordinary data symbols. They introduce neither
+# language nil nor language booleans, which lets them round-trip.
 value "note" at io.pp
 value "note" at type io.pp
 value "active" at io.pp
@@ -34,11 +34,11 @@ value json.emit corpus match? io.pp
 
 # Emission requires string or symbol dict keys, and rejects values with no
 # JSON form.
-({1 2} json.emit) @attempt 'err at 'kind at io.pp
-('foo json.emit) @attempt 'err at 'kind at io.pp
-("a" first json.emit) @attempt 'err at 'kind at io.pp
+[] ({1 2} json.emit) @attempt 'err at 'kind at io.pp
+[] ('foo json.emit) @attempt 'err at 'kind at io.pp
+[] ("a" first json.emit) @attempt 'err at 'kind at io.pp
 
 # Malformed and empty input are 'parse.
-("" json.parse) @attempt 'err at 'kind at io.pp
-("{\"a\":}" json.parse) @attempt 'err at 'kind at io.pp
-("1 2" json.parse) @attempt 'err at 'kind at io.pp
+[] ("" json.parse) @attempt 'err at 'kind at io.pp
+[] ("{\"a\":}" json.parse) @attempt 'err at 'kind at io.pp
+[] ("1 2" json.parse) @attempt 'err at 'kind at io.pp

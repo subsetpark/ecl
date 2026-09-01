@@ -313,7 +313,7 @@ test "native: source candidates win inside a root and path-root order wins acros
     defer same_root.cleanup();
     try same_root.dir.writeFile(std.testing.io, .{
         .sub_path = "sample.ecl",
-        .data = "(100 'increment set) 'sample @defm",
+        .data = "[] (100 'increment set) 'sample @defm",
     });
     try std.Io.Dir.copyFile(
         std.Io.Dir.cwd(),
@@ -352,7 +352,7 @@ test "native: source candidates win inside a root and path-root order wins acros
     defer later_source.cleanup();
     try later_source.dir.writeFile(std.testing.io, .{
         .sub_path = "sample.ecl",
-        .data = "(100 'increment set) 'sample @defm",
+        .data = "[] (100 'increment set) 'sample @defm",
     });
     const native_root_path = try native_root.dir.realPathFileAlloc(
         std.testing.io,
@@ -569,8 +569,8 @@ test "native: cooperative slices let another unit progress at one worker" {
     defer runtime.deinit();
     try expectOk(
         &runtime,
-        "((sample.cooperative) @spawn 'native-task set " ++
-            "(7) @spawn 'observer set native-task observer pair await-any) @spawn await",
+        "[] ([] (sample.cooperative) @spawn 'native-task set " ++
+            "[] (7) @spawn 'observer set native-task observer pair await-any) @spawn await",
     );
     var display = try runtime.stackDisplay();
     defer display.deinit();
@@ -620,7 +620,7 @@ test "native: cancellation after a yield preserves the pre-call operand stack" {
     try expectOk(&runtime, "5");
     try expectOk(
         &runtime,
-        "(9 sample.yield-forever) @spawn dup 1 await-for pop dup cancel await pop",
+        "[] (9 sample.yield-forever) @spawn dup 1 await-for pop dup cancel await pop",
     );
     try std.testing.expectEqual(@as(usize, 1), runtime.stackItems().len);
     try std.testing.expectEqual(@as(i64, 5), runtime.stackItems()[0].int);

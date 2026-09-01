@@ -331,6 +331,10 @@ test "reader fixtures remain byte-for-byte anchors" {
     try std.testing.expect((try reader.read(host.cleanup(), "<repl>", "1 (2", &diag)) == .incomplete);
     try std.testing.expectError(error.Parse, reader.read(host.cleanup(), "test", "[1 2)", &diag));
     try std.testing.expectError(error.Parse, reader.read(host.cleanup(), "test", "(|x| (x))", &diag));
+    try std.testing.expectEqualStrings(
+        "local `x` crosses a quotation boundary; use `partial` to construct a quotation that captures it",
+        diag.text(),
+    );
     try std.testing.expectError(
         error.Parse,
         reader.read(host.cleanup(), "test", "9223372036854775808", &diag),

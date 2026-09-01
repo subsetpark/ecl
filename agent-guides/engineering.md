@@ -3,7 +3,7 @@
 Read this guide when designing or reviewing an implementation boundary. The
 short rules in [`AGENTS.md`](../AGENTS.md) always apply as well.
 
-- Put a cross-cutting rule at the boundary that owns it, not in each caller.
+- Put each cross-cutting rule at its owning boundary so callers do not repeat it.
   Escaping belongs to the sink that writes to the terminal, lexical state to
   the tokenizer that parses source, and the cursor/scalar invariant to the
   single splice that changes bytes. A policy attached to one producer will be
