@@ -779,7 +779,9 @@ advance independently. A full queue pauses only its producer; a background
 wait publishes one immutable `Child.Term`. POSIX children are created as
 process-group leaders, and scope cancellation closes input, signals the group,
 escalates when needed, reaps the direct child, and then lets the final
-controller lease detach membership. Stdin independently transitions through
+controller lease detach membership. Escalation owns independent process-group
+authority, so reaping the group leader cannot suppress the delayed KILL while
+a descendant remains. Stdin independently transitions through
 `open`, `closing`, `closed_cleanly`, or `broken`; `proc.run` cannot publish
 success until it observes a terminal stdin state, so a late background EPIPE
 remains observable even after all input entered the bounded queue.

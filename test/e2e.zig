@@ -209,13 +209,13 @@ test "e2e: proc write serializes at scheduler call arrival" {
         allocator,
         "'proc ('spawn 'write 'close-input 'read-stdout 'wait) import " ++
             "{{'executable \"{s}\" 'args (\"first-byte\")}} spawn 'p set " ++
-            "[] (p [1] 200000 take write) @spawn 'first set " ++
-            "[] ((1) () while) @spawn dup 1 await-for pop dup cancel await pop " ++
+            "[1] 200000 take 'bytes set " ++
+            "[] (p bytes write) @spawn 'first set [] () @spawn await pop " ++
             "p [2] write first await pop p close-input p 1 read-stdout [1] match? p wait pop",
         .{process_exe},
     );
     defer allocator.free(program);
-    var result = try cli.run(&.{ build_options.ecl_exe, program });
+    var result = try runWithWorkers(&.{ build_options.ecl_exe, program }, "1");
     defer result.deinit();
     try result.expect(.{ .exit_code = 0, .stdout = "1\n", .stderr = "" });
 }

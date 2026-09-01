@@ -682,14 +682,13 @@ pub const ProcessCell = struct {
 
     pub fn cancelExternalMember(self: *ProcessCell) void {
         var lease = self.controllers.tryLease() orelse return;
-        std.Io.Threaded.mutexLock(&self.mutex);
-        self.discard_outputs = true;
-        self.changed.broadcast(blockingIo());
-        std.Io.Threaded.mutexUnlock(&self.mutex);
-        self.terminate();
+        if (!self.beginScopeCancellation()) {
+            lease.release();
+            return;
+        }
         self.retainRef();
         const thread = std.Thread.spawn(.{}, escalationMain, .{ self, lease }) catch {
-            self.kill();
+            self.escalateKill();
             self.releaseRef();
             lease.release();
             return;
@@ -925,7 +924,41 @@ pub const ProcessCell = struct {
         self.changed.broadcast(blockingIo());
         self.notifyReadyLocked();
         std.Io.Threaded.mutexUnlock(&self.mutex);
-        if (should_signal) std.posix.kill(-self.pgid, signal_value) catch |err| switch (err) {
+        if (should_signal) self.signalGroup(signal_value);
+    }
+
+    fn beginScopeCancellation(self: *ProcessCell) bool {
+        var should_signal = false;
+        var should_escalate = false;
+        std.Io.Threaded.mutexLock(&self.mutex);
+        switch (self.phase) {
+            .constructing, .running => {
+                self.phase = .{ .closing = .terminate };
+                should_signal = true;
+                should_escalate = true;
+            },
+            .closing => |closing| should_escalate = closing == .terminate,
+            .terminal, .reaped => {},
+        }
+        if (self.input == .open) self.input = .closing;
+        self.discard_outputs = true;
+        self.changed.broadcast(blockingIo());
+        self.notifyReadyLocked();
+        std.Io.Threaded.mutexUnlock(&self.mutex);
+        if (should_signal) self.signalGroup(.TERM);
+        return should_escalate;
+    }
+
+    fn escalateKill(self: *ProcessCell) void {
+        std.Io.Threaded.mutexLock(&self.mutex);
+        if (self.phase == .closing and self.phase.closing == .terminate)
+            self.phase = .{ .closing = .kill };
+        std.Io.Threaded.mutexUnlock(&self.mutex);
+        self.signalGroup(.KILL);
+    }
+
+    fn signalGroup(self: *ProcessCell, signal_value: std.posix.SIG) void {
+        std.posix.kill(-self.pgid, signal_value) catch |err| switch (err) {
             error.ProcessNotFound => {},
             error.PermissionDenied => self.recordSignalFailure(),
             else => self.recordSignalFailure(),
@@ -1183,7 +1216,7 @@ fn escalationMain(cell: *ProcessCell, lease_value: ControllerLease) void {
     duration.sleep(cell.io) catch |err| switch (err) {
         error.Canceled => {},
     };
-    cell.kill();
+    cell.escalateKill();
 }
 
 fn detachMembership(membership: external.ScopeMembership) void {

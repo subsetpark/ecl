@@ -16,6 +16,7 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, mode, "block")) return block(init);
     if (std.mem.eql(u8, mode, "close-stdin")) return closeStdin(init);
     if (std.mem.eql(u8, mode, "first-byte")) return firstByte(init);
+    if (std.mem.eql(u8, mode, "ignore-term")) return ignoreTerm(init);
     if (std.mem.eql(u8, mode, "descendant")) return descendant(init, arguments[0]);
     return error.UnknownMode;
 }
@@ -133,13 +134,38 @@ fn firstByte(init: std.process.Init) !void {
     try output.interface.flush();
 }
 
+fn ignoreTerm(init: std.process.Init) !void {
+    const action: std.posix.Sigaction = .{
+        .handler = .{ .handler = std.posix.SIG.IGN },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(.TERM, &action, null);
+    var output_buffer: [1]u8 = undefined;
+    var output = stdoutWriter(init.io, &output_buffer);
+    try output.interface.writeByte(1);
+    try output.interface.flush();
+    try block(init);
+}
+
 fn descendant(init: std.process.Init, executable: []const u8) !void {
     var child = try std.process.spawn(init.io, .{
-        .argv = &.{ executable, "block" },
+        .argv = &.{ executable, "ignore-term" },
         .stdin = .inherit,
-        .stdout = .ignore,
+        .stdout = .pipe,
         .stderr = .ignore,
     });
+    const ready_file = child.stdout.?;
+    child.stdout = null;
+    defer ready_file.close(init.io);
+    var ready: [1]u8 = undefined;
+    var ready_len: usize = 0;
+    while (ready_len != ready.len) {
+        const amount = try ready_file.readStreaming(init.io, &.{ready[ready_len..]});
+        if (amount == 0) return error.DescendantExitedBeforeReady;
+        ready_len += amount;
+    }
+    if (ready[0] != 1) return error.InvalidDescendantReady;
     var output_buffer: [128]u8 = undefined;
     var output = stdoutWriter(init.io, &output_buffer);
     try output.interface.print("descendant={d}\n", .{child.id.?});
