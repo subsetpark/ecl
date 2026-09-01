@@ -320,13 +320,13 @@ const ProcessStatus = struct {
 fn processStatus(pid: std.posix.pid_t) ?ProcessStatus {
     if (builtin.os.tag != .linux) return null;
     var path_buffer: [64]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buffer, "/proc/{d}/stat", .{pid}) catch return false;
-    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return false;
+    const path = std.fmt.bufPrint(&path_buffer, "/proc/{d}/stat", .{pid}) catch return null;
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;
     defer file.close(io);
     var stat_buffer: [4096]u8 = undefined;
     var stat_len: usize = 0;
     while (stat_len != stat_buffer.len) {
-        const amount = file.readStreaming(io, &.{stat_buffer[stat_len..]}) catch return false;
+        const amount = file.readStreaming(io, &.{stat_buffer[stat_len..]}) catch return null;
         if (amount == 0) break;
         stat_len += amount;
     }
