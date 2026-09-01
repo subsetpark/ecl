@@ -302,14 +302,15 @@ fn expectProcessGone(pid: std.posix.pid_t, expected_group: std.posix.pid_t) !voi
         };
         try pause.sleep(io);
     }
-    if (processStatus(pid)) |status| {
-        std.log.err(
-            "descendant {d} remained state {c} in group {d}; expected group {d}\n",
-            .{ pid, status.state, status.group, expected_group },
-        );
-        if (status.group != expected_group) return error.DescendantLeftProcessGroup;
-    }
-    return error.DescendantStillRunning;
+    const status = processStatus(pid) orelse return error.DescendantStatusUnavailable;
+    if (status.group != expected_group) return error.DescendantLeftProcessGroup;
+    return switch (status.state) {
+        'R' => error.DescendantRunning,
+        'S' => error.DescendantSleeping,
+        'D' => error.DescendantUninterruptible,
+        'T', 't' => error.DescendantStopped,
+        else => error.DescendantStillRunning,
+    };
 }
 
 const ProcessStatus = struct {
