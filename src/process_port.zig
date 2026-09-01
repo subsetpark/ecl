@@ -1265,7 +1265,7 @@ pub const ProcessCell = struct {
             const observation: *const RunObservation = @ptrFromInt(pointer);
             const write_ready = if (observation.permit) |permit| ready: {
                 const node = writeNode(permit);
-                break :ready !node.linked or node.active or self.input != .open or self.io_failed;
+                break :ready self.writeReadyLocked(node);
             } else false;
             return self.stdout.len != 0 or self.stderr.len != 0 or write_ready or
                 !self.runEdgesLocked().subsetOf(observation.observed);
@@ -1276,9 +1276,14 @@ pub const ProcessCell = struct {
             readiness_terminal => self.phase == .reaped,
             else => {
                 const node: *WriteNode = @ptrFromInt(key);
-                return !node.linked or node.active or self.input != .open or self.io_failed;
+                return self.writeReadyLocked(node);
             },
         };
+    }
+
+    fn writeReadyLocked(self: *ProcessCell, node: *const WriteNode) bool {
+        return !node.linked or (node.active and self.stdin.free() != 0) or
+            self.input != .open or self.io_failed;
     }
 
     fn wakeReasonLocked(self: *ProcessCell, key: u64) external.Wake {
