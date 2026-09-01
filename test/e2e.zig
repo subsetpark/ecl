@@ -241,7 +241,8 @@ test "e2e: proc scope cancellation kills and reaps the process group" {
         .stdout_contains = &.{ "[100 101 115 99 101 110 100 97 110 116 61", "<port:1>" },
         .stderr = "",
     });
-    try expectProcessGone(try descendantPid(result.stdout));
+    const processes = try descendantProcesses(result.stdout);
+    try expectProcessGone(processes.descendant, processes.leader);
 }
 
 fn appendByteList(writer: *std.Io.Writer, bytes: []const u8) !void {
@@ -253,7 +254,12 @@ fn appendByteList(writer: *std.Io.Writer, bytes: []const u8) !void {
     try writer.writeByte(']');
 }
 
-fn descendantPid(output: []const u8) !std.posix.pid_t {
+const DescendantProcesses = struct {
+    descendant: std.posix.pid_t,
+    leader: std.posix.pid_t,
+};
+
+fn descendantProcesses(output: []const u8) !DescendantProcesses {
     if (output.len == 0 or output[0] != '[') return error.InvalidDescendantOutput;
     const close = std.mem.indexOfScalar(u8, output, ']') orelse return error.InvalidDescendantOutput;
     var decoded: [128]u8 = undefined;
@@ -267,28 +273,52 @@ fn descendantPid(output: []const u8) !std.posix.pid_t {
     const prefix = "descendant=";
     const line = std.mem.trim(u8, decoded[0..count], "\r\n");
     if (!std.mem.startsWith(u8, line, prefix)) return error.InvalidDescendantOutput;
-    return std.fmt.parseInt(std.posix.pid_t, line[prefix.len..], 10);
+    const leader_separator = " leader=";
+    const separator = std.mem.indexOf(u8, line, leader_separator) orelse
+        return error.InvalidDescendantOutput;
+    return .{
+        .descendant = try std.fmt.parseInt(std.posix.pid_t, line[prefix.len..separator], 10),
+        .leader = try std.fmt.parseInt(
+            std.posix.pid_t,
+            line[separator + leader_separator.len ..],
+            10,
+        ),
+    };
 }
 
-fn expectProcessGone(pid: std.posix.pid_t) !void {
+fn expectProcessGone(pid: std.posix.pid_t, expected_group: std.posix.pid_t) !void {
     for (0..200) |_| {
         std.posix.kill(pid, @enumFromInt(0)) catch |err| switch (err) {
             error.ProcessNotFound => return,
             error.PermissionDenied => {},
             else => |unexpected| return unexpected,
         };
-        if (processIsZombie(pid)) return;
+        if (processStatus(pid)) |status| {
+            if (status.state == 'Z' or status.state == 'X') return;
+        }
         const pause: std.Io.Clock.Duration = .{
             .clock = .awake,
             .raw = .fromMilliseconds(5),
         };
         try pause.sleep(io);
     }
+    if (processStatus(pid)) |status| {
+        std.log.err(
+            "descendant {d} remained state {c} in group {d}; expected group {d}\n",
+            .{ pid, status.state, status.group, expected_group },
+        );
+        if (status.group != expected_group) return error.DescendantLeftProcessGroup;
+    }
     return error.DescendantStillRunning;
 }
 
-fn processIsZombie(pid: std.posix.pid_t) bool {
-    if (builtin.os.tag != .linux) return false;
+const ProcessStatus = struct {
+    state: u8,
+    group: std.posix.pid_t,
+};
+
+fn processStatus(pid: std.posix.pid_t) ?ProcessStatus {
+    if (builtin.os.tag != .linux) return null;
     var path_buffer: [64]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buffer, "/proc/{d}/stat", .{pid}) catch return false;
     const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return false;
@@ -301,10 +331,16 @@ fn processIsZombie(pid: std.posix.pid_t) bool {
         stat_len += amount;
     }
     const stat = stat_buffer[0..stat_len];
-    const command_end = std.mem.lastIndexOfScalar(u8, stat, ')') orelse return false;
+    const command_end = std.mem.lastIndexOfScalar(u8, stat, ')') orelse return null;
     if (command_end + 2 >= stat.len or stat[command_end + 1] != ' ')
-        return false;
-    return stat[command_end + 2] == 'Z';
+        return null;
+    var fields = std.mem.tokenizeScalar(u8, stat[command_end + 2 ..], ' ');
+    const state = fields.next() orelse return null;
+    if (state.len != 1) return null;
+    _ = fields.next() orelse return null;
+    const group = std.fmt.parseInt(std.posix.pid_t, fields.next() orelse return null, 10) catch
+        return null;
+    return .{ .state = state[0], .group = group };
 }
 
 fn writeTestProject(

@@ -168,7 +168,10 @@ fn descendant(init: std.process.Init, executable: []const u8) !void {
     if (ready[0] != 1) return error.InvalidDescendantReady;
     var output_buffer: [128]u8 = undefined;
     var output = stdoutWriter(init.io, &output_buffer);
-    try output.interface.print("descendant={d}\n", .{child.id.?});
+    try output.interface.print(
+        "descendant={d} leader={d}\n",
+        .{ child.id.?, std.posix.system.getpid() },
+    );
     try output.interface.flush();
     try block(init);
     _ = try child.wait(init.io);
