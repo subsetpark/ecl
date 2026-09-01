@@ -1,7 +1,7 @@
 const std = @import("std");
 const pkg_lock_fixture = @import("pkg_lock_fixture.zig");
 const pkg_example_hash = "315c772a16778673e205ae556185d25b4109ad40641e60e6b5d96d1f7db99745";
-const pkg_runtime_hash = "dc420afa6a08f04f1ddd275285ed2b2056d1569145b39a2a49e7eb63db267975";
+const pkg_runtime_hash = "362f3e41985531be0e370732383222845a4533c75f07ca384323e49ea93801eb";
 const pkg_runtime_key = "a-1.0.0-" ++ pkg_runtime_hash;
 const pkg_runtime_manifest =
     "{'format 1 'name \"root\" 'version \"0.1.0\" 'exports {} 'requires " ++
