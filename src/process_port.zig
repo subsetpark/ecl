@@ -561,15 +561,17 @@ pub const InputTerminal = enum {
 /// lease detaches membership. Port/readiness refs use the independent cell
 /// refcount.
 const ControllerGroup = struct {
-    leases: std.atomic.Value(usize) = .init(0),
+    /// Protected by `cell.mutex` after the initial lease is issued. A count
+    /// decrement is published only after that lease has dropped its cell pin.
+    leases: usize = 0,
     membership: ?external.ScopeMembership = null,
     cell: *ProcessCell,
 
     fn initialLease(self: *ControllerGroup) ControllerLease {
         const cell = self.cell;
         cell.retainRef();
-        if (self.leases.fetchAdd(1, .monotonic) != 0)
-            @panic("initial controller lease already issued");
+        if (self.leases != 0) @panic("initial controller lease already issued");
+        self.leases = 1;
         return .{ .group = self, .cell = cell };
     }
 
@@ -579,25 +581,34 @@ const ControllerGroup = struct {
         defer std.Io.Threaded.mutexUnlock(&cell.mutex);
         if (cell.group_state == .retired) return null;
         cell.retainRef();
-        const old = self.leases.fetchAdd(1, .monotonic);
-        if (old == 0 or old == std.math.maxInt(usize)) @panic("invalid controller lease count");
+        if (self.leases == 0 or self.leases == std.math.maxInt(usize))
+            @panic("invalid controller lease count");
+        self.leases += 1;
         return .{ .group = self, .cell = cell };
     }
 
-    fn release(self: *ControllerGroup) ?external.ScopeMembership {
-        const old = self.leases.fetchSub(1, .release);
-        std.debug.assert(old != 0);
-        if (old != 1) {
-            if (old == 2) {
-                const cell = self.cell;
-                std.Io.Threaded.mutexLock(&cell.mutex);
-                cell.changed.broadcast(blockingIo());
-                std.Io.Threaded.mutexUnlock(&cell.mutex);
-            }
-            return null;
+    /// Consumes `cell`'s reference owned by one lease. Nonfinal releases drop
+    /// that pin before making the smaller count observable to the supervisor.
+    fn releasePinned(self: *ControllerGroup, cell: *ProcessCell) void {
+        var membership: ?external.ScopeMembership = null;
+        std.Io.Threaded.mutexLock(&cell.mutex);
+        std.debug.assert(self.cell == cell);
+        std.debug.assert(self.leases != 0);
+        if (self.leases != 1) {
+            cell.releaseRef();
+            self.leases -= 1;
+            if (self.leases == 1) cell.changed.broadcast(blockingIo());
+            std.Io.Threaded.mutexUnlock(&cell.mutex);
+            return;
         }
-        _ = self.leases.load(.acquire);
-        return self.cell.takeRetiredMembership(self);
+        if (cell.group_state != .retired) @panic("process scope detached before group retirement");
+        self.leases = 0;
+        membership = self.membership;
+        self.membership = null;
+        std.Io.Threaded.mutexUnlock(&cell.mutex);
+
+        cell.releaseRef();
+        if (membership) |token| detachMembership(token);
     }
 };
 
@@ -610,9 +621,7 @@ const ControllerLease = struct {
         const cell = self.cell orelse @panic("controller lease lost its cell reference");
         self.group = null;
         self.cell = null;
-        const membership = group.release();
-        cell.releaseRef();
-        if (membership) |token| detachMembership(token);
+        group.releasePinned(cell);
     }
 };
 
@@ -775,22 +784,10 @@ pub const ProcessCell = struct {
         self.allocator.destroy(self);
     }
 
-    fn takeRetiredMembership(
-        self: *ProcessCell,
-        controllers: *ControllerGroup,
-    ) ?external.ScopeMembership {
-        std.Io.Threaded.mutexLock(&self.mutex);
-        defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        if (self.group_state != .retired) @panic("process scope detached before group retirement");
-        const membership = controllers.membership;
-        controllers.membership = null;
-        return membership;
-    }
-
     fn waitForOtherControllers(self: *ProcessCell) void {
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        while (self.controllers.leases.load(.acquire) != 1)
+        while (self.controllers.leases != 1)
             self.changed.waitUncancelable(blockingIo(), &self.mutex);
     }
 
