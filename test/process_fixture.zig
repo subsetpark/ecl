@@ -17,7 +17,10 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, mode, "close-stdin")) return closeStdin(init);
     if (std.mem.eql(u8, mode, "first-byte")) return firstByte(init);
     if (std.mem.eql(u8, mode, "ignore-term")) return ignoreTerm(init);
+    if (std.mem.eql(u8, mode, "ignore-term-stderr")) return ignoreTermStderr(init);
     if (std.mem.eql(u8, mode, "descendant")) return descendant(init, arguments[0]);
+    if (std.mem.eql(u8, mode, "orphan-descendant"))
+        return orphanDescendant(init, arguments[0], arguments[2..]);
     return error.UnknownMode;
 }
 
@@ -135,17 +138,30 @@ fn firstByte(init: std.process.Init) !void {
 }
 
 fn ignoreTerm(init: std.process.Init) !void {
+    ignoreTermSignal();
+    var output_buffer: [1]u8 = undefined;
+    var output = stdoutWriter(init.io, &output_buffer);
+    try output.interface.writeByte(1);
+    try output.interface.flush();
+    try block(init);
+}
+
+fn ignoreTermStderr(init: std.process.Init) !void {
+    ignoreTermSignal();
+    var output_buffer: [1]u8 = undefined;
+    var output = stderrWriter(init.io, &output_buffer);
+    try output.interface.writeByte(1);
+    try output.interface.flush();
+    try block(init);
+}
+
+fn ignoreTermSignal() void {
     const action: std.posix.Sigaction = .{
         .handler = .{ .handler = std.posix.SIG.IGN },
         .mask = std.posix.sigemptyset(),
         .flags = 0,
     };
     std.posix.sigaction(.TERM, &action, null);
-    var output_buffer: [1]u8 = undefined;
-    var output = stdoutWriter(init.io, &output_buffer);
-    try output.interface.writeByte(1);
-    try output.interface.flush();
-    try block(init);
 }
 
 fn descendant(init: std.process.Init, executable: []const u8) !void {
@@ -175,4 +191,38 @@ fn descendant(init: std.process.Init, executable: []const u8) !void {
     try output.interface.flush();
     try block(init);
     _ = try child.wait(init.io);
+}
+
+fn orphanDescendant(init: std.process.Init, executable: []const u8, arguments: []const []const u8) !void {
+    if (arguments.len != 1) return error.BadArguments;
+    const retained = if (std.mem.eql(u8, arguments[0], "retained"))
+        true
+    else if (std.mem.eql(u8, arguments[0], "redirected"))
+        false
+    else
+        return error.BadArguments;
+    var child = try std.process.spawn(init.io, .{
+        .argv = &.{ executable, "ignore-term-stderr" },
+        .stdin = if (retained) .inherit else .ignore,
+        .stdout = if (retained) .inherit else .ignore,
+        .stderr = .pipe,
+    });
+    const ready_file = child.stderr.?;
+    child.stderr = null;
+    defer ready_file.close(init.io);
+    var ready: [1]u8 = undefined;
+    var ready_len: usize = 0;
+    while (ready_len != ready.len) {
+        const amount = try ready_file.readStreaming(init.io, &.{ready[ready_len..]});
+        if (amount == 0) return error.DescendantExitedBeforeReady;
+        ready_len += amount;
+    }
+    if (ready[0] != 1) return error.InvalidDescendantReady;
+    var output_buffer: [128]u8 = undefined;
+    var output = stdoutWriter(init.io, &output_buffer);
+    try output.interface.print(
+        "descendant={d} leader={d}\n",
+        .{ child.id.?, std.posix.system.getpid() },
+    );
+    try output.interface.flush();
 }

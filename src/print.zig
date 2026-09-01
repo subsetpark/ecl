@@ -145,7 +145,7 @@ pub const RenderCursor = struct {
                     } });
                 },
                 .task => |header| try self.writeFmt(writer, "<task:{d}>", .{heap.taskStorage(header).identity}),
-                .port => |header| try self.writeFmt(writer, "<port:{d}>", .{heap.portStorage(header).identity}),
+                .port => |header| try self.writeFmt(writer, "<port:{d}>", .{heap.portIdentity(header)}),
                 // An anonymous image has no name and no stable display
                 // number to report, so the marker carries identity nowhere:
                 // `match?` is the only identity observation.

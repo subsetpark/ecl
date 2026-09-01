@@ -6793,6 +6793,7 @@ fn resumePark(self: *Machine) MachineError!void {
             window.pushOwned(indexed.outcome);
         },
         .timeout => {
+            clearWorkDriver(self.unit);
             var timeout = EclErr.init(.timeout, "task wait timed out");
             defer timeout.retire(self.releaseDomain());
             const failure = try errorValue(

@@ -504,7 +504,7 @@ pub const TaskStorage = struct {
 /// A port value owns one reference to an opaque external cell. The cell's
 /// semantic owner supplies `releasePort`; the heap never observes its backend
 /// state or confuses value-reference lifetime with live-resource lifetime.
-pub const PortStorage = struct {
+const PortStorage = struct {
     identity: u64,
     payload: *anyopaque,
     release: *const fn (*anyopaque) void,
@@ -1147,8 +1147,12 @@ pub fn createPort(
     return .{ .port = publishPort(initializing) };
 }
 
-pub fn portStorage(header: *const PortHandle) *const PortStorage {
+fn portStorage(header: *const PortHandle) *const PortStorage {
     return @ptrCast(@alignCast(objectConst(headerFromPort(@constCast(header))).payload.?));
+}
+
+pub fn portIdentity(header: *const PortHandle) u64 {
+    return portStorage(header).identity;
 }
 
 /// Validated typed projection for the backend that created a port. Matching

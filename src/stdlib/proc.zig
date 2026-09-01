@@ -168,6 +168,12 @@ const SpecDriver = struct {
     stderr_capture: std.ArrayList(u8) = .empty,
     stdout_eof: bool = false,
     stderr_eof: bool = false,
+    run_readiness: process.RunReadiness = .{
+        .permit = null,
+        .stdout_eof = false,
+        .stderr_eof = false,
+        .input_terminal = false,
+    },
     stdout_reader: bool = false,
     stderr_reader: bool = false,
     failed: ?RunFailure = null,
@@ -501,7 +507,13 @@ const SpecDriver = struct {
             return .yielded;
         }
         if (progressed) return .yielded;
-        try evaluator.park(.{ .external = cell.runSource(self.write_permit) });
+        self.run_readiness = .{
+            .permit = self.write_permit,
+            .stdout_eof = self.stdout_eof,
+            .stderr_eof = self.stderr_eof,
+            .input_terminal = input_terminal != .pending,
+        };
+        try evaluator.park(.{ .external = cell.runSource(&self.run_readiness) });
         return .yielded;
     }
 
@@ -733,9 +745,10 @@ fn beginRead(evaluator: *Machine, stream: process.Stream) MachineError!void {
     var port = try evaluator.popValue();
     errdefer port.deinit();
     const cell = try portCell(evaluator, port.borrow());
+    const count = @min(@as(usize, @intCast(maximum.borrow().int)), cell.readCapacity(stream));
     cell.beginRead(stream) catch return evaluator.fail(.contract, "process stream already has a pending reader");
     errdefer cell.endRead(stream);
-    const buffer = try evaluator.allocator().alloc(u8, @intCast(maximum.borrow().int));
+    const buffer = try evaluator.allocator().alloc(u8, count);
     errdefer evaluator.allocator().free(buffer);
     const driver = try evaluator.allocator().create(ReadDriver);
     errdefer evaluator.allocator().destroy(driver);

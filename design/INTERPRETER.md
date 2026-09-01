@@ -771,20 +771,26 @@ cleanup performed by a membership callback.
 A native work driver that must wait carries its driver and park request in one
 exhaustive continuation variant. This is the external equivalent of the task
 join/work cleanup states: no side-band pointer can outlive the stack window or
-be deinitialized twice when readiness races cancellation.
+be deinitialized twice when readiness races cancellation. A deadline timeout
+clears any attached work driver before publishing its result.
 
 Process cells own exhaustive constructing, running, closing, terminal, and
-reaped phases. Separate bounded stdin, stdout, and stderr queues let each pipe
-advance independently. A full queue pauses only its producer; a background
-wait publishes one immutable `Child.Term`. POSIX children are created as
-process-group leaders, and scope cancellation closes input, signals the group,
-escalates when needed, reaps the direct child, and then lets the final
-controller lease detach membership. Escalation owns independent process-group
-authority, so reaping the group leader cannot suppress the delayed KILL while
-a descendant remains. Stdin independently transitions through
+reaped phases, independently from the process group's running, terminating,
+escalating, and killing phases. Separate bounded stdin, stdout, and stderr queues let each
+pipe advance independently. A full queue pauses only its producer; a
+background wait publishes one immutable `Child.Term`. POSIX children are
+created as process-group leaders. Scope cancellation and leader exit both
+close the group through TERM-to-KILL escalation when descendants remain, and
+the escalation lease prevents membership detachment even when those
+descendants redirected every pipe. Reaping the group leader therefore cannot
+suppress group cleanup or publish scope quiescence while cleanup still owns
+process-group authority. Stdin independently transitions through
 `open`, `closing`, `closed_cleanly`, or `broken`; `proc.run` cannot publish
 success until it observes a terminal stdin state, so a late background EPIPE
-remains observable even after all input entered the bounded queue.
+remains observable even after all input entered the bounded queue. Compound
+`proc.run` readiness carries the driver's consumed EOF and input-terminal
+facts, so terminal edges wake it once while buffered bytes, I/O failure, and
+reaping remain level-triggered.
 
 Every `proc.write` call acquires its nominal write ticket when the call reaches
 the primitive, before resumable byte validation and encoding. A driver owns

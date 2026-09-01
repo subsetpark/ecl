@@ -131,3 +131,25 @@ test "process: shared port operations linearize and converge" {
         "[0 1 255 2 3] {'kind 'exited 'code 0}",
     );
 }
+
+test "process: stream reads bound storage by the selected pipe capacity" {
+    const fixture_path = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, fixture.process_exe, allocator);
+    defer allocator.free(fixture_path);
+    const program = try source(
+        "'proc ('spawn 'read-stdout 'read-stderr 'wait) import " ++
+            "{{'executable \"{s}\" 'args (\"split\" \"abcd\" \"wxyz\")}} spawn 'p set " ++
+            "p 9223372036854775807 read-stdout " ++
+            "p 9223372036854775807 read-stderr p wait",
+        .{fixture_path},
+    );
+    defer allocator.free(program);
+    try expectStack(
+        program,
+        .{
+            .executables = .{ .exact = &.{fixture_path} },
+            .stdout_capacity = 4,
+            .stderr_capacity = 4,
+        },
+        "[97 98 99 100] [119 120 121 122] {'kind 'exited 'code 0}",
+    );
+}

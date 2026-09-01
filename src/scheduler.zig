@@ -1088,7 +1088,7 @@ const ScopeCancellationCursor = struct {
     tasks: ?CancellationCursor,
     scope: *TaskScope,
 
-    fn init(scope: *TaskScope) ScopeCancellationCursor {
+    fn initLocked(scope: *TaskScope) ScopeCancellationCursor {
         beginExternalCancellationLocked(scope);
         return .{ .tasks = .{ .root = scope }, .scope = scope };
     }
@@ -1717,7 +1717,7 @@ pub const WorkerScheduler = enum(usize) {
             std.debug.assert(!cell.scope.cancellation_walk_active);
             cell.scope.cancellation_walk_active = true;
             std.debug.assert(cell.cancellation == .none);
-            cell.cancellation = .{ .task = ScopeCancellationCursor.init(&cell.scope) };
+            cell.cancellation = .{ .task = ScopeCancellationCursor.initLocked(&cell.scope) };
         }
         std.Io.Threaded.mutexUnlock(&cell.scope.mutex);
         std.Io.Threaded.mutexUnlock(&state_.tree_mutex);
@@ -2235,7 +2235,7 @@ fn beginExternalCancellation(cell: *TaskCell) bool {
         if (!cell.scope.cancellation_walk_active) {
             cell.scope.cancellation_walk_active = true;
             std.debug.assert(cell.cancellation == .none);
-            cell.cancellation = .{ .external = ScopeCancellationCursor.init(&cell.scope) };
+            cell.cancellation = .{ .external = ScopeCancellationCursor.initLocked(&cell.scope) };
             heap.incRef(cell.handle());
             enqueue = true;
         }
@@ -2247,7 +2247,7 @@ fn beginExternalCancellation(cell: *TaskCell) bool {
 
 fn cancelScopeTree(scope: *TaskScope) void {
     std.Io.Threaded.mutexLock(&scope.mutex);
-    var cursor = ScopeCancellationCursor.init(scope);
+    var cursor = ScopeCancellationCursor.initLocked(scope);
     std.Io.Threaded.mutexUnlock(&scope.mutex);
     defer cursor.deinit();
     while (!cursor.advance()) std.Thread.yield() catch

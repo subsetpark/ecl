@@ -321,7 +321,7 @@ pub const ProcessOwner = struct {
             .stderr = .pipe,
             .pgid = 0,
         }) catch return error.Io;
-        errdefer if (child) |*owned_child| owned_child.kill(self.io);
+        errdefer if (child) |*owned_child| killChildGroup(owned_child, self.io);
 
         const cell = ProcessCell.create(
             self,
@@ -457,6 +457,13 @@ const ProcessPhase = union(enum) {
     reaped: Termination,
 };
 
+const ProcessGroupPhase = enum {
+    running,
+    terminating,
+    escalating,
+    killing,
+};
+
 const WriteNode = struct {
     cell: *ProcessCell,
     previous: ?*WriteNode = null,
@@ -530,6 +537,16 @@ const ControllerLease = struct {
 
 pub const WritePermit = opaque {};
 
+/// One stable snapshot of the terminal facts already consumed by `proc.run`.
+/// The address remains valid while its external readiness registration is
+/// active because the owning run driver is address-stable.
+pub const RunReadiness = struct {
+    permit: ?*WritePermit,
+    stdout_eof: bool,
+    stderr_eof: bool,
+    input_terminal: bool,
+};
+
 fn writeNode(permit: *WritePermit) *WriteNode {
     return @ptrCast(@alignCast(permit));
 }
@@ -577,6 +594,7 @@ pub const ProcessCell = struct {
     child: ?std.process.Child,
     pgid: std.posix.pid_t,
     phase: ProcessPhase = .constructing,
+    group_phase: ProcessGroupPhase = .running,
     controllers: ControllerGroup = .{},
     stdin: Ring,
     stdout: Ring,
@@ -636,6 +654,7 @@ pub const ProcessCell = struct {
     fn failBeforeStart(self: *ProcessCell) void {
         var child = self.child.?;
         self.child = null;
+        self.signalGroup(.KILL);
         child.kill(self.io);
         self.phase = .{ .reaped = .{ .unknown = 0 } };
         self.owner.releaseLive();
@@ -686,6 +705,11 @@ pub const ProcessCell = struct {
             lease.release();
             return;
         }
+        self.startEscalation(lease);
+    }
+
+    fn startEscalation(self: *ProcessCell, lease_value: ControllerLease) void {
+        var lease = lease_value;
         self.retainRef();
         const thread = std.Thread.spawn(.{}, escalationMain, .{ self, lease }) catch {
             self.escalateKill();
@@ -761,10 +785,10 @@ pub const ProcessCell = struct {
     }
 
     /// Readiness for `proc.run`, which must drain both output streams while it
-    /// feeds stdin. The tagged write node makes that compound predicate one
+    /// feeds stdin. The tagged observation makes that compound predicate one
     /// scheduler registration without introducing an unbounded polling loop.
-    pub fn runSource(self: *ProcessCell, permit: ?*WritePermit) external.ReadinessSource {
-        const pointer: u64 = if (permit) |active| @intFromPtr(writeNode(active)) else 0;
+    pub fn runSource(self: *ProcessCell, observed: *const RunReadiness) external.ReadinessSource {
+        const pointer: u64 = @intFromPtr(observed);
         std.debug.assert(pointer & ~readiness_pointer_mask == 0);
         return external.readinessSource(ProcessCell, self, pointer | readiness_run_tag);
     }
@@ -813,6 +837,13 @@ pub const ProcessCell = struct {
             .stderr => self.stderr_reader_active = false,
         }
         std.Io.Threaded.mutexUnlock(&self.mutex);
+    }
+
+    pub fn readCapacity(self: *const ProcessCell, stream: Stream) usize {
+        return switch (stream) {
+            .stdout => self.stdout.bytes.len,
+            .stderr => self.stderr.bytes.len,
+        };
     }
 
     pub fn read(self: *ProcessCell, stream: Stream, destination: []u8) ReadProgress {
@@ -911,13 +942,21 @@ pub const ProcessCell = struct {
         switch (self.phase) {
             .constructing, .running => {
                 self.phase = .{ .closing = reason };
-                should_signal = true;
             },
             .closing => |closing| if (closing == .terminate and reason == .kill) {
                 self.phase = .{ .closing = .kill };
-                should_signal = true;
             },
             .terminal, .reaped => {},
+        }
+        switch (reason) {
+            .terminate => if (self.group_phase == .running) {
+                self.group_phase = .terminating;
+                should_signal = true;
+            },
+            .kill => if (self.group_phase != .killing) {
+                self.group_phase = .killing;
+                should_signal = true;
+            },
         }
         if (self.input == .open) self.input = .closing;
         self.discard_outputs = true;
@@ -934,11 +973,21 @@ pub const ProcessCell = struct {
         switch (self.phase) {
             .constructing, .running => {
                 self.phase = .{ .closing = .terminate };
+            },
+            .closing => {},
+            .terminal, .reaped => {},
+        }
+        switch (self.group_phase) {
+            .running => {
+                self.group_phase = .escalating;
                 should_signal = true;
                 should_escalate = true;
             },
-            .closing => |closing| should_escalate = closing == .terminate,
-            .terminal, .reaped => {},
+            .terminating => {
+                self.group_phase = .escalating;
+                should_escalate = true;
+            },
+            .escalating, .killing => {},
         }
         if (self.input == .open) self.input = .closing;
         self.discard_outputs = true;
@@ -949,12 +998,51 @@ pub const ProcessCell = struct {
         return should_escalate;
     }
 
+    fn beginPostLeaderCleanup(self: *ProcessCell) void {
+        var lease = self.controllers.tryLease() orelse return;
+        var should_signal = false;
+        var should_escalate = false;
+        std.Io.Threaded.mutexLock(&self.mutex);
+        switch (self.group_phase) {
+            .running => {
+                self.group_phase = .escalating;
+                should_signal = true;
+                should_escalate = true;
+            },
+            .terminating => {
+                self.group_phase = .escalating;
+                should_escalate = true;
+            },
+            .escalating, .killing => {},
+        }
+        std.Io.Threaded.mutexUnlock(&self.mutex);
+        if (should_signal) self.signalGroup(.TERM);
+        if (!should_escalate) {
+            lease.release();
+            return;
+        }
+        self.startEscalation(lease);
+    }
+
     fn escalateKill(self: *ProcessCell) void {
         std.Io.Threaded.mutexLock(&self.mutex);
         if (self.phase == .closing and self.phase.closing == .terminate)
             self.phase = .{ .closing = .kill };
+        self.group_phase = .killing;
         std.Io.Threaded.mutexUnlock(&self.mutex);
         self.signalGroup(.KILL);
+    }
+
+    fn groupExists(self: *ProcessCell) bool {
+        std.posix.kill(-self.pgid, @enumFromInt(0)) catch |err| switch (err) {
+            error.ProcessNotFound => return false,
+            error.PermissionDenied => return true,
+            else => {
+                self.recordSignalFailure();
+                return true;
+            },
+        };
+        return true;
     }
 
     fn signalGroup(self: *ProcessCell, signal_value: std.posix.SIG) void {
@@ -975,13 +1063,16 @@ pub const ProcessCell = struct {
     fn readyLocked(self: *ProcessCell, key: u64) bool {
         if (key & ~readiness_pointer_mask == readiness_run_tag) {
             const pointer = key & readiness_pointer_mask;
-            const write_ready = if (pointer != 0) ready: {
-                const node: *WriteNode = @ptrFromInt(pointer);
+            const observed: *const RunReadiness = @ptrFromInt(pointer);
+            const write_ready = if (observed.permit) |permit| ready: {
+                const node = writeNode(permit);
                 break :ready !node.linked or node.active or self.input != .open or self.io_failed;
             } else false;
             return self.stdout.len != 0 or self.stderr.len != 0 or
-                self.stdout_done or self.stderr_done or self.phase == .reaped or
-                self.input.terminal() or write_ready;
+                (self.stdout_done and !observed.stdout_eof) or
+                (self.stderr_done and !observed.stderr_eof) or
+                self.phase == .reaped or self.io_failed or
+                (self.input.terminal() and !observed.input_terminal) or write_ready;
         }
         return switch (key) {
             readiness_stdout => self.stdout.len != 0 or self.stdout_done,
@@ -1045,6 +1136,7 @@ pub const ProcessCell = struct {
 
         const translated: Termination = translated: {
             const term = child.wait(self.io) catch {
+                self.signalGroup(.KILL);
                 child.kill(self.io);
                 std.Io.Threaded.mutexLock(&self.mutex);
                 self.io_failed = true;
@@ -1059,6 +1151,15 @@ pub const ProcessCell = struct {
         if (self.input == .open) self.input = .closing;
         self.changed.broadcast(blockingIo());
         self.notifyReadyLocked();
+        std.Io.Threaded.mutexUnlock(&self.mutex);
+
+        // Reaping the group leader does not end ownership of descendants that
+        // remain in its process group. Keep a controller lease through the
+        // ordinary TERM-to-KILL cleanup even when those descendants inherited
+        // none of the leader's pipes.
+        if (self.groupExists()) self.beginPostLeaderCleanup();
+
+        std.Io.Threaded.mutexLock(&self.mutex);
         while (!self.stdin_done or !self.stdout_done or !self.stderr_done)
             self.changed.waitUncancelable(blockingIo(), &self.mutex);
         self.phase = .{ .reaped = translated };
@@ -1256,6 +1357,14 @@ fn writeFileAll(file: std.Io.File, io: std.Io, bytes: []const u8) !void {
     var written: usize = 0;
     while (written != bytes.len)
         written += try std.Io.File.writeStreaming(file, io, &.{}, &.{bytes[written..]}, 1);
+}
+
+fn killChildGroup(child: *std.process.Child, io: std.Io) void {
+    if (child.id) |pid| std.posix.kill(-pid, .KILL) catch |err| switch (err) {
+        error.ProcessNotFound, error.PermissionDenied => {},
+        else => {},
+    };
+    child.kill(io);
 }
 
 fn translateTerm(term: std.process.Child.Term) Termination {

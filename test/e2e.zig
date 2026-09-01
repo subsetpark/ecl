@@ -106,7 +106,10 @@ test "e2e: proc ports stream binary data with backpressure and EOF" {
         .{process_exe},
     );
     defer allocator.free(stderr_first);
-    var stderr_first_result = try cli.run(&.{ build_options.ecl_exe, stderr_first });
+    var stderr_first_result = try cli.runOptions(.{
+        .argv = &.{ build_options.ecl_exe, stderr_first },
+        .timeout = .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(5) } },
+    });
     defer stderr_first_result.deinit();
     try stderr_first_result.expect(.{ .exit_code = 0, .stdout = "0 90000\n", .stderr = "" });
 }
@@ -245,6 +248,29 @@ test "e2e: proc scope cancellation kills and reaps the process group" {
     try expectProcessGone(processes.descendant, processes.leader);
 }
 
+test "e2e: proc leader exit cleans retained and redirected descendants" {
+    const process_exe = try absoluteProcessExe();
+    defer allocator.free(process_exe);
+    for ([_][]const u8{ "retained", "redirected" }) |mode| {
+        const program = try std.fmt.allocPrint(
+            allocator,
+            "'proc ('run) import 'io ('pp) import " ++
+                "{{'executable \"{s}\" 'args (\"orphan-descendant\" \"{s}\")}} run " ++
+                "'stdout at pp",
+            .{ process_exe, mode },
+        );
+        defer allocator.free(program);
+        var result = try cli.runOptions(.{
+            .argv = &.{ build_options.ecl_exe, program },
+            .timeout = .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(5) } },
+        });
+        defer result.deinit();
+        try result.expect(.{ .exit_code = 0, .stderr = "" });
+        const processes = try descendantProcesses(result.stdout);
+        try expectProcessGone(processes.descendant, processes.leader);
+    }
+}
+
 fn appendByteList(writer: *std.Io.Writer, bytes: []const u8) !void {
     try writer.writeByte('[');
     for (bytes, 0..) |byte, index| {
@@ -290,7 +316,7 @@ fn expectProcessGone(pid: std.posix.pid_t, expected_group: std.posix.pid_t) !voi
     for (0..200) |_| {
         std.posix.kill(pid, @enumFromInt(0)) catch |err| switch (err) {
             error.ProcessNotFound => return,
-            error.PermissionDenied => {},
+            error.PermissionDenied => return error.ProcessProbePermissionDenied,
             else => |unexpected| return unexpected,
         };
         if (processStatus(pid)) |status| {

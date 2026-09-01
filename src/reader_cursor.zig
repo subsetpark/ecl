@@ -441,30 +441,14 @@ const AtomBuilder = struct {
                 diag.set(self.token.span, "module display markers are runtime-only and cannot be parsed");
                 return error.Parse;
             },
-            .task_digits => {
-                const end = self.token.bytes.len - 1;
-                if (self.marker_index == 0) self.marker_index = 6;
-                if (self.marker_index != end) {
-                    if (!std.ascii.isDigit(self.token.bytes[self.marker_index])) {
-                        self.marker = .none;
-                    } else self.marker_index += 1;
-                    return .pending;
-                }
-                diag.set(self.token.span, "task display markers are runtime-only and cannot be parsed");
-                return error.Parse;
-            },
-            .port_digits => {
-                const end = self.token.bytes.len - 1;
-                if (self.marker_index == 0) self.marker_index = 6;
-                if (self.marker_index != end) {
-                    if (!std.ascii.isDigit(self.token.bytes[self.marker_index])) {
-                        self.marker = .none;
-                    } else self.marker_index += 1;
-                    return .pending;
-                }
-                diag.set(self.token.span, "port display markers are runtime-only and cannot be parsed");
-                return error.Parse;
-            },
+            .task_digits => return self.advanceMarkerDigits(
+                diag,
+                "task display markers are runtime-only and cannot be parsed",
+            ),
+            .port_digits => return self.advanceMarkerDigits(
+                diag,
+                "port display markers are runtime-only and cannot be parsed",
+            ),
         }
         if (!self.quoted and self.classification == null) {
             if (self.classifier == null) self.classifier = .init(self.token.bytes);
@@ -533,6 +517,23 @@ const AtomBuilder = struct {
                     .{ .word = .{ .name = id, .scope = self.word_scope } },
             },
         };
+    }
+
+    fn advanceMarkerDigits(
+        self: *AtomBuilder,
+        diag: *reader.Diag,
+        message: []const u8,
+    ) error{Parse}!ScalarProgress {
+        const end = self.token.bytes.len - 1;
+        if (self.marker_index == 0) self.marker_index = 6;
+        if (self.marker_index != end) {
+            if (!std.ascii.isDigit(self.token.bytes[self.marker_index])) {
+                self.marker = .none;
+            } else self.marker_index += 1;
+            return .pending;
+        }
+        diag.set(self.token.span, message);
+        return error.Parse;
     }
 };
 
