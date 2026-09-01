@@ -420,6 +420,42 @@ pub fn backendSupported() bool {
     };
 }
 
+const wait_api = struct {
+    extern "c" fn waitid(
+        id_type: c_int,
+        id: c_uint,
+        info: *std.c.siginfo_t,
+        options: c_int,
+    ) c_int;
+};
+
+fn observeLeaderTermination(group: *OwnedGroup) error{Io}!void {
+    const pid_selector: c_int = switch (builtin.os.tag) {
+        .freebsd, .dragonfly => 0,
+        .openbsd => 2,
+        .linux, .macos, .netbsd => 1,
+        else => unreachable,
+    };
+    const options: c_int = switch (builtin.os.tag) {
+        .linux => std.os.linux.W.EXITED | std.os.linux.W.NOWAIT,
+        .macos => 0x00000004 | 0x00000020,
+        .openbsd => 0x04 | 0x10,
+        .freebsd, .netbsd, .dragonfly => std.c.W.EXITED | std.c.W.NOWAIT,
+        else => unreachable,
+    };
+    // SAFETY: waitid initializes this output buffer, and its contents are not
+    // inspected before or after the call.
+    var info: std.c.siginfo_t = undefined;
+    while (true) {
+        const result = wait_api.waitid(pid_selector, @intCast(group.child.id.?), &info, options);
+        if (result == 0) return;
+        switch (std.posix.errno(result)) {
+            .INTR => continue,
+            else => return error.Io,
+        }
+    }
+}
+
 const Ring = struct {
     bytes: []u8,
     head: usize = 0,
@@ -457,11 +493,35 @@ const ProcessPhase = union(enum) {
     reaped: Termination,
 };
 
-const ProcessGroupPhase = enum {
-    running,
-    terminating,
-    escalating,
-    killing,
+const EscalationId = enum(u64) { _ };
+
+const OwnedGroup = struct {
+    child: std.process.Child,
+    pgid: std.posix.pid_t,
+    leader_observed: bool = false,
+
+    const SignalResult = enum { sent, absent, denied };
+
+    fn send(self: *OwnedGroup, signal_value: std.posix.SIG) error{Io}!SignalResult {
+        std.posix.kill(-self.pgid, signal_value) catch |err| {
+            return switch (err) {
+                error.ProcessNotFound => .absent,
+                error.PermissionDenied => .denied,
+                else => error.Io,
+            };
+        };
+        return .sent;
+    }
+};
+
+const GroupState = union(enum) {
+    running: *OwnedGroup,
+    grace: struct {
+        group: *OwnedGroup,
+        escalation: EscalationId,
+    },
+    kill_issued: *OwnedGroup,
+    retired: Termination,
 };
 
 const WriteNode = struct {
@@ -492,36 +552,43 @@ pub const InputTerminal = enum {
     broken,
 };
 
-/// Controller leases cover detached threads only. The embedded group owns the
-/// scope membership until its last lease is released; port/readiness refs use
-/// the independent ProcessCell refcount.
+/// Controller leases cover detached threads only. Retirement closes lease
+/// creation; the supervisor waits for every other controller before its final
+/// lease detaches membership. Port/readiness refs use the independent cell
+/// refcount.
 const ControllerGroup = struct {
     leases: std.atomic.Value(usize) = .init(1),
     membership: ?external.ScopeMembership = null,
+    cell: *ProcessCell,
 
     fn initialLease(self: *ControllerGroup) ControllerLease {
         return .{ .group = self };
     }
 
     fn tryLease(self: *ControllerGroup) ?ControllerLease {
-        var observed = self.leases.load(.acquire);
-        while (observed != 0) {
-            if (observed == std.math.maxInt(usize)) @panic("controller lease overflow");
-            if (self.leases.cmpxchgWeak(observed, observed + 1, .acquire, .acquire)) |actual| {
-                observed = actual;
-            } else return .{ .group = self };
-        }
-        return null;
+        const cell = self.cell;
+        std.Io.Threaded.mutexLock(&cell.mutex);
+        defer std.Io.Threaded.mutexUnlock(&cell.mutex);
+        if (cell.group_state == .retired) return null;
+        const old = self.leases.fetchAdd(1, .monotonic);
+        if (old == 0 or old == std.math.maxInt(usize)) @panic("invalid controller lease count");
+        return .{ .group = self };
     }
 
     fn release(self: *ControllerGroup) void {
         const old = self.leases.fetchSub(1, .release);
         std.debug.assert(old != 0);
-        if (old != 1) return;
+        if (old != 1) {
+            if (old == 2) {
+                const cell = self.cell;
+                std.Io.Threaded.mutexLock(&cell.mutex);
+                cell.changed.broadcast(blockingIo());
+                std.Io.Threaded.mutexUnlock(&cell.mutex);
+            }
+            return;
+        }
         _ = self.leases.load(.acquire);
-        const membership = self.membership;
-        self.membership = null;
-        if (membership) |token| detachMembership(token);
+        self.cell.detachRetiredMembership(self);
     }
 };
 
@@ -537,14 +604,26 @@ const ControllerLease = struct {
 
 pub const WritePermit = opaque {};
 
-/// One stable snapshot of the terminal facts already consumed by `proc.run`.
-/// The address remains valid while its external readiness registration is
-/// active because the owning run driver is address-stable.
-pub const RunReadiness = struct {
-    permit: ?*WritePermit,
-    stdout_eof: bool,
-    stderr_eof: bool,
-    input_terminal: bool,
+pub const RunEdge = enum {
+    stdout_terminal,
+    stderr_terminal,
+    input_terminal,
+    io_failure,
+    reaped,
+};
+
+pub const RunCursor = opaque {};
+
+const RunObservation = struct {
+    permit: ?*WritePermit = null,
+    observed: std.EnumSet(RunEdge) = .initEmpty(),
+    active: bool = false,
+};
+
+pub const RunPoll = struct {
+    edges: std.EnumSet(RunEdge),
+    input: InputTerminal,
+    termination: ?Termination,
 };
 
 fn writeNode(permit: *WritePermit) *WriteNode {
@@ -591,11 +670,10 @@ pub const ProcessCell = struct {
     refs: std.atomic.Value(usize) = .init(1),
     mutex: std.Io.Mutex = .init,
     changed: std.Io.Condition = .init,
-    child: ?std.process.Child,
-    pgid: std.posix.pid_t,
     phase: ProcessPhase = .constructing,
-    group_phase: ProcessGroupPhase = .running,
-    controllers: ControllerGroup = .{},
+    group_state: GroupState,
+    next_escalation: u64 = 1,
+    controllers: ControllerGroup,
     stdin: Ring,
     stdout: Ring,
     stderr: Ring,
@@ -613,12 +691,16 @@ pub const ProcessCell = struct {
     ready_last: ?*ReadyWait = null,
     timeout_done: std.Io.Event = .unset,
     timed_out: bool = false,
+    run_observation: RunObservation = .{},
 
     fn create(
         owner: *ProcessOwner,
         child: std.process.Child,
         identity: u64,
     ) error{OutOfMemory}!*ProcessCell {
+        const group = try owner.allocator.create(OwnedGroup);
+        errdefer owner.allocator.destroy(group);
+        group.* = .{ .child = child, .pgid = child.id.? };
         const cell = try owner.allocator.create(ProcessCell);
         errdefer owner.allocator.destroy(cell);
         const stdin = try owner.allocator.alloc(u8, owner.policy.stdin_capacity);
@@ -631,8 +713,8 @@ pub const ProcessCell = struct {
             .io = owner.io,
             .owner = owner,
             .identity = identity,
-            .child = child,
-            .pgid = child.id.?,
+            .group_state = .{ .running = group },
+            .controllers = .{ .cell = cell },
             .stdin = .{ .bytes = stdin },
             .stdout = .{ .bytes = stdout },
             .stderr = .{ .bytes = stderr },
@@ -652,11 +734,17 @@ pub const ProcessCell = struct {
     }
 
     fn failBeforeStart(self: *ProcessCell) void {
-        var child = self.child.?;
-        self.child = null;
-        self.signalGroup(.KILL);
-        child.kill(self.io);
+        self.kill();
+        const group = switch (self.group_state) {
+            .running => |group| group,
+            .grace => |grace| grace.group,
+            .kill_issued => |group| group,
+            .retired => unreachable,
+        };
+        group.child.kill(self.io);
         self.phase = .{ .reaped = .{ .unknown = 0 } };
+        self.group_state = .{ .retired = .{ .unknown = 0 } };
+        self.allocator.destroy(group);
         self.owner.releaseLive();
         self.controllers.release();
     }
@@ -677,6 +765,22 @@ pub const ProcessCell = struct {
         self.allocator.free(self.stdout.bytes);
         self.allocator.free(self.stderr.bytes);
         self.allocator.destroy(self);
+    }
+
+    fn detachRetiredMembership(self: *ProcessCell, controllers: *ControllerGroup) void {
+        std.Io.Threaded.mutexLock(&self.mutex);
+        if (self.group_state != .retired) @panic("process scope detached before group retirement");
+        const membership = controllers.membership;
+        controllers.membership = null;
+        std.Io.Threaded.mutexUnlock(&self.mutex);
+        if (membership) |token| detachMembership(token);
+    }
+
+    fn waitForOtherControllers(self: *ProcessCell) void {
+        std.Io.Threaded.mutexLock(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        while (self.controllers.leases.load(.acquire) != 1)
+            self.changed.waitUncancelable(blockingIo(), &self.mutex);
     }
 
     pub fn releasePort(self: *ProcessCell) void {
@@ -701,18 +805,21 @@ pub const ProcessCell = struct {
 
     pub fn cancelExternalMember(self: *ProcessCell) void {
         var lease = self.controllers.tryLease() orelse return;
-        if (!self.beginScopeCancellation()) {
-            lease.release();
-            return;
-        }
-        self.startEscalation(lease);
+        const escalation = self.beginGrace(true);
+        if (escalation) |id| {
+            self.startEscalation(id, lease);
+        } else lease.release();
     }
 
-    fn startEscalation(self: *ProcessCell, lease_value: ControllerLease) void {
+    fn startEscalation(
+        self: *ProcessCell,
+        escalation: EscalationId,
+        lease_value: ControllerLease,
+    ) void {
         var lease = lease_value;
         self.retainRef();
-        const thread = std.Thread.spawn(.{}, escalationMain, .{ self, lease }) catch {
-            self.escalateKill();
+        const thread = std.Thread.spawn(.{}, escalationMain, .{ self, escalation, lease }) catch {
+            self.escalateKill(escalation);
             self.releaseRef();
             lease.release();
             return;
@@ -735,7 +842,7 @@ pub const ProcessCell = struct {
         };
         std.Io.Threaded.mutexLock(&self.mutex);
         if (self.readyLocked(key)) {
-            const reason = if (self.io_failed) external.Wake.io else .ready;
+            const reason = self.wakeReasonLocked(key);
             std.Io.Threaded.mutexUnlock(&self.mutex);
             self.allocator.destroy(wait);
             return .{ .ready = reason };
@@ -784,13 +891,64 @@ pub const ProcessCell = struct {
         return external.readinessSource(ProcessCell, self, @intFromPtr(writeNode(permit)));
     }
 
-    /// Readiness for `proc.run`, which must drain both output streams while it
-    /// feeds stdin. The tagged observation makes that compound predicate one
-    /// scheduler registration without introducing an unbounded polling loop.
-    pub fn runSource(self: *ProcessCell, observed: *const RunReadiness) external.ReadinessSource {
-        const pointer: u64 = @intFromPtr(observed);
+    pub fn beginRun(self: *ProcessCell) *RunCursor {
+        std.Io.Threaded.mutexLock(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        if (self.run_observation.active) @panic("process already has an active run cursor");
+        self.run_observation = .{ .active = true };
+        return @ptrCast(&self.run_observation);
+    }
+
+    pub fn endRun(self: *ProcessCell, cursor: *RunCursor) void {
+        const observation = self.runObservation(cursor);
+        std.Io.Threaded.mutexLock(&self.mutex);
+        observation.* = .{};
+        std.Io.Threaded.mutexUnlock(&self.mutex);
+    }
+
+    /// Atomically consumes every run-terminal edge currently visible.
+    pub fn pollRun(
+        self: *ProcessCell,
+        cursor: *RunCursor,
+    ) RunPoll {
+        const observation = self.runObservation(cursor);
+        std.Io.Threaded.mutexLock(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        const edges = self.runEdgesLocked();
+        observation.observed = observation.observed.unionWith(edges);
+        return .{
+            .edges = edges,
+            .input = switch (self.input) {
+                .open, .closing => .pending,
+                .closed_cleanly => .closed_cleanly,
+                .broken => .broken,
+            },
+            .termination = switch (self.phase) {
+                .reaped => |result| result,
+                .constructing, .running, .closing, .terminal => null,
+            },
+        };
+    }
+
+    pub fn runSource(
+        self: *ProcessCell,
+        cursor: *RunCursor,
+        permit: ?*WritePermit,
+    ) external.ReadinessSource {
+        const observation = self.runObservation(cursor);
+        std.Io.Threaded.mutexLock(&self.mutex);
+        observation.permit = permit;
+        std.Io.Threaded.mutexUnlock(&self.mutex);
+        const pointer: u64 = @intFromPtr(observation);
         std.debug.assert(pointer & ~readiness_pointer_mask == 0);
         return external.readinessSource(ProcessCell, self, pointer | readiness_run_tag);
+    }
+
+    fn runObservation(self: *ProcessCell, cursor: *RunCursor) *RunObservation {
+        const observation: *RunObservation = @ptrCast(@alignCast(cursor));
+        if (observation != &self.run_observation or !observation.active)
+            @panic("run cursor belongs to another process");
+        return observation;
     }
 
     pub fn finishWrite(self: *ProcessCell, permit: *WritePermit) void {
@@ -901,11 +1059,15 @@ pub const ProcessCell = struct {
     }
 
     pub fn terminate(self: *ProcessCell) void {
-        self.signal(.TERM, .terminate);
+        var lease = self.controllers.tryLease() orelse return;
+        const escalation = self.beginGrace(true);
+        if (escalation) |id| {
+            self.startEscalation(id, lease);
+        } else lease.release();
     }
 
     pub fn kill(self: *ProcessCell) void {
-        self.signal(.KILL, .kill);
+        self.issueKill(null);
     }
 
     pub fn armTimeout(self: *ProcessCell, milliseconds: u64) error{Io}!void {
@@ -936,124 +1098,123 @@ pub const ProcessCell = struct {
         return self.timed_out;
     }
 
-    fn signal(self: *ProcessCell, signal_value: std.posix.SIG, reason: @FieldType(ProcessPhase, "closing")) void {
-        var should_signal = false;
+    fn beginGrace(self: *ProcessCell, close_process: bool) ?EscalationId {
         std.Io.Threaded.mutexLock(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        if (close_process) switch (self.phase) {
+            .constructing, .running => self.phase = .{ .closing = .terminate },
+            .closing, .terminal, .reaped => {},
+        };
+        const escalation: ?EscalationId = transition: switch (self.group_state) {
+            .running => |group| {
+                const id: EscalationId = @enumFromInt(self.next_escalation);
+                self.next_escalation +%= 1;
+                if (self.next_escalation == 0) @panic("process escalation identity exhausted");
+                self.group_state = .{ .grace = .{ .group = group, .escalation = id } };
+                const signal_result = group.send(.TERM) catch failure: {
+                    self.recordSignalFailureLocked();
+                    break :failure .sent;
+                };
+                switch (signal_result) {
+                    .sent => {},
+                    .absent => {
+                        self.group_state = .{ .kill_issued = group };
+                        break :transition null;
+                    },
+                    .denied => if (group.leader_observed) {
+                        // Darwin reports EPERM when the pinned zombie is the
+                        // group's only remaining member. A signalable live
+                        // descendant makes the same-group signal succeed.
+                        self.group_state = .{ .kill_issued = group };
+                        break :transition null;
+                    } else self.recordSignalFailureLocked(),
+                }
+                break :transition id;
+            },
+            .grace, .kill_issued, .retired => null,
+        };
+        if (close_process) {
+            if (self.input == .open) self.input = .closing;
+            self.discard_outputs = true;
+            self.changed.broadcast(blockingIo());
+            self.notifyReadyLocked();
+        }
+        return escalation;
+    }
+
+    fn issueKill(self: *ProcessCell, escalation: ?EscalationId) void {
+        std.Io.Threaded.mutexLock(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        var group_to_signal: ?*OwnedGroup = null;
+        switch (self.group_state) {
+            .running => |group| if (escalation == null) {
+                self.group_state = .{ .kill_issued = group };
+                group_to_signal = group;
+            },
+            .grace => |grace| if (escalation == null or escalation.? == grace.escalation) {
+                self.group_state = .{ .kill_issued = grace.group };
+                group_to_signal = grace.group;
+            },
+            .kill_issued, .retired => {},
+        }
+        if (group_to_signal) |group| {
+            const signal_result = group.send(.KILL) catch failure: {
+                self.recordSignalFailureLocked();
+                break :failure .sent;
+            };
+            if (signal_result == .denied and !group.leader_observed)
+                self.recordSignalFailureLocked();
+            self.changed.broadcast(blockingIo());
+        } else if (escalation != null) return;
         switch (self.phase) {
             .constructing, .running => {
-                self.phase = .{ .closing = reason };
+                self.phase = .{ .closing = .kill };
             },
-            .closing => |closing| if (closing == .terminate and reason == .kill) {
+            .closing => |closing| if (closing == .terminate) {
                 self.phase = .{ .closing = .kill };
             },
             .terminal, .reaped => {},
         }
-        switch (reason) {
-            .terminate => if (self.group_phase == .running) {
-                self.group_phase = .terminating;
-                should_signal = true;
-            },
-            .kill => if (self.group_phase != .killing) {
-                self.group_phase = .killing;
-                should_signal = true;
-            },
-        }
         if (self.input == .open) self.input = .closing;
         self.discard_outputs = true;
         self.changed.broadcast(blockingIo());
         self.notifyReadyLocked();
-        std.Io.Threaded.mutexUnlock(&self.mutex);
-        if (should_signal) self.signalGroup(signal_value);
-    }
-
-    fn beginScopeCancellation(self: *ProcessCell) bool {
-        var should_signal = false;
-        var should_escalate = false;
-        std.Io.Threaded.mutexLock(&self.mutex);
-        switch (self.phase) {
-            .constructing, .running => {
-                self.phase = .{ .closing = .terminate };
-            },
-            .closing => {},
-            .terminal, .reaped => {},
-        }
-        switch (self.group_phase) {
-            .running => {
-                self.group_phase = .escalating;
-                should_signal = true;
-                should_escalate = true;
-            },
-            .terminating => {
-                self.group_phase = .escalating;
-                should_escalate = true;
-            },
-            .escalating, .killing => {},
-        }
-        if (self.input == .open) self.input = .closing;
-        self.discard_outputs = true;
-        self.changed.broadcast(blockingIo());
-        self.notifyReadyLocked();
-        std.Io.Threaded.mutexUnlock(&self.mutex);
-        if (should_signal) self.signalGroup(.TERM);
-        return should_escalate;
     }
 
     fn beginPostLeaderCleanup(self: *ProcessCell) void {
         var lease = self.controllers.tryLease() orelse return;
-        var should_signal = false;
-        var should_escalate = false;
+        const escalation = self.beginGrace(false);
+        if (escalation) |id| {
+            self.startEscalation(id, lease);
+        } else lease.release();
+    }
+
+    fn escalateKill(self: *ProcessCell, escalation: EscalationId) void {
+        self.issueKill(escalation);
+    }
+
+    fn waitForFinalGroupSignal(self: *ProcessCell) void {
         std.Io.Threaded.mutexLock(&self.mutex);
-        switch (self.group_phase) {
-            .running => {
-                self.group_phase = .escalating;
-                should_signal = true;
-                should_escalate = true;
-            },
-            .terminating => {
-                self.group_phase = .escalating;
-                should_escalate = true;
-            },
-            .escalating, .killing => {},
-        }
-        std.Io.Threaded.mutexUnlock(&self.mutex);
-        if (should_signal) self.signalGroup(.TERM);
-        if (!should_escalate) {
-            lease.release();
-            return;
-        }
-        self.startEscalation(lease);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        while (self.group_state == .grace)
+            self.changed.waitUncancelable(blockingIo(), &self.mutex);
     }
 
-    fn escalateKill(self: *ProcessCell) void {
-        std.Io.Threaded.mutexLock(&self.mutex);
-        if (self.phase == .closing and self.phase.closing == .terminate)
-            self.phase = .{ .closing = .kill };
-        self.group_phase = .killing;
-        std.Io.Threaded.mutexUnlock(&self.mutex);
-        self.signalGroup(.KILL);
-    }
-
-    fn groupExists(self: *ProcessCell) bool {
-        std.posix.kill(-self.pgid, @enumFromInt(0)) catch |err| switch (err) {
-            error.ProcessNotFound => return false,
-            error.PermissionDenied => return true,
-            else => {
-                self.recordSignalFailure();
-                return true;
-            },
-        };
-        return true;
-    }
-
-    fn signalGroup(self: *ProcessCell, signal_value: std.posix.SIG) void {
-        std.posix.kill(-self.pgid, signal_value) catch |err| switch (err) {
-            error.ProcessNotFound => {},
-            error.PermissionDenied => self.recordSignalFailure(),
-            else => self.recordSignalFailure(),
+    fn groupLocked(self: *ProcessCell) ?*OwnedGroup {
+        return switch (self.group_state) {
+            .running => |group| group,
+            .grace => |grace| grace.group,
+            .kill_issued => |group| group,
+            .retired => null,
         };
     }
 
-    fn recordSignalFailure(self: *ProcessCell) void {
+    fn recordSignalFailureLocked(self: *ProcessCell) void {
+        self.io_failed = true;
+        self.notifyReadyLocked();
+    }
+
+    fn recordIoFailure(self: *ProcessCell) void {
         std.Io.Threaded.mutexLock(&self.mutex);
         self.io_failed = true;
         self.notifyReadyLocked();
@@ -1063,16 +1224,13 @@ pub const ProcessCell = struct {
     fn readyLocked(self: *ProcessCell, key: u64) bool {
         if (key & ~readiness_pointer_mask == readiness_run_tag) {
             const pointer = key & readiness_pointer_mask;
-            const observed: *const RunReadiness = @ptrFromInt(pointer);
-            const write_ready = if (observed.permit) |permit| ready: {
+            const observation: *const RunObservation = @ptrFromInt(pointer);
+            const write_ready = if (observation.permit) |permit| ready: {
                 const node = writeNode(permit);
                 break :ready !node.linked or node.active or self.input != .open or self.io_failed;
             } else false;
-            return self.stdout.len != 0 or self.stderr.len != 0 or
-                (self.stdout_done and !observed.stdout_eof) or
-                (self.stderr_done and !observed.stderr_eof) or
-                self.phase == .reaped or self.io_failed or
-                (self.input.terminal() and !observed.input_terminal) or write_ready;
+            return self.stdout.len != 0 or self.stderr.len != 0 or write_ready or
+                !self.runEdgesLocked().subsetOf(observation.observed);
         }
         return switch (key) {
             readiness_stdout => self.stdout.len != 0 or self.stdout_done,
@@ -1083,6 +1241,26 @@ pub const ProcessCell = struct {
                 return !node.linked or node.active or self.input != .open or self.io_failed;
             },
         };
+    }
+
+    fn wakeReasonLocked(self: *ProcessCell, key: u64) external.Wake {
+        if (key & ~readiness_pointer_mask == readiness_run_tag) return .ready;
+        return if (self.io_failed) .io else .ready;
+    }
+
+    fn runEdgesLocked(self: *ProcessCell) std.EnumSet(RunEdge) {
+        var edges: std.EnumSet(RunEdge) = .initEmpty();
+        inline for (std.enums.values(RunEdge)) |edge| {
+            const present = switch (edge) {
+                .stdout_terminal => self.stdout_done and self.stdout.len == 0,
+                .stderr_terminal => self.stderr_done and self.stderr.len == 0,
+                .input_terminal => self.input.terminal(),
+                .io_failure => self.io_failed,
+                .reaped => self.phase == .reaped,
+            };
+            if (present) edges.insert(edge);
+        }
+        return edges;
     }
 
     fn linkReadyLocked(self: *ProcessCell, wait: *ReadyWait) void {
@@ -1114,36 +1292,52 @@ pub const ProcessCell = struct {
             const next = candidate.next;
             if (self.readyLocked(candidate.key)) {
                 self.unlinkReadyLocked(candidate);
-                candidate.target.wake(if (self.io_failed) .io else .ready);
+                candidate.target.wake(self.wakeReasonLocked(candidate.key));
             }
             wait = next;
         }
     }
 
     fn supervisorMain(self: *ProcessCell) void {
-        var child = self.child.?;
-        self.child = null;
-        const stdin_file = child.stdin.?;
-        const stdout_file = child.stdout.?;
-        const stderr_file = child.stderr.?;
-        child.stdin = null;
-        child.stdout = null;
-        child.stderr = null;
+        std.Io.Threaded.mutexLock(&self.mutex);
+        const group = self.groupLocked().?;
+        const stdin_file = group.child.stdin.?;
+        const stdout_file = group.child.stdout.?;
+        const stderr_file = group.child.stderr.?;
+        group.child.stdin = null;
+        group.child.stdout = null;
+        group.child.stderr = null;
+        std.Io.Threaded.mutexUnlock(&self.mutex);
 
         self.startIoThread(stdinThreadMain, stdin_file, .stdin) catch self.failIoThread(stdin_file, .stdin);
         self.startIoThread(stdoutThreadMain, stdout_file, .stdout) catch self.failIoThread(stdout_file, .stdout);
         self.startIoThread(stderrThreadMain, stderr_file, .stderr) catch self.failIoThread(stderr_file, .stderr);
 
-        const translated: Termination = translated: {
-            const term = child.wait(self.io) catch {
-                self.signalGroup(.KILL);
-                child.kill(self.io);
-                std.Io.Threaded.mutexLock(&self.mutex);
-                self.io_failed = true;
-                std.Io.Threaded.mutexUnlock(&self.mutex);
+        var leader_observed = true;
+        observeLeaderTermination(group) catch {
+            leader_observed = false;
+        };
+        const translated: Termination = if (leader_observed) translated: {
+            std.Io.Threaded.mutexLock(&self.mutex);
+            group.leader_observed = true;
+            std.Io.Threaded.mutexUnlock(&self.mutex);
+            // Keep the terminated leader waitable while the consuming group
+            // transition issues its final signal. The zombie pins the numeric
+            // process-group identity against reuse until the reap below.
+            self.beginPostLeaderCleanup();
+            self.waitForFinalGroupSignal();
+            const term = group.child.wait(self.io) catch {
+                self.issueKill(null);
+                group.child.kill(self.io);
+                self.recordIoFailure();
                 break :translated .{ .unknown = 0 };
             };
             break :translated translateTerm(term);
+        } else translated: {
+            self.issueKill(null);
+            group.child.kill(self.io);
+            self.recordIoFailure();
+            break :translated .{ .unknown = 0 };
         };
 
         std.Io.Threaded.mutexLock(&self.mutex);
@@ -1153,20 +1347,17 @@ pub const ProcessCell = struct {
         self.notifyReadyLocked();
         std.Io.Threaded.mutexUnlock(&self.mutex);
 
-        // Reaping the group leader does not end ownership of descendants that
-        // remain in its process group. Keep a controller lease through the
-        // ordinary TERM-to-KILL cleanup even when those descendants inherited
-        // none of the leader's pipes.
-        if (self.groupExists()) self.beginPostLeaderCleanup();
-
         std.Io.Threaded.mutexLock(&self.mutex);
         while (!self.stdin_done or !self.stdout_done or !self.stderr_done)
             self.changed.waitUncancelable(blockingIo(), &self.mutex);
         self.phase = .{ .reaped = translated };
+        self.group_state = .{ .retired = translated };
         self.timeout_done.set(blockingIo());
         self.notifyReadyLocked();
         std.Io.Threaded.mutexUnlock(&self.mutex);
 
+        self.allocator.destroy(group);
+        self.waitForOtherControllers();
         self.owner.releaseLive();
     }
 
@@ -1306,7 +1497,11 @@ fn timeoutThreadMain(cell: *ProcessCell, milliseconds: u64, lease_value: Control
     };
 }
 
-fn escalationMain(cell: *ProcessCell, lease_value: ControllerLease) void {
+fn escalationMain(
+    cell: *ProcessCell,
+    escalation: EscalationId,
+    lease_value: ControllerLease,
+) void {
     var lease = lease_value;
     defer lease.release();
     defer cell.releaseRef();
@@ -1317,7 +1512,7 @@ fn escalationMain(cell: *ProcessCell, lease_value: ControllerLease) void {
     duration.sleep(cell.io) catch |err| switch (err) {
         error.Canceled => {},
     };
-    cell.escalateKill();
+    cell.escalateKill(escalation);
 }
 
 fn detachMembership(membership: external.ScopeMembership) void {

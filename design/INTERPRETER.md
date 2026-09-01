@@ -775,22 +775,32 @@ be deinitialized twice when readiness races cancellation. A deadline timeout
 clears any attached work driver before publishing its result.
 
 Process cells own exhaustive constructing, running, closing, terminal, and
-reaped phases, independently from the process group's running, terminating,
-escalating, and killing phases. Separate bounded stdin, stdout, and stderr queues let each
-pipe advance independently. A full queue pauses only its producer; a
-background wait publishes one immutable `Child.Term`. POSIX children are
-created as process-group leaders. Scope cancellation and leader exit both
-close the group through TERM-to-KILL escalation when descendants remain, and
-the escalation lease prevents membership detachment even when those
-descendants redirected every pipe. Reaping the group leader therefore cannot
-suppress group cleanup or publish scope quiescence while cleanup still owns
-process-group authority. Stdin independently transitions through
-`open`, `closing`, `closed_cleanly`, or `broken`; `proc.run` cannot publish
-success until it observes a terminal stdin state, so a late background EPIPE
-remains observable even after all input entered the bounded queue. Compound
-`proc.run` readiness carries the driver's consumed EOF and input-terminal
-facts, so terminal edges wake it once while buffered bytes, I/O failure, and
-reaping remain level-triggered.
+reaped phases, independently from a private process-group authority with
+`running`, `grace`, `kill_issued`, and `retired` variants. Only its nominal
+`OwnedGroup` payload contains the child handle and PGID. A transition consumes
+that payload before signaling; the grace timer carries only the matching
+escalation identity, and `kill_issued` and `retired` permit no further signal.
+Separate bounded stdin, stdout, and stderr queues let each pipe advance
+independently. A full queue pauses only its producer; a background wait
+publishes one immutable `Child.Term`. POSIX children are created as
+process-group leaders. The supervisor observes leader termination with
+`waitid(..., WNOWAIT)`, performs the consuming TERM-to-KILL cleanup, and reaps
+the leader only afterward. The waitable leader pins its PID slot, so the PGID
+cannot be reused while cleanup retains it. The controller group stops issuing
+leases at retirement and its final lease may detach scope membership only
+after the group state contains no process identity. Reaping the group leader
+therefore cannot suppress group cleanup or publish scope quiescence while
+cleanup still owns process-group authority. Stdin independently transitions
+through `open`, `closing`, `closed_cleanly`, or `broken`; `proc.run` cannot
+publish success until it observes a terminal stdin state, so a late background
+EPIPE remains observable even after all input entered the bounded queue.
+Compound `proc.run` readiness uses an opaque process-owned cursor over an
+exhaustive set of stdout-terminal, stderr-terminal, input-terminal,
+I/O-failure, and reap edges. Polling consumes visible edges under the process
+lock, while registration compares newly published edges with that cursor.
+Buffered bytes and writable queue capacity remain level-triggered. A failure
+published after polling still wakes the driver, while an observed failure
+cannot turn later pipe or reap readiness into a scheduler hot loop.
 
 Every `proc.write` call acquires its nominal write ticket when the call reaches
 the primitive, before resumable byte validation and encoding. A driver owns

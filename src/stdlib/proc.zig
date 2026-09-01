@@ -168,12 +168,7 @@ const SpecDriver = struct {
     stderr_capture: std.ArrayList(u8) = .empty,
     stdout_eof: bool = false,
     stderr_eof: bool = false,
-    run_readiness: process.RunReadiness = .{
-        .permit = null,
-        .stdout_eof = false,
-        .stderr_eof = false,
-        .input_terminal = false,
-    },
+    run_cursor: ?*process.RunCursor = null,
     stdout_reader: bool = false,
     stderr_reader: bool = false,
     failed: ?RunFailure = null,
@@ -191,6 +186,7 @@ const SpecDriver = struct {
         if (self.port_value) |port| {
             const cell = process.fromValue(port).?;
             if (self.write_permit) |permit| cell.abandonWrite(permit);
+            if (self.run_cursor) |cursor| cell.endRun(cursor);
             if (self.stdout_reader) cell.endRead(.stdout);
             if (self.stderr_reader) cell.endRead(.stderr);
             if (self.mode == .run and self.termination == null) cell.kill();
@@ -443,6 +439,7 @@ const SpecDriver = struct {
         self.port_value = port;
         const cell = process.fromValue(port).?;
         self.write_permit = try cell.beginWrite();
+        self.run_cursor = cell.beginRun();
         cell.beginRead(.stdout) catch return evaluator.fail(.contract, "stdout already has a pending reader");
         self.stdout_reader = true;
         cell.beginRead(.stderr) catch return evaluator.fail(.contract, "stderr already has a pending reader");
@@ -475,8 +472,8 @@ const SpecDriver = struct {
         }
         if (!self.stdout_eof) progressed = (try self.drain(evaluator, cell, .stdout)) or progressed;
         if (!self.stderr_eof) progressed = (try self.drain(evaluator, cell, .stderr)) or progressed;
-        const input_terminal = cell.inputTerminal();
-        if (input_terminal == .broken) self.noteFailure(.io);
+        const poll = cell.pollRun(self.run_cursor.?);
+        progressed = self.observeRunPoll(poll) or progressed;
         if (cell.timedOut()) self.failed = .timeout;
         if (self.failed != null) {
             if (self.write_permit) |permit| {
@@ -485,9 +482,8 @@ const SpecDriver = struct {
             }
             cell.kill();
         }
-        if (cell.termination()) |termination| self.termination = termination;
         if (self.termination != null and self.stdout_eof and self.stderr_eof and
-            input_terminal != .pending)
+            poll.input != .pending)
         {
             if (self.write_permit) |permit| {
                 cell.abandonWrite(permit);
@@ -507,14 +503,28 @@ const SpecDriver = struct {
             return .yielded;
         }
         if (progressed) return .yielded;
-        self.run_readiness = .{
-            .permit = self.write_permit,
-            .stdout_eof = self.stdout_eof,
-            .stderr_eof = self.stderr_eof,
-            .input_terminal = input_terminal != .pending,
-        };
-        try evaluator.park(.{ .external = cell.runSource(&self.run_readiness) });
+        try evaluator.park(.{ .external = cell.runSource(self.run_cursor.?, self.write_permit) });
         return .yielded;
+    }
+
+    fn observeRunPoll(self: *SpecDriver, poll: process.RunPoll) bool {
+        var progressed = false;
+        inline for (std.enums.values(process.RunEdge)) |edge| {
+            if (poll.edges.contains(edge)) switch (edge) {
+                .stdout_terminal => if (!self.stdout_eof) {
+                    self.stdout_eof = true;
+                    progressed = true;
+                },
+                .stderr_terminal => if (!self.stderr_eof) {
+                    self.stderr_eof = true;
+                    progressed = true;
+                },
+                .input_terminal => if (poll.input == .broken) self.noteFailure(.io),
+                .io_failure => self.noteFailure(.io),
+                .reaped => self.termination = poll.termination.?,
+            };
+        }
+        return progressed;
     }
 
     fn drain(
