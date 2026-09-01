@@ -584,7 +584,7 @@ const ControllerGroup = struct {
         return .{ .group = self, .cell = cell };
     }
 
-    fn release(self: *ControllerGroup) void {
+    fn release(self: *ControllerGroup) ?external.ScopeMembership {
         const old = self.leases.fetchSub(1, .release);
         std.debug.assert(old != 0);
         if (old != 1) {
@@ -594,10 +594,10 @@ const ControllerGroup = struct {
                 cell.changed.broadcast(blockingIo());
                 std.Io.Threaded.mutexUnlock(&cell.mutex);
             }
-            return;
+            return null;
         }
         _ = self.leases.load(.acquire);
-        self.cell.detachRetiredMembership(self);
+        return self.cell.takeRetiredMembership(self);
     }
 };
 
@@ -610,8 +610,9 @@ const ControllerLease = struct {
         const cell = self.cell orelse @panic("controller lease lost its cell reference");
         self.group = null;
         self.cell = null;
-        group.release();
+        const membership = group.release();
         cell.releaseRef();
+        if (membership) |token| detachMembership(token);
     }
 };
 
@@ -774,13 +775,16 @@ pub const ProcessCell = struct {
         self.allocator.destroy(self);
     }
 
-    fn detachRetiredMembership(self: *ProcessCell, controllers: *ControllerGroup) void {
+    fn takeRetiredMembership(
+        self: *ProcessCell,
+        controllers: *ControllerGroup,
+    ) ?external.ScopeMembership {
         std.Io.Threaded.mutexLock(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
         if (self.group_state != .retired) @panic("process scope detached before group retirement");
         const membership = controllers.membership;
         controllers.membership = null;
-        std.Io.Threaded.mutexUnlock(&self.mutex);
-        if (membership) |token| detachMembership(token);
+        return membership;
     }
 
     fn waitForOtherControllers(self: *ProcessCell) void {

@@ -790,8 +790,10 @@ cannot be reused while cleanup retains it. The controller group stops issuing
 leases at retirement and its final lease may detach scope membership only
 after the group state contains no process identity. Every controller lease
 owns a process-cell reference and releases it only after its controller-count
-transition and any quiescence notification complete, so observing the final
-count cannot expose freed cell storage. Reaping the group leader therefore
+transition completes. The final lease takes the membership token, drops its
+cell reference while the external-member reference still pins the cell, and
+only then detaches membership, so scope quiescence cannot race the last
+controller release. Reaping the group leader therefore
 cannot suppress group cleanup or publish scope quiescence while cleanup still
 owns process-group authority. Stdin independently transitions
 through `open`, `closing`, `closed_cleanly`, or `broken`; `proc.run` cannot
