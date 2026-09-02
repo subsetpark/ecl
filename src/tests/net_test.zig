@@ -425,3 +425,77 @@ test "net: words cold-load through the builtin manifest and are documented" {
     );
     try support.expectStack("'net ('listen 'local-address 'close) import 1", "1");
 }
+
+// Connection words. PENDING: Patch 4 of gameplans/net-connections.json
+// implements each test below against the public Session with a Zig-side
+// `Peer` thread (connect, scripted write/read/close, optional SO_LINGER zero).
+
+// PENDING: Patch 4. Oracle: a Zig `Peer` thread connects to the listener's port after `net.accept` has parked; the stack then shows a `'port` value and the peer's write is read in full.
+test "net: accept parks until a peer connects and yields a connection port" {
+    return error.SkipZigTest;
+}
+
+// PENDING: Patch 4. Oracle: policy `receive_capacity = 4`; the peer writes eight bytes and closes; two reads of at most eight return four bytes each, `2 net.read` returns two, and reads after EOF return `[]`.
+test "net: read returns exact bytes bounded by max and the receive capacity and an empty list at EOF" {
+    return error.SkipZigTest;
+}
+
+// PENDING: Patch 4. Oracle: policy `send_capacity = 4`; `[1 2 3 4 5 6 7 8] net.write` completes and the peer, reading until EOF, observes exactly those bytes in order.
+test "net: write delivers exact bytes in order under bounded send pressure" {
+    return error.SkipZigTest;
+}
+
+// PENDING: Patch 4. Oracle: `peer-address` equals the address and port the peer bound; `local-address 'port at` equals the listener's port.
+test "net: peer-address and local-address describe both ends of a connection" {
+    return error.SkipZigTest;
+}
+
+// PENDING: Patch 4. Oracle: a child unit accepts and returns the connection; after `await` the peer observes EOF and `net.read` on the retained value is `'io` `'closed`.
+test "net: a connection belongs to the accepting unit's scope and closes with it" {
+    return error.SkipZigTest;
+}
+
+// PENDING: Patch 4. Oracle: `[111 107] net.write net.close net.close`; the peer reads exactly `ok` then EOF.
+test "net: close flushes queued bytes before the peer observes EOF and is idempotent" {
+    return error.SkipZigTest;
+}
+
+// PENDING: Patch 4. Oracle: a parked `accept` child fails `'io` `'closed` after `net.close` on the listener; a connection accepted earlier still reads and writes.
+test "net: closing a listener wakes parked acceptors with io closed and leaves accepted connections open" {
+    return error.SkipZigTest;
+}
+
+// PENDING: Patch 4. Oracle: a child parks in `net.read`; the parent's `net.read` on the same connection fails `'contract`.
+test "net: overlapping reads on one connection are a contract failure" {
+    return error.SkipZigTest;
+}
+
+// PENDING: Patch 4. Oracle: the peer closes with `SO_LINGER` zero; the next `net.write` or `net.read` fails `'io` with `'reason` `'reset` and the peer's `'address` and `'port`.
+test "net: a peer reset is an io failure carrying the peer address and reason" {
+    return error.SkipZigTest;
+}
+
+// PENDING: Patch 4. Oracle: policy `max_live_connections = 1`; the second `accept` fails `'domain` `'limit` synchronously; after `net.close` a third accept succeeds.
+test "net: the live-connection quota refuses accept with domain limit and is released on close" {
+    return error.SkipZigTest;
+}
+
+// PENDING: Patch 4. Oracle: a cancelled accept child reports `'cancelled` and a later `accept` succeeds; a cancelled read child reports `'cancelled` and a later `read` returns the bytes the peer sent meanwhile.
+test "net: cancelling a parked accept or read leaves the listener and connection usable" {
+    return error.SkipZigTest;
+}
+
+// PENDING: Patch 4. Oracle: `net.read`, `net.write`, `net.peer-address` on a listener and `net.accept` on a connection or process port fail `'type`.
+test "net: connection words reject listeners, process ports, and non-ports with type" {
+    return error.SkipZigTest;
+}
+
+// PENDING: Patch 4. Oracle: `.{ .worker_pool = 4 }`; three child units each accept one connection; every peer observes EOF once the children finish.
+test "net: concurrent connections under the worker pool close with their scopes" {
+    return error.SkipZigTest;
+}
+
+// PENDING: Patch 4. Oracle: `doc` is non-empty for the four new words and `import` binds them.
+test "net: connection words cold-load through the builtin manifest and are documented" {
+    return error.SkipZigTest;
+}

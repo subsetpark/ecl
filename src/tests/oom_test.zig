@@ -758,6 +758,7 @@ const StdlibSurface = enum {
     http,
     process,
     net,
+    net_connection,
     package_sync_module,
     package_sync,
     package_cli_module,
@@ -811,7 +812,7 @@ fn stdlibSessionAllocationProbe(
                 .stdout_capacity = 16,
                 .stderr_capacity = 16,
             } else null,
-            .net_policy = if (surface == .net) .{
+            .net_policy = if (surface == .net or surface == .net_connection) .{
                 .binds = .{ .exact = &.{.{ .address = "127.0.0.1", .port = 0 }} },
             } else null,
             .filesystem_policy = .{ .roots = &.{
@@ -972,6 +973,9 @@ fn stdlibSessionAllocationProbe(
                 "[] ({'address \"127.0.0.1\" 'port 1} net.listen) @attempt pop " ++
                 "[] ({'address \"127.0.0.1\" 'port 0} net.listen net.local-address) @spawn await pop",
         ),
+        // PENDING: Patch 4 of gameplans/net-connections.json: listen and read
+        // the port back, start a Zig peer, then accept/read/write/close.
+        .net_connection => return error.SkipZigTest,
         .time => try runOk(
             &runtime,
             "oom-time.ecl",
@@ -1313,6 +1317,11 @@ test "oom: standard-library and host: host: filesystem propagates every allocati
 test "oom: standard-library and host: host: network listeners propagate every allocation failure" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.net);
+}
+
+test "oom: standard-library and host: host: network connections propagate every allocation failure" {
+    try requireSelectedOomTest(@src());
+    try checkStdlibSurface(.net_connection);
 }
 
 test "oom: standard-library and host: host: HTTP propagates every allocation failure" {

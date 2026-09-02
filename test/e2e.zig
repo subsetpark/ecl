@@ -265,6 +265,14 @@ test "e2e: net listen under the CLI grant binds an ephemeral port and reports it
     try std.testing.expect(try std.fmt.parseInt(u16, result.stdout[start..end], 10) != 0);
 }
 
+// PENDING: Patch 4 of gameplans/net-connections.json: spawn the binary with
+// piped stdout, read the `{'address "127.0.0.1" 'port N}` handshake line,
+// connect, write `ping`, read `pong` until EOF, and expect exit 0 with the
+// echoed request bytes on stdout.
+test "e2e: net accept, read, write, and close round-trip over loopback under the CLI grant" {
+    return error.SkipZigTest;
+}
+
 test "e2e: proc leader exit cleans retained and redirected descendants" {
     const process_exe = try absoluteProcessExe();
     defer allocator.free(process_exe);
