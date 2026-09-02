@@ -961,8 +961,10 @@ the process live slot), open the socket, create the `ListenerCell`, attach it
 to the calling unit's `TaskScope` through `attachExternal` and store the
 returned membership token, and only then wrap it in a port value with
 `heap.createPort`. Every failure on that path releases the reservation and
-closes the socket exactly once, and a scope that is already closing refuses
-the attachment before the socket is opened.
+closes the socket exactly once. The socket is opened before the scope is asked,
+because a scope may begin closing between any earlier check and the attach;
+when `attachExternal` refuses a closing scope, the just-opened socket is closed
+through the same `close` transition and the caller sees `'cancelled`.
 
 A `ListenerCell` has one mutex-protected exhaustive state, `bound` (owning the
 server socket and its resolved address) or `closed`, and one reference count
