@@ -61,6 +61,7 @@ The main components are these:
 | Bulk execution | Pervasive scalar semantics, typed flat loops, and guarded source-phrase recognition | `kernel_*.zig`, `kernels.zig`, `idioms.zig` |
 | Scheduler | Green units, structured task scopes, task and external waits, cancellation, timers, external membership, and retirement service | `scheduler_core.zig`, `scheduler.zig`, `external.zig`, `task_prims.zig` |
 | Process ports | Process policy, POSIX process-group ownership, bounded pipe queues, and terminal publication | `process_port.zig`, `stdlib/proc.zig` |
+| Network listeners | Listen policy, exact grant matching over normalized IP literals, scope-owned listening sockets, and idempotent close | `net_port.zig`, `stdlib/net.zig` |
 | Boundary layers | Embedded modules, native extensions, rendering, terminal safety, the REPL, and the CLI | `prelude.zig`, `stdlib.zig`, `native_*.zig`, `print.zig`, `console.zig`, `line_editor.zig`, `main.zig` |
 
 ### Position in the design space
@@ -927,12 +928,65 @@ one entry per step, and releases the quota slot last, so a task scope or
 Session cannot publish quiescence while an operation still owns any of them.
 The filesystem read, write, and publication primitives run on the worker in
 these bounded quanta, the same convention the archive and package-store
-drivers already use; only process pipes use detached controller threads.
+drivers already use; only process pipes use detached controller threads, and
+a network listener owns a socket and no thread.
 
 Every failure maps a host error to one closed reason vocabulary at the
 `filesystem_port` boundary and attaches the operation, root, path (or both
 ends of a transfer), and reason to the pending failure, so programs branch on
 stable symbols and never on errno names.
+
+### Network listeners are scope-owned sockets without controllers
+
+Inbound listening follows the filesystem model, not the process model. A Host
+may supply a `NetPolicy`: either an unrestricted grant or an exact allowlist
+of address and port pairs, plus a maximum live-listener count and the kernel
+accept backlog. Session construction copies the policy into a `NetOwner`,
+parsing every address once through `std.Io.net.IpAddress.parse` (literals
+only, never resolution) and normalizing IPv4-mapped IPv6 addresses to IPv4, so
+grant comparison is over parsed values and no spelling of an address can
+bypass an entry. A literal that does not parse, two entries that normalize to
+the same address and port, a zero limit, or an unsupported target fails with
+`InvalidHostPolicy` rather than `OutOfMemory`. The owner mints one opaque
+`NetAccess`; Units receive only that and cannot reach the owner, the socket,
+or the descriptor.
+
+`listen` runs four bounded syscalls on the worker — socket, bind, listen, and
+getsockname, all through `std.Io.net.IpAddress.listen`, which stores the
+resolved local address on the returned socket — and never parks, so no
+controller thread, readiness source, or wait registration exists for a
+listener. The order is the process port's: validate the configuration, check
+the grant, acquire a live-listener reservation (a consuming capability like
+the process live slot), open the socket, create the `ListenerCell`, attach it
+to the calling unit's `TaskScope` through `attachExternal` and store the
+returned membership token, and only then wrap it in a port value with
+`heap.createPort`. Every failure on that path releases the reservation and
+closes the socket exactly once. The socket is opened before the scope is asked,
+because a scope may begin closing between any earlier check and the attach;
+when `attachExternal` refuses a closing scope, the just-opened socket is closed
+through the same `close` transition and the caller sees `'cancelled`.
+
+A `ListenerCell` has one mutex-protected exhaustive state, `bound` (owning the
+server socket and its resolved address) or `closed`, and one reference count
+shared by the port value and the scope member; the heap projects a port to a
+cell only when the release adapter matches, so a process port and a listener
+cannot be confused. `ListenerCell.close` is the single close transition: under
+the mutex it moves `bound` to `closed`, closes the socket, and releases the
+reservation; after unlocking it detaches the scope membership token once. It
+is idempotent, and both the `net.close` word and `cancelExternalMember` call
+it, so a listener closed explicitly and later swept by its scope, or the
+reverse, closes exactly once and detaches exactly once. `local-address` reads
+the state under the mutex and copies the address out; a `closed` cell has no
+address to report. The cell is destroyed when the last reference drops and is
+asserted `closed` at that point. `NetOwner.deinit` asserts a zero live count,
+which holds because Session teardown closes the root scope first.
+
+Every failure maps a `std.Io.net.IpAddress.ListenError` to one closed reason
+vocabulary at the `net_port` boundary — `'in-use`, `'unavailable`,
+`'resources`, `'unsupported`, `'io` — and the `net` module attaches the
+requested address, the requested port, and the reason to the pending failure.
+Refusals before the host is reached are `'domain` with reasons `'unavailable`,
+`'denied`, and `'limit`, matching the process and filesystem capabilities.
 
 ### Absolute deadlines govern timer races
 

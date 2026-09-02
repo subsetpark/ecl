@@ -23,6 +23,7 @@ const session_options = @import("session_options");
 const stdlib = @import("stdlib.zig");
 const process_port = @import("process_port.zig");
 const filesystem_port = @import("filesystem_port.zig");
+const net_port = @import("net_port.zig");
 const package_authority = @import("package_authority.zig");
 pub const Value = value.Value;
 /// Session construction distinguishes an unsatisfiable host policy from
@@ -101,6 +102,9 @@ pub const Host = struct {
     /// Absent by default: every caller-selected filesystem operation is denied
     /// until the host names root directories and their permissions.
     filesystem_policy: ?filesystem_port.FilesystemPolicy = null,
+    /// Absent by default: no address may be bound until the host names exact
+    /// address and port pairs or grants an unrestricted listen policy.
+    net_policy: ?net_port.NetPolicy = null,
     /// Host monotonic time and no wall clock by default.
     clock: ClockPolicy = .{},
 };
@@ -259,6 +263,7 @@ const SessionCore = struct {
     native_owner: *native_module.Owner,
     process_owner: ?*process_port.ProcessOwner,
     filesystem_owner: ?*filesystem_port.FilesystemOwner,
+    net_owner: ?*net_port.NetOwner,
     package_owner: ?*package_authority.PackageOwner,
     stack: std.ArrayList(Value) = .empty,
     archive_owner: spans.SpanArchiveOwner,
@@ -531,6 +536,19 @@ pub const Session = enum(usize) {
             owner.deinit();
             allocator.destroy(owner);
         };
+        const net_owner = if (host) |services| if (services.net_policy) |policy| owner: {
+            const owned = try allocator.create(net_port.NetOwner);
+            errdefer allocator.destroy(owned);
+            owned.* = net_port.NetOwner.init(allocator, services.io, policy) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidPolicy => return error.InvalidHostPolicy,
+            };
+            break :owner owned;
+        } else null else null;
+        errdefer if (net_owner) |owner| {
+            owner.deinit();
+            allocator.destroy(owner);
+        };
         const package_owner = if (package_grant) |grant| owner: {
             const services = host orelse return error.InvalidHostPolicy;
             const owned = try allocator.create(package_authority.PackageOwner);
@@ -567,6 +585,7 @@ pub const Session = enum(usize) {
             .native_owner = native_owner,
             .process_owner = process_owner,
             .filesystem_owner = filesystem_owner,
+            .net_owner = net_owner,
             .package_owner = package_owner,
             .archive_owner = archive_owner,
             .archive = archive,
@@ -619,6 +638,12 @@ pub const Session = enum(usize) {
         // handle, staging entry, or quota reservation can still reference
         // these owners.
         if (core.filesystem_owner) |owner| {
+            owner.deinit();
+            core.allocator().destroy(owner);
+        }
+        // Every listener closed when the scheduler closed the root scope, so
+        // the live count is zero here.
+        if (core.net_owner) |owner| {
             owner.deinit();
             core.allocator().destroy(owner);
         }
@@ -724,6 +749,7 @@ pub const Session = enum(usize) {
             .phrase_recognizer = idioms.tryApply,
             .process_access = if (core.process_owner) |owner| owner.access() else null,
             .filesystem_access = if (core.filesystem_owner) |owner| owner.access() else null,
+            .net_access = if (core.net_owner) |owner| owner.access() else null,
             .package_access = if (core.package_owner) |owner| owner.access() else null,
             .wall_clock = core.wall_clock,
         };

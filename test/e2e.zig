@@ -248,6 +248,23 @@ test "e2e: proc scope cancellation kills and reaps the process group" {
     try expectProcessGone(processes.descendant, processes.leader);
 }
 
+test "e2e: net listen under the CLI grant binds an ephemeral port and reports it" {
+    var result = try cli.runOptions(.{
+        .argv = &.{ build_options.ecl_exe, "{'address \"127.0.0.1\" 'port 0} net.listen net.local-address io.pp" },
+        .timeout = .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(5) } },
+    });
+    defer result.deinit();
+    try result.expect(.{
+        .exit_code = 0,
+        .stdout_contains = &.{"{'address \"127.0.0.1\" 'port "},
+        .stderr = "",
+    });
+    const marker = "'port ";
+    const start = std.mem.indexOf(u8, result.stdout, marker).? + marker.len;
+    const end = std.mem.indexOfScalarPos(u8, result.stdout, start, '}').?;
+    try std.testing.expect(try std.fmt.parseInt(u16, result.stdout[start..end], 10) != 0);
+}
+
 test "e2e: proc leader exit cleans retained and redirected descendants" {
     const process_exe = try absoluteProcessExe();
     defer allocator.free(process_exe);

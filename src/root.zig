@@ -39,6 +39,8 @@ const process_port = @import("process_port.zig");
 pub const ProcessPolicy = process_port.ProcessPolicy;
 pub const filesystem_port = @import("filesystem_port.zig");
 pub const FilesystemPolicy = filesystem_port.FilesystemPolicy;
+pub const net_port = @import("net_port.zig");
+pub const NetPolicy = net_port.NetPolicy;
 pub const package_authority = @import("package_authority.zig");
 pub const directory_order = @import("directory_order.zig");
 pub const task_prims = @import("task_prims.zig");
@@ -79,6 +81,7 @@ test {
     _ = external;
     _ = process_port;
     _ = filesystem_port;
+    _ = net_port;
     _ = package_authority;
     _ = directory_order;
     _ = task_prims;
@@ -91,6 +94,7 @@ test {
     _ = @import("tests/test_language_test.zig");
     _ = @import("tests/process_test.zig");
     _ = @import("tests/filesystem_test.zig");
+    _ = @import("tests/net_test.zig");
     _ = @import("tests/allocation_budget_test.zig");
     _ = @import("tests/kernel_numeric_test.zig");
     _ = @import("tests/kernel_sequence_test.zig");

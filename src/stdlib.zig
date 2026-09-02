@@ -21,6 +21,7 @@ const dict_module = @import("stdlib/dict.zig");
 const rand_module = @import("stdlib/rand.zig");
 const proc_module = @import("stdlib/proc.zig");
 const fs_module = @import("stdlib/fs.zig");
+const net_module = @import("stdlib/net.zig");
 const clock_module = @import("stdlib/clock.zig");
 const time_module = @import("stdlib/time.zig");
 
@@ -76,6 +77,7 @@ const modules = [_]Module{
     .{ .name = "http", .entry = .{ .builtin = &http_module.words } },
     .{ .name = "proc", .entry = .{ .builtin = &proc_module.words } },
     .{ .name = "fs", .entry = .{ .builtin = &fs_module.words } },
+    .{ .name = "net", .entry = .{ .builtin = &net_module.words } },
     .{ .name = "path", .entry = .{ .source = .{
         .name = "<stdlib:path>",
         .text = @embedFile("stdlib/path.ecl"),

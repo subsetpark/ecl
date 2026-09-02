@@ -98,6 +98,35 @@ removal, recursive directory creation, globbing, watching, memory mapping,
 locking, link creation, permission changes, timestamps, and Windows support are
 outside this contract.
 
+## Network listeners
+
+Inbound TCP listening goes through the `net` module documented in
+`STDLIB.md`. It is a capability: the Session host names, once, either an
+unrestricted grant or an exact allowlist of address and port pairs, together
+with a maximum number of live listeners and the kernel accept backlog. A
+program requests one address and one port; a grant entry whose port is `0`
+admits only requests for an ephemeral port. Addresses are IPv4 or IPv6
+literals compared after normalization, so `::ffff:127.0.0.1` matches a grant
+for `127.0.0.1`; no name is resolved and no interface scope id is accepted.
+Listen authority is separate from outbound HTTP, filesystem, and process
+authority, and none of those implies it.
+
+The `ecl` command grants an unrestricted listen policy: any local address, any
+port. Embedded Sessions are default-deny: without a `NetPolicy` every `net`
+word that needs authority raises `'domain` with reason `'unavailable`, a
+request outside the grant raises `'domain` with reason `'denied`, and an
+unsatisfiable policy (a literal that does not parse, a duplicate entry, a zero
+limit, or an unsupported target) is a Session construction error distinct from
+allocation failure.
+
+Supported targets are Linux and macOS. A listener is an opaque port owned by
+the task scope that created it; the socket closes when that scope closes or
+when `net.close` runs, whichever comes first, and the same address and port
+can then be bound again. Address reuse options are not set, so two listeners
+never share one address and port. Accepting connections, reading, writing,
+TLS, and protocol framing are outside this contract; they belong to the
+protocol modules built over a listener.
+
 ## Clocks
 
 The `clock` and `time` modules documented in `STDLIB.md` split effectful time

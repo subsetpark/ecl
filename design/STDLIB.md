@@ -1819,6 +1819,73 @@ become floats. JSON null and booleans become the ordinary symbols `'null`,
 # => {"a" (1 'null)}
 ```
 
+## net
+
+Host-backed TCP listeners. The module is present in every standard image, but
+binding a socket is `'domain` unless the Session host supplied listen
+authority. The CLI supplies an explicit unrestricted grant; embedding hosts
+default to none and may instead name an exact allowlist of address and port
+pairs, a maximum number of live listeners, and the kernel accept backlog.
+
+A listen configuration is a dictionary with exactly these fields:
+
+- required `'address`: a string holding an IPv4 or IPv6 literal; and
+- required `'port`: an integer in `0...65535`, where `0` requests an ephemeral
+  port.
+
+Addresses are literals only: no name resolution and no interface scope id. A
+non-dictionary configuration is `'type`; a missing, unknown, or repeated field
+is `'domain`; a non-string address or non-integer port is `'type`; a port
+outside the range or a literal that does not parse is `'domain` with `'reason`
+`'invalid` and the offending `'address` and `'port` attached. The
+configuration is validated before authority is consulted, and authority is
+checked before the operating system is reached.
+
+Grants are exact. A request matches a grant entry when the two addresses are
+equal after normalization (an IPv4-mapped IPv6 literal such as
+`::ffff:127.0.0.1` equals `127.0.0.1`) and the ports are equal; a grant entry
+whose port is `0` admits only a request whose port is `0`. Every refusal is
+`'domain` with a `'reason` symbol and the requested `'address` and `'port`
+attached: `'unavailable` when the Session has no listen authority, `'denied`
+when no entry admits the request, and `'limit` when the number of live
+listeners already equals the host maximum. A host failure to bind or listen is
+`'io` with the same `'address` and `'port` and one of the closed reasons
+`'in-use`, `'unavailable` (the address is not local), `'resources`,
+`'unsupported`, or `'io`.
+
+A listener is an opaque identity capability that prints `<port:N>` and has
+type `'port`; it exposes no descriptor and cannot be passed through JSON or the
+native value ABI. `proc` words reject a listener with `'type`, and `net` words
+reject a process port with `'type`. The socket is bound and listening before
+the value is returned, so a returned listener is ready, and `local-address` is
+the whole readiness protocol. No `net` word parks. The listener belongs to the
+creating unit's task scope: scope closure closes the socket and releases the
+live-listener slot even if a listener value is stored elsewhere, and `close`
+performs the same idempotent transition early. There is no detach or ownership
+transfer. Address reuse is not requested, so two listeners can never hold one
+address and port at once. Accepting connections, reading, writing, and every
+framing limit belong to the protocol words built over a listener, not to this
+module.
+
+### close
+`( listener -- )` — Close the listener's socket now, release its live-listener
+slot, and detach it from its task scope. Idempotent: closing a listener that
+is already closed, whether by an earlier `close` or by scope closure, does
+nothing and does not fail. A non-listener is `'type`.
+
+### listen
+`( config -- listener )` — Bind and listen on the configured address and port
+and return the listener once the socket is accepting connections at the
+kernel. Configuration, authority, and host failures are described above.
+
+### local-address
+`( listener -- address )` — Return `{'address string 'port int}` for a bound
+listener. The address is the canonical text of the bound IP literal (dotted
+quad for IPv4; RFC 5952 form without brackets for IPv6) and the port is the
+bound port, which for an ephemeral request is the kernel-assigned port. A
+closed listener is `'io` with `'reason` `'closed` and the address and port it
+was bound to attached. A non-listener is `'type`.
+
 ## proc
 
 Host-backed subprocess ports. The module is present in every standard image,
