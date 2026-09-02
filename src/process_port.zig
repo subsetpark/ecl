@@ -1661,7 +1661,7 @@ test "dormant controller reaps a direct child before scope detachment" {
 
     var host = heap.HostOwner.init(std.testing.allocator);
     defer host.cleanup().drain();
-    var runtime_scheduler = try scheduler_api.Scheduler.init(host.cleanup(), .cooperative);
+    var runtime_scheduler = try scheduler_api.Scheduler.init(host.cleanup(), .cooperative, .host);
     runtime_scheduler.attachRetirement();
     var root_scope = scheduler_api.TaskScope.init(runtime_scheduler.worker());
     defer runtime_scheduler.deinit(&root_scope);
@@ -1709,7 +1709,7 @@ test "scope shutdown cancels a blocked controller independently of port referenc
     defer std.testing.allocator.free(fixture_path);
     var host = heap.HostOwner.init(std.testing.allocator);
     defer host.cleanup().drain();
-    var runtime_scheduler = try scheduler_api.Scheduler.init(host.cleanup(), .cooperative);
+    var runtime_scheduler = try scheduler_api.Scheduler.init(host.cleanup(), .cooperative, .host);
     runtime_scheduler.attachRetirement();
     var root_scope = scheduler_api.TaskScope.init(runtime_scheduler.worker());
     var owner = try ProcessOwner.init(

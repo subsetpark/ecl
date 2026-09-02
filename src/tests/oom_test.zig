@@ -746,6 +746,8 @@ const StdlibSurface = enum {
     package_store_gc,
     host_io,
     filesystem,
+    clock,
+    time,
     http,
     process,
     package_sync_module,
@@ -940,6 +942,22 @@ fn stdlibSessionAllocationProbe(
                 "\"a//b/../c\" path.normalize pop (\"a\" \"b\") path.join pop " ++
                 "\"a/b.c\" path.dirname pop \"a/b.c\" path.basename pop \"a/b.c\" path.extension pop " ++
                 "\"a/b\" path.components pop \"a/b\" path.valid-relative? pop",
+        ),
+        .clock => try runOk(
+            &runtime,
+            "oom-clock.ecl",
+            // The probe Session grants no wall clock, so `unix` exercises the
+            // refusal path; a zero sleep parks and resumes without a timer.
+            "clock.now clock.elapsed pop [] (0 clock.sleep 1) @spawn await pop " ++
+                "[] (clock.unix) @attempt pop",
+        ),
+        .time => try runOk(
+            &runtime,
+            "oom-time.ecl",
+            "\"2024-02-29T12:34:56.789+05:30\" time.parse dup time.format pop " ++
+                "dup time.to-utc time.from-utc pop dup 5 time.add time.diff pop " ++
+                "0 time.from-unix 1 time.from-unix time.cmp pop 3 time.seconds pop " ++
+                "[] (\"2024-02-30T00:00:00Z\" time.parse) @attempt pop",
         ),
         .http => try runOk(
             &runtime,
@@ -1189,6 +1207,16 @@ fn checkStdlibSurfaceOrdinalShard(
 test "oom: standard-library and host: package: locked project module propagates every allocation failure" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.locked_project_module);
+}
+
+test "oom: standard-library and host: stdlib: clock propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
+    try checkStdlibSurface(.clock);
+}
+
+test "oom: standard-library and host: stdlib: time propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
+    try checkStdlibSurface(.time);
 }
 
 test "oom: standard-library and host: stdlib: random propagates every allocation failure" {

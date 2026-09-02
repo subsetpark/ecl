@@ -81,12 +81,14 @@ const source_groups = [_]SourceGroup{
     // Builtin-backed stdlib modules hold host authority the SDK withholds, so
     // they are ordinary production sources under the bounded-traversal rules.
     .{ .production = true, .files = &.{
-        "stdlib/dict.zig", "stdlib/rand.zig", "stdlib/json.zig", "stdlib/http.zig", "stdlib/proc.zig", "stdlib/archive.zig", "stdlib/pkg_store.zig", "stdlib/fs.zig",
+        "stdlib/dict.zig",  "stdlib/rand.zig", "stdlib/json.zig", "stdlib/http.zig", "stdlib/proc.zig", "stdlib/archive.zig", "stdlib/pkg_store.zig", "stdlib/fs.zig",
+        "stdlib/clock.zig", "stdlib/time.zig",
     }, .sources = &.{
         @embedFile("../stdlib/dict.zig"),      @embedFile("../stdlib/rand.zig"),
         @embedFile("../stdlib/json.zig"),      @embedFile("../stdlib/http.zig"),
         @embedFile("../stdlib/proc.zig"),      @embedFile("../stdlib/archive.zig"),
         @embedFile("../stdlib/pkg_store.zig"), @embedFile("../stdlib/fs.zig"),
+        @embedFile("../stdlib/clock.zig"),     @embedFile("../stdlib/time.zig"),
     } },
     .{ .production = true, .files = &.{
         "combinators.zig",
@@ -197,6 +199,7 @@ const test_files = [_][]const u8{
     "tests/test_language_test.zig",
     "tests/process_test.zig",
     "tests/filesystem_test.zig",
+    "tests/clock_test.zig",
 };
 const repository_verification_files = [_][]const u8{
     "build.zig",

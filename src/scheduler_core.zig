@@ -20,6 +20,8 @@ pub const WakeReason = union(enum) {
     cancellation,
     io,
     out_of_memory,
+    /// The wait's deadline lies beyond any instant its clock can report.
+    overflow,
     external_ready,
     external_io,
 
@@ -27,7 +29,7 @@ pub const WakeReason = union(enum) {
         if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
         return switch (a) {
             .task => |index| index == b.task,
-            .timeout, .cancellation, .io, .out_of_memory, .external_ready, .external_io => true,
+            .timeout, .cancellation, .io, .out_of_memory, .overflow, .external_ready, .external_io => true,
         };
     }
 };

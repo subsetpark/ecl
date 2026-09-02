@@ -37,6 +37,115 @@ fn scopeDecision(before: core.Scope, event: core.ScopeEvent) core.ScopeDecision 
     return core.decideScope(before, event) catch @panic("invalid scheduler scope transition");
 }
 
+/// Where the scheduler reads monotonic time. `host` samples the process's
+/// awake clock. `manual` starts at zero and moves only through
+/// `Scheduler.advanceManualClock`, so a deterministic embedding drives every
+/// deadline, sleep, and `clock.now` sample without a real wait anywhere.
+pub const ClockSource = enum { host, manual };
+
+/// An absolute instant on the scheduler clock that the clock can reach.
+/// `MonotonicClock.deadlineAfter` is the only constructor, and timer state
+/// holds deadlines rather than raw timestamps, so an instant the clock could
+/// never report cannot be registered and left waiting forever.
+const Deadline = struct {
+    nanoseconds: i96,
+
+    fn reachedBy(self: Deadline, now: std.Io.Timestamp) bool {
+        return now.nanoseconds >= self.nanoseconds;
+    }
+
+    fn before(self: Deadline, other: Deadline) bool {
+        return self.nanoseconds < other.nanoseconds;
+    }
+
+    /// The same instant as a host wait target; meaningful under `host` only.
+    fn hostInstant(self: Deadline) std.Io.Clock.Timestamp {
+        return .{ .raw = .{ .nanoseconds = self.nanoseconds }, .clock = .awake };
+    }
+};
+
+/// Manual monotonic time. The reading is whole nonnegative milliseconds, the
+/// language's own unit, and the only mutation is a checked advance: a step
+/// whose sum would leave the range is refused and the stored reading is
+/// unchanged, so the clock can neither wrap nor run backwards.
+const ManualClock = struct {
+    milliseconds: std.atomic.Value(i64),
+
+    fn init() ManualClock {
+        return .{ .milliseconds = .init(0) };
+    }
+
+    fn reading(self: *const ManualClock) i64 {
+        return self.milliseconds.load(.acquire);
+    }
+
+    fn now(self: *const ManualClock) std.Io.Timestamp {
+        return .{ .nanoseconds = @as(i96, self.reading()) * std.time.ns_per_ms };
+    }
+
+    fn advance(self: *ManualClock, milliseconds: u64) error{Overflow}!void {
+        const step = std.math.cast(i64, milliseconds) orelse return error.Overflow;
+        var current = self.reading();
+        while (true) {
+            const next = std.math.add(i64, current, step) catch return error.Overflow;
+            current = self.milliseconds.cmpxchgWeak(current, next, .acq_rel, .acquire) orelse return;
+        }
+    }
+};
+
+/// The scheduler's monotonic clock, one variant per source so neither carries
+/// state the other would leave meaningless. The tag is fixed at construction;
+/// only the manual reading ever changes.
+const MonotonicClock = union(enum) {
+    /// The process's awake clock, with the instant this scheduler started so
+    /// monotonic instants handed to programs count from zero.
+    host: struct { origin: std.Io.Timestamp },
+    /// Moves only through `Scheduler.advanceManualClock`.
+    manual: ManualClock,
+
+    fn init(source: ClockSource) MonotonicClock {
+        return switch (source) {
+            .host => .{ .host = .{ .origin = std.Io.Clock.awake.now(blockingIo()) } },
+            .manual => .{ .manual = .init() },
+        };
+    }
+
+    fn now(self: *const MonotonicClock) std.Io.Timestamp {
+        return switch (self.*) {
+            .host => std.Io.Clock.awake.now(blockingIo()),
+            .manual => |*clock| clock.now(),
+        };
+    }
+
+    fn origin(self: *const MonotonicClock) std.Io.Timestamp {
+        return switch (self.*) {
+            .host => |host| host.origin,
+            .manual => .zero,
+        };
+    }
+
+    /// The instant `milliseconds` from now, or `Overflow` when that instant
+    /// lies beyond what this clock can ever report: past the i96 nanoseconds
+    /// of a host timestamp, or past i64 milliseconds for the manual clock.
+    fn deadlineAfter(self: *const MonotonicClock, milliseconds: u63) error{Overflow}!Deadline {
+        return switch (self.*) {
+            .host => {
+                const current = std.Io.Clock.awake.now(blockingIo());
+                const step = std.math.mul(i96, milliseconds, std.time.ns_per_ms) catch
+                    return error.Overflow;
+                const instant = std.math.add(i96, current.nanoseconds, step) catch
+                    return error.Overflow;
+                return .{ .nanoseconds = instant };
+            },
+            .manual => |*clock| {
+                const total = std.math.add(i64, clock.reading(), milliseconds) catch
+                    return error.Overflow;
+                return .{ .nanoseconds = @as(i96, total) * std.time.ns_per_ms };
+            },
+        };
+    }
+};
+
 pub const Config = union(enum) {
     cooperative,
     worker_pool: usize,
@@ -58,7 +167,7 @@ const TerminalState = union(enum) {
     oom,
 };
 
-const WaitKind = enum { one, any, deadline, external };
+const WaitKind = enum { one, any, deadline, sleep, external };
 const Finish = enum { success, language_error, oom };
 
 const FinishingWork = union(enum) {
@@ -162,10 +271,25 @@ const WaitRegistration = struct {
     }
 };
 
+/// A wait's slot in the timer heap. A node carries a deadline only while it
+/// is linked: there is no detached node with a stale instant to misread.
 const TimerNode = struct {
     wait: *WaitSet,
-    deadline: std.Io.Timestamp = .zero,
-    membership: union(enum) { detached, linked: usize } = .detached,
+    membership: union(enum) {
+        detached,
+        linked: struct { index: usize, deadline: Deadline },
+    } = .detached,
+
+    fn deadline(self: *const TimerNode) Deadline {
+        return switch (self.membership) {
+            .linked => |linked| linked.deadline,
+            .detached => unreachable,
+        };
+    }
+
+    fn relink(self: *TimerNode, index: usize) void {
+        self.membership = .{ .linked = .{ .index = index, .deadline = self.deadline() } };
+    }
 };
 
 const timer_chunk_capacity = 64;
@@ -191,6 +315,7 @@ const TimerHeap = struct {
         self: *TimerHeap,
         allocator: std.mem.Allocator,
         node: *TimerNode,
+        deadline: Deadline,
     ) error{OutOfMemory}!void {
         std.debug.assert(node.membership == .detached);
         if (self.len == self.chunks.items.len * timer_chunk_capacity) {
@@ -202,13 +327,13 @@ const TimerHeap = struct {
         const index = self.len;
         self.len += 1;
         self.set(index, node);
-        node.membership = .{ .linked = index };
+        node.membership = .{ .linked = .{ .index = index, .deadline = deadline } };
         self.siftUp(index);
     }
 
     fn remove(self: *TimerHeap, node: *TimerNode) void {
         const index = switch (node.membership) {
-            .linked => |linked| linked,
+            .linked => |linked| linked.index,
             .detached => unreachable,
         };
         std.debug.assert(index < self.len and self.get(index) == node);
@@ -219,7 +344,7 @@ const TimerHeap = struct {
         node.membership = .detached;
         if (index == last_index) return;
         self.set(index, last);
-        last.membership = .{ .linked = index };
+        last.relink(index);
         if (index > 0 and earlier(last, self.get((index - 1) / 2)))
             self.siftUp(index)
         else
@@ -257,8 +382,8 @@ const TimerHeap = struct {
         const right_node = self.get(right);
         self.set(left, right_node);
         self.set(right, left_node);
-        left_node.membership = .{ .linked = right };
-        right_node.membership = .{ .linked = left };
+        left_node.relink(right);
+        right_node.relink(left);
     }
 
     fn get(self: *const TimerHeap, index: usize) *TimerNode {
@@ -270,7 +395,7 @@ const TimerHeap = struct {
     }
 
     fn earlier(left: *const TimerNode, right: *const TimerNode) bool {
-        return left.deadline.nanoseconds < right.deadline.nanoseconds;
+        return left.deadline().before(right.deadline());
     }
 };
 
@@ -289,7 +414,7 @@ const WaitSet = struct {
     external_registration: ?external.ReadinessRegistration = null,
     state: State,
     timer: TimerNode,
-    absolute_deadline: ?std.Io.Timestamp = null,
+    absolute_deadline: ?Deadline = null,
 
     const JoinRequest = @FieldType(machine.ParkRequest, "join");
     const State = union(enum) {
@@ -426,7 +551,7 @@ const WaitSet = struct {
     ) core.WakeReason {
         const deadline = self.absolute_deadline orelse return candidate;
         return switch (self.policy) {
-            .registering, .active => if (std.Io.Clock.awake.now(blockingIo()).nanoseconds >= deadline.nanoseconds)
+            .registering, .active => if (deadline.reachedBy(self.scheduler.now()))
                 .timeout
             else
                 candidate,
@@ -434,21 +559,21 @@ const WaitSet = struct {
         };
     }
 
-    fn addTimer(self: *WaitSet, milliseconds: i64) error{ Io, OutOfMemory }!void {
+    fn addTimer(self: *WaitSet, milliseconds: u63) error{ Io, OutOfMemory, Overflow }!void {
         // The wait's semantic deadline starts before lazy infrastructure work.
         // A deadline that expires while the timer thread is being created is
         // resolved here while selectors are excluded, so startup latency can
         // neither extend the timeout nor let a later completion overtake it.
-        const deadline = std.Io.Clock.awake.now(blockingIo()).addDuration(
-            .fromMilliseconds(milliseconds),
-        );
+        // The factory refuses an instant the clock can never reach, so no
+        // unreachable deadline enters the heap.
+        const deadline = try self.scheduler.deadlineAfter(milliseconds);
         std.Io.Threaded.mutexLock(&self.mutex);
         if (self.policy != .registering) {
             std.Io.Threaded.mutexUnlock(&self.mutex);
             return;
         }
         self.absolute_deadline = deadline;
-        if (std.Io.Clock.awake.now(blockingIo()).nanoseconds >= deadline.nanoseconds) {
+        if (deadline.reachedBy(self.scheduler.now())) {
             const decision = waitDecision(self.policy, .{ .candidate = .timeout });
             self.policy = decision.next;
             std.Io.Threaded.mutexUnlock(&self.mutex);
@@ -459,22 +584,21 @@ const WaitSet = struct {
             std.Io.Threaded.mutexUnlock(&self.mutex);
             return err;
         };
-        if (std.Io.Clock.awake.now(blockingIo()).nanoseconds >= deadline.nanoseconds) {
+        if (deadline.reachedBy(self.scheduler.now())) {
             const decision = waitDecision(self.policy, .{ .candidate = .timeout });
             self.policy = decision.next;
             std.Io.Threaded.mutexUnlock(&self.mutex);
             self.performWaitCommand(decision.command);
             return;
         }
-        self.timer.deadline = deadline;
         const scheduler_state = self.scheduler.privateState();
         std.Io.Threaded.mutexLock(&scheduler_state.timer_mutex);
-        scheduler_state.timer_heap.insert(self.scheduler.allocator(), &self.timer) catch {
+        scheduler_state.timer_heap.insert(self.scheduler.allocator(), &self.timer, deadline) catch {
             std.Io.Threaded.mutexUnlock(&scheduler_state.timer_mutex);
             std.Io.Threaded.mutexUnlock(&self.mutex);
             return error.OutOfMemory;
         };
-        if (std.Io.Clock.awake.now(blockingIo()).nanoseconds >= deadline.nanoseconds) {
+        if (deadline.reachedBy(self.scheduler.now())) {
             scheduler_state.timer_heap.remove(&self.timer);
             const decision = waitDecision(self.policy, .{ .candidate = .timeout });
             self.policy = decision.next;
@@ -524,24 +648,44 @@ const WaitSet = struct {
         self.scheduler.enqueueWait(self);
     }
 
+    /// The wait kind selects the resume family, so a sleep can only produce a
+    /// sleep result and a task wait can only produce a task result; the wake
+    /// reason then selects the variant within that family.
     fn materializeResume(self: *WaitSet, reason: core.WakeReason) machine.ParkResume {
-        return switch (reason) {
-            .task => |index| outcome: {
-                const cell = self.registrations[index].cell.?;
-                const terminal_value = cell.terminalOwned() catch break :outcome .out_of_memory;
-                const outcome_value = terminal_value orelse unreachable;
-                break :outcome switch (self.kind) {
-                    .one, .deadline => .{ .outcome = outcome_value },
-                    .any => .{ .indexed = .{ .index = index, .outcome = outcome_value } },
-                    .external => unreachable,
-                };
-            },
-            .timeout => .timeout,
-            .cancellation => .cancelled,
-            .io => .io,
-            .out_of_memory => .out_of_memory,
-            .external_ready => .{ .external = .ready },
-            .external_io => .{ .external = .io },
+        return switch (self.kind) {
+            .sleep => .{ .sleep = switch (reason) {
+                .timeout => .elapsed,
+                .cancellation => .cancelled,
+                .io => .io,
+                .overflow => .overflow,
+                .out_of_memory => .out_of_memory,
+                .task, .external_ready, .external_io => unreachable,
+            } },
+            .external => .{ .external = switch (reason) {
+                .external_ready => .{ .wake = .ready },
+                .external_io => .{ .wake = .io },
+                .cancellation => .cancelled,
+                .io => .io,
+                .out_of_memory => .out_of_memory,
+                .task, .timeout, .overflow => unreachable,
+            } },
+            .one, .any, .deadline => .{ .task_wait = switch (reason) {
+                .task => |index| outcome: {
+                    const cell = self.registrations[index].cell.?;
+                    const terminal_value = cell.terminalOwned() catch break :outcome .out_of_memory;
+                    const outcome_value = terminal_value orelse unreachable;
+                    break :outcome if (self.kind == .any)
+                        .{ .indexed = .{ .index = index, .outcome = outcome_value } }
+                    else
+                        .{ .outcome = outcome_value };
+                },
+                .timeout => .timeout,
+                .cancellation => .cancelled,
+                .io => .io,
+                .overflow => .overflow,
+                .out_of_memory => .out_of_memory,
+                .external_ready, .external_io => unreachable,
+            } },
         };
     }
 
@@ -669,10 +813,17 @@ const WaitSet = struct {
                 budget -= 1;
             },
             .timer => |request| {
-                if (request == .deadline) {
-                    self.addTimer(request.deadline.milliseconds) catch |err| switch (err) {
+                const milliseconds: ?u63 = switch (request) {
+                    .deadline => |deadline| deadline.milliseconds,
+                    .sleep => |duration| duration,
+                    .task, .any, .join, .external => null,
+                    .close_scope => unreachable,
+                };
+                if (milliseconds) |duration| {
+                    self.addTimer(duration) catch |err| switch (err) {
                         error.Io => self.select(.io),
                         error.OutOfMemory => self.select(.out_of_memory),
+                        error.Overflow => self.select(.overflow),
                     };
                 }
                 self.state = .{ .release_request = request };
@@ -1143,6 +1294,7 @@ const WorkerState = struct {
     allocator: std.mem.Allocator,
     releases: *heap.ReleaseDomain,
     config: Config,
+    clock: MonotonicClock,
     start_mutex: std.Io.Mutex = .init,
     queue_mutex: std.Io.Mutex = .init,
     tree_mutex: std.Io.Mutex = .init,
@@ -1179,6 +1331,33 @@ pub const WorkerScheduler = enum(usize) {
 
     fn releaseDomain(self: *const WorkerScheduler) *heap.ReleaseDomain {
         return self.privateState().releases;
+    }
+
+    /// The scheduler's monotonic clock. Every deadline capture, timer wake,
+    /// arbitration check, and `clock.now` sample reads through here, so one
+    /// authority decides what "now" means for the whole Session.
+    pub fn now(self: *const WorkerScheduler) std.Io.Timestamp {
+        return self.privateState().clock.now();
+    }
+
+    fn deadlineAfter(self: *const WorkerScheduler, milliseconds: u63) error{Overflow}!Deadline {
+        return self.privateState().clock.deadlineAfter(milliseconds);
+    }
+
+    /// Whether a wait of this length could register now. The clock only moves
+    /// forward, so a duration refused here is refused at registration too; a
+    /// primitive uses this to fail with `'overflow` before parking.
+    pub fn checkDeadline(self: *const WorkerScheduler, milliseconds: u63) error{Overflow}!void {
+        _ = try self.deadlineAfter(milliseconds);
+    }
+
+    /// Whole milliseconds elapsed on the scheduler clock since this
+    /// scheduler's origin. The origin is the Session's start, so the value is
+    /// never a portable timestamp.
+    pub fn monotonicMilliseconds(self: *const WorkerScheduler) i64 {
+        const clock = &self.privateState().clock;
+        const elapsed = clock.now().nanoseconds - clock.origin().nanoseconds;
+        return @intCast(@divFloor(elapsed, std.time.ns_per_ms));
     }
 
     pub fn wakeRetirement(self: *const WorkerScheduler) void {
@@ -1475,8 +1654,8 @@ pub const WorkerScheduler = enum(usize) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Io => {
                 _ = unit.takeParkRequest();
+                unit.installParkResume(machine.ParkResume.serviceUnavailable(request));
                 request.deinit(self.releaseDomain());
-                unit.installParkResume(.io);
                 return;
             },
         };
@@ -1661,7 +1840,7 @@ pub const WorkerScheduler = enum(usize) {
         std.Io.Threaded.mutexUnlock(&cell.mutex);
 
         if (parking.command == .enqueue) {
-            unit.installParkResume(.cancelled);
+            unit.installParkResume(machine.ParkResume.cancelledFor(request));
             wait.discard();
             self.enqueueTask(cell);
             return;
@@ -1954,7 +2133,11 @@ pub const Scheduler = enum(usize) {
         return @ptrFromInt(@intFromEnum(self.*));
     }
 
-    pub fn init(host: *const heap.HostCleanup, config: Config) error{OutOfMemory}!Scheduler {
+    pub fn init(
+        host: *const heap.HostCleanup,
+        config: Config,
+        clock: ClockSource,
+    ) error{OutOfMemory}!Scheduler {
         config.validate() catch @panic("scheduler worker count must be positive when using a pool");
         const backing = try host.allocator().create(SchedulerState);
         backing.* = .{
@@ -1964,6 +2147,7 @@ pub const Scheduler = enum(usize) {
                 .allocator = host.allocator(),
                 .releases = heap.hostDomain(host),
                 .config = config,
+                .clock = .init(clock),
             },
         };
         backing.worker_facade = @enumFromInt(@intFromPtr(&backing.worker));
@@ -2023,6 +2207,28 @@ pub const Scheduler = enum(usize) {
         return self.privateState().worker.worker_threads.load(.acquire);
     }
 
+    /// Move the manual clock forward by whole milliseconds and let the timer
+    /// thread reconsider its heap. Only the host root may call this: an
+    /// executing unit cannot reach it, so evaluated code never decides what
+    /// time it is. Refused when the scheduler reads the host clock, and with
+    /// `Overflow` — the reading unchanged — when the sum would leave the
+    /// clock's range.
+    pub fn advanceManualClock(
+        self: *Scheduler,
+        milliseconds: u64,
+    ) error{ HostClock, Overflow }!void {
+        const execution = &self.privateState().worker;
+        switch (execution.clock) {
+            .host => return error.HostClock,
+            .manual => |*clock| try clock.advance(milliseconds),
+        }
+        // The timer thread re-reads the clock after every wake, so a store
+        // that lands before its `reset` is observed by the following peek and
+        // one that lands after is observed through this set. Setting an event
+        // nobody waits on is harmless: the loop resets it before each check.
+        execution.timer_wake.set(blockingIo());
+    }
+
     pub fn timerThreadCount(self: *const Scheduler) usize {
         return self.privateState().worker.timer_threads.load(.acquire);
     }
@@ -2045,6 +2251,7 @@ fn requestKind(request: machine.ParkRequest) WaitKind {
         .task, .join => .one,
         .any => .any,
         .deadline => .deadline,
+        .sleep => .sleep,
         .external => .external,
         .close_scope => unreachable,
     };
@@ -2375,24 +2582,27 @@ fn timerMain(scheduler: *const WorkerScheduler) void {
             return;
         }
         const first = scheduler_state.timer_heap.peek();
-        var next_deadline: ?std.Io.Timestamp = null;
+        var next_deadline: ?Deadline = null;
         if (first) |node| {
-            const now = std.Io.Clock.awake.now(io);
-            if (now.nanoseconds >= node.deadline.nanoseconds) {
+            const deadline = node.deadline();
+            if (deadline.reachedBy(scheduler.now())) {
                 scheduler_state.timer_heap.remove(node);
                 std.Io.Threaded.mutexUnlock(&scheduler_state.timer_mutex);
                 node.wait.select(.timeout);
                 node.wait.release();
                 continue;
             }
-            next_deadline = node.deadline;
+            next_deadline = deadline;
         }
         std.Io.Threaded.mutexUnlock(&scheduler_state.timer_mutex);
-        if (next_deadline) |deadline| {
-            scheduler_state.timer_wake.waitTimeout(io, .{ .deadline = deadline.withClock(.awake) }) catch |err| switch (err) {
+        if (next_deadline) |deadline| switch (scheduler_state.clock) {
+            .host => scheduler_state.timer_wake.waitTimeout(io, .{ .deadline = deadline.hostInstant() }) catch |err| switch (err) {
                 error.Timeout => {},
                 error.Canceled => @panic("uncancelable scheduler timer wait was canceled"),
-            };
+            },
+            // A manual clock moves only through `advanceManualClock`, which
+            // sets this event; there is no host instant worth waiting for.
+            .manual => scheduler_state.timer_wake.waitUncancelable(io),
         } else scheduler_state.timer_wake.waitUncancelable(io);
     }
 }

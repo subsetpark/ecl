@@ -98,6 +98,41 @@ removal, recursive directory creation, globbing, watching, memory mapping,
 locking, link creation, permission changes, timestamps, and Windows support are
 outside this contract.
 
+## Clocks
+
+The `clock` and `time` modules documented in `STDLIB.md` split effectful time
+from pure conversion. `time` is pure and available everywhere. `clock` reads
+two distinct authorities that a Session's host configures separately.
+
+Monotonic time belongs to the scheduler and always exists. The host selects
+its source once, at Session construction: the process's awake clock, or a
+manual clock that starts at zero and moves only when the embedder advances it
+through the Session by whole milliseconds. An advance that would carry the
+reading past the int range is refused and leaves the reading unchanged, so
+the manual clock never wraps or runs backwards. Every deadline —
+`clock.sleep`, `await-for`, and any future timed wait — captures its absolute
+instant on that one clock before registering any timer state; an instant the
+clock could never report is refused with `'overflow` instead of being
+registered, and the timer thread reconsiders its heap on every advance. Under a manual clock no wait, wake, or `clock.now` sample
+touches host time, so an embedding can drive sleeping programs to exact
+instants; a sleeping unit is never woken early, and one is never woken at all
+unless the clock reaches its deadline or it is cancelled. Evaluated code
+cannot advance a clock or discover which source it runs on beyond observing
+the readings.
+
+Wall-clock time is a grant, absent by default like process and filesystem
+authority. A host may withhold it (`clock.unix` raises `'domain` with reason
+`'unavailable`), fix it at one Unix millisecond value, anchor a base value to
+the monotonic clock so a manual clock yields a deterministic advancing wall
+time, or pass the process realtime clock through. The `ecl` command grants the
+process clock. Host I/O, a TLS verification timestamp, and every other
+capability confer no wall clock; nothing in the environment or ECL source can
+widen the grant.
+
+Time zones, locale-sensitive formatting, leap-second tables, timers that run
+callbacks, and periodic scheduling are outside this contract. Process
+deadlines (`'timeout-ms`) continue to run on a per-process host timer.
+
 ## Host-backed data contracts
 
 ### Byte lists and archives

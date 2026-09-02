@@ -10,6 +10,7 @@
   "stdlib.test.json" ["json.ecl"]
   "stdlib.test.random" ["random.ecl"]
   "stdlib.test.archive" ["archive.ecl"]
+  "stdlib.test.time" ["time.ecl"]
   "stdlib.test.pkg-version" ["pkg-version.ecl"]
   "stdlib.test.pkg-name" ["pkg-name.ecl"]
   "stdlib.test.pkg-manifest" ["pkg-manifest.ecl"]

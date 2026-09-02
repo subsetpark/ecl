@@ -866,6 +866,10 @@ pub fn build(b: *std.Build) void {
             // case runs against a temporary directory through the public
             // Session and finishes well inside the fast budget.
             "tests.filesystem_test.",
+            // Clock policy and scheduler-backed sleep. Every timing case runs
+            // under a manual clock the test advances, so nothing here waits
+            // on host time.
+            "tests.clock_test.",
             // Fast families inside sources that also hold heavy tests.
             "env:",
             "modules:",
