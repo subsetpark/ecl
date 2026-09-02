@@ -1,4 +1,5 @@
-//! Explicit host scripting capabilities in `io`, plus global `getenv`.
+//! Console words in `io`, plus global `getenv`. File access is not here:
+//! it lives behind the `fs` capability and is covered by `filesystem_test`.
 //!
 //! Every case drives a whole Session over source strings only, so the
 //! traceless session heap is the right allocator (see `test_heap.zig`). The
@@ -82,130 +83,6 @@ fn expectError(case: Case, expected: support.ErrorCase) !void {
     try support.expectLanguageError(failure, expected);
 }
 
-/// A temporary directory plus the source text that names files inside it.
-const Scratch = struct {
-    directory: std.testing.TmpDir,
-    /// `realPathFileAlloc` returns a sentinel slice; keeping the sentinel in
-    /// the field type is what makes the matching free the right size.
-    path: [:0]u8,
-
-    fn init() !Scratch {
-        var directory = std.testing.tmpDir(.{});
-        const path = directory.dir.realPathFileAlloc(std.testing.io, ".", allocator) catch |err| {
-            directory.cleanup();
-            return err;
-        };
-        return .{ .directory = directory, .path = path };
-    }
-    fn deinit(self: *Scratch) void {
-        allocator.free(self.path);
-        self.directory.cleanup();
-    }
-    fn write(self: *Scratch, name: []const u8, data: []const u8) !void {
-        try self.directory.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = data });
-    }
-    /// Renders `template` with each `{s}` replaced by a source-escaped path
-    /// to `name` inside the scratch directory.
-    fn source(self: *Scratch, comptime template: []const u8, name: []const u8) ![]u8 {
-        var joined: std.ArrayList(u8) = .empty;
-        defer joined.deinit(allocator);
-        for (self.path) |byte| {
-            if (byte == '\\' or byte == '"') try joined.append(allocator, '\\');
-            try joined.append(allocator, byte);
-        }
-        try joined.append(allocator, std.fs.path.sep);
-        try joined.appendSlice(allocator, name);
-        const placeholders = comptime std.mem.count(u8, template, "{s}");
-        const arguments = .{joined.items} ** placeholders;
-        return std.fmt.allocPrint(allocator, template, arguments);
-    }
-};
-
-test "hostio: slurp reads a UTF-8 file" {
-    var scratch = try Scratch.init();
-    defer scratch.deinit();
-    try scratch.write("greeting.txt", "héllo\nworld\n");
-    try scratch.write("raw.bin", "\xff\xfe");
-
-    const read = try scratch.source("\"{s}\" io.slurp dup len swap", "greeting.txt");
-    defer allocator.free(read);
-    try expectStack(.{ .source = read }, "12 \"héllo\\nworld\\n\"");
-
-    const empty = try scratch.source("\"{s}\" io.slurp", "empty.txt");
-    defer allocator.free(empty);
-    try scratch.write("empty.txt", "");
-    try expectStack(.{ .source = empty }, "\"\"");
-
-    const invalid = try scratch.source("\"{s}\" io.slurp", "raw.bin");
-    defer allocator.free(invalid);
-    try expectError(.{ .source = invalid }, .{
-        .name = "invalid encoding",
-        .source = invalid,
-        .kind = "io",
-        .word = "io.slurp",
-        .message = "file is not valid UTF-8",
-    });
-}
-
-test "hostio: slurp missing file is io with path data" {
-    var scratch = try Scratch.init();
-    defer scratch.deinit();
-
-    const missing = try scratch.source("\"{s}\" io.slurp", "absent.txt");
-    defer allocator.free(missing);
-    try expectError(.{ .source = missing }, .{
-        .name = "missing file",
-        .source = missing,
-        .kind = "io",
-        .word = "io.slurp",
-        .message_contains = "FileNotFound",
-        .data = &.{.{ .name = "path", .expected = .{ .string = missing[1 .. missing.len - 10] } }},
-    });
-
-    try expectError(.{ .source = "42 io.slurp" }, .{
-        .name = "non-string path",
-        .source = "42 io.slurp",
-        .kind = "type",
-        .word = "io.slurp",
-    });
-}
-
-test "hostio: spit writes and slurp round-trips" {
-    var scratch = try Scratch.init();
-    defer scratch.deinit();
-
-    // Truncate-and-replace: the shorter second write leaves no tail behind.
-    const round_trip = try scratch.source(
-        "\"first\\ntext\" \"{s}\" io.spit \"{s}\" io.slurp \"2nd\" \"{s}\" io.spit \"{s}\" io.slurp",
-        "out.txt",
-    );
-    defer allocator.free(round_trip);
-    try expectStack(.{ .source = round_trip }, "\"first\\ntext\" \"2nd\"");
-
-    const unwritable = try scratch.source("\"x\" \"{s}\" io.spit", "no-such-dir/out.txt");
-    defer allocator.free(unwritable);
-    try expectError(.{ .source = unwritable }, .{
-        .name = "unwritable path",
-        .source = unwritable,
-        .kind = "io",
-        .word = "io.spit",
-        .message_contains = "cannot write",
-    });
-
-    try expectError(.{ .source = "42 \"p\" io.spit" }, .{
-        .name = "non-string contents",
-        .source = "42 \"p\" io.spit",
-        .kind = "type",
-        .word = "io.spit",
-    });
-    try expectError(.{ .source = "\"x\" 42 io.spit" }, .{
-        .name = "non-string path",
-        .source = "\"x\" 42 io.spit",
-        .kind = "type",
-        .word = "io.spit",
-    });
-}
-
 test "hostio: getenv returns the snapshot value and unset is an error" {
     const environ: []const machine.Environ.Entry = &.{
         .{ .name = "ECL_TEST_ONE", .value = "first" },
@@ -239,25 +116,6 @@ test "hostio: getenv returns the snapshot value and unset is an error" {
         .source = "\"ECL_TEST_ONE\" getenv",
         .kind = "io",
         .word = "getenv",
-    });
-}
-
-test "hostio: lines splits slurped text" {
-    var scratch = try Scratch.init();
-    defer scratch.deinit();
-    try scratch.write("rows.txt", "a\nbb\n\nccc");
-
-    const split = try scratch.source("\"{s}\" io.lines", "rows.txt");
-    defer allocator.free(split);
-    try expectStack(.{ .source = split }, "(\"a\" \"bb\" \"\" \"ccc\")");
-
-    const missing = try scratch.source("\"{s}\" io.lines", "absent.txt");
-    defer allocator.free(missing);
-    try expectError(.{ .source = missing }, .{
-        .name = "lines propagates slurp failure",
-        .source = missing,
-        .kind = "io",
-        .word = "io.slurp",
     });
 }
 

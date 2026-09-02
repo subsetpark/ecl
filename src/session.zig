@@ -22,7 +22,13 @@ const pkg_lock = @import("pkg_lock.zig");
 const session_options = @import("session_options");
 const stdlib = @import("stdlib.zig");
 const process_port = @import("process_port.zig");
+const filesystem_port = @import("filesystem_port.zig");
+const package_authority = @import("package_authority.zig");
 pub const Value = value.Value;
+/// Session construction distinguishes an unsatisfiable host policy from
+/// allocation failure: a misnamed root, a relative or missing directory, or an
+/// unsupported target is a configuration error the embedder must see.
+pub const InitError = error{ OutOfMemory, InvalidHostPolicy };
 pub const UnitOutcome = union(enum) {
     ok,
     incomplete: reader.Incomplete,
@@ -69,6 +75,9 @@ pub const Host = struct {
     standard_input: machine.StandardInput.Availability = .data,
     /// Absent by default: host I/O alone never grants executable authority.
     process_policy: ?process_port.ProcessPolicy = null,
+    /// Absent by default: every caller-selected filesystem operation is denied
+    /// until the host names root directories and their permissions.
+    filesystem_policy: ?filesystem_port.FilesystemPolicy = null,
 };
 
 const CompletionBacking = struct {
@@ -224,6 +233,8 @@ const SessionCore = struct {
     test_authority: ?modules.TestAuthority,
     native_owner: *native_module.Owner,
     process_owner: ?*process_port.ProcessOwner,
+    filesystem_owner: ?*filesystem_port.FilesystemOwner,
+    package_owner: ?*package_authority.PackageOwner,
     stack: std.ArrayList(Value) = .empty,
     archive_owner: spans.SpanArchiveOwner,
     archive: spans.SpanArchive,
@@ -313,23 +324,23 @@ pub const Session = enum(usize) {
     pub fn init(
         allocator: std.mem.Allocator,
         arguments: []const []const u8,
-    ) error{OutOfMemory}!Session {
-        return initFull(allocator, arguments, null, null, .default, .application);
+    ) InitError!Session {
+        return initFull(allocator, arguments, null, null, .default, .application, null);
     }
     pub fn initWithConfig(
         allocator: std.mem.Allocator,
         arguments: []const []const u8,
         config: Config,
-    ) error{OutOfMemory}!Session {
-        return initFull(allocator, arguments, null, null, config, .application);
+    ) InitError!Session {
+        return initFull(allocator, arguments, null, null, config, .application, null);
     }
     /// The output writer must outlive the session.
     pub fn initWithOutput(
         allocator: std.mem.Allocator,
         arguments: []const []const u8,
         output: *std.Io.Writer,
-    ) error{OutOfMemory}!Session {
-        return initFull(allocator, arguments, output, null, .default, .application);
+    ) InitError!Session {
+        return initFull(allocator, arguments, output, null, .default, .application, null);
     }
     /// Every writer and slice in `host` must outlive the session; the
     /// environment snapshot is copied.
@@ -337,16 +348,31 @@ pub const Session = enum(usize) {
         allocator: std.mem.Allocator,
         arguments: []const []const u8,
         host: Host,
-    ) error{OutOfMemory}!Session {
-        return initFull(allocator, arguments, host.output, host, .default, .application);
+    ) InitError!Session {
+        return initFull(allocator, arguments, host.output, host, .default, .application, null);
     }
     pub fn initWithHostConfig(
         allocator: std.mem.Allocator,
         arguments: []const []const u8,
         host: Host,
         config: Config,
-    ) error{OutOfMemory}!Session {
-        return initFull(allocator, arguments, host.output, host, config, .application);
+    ) InitError!Session {
+        return initFull(allocator, arguments, host.output, host, config, .application, null);
+    }
+
+    /// Create a package-command Session. Beyond the ordinary host services it
+    /// mints the opaque package authority over the host-selected stores, so
+    /// `pkg.store` words can act without any absolute path entering evaluated
+    /// code. Library embeddings have no reason to call this; ordinary
+    /// constructors never mint it.
+    pub fn initPackageCommand(
+        allocator: std.mem.Allocator,
+        arguments: []const []const u8,
+        host: Host,
+        config: Config,
+        grant: package_authority.PackageGrant,
+    ) InitError!Session {
+        return initFull(allocator, arguments, host.output, host, config, .application, grant);
     }
 
     /// Create the closed execution domain used by `ecl test` and trusted host
@@ -356,15 +382,15 @@ pub const Session = enum(usize) {
         arguments: []const []const u8,
         host: Host,
         config: Config,
-    ) error{OutOfMemory}!Session {
-        return initFull(allocator, arguments, host.output, host, config, .testing);
+    ) InitError!Session {
+        return initFull(allocator, arguments, host.output, host, config, .testing, null);
     }
 
     pub fn initTest(
         allocator: std.mem.Allocator,
         arguments: []const []const u8,
-    ) error{OutOfMemory}!Session {
-        return initFull(allocator, arguments, null, null, .default, .testing);
+    ) InitError!Session {
+        return initFull(allocator, arguments, null, null, .default, .testing, null);
     }
 
     const ExecutionDomain = enum { application, testing };
@@ -375,7 +401,8 @@ pub const Session = enum(usize) {
         host: ?Host,
         config: Config,
         domain: ExecutionDomain,
-    ) error{OutOfMemory}!Session {
+        package_grant: ?package_authority.PackageGrant,
+    ) InitError!Session {
         const scheduler_config = config.schedulerConfig();
         scheduler_config.validate() catch return error.OutOfMemory;
         const host_owner = try allocator.create(heap.HostOwner);
@@ -456,11 +483,39 @@ pub const Session = enum(usize) {
                 policy,
                 entries,
             ) catch |err| switch (err) {
-                error.OutOfMemory, error.InvalidPolicy => return error.OutOfMemory,
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidPolicy => return error.InvalidHostPolicy,
             };
             break :owner owned;
         } else null else null;
         errdefer if (process_owner) |owner| {
+            owner.deinit();
+            allocator.destroy(owner);
+        };
+        const filesystem_owner = if (host) |services| if (services.filesystem_policy) |policy| owner: {
+            const owned = try allocator.create(filesystem_port.FilesystemOwner);
+            errdefer allocator.destroy(owned);
+            owned.* = filesystem_port.FilesystemOwner.init(allocator, services.io, policy) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidPolicy => return error.InvalidHostPolicy,
+            };
+            break :owner owned;
+        } else null else null;
+        errdefer if (filesystem_owner) |owner| {
+            owner.deinit();
+            allocator.destroy(owner);
+        };
+        const package_owner = if (package_grant) |grant| owner: {
+            const services = host orelse return error.InvalidHostPolicy;
+            const owned = try allocator.create(package_authority.PackageOwner);
+            errdefer allocator.destroy(owned);
+            owned.* = package_authority.PackageOwner.init(allocator, services.io, grant) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidPolicy => return error.InvalidHostPolicy,
+            };
+            break :owner owned;
+        } else null;
+        errdefer if (package_owner) |owner| {
             owner.deinit();
             allocator.destroy(owner);
         };
@@ -480,6 +535,8 @@ pub const Session = enum(usize) {
             .test_authority = test_authority,
             .native_owner = native_owner,
             .process_owner = process_owner,
+            .filesystem_owner = filesystem_owner,
+            .package_owner = package_owner,
             .archive_owner = archive_owner,
             .archive = archive,
             .output = output,
@@ -516,6 +573,17 @@ pub const Session = enum(usize) {
         core.stack.deinit(core.allocator());
         core.releaseDomain().releaseValue(core.arguments);
         if (core.process_owner) |owner| {
+            owner.deinit();
+            core.allocator().destroy(owner);
+        }
+        // Every filesystem driver retired with the scheduler above, so no
+        // handle, staging entry, or quota reservation can still reference
+        // these owners.
+        if (core.filesystem_owner) |owner| {
+            owner.deinit();
+            core.allocator().destroy(owner);
+        }
+        if (core.package_owner) |owner| {
             owner.deinit();
             core.allocator().destroy(owner);
         }
@@ -616,6 +684,8 @@ pub const Session = enum(usize) {
             .idiom_mode = core.idiom_mode,
             .phrase_recognizer = idioms.tryApply,
             .process_access = if (core.process_owner) |owner| owner.access() else null,
+            .filesystem_access = if (core.filesystem_owner) |owner| owner.access() else null,
+            .package_access = if (core.package_owner) |owner| owner.access() else null,
         };
         unit.scheduler = core.scheduler.worker();
         unit.task_scope = &core.root_tasks;

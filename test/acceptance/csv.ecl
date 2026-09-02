@@ -2,7 +2,7 @@
 # and LF records, a blank record, a ragged record, a header-looking first row,
 # leading-zero text, a semicolon, an embedded comma, an embedded newline, and
 # an escaped quote.
-"test/acceptance/csv-corpus.csv" io.slurp 'corpus set
+'cwd "test/acceptance/csv-corpus.csv" fs.read-text 'corpus set
 
 # Every field is text. Nothing is inferred: no header, no delimiter sniffing,
 # no scalar coercion.

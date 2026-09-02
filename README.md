@@ -255,7 +255,9 @@ cannot be replaced accidentally by a file with the same name.
 | `error` | Structured error construction and inspection |
 | `result` | Validated success and error envelopes |
 | `str` | Text formatting, search, replacement, case, trimming, and padding |
-| `io` | Terminal, stdin, and UTF-8 file operations |
+| `io` | Terminal and stdin operations |
+| `fs` | Capability-gated file reads, atomic writes, metadata, listing, and namespace operations beneath named roots |
+| `path` | Pure lexical slash-path manipulation |
 | `csv`, `json` | External data formats |
 | `table` | Column-oriented tables represented as ordinary dictionaries |
 | `http` | HTTP GET and POST |
@@ -284,6 +286,15 @@ detach a child. `proc.run` is the bounded capture convenience over the same
 controller. The initial backend supports POSIX hosts; other targets fail
 closed until they can provide equivalent process-tree ownership. Child side
 effects are external effects and are not rolled back when an ECL unit fails.
+
+Filesystem access is likewise a capability, not ambient power. The CLI grants
+exactly one root, `'cwd`, for the startup working directory; library Sessions
+deny every `fs` word unless their Host names roots and permissions through a
+`FilesystemPolicy`. Words take a root symbol and a canonical relative path
+(`'cwd "notes/todo.txt" fs.read-text`), resolve beneath the root's retained
+directory handle without following escaping symlinks, and publish writes
+atomically. `path` manipulates path strings without touching the filesystem.
+Package commands receive a separate, nonforgeable package-store authority.
 
 `import` gives selected public module words bare names in the current
 environment. Every requested word must be public.

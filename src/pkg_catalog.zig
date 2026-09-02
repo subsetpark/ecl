@@ -28,6 +28,15 @@ pub const PackageInput = struct {
     name: []const u8,
     version: []const u8,
     root_dir: []const u8,
+    /// The directory `root_dir` is relative to. Lock-derived inputs name
+    /// trusted absolute store paths and leave this null; the installer
+    /// validates a staged tree through the handle it already holds, so no
+    /// path text is ever re-resolved from the process working directory.
+    base_dir: ?std.Io.Dir = null,
+
+    fn base(self: PackageInput) std.Io.Dir {
+        return self.base_dir orelse std.Io.Dir.cwd();
+    }
 };
 
 pub const Artifact = struct {
@@ -134,7 +143,7 @@ const Builder = struct {
     /// tree holds thousands of artifacts and a scheduler step may not traverse
     /// them all at once.
     fn openPackage(self: *Builder, input: PackageInput) BuildError!Walk {
-        var manifest = try self.readManifest(input.root_dir);
+        var manifest = try self.readManifest(input);
         errdefer manifest.deinit(self.allocator);
         if (!std.mem.eql(u8, manifest.name, input.name) or
             (input.version.len != 0 and !std.mem.eql(u8, manifest.version, input.version)))
@@ -144,7 +153,7 @@ const Builder = struct {
                 .{ input.root_dir, manifest.name, manifest.version, input.name, input.version },
             );
         }
-        var directory = std.Io.Dir.cwd().openDir(self.io, input.root_dir, .{ .iterate = true }) catch |err|
+        var directory = input.base().openDir(self.io, input.root_dir, .{ .iterate = true }) catch |err|
             return self.fail("cannot open package directory `{s}`: {s}", .{ input.root_dir, @errorName(err) });
         errdefer directory.close(self.io);
         const walker = directory.walk(self.allocator) catch return error.OutOfMemory;
@@ -231,7 +240,7 @@ const Builder = struct {
         const absolute = std.fs.path.join(self.allocator, &.{ input.root_dir, claim.relative_path }) catch
             return error.OutOfMemory;
         errdefer self.allocator.free(absolute);
-        const source = std.Io.Dir.cwd().readFileAlloc(
+        const source = input.base().readFileAlloc(
             self.io,
             absolute,
             self.allocator,
@@ -321,11 +330,11 @@ const Builder = struct {
         });
     }
 
-    fn readManifest(self: *Builder, root_dir: []const u8) BuildError!Manifest {
-        const path = std.fs.path.join(self.allocator, &.{ root_dir, "ecl.pkg" }) catch
+    fn readManifest(self: *Builder, input: PackageInput) BuildError!Manifest {
+        const path = std.fs.path.join(self.allocator, &.{ input.root_dir, "ecl.pkg" }) catch
             return error.OutOfMemory;
         defer self.allocator.free(path);
-        const source = std.Io.Dir.cwd().readFileAlloc(
+        const source = input.base().readFileAlloc(
             self.io,
             path,
             self.allocator,
@@ -630,6 +639,7 @@ pub const Build = struct {
         io: std.Io,
         name: []const u8,
         root_dir: []const u8,
+        base_dir: ?std.Io.Dir,
         diagnostic: *?[]u8,
     ) error{OutOfMemory}!Build {
         const allocator = host.allocator();
@@ -644,6 +654,7 @@ pub const Build = struct {
                 .name = owned_name,
                 .version = "",
                 .root_dir = owned_root,
+                .base_dir = base_dir,
             },
             .name = owned_name,
             .root_dir = owned_root,

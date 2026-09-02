@@ -2124,6 +2124,7 @@ pub const Registry = enum(usize) {
         io: std.Io,
         package_name: []const u8,
         root_dir: []const u8,
+        base_dir: ?std.Io.Dir,
         diagnostic: *?[]u8,
     ) error{OutOfMemory}!pkg_catalog.Build {
         return pkg_catalog.Build.initOwned(
@@ -2131,6 +2132,7 @@ pub const Registry = enum(usize) {
             io,
             package_name,
             root_dir,
+            base_dir,
             diagnostic,
         );
     }

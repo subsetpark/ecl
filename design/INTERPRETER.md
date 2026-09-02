@@ -100,8 +100,8 @@ That state owns:
 - the scheduler and root task scope; and
 - immutable or explicitly synchronized views of host services such as
   arguments, environment variables, standard input, output, diagnostics, TLS
-  trust, project configuration, module search paths, and optional process
-  authority.
+  trust, project configuration, module search paths, and optional process,
+  filesystem, and package-store authority.
 
 Grouping these objects under one owner correlates every dependent lifetime.
 Values, module pins, source cursors, task cells, and deferred destruction all
@@ -149,14 +149,47 @@ construction copies that policy and mints one narrow `ProcessAccess`; having
 perform a process operation, but cannot obtain the owner, scheduler scope,
 process cell, group identifier, or PID.
 
+Filesystem access is the same shape. A Host may name root directories, each
+with a permission set (`read-data`, `inspect`, `list`, `create`, `replace`,
+`rename`, `remove`) and shared limits; construction validates the policy,
+opens every root once, and fails with `InvalidHostPolicy` rather than
+`OutOfMemory` when a root is relative, missing, not a directory, misnamed, or
+duplicated, or when a limit is zero. From then on authority is the retained
+directory handle, not the configured path: renaming the directory afterward
+moves nothing. The `FilesystemOwner` owns the copied policy, the handles, and
+the live-operation quota; Units receive one opaque `FilesystemAccess` and can
+only ask the owner to look a symbol up, check a grant, or reserve a slot. No
+evaluated word can mint, widen, duplicate, serialize, or inspect a root, and a
+Session without a policy denies every `fs` word before reaching the host.
+Module loading through `load` and `ECL_PATH` remains a separate host facility
+and grants no caller-selected file access.
+
+Package commands add a third authority. `initPackageCommand` is the only
+constructor that mints a `PackageOwner`, and it takes one tagged
+`PackageGrant` naming exactly the stores a command shape may touch (`inspect`,
+`collect`, `verify`, `synchronize`, `vendor`). The shared cache is an
+absolute host path the command line resolved once at startup, a relative
+`ECL_CACHE` included; the vendor store has no path at all and is only ever the
+fixed child `vendor` of the retained project handle, opened without following
+a final symlink, so a repository-controlled link cannot become a store.
+`pkg.store` words receive the opaque `PackageAccess`, name a store by symbol,
+and address entries only by validated canonical store keys. Ordinary and
+embedded Sessions never construct it, so their package-store words fail
+closed, and no absolute store path is ever passed through evaluated code.
+Cache selection from `ECL_CACHE`, `XDG_CACHE_HOME`, and `HOME` is host
+startup work shared with runtime module loading.
+
 ### Shutdown follows the ownership graph
 
 Session teardown first stops execution and closes task and external-resource
 creation. It then retires root scopes, including cancellation and direct-child
-reap for every process member, before destroying the process owner. Stacks,
-module generations, source provenance, and native pins follow in dependency
-order, with bounded retirement drained while the owners needed by that work
-are still alive. The allocator is destroyed last.
+reap for every process member, before destroying the process, filesystem, and
+package owners; every filesystem driver is retired with the scheduler, so no
+handle, staging entry, or quota reservation can still reference an owner when
+its root handles close. Stacks, module generations, source provenance, and
+native pins follow in dependency order, with bounded retirement drained while
+the owners needed by that work are still alive. The allocator is destroyed
+last.
 
 That order is an architectural invariant. A pin, cursor, lease, callback, or
 task that releases through a domain cannot outlive the domain. Teardown must
@@ -821,6 +854,51 @@ overtake an earlier call while it yields. An optional process deadline stores
 presence separately from its duration: absence is unlimited, while a present
 zero duration expires immediately.
 
+### Filesystem operations are bounded drivers over confined handles
+
+Every `fs` word, generic archive extraction, and package-store operation runs
+as one scheduler driver. The driver first encodes and validates its inputs
+without touching the host: the canonical path grammar, the named root, the
+semantic grant, and a live-operation slot from the owner's quota. It then
+resolves the path with `filesystem_port.Resolver`, one component per step:
+each component is opened or inspected relative to the handle on top of a
+stack anchored at the root with `O_NOFOLLOW`; a symlink target is read and
+spliced into the resolver's budgeted input, a private `BoundedPath` that the
+initial path pays into at construction and that every splice charges before
+replacing the text (40 expansions and 64 KiB by default), so a resolver never
+holds bytes the limit did not admit; `..` pops one handle and refuses to pop
+the root; an absolute target is refused. Linux and macOS share this one walker, and the only
+platform-specific code is the atomic no-clobber and exchange rename
+(`renameat2` flags on Linux, `renameatx_np` on Darwin). Hosts without those
+primitives fail rather than degrade to a check-then-overwrite sequence, and no
+supported path ever reopens a root by its configured string or consults the
+process working directory.
+
+Transfers move 64 KiB per step; listings observe at most 256 entries and
+64 KiB of names per step, and ordering runs through `directory_order.Orderer`,
+a resumable pointer collection plus bottom-up merge sort whose sorted slice is
+reachable only from its completed state; the source audit forbids general
+sort calls in the filesystem, archive, and package-store drivers, so a whole
+listing can never be ordered in one scheduler step. Mutation stages complete contents in a private
+sibling entry whose unguessable name is known only to the driver, checks
+cancellation after the last write, and publishes with one atomic namespace
+operation: a no-clobber rename for create and copy, an exchange for replace
+(the displaced entry then sits under the staging name and is disposed after
+the commit has already succeeded). Cancellation or failure before the commit
+unlinks the staging entry and leaves the destination unchanged; a commit that
+has succeeded is reported as success. The driver's bounded retirement closes
+every handle, disposes any unpublished staging entry, releases listing storage
+one entry per step, and releases the quota slot last, so a task scope or
+Session cannot publish quiescence while an operation still owns any of them.
+The filesystem read, write, and publication primitives run on the worker in
+these bounded quanta, the same convention the archive and package-store
+drivers already use; only process pipes use detached controller threads.
+
+Every failure maps a host error to one closed reason vocabulary at the
+`filesystem_port` boundary and attaches the operation, root, path (or both
+ends of a transfer), and reason to the pending failure, so programs branch on
+stable symbols and never on errno names.
+
 ### Absolute deadlines govern timer races
 
 Timeouts capture an absolute deadline before lazy timer startup. Every
@@ -1083,6 +1161,7 @@ Verification assigns each architectural claim to its strongest proof surface.
 | Closed representations and phase machines | Zig types, opaque factories, `comptime` registries, exhaustive switches, and layout assertions |
 | Repository and source-shape rules | The recursive AST-aware source audit over every classified first-party Zig file, plus the prelude layout audit |
 | Language behavior | Runtime and CLI tests through `Session`, the executable, native fixtures, and checked snapshots |
+| Filesystem confinement | Public `Session` tests over temporary directories with default-deny, per-grant, symlink-escape, staging-residue, cancellation, and concurrent-winner cases, plus the resolver's own component tests |
 | Fast paths are unobservable | Differential tests comparing idiom-enabled and generic execution, and typed-leaf versus boxed-spine execution |
 | Bounded work | Safe-point counts, fault-index tests, cancellation cases, memory ceilings, and large public workloads |
 | Ownership under failure | Focused allocator-failure injection plus the initialized-Session OOM gate |

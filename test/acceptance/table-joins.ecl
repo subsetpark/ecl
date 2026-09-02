@@ -5,8 +5,8 @@
  'column)
 import
 
-"test/acceptance/orders.csv" io.slurp csv.parse from-header-rows 'orders set
-"test/acceptance/customers.json" io.slurp json.parse from-records 'customers set
+'cwd "test/acceptance/orders.csv" fs.read-text csv.parse from-header-rows 'orders set
+'cwd "test/acceptance/customers.json" fs.read-text json.parse from-records 'customers set
 orders io.pp
 customers io.pp
 

@@ -135,7 +135,7 @@ const cases = [_]Case{
     },
     .{ .name = "table invalid", .source = "{\"a\" [1 2] \"b\" [3]} table.rows" },
     .{ .name = "getenv unset", .source = "\"ECL_SNAPSHOT_ABSENT\" getenv" },
-    .{ .name = "slurp missing", .source = "\"no-such-file.ecl\" io.slurp" },
+    .{ .name = "read-text missing", .source = "'cwd \"no-such-file.ecl\" fs.read-text" },
     .{ .name = "http dead port", .source = "\"http://127.0.0.1:1/x\" {} http.get" },
     // Bit patterns and counter-based randomness. Every draw here is seeded, so
     // the transcript is as reproducible as the arithmetic above it.
@@ -1020,13 +1020,13 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\<empty>
         \\stderr:
         \\{'kind 'io 'msg "environment variable `ECL_SNAPSHOT_ABSENT` is not set" 'word 'getenv 'trace ['getenv] 'data {'name "ECL_SNAPSHOT_ABSENT" 'source "<command>" 'line 1 'col 23}}
-        \\=== slurp missing ===
-        \\source: "no-such-file.ecl" io.slurp
+        \\=== read-text missing ===
+        \\source: 'cwd "no-such-file.ecl" fs.read-text
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'io 'msg "cannot read `no-such-file.ecl`: FileNotFound" 'word 'io.slurp 'trace ['io.slurp] 'data {'path "no-such-file.ecl" 'source "<command>" 'line 1 'col 20}}
+        \\{'kind 'io 'msg "entry does not exist" 'word 'fs.read-text 'trace ['fs.read-text] 'data {'operation 'read-text 'root 'cwd 'path "no-such-file.ecl" 'reason 'not-found 'source "<command>" 'line 1 'col 25}}
         \\=== http dead port ===
         \\source: "http://127.0.0.1:1/x" {} http.get
         \\exit: 1

@@ -11,6 +11,16 @@ const std = @import("std");
 /// controller ownership and policy remain private to `process_port.zig`.
 pub const ProcessAccess = opaque {};
 
+/// Nominal proof that a Session granted named filesystem roots. Root handles,
+/// permissions, limits, and the live-operation quota remain private to
+/// `filesystem_port.zig`; a Unit can neither mint nor widen one.
+pub const FilesystemAccess = opaque {};
+
+/// Nominal proof that a Session was constructed for a package command. It
+/// carries the package store handles that `pkg.store` needs and nothing an
+/// ordinary embedding Session ever mints; see `package_authority.zig`.
+pub const PackageAccess = opaque {};
+
 pub const Wake = enum {
     ready,
     io,

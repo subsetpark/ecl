@@ -81,12 +81,12 @@ const source_groups = [_]SourceGroup{
     // Builtin-backed stdlib modules hold host authority the SDK withholds, so
     // they are ordinary production sources under the bounded-traversal rules.
     .{ .production = true, .files = &.{
-        "stdlib/dict.zig", "stdlib/rand.zig", "stdlib/json.zig", "stdlib/http.zig", "stdlib/proc.zig", "stdlib/archive.zig", "stdlib/pkg_store.zig",
+        "stdlib/dict.zig", "stdlib/rand.zig", "stdlib/json.zig", "stdlib/http.zig", "stdlib/proc.zig", "stdlib/archive.zig", "stdlib/pkg_store.zig", "stdlib/fs.zig",
     }, .sources = &.{
         @embedFile("../stdlib/dict.zig"),      @embedFile("../stdlib/rand.zig"),
         @embedFile("../stdlib/json.zig"),      @embedFile("../stdlib/http.zig"),
         @embedFile("../stdlib/proc.zig"),      @embedFile("../stdlib/archive.zig"),
-        @embedFile("../stdlib/pkg_store.zig"),
+        @embedFile("../stdlib/pkg_store.zig"), @embedFile("../stdlib/fs.zig"),
     } },
     .{ .production = true, .files = &.{
         "combinators.zig",
@@ -133,12 +133,17 @@ const source_groups = [_]SourceGroup{
         @embedFile("captured_test_runner.zig"), @embedFile("bench_kernels.zig"),
         @embedFile("bench_workdrivers.zig"),    @embedFile("ecl_source_check.zig"),
     } },
+    // Scheduler-owned external resources: process ports, filesystem roots,
+    // and package stores share the nominal capability vocabulary in
+    // external.zig and are opened only by their Session-owned owner.
     .{ .production = true, .files = &.{
-        "scheduler.zig", "scheduler_core.zig", "external.zig", "process_port.zig", "console.zig", "task_prims.zig",
+        "scheduler.zig", "scheduler_core.zig", "external.zig", "process_port.zig", "console.zig", "task_prims.zig", "filesystem_port.zig", "package_authority.zig", "directory_order.zig",
     }, .sources = &.{
-        @embedFile("../scheduler.zig"), @embedFile("../scheduler_core.zig"),
-        @embedFile("../external.zig"),  @embedFile("../process_port.zig"),
-        @embedFile("../console.zig"),   @embedFile("../task_prims.zig"),
+        @embedFile("../scheduler.zig"),       @embedFile("../scheduler_core.zig"),
+        @embedFile("../external.zig"),        @embedFile("../process_port.zig"),
+        @embedFile("../console.zig"),         @embedFile("../task_prims.zig"),
+        @embedFile("../filesystem_port.zig"), @embedFile("../package_authority.zig"),
+        @embedFile("../directory_order.zig"),
     } },
     // The installed author SDK, its sized ABI records, validation, loader,
     // and transactional-call boundary form one separately rooted component.
@@ -191,6 +196,7 @@ const test_files = [_][]const u8{
     "tests/module_source_test.zig",
     "tests/test_language_test.zig",
     "tests/process_test.zig",
+    "tests/filesystem_test.zig",
 };
 const repository_verification_files = [_][]const u8{
     "build.zig",
@@ -222,6 +228,7 @@ pub fn main(init: std.process.Init) !void {
     }
     failed = auditSourceCoverage(init) or failed;
     failed = auditSourceBodies() or failed;
+    failed = auditFilesystemAuthority() or failed;
     failed = auditUnsafeCasts() or failed;
     failed = auditPreludeLayout() or failed;
     failed = auditUnitConstructorSpelling() or failed;
@@ -728,6 +735,64 @@ fn auditSourceBodies() bool {
     return failed;
 }
 
+/// Caller-selected filesystem work must flow through a retained root or store
+/// handle, never through the process working directory, and the ambient file
+/// words removed from `io` must stay removed everywhere first-party code is
+/// written. Types cannot state either rule: `std.Io.Dir.cwd()` is an ordinary
+/// function and a word spelling is text. Among the modules that implement
+/// evaluated filesystem words, none may name the working directory; the
+/// owners that open trusted host paths once at Session construction
+/// (`filesystem_port.zig`, `package_authority.zig`) and the CLI, project
+/// discovery, and module-loading host boundaries do so by design.
+fn auditFilesystemAuthority() bool {
+    var failed = false;
+    const ambient_cwd = [_][]const []const u8{
+        &.{ "Dir", ".", "cwd", "(", ")" },
+    };
+    const confined_sources = [_]struct { name: []const u8, text: [:0]const u8 }{
+        .{ .name = "fs module", .text = @embedFile("../stdlib/fs.zig") },
+        .{ .name = "archive module", .text = @embedFile("../stdlib/archive.zig") },
+        .{ .name = "package store module", .text = @embedFile("../stdlib/pkg_store.zig") },
+    };
+    for (confined_sources) |source| {
+        failed = auditTokens(source.name, source.text, &ambient_cwd) or failed;
+    }
+    // User-sized ordering inside a scheduler driver goes through the
+    // resumable directory orderer; a general sort call would run a whole
+    // listing in one step.
+    const unbounded_sorting = [_][]const []const u8{
+        &.{ "std", ".", "mem", ".", "sort" },
+        &.{ "std", ".", "sort", "." },
+    };
+    for (confined_sources) |source| {
+        failed = auditTokens(source.name, source.text, &unbounded_sorting) or failed;
+    }
+    // The filesystem port opens configured roots by their trusted host path
+    // exactly once, inside the owner's constructor, and nowhere else.
+    failed = auditProductionFunctionTokenPair(
+        "filesystem_port.zig",
+        @embedFile("../filesystem_port.zig"),
+        "step",
+        "cwd",
+    ) or failed;
+    const removed_words = [_][]const u8{ "slurp", "spit", "lines" };
+    const console_module = @embedFile("../stdlib/io.zig");
+    for (removed_words) |name| {
+        if (installedPrimitiveName(console_module, name)) {
+            std.log.err("filesystem authority: `io.{s}` is an ambient file word and must not exist", .{name});
+            failed = true;
+        }
+    }
+    const removed_spellings = [_][]const u8{ "io.slurp", "io.spit", "io.lines" };
+    for (first_party_definition_sources) |source| {
+        for (removed_spellings) |spelling| if (std.mem.indexOf(u8, source, spelling) != null) {
+            std.log.err("filesystem authority: first-party source still uses `{s}`", .{spelling});
+            failed = true;
+        };
+    }
+    return failed;
+}
+
 /// Unsafe casts can bypass an opaque capability or callback adapter. Keep
 /// those casts confined to the factories that own the corresponding erasure.
 fn auditUnsafeCasts() bool {
@@ -979,6 +1044,8 @@ const first_party_definition_sources = [_][:0]const u8{
     @embedFile("../stdlib/pkg/lock.ecl"),
     @embedFile("../stdlib/pkg/mvs.ecl"),
     @embedFile("../stdlib/pkg/sync.ecl"),
+    @embedFile("../stdlib/pkg/cli.ecl"),
+    @embedFile("../stdlib/path.ecl"),
     @embedFile("../stdlib/test/default.ecl"),
 };
 

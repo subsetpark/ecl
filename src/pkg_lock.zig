@@ -752,7 +752,10 @@ fn ownedUtf8(allocator: std.mem.Allocator, item: Value) ValidationError![]u8 {
     };
 }
 
-fn cacheRoot(allocator: std.mem.Allocator, cache: CacheInputs) error{OutOfMemory}!?[]u8 {
+/// The one host-side cache selection: `ECL_CACHE`, then `XDG_CACHE_HOME/ecl/pkg`,
+/// then `HOME/.cache/ecl/pkg`; empty values are absent. Package commands and
+/// runtime module loading share it so evaluated code never derives the path.
+pub fn cacheRoot(allocator: std.mem.Allocator, cache: CacheInputs) error{OutOfMemory}!?[]u8 {
     if (nonEmpty(cache.ecl_cache)) |root|
         return @as(?[]u8, try allocator.dupe(u8, root));
     if (nonEmpty(cache.xdg_cache_home)) |root| return @as(
@@ -779,6 +782,26 @@ fn findEntry(entries: []const Entry, name: []const u8) ?*const Entry {
 fn findEntryIndex(entries: []const Entry, name: []const u8) ?usize {
     for (entries, 0..) |entry, index| if (std.mem.eql(u8, entry.name, name)) return index;
     return null;
+}
+
+/// A canonical immutable store key: `<name>-<version>-<64 lowercase hex>`.
+/// The package store addresses every entry by one of these and nothing else,
+/// so a key is the only path text that ever reaches a store handle.
+pub fn validStoreKey(key: []const u8) bool {
+    if (key.len < 67) return false;
+    const hash_start = key.len - 64;
+    if (key[hash_start - 1] != '-') return false;
+    for (key[hash_start..]) |byte| switch (byte) {
+        '0'...'9', 'a'...'f' => {},
+        else => return false,
+    };
+    const prefix = key[0 .. hash_start - 1];
+    for (prefix, 0..) |byte, index| {
+        if (byte != '-' or index == 0 or index + 1 == prefix.len) continue;
+        if (validPackageName(prefix[0..index]) and
+            validVersion(prefix[index + 1 ..])) return true;
+    }
+    return false;
 }
 
 /// The package-name, version, hash, and URL grammar has one owner: the
@@ -827,4 +850,19 @@ fn identifierOrder(left: []const u8, right: []const u8) std.math.Order {
 fn allDigits(bytes: []const u8) bool {
     for (bytes) |byte| if (byte < '0' or byte > '9') return false;
     return true;
+}
+
+test "cache root selection prefers ECL_CACHE then XDG_CACHE_HOME then HOME" {
+    const allocator = std.testing.allocator;
+    const direct = (try cacheRoot(allocator, .{ .ecl_cache = "/direct", .xdg_cache_home = "/xdg", .home = "/home/u" })).?;
+    defer allocator.free(direct);
+    try std.testing.expectEqualStrings("/direct", direct);
+    const xdg = (try cacheRoot(allocator, .{ .ecl_cache = "", .xdg_cache_home = "/xdg", .home = "/home/u" })).?;
+    defer allocator.free(xdg);
+    try std.testing.expectEqualStrings("/xdg/ecl/pkg", xdg);
+    const home = (try cacheRoot(allocator, .{ .ecl_cache = "", .xdg_cache_home = "", .home = "/home/u" })).?;
+    defer allocator.free(home);
+    try std.testing.expectEqualStrings("/home/u/.cache/ecl/pkg", home);
+    try std.testing.expect((try cacheRoot(allocator, .{ .ecl_cache = "", .xdg_cache_home = "", .home = "" })) == null);
+    try std.testing.expect((try cacheRoot(allocator, .{})) == null);
 }

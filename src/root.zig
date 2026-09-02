@@ -16,6 +16,7 @@ pub const formatter = @import("formatter.zig");
 pub const line_editor = @import("line_editor.zig");
 pub const spans = @import("spans.zig");
 pub const project = @import("project.zig");
+pub const pkg_lock = @import("pkg_lock.zig");
 pub const env = @import("env.zig");
 pub const native_abi = @import("native-abi");
 pub const native_descriptor = @import("native_descriptor.zig");
@@ -36,6 +37,10 @@ pub const scheduler = @import("scheduler.zig");
 const external = @import("external.zig");
 const process_port = @import("process_port.zig");
 pub const ProcessPolicy = process_port.ProcessPolicy;
+pub const filesystem_port = @import("filesystem_port.zig");
+pub const FilesystemPolicy = filesystem_port.FilesystemPolicy;
+pub const package_authority = @import("package_authority.zig");
+pub const directory_order = @import("directory_order.zig");
 pub const task_prims = @import("task_prims.zig");
 pub const test_prims = @import("test_prims.zig");
 test {
@@ -73,6 +78,9 @@ test {
     _ = scheduler;
     _ = external;
     _ = process_port;
+    _ = filesystem_port;
+    _ = package_authority;
+    _ = directory_order;
     _ = task_prims;
     _ = test_prims;
     _ = @import("tests/value_test.zig");
@@ -82,6 +90,7 @@ test {
     _ = @import("tests/module_source_test.zig");
     _ = @import("tests/test_language_test.zig");
     _ = @import("tests/process_test.zig");
+    _ = @import("tests/filesystem_test.zig");
     _ = @import("tests/allocation_budget_test.zig");
     _ = @import("tests/kernel_numeric_test.zig");
     _ = @import("tests/kernel_sequence_test.zig");

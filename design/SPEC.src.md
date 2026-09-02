@@ -1179,6 +1179,16 @@ participates in the same cancellation and deadline arbitration as task waits,
 and resumes a bounded continuation. Input and output queues are bounded, so a
 producer waits under pressure rather than causing unbounded allocation.
 
+Filesystem access is likewise a host capability. A Session names directory
+roots and their permissions when it is constructed, or names none and denies
+every filesystem word; evaluated code selects a root by symbol and a canonical
+relative path beneath it, and neither a path string nor possession of console
+or module-loading services confers any wider authority. Path manipulation is
+pure string computation and proves nothing about containment; containment is
+enforced at the root's retained directory handle. Filesystem operations are
+bounded drivers whose staged mutations either publish atomically or leave the
+destination unchanged.
+
 The shipped `proc` module is a host capability, not ambient language power. A
 Session without process authority rejects process creation before reaching the
 operating system. A process specification names one absolute executable path,

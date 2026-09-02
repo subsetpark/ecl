@@ -1041,6 +1041,25 @@ test "e2e: pkg gc retains the union of named locks and preserves unknown cache n
     });
     defer repeated.deinit();
     try repeated.expect(.{ .exit_code = 0, .stdout = "removed 0 packages\n", .stderr = "" });
+
+    // A relative ECL_CACHE keeps its meaning: it is resolved once against the
+    // startup working directory, so a fresh unreferenced entry there is
+    // collected exactly as through the absolute spelling.
+    try scratch.dir.createDir(io, "cache/f-6.0.0-" ++ hash_a, .default_dir);
+    var relative_environment = std.process.Environ.Map.init(allocator);
+    defer relative_environment.deinit();
+    try relative_environment.put("ECL_CACHE", "cache");
+    var relative = try cli.runOptions(.{
+        .argv = &.{ exe, "pkg", "gc", "one.lock", "two.lock" },
+        .cwd = .{ .dir = scratch.dir },
+        .environ_map = &relative_environment,
+    });
+    defer relative.deinit();
+    try relative.expect(.{ .exit_code = 0, .stdout = "removed 1 packages\n", .stderr = "" });
+    try std.testing.expectError(
+        error.FileNotFound,
+        scratch.dir.statFile(io, "cache/f-6.0.0-" ++ hash_a, .{ .follow_symlinks = false }),
+    );
 }
 const builtin = @import("builtin");
 const build_options = @import("build_options");
@@ -1884,14 +1903,17 @@ test "e2e: embedded prelude is independent of cwd and ECL_PATH" {
         .stderr = "",
     });
 
-    // The host scripting words landed with M12; the same empty environment
-    // proves they are ordinary vocabulary rather than ECL_PATH-dependent.
+    // The command line grants exactly one filesystem root, the startup
+    // working directory as `'cwd`; the same empty environment proves the
+    // capability words are ordinary vocabulary rather than ECL_PATH-dependent.
     var round_trip = try cli.runOptions(.{
         .argv = &.{
             "./ecl",
             "-e",
-            "\"alpha\\nbeta\\n\" \"round-trip.txt\" io.spit " ++
-                "\"round-trip.txt\" io.slurp io.pp \"round-trip.txt\" io.lines io.pp",
+            "\"alpha\\nbeta\\n\" 'cwd \"round-trip.txt\" fs.create-text " ++
+                "'cwd \"round-trip.txt\" fs.read-text io.pp " ++
+                "'cwd \"round-trip.txt\" fs.read-text \"\\n\" split io.pp " ++
+                "'cwd \".\" fs.list ('name at \"round-trip.txt\" match?) filter io.pp",
         },
         .cwd = .{ .dir = temporary.dir },
         .environ_map = &environment,
@@ -1899,19 +1921,38 @@ test "e2e: embedded prelude is independent of cwd and ECL_PATH" {
     defer round_trip.deinit();
     try round_trip.expect(.{
         .exit_code = 0,
-        .stdout = "\"alpha\\nbeta\\n\"\n(\"alpha\" \"beta\" \"\")\n",
+        .stdout = "\"alpha\\nbeta\\n\"\n(\"alpha\" \"beta\" \"\")\n" ++
+            "({'name \"round-trip.txt\" 'kind 'file})\n",
         .stderr = "",
     });
 
     var missing_file = try cli.runOptions(.{
-        .argv = &.{ "./ecl", "-e", "\"absent.txt\" io.slurp" },
+        .argv = &.{ "./ecl", "-e", "'cwd \"absent.txt\" fs.read-text" },
         .cwd = .{ .dir = temporary.dir },
         .environ_map = &environment,
     });
     defer missing_file.deinit();
     try missing_file.expect(.{
         .exit_code = 1,
-        .stderr_contains = &.{ "'kind 'io", "'word 'io.slurp", "'path \"absent.txt\"" },
+        .stderr_contains = &.{
+            "'kind 'io",
+            "'word 'fs.read-text",
+            "'root 'cwd",
+            "'path \"absent.txt\"",
+            "'reason 'not-found",
+        },
+    });
+
+    // Only the granted root exists; a path string never widens it.
+    var other_root = try cli.runOptions(.{
+        .argv = &.{ "./ecl", "-e", "'home \"absent.txt\" fs.exists?" },
+        .cwd = .{ .dir = temporary.dir },
+        .environ_map = &environment,
+    });
+    defer other_root.deinit();
+    try other_root.expect(.{
+        .exit_code = 1,
+        .stderr_contains = &.{ "'kind 'domain", "'reason 'unknown-root" },
     });
 
     var unset = try cli.runOptions(.{

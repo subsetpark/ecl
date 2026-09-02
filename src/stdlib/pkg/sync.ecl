@@ -1,49 +1,9 @@
 ### module pkg.sync
-# Discover, resolve, install, and atomically lock source packages.
+# Discover, resolve, install, and atomically lock source packages. Stores are
+# named `'cache` or `'vendor` and reached only through the Session's package
+# authority; project files are reached through the `'project` filesystem root.
 []
 (
- ### defp env-or-empty
- (name -- text : "Read one captured environment value, returning an empty string when absent.")
- (wrap (getenv) @attempt
-  dup 'ok dict.has?
-  ('ok at first)
-  (pop "")
-  if)
- 'env-or-empty defp
-
- ### defp missing-cache-root
- (value -- : "Raise when no captured environment value selects a package cache.")
- (pop
-  {'kind 'io
-   'msg "pkg.sync.run needs ECL_CACHE, XDG_CACHE_HOME, or HOME to select a package store"}
-  raise)
- 'missing-cache-root defp
-
- ### defp home-cache-root
- (home -- store-root : "Derive the default package cache from a captured HOME value.")
- (dup empty?
-  (missing-cache-root)
-  ("/.cache/ecl/pkg" cat)
-  if)
- 'home-cache-root defp
-
- ### defp xdg-cache-root
- (xdg -- store-root : "Use XDG_CACHE_HOME when nonempty, otherwise derive the cache from HOME.")
- (dup empty?
-  (pop "HOME" env-or-empty home-cache-root)
-  ("/ecl/pkg" cat)
-  if)
- 'xdg-cache-root defp
-
- ### def cache-root
- (-- store-root : "Select the package store from the Session's captured environment snapshot.")
- ("ECL_CACHE" env-or-empty
-  dup empty?
-  (pop "XDG_CACHE_HOME" env-or-empty xdg-cache-root)
-  ()
-  if)
- 'cache-root def
-
  ### def store-key
  (package requirement -- key : "Derive the immutable name-version-hash store key.")
  (|package requirement|
@@ -53,11 +13,6 @@
   requirement 'hash at 7 drop cat)
  'store-key def
 
- ### def store-path
- (store package requirement -- path : "Derive one immutable package destination.")
- (|store package requirement| store "/" cat package requirement store-key cat)
- 'store-path def
-
  ### def store-keys
  (lock -- keys : "Return the canonical immutable store keys selected by a lock.")
  (pkg.lock.validate 'packages at pkg.data.sorted-entries
@@ -65,16 +20,17 @@
  'store-keys def
 
  ### def store-root
- (lock project-root -- store-root :
-  "Select the shared cache or the fixed project-local vendor store named by a lock.")
- (|lock project|
-  lock pkg.lock.validate pop
-  project
-  lock 'store dict.has?
-  ("/vendor" cat)
-  (pop pkg.sync.cache-root)
-  if)
+ (lock -- store :
+  "Return the store a validated lock selects: 'vendor for a vendored lock, otherwise 'cache.")
+ (pkg.lock.validate 'store dict.has? ('vendor) ('cache) if)
  'store-root def
+
+ ### def write-project-file
+ (text path -- :
+  "Publish one project data file beneath 'project: create it when absent, otherwise strictly replace
+   the existing regular file.")
+ ('project swap over over fs.exists? (fs.replace-text) (fs.create-text) if)
+ 'write-project-file def
 
  ### defp success-response
  (response package url -- response : "Require a successful HTTP status with package provenance.")
@@ -193,9 +149,9 @@
  'fetched-manifest defp
 
  ### defp stored-manifest
- (destination package version -- manifest : "Read and identity-check a present store manifest.")
- (|destination package version|
-  destination "/ecl.pkg" cat io.slurp pkg.manifest.read
+ (store key package version -- manifest : "Read and identity-check a present store manifest.")
+ (|store key package version|
+  store key pkg.store.manifest pkg.manifest.read
   package version matching-manifest)
  'stored-manifest defp
 
@@ -246,10 +202,10 @@
  'record-discovery-node defp
 
  ### defp load-stored-discovery-node
- (state package version node destination -- state : "Read and record one present immutable entry.")
- (|state package version node destination|
+ (state package version node key -- state : "Read and record one present immutable entry.")
+ (|state package version node key|
   state package version node
-  destination package version stored-manifest
+  state 'store at key package version stored-manifest
   record-discovery-node)
  'load-stored-discovery-node defp
 
@@ -277,11 +233,11 @@
  'offline-missing-context defp
 
  ### defp load-absent-discovery-node
- (state package requirement node destination -- state :
+ (state package requirement node key -- state :
   "Reject an absent offline node or fetch it in the network-enabled mode.")
- (|state package requirement node destination|
+ (|state package requirement node key|
   state 'offline at
-  package destination 2 pack (offline-missing-context) partial
+  package state 'store at key 3 pack (offline-missing-context) partial
   state package requirement node 4 pack (load-fetched-context) partial
   if)
  'load-absent-discovery-node defp
@@ -292,21 +248,21 @@
  'load-absent-context defp
 
  ### defp load-discovery-node
- (state package requirement node destination -- state :
+ (state package requirement node key -- state :
   "Load one present or fetched manifest, then record and traverse its exact node.")
- (|state package requirement node destination|
-  destination pkg.store.present?
-  state package requirement 'version at node destination 5 pack (load-stored-context) partial
-  state package requirement node destination 5 pack (load-absent-context) partial
+ (|state package requirement node key|
+  state 'store at key pkg.store.present?
+  state package requirement 'version at node key 5 pack (load-stored-context) partial
+  state package requirement node key 5 pack (load-absent-context) partial
   if)
  'load-discovery-node defp
 
  ### defp offline-missing
- (package destination -- : "Raise when offline synchronization needs an absent exact store entry.")
- (|package destination|
+ (package store key -- : "Raise when offline synchronization needs an absent exact store entry.")
+ (|package store key|
   'io error.new "offline synchronization is missing a package store entry" error.with-message
-  package destination pair
-  (|package destination| 'package package 'path destination)
+  package store key 3 pack
+  (|package store key| 'package package 'store store 'key key)
   infra
   dict.from-flat
   error.with-data
@@ -317,7 +273,7 @@
  (state package requirement node -- state : "Derive and load one previously unseen exact node.")
  (|state package requirement node|
   state package requirement node
-  state 'store at package requirement store-path
+  package requirement store-key
   load-discovery-node)
  'discover-new-node defp
 
@@ -346,11 +302,11 @@
  'discover defp
 
  ### defp finish-install
- (result destination -- : "Accept a racing immutable publication or re-raise its install failure.")
- (|result destination|
+ (result store key -- : "Accept a racing immutable publication or re-raise its install failure.")
+ (|result store key|
   result 'err at
   dup 'data at 'destination-exists 0 at-or
-  destination wrap (pkg.store.present?) @attempt
+  store key 2 pack (pkg.store.present?) @attempt
   dup 'ok dict.has?
   ('ok at first)
   (pop 0)
@@ -362,36 +318,36 @@
  'finish-install defp
 
  ### def install-immutable
- (bytes package destination -- :
+ (bytes package store key -- :
   "Install one immutable package, treating a concurrently published real directory as success.")
- (|bytes package destination|
-  bytes package destination 3 pack (pkg.store.install pop) @attempt
+ (|bytes package store key|
+  bytes package store key 4 pack (pkg.store.install pop) @attempt
   dup 'ok dict.has?
   (pop)
-  destination (finish-install) partial
+  store key 2 pack (finish-install) with
   if)
  'install-immutable def
+
+ ### defp install-fetched
+ (key package requirement store -- : "Fetch, verify, and install one absent selection.")
+ (|key package requirement store|
+  package requirement fetch-body
+  dup package inspect-checked pkg.manifest.read
+  package requirement 'version at matching-manifest pop
+  package store key install-immutable)
+ 'install-fetched defp
 
  ### defp install-selection
  (pair store -- : "Install one missing selected package after repeating every verification.")
  (|pair store|
-  pair first
-  pair 1 at
-  store 3 pack
+  pair first pair 1 at store 3 pack
   (|package requirement store|
-   store package requirement store-path
-   dup pkg.store.present?
+   package requirement store-key
+   store over pkg.store.present?
    (pop)
-   package requirement 2 pack
-   (|destination package requirement|
-    package requirement fetch-body
-    dup package inspect-checked pkg.manifest.read
-    package requirement 'version at matching-manifest pop
-    package destination install-immutable)
-   with
+   package requirement store 3 pack (install-fetched) with
    if)
-  with
-  call)
+  with call)
  'install-selection defp
 
  ### defp install-selected
@@ -405,37 +361,33 @@
  ### defp verify-selection
  (pair store -- : "Stream and hash-check one selected package's retained archive seal.")
  (|pair store|
-  store pair first pair 1 at store-path
+  store pair first pair 1 at store-key
   pair first
   pair 1 at 'hash at
   pkg.store.verify)
  'verify-selection defp
 
  ### def verify
- (lock project-root -- count :
-  "Verify every immutable package selected by a lock at its cache or vendor root.")
- (|lock project|
+ (lock -- count : "Verify every immutable package selected by a lock at its cache or vendor store.")
+ (|lock|
   lock pkg.lock.validate pop
   lock 'packages at pkg.data.sorted-entries
   dup len swap
-  lock project pkg.sync.store-root (verify-selection) partial
+  lock store-root (verify-selection) partial
   for)
  'verify def
 
  ### def run
- (root-manifest project-root -- lock :
-  "Discover and resolve transitive packages, install selected artifacts, atomically write ecl.lock,
-   and return the validated lock.")
- (|root project|
-  project str.str?
-  {'kind 'type 'msg "pkg.sync.run expects a string project root"} assert
-  root project 0 run-mode)
+ (root-manifest -- lock :
+  "Discover and resolve transitive packages, install selected artifacts, atomically write the
+   project's ecl.lock, and return the validated lock.")
+ (0 run-mode)
  'run def
 
  ### def run-offline
- (root-manifest project-root -- lock :
+ (root-manifest -- lock :
   "Resolve and atomically lock using immutable store entries without opening a network request.")
- (|root project| root project 1 run-mode)
+ (1 run-mode)
  'run-offline def
 
  ### defp lock-mode
@@ -455,35 +407,27 @@
  'mode-result defp
 
  ### defp project-mode
- (project-root -- mode : "Read store mode only from the explicit project being synchronized.")
- ("/ecl.lock" cat wrap (io.slurp pkg.lock.read) @attempt mode-result)
+ (-- mode : "Read store mode only from the explicit project being synchronized.")
+ ([] ('project "ecl.lock" fs.read-text pkg.lock.read) @attempt mode-result)
  'project-mode defp
 
  ### defp run-mode
- (root-manifest project-root offline -- lock : "Validate explicit sync inputs and select its mode.")
- (|root project offline|
-  project str.str?
-  {'kind 'type 'msg "pkg.sync expects a string project root"} assert
+ (root-manifest offline -- lock : "Validate explicit sync inputs and select its store.")
+ (|root offline|
   root pkg.manifest.validate
-  project project-mode
-  dup 'vendor match?
-  project ("/vendor" cat) partial
-  (cache-root)
-  if
-  project offline 5 pack
-  (|root mode store project offline| root store project offline mode run-validated)
+  project-mode
+  offline 3 pack
+  (|root store offline| root store offline run-validated)
   with call)
  'run-mode defp
 
  ### defp run-validated
- (root store project-root offline mode -- lock : "Run synchronization after validating its inputs.")
- (|root store project offline mode|
+ (root store offline -- lock : "Run synchronization after validating its inputs.")
+ (|root store offline|
   root store offline discover
   root swap pkg.mvs.resolve
-  mode 'vendor match? (pkg.lock.vendor) when
+  store 'vendor match? (pkg.lock.vendor) when
   dup store install-selected
-  dup pkg.lock.write
-  project "/ecl.lock" cat
-  pkg.store.write-lock)
+  dup pkg.lock.write "ecl.lock" write-project-file)
  'run-validated defp
 ) 'pkg.sync @defm

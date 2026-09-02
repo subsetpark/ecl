@@ -157,7 +157,7 @@ test "loader: catalog discovery holds a manifest to the whole public contract" {
             .needle = "under more than one alias",
         },
         .{
-            .requires = "((\"pwned\" \"/tmp/pkg-pwned\" io.spit))",
+            .requires = "((\"pwned\" 'cwd \"pkg-pwned\" fs.create-text))",
             .needle = "requires must be a dict",
         },
     };

@@ -1,10 +1,12 @@
-//! Console and UTF-8 file operations, grouped behind the `io` module.
+//! Console operations, grouped behind the `io` module.
 //!
 //! The host-backed words reuse the core implementations directly. Derived
 //! words schedule fixed quotations in their definition-site module,
-//! so `print` remains `prin "\n" prin`, `debug` remains
-//! `prin ": " prin inspect`, and `lines` remains `slurp "\n" split`
-//! without exposing the host primitives globally.
+//! so `print` remains `prin "\n" prin` and `debug` remains
+//! `prin ": " prin inspect` without exposing the host primitives globally.
+//! File access is not here: possession of console output never implies
+//! caller-selected filesystem authority, which lives in the capability-gated
+//! `fs` module.
 const heap = @import("../heap.zig");
 const list = @import("../list.zig");
 const intern = @import("../intern.zig");
@@ -51,21 +53,6 @@ pub const words = [_]env.BuiltinWord{
         .doc = "( -- string ) Read the whole standard input stream once.",
         .primitive = prims.ioStdin,
     },
-    .{
-        .name = "slurp",
-        .doc = "( path -- string ) Read one whole UTF-8 file.",
-        .primitive = prims.ioSlurp,
-    },
-    .{
-        .name = "spit",
-        .doc = "( string path -- ) Write a string to one file, truncating and replacing it.",
-        .primitive = prims.ioSpit,
-    },
-    .{
-        .name = "lines",
-        .doc = "( path -- lines ) Read one UTF-8 file and split it at newline characters.",
-        .primitive = lines,
-    },
 };
 
 fn print(evaluator: *Machine) MachineError!void {
@@ -95,13 +82,9 @@ fn debug(evaluator: *Machine) MachineError!void {
     try evaluator.callOwned(quotation.list);
 }
 
-fn lines(evaluator: *Machine) MachineError!void {
-    return callWithNewline(evaluator, "io.slurp", "split");
-}
-
-/// Schedule either `prin "\n" prin` or `slurp "\n" split` as an ordinary
-/// definition-site quotation. The body is fixed-size; its one heap value is
-/// retained by the quotation before the local owner releases it.
+/// Schedule `prin "\n" prin` as an ordinary definition-site quotation. The
+/// body is fixed-size; its one heap value is retained by the quotation before
+/// the local owner releases it.
 fn callWithNewline(
     evaluator: *Machine,
     comptime first: []const u8,
