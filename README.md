@@ -262,7 +262,7 @@ cannot be replaced accidentally by a file with the same name.
 | `table` | Column-oriented tables represented as ordinary dictionaries |
 | `http` | HTTP GET and POST |
 | `proc` | Capability-gated subprocess ports and bounded process execution |
-| `net` | Capability-gated TCP listeners with scope-owned sockets |
+| `net` | Capability-gated TCP listeners and connections with scope-owned sockets |
 | `rand` | Explicit-state random draws and host entropy |
 | `rng` | Durable module-state random generation |
 | `archive` | SHA-256 and atomic validated `.tgz` extraction |
@@ -303,8 +303,13 @@ policy; library Sessions deny every `net.listen` unless their Host supplies a
 ephemeral binds). `{'address "127.0.0.1" 'port 0} net.listen` returns a
 scope-owned port whose socket is already listening, `net.local-address`
 reports the bound address and kernel-assigned port, and `net.close` releases
-it early; scope closure releases it otherwise. Accepting connections belongs
-to the protocol modules built over a listener.
+it early; scope closure releases it otherwise. `net.accept` parks until a peer
+connects and returns a connection owned by the accepting unit's scope;
+`net.read` and `net.write` exchange exact byte lists through bounded queues,
+`net.peer-address` names the other end, and `net.close` on a connection
+delivers queued bytes before shutting the socket down. Hosts bound live
+connections and queue capacities. Protocol framing and TLS belong to the
+modules built over a connection.
 
 `import` gives selected public module words bare names in the current
 environment. Every requested word must be public.

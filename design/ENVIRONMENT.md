@@ -103,7 +103,9 @@ outside this contract.
 Inbound TCP listening goes through the `net` module documented in
 `STDLIB.md`. It is a capability: the Session host names, once, either an
 unrestricted grant or an exact allowlist of address and port pairs, together
-with a maximum number of live listeners and the kernel accept backlog. A
+with a maximum number of live listeners, the kernel accept backlog, a maximum
+number of live connections (default 64), and the receive and send queue
+capacities of each connection (default 64 KiB each). A
 program requests one address and one port; a grant entry whose port is `0`
 admits only requests for an ephemeral port. Addresses are IPv4 or IPv6
 literals compared after normalization, so `::ffff:127.0.0.1` matches a grant
@@ -123,9 +125,20 @@ Supported targets are Linux and macOS. A listener is an opaque port owned by
 the task scope that created it; the socket closes when that scope closes or
 when `net.close` runs, whichever comes first, and the same address and port
 can then be bound again. Address reuse options are not set, so two listeners
-never share one address and port. Accepting connections, reading, writing,
-TLS, and protocol framing are outside this contract; they belong to the
-protocol modules built over a listener.
+never share one address and port.
+
+Accepting connections, reading, and writing are inside the contract.
+`net.accept` parks until a peer connects and returns a connection port owned
+by the accepting unit's task scope; a connection is taken from the kernel
+backlog only while an accept is outstanding. `net.read` and `net.write`
+exchange exact byte lists through bounded queues of the host capacities,
+parking on readiness without holding a worker; `net.peer-address` and
+`net.local-address` report both ends. `net.close` on a connection delivers
+queued bytes and then shuts the socket down, while scope closure aborts it.
+The live-connection maximum bounds descriptors and controller threads per
+Session; exceeding it is `'domain` with reason `'limit`. Zero for any limit
+is a Session construction error. TLS and protocol framing remain outside this
+contract; they belong to the protocol modules built over a connection.
 
 ## Clocks
 

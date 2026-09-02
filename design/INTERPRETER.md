@@ -61,7 +61,7 @@ The main components are these:
 | Bulk execution | Pervasive scalar semantics, typed flat loops, and guarded source-phrase recognition | `kernel_*.zig`, `kernels.zig`, `idioms.zig` |
 | Scheduler | Green units, structured task scopes, task and external waits, cancellation, timers, external membership, and retirement service | `scheduler_core.zig`, `scheduler.zig`, `external.zig`, `task_prims.zig` |
 | Process ports | Process policy, POSIX process-group ownership, bounded pipe queues, and terminal publication | `process_port.zig`, `stdlib/proc.zig` |
-| Network listeners | Listen policy, exact grant matching over normalized IP literals, scope-owned listening sockets, and idempotent close | `net_port.zig`, `stdlib/net.zig` |
+| Network listeners and connections | Listen policy, exact grant matching over normalized IP literals, scope-owned listening sockets, demand-gated accept, bounded connection queues serviced by controller threads, and idempotent close | `net_port.zig`, `stdlib/net.zig` |
 | Boundary layers | Embedded modules, native extensions, rendering, terminal safety, the REPL, and the CLI | `prelude.zig`, `stdlib.zig`, `native_*.zig`, `print.zig`, `console.zig`, `line_editor.zig`, `main.zig` |
 
 ### Position in the design space
@@ -928,15 +928,16 @@ one entry per step, and releases the quota slot last, so a task scope or
 Session cannot publish quiescence while an operation still owns any of them.
 The filesystem read, write, and publication primitives run on the worker in
 these bounded quanta, the same convention the archive and package-store
-drivers already use; only process pipes use detached controller threads, and
-a network listener owns a socket and no thread.
+drivers already use; only process pipes and network connections use detached
+controller threads, and a network listener owns a socket and starts one
+acceptor thread only when a unit first parks in `accept`.
 
 Every failure maps a host error to one closed reason vocabulary at the
 `filesystem_port` boundary and attaches the operation, root, path (or both
 ends of a transfer), and reason to the pending failure, so programs branch on
 stable symbols and never on errno names.
 
-### Network listeners are scope-owned sockets without controllers
+### Network listeners are scope-owned sockets with a lazy acceptor
 
 Inbound listening follows the filesystem model, not the process model. A Host
 may supply a `NetPolicy`: either an unrestricted grant or an exact allowlist
@@ -953,9 +954,9 @@ or the descriptor.
 
 `listen` runs four bounded syscalls on the worker — socket, bind, listen, and
 getsockname, all through `std.Io.net.IpAddress.listen`, which stores the
-resolved local address on the returned socket — and never parks, so no
-controller thread, readiness source, or wait registration exists for a
-listener. The order is the process port's: validate the configuration, check
+resolved local address on the returned socket — and never parks; a listener
+that is never asked to accept has no controller thread, readiness source, or
+wait registration. The order is the process port's: validate the configuration, check
 the grant, acquire a live-listener reservation (a consuming capability like
 the process live slot), open the socket, create the `ListenerCell`, attach it
 to the calling unit's `TaskScope` through `attachExternal` and store the
@@ -971,11 +972,13 @@ server socket and its resolved address) or `closed`, and one reference count
 shared by the port value and the scope member; the heap projects a port to a
 cell only when the release adapter matches, so a process port and a listener
 cannot be confused. `ListenerCell.close` is the single close transition: under
-the mutex it moves `bound` to `closed`, closes the socket, and releases the
-reservation; after unlocking it detaches the scope membership token once. It
-is idempotent, and both the `net.close` word and `cancelExternalMember` call
-it, so a listener closed explicitly and later swept by its scope, or the
-reverse, closes exactly once and detaches exactly once. `local-address` reads
+the mutex it moves `bound` to `closed`, stops the acceptor if one is running
+(see the next section), closes the socket, and releases the reservation; after
+unlocking it detaches the scope membership token once. It is idempotent, and
+both the `net.close` word and `cancelExternalMember` call it, so a listener
+closed explicitly and later swept by its scope, or the reverse, closes exactly
+once and detaches exactly once. When `close` returns the socket is closed, so
+the same address and port may be bound again immediately. `local-address` reads
 the state under the mutex and copies the address out; a `closed` cell has no
 address to report. The cell is destroyed when the last reference drops and is
 asserted `closed` at that point. `NetOwner.deinit` asserts a zero live count,
@@ -987,6 +990,77 @@ vocabulary at the `net_port` boundary — `'in-use`, `'unavailable`,
 requested address, the requested port, and the reason to the pending failure.
 Refusals before the host is reached are `'domain` with reasons `'unavailable`,
 `'denied`, and `'limit`, matching the process and filesystem capabilities.
+
+### Network connections extend the controller model
+
+Accepting, reading, and writing block indefinitely at the kernel and have no
+worker-side readiness source, so they follow the process-pipe model rather
+than the filesystem model: detached controller threads perform the blocking
+calls and hand results to the scheduler through bounded queues and the
+readiness capabilities in `external.zig`. A parked unit holds no worker. Every
+controller thread holds a lease on its cell, and the final lease release is
+the only place that closes the descriptor, releases the live reservation, and
+detaches scope membership, exactly as the process supervisor does.
+
+The listener gains one acceptor thread, started by the first `beginAccept`
+and never before. Each parked `accept` owns an intrusive `AcceptSlot` linked
+in FIFO order under the cell mutex; the acceptor calls `accept4` only while an
+unfilled slot exists, so the number of sockets taken from the kernel backlog
+and not yet handed over never exceeds the number of outstanding accepts
+(`queued <= demand`), and an idle program leaves backpressure in the kernel
+backlog. The acceptor waits in `poll` on the listening socket, switched to
+non-blocking, and on the read end of a private wake pipe. It does not block
+in `std.Io.net.Server.accept`: `shutdown(2)` on a listening socket does not
+wake a blocked `accept` on macOS, closing a descriptor another thread is
+blocked on is a reuse hazard everywhere, and `netAcceptPosix` treats `EAGAIN`
+as a bug, so the non-blocking socket that `poll` requires would trip it. A
+connection aborted between `poll` and `accept4` is skipped; descriptor and
+buffer exhaustion fill the first unfilled slot with a `resources` marker
+rather than failing the thread; the peer address is converted from the
+returned `sockaddr` at accept time and recorded on the connection. Readiness
+keys are slot pointers, so `notifyReadyLocked` wakes the slot's owner and the
+owning driver takes exactly its own socket. A driver torn down before it took
+its socket closes that socket itself. `ListenerCell.close` writes one byte to
+the wake pipe and waits under the cell condition until the acceptor reports
+it has left `poll` and will not touch the descriptor again; only then does it
+close the socket, mark every unfilled slot closed, and wake their owners with
+`'closed`. That wait is bounded by one thread returning from a `poll` the
+wake byte has already satisfied, which is not the unbounded worker wait this
+document forbids; the process controller's cancellation does not wait because
+a child may take hundreds of milliseconds to die, and no such delay exists
+here.
+
+A `ConnectionCell` mirrors `ProcessCell`: one exhaustive phase (`open`,
+`closing`, `closed`), a bounded receive ring filled by a reader thread and a
+bounded send ring drained by a writer thread, both of the host capacities, a
+`ReadyWait` list keyed by `1` for the reader and by permit pointer for
+writers, and a consuming live-connection reservation acquired by
+`beginAccept` and transferred to the cell when the socket is taken. At most
+one reader may be pending, and writes are serialized by permits in arrival
+order, as for process streams. The reader thread reads only as much as the
+ring can hold and waits while it is full; end of stream, a reset
+(`ECONNRESET`, or `EPIPE`/`ENOTCONN` after the peer went away), and every
+other error are distinct flags the word-side driver maps to `[]`, `'reset`,
+and `'io`. Explicit `close` moves `open` to `closing`: new writes fail
+`'closed`, the writer drains the ring, performs `shutdown(SHUT_RDWR)`, and
+exits; the reader discards until end of stream or error. Scope cancellation
+(`cancelExternalMember`) discards the send ring and shuts the socket down at
+once, so quiescence never waits on a peer. The final lease closes the
+descriptor, releases the reservation, sets `closed`, wakes every waiter, and
+detaches membership. A connection is attached to the *accepting* unit's
+`TaskScope`, never the listener's, so the listener may close first and a
+per-connection child unit owns exactly its own connection. A peer that never
+reads leaves at most `send_capacity` bytes queued after an explicit `close`;
+`write` parked until those bytes entered the ring, so the bound is the ring
+and nothing else.
+
+The connection quota (`max_live_connections`) is a second compare-exchange
+counter on `NetOwner` beside the listener quota; `NetOwner.deinit` asserts
+both are zero, which holds because Session teardown closes the root scope and
+every connection thread holds a lease the scope waits on. Failures on a
+connection are `'io` with the peer's address and port and one of `'closed`,
+`'reset`, `'io`; the quota refusal is `'domain` `'limit`; the mapping has one
+owner in `net_port.zig`.
 
 ### Absolute deadlines govern timer races
 
