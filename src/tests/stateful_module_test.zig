@@ -331,6 +331,12 @@ test "modules: core qualifier reaches shadowed core words and is never a registr
     try expectErrorContains(&runtime, "[] () @module 'core register", &.{ "'kind 'domain", "reserved for the core qualifier" });
     try expectErrorContains(&runtime, "'core 'shadow.host alias", &.{ "'kind 'domain", "reserved for the core qualifier" });
     try expectErrorContains(&runtime, "'short 'core alias", &.{ "'kind 'undefined-word", "undefined module `core`" });
+    try expectErrorContains(&runtime, "'core ('dup) import", &.{ "'kind 'undefined-word", "'scope 'qualified" });
+    try expectErrorContains(&runtime, "'core unmodule", &.{ "'kind 'undefined-word", "undefined word `core`" });
+    // The reservation is the whole name, not a segment: a dotted name under it
+    // registers, resolves, and qualifies like any other module.
+    try expectOk(&runtime, "[] ((1) 'f def) 'core.utils @defm");
+    try expectStack(&runtime, "core.utils.f 'core.utils 'f qualify execute", "1 1");
     try expectStack(&runtime, "1 core.dup", "1 1");
 }
 

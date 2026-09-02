@@ -578,8 +578,12 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         "oom-session.ecl",
         "args pop \"42 missing\" parse pop \"1\" int pop \"1\" float pop " ++
             // Each conversion reaches its own driver once: spelling and byte
-            // decoding, UTF-8 encoding, symbol lookup, and the core qualifier.
-            "'a chars pop [97] chars pop \"a\" bytes pop \"a\" symbol pop 97 char pop 1 core.dup pop pop",
+            // decoding, UTF-8 encoding, symbol lookup and insertion, and the
+            // core qualifier. The insertion spelling is fresh on the first
+            // replay and already interned on later ones, so both arms of the
+            // intern cursor see allocation failure.
+            "'a chars pop [97] chars pop \"a\" bytes pop \"a\" symbol pop \"oom-fresh-spelling\" intern pop " ++
+            "97 char pop 1 core.dup pop pop",
     );
     try runOk(
         &runtime,
