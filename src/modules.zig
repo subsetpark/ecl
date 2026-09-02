@@ -1931,6 +1931,8 @@ pub fn imageRef(item: value.Value) ?ImageRef {
 pub const CommitError = error{
     OutOfMemory,
     NameConflict,
+    /// The exact name `core` is the core qualifier, never a registration.
+    ReservedName,
     /// The initiating unit already holds a slot's turn, so it cannot wait
     /// for a second one.
     StateApplicationActive,
@@ -1943,6 +1945,8 @@ pub const RemovalError = error{
 pub const AliasError = error{
     OutOfMemory,
     NameConflict,
+    /// The exact name `core` is the core qualifier, never an alias.
+    ReservedName,
     MissingModule,
 };
 
@@ -3019,12 +3023,18 @@ pub const Registry = enum(usize) {
         pub fn advance(self: *RegistrationCursor) CommitError!CommitProgress {
             const name = self.name;
             return switch (self.state) {
-                .maintenance => |*maintenance| switch (maintenance.advance()) {
-                    .pending => .pending,
-                    .complete => result: {
-                        self.state = .snapshot;
-                        break :result .pending;
-                    },
+                .maintenance => |*maintenance| {
+                    // Refused before any directory work so the cursor is still
+                    // in its initial state when the caller retires it.
+                    if (intern.isReservedRegistryBytes(intern.get(intern.moduleId(name))))
+                        return error.ReservedName;
+                    return switch (maintenance.advance()) {
+                        .pending => .pending,
+                        .complete => result: {
+                            self.state = .snapshot;
+                            break :result .pending;
+                        },
+                    };
                 },
                 .snapshot => result: {
                     const directory = self.registry.acquireDirectory();
@@ -3731,6 +3741,8 @@ pub const Registry = enum(usize) {
         pub fn advance(self: *AliasCursor) AliasError!AliasProgress {
             return switch (self.state) {
                 .snapshot => result: {
+                    if (intern.isReservedRegistryBytes(intern.get(intern.bindingId(self.short))))
+                        return error.ReservedName;
                     const directory = self.registry.acquireDirectory();
                     const old = directory.directory orelse {
                         self.state = .{ .failed = directory };

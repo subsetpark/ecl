@@ -227,11 +227,6 @@
   table name column put)
  'with-column def
 
- ### defp selected
- (mask -- indices : "Return the indices selected by a 0/1 mask.")
- (|mask| mask len range mask (swap at) partial filter)
- 'selected defp
-
  ### defp slice-at
  (position lists -- slice : "Return the item at one position from each list.")
  (|position lists| lists position (at) partial each)
@@ -268,7 +263,7 @@
   mask len table height =
   'shape error.new "a table mask must match the table's row count" error.with-message assert
   table dict.keys
-  table dict.vals mask selected (at) partial each
+  table dict.vals mask core.where (at) partial each
   dict.from-lists)
  'where def
 
@@ -418,7 +413,7 @@
  ### defp key-matches
  (index left-keys right-keys -- indices : "Return matching right-row indices in ascending order.")
  (|index left-keys right-keys|
-  right-keys left-keys index at (match?) partial each selected)
+  right-keys left-keys index at (match?) partial each core.where)
  'key-matches defp
 
  ### defp table-row

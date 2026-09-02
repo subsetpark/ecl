@@ -10,7 +10,7 @@
   descriptor @test descriptor pair
   dup first 'ok dict.has?
   (1 at
-   dup 'module at swap 'name at pair (str 1 drop) each
+   dup 'module at swap 'name at pair (chars) each
    "ok {}.{}" str.format io.print
    0)
   (dup 1 at swap first pair "FAIL {}: {}" str.format io.print

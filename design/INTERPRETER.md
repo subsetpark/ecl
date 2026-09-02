@@ -366,8 +366,17 @@ Interned IDs are an in-process representation only: persistence and the native
 ABI carry spelling bytes and intern them in the receiving process.
 
 The table makes reads cheap and lets word occurrences fit in one value cell.
-It lives for the process lifetime, which leaves unbounded growth from
-adversarial or long-lived name creation as a known limitation.
+It lives for the process lifetime and is shared by every Session, so a spelling
+interned anywhere stays interned everywhere and exhausting the table starves
+every reader in the process. Growth is therefore a language-level invariant
+rather than a limitation to document: the table grows only through reading
+source (including `parse`), the module loaders, and the one word whose purpose
+is to grow it, `intern`. Every other path from data to a name is lookup-only.
+`symbol` converts a string only to a spelling that already exists, and words
+that materialize values from external bytes — JSON, CSV, directory listings,
+environment variables, HTTP headers — produce strings, never symbols. A new
+data-facing word that emits a symbol from input violates this invariant even
+when its inputs are small.
 
 ### Ownership passing makes precise reference counting useful
 
@@ -520,6 +529,16 @@ Qualified lookup acquires a generation lease, resolves a public binding, and
 turns the result into an execution pin before code runs. A Unit retains each
 generation it dispatches through. A module-local word can therefore keep
 running during replacement without a raw environment pointer escaping.
+
+The reserved qualifier `core` is decided before any of that. When the
+resolution cursor splits a dotted spelling and the module segment is exactly
+`core`, it looks the binding segment up in the core environment directly and
+never acquires a registry lease, so `core.dup` reaches the primitive from a
+session or image that has shadowed `dup`, with no generation, home, or
+call-site cache involved. Core is not an image and gains no module lifecycle
+by being nameable: the registry refuses the exact name `core` for both module
+registration and alias publication, which is the single boundary that owns
+registry names, so no later registration can capture the qualifier.
 
 ### Stateful module application is an explicit transaction
 

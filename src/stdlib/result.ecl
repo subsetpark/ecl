@@ -151,9 +151,8 @@
  ### def partition
  (results -- successes errors :
   "Return the success lists and error dictionaries as separate lists in input order.")
- (checked-all
-  dup ('ok dict.has?) filter ('ok at) each
-  swap ('err dict.has?) filter ('err at) each)
+ (checked-all ('ok dict.has?) core.partition
+  (('ok at) each) dip ('err at) each)
  'partition def
 
 ) 'result @defm

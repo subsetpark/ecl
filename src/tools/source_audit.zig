@@ -200,6 +200,7 @@ const test_files = [_][]const u8{
     "tests/process_test.zig",
     "tests/filesystem_test.zig",
     "tests/clock_test.zig",
+    "tests/conversion_test.zig",
 };
 const repository_verification_files = [_][]const u8{
     "build.zig",

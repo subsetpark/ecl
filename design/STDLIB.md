@@ -298,6 +298,19 @@ is `'domain`.
 `( x y -- z )` — **Pervasive.** Bitwise exclusive or. On 0/1 masks `<>`
 does the same job on any leaf type; `bxor` is for whole patterns.
 
+### bytes
+`( value -- bytes )` — Encode a string as UTF-8 into a byte list: an integer
+list whose elements are 0 through 255. A byte list is returned unchanged, so
+the word is idempotent. Any other value is `'type`. Inverse of `chars`; see
+[Conversions](SPEC.md#conversions).
+
+#### Examples
+
+```ecl
+"hé" bytes
+# => [104 195 169]
+```
+
 ### call
 `( q -- ... )` — *Inline.* Run a quotation on the current stack. A data
 list pushes its elements.
@@ -327,6 +340,34 @@ Defined in ecl; `'case see` renders the definition.
 ### ceil
 `( x -- integer )` — **Pervasive.** Round up; the result is int64,
 `'overflow` outside its range.
+
+### char
+`( value -- char )` — Return a char unchanged, the char with an int's codepoint,
+or the single char of a one-char string. An int outside the Unicode scalar
+range or a string of any other length is `'domain`; any other value is `'type`.
+
+#### Examples
+
+```ecl
+955 char
+# => \λ
+```
+
+### chars
+`( value -- string )` — Return a value's text content as a string: a string
+unchanged, the spelling of a symbol or word, a char as a one-element string,
+or a byte list decoded as UTF-8. Bytes that are not valid UTF-8 are `'domain`
+with `'reason 'invalid-utf8`; a list that is neither a string nor a byte list,
+or any other kind, is `'type`. Unlike `str`, the result is content rather than
+representation: `'foo chars` is `"foo"`, not `"'foo"`. See
+[Conversions](SPEC.md#conversions).
+
+#### Examples
+
+```ecl
+'foo chars [104 195 169] chars
+# => "foo" "hé"
+```
 
 ### clamp
 `( value lower upper -- bounded )` — **Pervasive** by composition.
@@ -499,6 +540,18 @@ miss. Defined in ecl.
 `( list -- list )` — Transpose; requires an exact rectangular
 list-of-lists.
 
+### float
+`( value -- float )` — Return a float unchanged, an int as a float, or the
+value of a string in the numeric-literal grammar. A string outside that grammar
+is `'parse`; any other value is `'type`.
+
+#### Examples
+
+```ecl
+"2.5e1" float 3 float
+# => 25.0 3.0
+```
+
 ### floor
 `( x -- integer )` — **Pervasive.** Round down; the result is int64,
 `'overflow` outside its range.
@@ -595,6 +648,34 @@ substack that remains is the result list.
 ```ecl
 [1 2 3] (dup) infra
 # => [1 2 3 3]
+```
+
+### int
+`( value -- int )` — Return an int unchanged, a char's codepoint, or the value
+of a string in the integer-literal grammar. A string outside that grammar is
+`'parse`. A float is `'type`: choose `floor`, `round`, or `ceil` instead. Any
+other value is also `'type`.
+
+#### Examples
+
+```ecl
+"42" int "a" first int
+# => 42 97
+```
+
+### intern
+`( value -- symbol )` — Return a symbol or word as a symbol, or create the
+symbol for a string, interning the spelling when it is new. A string that is
+not a valid symbol spelling is `'domain`; any other value is `'type`. Interned
+names live for the whole process and are never reclaimed, so never apply this
+to unbounded external input; `symbol` is the lookup-only form. See
+[Conversions](SPEC.md#conversions).
+
+#### Examples
+
+```ecl
+"fresh-name" intern
+# => 'fresh-name
 ```
 
 ### iterations
@@ -735,7 +816,9 @@ to `() cons cons`.
 
 ### parse
 `( string -- quotation )` — The reader, reified: parse source text into
-an unevaluated quotation. `"42" parse first` is string-to-number.
+an unevaluated quotation. Reading interns every symbol and word in the text,
+so this is a load-class word for trusted source, not a conversion: use `int`,
+`float`, and `symbol` on data.
 
 #### Examples
 
@@ -796,10 +879,12 @@ the selector is always one whole-value key, including a list key.
 
 ### qualify
 `( 'module-name 'binding-name -- qualified-word )` — Validate a canonical
-module path and one unqualified, non-reserved binding segment, then construct
-their qualified executable word directly from the interned components. It
-does not parse source or grant module-state/lifecycle authority; use `execute`
-to invoke the result dynamically.
+module path, or the reserved qualifier `'core`, and one unqualified,
+non-reserved binding segment, then construct their qualified executable word
+directly from the interned components. It does not parse source, intern
+anything new, or grant module-state/lifecycle authority; use `execute` to
+invoke the result dynamically. `'core 'dup qualify` reaches the primitive even
+where `dup` is shadowed.
 
 ### raise
 `( error -- )` — Raise a language error from an error dict.
@@ -1000,6 +1085,22 @@ readable value.
 ### sum
 `( sequence -- total )` — Sum of a numeric sequence; 0 when empty.
 Equivalent to `0 (+) fold`.
+
+### symbol
+`( value -- symbol )` — Return a symbol unchanged, a word as a symbol, or the
+already-interned symbol whose spelling a string names. A spelling that is not
+yet interned is `'domain`, as is a string that is not a valid symbol spelling;
+any other value is `'type`. Every symbol written in loaded source is interned,
+so this succeeds for any key a program compares against and never grows the
+interned name space; use `intern` to create one. See
+[Conversions](SPEC.md#conversions).
+
+#### Examples
+
+```ecl
+"foo" symbol 'foo match?
+# => 1
+```
 
 ### swap
 `( x y -- y x )` — Exchange the top two stack values.

@@ -64,8 +64,13 @@ const cases = [_]Case{
     .{ .name = "join", .source = "[\"a\" 2] \"-\" join" },
     .{ .name = "str.format", .source = "[3.14 2] \"pi={} n={}\" str.format" },
     .{ .name = "parse", .source = "\"42\" parse first" },
-    .{ .name = "parse-int", .source = "\"42\" parse-int" },
-    .{ .name = "parse-float", .source = "\"3.5\" parse-float" },
+    .{ .name = "int", .source = "\"42\" int \"a\" first int" },
+    .{ .name = "float", .source = "\"3.5\" float 3 float" },
+    .{ .name = "chars", .source = "'foo chars [104 195 169] chars" },
+    .{ .name = "bytes", .source = "\"hé\" bytes" },
+    .{ .name = "symbol", .source = "'a pop \"a\" symbol" },
+    .{ .name = "char", .source = "955 char" },
+    .{ .name = "core qualifier", .source = "(2 *) 'dup def 3 dup 3 core.dup" },
     .{ .name = "each", .source = "[1 2 3] (dup *) each" },
     .{ .name = "zip-with", .source = "[1 2] [3 4] (+) zip-with" },
     .{ .name = "for", .source = "[1 2] (io.pp) for" },
@@ -566,18 +571,53 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\42
         \\stderr:
         \\<empty>
-        \\=== parse-int ===
-        \\source: "42" parse-int
+        \\=== int ===
+        \\source: "42" int "a" first int
         \\exit: 0
         \\stdout:
-        \\42
+        \\42 97
         \\stderr:
         \\<empty>
-        \\=== parse-float ===
-        \\source: "3.5" parse-float
+        \\=== float ===
+        \\source: "3.5" float 3 float
         \\exit: 0
         \\stdout:
-        \\3.5
+        \\3.5 3.0
+        \\stderr:
+        \\<empty>
+        \\=== chars ===
+        \\source: 'foo chars [104 195 169] chars
+        \\exit: 0
+        \\stdout:
+        \\"foo" "hé"
+        \\stderr:
+        \\<empty>
+        \\=== bytes ===
+        \\source: "hé" bytes
+        \\exit: 0
+        \\stdout:
+        \\[104 195 169]
+        \\stderr:
+        \\<empty>
+        \\=== symbol ===
+        \\source: 'a pop "a" symbol
+        \\exit: 0
+        \\stdout:
+        \\'a
+        \\stderr:
+        \\<empty>
+        \\=== char ===
+        \\source: 955 char
+        \\exit: 0
+        \\stdout:
+        \\\λ
+        \\stderr:
+        \\<empty>
+        \\=== core qualifier ===
+        \\source: (2 *) 'dup def 3 dup 3 core.dup
+        \\exit: 0
+        \\stdout:
+        \\6 3 3
         \\stderr:
         \\<empty>
         \\=== each ===

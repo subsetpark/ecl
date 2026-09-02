@@ -870,6 +870,10 @@ pub fn build(b: *std.Build) void {
             // under a manual clock the test advances, so nothing here waits
             // on host time.
             "tests.clock_test.",
+            // Kind conversions and the reserved `core.` qualifier. Every case
+            // is a handful of scalar words through the public Session and the
+            // whole file costs well under a second.
+            "tests.conversion_test.",
             // Fast families inside sources that also hold heavy tests.
             "env:",
             "modules:",

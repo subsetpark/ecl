@@ -7847,6 +7847,10 @@ pub const ResolutionCursor = struct {
         package_authorization,
         qualified_acquire,
         qualified_export,
+        /// The reserved `core.` qualifier: the binding segment is looked up as
+        /// an interned atom and then resolved in core alone, never in the
+        /// registry.
+        core_export,
         scope,
         direct,
         core,
@@ -8100,7 +8104,21 @@ pub const ResolutionCursor = struct {
                 .pending => .pending,
                 .complete => |maybe_dot| result: {
                     if (maybe_dot) |dot_index| {
-                        if (dot_index == 0 or dot_index + 1 == self.spelling.len or self.registry == null) {
+                        if (dot_index == 0 or dot_index + 1 == self.spelling.len) {
+                            self.work.deinit();
+                            self.phase = .complete;
+                            break :result .{ .complete = .{ .unresolved = .qualified } };
+                        }
+                        if (intern.isReservedRegistryBytes(self.spelling[0..dot_index])) {
+                            // `core` is a scope, not a registration: skip the
+                            // registry entirely, including when there is none.
+                            self.dot_index = dot_index;
+                            self.plain_chain = .core;
+                            self.work = .{ .atom = intern.lookupCursor(self.spelling[dot_index + 1 ..]) };
+                            self.phase = .core_export;
+                            break :result .pending;
+                        }
+                        if (self.registry == null) {
                             self.work.deinit();
                             self.phase = .complete;
                             break :result .{ .complete = .{ .unresolved = .qualified } };
@@ -8245,6 +8263,21 @@ pub const ResolutionCursor = struct {
                     break :result .{ .complete = .{
                         .resolved = self.generationResult(lease, captured_cell),
                     } };
+                },
+            },
+            .core_export => switch (self.work.atom.advance()) {
+                .pending => .pending,
+                .complete => |maybe_export| result: {
+                    // An atom no source has interned cannot name a core
+                    // binding; the miss reports the chain actually searched.
+                    const export_name = maybe_export orelse {
+                        self.work.deinit();
+                        self.phase = .complete;
+                        break :result .{ .complete = .{ .unresolved = .core } };
+                    };
+                    self.work = .{ .direct = self.core.directLookupCursor(export_name) };
+                    self.phase = .core;
+                    break :result .pending;
                 },
             },
             .scope => result: {
@@ -8990,6 +9023,7 @@ fn advanceRegistration(
         switch (cursor.advance() catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.NameConflict => return evaluator.fail(.domain, "module name collides with an alias"),
+            error.ReservedName => return evaluator.fail(.domain, "module name `core` is reserved for the core qualifier"),
             error.StateApplicationActive => return evaluator.fail(
                 .domain,
                 "a module cannot be registered from inside a state application",

@@ -27,19 +27,19 @@ right.peek io.pp
 
 ### Namespaced modules and dynamic dispatch use the same final-dot lookup.
 
-### module core
+### module base
 []
 (
  ### def utils
- (0) 'utils def) 'core @defm
+ (0) 'utils def) 'base @defm
 
-### module core.utils
+### module base.utils
 []
 (
  ### def f
- (1) 'f def) 'core.utils @defm
-core.utils io.pp
-'core.utils 'f qualify dup type io.pp execute io.pp
+ (1) 'f def) 'base.utils @defm
+base.utils io.pp
+'base.utils 'f qualify dup type io.pp execute io.pp
 
 ### A pool built from `with`: checkout moves a value outward, checkin
 ### returns one, and both are ordinary transactional updates.
