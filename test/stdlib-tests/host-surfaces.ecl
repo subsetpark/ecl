@@ -13,6 +13,7 @@
    'path.absolute? 'path.relative? 'path.components 'path.valid-relative?
    'http.get 'http.get-bytes 'http.post
    'clock.unix
+   'net.listen 'net.local-address 'net.close
    'pkg.store.inspect 'pkg.store.install 'pkg.store.present?
    'pkg.store.verify 'pkg.store.read-seal 'pkg.store.manifest 'pkg.store.gc)
   documented)

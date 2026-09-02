@@ -193,6 +193,8 @@ const ErrorDataKey = enum {
     @"source-path",
     @"destination-root",
     @"destination-path",
+    address,
+    port,
 };
 const ErrorData = struct {
     key: ErrorDataKey,
@@ -1777,6 +1779,7 @@ pub const InheritedContext = struct {
     phrase_recognizer: ?PhraseRecognizer = null,
     process_access: ?*external.ProcessAccess = null,
     filesystem_access: ?*external.FilesystemAccess = null,
+    net_access: ?*external.NetAccess = null,
     package_access: ?*external.PackageAccess = null,
     wall_clock: WallClock = .absent,
 };
@@ -5058,6 +5061,15 @@ pub const Machine = struct {
             },
         }
         failure.addData(.reason, data.reason);
+    }
+    /// The stable data dictionary every network-listener failure carries: the
+    /// requested address string, the requested port, and a closed portable
+    /// reason symbol.
+    pub fn addErrorNet(self: *Machine, address: Value, port: Value, reason: Value) void {
+        const failure = self.unit.pendingFailure();
+        failure.addData(.address, address);
+        failure.addData(.port, port);
+        failure.addData(.reason, reason);
     }
     /// Attach the closed-vocabulary `'reason` symbol a capability refusal
     /// reports, so programs branch on the symbol rather than the message.

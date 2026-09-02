@@ -82,13 +82,14 @@ const source_groups = [_]SourceGroup{
     // they are ordinary production sources under the bounded-traversal rules.
     .{ .production = true, .files = &.{
         "stdlib/dict.zig",  "stdlib/rand.zig", "stdlib/json.zig", "stdlib/http.zig", "stdlib/proc.zig", "stdlib/archive.zig", "stdlib/pkg_store.zig", "stdlib/fs.zig",
-        "stdlib/clock.zig", "stdlib/time.zig",
+        "stdlib/clock.zig", "stdlib/time.zig", "stdlib/net.zig",
     }, .sources = &.{
         @embedFile("../stdlib/dict.zig"),      @embedFile("../stdlib/rand.zig"),
         @embedFile("../stdlib/json.zig"),      @embedFile("../stdlib/http.zig"),
         @embedFile("../stdlib/proc.zig"),      @embedFile("../stdlib/archive.zig"),
         @embedFile("../stdlib/pkg_store.zig"), @embedFile("../stdlib/fs.zig"),
         @embedFile("../stdlib/clock.zig"),     @embedFile("../stdlib/time.zig"),
+        @embedFile("../stdlib/net.zig"),
     } },
     .{ .production = true, .files = &.{
         "combinators.zig",
@@ -136,16 +137,18 @@ const source_groups = [_]SourceGroup{
         @embedFile("bench_workdrivers.zig"),    @embedFile("ecl_source_check.zig"),
     } },
     // Scheduler-owned external resources: process ports, filesystem roots,
-    // and package stores share the nominal capability vocabulary in
-    // external.zig and are opened only by their Session-owned owner.
+    // network listeners, and package stores share the nominal capability
+    // vocabulary in external.zig and are opened only by their Session-owned
+    // owner.
     .{ .production = true, .files = &.{
         "scheduler.zig", "scheduler_core.zig", "external.zig", "process_port.zig", "console.zig", "task_prims.zig", "filesystem_port.zig", "package_authority.zig", "directory_order.zig",
+        "net_port.zig",
     }, .sources = &.{
         @embedFile("../scheduler.zig"),       @embedFile("../scheduler_core.zig"),
         @embedFile("../external.zig"),        @embedFile("../process_port.zig"),
         @embedFile("../console.zig"),         @embedFile("../task_prims.zig"),
         @embedFile("../filesystem_port.zig"), @embedFile("../package_authority.zig"),
-        @embedFile("../directory_order.zig"),
+        @embedFile("../directory_order.zig"), @embedFile("../net_port.zig"),
     } },
     // The installed author SDK, its sized ABI records, validation, loader,
     // and transactional-call boundary form one separately rooted component.
@@ -199,6 +202,7 @@ const test_files = [_][]const u8{
     "tests/test_language_test.zig",
     "tests/process_test.zig",
     "tests/filesystem_test.zig",
+    "tests/net_test.zig",
     "tests/clock_test.zig",
     "tests/conversion_test.zig",
 };

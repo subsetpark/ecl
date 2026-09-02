@@ -757,6 +757,7 @@ const StdlibSurface = enum {
     time,
     http,
     process,
+    net,
     package_sync_module,
     package_sync,
     package_cli_module,
@@ -809,6 +810,9 @@ fn stdlibSessionAllocationProbe(
                 .stdin_capacity = 16,
                 .stdout_capacity = 16,
                 .stderr_capacity = 16,
+            } else null,
+            .net_policy = if (surface == .net) .{
+                .binds = .{ .exact = &.{.{ .address = "127.0.0.1", .port = 0 }} },
             } else null,
             .filesystem_policy = .{ .roots = &.{
                 .{ .name = "cwd", .absolute_path = scratch_path, .permissions = .all },
@@ -957,6 +961,16 @@ fn stdlibSessionAllocationProbe(
             // refusal path; a zero sleep parks and resumes without a timer.
             "clock.now clock.elapsed pop [] (0 clock.sleep 1) @spawn await pop " ++
                 "[] (clock.unix) @attempt pop",
+        ),
+        .net => try runOk(
+            &runtime,
+            "oom-net.ecl",
+            // One granted bind read back and closed twice, one denied port,
+            // and one listener released by its child scope.
+            "{'address \"127.0.0.1\" 'port 0} net.listen dup net.local-address pop " ++
+                "dup net.close net.close " ++
+                "[] ({'address \"127.0.0.1\" 'port 1} net.listen) @attempt pop " ++
+                "[] ({'address \"127.0.0.1\" 'port 0} net.listen net.local-address) @spawn await pop",
         ),
         .time => try runOk(
             &runtime,
@@ -1294,6 +1308,11 @@ test "oom: standard-library and host: host: IO propagates every allocation failu
 test "oom: standard-library and host: host: filesystem propagates every allocation failure" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.filesystem);
+}
+
+test "oom: standard-library and host: host: network listeners propagate every allocation failure" {
+    try requireSelectedOomTest(@src());
+    try checkStdlibSurface(.net);
 }
 
 test "oom: standard-library and host: host: HTTP propagates every allocation failure" {

@@ -687,6 +687,7 @@ pub fn build(b: *std.Build) void {
             "archive: unpack-tgz preserves existing destinations and has one concurrent winner",
             "pkg store: existing immutable entry wins concurrent install",
             "process:",
+            "net:",
             "fs: concurrent creates have exactly one winner and no staging residue",
             "fs: cancellation before commit leaves the destination unchanged",
         },
@@ -870,6 +871,10 @@ pub fn build(b: *std.Build) void {
             // under a manual clock the test advances, so nothing here waits
             // on host time.
             "tests.clock_test.",
+            // Capability-gated TCP listeners. Every case binds an ephemeral
+            // loopback port through the public Session and probes it from the
+            // test; no fixture process, no sleeps, well inside the fast budget.
+            "tests.net_test.",
             // Kind conversions and the reserved `core.` qualifier. Every case
             // is a handful of scalar words through the public Session and the
             // whole file costs well under a second.

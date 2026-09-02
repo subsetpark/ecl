@@ -16,6 +16,11 @@ pub const ProcessAccess = opaque {};
 /// `filesystem_port.zig`; a Unit can neither mint nor widen one.
 pub const FilesystemAccess = opaque {};
 
+/// Nominal proof that a Session granted inbound listen authority. The bind
+/// allowlist, limits, and live-listener quota remain private to
+/// `net_port.zig`; a Unit can neither mint nor widen one.
+pub const NetAccess = opaque {};
+
 /// Nominal proof that a Session was constructed for a package command. It
 /// carries the package store handles that `pkg.store` needs and nothing an
 /// ordinary embedding Session ever mints; see `package_authority.zig`.
