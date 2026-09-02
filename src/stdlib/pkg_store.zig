@@ -627,12 +627,12 @@ const ManifestDriver = struct {
                     .failed => |reason| return self.failIoName(evaluator, reason.message()),
                     .file => |file| file,
                 };
-                const size = switch (fsport.regularFileSize(self.io, file, max_manifest_bytes)) {
+                const size = switch (fsport.regularFileInfo(self.io, file, max_manifest_bytes)) {
                     .failed => |reason| {
                         file.close(self.io);
                         return self.failIoName(evaluator, reason.message());
                     },
-                    .size => |size| size,
+                    .regular => |info| info.size,
                 };
                 const buffer = self.allocator.alloc(u8, @intCast(size)) catch |err| {
                     file.close(self.io);

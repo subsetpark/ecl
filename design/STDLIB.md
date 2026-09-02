@@ -1486,10 +1486,12 @@ entry count (100,000) and aggregate name bytes (64 MiB); a Session runs at most
 64 filesystem operations at once. Mutation stages complete contents in a
 private sibling entry and publishes with one atomic namespace operation, so
 failure or cancellation before the commit leaves the destination unchanged.
-The atomicity promised is namespace and failure atomicity; no `fsync`, crash
-durability, or preservation of ownership, permissions, timestamps, or extended
-attributes is promised. Created files use the host's ordinary creation mode
-under the process umask.
+Staged contents are flushed to the device before publication, so a crash
+after the commit cannot leave an empty file under the final name; directory
+entry durability, ownership, timestamps, and extended attributes are not
+promised. Created files use the host's ordinary creation mode under the
+process umask, a replaced file keeps its permission bits, and a copy carries
+the source's permission bits under the umask.
 
 ### copy
 `( source-root source-path destination-root destination-path -- )` — Copy a

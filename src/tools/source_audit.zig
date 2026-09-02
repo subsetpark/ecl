@@ -739,9 +739,11 @@ fn auditSourceBodies() bool {
 /// handle, never through the process working directory, and the ambient file
 /// words removed from `io` must stay removed everywhere first-party code is
 /// written. Types cannot state either rule: `std.Io.Dir.cwd()` is an ordinary
-/// function and a word spelling is text. Only the two owners that open
-/// trusted host paths once at Session construction (`filesystem_port.zig`
-/// and `package_authority.zig`) may name the working directory.
+/// function and a word spelling is text. Among the modules that implement
+/// evaluated filesystem words, none may name the working directory; the
+/// owners that open trusted host paths once at Session construction
+/// (`filesystem_port.zig`, `package_authority.zig`) and the CLI, project
+/// discovery, and module-loading host boundaries do so by design.
 fn auditFilesystemAuthority() bool {
     var failed = false;
     const ambient_cwd = [_][]const []const u8{

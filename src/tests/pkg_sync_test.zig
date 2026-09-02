@@ -571,6 +571,7 @@ const PackageHost = struct {
     project: []u8,
     project_handle: std.Io.Dir,
     cache: []u8,
+    output: *DiscardingOutput,
     project_start: ?[]const u8 = null,
 
     fn init(options: HostOptions) !PackageHost {
@@ -598,6 +599,8 @@ const PackageHost = struct {
         errdefer allocator.free(project);
         const cache = try scratch.pathFor("cache");
         errdefer allocator.free(cache);
+        const output = try DiscardingOutput.create();
+        errdefer allocator.destroy(output);
         const project_handle = try scratch.directory.dir.openDir(std.testing.io, "project", .{});
         return .{
             .scratch = scratch,
@@ -606,11 +609,13 @@ const PackageHost = struct {
             .project = project,
             .project_handle = project_handle,
             .cache = cache,
+            .output = output,
         };
     }
 
     fn deinit(self: *PackageHost) void {
         self.project_handle.close(std.testing.io);
+        allocator.destroy(self.output);
         allocator.free(self.cache);
         allocator.free(self.project);
         if (self.owned_scratch) |owned| {
@@ -630,8 +635,8 @@ const PackageHost = struct {
     fn openSessionWithConfig(self: *const PackageHost, heap_allocator: std.mem.Allocator, config: session.Config) !session.Session {
         return session.Session.initPackageCommand(heap_allocator, &.{}, .{
             .io = std.testing.io,
-            .output = discarding_output.writer(),
-            .diagnostics = discarding_output.writer(),
+            .output = self.output.writer(),
+            .diagnostics = self.output.writer(),
             .tls_trust = if (self.options.tls) .{ .ca_file = pkg_fixture.ca_file, .now = valid_cert_time } else null,
             .project_start = self.project_start,
             .filesystem_policy = .{ .roots = &.{.{
@@ -687,18 +692,24 @@ const PackageHost = struct {
     }
 };
 
-/// Session output is irrelevant to every case here; a shared discarding
-/// writer keeps the host constructors free of per-call buffers.
+/// Session output is irrelevant to every case here. Each host owns one
+/// heap-allocated discarding writer: the writer borrows its buffer, so it
+/// needs a stable address, and the concurrent-install cases run two hosts
+/// on separate threads at once.
 const DiscardingOutput = struct {
-    buffer: [256]u8 = @splat(0),
-    sink: ?std.Io.Writer.Discarding = null,
+    buffer: [256]u8,
+    sink: std.Io.Writer.Discarding,
+
+    fn create() !*DiscardingOutput {
+        const output = try allocator.create(DiscardingOutput);
+        output.sink = std.Io.Writer.Discarding.init(&output.buffer);
+        return output;
+    }
 
     fn writer(self: *DiscardingOutput) *std.Io.Writer {
-        if (self.sink == null) self.sink = std.Io.Writer.Discarding.init(&self.buffer);
-        return &self.sink.?.writer;
+        return &self.sink.writer;
     }
 };
-var discarding_output: DiscardingOutput = .{};
 
 const PackageOperation = enum { inspect, install };
 

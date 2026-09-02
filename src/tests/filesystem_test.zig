@@ -582,6 +582,17 @@ test "fs: create is exclusive and replace is strict" {
     const through_link = try scratch.read("existing");
     defer allocator.free(through_link);
     try std.testing.expectEqualStrings("\x07", through_link);
+
+    // Replacement keeps the target's permissions through the exchange, so an
+    // executable stays executable; a created file gets the host default.
+    const script = try scratch.directory.dir.createFile(io, "script", .{ .permissions = .executable_file });
+    script.close(io);
+    const before = try scratch.directory.dir.statFile(io, "script", .{ .follow_symlinks = false });
+    try expectStack(policy, "\"#!\" 'root \"script\" fs.replace-text 'root \"script\" fs.read-text", "\"#!\"");
+    const after = try scratch.directory.dir.statFile(io, "script", .{ .follow_symlinks = false });
+    try std.testing.expectEqual(before.permissions, after.permissions);
+    const plain = try scratch.directory.dir.statFile(io, "existing", .{ .follow_symlinks = false });
+    try std.testing.expect(plain.permissions != after.permissions);
     try scratch.expectNoStaging(".");
 }
 
@@ -606,6 +617,13 @@ test "fs: mkdir copy rename and removal act on final entries without following" 
     try expectFsFailure(policy, "'root \"absent\" 'root \"made/again\" fs.copy", "io", "fs.copy", "not-found");
     try expectFsFailure(policy, "'root \"file\" 'root \".\" fs.copy", "domain", "fs.copy", "invalid-path");
     try scratch.expectAbsent("made/again");
+    // A copy carries the source permissions, as `cp` does.
+    const script = try scratch.directory.dir.createFile(io, "script", .{ .permissions = .executable_file });
+    script.close(io);
+    try expectStack(policy, "'root \"script\" 'root \"script-copy\" fs.copy 'root \"script-copy\" fs.exists?", "1");
+    const source_info = try scratch.directory.dir.statFile(io, "script", .{ .follow_symlinks = false });
+    const copy_info = try scratch.directory.dir.statFile(io, "script-copy", .{ .follow_symlinks = false });
+    try std.testing.expectEqual(source_info.permissions, copy_info.permissions);
 
     try expectStack(policy, "'root \"made/copy\" \"renamed\" fs.rename 'root \"renamed\" fs.exists? 'root \"made/copy\" fs.exists?", "1 0");
     try expectStack(policy, "'root \"made\" \"moved-dir\" fs.rename 'root \"moved-dir/via-link\" fs.exists?", "1");

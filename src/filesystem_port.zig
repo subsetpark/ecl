@@ -669,17 +669,22 @@ pub fn openRegularForRead(io: std.Io, parent: std.Io.Dir, name: []const u8) Open
     return .{ .file = file };
 }
 
-pub const SizeOutcome = union(enum) {
+pub const RegularInfo = struct {
     size: u64,
+    permissions: std.Io.File.Permissions,
+};
+
+pub const InfoOutcome = union(enum) {
+    regular: RegularInfo,
     failed: Reason,
 };
 
 /// Requires an opened entry to be a regular file no larger than `limit`.
-pub fn regularFileSize(io: std.Io, file: std.Io.File, limit: u64) SizeOutcome {
+pub fn regularFileInfo(io: std.Io, file: std.Io.File, limit: u64) InfoOutcome {
     const info = file.stat(io) catch |err| return .{ .failed = reasonForError(err) };
     if (info.kind != .file) return .{ .failed = .not_regular };
     if (info.size > limit) return .{ .failed = .limit };
-    return .{ .size = info.size };
+    return .{ .regular = .{ .size = info.size, .permissions = info.permissions } };
 }
 
 pub const ReadProgress = union(enum) {
@@ -781,10 +786,20 @@ pub const StagedFile = struct {
         self.file = null;
     }
 
+    /// Flushes the staged contents to the device and closes the handle, so
+    /// a crash after publication cannot leave an empty file under the final
+    /// name. Directory-entry durability is not promised: `std.Io.Dir` has no
+    /// sync, and the words guarantee atomic visibility, not persistence.
+    fn seal(self: *StagedFile) ?Reason {
+        if (self.file) |file| file.sync(self.io) catch |err| return reasonForError(err);
+        self.closeHandle();
+        return null;
+    }
+
     /// Publishes without replacing an existing destination. On success the
     /// staging name is consumed and nothing remains to dispose.
     pub fn commitNoReplace(self: *StagedFile, final_name: []const u8) ?Reason {
-        self.closeHandle();
+        if (self.seal()) |reason| return reason;
         renameNoReplace(self.io, self.parent, &self.name, self.parent, final_name) catch |err|
             return reasonForError(err);
         return null;
@@ -794,7 +809,7 @@ pub const StagedFile = struct {
     /// The displaced entry now sits under the staging name and must be
     /// disposed by the caller.
     pub fn commitExchange(self: *StagedFile, final_name: []const u8) ?Reason {
-        self.closeHandle();
+        if (self.seal()) |reason| return reason;
         renameExchange(self.io, self.parent, &self.name, self.parent, final_name) catch |err|
             return reasonForError(err);
         self.displaced = true;

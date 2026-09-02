@@ -33,7 +33,7 @@ pub fn main(init: std.process.Init) void {
             break :failure 1;
         },
         error.InvalidHostPolicy => failure: {
-            writeFile(init.io, .stderr, "ecl: host filesystem or process policy is invalid\n") catch
+            writeFile(init.io, .stderr, "ecl: host filesystem, package store, or process policy is invalid\n") catch
                 std.process.exit(1);
             break :failure 1;
         },

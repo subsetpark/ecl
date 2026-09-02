@@ -736,12 +736,12 @@ const Driver = struct {
             .failed => |reason| return self.fail(evaluator, reason),
             .file => |file| file,
         };
-        const size = switch (fsport.regularFileSize(self.io, file, self.limits.max_transfer_bytes)) {
+        const size = switch (fsport.regularFileInfo(self.io, file, self.limits.max_transfer_bytes)) {
             .failed => |reason| {
                 file.close(self.io);
                 return self.fail(evaluator, reason);
             },
-            .size => |size| size,
+            .regular => |info| info.size,
         };
         const buffer = self.allocator.alloc(u8, @intCast(size)) catch |err| {
             file.close(self.io);
@@ -1040,14 +1040,17 @@ const Driver = struct {
             error.FileNotFound => null,
             else => return self.fail(evaluator, fsport.reasonForError(err)),
         };
-        switch (mode) {
-            .create => if (existing != null) return self.fail(evaluator, .already_exists),
-            .replace => {
+        // A replaced file keeps its permissions through the exchange; a
+        // created one gets the host default.
+        const permissions: std.Io.File.Permissions = switch (mode) {
+            .create => if (existing != null) return self.fail(evaluator, .already_exists) else .default_file,
+            .replace => permissions: {
                 const info = existing orelse return self.fail(evaluator, .not_found);
                 if (info.kind != .file) return self.fail(evaluator, .not_regular);
+                break :permissions info.permissions;
             },
-        }
-        const staged = switch (fsport.StagedFile.create(self.io, entry.parent.dir, .default_file)) {
+        };
+        const staged = switch (fsport.StagedFile.create(self.io, entry.parent.dir, permissions)) {
             .failed => |reason| return self.fail(evaluator, reason),
             .staged => |staged| staged,
         };
@@ -1102,18 +1105,19 @@ const Driver = struct {
             .failed => |reason| return self.fail(evaluator, reason),
             .file => |file| file,
         };
-        const size = switch (fsport.regularFileSize(self.io, file, self.limits.max_transfer_bytes)) {
+        const source_info = switch (fsport.regularFileInfo(self.io, file, self.limits.max_transfer_bytes)) {
             .failed => |reason| {
                 file.close(self.io);
                 return self.fail(evaluator, reason);
             },
-            .size => |size| size,
+            .regular => |info| info,
         };
         const buffer = self.allocator.alloc(u8, fsport.transfer_quantum) catch |err| {
             file.close(self.io);
             return err;
         };
-        const staged = switch (fsport.StagedFile.create(self.io, destination.parent.dir, .default_file)) {
+        // The copy carries the source file's permissions, as `cp` does.
+        const staged = switch (fsport.StagedFile.create(self.io, destination.parent.dir, source_info.permissions)) {
             .failed => |reason| {
                 file.close(self.io);
                 self.allocator.free(buffer);
@@ -1123,7 +1127,7 @@ const Driver = struct {
         };
         self.state = .{ .copy = .{
             .file = file,
-            .size = @intCast(size),
+            .size = @intCast(source_info.size),
             .staged = staged,
             .buffer = buffer,
         } };

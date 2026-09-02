@@ -10,12 +10,16 @@
 # embedded two heading levels beneath their authored section. Assembly fails
 # before writing when an input cannot be read or a directive is malformed.
 
+### def root-prefix
+(root -- prefix : "The build root with exactly one trailing separator.")
+(dup "/" str.ends? () ("/" cat) if)
+'root-prefix def
+
 ### def relativize-absolute
 (root path -- path : "Strip the build root prefix from an absolute path beneath it.")
-(|root path|
- path root "/" cat str.starts?
+(swap root-prefix over over str.starts?
  'domain error.new "assembly input is outside the build root" error.with-message assert
- path root len 1 + drop)
+ len drop)
 'relativize-absolute def
 
 ### def relativize

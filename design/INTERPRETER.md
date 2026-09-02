@@ -155,7 +155,7 @@ with a permission set (`read-data`, `inspect`, `list`, `create`, `replace`,
 opens every root once, and fails with `InvalidHostPolicy` rather than
 `OutOfMemory` when a root is relative, missing, not a directory, misnamed, or
 duplicated, or when a limit is zero. From then on authority is the retained
-directory handle, not the configured path: renaming the directory afterwards
+directory handle, not the configured path: renaming the directory afterward
 moves nothing. The `FilesystemOwner` owns the copied policy, the handles, and
 the live-operation quota; Units receive one opaque `FilesystemAccess` and can
 only ask the owner to look a symbol up, check a grant, or reserve a slot. No
@@ -184,7 +184,7 @@ startup work shared with runtime module loading.
 Session teardown first stops execution and closes task and external-resource
 creation. It then retires root scopes, including cancellation and direct-child
 reap for every process member, before destroying the process, filesystem, and
-package owners; every filesystem driver retired with the scheduler, so no
+package owners; every filesystem driver is retired with the scheduler, so no
 handle, staging entry, or quota reservation can still reference an owner when
 its root handles close. Stacks, module generations, source provenance, and
 native pins follow in dependency order, with bounded retirement drained while
