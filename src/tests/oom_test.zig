@@ -576,7 +576,10 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     try runOk(
         &runtime,
         "oom-session.ecl",
-        "args pop \"42 missing\" parse pop \"1\" parse-int pop \"1\" parse-float pop",
+        "args pop \"42 missing\" parse pop \"1\" int pop \"1\" float pop " ++
+            // Each conversion reaches its own driver once: spelling and byte
+            // decoding, UTF-8 encoding, symbol lookup, and the core qualifier.
+            "'a chars pop [97] chars pop \"a\" bytes pop \"a\" symbol pop 97 char pop 1 core.dup pop pop",
     );
     try runOk(
         &runtime,

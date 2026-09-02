@@ -1218,6 +1218,15 @@ A module image sees its own public and private bindings followed by core and
 never sees the invoking session. Core and prelude definitions resolve in core.
 Parentage does not change after scope creation.
 
+`core` is a reserved qualifier, not a registration. A qualified word whose
+module segment is exactly `core` resolves its binding segment in core alone,
+skipping every session, child, and image scope, so a shadowed core definition
+remains reachable: after `(2 *) 'dup def`, `core.dup` is still the primitive.
+Only public core bindings resolve this way; a missing or private name is
+`'undefined-word` with `'scope 'core`. `'core 'dup qualify` constructs the same
+word. `import`, `alias`, and `unmodule` observe registrations only and do not
+accept `core`.
+
 Resolution scope and module home are independent parts of an activation.
 Resolution scope determines where a word's spelling is looked up. Module home
 determines privacy and registration-owned authority. Homeless helpers preserve
@@ -1420,6 +1429,34 @@ mapping, and locale collation are not provided, so composed and decomposed
 `"café"` have lengths 4 and 5. Symbols are interned at parse; strings are plain
 uninterned vectors.
 
+### Conversions
+
+Conversion between kinds is explicit and names its target. `chars` yields a
+value's text content as a string: a string unchanged, a symbol's or word's
+spelling, a char as a one-element string, or a byte list decoded as UTF-8. A
+byte list is an integer list whose every element is 0 through 255; bytes that
+are not valid UTF-8 are `'domain` with `'reason 'invalid-utf8`. `bytes` is the
+inverse: it encodes a string as UTF-8 and returns a byte list unchanged. `int`
+accepts an int, a string in the integer-literal grammar, or a char, whose
+codepoint it returns. `float` accepts a float, an int, or a string in the
+numeric-literal grammar. A float is not accepted by `int`: `floor`, `round`,
+and `ceil` name the rounding. `char` accepts a char, an int in the Unicode
+scalar range, or a one-char string. A string outside the literal grammar is
+`'parse`; an int outside the scalar range or a string of the wrong length is
+`'domain`; every other operand kind is `'type`. `str` remains the readable
+representation and `parse` remains the reader; neither is a conversion.
+
+Symbol conversion is split so that programs cannot grow the interned name
+space by accident. `symbol` accepts a symbol or word unchanged and converts a
+string only when that spelling is already interned, failing `'domain`
+otherwise; every symbol a program can meaningfully compare against was
+interned when its source was read, so lookup is the common case. `intern`
+accepts the same operands and creates the symbol when the spelling is new.
+Both reject a string that is not a valid symbol spelling as `'domain`. The
+interned name space grows only through reading source, `parse`, `intern`, and
+the module loaders; words that materialize values from external data produce
+strings, never symbols.
+
 ## Modules
 
 A module is a value; a *registration* is the assignment of a module to a public
@@ -1465,7 +1502,9 @@ anonymously, be passed as data, and be registered more than once.
   and `company.data.csv` are valid; leading, trailing, and doubled dots are
   not. Definition names and aliases remain one unqualified segment. Qualified
   executable names split at their final dot, so `core.utils.f` always means
-  module `core.utils`, binding `f`, even when module `core` also exists. Host
+  module `core.utils`, binding `f`. The exact name `core` is reserved for the
+  core qualifier (see Scope chains): registering a module or an alias under it
+  is `'domain`, while `core.utils` stays an ordinary module name. Host
   and native factories apply the reader's single scalar-level symbol-segment
   grammar; ASCII or Unicode whitespace, delimiters, malformed UTF-8, and other
   unreadable spellings do not become validated names. Reserved syntax markers
@@ -2076,8 +2115,9 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   Naming a binding that already exists replaces only that binding; importing
   selected names never splices an entire module or emits shadow notices.
   Dotted words split at their final dot and give qualified access with
-  no import. `qualify` validates a module-name symbol and an unqualified
-  binding-name symbol and constructs the corresponding executable word;
+  no import. `qualify` validates a module-name symbol, which may be `'core`,
+  and an unqualified binding-name symbol and constructs the corresponding
+  executable word;
   `execute` applies that word through ordinary late-bound dispatch, preserving
   its module home, private lookup, annotations, tracing, native/builtin path,
   cancellation, and `within` authority. `alias` registers a short registry
@@ -2086,7 +2126,9 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   resolution.
 - **Qualified resolution observes registrations only.** A qualified name
   splits at its final dot into a module name and a public binding name. The
-  module name selects a canonical registration directly or through an alias.
+  module name selects a canonical registration directly or through an alias,
+  except that the reserved module segment `core` selects the core scope (see
+  Scope chains) and never consults the registry.
   A missing registration or public binding raises `'undefined-word`.
   Filesystem search, embedded resources, package catalogs, native loading, and
   eager or on-demand acquisition are host facilities outside the language

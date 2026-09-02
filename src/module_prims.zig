@@ -489,6 +489,7 @@ const AliasDriver = struct {
             switch (self.cursor.?.borrowMut().advance() catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.NameConflict => return evaluator.fail(.domain, "alias collides with a module name"),
+                error.ReservedName => return evaluator.fail(.domain, "alias name `core` is reserved for the core qualifier"),
                 error.MissingModule => return evaluator.undefinedModule(intern.moduleId(self.target.?)),
             }) {
                 .pending => {},

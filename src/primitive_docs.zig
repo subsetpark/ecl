@@ -40,8 +40,44 @@ const entries = [_]Metadata{
     .{ .name = "type", .effect = "value -- type", .text = "Return the value kind as a symbol." },
     .{ .name = "execute", .effect = "word -- ...", .text = "Execute a word through ordinary name resolution and dispatch." },
     .{ .name = "parse", .effect = "string -- quotation", .text = "Parse source text into an unevaluated quotation." },
-    .{ .name = "parse-int", .effect = "string -- integer", .text = "Parse one ECL integer literal without evaluating source text." },
-    .{ .name = "parse-float", .effect = "string -- float", .text = "Parse one ECL numeric literal and return its floating-point value." },
+    .{
+        .name = "chars",
+        .effect = "value -- string",
+        .text = "Return a value's text content as a string: a string unchanged, a symbol or word spelling, " ++
+            "a char as a one-element string, or a byte list decoded as UTF-8.",
+    },
+    .{
+        .name = "bytes",
+        .effect = "value -- bytes",
+        .text = "Encode a string as UTF-8 into a byte list, or return a byte list unchanged.",
+    },
+    .{
+        .name = "symbol",
+        .effect = "value -- symbol",
+        .text = "Return a symbol or word as a symbol, or the already-interned symbol a string spells; " ++
+            "a spelling that was never interned is 'domain.",
+    },
+    .{
+        .name = "intern",
+        .effect = "value -- symbol",
+        .text = "Return a symbol or word as a symbol, or create the symbol a string spells, growing the " ++
+            "process-lifetime name table when it is new.",
+    },
+    .{
+        .name = "int",
+        .effect = "value -- int",
+        .text = "Return an int unchanged, a char's codepoint, or the value of an integer-literal string.",
+    },
+    .{
+        .name = "float",
+        .effect = "value -- float",
+        .text = "Return a float unchanged, an int as a float, or the value of a numeric-literal string.",
+    },
+    .{
+        .name = "char",
+        .effect = "value -- char",
+        .text = "Return a char unchanged, the char with an int's codepoint, or the single char of a one-char string.",
+    },
     .{ .name = "@attempt", .effect = "values quotation -- result", .text = "Run a body with an explicit initial stack in a fresh unit and return an ok or error result dictionary; observationally `@spawn await`." },
     .{ .name = "raise", .effect = "error --", .text = "Raise a language error from an error dictionary." },
     .{ .name = "args", .effect = "-- arguments", .text = "Return the process arguments as a list of strings." },

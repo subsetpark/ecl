@@ -652,6 +652,13 @@ pub fn get(id: u32) []const u8 {
     return process_table.getBytes(id) orelse unreachable;
 }
 
+/// The exact spelling reserved for the core qualifier: `core.dup` reaches the
+/// core scope, so no module or alias may publish under this name. It is a
+/// whole-name rule, not a segment rule; `core.utils` stays an ordinary module.
+pub fn isReservedRegistryBytes(name: []const u8) bool {
+    return std.mem.eql(u8, name, "core");
+}
+
 pub fn isReservedBytes(name: []const u8) bool {
     return std.mem.eql(u8, name, "--") or std.mem.eql(u8, name, ":") or
         std.mem.eql(u8, name, lexer.row_token);

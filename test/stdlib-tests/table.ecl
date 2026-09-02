@@ -69,7 +69,7 @@
   {"a" [1 2] "b" [3 4]} "b" table.column [3 4] equal
   {"a" [1 2]} table.height 2 equal
   {"a" ["1" "2"] "b" ["5" "6"]}
-  {"a" (parse-int)}
+  {"a" (int)}
   table.cast
   {"a" [1 2] "b" ("5" "6")} equal
   {"a" [1 2] "b" [3 4] "c" [5 6]} ["c" "a"] table.select

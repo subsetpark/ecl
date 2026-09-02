@@ -293,22 +293,45 @@ test "modules: explicit seeds initialize the @defm construction stack in order" 
 test "modules: dotted names qualify dynamically and split executable words at the final dot" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
-    try expectOk(&runtime, "[] ((1) 'utils def) 'core @defm");
-    try expectOk(&runtime, "[] ((41) 'f def (42) 'g def) 'core.utils @defm");
-    try expectStack(&runtime, "core.utils core.utils.f", "1 41");
-    try expectStack(&runtime, "'core.utils 'f qualify dup type swap execute", "'word 41");
-    try expectStack(&runtime, "'core.utils 1 ('f) ('g) if qualify execute", "41");
-    try expectOk(&runtime, "'utils 'core.utils alias");
+    try expectOk(&runtime, "[] ((1) 'utils def) 'base @defm");
+    try expectOk(&runtime, "[] ((41) 'f def (42) 'g def) 'base.utils @defm");
+    try expectStack(&runtime, "base.utils base.utils.f", "1 41");
+    try expectStack(&runtime, "'base.utils 'f qualify dup type swap execute", "'word 41");
+    try expectStack(&runtime, "'base.utils 1 ('f) ('g) if qualify execute", "41");
+    try expectOk(&runtime, "'utils 'base.utils alias");
     try expectStack(&runtime, "utils.g", "42");
-    try expectOk(&runtime, "'core.utils ('g) import");
+    try expectOk(&runtime, "'base.utils ('g) import");
     try expectStack(&runtime, "g", "42");
-    try expectOk(&runtime, "[] ((43) 'f def) 'core.utils @defm");
-    try expectStack(&runtime, "core.utils.f 'core.utils 'f qualify execute", "43 43");
+    try expectOk(&runtime, "[] ((43) 'f def) 'base.utils @defm");
+    try expectStack(&runtime, "base.utils.f 'base.utils 'f qualify execute", "43 43");
     try expectOk(&runtime, "'utils unmodule");
-    try expectErrorContains(&runtime, "core.utils.f", &.{ "'kind 'undefined-word", "core.utils.f" });
+    try expectErrorContains(&runtime, "base.utils.f", &.{ "'kind 'undefined-word", "base.utils.f" });
     try expectErrorContains(&runtime, "utils.f", &.{ "'kind 'undefined-word", "utils.f" });
-    try expectOk(&runtime, "[] ((44) 'f def) 'core.utils @defm");
-    try expectStack(&runtime, "core.utils.f", "44");
+    try expectOk(&runtime, "[] ((44) 'f def) 'base.utils @defm");
+    try expectStack(&runtime, "base.utils.f", "44");
+}
+
+test "modules: core qualifier reaches shadowed core words and is never a registration" {
+    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    defer runtime.deinit();
+    try expectStack(&runtime, "1 core.dup", "1 1");
+    try expectOk(&runtime, "(2 *) 'dup def");
+    try expectStack(&runtime, "3 dup 3 core.dup", "6 3 3");
+    try expectStack(&runtime, "'core 'dup qualify 4 swap execute", "4 4");
+    // A module whose own export shadows a core word reaches the original
+    // through the qualifier, which is the case the standard library needs.
+    try expectOk(&runtime, "[] ((pop 'shadowed) 'where def ([0 1 1] core.where) 'indices def) 'shadow.host @defm");
+    try expectStack(&runtime, "shadow.host.indices", "[1 2]");
+    try expectStack(&runtime, "7 shadow.host.where", "'shadowed");
+    try expectErrorContains(&runtime, "core.no-such-binding", &.{ "'kind 'undefined-word", "'scope 'core" });
+    // Core is a scope, not a registration: nothing may publish under its name
+    // from either module spelling or as an alias, and it is not a module to
+    // alias, import from, or remove.
+    try expectErrorContains(&runtime, "[] () 'core @defm", &.{ "'kind 'domain", "reserved for the core qualifier" });
+    try expectErrorContains(&runtime, "[] () @module 'core register", &.{ "'kind 'domain", "reserved for the core qualifier" });
+    try expectErrorContains(&runtime, "'core 'shadow.host alias", &.{ "'kind 'domain", "reserved for the core qualifier" });
+    try expectErrorContains(&runtime, "'short 'core alias", &.{ "'kind 'undefined-word", "undefined module `core`" });
+    try expectStack(&runtime, "1 core.dup", "1 1");
 }
 
 test "modules: execute preserves ordinary dispatch home contracts and errors" {

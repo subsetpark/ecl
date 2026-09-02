@@ -34,8 +34,13 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "type", .primitive = typeWord },
         .{ .name = "execute", .primitive = execute },
         .{ .name = "parse", .primitive = parse },
-        .{ .name = "parse-int", .primitive = parseInt },
-        .{ .name = "parse-float", .primitive = parseFloat },
+        .{ .name = "chars", .primitive = chars },
+        .{ .name = "bytes", .primitive = bytesWord },
+        .{ .name = "symbol", .primitive = symbolWord },
+        .{ .name = "intern", .primitive = internWord },
+        .{ .name = "int", .primitive = intWord },
+        .{ .name = "float", .primitive = floatWord },
+        .{ .name = "char", .primitive = charWord },
         .{ .name = "@attempt", .primitive = attempt },
         .{ .name = "raise", .primitive = raise },
         .{ .name = "args", .primitive = args },
@@ -335,17 +340,317 @@ const ParseDriver = struct {
 
 const NumericParseTarget = enum { integer, float };
 
-fn parseInt(evaluator: *Machine) MachineError!void {
-    return startNumericParse(evaluator, .integer);
+// ── Kind conversions ────────────────────────────────────────────────────────
+//
+// Each word names its target kind and accepts the documented source kinds;
+// anything else is `'type`. Toward text one polymorphic word suffices
+// (`chars`), because every source has one text content. Away from text the
+// target must be named (`int`, `float`, `char`, `symbol`, `bytes`), because a
+// string alone does not say what it should become. `str` stays the readable
+// representation and `parse` the reader; neither is a conversion.
+
+const chars_expected = "a string, symbol, word, char, or byte list";
+
+fn chars(evaluator: *Machine) MachineError!void {
+    var item = try evaluator.popValue();
+    defer item.deinit();
+    switch (item.borrow()) {
+        .list => {
+            if (item.borrow().isString()) return evaluator.pushOwned(item.take());
+            const encoder = kernel_storage.ByteVectorEncoder.init(evaluator.allocator(), item.borrow());
+            try evaluator.startDriver(BytesToCharsDriver{
+                .source_value = .init(item.take()),
+                .encoder = .init(encoder),
+            });
+        },
+        .symbol => |id| try startSpellingChars(evaluator, id),
+        .word => |word| try startSpellingChars(evaluator, word.name),
+        .char => |codepoint| {
+            const one = [_]u32{codepoint};
+            try evaluator.pushOwned(try list.fromCodepoints(evaluator.allocator(), &one));
+        },
+        else => return evaluator.typeError(chars_expected),
+    }
 }
 
-fn parseFloat(evaluator: *Machine) MachineError!void {
-    return startNumericParse(evaluator, .float);
+/// Spellings are process-lifetime bytes validated as UTF-8 when interned, so
+/// the driver borrows them and owns only the string it builds.
+fn startSpellingChars(evaluator: *Machine, id: u32) MachineError!void {
+    try evaluator.startDriver(SpellingCharsDriver{
+        .text = .init(.init(evaluator.allocator(), intern.get(id))),
+    });
 }
 
-fn startNumericParse(evaluator: *Machine, target: NumericParseTarget) MachineError!void {
-    var source_value = try evaluator.popString();
-    defer source_value.deinit();
+const SpellingCharsDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+    text: heap.Owned(kernel_storage.Utf8Materializer),
+
+    pub fn advance(evaluator: *Machine, self: *SpellingCharsDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        return switch (self.text.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidUtf8 => return invalidUtf8(evaluator, "spelling is not valid UTF-8"),
+        }) {
+            .pending => .yielded,
+            .complete => |text| .{ .output = text },
+        };
+    }
+};
+
+fn invalidUtf8(evaluator: *Machine, message: []const u8) MachineError {
+    const failure = evaluator.fail(.domain, message);
+    evaluator.addErrorReason(.{ .symbol = intern.intern("invalid-utf8") catch return error.OutOfMemory });
+    return failure;
+}
+
+const BytesToCharsDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+    source_value: heap.Owned(Value),
+    encoder: heap.Owned(kernel_storage.ByteVectorEncoder),
+    bytes: ?heap.Owned(kernel_storage.ByteVector) = null,
+    text: ?heap.Owned(kernel_storage.Utf8Materializer) = null,
+
+    pub fn advance(evaluator: *Machine, self: *BytesToCharsDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        if (self.bytes == null) switch (self.encoder.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidByte => return evaluator.typeError(chars_expected),
+        }) {
+            .pending => return .yielded,
+            .complete => |bytes| {
+                self.bytes = .init(bytes);
+                self.text = .init(.init(evaluator.allocator(), self.bytes.?.borrowMut().bytes()));
+                return .yielded;
+            },
+        };
+        return switch (self.text.?.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidUtf8 => return invalidUtf8(evaluator, "byte list is not valid UTF-8"),
+        }) {
+            .pending => .yielded,
+            .complete => |text| .{ .output = text },
+        };
+    }
+};
+
+fn bytesWord(evaluator: *Machine) MachineError!void {
+    var item = try evaluator.popValue();
+    defer item.deinit();
+    if (item.borrow() != .list) return evaluator.typeError("a string or byte list");
+    if (item.borrow().isString()) {
+        const encoder = kernel_storage.ToUtf8Cursor.init(evaluator.allocator(), item.borrow());
+        return evaluator.startDriver(StringBytesDriver{
+            .source_value = .init(item.take()),
+            .encoder = .init(encoder),
+        });
+    }
+    const encoder = kernel_storage.ByteVectorEncoder.init(evaluator.allocator(), item.borrow());
+    try evaluator.startDriver(ByteListIdentityDriver{
+        .source_value = .init(item.take()),
+        .encoder = .init(encoder),
+    });
+}
+
+const StringBytesDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+    source_value: heap.Owned(Value),
+    encoder: heap.Owned(kernel_storage.ToUtf8Cursor),
+    encoded: ?heap.Owned([]u8) = null,
+    materializer: ?heap.Owned(list.ByteListMaterializer) = null,
+
+    pub fn advance(evaluator: *Machine, self: *StringBytesDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        if (self.encoded == null) switch (self.encoder.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidCodepoint => return evaluator.fail(.domain, "string contains an invalid Unicode scalar"),
+        }) {
+            .pending => return .yielded,
+            .complete => |encoded| {
+                self.encoded = .init(encoded);
+                self.materializer = .init(.init(evaluator.allocator(), self.encoded.?.borrow()));
+                return .yielded;
+            },
+        };
+        return switch (try self.materializer.?.borrowMut().advance(machine.kernel_poll_quantum)) {
+            .pending => .yielded,
+            .complete => |result| .{ .output = result },
+        };
+    }
+};
+
+/// A byte list is already bytes; the driver only proves it is one before
+/// handing the same value back, so `bytes` is idempotent like `chars`.
+const ByteListIdentityDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+    source_value: heap.Owned(Value),
+    encoder: heap.Owned(kernel_storage.ByteVectorEncoder),
+
+    pub fn advance(evaluator: *Machine, self: *ByteListIdentityDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        switch (self.encoder.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidByte => return evaluator.typeError("a string or byte list"),
+        }) {
+            .pending => return .yielded,
+            .complete => |vector| {
+                var owned = vector;
+                owned.retire(evaluator.releaseDomain(), evaluator.allocator());
+                return .{ .output = self.source_value.take() };
+            },
+        }
+    }
+};
+
+const SymbolConversion = enum { lookup, insert };
+
+fn symbolWord(evaluator: *Machine) MachineError!void {
+    return startSymbolConversion(evaluator, .lookup);
+}
+
+fn internWord(evaluator: *Machine) MachineError!void {
+    return startSymbolConversion(evaluator, .insert);
+}
+
+fn startSymbolConversion(evaluator: *Machine, mode: SymbolConversion) MachineError!void {
+    var item = try evaluator.popValue();
+    defer item.deinit();
+    switch (item.borrow()) {
+        .symbol => try evaluator.pushOwned(item.take()),
+        .word => |word| try evaluator.pushOwned(.{ .symbol = word.name }),
+        .list => {
+            if (!item.borrow().isString()) return evaluator.typeError("a string, symbol, or word");
+            const encoder = kernel_storage.ToUtf8Cursor.init(evaluator.allocator(), item.borrow());
+            try evaluator.startDriver(SymbolConversionDriver{
+                .source_value = .init(item.take()),
+                .encoder = .init(encoder),
+                .mode = mode,
+            });
+        },
+        else => return evaluator.typeError("a string, symbol, or word"),
+    }
+}
+
+/// `symbol` and `intern` differ only in the final cursor: lookup answers
+/// absence with `'domain`, insertion grows the process-lifetime table.
+const SymbolConversionDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+    source_value: heap.Owned(Value),
+    encoder: heap.Owned(kernel_storage.ToUtf8Cursor),
+    mode: SymbolConversion,
+    spelling: ?heap.Owned([]u8) = null,
+    validation: ?lexer.SymbolCursor = null,
+    name: union(enum) {
+        none,
+        lookup: intern.InternLookupCursor,
+        insert: intern.InternInsertionCursor,
+    } = .none,
+
+    pub fn advance(evaluator: *Machine, self: *SymbolConversionDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        if (self.spelling == null) switch (self.encoder.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidCodepoint => return evaluator.fail(.domain, "string contains an invalid Unicode scalar"),
+        }) {
+            .pending => return .yielded,
+            .complete => |spelling| {
+                self.spelling = .init(spelling);
+                self.validation = .init(spelling);
+                return .yielded;
+            },
+        };
+        var budget: usize = machine.kernel_poll_quantum;
+        if (self.validation) |*validation| {
+            while (budget != 0) : (budget -= 1) switch (validation.advance()) {
+                .pending => {},
+                .complete => |valid| {
+                    if (!valid) return evaluator.fail(.domain, "string is not a valid symbol spelling");
+                    self.validation = null;
+                    const spelling = self.spelling.?.borrow();
+                    self.name = switch (self.mode) {
+                        .lookup => .{ .lookup = intern.lookupCursor(spelling) },
+                        .insert => .{ .insert = intern.insertionCursor(spelling) },
+                    };
+                    break;
+                },
+            };
+            if (self.validation != null) return .yielded;
+        }
+        while (budget != 0) : (budget -= 1) switch (self.name) {
+            .none => unreachable,
+            .lookup => |*cursor| switch (cursor.advance()) {
+                .pending => {},
+                .complete => |maybe_id| {
+                    const id = maybe_id orelse
+                        return evaluator.fail(.domain, "symbol spelling is not interned; use intern to create it");
+                    return .{ .output = .{ .symbol = id } };
+                },
+            },
+            .insert => |*cursor| switch (try cursor.advance()) {
+                .pending => {},
+                .complete => |id| return .{ .output = .{ .symbol = id } },
+            },
+        };
+        return .yielded;
+    }
+};
+
+fn intWord(evaluator: *Machine) MachineError!void {
+    var item = try evaluator.popValue();
+    defer item.deinit();
+    switch (item.borrow()) {
+        .int => try evaluator.pushOwned(item.take()),
+        .char => |codepoint| try evaluator.pushOwned(.{ .int = codepoint }),
+        .list => {
+            if (!item.borrow().isString()) return evaluator.typeError(int_expected);
+            try startNumericParse(evaluator, &item, .integer);
+        },
+        else => return evaluator.typeError(int_expected),
+    }
+}
+
+const int_expected = "an int, char, or integer string (floor, round, or ceil convert a float)";
+const float_expected = "a float, int, or numeric string";
+
+fn floatWord(evaluator: *Machine) MachineError!void {
+    var item = try evaluator.popValue();
+    defer item.deinit();
+    switch (item.borrow()) {
+        .float => try evaluator.pushOwned(item.take()),
+        .int => |number| try evaluator.pushOwned(.{ .float = @floatFromInt(number) }),
+        .list => {
+            if (!item.borrow().isString()) return evaluator.typeError(float_expected);
+            try startNumericParse(evaluator, &item, .float);
+        },
+        else => return evaluator.typeError(float_expected),
+    }
+}
+
+fn charWord(evaluator: *Machine) MachineError!void {
+    var item = try evaluator.popValue();
+    defer item.deinit();
+    switch (item.borrow()) {
+        .char => try evaluator.pushOwned(item.take()),
+        .int => |number| {
+            const codepoint = std.math.cast(u21, number) orelse
+                return evaluator.fail(.domain, "char expects a Unicode scalar value");
+            if (!std.unicode.utf8ValidCodepoint(codepoint))
+                return evaluator.fail(.domain, "char expects a Unicode scalar value");
+            try evaluator.pushOwned(.{ .char = codepoint });
+        },
+        .list => |header| {
+            if (!item.borrow().isString()) return evaluator.typeError("a char, int, or one-char string");
+            if (header.length() != 1) return evaluator.fail(.domain, "char expects a one-char string");
+            try evaluator.pushOwned(list.atUnchecked(item.borrow(), 0));
+        },
+        else => return evaluator.typeError("a char, int, or one-char string"),
+    }
+}
+
+fn startNumericParse(
+    evaluator: *Machine,
+    source_value: *heap.OwnedValue,
+    target: NumericParseTarget,
+) MachineError!void {
     const source = source_value.borrow();
     if (source.list.kind() != .leaf_char1) return invalidNumericText(evaluator, target);
     const length: usize = @intCast(source.list.length());
@@ -359,8 +664,8 @@ fn startNumericParse(evaluator: *Machine, target: NumericParseTarget) MachineErr
 
 fn invalidNumericText(evaluator: *Machine, target: NumericParseTarget) MachineError {
     return switch (target) {
-        .integer => evaluator.fail(.parse, "parse-int expects an integer literal"),
-        .float => evaluator.fail(.parse, "parse-float expects a numeric literal"),
+        .integer => evaluator.fail(.parse, "int expects an integer literal"),
+        .float => evaluator.fail(.parse, "float expects a numeric literal"),
     };
 }
 
@@ -397,8 +702,8 @@ const NumericParseDriver = struct {
             },
             .word => invalidNumericText(evaluator, self.target),
             .out_of_range => switch (self.target) {
-                .integer => evaluator.fail(.overflow, "parse-int result is outside int64"),
-                .float => evaluator.fail(.overflow, "parse-float input is outside the ECL numeric range"),
+                .integer => evaluator.fail(.overflow, "int result is outside int64"),
+                .float => evaluator.fail(.overflow, "float input is outside the ECL numeric range"),
             },
         };
     }

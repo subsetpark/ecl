@@ -35,11 +35,6 @@
  (dup len 1 - take)
  'pop-component defp
 
- ### defp join-slashes
- (parts -- string : "Join components with `/`; the module's own `join` shadows the core word here.")
- (dup len 0 = (pop "") (dup first swap rest swap (swap "/" cat swap cat) fold) if)
- 'join-slashes defp
-
  ### defp append-part
  (state part -- state : "Retain one component.")
  (over 'parts at swap append 'parts swap put)
@@ -69,7 +64,7 @@
   swap "/" split
   over 'absolute swap 'parts [] 4 pack dict.from-flat
   (clean-step) fold
-  'parts at join-slashes
+  'parts at "/" core.join
   swap ("/" swap cat) () if
   dup "" match? (pop ".") () if)
  'normalize def
@@ -82,7 +77,7 @@
   'type error.new "path.join expects a list of string segments" error.with-message assert
   dup (str.str?) all?
   'type error.new "path.join expects a list of string segments" error.with-message assert
-  ("" match? not) filter join-slashes normalize)
+  ("" match? not) filter "/" core.join normalize)
  'join def
 
  ### def dirname
@@ -93,7 +88,7 @@
   "/" split
   dup len 1 =
   (pop ".")
-  (pop-component join-slashes "/" cat normalize)
+  (pop-component "/" core.join "/" cat normalize)
   if)
  'dirname def
 

@@ -739,59 +739,59 @@ test "public parse maps malformed incomplete and type inputs to language errors"
     });
 }
 
-test "numeric text parsers accept ECL literals without general source parsing" {
+test "int and float accept ECL literals without general source parsing" {
     const support = @import("kernel_test_support.zig");
     try support.expectStacks(&.{
         .{
             .name = "integer literal forms",
-            .source = "\"0\" parse-int \"-9223372036854775808\" parse-int " ++
-                "\"+17\" parse-int \"0x10\" parse-int \"1_000\" parse-int",
+            .source = "\"0\" int \"-9223372036854775808\" int " ++
+                "\"+17\" int \"0x10\" int \"1_000\" int",
             .expected = "0 -9223372036854775808 17 16 1000",
         },
         .{
             .name = "integer and floating literals become floats",
-            .source = "\"1\" parse-float \"-3.5\" parse-float \"2e3\" parse-float " ++
-                "\"+inf\" parse-float dup type",
+            .source = "\"1\" float \"-3.5\" float \"2e3\" float " ++
+                "\"+inf\" float dup type",
             .expected = "1.0 -3.5 2000.0 inf 'float",
         },
         .{
             .name = "each collects parsed integers into a numeric list",
-            .source = "[\"1\" \"2\" \"3\"] (parse-int) each",
+            .source = "[\"1\" \"2\" \"3\"] (int) each",
             .expected = "[1 2 3]",
         },
     });
     try support.expectErrors(&.{
-        .{ .name = "parse-int type", .source = "1 parse-int", .kind = "type", .word = "parse-int" },
-        .{ .name = "parse-float type", .source = "1 parse-float", .kind = "type", .word = "parse-float" },
+        .{ .name = "int type", .source = "'x int", .kind = "type", .word = "int" },
+        .{ .name = "float type", .source = "'x float", .kind = "type", .word = "float" },
         .{
-            .name = "parse-int rejects a float",
-            .source = "\"1.0\" parse-int",
+            .name = "int rejects a float",
+            .source = "\"1.0\" int",
             .kind = "parse",
-            .word = "parse-int",
+            .word = "int",
         },
         .{
-            .name = "parse-int rejects malformed text",
-            .source = "\"12x\" parse-int",
+            .name = "int rejects malformed text",
+            .source = "\"12x\" int",
             .kind = "parse",
-            .word = "parse-int",
+            .word = "int",
         },
         .{
-            .name = "parse-int reports range failure",
-            .source = "\"9223372036854775808\" parse-int",
+            .name = "int reports range failure",
+            .source = "\"9223372036854775808\" int",
             .kind = "overflow",
-            .word = "parse-int",
+            .word = "int",
         },
         .{
-            .name = "parse-float rejects malformed text",
-            .source = "\"nan\" parse-float",
+            .name = "float rejects malformed text",
+            .source = "\"nan\" float",
             .kind = "parse",
-            .word = "parse-float",
+            .word = "float",
         },
         .{
-            .name = "parse-float reports range failure",
-            .source = "\"1e1000000\" parse-float",
+            .name = "float reports range failure",
+            .source = "\"1e1000000\" float",
             .kind = "overflow",
-            .word = "parse-float",
+            .word = "float",
         },
     });
 }
