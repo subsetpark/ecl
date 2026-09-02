@@ -1778,6 +1778,24 @@ pub const InheritedContext = struct {
     process_access: ?*external.ProcessAccess = null,
     filesystem_access: ?*external.FilesystemAccess = null,
     package_access: ?*external.PackageAccess = null,
+    wall_clock: WallClock = .absent,
+};
+
+/// The Session's wall-clock authority. Monotonic time always exists because
+/// the scheduler owns it; wall time is a separate grant, absent by default, so
+/// possession of host I/O or of a TLS verification timestamp never implies it.
+/// Values are Unix milliseconds.
+pub const WallClock = union(enum) {
+    /// `clock.unix` raises `'domain` with reason `'unavailable`.
+    absent,
+    /// Read the realtime clock through this host I/O on every call.
+    host: std.Io,
+    /// Every read returns this timestamp.
+    fixed: i64,
+    /// Every read returns this base plus the scheduler's monotonic
+    /// milliseconds since the Session started, so a manual scheduler clock
+    /// drives a deterministic advancing wall clock.
+    anchored: i64,
 };
 
 /// Immutable HTTPS verification inputs inherited by every Unit. The CA path
@@ -1885,7 +1903,11 @@ pub const PhraseRecognizer = *const fn (*Machine, IdiomRequest, IdiomFallback) M
 pub const ParkRequest = union(enum) {
     task: Value,
     any: Value,
-    deadline: struct { task: Value, milliseconds: i64 },
+    deadline: struct { task: Value, milliseconds: u63 },
+    /// Park for a number of milliseconds with nothing to wait for but the
+    /// clock. Shares the deadline wait's timer registration and arbitration
+    /// and resumes through the `sleep` family, never a task result.
+    sleep: u63,
     close_scope: u8,
     join: struct {
         tasks: Value,
@@ -1901,7 +1923,7 @@ pub const ParkRequest = union(enum) {
             .task, .any => |item| item,
             .deadline => |deadline| deadline.task,
             .join => |join| join.tasks,
-            .close_scope, .external => null,
+            .close_scope, .external, .sleep => null,
         };
     }
 
@@ -1909,7 +1931,7 @@ pub const ParkRequest = union(enum) {
         return switch (self) {
             .task, .deadline, .join => 1,
             .any => |tasks| @intCast(tasks.list.length()),
-            .close_scope, .external => 0,
+            .close_scope, .external, .sleep => 0,
         };
     }
 
@@ -1928,7 +1950,7 @@ pub const ParkRequest = union(enum) {
                 std.debug.assert(index == 0);
                 break :single list.atUnchecked(join.tasks, join.index);
             },
-            .close_scope, .external => unreachable,
+            .close_scope, .external, .sleep => unreachable,
         };
     }
 
@@ -1944,21 +1966,72 @@ pub const ParkRequest = union(enum) {
     }
 };
 
-pub const ParkResume = union(enum) {
+/// How a wait on one or more tasks ended.
+pub const TaskWaitResume = union(enum) {
     outcome: Value,
     indexed: struct { index: u32, outcome: Value },
     timeout,
     cancelled,
     io,
+    /// The deadline lay beyond any instant the scheduler clock can report.
+    overflow,
     out_of_memory,
-    scope_closed: u8,
-    external: external.Wake,
 
-    pub fn ownedValue(self: ParkResume) ?Value {
+    fn ownedValue(self: TaskWaitResume) ?Value {
         return switch (self) {
             .outcome => |outcome| outcome,
             .indexed => |indexed| indexed.outcome,
-            .timeout, .cancelled, .io, .out_of_memory, .scope_closed, .external => null,
+            .timeout, .cancelled, .io, .overflow, .out_of_memory => null,
+        };
+    }
+};
+
+/// How a `clock.sleep` ended. Nothing is ever pushed.
+pub const SleepResume = enum { elapsed, cancelled, io, overflow, out_of_memory };
+
+/// How a wait on host readiness ended.
+pub const ExternalResume = union(enum) {
+    /// The source reported readiness or its own failure; the driver polls.
+    wake: external.Wake,
+    cancelled,
+    io,
+    out_of_memory,
+};
+
+/// One family per park request, so a sleep cannot deliver a task outcome, a
+/// task wait cannot report that it slept, and each family's failure wording
+/// describes what the unit was actually doing.
+pub const ParkResume = union(enum) {
+    task_wait: TaskWaitResume,
+    sleep: SleepResume,
+    external: ExternalResume,
+    scope_closed: u8,
+
+    pub fn ownedValue(self: ParkResume) ?Value {
+        return switch (self) {
+            .task_wait => |wait| wait.ownedValue(),
+            .sleep, .external, .scope_closed => null,
+        };
+    }
+
+    /// The failure a request receives when no wait service could start.
+    pub fn serviceUnavailable(request: ParkRequest) ParkResume {
+        return switch (request) {
+            .sleep => .{ .sleep = .io },
+            .external => .{ .external = .io },
+            .task, .any, .deadline, .join => .{ .task_wait = .io },
+            .close_scope => unreachable,
+        };
+    }
+
+    /// The failure a request receives when its unit was cancelled before the
+    /// wait registered.
+    pub fn cancelledFor(request: ParkRequest) ParkResume {
+        return switch (request) {
+            .sleep => .{ .sleep = .cancelled },
+            .external => .{ .external = .cancelled },
+            .task, .any, .deadline, .join => .{ .task_wait = .cancelled },
+            .close_scope => unreachable,
         };
     }
 
@@ -4986,6 +5059,11 @@ pub const Machine = struct {
         }
         failure.addData(.reason, data.reason);
     }
+    /// Attach the closed-vocabulary `'reason` symbol a capability refusal
+    /// reports, so programs branch on the symbol rather than the message.
+    pub fn addErrorReason(self: *Machine, reason: Value) void {
+        self.unit.pendingFailure().addData(.reason, reason);
+    }
     /// The one absence-is-absence failure for `getenv`: an unset variable is
     /// an error carrying the requested name, never an empty string.
     pub fn unsetEnvironVariable(
@@ -6704,9 +6782,45 @@ fn clearWorkDriver(unit: *Unit) void {
 
 fn resumePark(self: *Machine) MachineError!void {
     const delivery = self.unit.takeParkResume().?;
-    const park_result = delivery.result;
-    switch (park_result) {
-        .outcome => |outcome| if (delivery.task_join)
+    switch (delivery.result) {
+        .task_wait => |wait| return resumeTaskWait(self, wait, delivery.task_join),
+        .sleep => |sleep| {
+            std.debug.assert(!delivery.task_join);
+            // A work-driver park owns backend state across the wait. Move its
+            // cleanup through the ordinary driver destructor before raising;
+            // the failure unwinder requires that no native continuation still
+            // owns the operands or external registration it is abandoning.
+            clearWorkDriver(self.unit);
+            return switch (sleep) {
+                .elapsed => {},
+                .cancelled => self.fail(.cancelled, "unit cancelled while sleeping"),
+                .io => self.fail(.io, "could not start the scheduler timer service"),
+                .overflow => self.fail(.overflow, "sleep deadline lies beyond the clock's range"),
+                .out_of_memory => error.OutOfMemory,
+            };
+        },
+        .external => |ready| switch (ready) {
+            .wake => {},
+            .cancelled => {
+                clearWorkDriver(self.unit);
+                return self.fail(.cancelled, "unit cancelled while awaiting host readiness");
+            },
+            .io => {
+                clearWorkDriver(self.unit);
+                return self.fail(.io, "could not start a scheduler wait service");
+            },
+            .out_of_memory => {
+                clearWorkDriver(self.unit);
+                return error.OutOfMemory;
+            },
+        },
+        .scope_closed => |status| self.unit.requestExit(status),
+    }
+}
+
+fn resumeTaskWait(self: *Machine, wait: TaskWaitResume, task_join: bool) MachineError!void {
+    switch (wait) {
+        .outcome => |outcome| if (task_join)
             try resumeTaskJoin(self, outcome)
         else
             try self.pushOwned(outcome),
@@ -6738,10 +6852,6 @@ fn resumePark(self: *Machine) MachineError!void {
         },
         .cancelled => {
             abandonTaskJoin(self);
-            // A work-driver park owns backend state across the wait. Move its
-            // cleanup through the ordinary driver destructor before raising;
-            // the failure unwinder requires that no native continuation still
-            // owns the operands or external registration it is abandoning.
             clearWorkDriver(self.unit);
             return self.fail(.cancelled, "unit cancelled while awaiting a task");
         },
@@ -6750,14 +6860,17 @@ fn resumePark(self: *Machine) MachineError!void {
             clearWorkDriver(self.unit);
             return self.fail(.io, "could not start a scheduler wait service");
         },
-        .out_of_memory => if (delivery.task_join)
+        .overflow => {
+            abandonTaskJoin(self);
+            clearWorkDriver(self.unit);
+            return self.fail(.overflow, "await-for deadline lies beyond the clock's range");
+        },
+        .out_of_memory => if (task_join)
             try resumeTaskJoinOutOfMemory(self)
         else {
             clearWorkDriver(self.unit);
             return error.OutOfMemory;
         },
-        .scope_closed => |status| self.unit.requestExit(status),
-        .external => {},
     }
 }
 

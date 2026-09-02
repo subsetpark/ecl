@@ -183,6 +183,7 @@ fn testCommand(init: std.process.Init, arguments: []const []const u8) AppError!u
                 .inherit_environment = true,
             },
             .filesystem_policy = .{ .roots = &.{cwdRoot(initial_cwd)} },
+            .clock = .{ .wall = .host },
         },
         .{ .worker_pool = worker_count },
     );
@@ -606,6 +607,7 @@ fn executeWith(
             .inherit_environment = true,
         },
         .filesystem_policy = .{ .roots = filesystem_roots[0..root_count] },
+        .clock = .{ .wall = .host },
     };
     var session = if (package_grant) |grant|
         try ecl.session.Session.initPackageCommand(init.gpa, arguments, host, .{ .worker_pool = worker_count }, grant)
@@ -658,6 +660,7 @@ fn repl(init: std.process.Init, worker_count: usize) AppError!u8 {
                 .inherit_environment = true,
             },
             .filesystem_policy = .{ .roots = &.{cwdRoot(initial_cwd)} },
+            .clock = .{ .wall = .host },
         },
         .{ .worker_pool = worker_count },
     );

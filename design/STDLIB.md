@@ -254,7 +254,9 @@ completion.
 ### await-for
 `( task milliseconds -- result )` — `await` with a nonnegative int
 deadline; expiry returns `{'err {'kind 'timeout}}` without cancelling the
-task. A terminal task beats even a zero deadline.
+task. A terminal task beats even a zero deadline. A deadline beyond any
+instant the scheduler clock can report is `'overflow` before the wait
+registers.
 
 ### band
 `( x y -- z )` — **Pervasive.** Bitwise and over the two's-complement bit
@@ -1241,6 +1243,65 @@ exhausted operation quota is `'overflow`; filesystem and destination
 conflicts are `'io`. Failure never publishes a partial destination. See the
 environment's [`archive` contract](ENVIRONMENT.md#byte-lists-and-archives)
 for the complete format, limit, containment, and publication contract.
+
+## clock
+
+Scheduler-backed time. `now`, `elapsed`, and `sleep` read the one monotonic
+clock the Session's scheduler owns, so a program's instants, its sleeps, and
+every `await-for` deadline agree on the current time. `unix` is a separate
+wall-clock grant: the Session host may withhold it, fix it, anchor it to the
+monotonic clock, or pass the process clock through. The command line grants
+the process clock; embedded Sessions grant none by default. Possession of host
+I/O, filesystem or process authority, or a TLS verification timestamp never
+implies a wall clock.
+
+Every quantity is a whole number of milliseconds. A monotonic instant is the
+one-key dictionary `{'monotonic ms}` counting from Session construction; a wall
+timestamp is `{'unix ms}` counting from 1970-01-01T00:00:00Z. The tag is the
+clock domain: an instant handed to a `time` word, or a timestamp handed to
+`elapsed`, is `'type`. Monotonic instants are not portable across Sessions and
+carry no date; wall time may jump and is not suitable for scheduling.
+
+A Session may run under a manual monotonic clock that starts at zero and moves
+only when the host advances it. Under that clock `now` is exact, `sleep` and
+`await-for` complete on the advance that reaches their deadline, and no word
+waits on host time. `ENVIRONMENT.md` describes the host policy.
+
+### elapsed
+`( instant -- milliseconds )` — Monotonic milliseconds from an instant produced
+by `now` to the present. Anything but `{'monotonic int}` is `'type`.
+
+### now
+`( -- instant )` — Read the monotonic clock as `{'monotonic ms}`. Successive
+reads never decrease. The first read of a fresh Session is close to
+`{'monotonic 0}`, and exactly that under a manual clock.
+
+### sleep
+`( milliseconds -- )` — Park the calling unit until the monotonic clock has
+advanced by a nonnegative int duration, then continue with nothing pushed. The
+unit holds no worker while parked; runnable work proceeds on a one-worker pool.
+The deadline is captured once, before any timer state is created, and a
+duration of `0` is already expired at that point: the unit yields to the
+scheduler and resumes on its next turn without starting the timer thread.
+Cancellation before or after registration wakes the unit with `'cancelled`
+and retires its timer entry. A negative duration is `'domain`, a non-int is
+`'type`, and a duration whose deadline lies beyond any instant the clock can
+report is `'overflow`; all three fail before anything is registered. Sleeping
+inside a `within` application is `'domain`.
+
+#### Examples
+
+```ecl
+clock.now 'start set 250 clock.sleep start clock.elapsed 250 >=
+# => 1
+```
+
+### unix
+`( -- timestamp )` — Read the wall clock as `{'unix ms}`. Without a wall-clock
+grant this is `'domain` with `'reason 'unavailable`. Under a fixed grant every
+read returns the configured value; under an anchored grant it returns the
+configured base plus the monotonic milliseconds since Session construction.
+Convert with the `time` module.
 
 ## csv
 
@@ -2451,3 +2512,98 @@ substrate. Projects may replace it with any public qualified runner word.
 `( -- )` — Discover canonical tests, invoke them sequentially in deterministic
 module/name order, print one `ok` or `FAIL` line for every result, continue
 after ordinary test failures, and request process status 1 if any failed.
+
+## time
+
+Pure UTC time over the millisecond timestamps `clock.unix` produces. Every
+word accepts and returns whole milliseconds; a timestamp is `{'unix ms}` and
+nothing else — a `{'monotonic ms}` instant, an untagged int, a float payload,
+or a dictionary with any other key is `'type`. Arithmetic is checked: leaving
+the int millisecond range is `'overflow`. Calendar words use the proleptic
+Gregorian calendar with no leap seconds, so Unix time here is the POSIX count
+in which every day has exactly 86,400,000 milliseconds. The representable
+range runs from `-292275055-05-16T16:47:04.192` through
+`292278994-08-17T07:12:55.807`. Nothing in this module reads a clock.
+
+### add
+`( timestamp milliseconds -- timestamp )` — Shift a timestamp by a signed int
+duration.
+
+### cmp
+`( left right -- ordering )` — Three-way order two timestamps as −1, 0, or 1.
+Whole-value `match?` also compares timestamps; `<` and `=` do not.
+
+### days
+`( n -- milliseconds )` — `n` days of 86,400 seconds as milliseconds.
+
+### diff
+`( later earlier -- milliseconds )` — `later` minus `earlier`, signed.
+
+### format
+`( timestamp -- string )` — Render as `YYYY-MM-DDTHH:MM:SS.mmmZ`: always UTC,
+always three fractional digits, so `format` then `parse` returns the same
+timestamp and `parse` then `format` returns the same text for every string in
+that shape. A year outside 0000 through 9999 cannot be written in four digits
+and is `'domain`.
+
+#### Examples
+
+```ecl
+0 time.from-unix time.format
+# => "1970-01-01T00:00:00.000Z"
+```
+
+### from-unix
+`( milliseconds -- timestamp )` — Tag an int as `{'unix ms}`. Negative counts
+name instants before 1970.
+
+### from-utc
+`( fields -- timestamp )` — Build a timestamp from a dictionary of int fields.
+`'year`, `'month`, and `'day` are required; `'hour`, `'minute`, `'second`, and
+`'millisecond` default to 0; `'weekday` is optional and must agree with the
+date. Any other key is `'domain`; a non-symbol key or non-int value is `'type`.
+Month is 1 through 12, day is 1 through the month's length in that year, hour
+0 through 23, minute and second 0 through 59, millisecond 0 through 999;
+anything else is `'domain`. `to-utc` output round-trips exactly.
+
+### hours
+`( n -- milliseconds )` — `n` hours as milliseconds.
+
+### minutes
+`( n -- milliseconds )` — `n` minutes as milliseconds.
+
+### parse
+`( string -- timestamp )` — Parse an RFC 3339 `date-time`:
+`YYYY-MM-DDTHH:MM:SS`, an optional fraction of one or more digits, then `Z` or
+a numeric `±HH:MM` offset that is subtracted to reach UTC. `T` and `Z` may be
+lower case. The first three fractional digits are kept and the rest are
+discarded, so `"…​:00.1239Z"` and `"…​:00.123Z"` parse alike. Text outside the
+grammar — a space separator, a missing designator, trailing characters, a
+non-ASCII scalar, an empty fraction — is `'parse`; a well-formed field outside
+its range, including second `60`, is `'domain`.
+
+#### Examples
+
+```ecl
+"2024-02-29T12:34:56.789+05:30" time.parse time.format
+# => "2024-02-29T07:04:56.789Z"
+```
+
+### seconds
+`( n -- milliseconds )` — `n` seconds as milliseconds.
+
+### to-unix
+`( timestamp -- milliseconds )` — The int inside a timestamp.
+
+### to-utc
+`( timestamp -- fields )` — Decompose into
+`{'year 'month 'day 'hour 'minute 'second 'millisecond 'weekday}`, all ints.
+`'weekday` counts from Monday as 0 through Sunday as 6. Years before 1 are
+negative in astronomical numbering (year 0 is 1 BC and is a leap year).
+
+#### Examples
+
+```ecl
+951782400000 time.from-unix time.to-utc
+# => {'year 2000 'month 2 'day 29 'hour 0 'minute 0 'second 0 'millisecond 0 'weekday 1}
+```

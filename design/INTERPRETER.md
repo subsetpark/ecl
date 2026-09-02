@@ -164,6 +164,22 @@ Session without a policy denies every `fs` word before reaching the host.
 Module loading through `load` and `ECL_PATH` remains a separate host facility
 and grants no caller-selected file access.
 
+Clocks are two more authorities with different shapes. The scheduler owns
+monotonic time as one `MonotonicClock` tagged union, selected at construction
+from the Host's `ClockPolicy`: the `host` variant carries the Session's origin
+instant and reads the process awake clock; the `manual` variant is an opaque
+`ManualClock` whose reading is whole milliseconds and whose only mutation is a
+compare-exchange advance with checked addition, refusing a step that would
+leave the range without touching the stored value. It moves through
+`Scheduler.advanceManualClock`, a method on the host-root handle that the
+`WorkerScheduler` facade does not expose, so no evaluated word can move time.
+Every deadline capture, arbitration check, timer wake, and `clock.now` sample
+reads `WorkerScheduler.now`, so the whole Session agrees on one "now". The wall clock is a separate
+`machine.WallClock` union on the inherited context — `absent`, `host` with the
+I/O it reads through, `fixed`, or `anchored` to the monotonic clock — converted
+from the Host policy at construction. Neither host I/O nor the TLS verification
+timestamp is consulted for it, and the default is `absent`.
+
 Package commands add a third authority. `initPackageCommand` is the only
 constructor that mints a `PackageOwner`, and it takes one tagged
 `PackageGrant` naming exactly the stores a command shape may touch (`inspect`,
@@ -908,6 +924,43 @@ leaves timer infrastructure dormant.
 
 The timer thread and indexed heap are created lazily. Blocking host I/O runs on
 workers, making pool capacity the explicit bound around an OS call.
+
+Timer state holds `Deadline` values, never raw timestamps. The only
+constructor is `MonotonicClock.deadlineAfter`, a checked factory that refuses
+an instant the clock can never report — past the i96 nanoseconds of a host
+timestamp, past i64 milliseconds for the manual clock — so an unreachable
+deadline cannot enter the heap. A `TimerNode` carries its deadline only inside
+its `linked` membership; a detached node has no instant to misread. Both
+timed primitives ask the scheduler to check the deadline before parking and
+raise `'overflow` from the word itself; the registration path repeats the
+check and, should the clock cross the boundary in between, selects the
+`overflow` wake reason.
+
+`clock.sleep` is the same wait with nothing to wait for but the clock. It is
+its own `ParkRequest` variant and `WaitKind`, owns no task value, registers no
+task cell, and reaches the timer arm of `WaitSet.advanceSetup` through the
+ordinary states. Park results are typed by operation: `ParkResume` has one
+family per request kind — `task_wait`, `sleep`, `external`, plus the root-only
+`scope_closed` — and `WaitSet.materializeResume` switches first on the wait
+kind and then on the wake reason, so a sleep can only produce a `SleepResume`
+(`elapsed`, `cancelled`, `io`, `overflow`, `out_of_memory`) and a task wait can
+only produce a `TaskWaitResume`. The machine's resume switch is exhaustive per
+family, which is what lets a cancelled sleep say it was sleeping and a
+cancelled readiness wait say it was awaiting host readiness rather than
+borrowing the task-wait wording. Cancellation, `Io`, and allocation failure
+flow through the identical arbitration, and delivery retires the timer entry
+through the same `removeTimer` before the owner is woken. A zero duration is
+already expired when the deadline is captured, so the unit parks and is
+re-enqueued without the timer thread.
+
+Every clock read inside the scheduler goes through `WorkerScheduler.now`.
+Under a `manual` clock the timer thread never waits with a host deadline: it
+blocks on its wake event, which `advanceManualClock` sets after storing the new
+reading, and re-reads the clock after every wake, so an advance that lands
+before the event is reset is seen by the following heap check and one that
+lands after is seen through the event. Shutdown is unchanged: root-scope close
+cancels sleeping tasks, their waits retire their timer entries, and the heap is
+destroyed only after the timer thread has joined.
 
 ### Scheduling is nondeterministic; joins define deterministic observations
 

@@ -108,9 +108,12 @@ fn awaitFor(evaluator: *Machine) MachineError!void {
     if (task.borrow() != .task) return evaluator.typeError("a task followed by milliseconds");
     if (duration.borrow() != .int) return evaluator.typeError("an integer millisecond duration");
     if (duration.borrow().int < 0) return evaluator.fail(.domain, "await-for duration must be nonnegative");
+    const milliseconds: u63 = @intCast(duration.borrow().int);
+    scheduler(evaluator).checkDeadline(milliseconds) catch
+        return evaluator.fail(.overflow, "await-for deadline lies beyond the clock's range");
     try evaluator.park(.{ .deadline = .{
         .task = task.take(),
-        .milliseconds = duration.borrow().int,
+        .milliseconds = milliseconds,
     } });
 }
 

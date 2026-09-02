@@ -56,6 +56,29 @@ pub const TlsTrustOverride = struct {
     now: std.Io.Timestamp,
 };
 
+/// The host's wall-clock grant. Monotonic time is not configured here: the
+/// scheduler always has one, selected by `ClockPolicy.monotonic`.
+pub const WallClockPolicy = union(enum) {
+    /// `clock.unix` is refused. The default, like every other host authority.
+    absent,
+    /// Read the process realtime clock through the Host's I/O.
+    host,
+    /// Every read returns this Unix millisecond timestamp.
+    fixed: i64,
+    /// Every read returns this Unix millisecond base plus the monotonic
+    /// milliseconds elapsed since Session construction.
+    anchored: i64,
+};
+
+/// Clock configuration for one Session. TLS verification time and host I/O
+/// are separate inputs and confer nothing here.
+pub const ClockPolicy = struct {
+    /// `host` reads the process's awake clock; `manual` starts at zero and
+    /// moves only through `Session.advanceManualClock`.
+    monotonic: scheduler_api.ClockSource = .host,
+    wall: WallClockPolicy = .absent,
+};
+
 /// The host services a Session inherits from its process. Grouping them
 /// nominally keeps adding one — an environment snapshot, a standard-input
 /// mode — from turning `init` into a positional checklist whose arguments
@@ -78,6 +101,8 @@ pub const Host = struct {
     /// Absent by default: every caller-selected filesystem operation is denied
     /// until the host names root directories and their permissions.
     filesystem_policy: ?filesystem_port.FilesystemPolicy = null,
+    /// Host monotonic time and no wall clock by default.
+    clock: ClockPolicy = .{},
 };
 
 const CompletionBacking = struct {
@@ -242,6 +267,7 @@ const SessionCore = struct {
     diagnostics: ?*std.Io.Writer,
     host_io: ?std.Io,
     tls_trust: ?machine.TlsTrust,
+    wall_clock: machine.WallClock,
     ecl_path: ?[]u8,
     project_lock: ?*pkg_lock.ProjectLock,
     root_preload: RootPreloadState = .idle,
@@ -526,7 +552,12 @@ pub const Session = enum(usize) {
         errdefer argv.deinit();
         const core = try allocator.create(SessionCore);
         errdefer allocator.destroy(core);
-        const scheduler = try scheduler_api.Scheduler.init(host_owner.cleanup(), scheduler_config);
+        const clock_policy: ClockPolicy = if (host) |services| services.clock else .{};
+        const scheduler = try scheduler_api.Scheduler.init(
+            host_owner.cleanup(),
+            scheduler_config,
+            clock_policy.monotonic,
+        );
         const root_tasks = scheduler_api.TaskScope.init(scheduler.worker());
         core.* = .{
             .host_owner = host_owner,
@@ -543,6 +574,14 @@ pub const Session = enum(usize) {
             .diagnostics = if (host) |services| services.diagnostics else null,
             .host_io = if (host) |services| services.io else null,
             .tls_trust = owned_tls_trust,
+            .wall_clock = switch (clock_policy.wall) {
+                .absent => .absent,
+                // A wall policy arrives only inside a Host, which always
+                // carries the I/O it reads through.
+                .host => .{ .host = host.?.io },
+                .fixed => |timestamp| .{ .fixed = timestamp },
+                .anchored => |base| .{ .anchored = base },
+            },
             .ecl_path = owned_ecl_path,
             .project_lock = owned_project_lock,
             .environ = .{ .entries = snapshot.entries },
@@ -686,6 +725,7 @@ pub const Session = enum(usize) {
             .process_access = if (core.process_owner) |owner| owner.access() else null,
             .filesystem_access = if (core.filesystem_owner) |owner| owner.access() else null,
             .package_access = if (core.package_owner) |owner| owner.access() else null,
+            .wall_clock = core.wall_clock,
         };
         unit.scheduler = core.scheduler.worker();
         unit.task_scope = &core.root_tasks;
@@ -1007,6 +1047,18 @@ pub const Session = enum(usize) {
     }
     pub fn schedulerTimerEntryCount(self: *Session) usize {
         return self.coreState().scheduler.timerEntryCount();
+    }
+    /// Advance a `manual` monotonic clock by whole milliseconds. Pending
+    /// sleeps and deadlines whose instant is reached become ready through the
+    /// ordinary timer path. The call returns once the clock has moved, not
+    /// once those wakes deliver; observe delivery through `await`. Refused for
+    /// a host clock, and with `Overflow` — the clock unchanged — when the sum
+    /// would leave the clock's range.
+    pub fn advanceManualClock(
+        self: *Session,
+        milliseconds: u64,
+    ) error{ HostClock, Overflow }!void {
+        return self.coreState().scheduler.advanceManualClock(milliseconds);
     }
 };
 
