@@ -1,12 +1,14 @@
 //! Public package-store and synchronization behavior over the hermetic HTTPS fixture.
 //!
-//! Patch 2 registers the complete proof surface before production symbols
-//! exist. Each skipped case is activated by the patch that implements the
-//! behavior named in its title.
+//! Package words act through the Session's package authority: a
+//! package-command Session names the shared `'cache` and project `'vendor`
+//! stores as host directories and the `'project` filesystem root, so no test
+//! source contains an absolute path. Ordinary Sessions receive no package
+//! authority and are proven to fail closed.
 const std = @import("std");
 const pkg_fixture = @import("pkg_fixture_options");
 const archive_fixtures = @import("archive_fixture_options");
-const machine = @import("../machine.zig");
+const package_authority = @import("../package_authority.zig");
 const session = @import("../session.zig");
 const support = @import("kernel_test_support.zig");
 const test_heap = @import("test_heap.zig");
@@ -15,17 +17,21 @@ const allocator = std.testing.allocator;
 const valid_cert_time = std.Io.Timestamp.fromNanoseconds(
     @as(i96, 1_788_220_800) * std.time.ns_per_s,
 );
+const fixture_a_key = "a-1.0.0-1f9aefdfdd91996e4f2f80b7f89f1ac3d8907616b74f1cf55a1a48042556738a";
+const fixture_a_hash = "sha256-1f9aefdfdd91996e4f2f80b7f89f1ac3d8907616b74f1cf55a1a48042556738a";
+const placeholder_hex = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 test "pkg store: inspect returns exact root manifest" {
     var fixture = try HttpsFixture.start();
     defer fixture.stop();
     const source = try packageSource(fixture.port, "/pkg/bad-1.0.0.tgz", "bad", .inspect, null);
     defer allocator.free(source);
-    try expectHostStack(
+    var host = try PackageHost.init(.{ .tls = true });
+    defer host.deinit();
+    try host.expectStack(
         source,
         "\"{'format 1 'name \\\"bad\\\" 'version \\\"1.0.0\\\" 'exports " ++
             "{\\\"bad\\\" [\\\"**/*\\\"]} 'requires {}}\\n\"",
-        true,
     );
 }
 
@@ -38,50 +44,44 @@ test "pkg store: rejects invalid source package layouts before publication" {
         .{ .endpoint = "/pkg/foo-1.0.0-invalid-manifest.tgz", .message = "not valid UTF-8" },
         .{ .endpoint = "/pkg/foo-1.0.0-reserved-seal.tgz", .message = ".ecl-package.tgz" },
     };
+    var host = try PackageHost.init(.{ .tls = true });
+    defer host.deinit();
     for (cases) |case| {
         const source = try packageSource(fixture.port, case.endpoint, "foo", .inspect, null);
         defer allocator.free(source);
-        try expectHostError(source, .{
+        try host.expectError(source, .{
             .name = case.endpoint,
             .source = source,
             .kind = "domain",
             .word = "pkg.store.inspect",
             .message_contains = case.message,
-        }, true);
+        });
     }
 }
 
 test "pkg store: package export globs admit nested source artifacts" {
     var fixture = try HttpsFixture.start();
     defer fixture.stop();
-    var scratch = try Scratch.init();
-    defer scratch.deinit();
-    const destination = try scratch.pathFor("cache/pkg/foo-nested");
-    defer allocator.free(destination);
-    const source = try packageSource(
-        fixture.port,
-        "/pkg/foo-1.0.0-nested.tgz",
-        "foo",
-        .install,
-        destination,
-    );
+    var host = try PackageHost.init(.{ .tls = true, .cache = true });
+    defer host.deinit();
+    const key = "foo-1.0.0-" ++ placeholder_hex;
+    const source = try packageSource(fixture.port, "/pkg/foo-1.0.0-nested.tgz", "foo", .install, key);
     defer allocator.free(source);
-    try expectHostStack(source, "(\"ecl.pkg\" \"nested/foo.ecl\")", true);
+    try host.expectStack(source, "(\"ecl.pkg\" \"nested/foo.ecl\")");
 }
 
 test "pkg store: atomically installs one valid source package" {
     var fixture = try HttpsFixture.start();
     defer fixture.stop();
-    var scratch = try Scratch.init();
-    defer scratch.deinit();
-    const destination = try scratch.pathFor("cache/pkg/bad-entry");
-    defer allocator.free(destination);
-    const source = try packageSource(fixture.port, "/pkg/bad-1.0.0.tgz", "bad", .install, destination);
+    var host = try PackageHost.init(.{ .tls = true, .cache = true });
+    defer host.deinit();
+    const key = "bad-1.0.0-" ++ placeholder_hex;
+    const source = try packageSource(fixture.port, "/pkg/bad-1.0.0.tgz", "bad", .install, key);
     defer allocator.free(source);
-    try expectHostStack(source, "(\"bad.ecl\" \"ecl.pkg\")", true);
-    const manifest = try scratch.directory.dir.readFileAlloc(
+    try host.expectStack(source, "(\"bad.ecl\" \"ecl.pkg\")");
+    const manifest = try host.scratch.directory.dir.readFileAlloc(
         std.testing.io,
-        "cache/pkg/bad-entry/ecl.pkg",
+        "cache/" ++ key ++ "/ecl.pkg",
         allocator,
         .unlimited,
     );
@@ -90,9 +90,9 @@ test "pkg store: atomically installs one valid source package" {
         "{'format 1 'name \"bad\" 'version \"1.0.0\" 'exports {\"bad\" [\"**/*\"]} 'requires {}}\n",
         manifest,
     );
-    const seal = try scratch.directory.dir.readFileAlloc(
+    const seal = try host.scratch.directory.dir.readFileAlloc(
         std.testing.io,
-        "cache/pkg/bad-entry/.ecl-package.tgz",
+        "cache/" ++ key ++ "/.ecl-package.tgz",
         allocator,
         .unlimited,
     );
@@ -100,22 +100,94 @@ test "pkg store: atomically installs one valid source package" {
     const expected_seal = try decodeFixtureBytes(fixture.bad_archive_hex);
     defer allocator.free(expected_seal);
     try std.testing.expectEqualSlices(u8, expected_seal, seal);
-    const present_source = try onePathSource(destination, " pkg.store.present?");
-    defer allocator.free(present_source);
-    try expectHostStack(present_source, "1", false);
+    try host.expectStack("'cache \"" ++ key ++ "\" pkg.store.present? 'cache \"" ++ key ++ "\" pkg.store.manifest", "1 " ++
+        "\"{'format 1 'name \\\"bad\\\" 'version \\\"1.0.0\\\" 'exports {\\\"bad\\\" [\\\"**/*\\\"]} 'requires {}}\\n\"");
+}
+
+test "pkg store: ordinary Sessions have no package authority" {
+    const programs = [_]struct { source: []const u8, word: []const u8 }{
+        .{ .source = "'cache \"" ++ fixture_a_key ++ "\" pkg.store.present?", .word = "pkg.store.present?" },
+        .{ .source = "'cache \"" ++ fixture_a_key ++ "\" pkg.store.manifest", .word = "pkg.store.manifest" },
+        .{ .source = "'cache \"" ++ fixture_a_key ++ "\" \"a\" \"" ++ fixture_a_hash ++ "\" pkg.store.verify", .word = "pkg.store.verify" },
+        .{ .source = "'cache \"" ++ fixture_a_key ++ "\" \"a\" \"" ++ fixture_a_hash ++ "\" pkg.store.read-seal", .word = "pkg.store.read-seal" },
+        .{ .source = "[] pkg.store.gc", .word = "pkg.store.gc" },
+        .{ .source = "[1] \"a\" 'cache \"" ++ fixture_a_key ++ "\" pkg.store.install", .word = "pkg.store.install" },
+    };
+    for (programs) |case| {
+        try support.expectError(.{
+            .name = case.word,
+            .source = case.source,
+            .kind = "domain",
+            .word = case.word,
+            .message_contains = "authority is unavailable",
+        });
+    }
+    // A package Session without the named store still refuses; a bad store
+    // symbol or a non-canonical key never reaches the host.
+    var host = try PackageHost.init(.{});
+    defer host.deinit();
+    try host.expectError("'cache \"" ++ fixture_a_key ++ "\" pkg.store.present?", .{
+        .name = "absent cache store",
+        .source = "'cache \"" ++ fixture_a_key ++ "\" pkg.store.present?",
+        .kind = "io",
+        .word = "pkg.store.present?",
+        .message_contains = "ECL_CACHE",
+    });
+    try host.expectError("'elsewhere \"" ++ fixture_a_key ++ "\" pkg.store.present?", .{
+        .name = "unknown store",
+        .source = "'elsewhere \"" ++ fixture_a_key ++ "\" pkg.store.present?",
+        .kind = "domain",
+        .word = "pkg.store.present?",
+        .message_contains = "'cache or 'vendor",
+    });
+    var cached = try PackageHost.init(.{ .cache = true });
+    defer cached.deinit();
+    try cached.expectError("'cache \"../escape\" pkg.store.present?", .{
+        .name = "non-canonical key",
+        .source = "'cache \"../escape\" pkg.store.present?",
+        .kind = "domain",
+        .word = "pkg.store.present?",
+        .message_contains = "canonical",
+    });
+    try cached.expectError("'cache \"../escape\" pkg.store.manifest", .{
+        .name = "non-canonical manifest key",
+        .source = "'cache \"../escape\" pkg.store.manifest",
+        .kind = "domain",
+        .word = "pkg.store.manifest",
+        .message_contains = "canonical",
+    });
+}
+
+test "pkg store: a project-controlled vendor symlink is refused at Session construction" {
+    var host = try PackageHost.init(.{ .cache = true, .vendor = true });
+    defer host.deinit();
+    try host.scratch.directory.dir.createDir(std.testing.io, "elsewhere", .default_dir);
+    try host.scratch.directory.dir.symLink(std.testing.io, "../elsewhere", "project/vendor", .{});
+    var heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&heap);
+    try std.testing.expectError(error.InvalidHostPolicy, host.openSession(heap.allocator()));
+    // The synchronize and verify shapes open a present vendor store too, and
+    // refuse the link the same way; nothing was created behind it.
+    var sync_host = try PackageHost.initAt(host.scratch, .{ .cache = true });
+    defer sync_host.deinit();
+    try std.testing.expectError(error.InvalidHostPolicy, sync_host.openSession(heap.allocator()));
+    var listing = try host.scratch.directory.dir.openDir(std.testing.io, "elsewhere", .{ .iterate = true });
+    defer listing.close(std.testing.io);
+    var iterator = listing.iterate();
+    try std.testing.expect((try iterator.next(std.testing.io)) == null);
 }
 
 test "pkg store: existing immutable entry wins concurrent install" {
     var scratch = try Scratch.init();
     defer scratch.deinit();
-    const destination = try scratch.pathFor("cache/pkg/racing-entry");
-    defer allocator.free(destination);
-    const source = try fixtureInstallSource(destination);
+    try scratch.directory.dir.createDir(std.testing.io, "cache", .default_dir);
+    const source = try fixtureInstallSource(fixture_a_key);
     defer allocator.free(source);
     var successes: std.atomic.Value(u32) = .init(0);
     var io_failures: std.atomic.Value(u32) = .init(0);
     var unexpected: std.atomic.Value(bool) = .init(false);
     var result = ConcurrentResult{
+        .scratch = &scratch,
         .source = source,
         .successes = &successes,
         .io_failures = &io_failures,
@@ -128,22 +200,22 @@ test "pkg store: existing immutable entry wins concurrent install" {
     try std.testing.expect(!unexpected.load(.acquire));
     try std.testing.expectEqual(@as(u32, 1), successes.load(.acquire));
     try std.testing.expectEqual(@as(u32, 1), io_failures.load(.acquire));
-    const present_source = try onePathSource(destination, " pkg.store.present?");
-    defer allocator.free(present_source);
-    try expectHostStack(present_source, "1", false);
+    var host = try PackageHost.initAt(&scratch, .{ .cache = true });
+    defer host.deinit();
+    try host.expectStack("'cache \"" ++ fixture_a_key ++ "\" pkg.store.present?", "1");
 }
 
 test "pkg sync: concurrent immutable publication treats the installed destination as success" {
     var scratch = try Scratch.init();
     defer scratch.deinit();
-    const destination = try scratch.pathFor("cache/pkg/racing-sync-entry");
-    defer allocator.free(destination);
-    const source = try fixtureSyncInstallSource(destination);
+    try scratch.directory.dir.createDir(std.testing.io, "cache", .default_dir);
+    const source = try fixtureSyncInstallSource(fixture_a_key);
     defer allocator.free(source);
     var successes: std.atomic.Value(u32) = .init(0);
     var io_failures: std.atomic.Value(u32) = .init(0);
     var unexpected: std.atomic.Value(bool) = .init(false);
     var result = ConcurrentResult{
+        .scratch = &scratch,
         .source = source,
         .successes = &successes,
         .io_failures = &io_failures,
@@ -156,69 +228,62 @@ test "pkg sync: concurrent immutable publication treats the installed destinatio
     try std.testing.expect(!unexpected.load(.acquire));
     try std.testing.expectEqual(@as(u32, 2), successes.load(.acquire));
     try std.testing.expectEqual(@as(u32, 0), io_failures.load(.acquire));
-    const present_source = try onePathSource(destination, " pkg.store.present?");
-    defer allocator.free(present_source);
-    try expectHostStack(present_source, "1", false);
+    var host = try PackageHost.initAt(&scratch, .{ .cache = true });
+    defer host.deinit();
+    try host.expectStack("'cache \"" ++ fixture_a_key ++ "\" pkg.store.present?", "1");
 }
 
 test "pkg sync: immutable publication accepts preflight winners but no other install failure" {
-    var scratch = try Scratch.init();
-    defer scratch.deinit();
-    const destination = try scratch.pathFor("cache/pkg/existing-sync-entry");
-    defer allocator.free(destination);
-    const installed = try fixtureInstallSource(destination);
+    var host = try PackageHost.init(.{ .cache = true });
+    defer host.deinit();
+    const installed = try fixtureInstallSource(fixture_a_key);
     defer allocator.free(installed);
-    try expectHostStack(installed, "(\"a.ecl\" \"ecl.pkg\")", false);
+    try host.expectStack(installed, "(\"a.ecl\" \"ecl.pkg\")");
 
-    const confirmed = try fixtureSyncInstallSource(destination);
+    const confirmed = try fixtureSyncInstallSource(fixture_a_key);
     defer allocator.free(confirmed);
-    try expectHostStack(confirmed, "", false);
+    try host.expectStack(confirmed, "");
 
-    try scratch.directory.dir.writeFile(std.testing.io, .{
-        .sub_path = "cache/pkg/not-a-directory",
+    const occupied_key = "occupied-1.0.0-" ++ placeholder_hex;
+    try host.scratch.directory.dir.writeFile(std.testing.io, .{
+        .sub_path = "cache/" ++ occupied_key,
         .data = "occupied",
     });
-    const occupied_destination = try scratch.pathFor("cache/pkg/not-a-directory");
-    defer allocator.free(occupied_destination);
-    const occupied = try fixtureSyncInstallSource(occupied_destination);
+    const occupied = try fixtureSyncInstallSource(occupied_key);
     defer allocator.free(occupied);
-    try expectHostError(occupied, .{
+    try host.expectError(occupied, .{
         .name = "non-directory destination",
         .source = occupied,
         .kind = "io",
         .word = "pkg.store.install",
         .message_contains = "archive destination already exists",
-    }, false);
+    });
 
-    var malformed = std.Io.Writer.Allocating.init(allocator);
-    defer malformed.deinit();
-    try malformed.writer.writeAll("[1] \"a\" ");
-    try appendString(&malformed.writer, destination);
-    try malformed.writer.writeAll(" pkg.sync.install-immutable");
-    try expectHostError(malformed.written(), .{
+    const malformed = "[1] \"a\" 'cache \"" ++ fixture_a_key ++ "\" pkg.sync.install-immutable";
+    try host.expectError(malformed, .{
         .name = "non-racing install error",
-        .source = malformed.written(),
+        .source = malformed,
         .kind = "domain",
         .word = "pkg.store.install",
-    }, false);
+    });
 }
 
-fn fixtureInstallSource(destination: []const u8) ![]u8 {
+fn fixtureInstallSource(key: []const u8) ![]u8 {
     var source = std.Io.Writer.Allocating.init(allocator);
     defer source.deinit();
     try appendFixtureBytes(&source.writer, archive_fixtures.package_valid);
-    try source.writer.writeAll(" \"a\" ");
-    try appendString(&source.writer, destination);
+    try source.writer.writeAll(" \"a\" 'cache ");
+    try appendString(&source.writer, key);
     try source.writer.writeAll(" pkg.store.install");
     return allocator.dupe(u8, source.written());
 }
 
-fn fixtureSyncInstallSource(destination: []const u8) ![]u8 {
+fn fixtureSyncInstallSource(key: []const u8) ![]u8 {
     var source = std.Io.Writer.Allocating.init(allocator);
     defer source.deinit();
     try appendFixtureBytes(&source.writer, archive_fixtures.package_valid);
-    try source.writer.writeAll(" \"a\" ");
-    try appendString(&source.writer, destination);
+    try source.writer.writeAll(" \"a\" 'cache ");
+    try appendString(&source.writer, key);
     try source.writer.writeAll(" pkg.sync.install-immutable");
     return allocator.dupe(u8, source.written());
 }
@@ -258,71 +323,73 @@ fn decodeFixtureBytes(encoded: []const u8) ![]u8 {
 }
 
 test "pkg store: present distinguishes absent directory and invalid node" {
-    var scratch = try Scratch.init();
-    defer scratch.deinit();
-    try scratch.directory.dir.createDir(std.testing.io, "directory", .default_dir);
-    try scratch.directory.dir.writeFile(std.testing.io, .{ .sub_path = "file", .data = "not a directory" });
-    try scratch.directory.dir.symLink(std.testing.io, "directory", "link", .{});
-    const absent = try scratch.pathFor("absent");
-    defer allocator.free(absent);
-    const directory = try scratch.pathFor("directory");
-    defer allocator.free(directory);
-    const file = try scratch.pathFor("file");
-    defer allocator.free(file);
-    const link = try scratch.pathFor("link");
-    defer allocator.free(link);
-    var source = std.Io.Writer.Allocating.init(allocator);
-    defer source.deinit();
-    try appendString(&source.writer, absent);
-    try source.writer.writeAll(" pkg.store.present? ");
-    try appendString(&source.writer, directory);
-    try source.writer.writeAll(" pkg.store.present?");
-    try expectHostStack(source.written(), "0 1", false);
-    for ([_][]const u8{ file, link }) |invalid| {
-        const invalid_source = try onePathSource(invalid, " pkg.store.present?");
+    var host = try PackageHost.init(.{ .cache = true });
+    defer host.deinit();
+    const directory_key = "dir-1.0.0-" ++ placeholder_hex;
+    const file_key = "file-1.0.0-" ++ placeholder_hex;
+    const link_key = "link-1.0.0-" ++ placeholder_hex;
+    const absent_key = "absent-1.0.0-" ++ placeholder_hex;
+    try host.scratch.directory.dir.createDir(std.testing.io, "cache/" ++ directory_key, .default_dir);
+    try host.scratch.directory.dir.writeFile(std.testing.io, .{ .sub_path = "cache/" ++ file_key, .data = "not a directory" });
+    try host.scratch.directory.dir.symLink(std.testing.io, directory_key, "cache/" ++ link_key, .{});
+    try host.expectStack(
+        "'cache \"" ++ absent_key ++ "\" pkg.store.present? 'cache \"" ++ directory_key ++ "\" pkg.store.present?",
+        "0 1",
+    );
+    for ([_][]const u8{ file_key, link_key }) |invalid| {
+        const invalid_source = try std.fmt.allocPrint(allocator, "'cache \"{s}\" pkg.store.present?", .{invalid});
         defer allocator.free(invalid_source);
-        try expectHostError(invalid_source, .{
+        try host.expectError(invalid_source, .{
             .name = "invalid store node",
             .source = invalid_source,
             .kind = "io",
             .word = "pkg.store.present?",
             .message_contains = "not a real directory",
-        }, false);
+        });
     }
+    // The manifest reader never follows a link at the entry or file level.
+    const manifest_source = "'cache \"" ++ link_key ++ "\" pkg.store.manifest";
+    try host.expectError(manifest_source, .{
+        .name = "manifest through link",
+        .source = manifest_source,
+        .kind = "io",
+        .word = "pkg.store.manifest",
+    });
 }
 
-test "pkg store: atomic lock replacement preserves prior bytes on failure" {
-    var scratch = try Scratch.init();
-    defer scratch.deinit();
-    try scratch.directory.dir.writeFile(std.testing.io, .{ .sub_path = "ecl.lock", .data = "prior\n" });
-    const lock_path = try scratch.pathFor("ecl.lock");
-    defer allocator.free(lock_path);
-    const success = try lockSource("replacement\n", lock_path);
-    defer allocator.free(success);
-    try expectHostStack(success, "", false);
-    const replaced = try scratch.directory.dir.readFileAlloc(std.testing.io, "ecl.lock", allocator, .unlimited);
+test "pkg sync: project file publication creates then strictly replaces beneath the project root" {
+    var host = try PackageHost.init(.{});
+    defer host.deinit();
+    try host.expectStack("\"first\\n\" \"ecl.lock\" pkg.sync.write-project-file 'project \"ecl.lock\" fs.read-text", "\"first\\n\"");
+    try host.expectStack("\"second\\n\" \"ecl.lock\" pkg.sync.write-project-file 'project \"ecl.lock\" fs.read-text", "\"second\\n\"");
+    const replaced = try host.scratch.directory.dir.readFileAlloc(std.testing.io, "project/ecl.lock", allocator, .unlimited);
     defer allocator.free(replaced);
-    try std.testing.expectEqualStrings("replacement\n", replaced);
+    try std.testing.expectEqualStrings("second\n", replaced);
 
+    try host.scratch.directory.dir.createDir(std.testing.io, "project/other.data", .default_dir);
+    const non_regular = "\"unused\\n\" \"other.data\" pkg.sync.write-project-file";
+    try host.expectError(non_regular, .{
+        .name = "non-regular target",
+        .source = non_regular,
+        .kind = "io",
+        .word = "fs.replace-text",
+        .data = &.{
+            .{ .name = "path", .expected = .{ .string = "other.data" } },
+            .{ .name = "reason", .expected = .{ .symbol = "not-regular" } },
+        },
+    });
+
+    // Cancellation before commit preserves the prior bytes.
     var heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&heap);
-    var output_buffer: [256]u8 = undefined;
-    var output = std.Io.Writer.Discarding.init(&output_buffer);
-    var diagnostics_buffer: [256]u8 = undefined;
-    var diagnostics = std.Io.Writer.Discarding.init(&diagnostics_buffer);
-    var runtime = try session.Session.initWithHostConfig(heap.allocator(), &.{}, .{
-        .io = std.testing.io,
-        .output = &output.writer,
-        .diagnostics = &diagnostics.writer,
-    }, .cooperative);
+    var runtime = try host.openSession(heap.allocator());
     defer runtime.deinit();
     switch (try runtime.runUnit("<pkg-store-warm>", "1 pop")) {
         .ok => {},
         .incomplete, .err => return error.UnexpectedWarmupResult,
     }
     runtime.requestCancellation();
-    const cancelled = try lockSource("must-not-publish\n", lock_path);
-    defer allocator.free(cancelled);
+    const cancelled = "\"must-not-publish\\n\" \"ecl.lock\" pkg.sync.write-project-file";
     const failure = switch (try runtime.runUnit("<pkg-store-cancel>", cancelled)) {
         .err => |item| item,
         .ok, .incomplete => return error.ExpectedCancellation,
@@ -333,86 +400,39 @@ test "pkg store: atomic lock replacement preserves prior bytes on failure" {
         .source = cancelled,
         .kind = "cancelled",
     });
-    const preserved = try scratch.directory.dir.readFileAlloc(std.testing.io, "ecl.lock", allocator, .unlimited);
+    const preserved = try host.scratch.directory.dir.readFileAlloc(std.testing.io, "project/ecl.lock", allocator, .unlimited);
     defer allocator.free(preserved);
-    try std.testing.expectEqualStrings("replacement\n", preserved);
-}
-
-test "pkg store: atomic new-file publication names and preserves its actual target" {
-    var scratch = try Scratch.init();
-    defer scratch.deinit();
-    const manifest_path = try scratch.pathFor("custom.data");
-    defer allocator.free(manifest_path);
-    const initial = try newFileSource("first\n", manifest_path);
-    defer allocator.free(initial);
-    try expectHostStack(initial, "", false);
-
-    const racing = try newFileSource("second\n", manifest_path);
-    defer allocator.free(racing);
-    try expectHostError(racing, .{
-        .name = "existing manifest wins atomic create",
-        .source = racing,
-        .kind = "io",
-        .word = "pkg.store.write-new",
-        .message_contains = "custom.data",
-    }, false);
-    const preserved = try scratch.directory.dir.readFileAlloc(
-        std.testing.io,
-        "custom.data",
-        allocator,
-        .unlimited,
-    );
-    defer allocator.free(preserved);
-    try std.testing.expectEqualStrings("first\n", preserved);
-
-    try scratch.directory.dir.createDir(std.testing.io, "other.data", .default_dir);
-    const directory_path = try scratch.pathFor("other.data");
-    defer allocator.free(directory_path);
-    const non_regular = try newFileSource("unused\n", directory_path);
-    defer allocator.free(non_regular);
-    try expectHostError(non_regular, .{
-        .name = "non-regular target names the supplied project file",
-        .source = non_regular,
-        .kind = "io",
-        .word = "pkg.store.write-new",
-        .message_contains = "other.data",
-    }, false);
+    try std.testing.expectEqualStrings("second\n", preserved);
 }
 
 test "pkg sync: explicit project root selects store mode without ambient discovery" {
-    var scratch = try Scratch.init();
-    defer scratch.deinit();
-    try scratch.directory.dir.createDir(std.testing.io, "ambient", .default_dir);
-    try scratch.directory.dir.createDir(std.testing.io, "target", .default_dir);
-    try scratch.directory.dir.createDir(std.testing.io, "cache", .default_dir);
+    var host = try PackageHost.init(.{ .cache = true });
+    defer host.deinit();
+    try host.scratch.directory.dir.createDir(std.testing.io, "ambient", .default_dir);
     const ambient_manifest = "{'format 1 'name \"ambient\" 'version \"0.1.0\" 'exports {} 'requires {}}\n";
     const target_manifest = "{'format 1 'name \"target\" 'version \"0.1.0\" 'exports {} 'requires {}}\n";
-    try scratch.directory.dir.writeFile(std.testing.io, .{
+    try host.scratch.directory.dir.writeFile(std.testing.io, .{
         .sub_path = "ambient/ecl.pkg",
         .data = ambient_manifest,
     });
-    try scratch.directory.dir.writeFile(std.testing.io, .{
+    try host.scratch.directory.dir.writeFile(std.testing.io, .{
         .sub_path = "ambient/ecl.lock",
         .data = "{'format 1 'root \"ambient\" 'store 'vendor 'packages {} 'requires {\"ambient\" {}}}\n",
     });
-    try scratch.directory.dir.writeFile(std.testing.io, .{
-        .sub_path = "target/ecl.pkg",
+    try host.scratch.directory.dir.writeFile(std.testing.io, .{
+        .sub_path = "project/ecl.pkg",
         .data = target_manifest,
     });
-    try scratch.directory.dir.writeFile(std.testing.io, .{
-        .sub_path = "target/ecl.lock",
+    try host.scratch.directory.dir.writeFile(std.testing.io, .{
+        .sub_path = "project/ecl.lock",
         .data = "{'format 1 'root \"target\" 'packages {} 'requires {\"target\" {}}}\n",
     });
-    const ambient = try scratch.pathFor("ambient");
+    const ambient = try host.scratch.pathFor("ambient");
     defer allocator.free(ambient);
-    const target = try scratch.pathFor("target");
-    defer allocator.free(target);
-    const cache = try scratch.pathFor("cache");
-    defer allocator.free(cache);
-    const source = try syncSource(target_manifest, target, " 'store dict.has?");
+    host.project_start = ambient;
+    const source = try syncSource(target_manifest, " 'store dict.has?");
     defer allocator.free(source);
-    const environ: []const machine.Environ.Entry = &.{.{ .name = "ECL_CACHE", .value = cache }};
-    try expectHostStackEnvironProject(source, "0", false, environ, ambient);
+    try host.expectStack(source, "0");
 }
 
 test "pkg sync: requirement derives the exact archive hash after identity validation" {
@@ -426,7 +446,9 @@ test "pkg sync: requirement derives the exact archive hash after identity valida
     var expected = std.Io.Writer.Allocating.init(allocator);
     defer expected.deinit();
     try expected.writer.print("\"1.0.0\" \"{s}\"", .{fixture.hash_mismatch_actual_hash});
-    try expectHostStack(source.written(), expected.written(), true);
+    var host = try PackageHost.init(.{ .tls = true });
+    defer host.deinit();
+    try host.expectStack(source.written(), expected.written());
 }
 
 const HttpsFixture = struct {
@@ -529,6 +551,155 @@ const Scratch = struct {
     }
 };
 
+const HostOptions = struct {
+    tls: bool = false,
+    /// Name `<scratch>/cache` as the shared cache store, creating it.
+    cache: bool = false,
+    /// Grant the `vendor` command shape, which creates the vendor store.
+    vendor: bool = false,
+};
+
+/// One package-command host over a scratch directory: `<scratch>/project` is
+/// the `'project` filesystem root, `<scratch>/cache` the optional shared
+/// cache, and `<scratch>/project/vendor` the optional vendor store.
+const PackageHost = struct {
+    scratch: *Scratch,
+    /// Heap-allocated so the borrowed `scratch` pointer stays valid when the
+    /// host is returned by value.
+    owned_scratch: ?*Scratch,
+    options: HostOptions,
+    project: []u8,
+    project_handle: std.Io.Dir,
+    cache: []u8,
+    project_start: ?[]const u8 = null,
+
+    fn init(options: HostOptions) !PackageHost {
+        const owned = try allocator.create(Scratch);
+        errdefer allocator.destroy(owned);
+        owned.* = try Scratch.init();
+        errdefer owned.deinit();
+        var host = try initAt(owned, options);
+        host.owned_scratch = owned;
+        return host;
+    }
+
+    fn initAt(scratch: *Scratch, options: HostOptions) !PackageHost {
+        scratch.directory.dir.createDir(std.testing.io, "project", .default_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+        // Tests seed store entries before the first Session opens the
+        // store, so the cache directory exists from construction on.
+        if (options.cache) scratch.directory.dir.createDir(std.testing.io, "cache", .default_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+        const project = try scratch.pathFor("project");
+        errdefer allocator.free(project);
+        const cache = try scratch.pathFor("cache");
+        errdefer allocator.free(cache);
+        const project_handle = try scratch.directory.dir.openDir(std.testing.io, "project", .{});
+        return .{
+            .scratch = scratch,
+            .owned_scratch = null,
+            .options = options,
+            .project = project,
+            .project_handle = project_handle,
+            .cache = cache,
+        };
+    }
+
+    fn deinit(self: *PackageHost) void {
+        self.project_handle.close(std.testing.io);
+        allocator.free(self.cache);
+        allocator.free(self.project);
+        if (self.owned_scratch) |owned| {
+            owned.deinit();
+            allocator.destroy(owned);
+        }
+    }
+
+    fn cachePath(self: *const PackageHost) []const u8 {
+        return self.cache;
+    }
+
+    fn openSession(self: *const PackageHost, heap_allocator: std.mem.Allocator) !session.Session {
+        return openSessionWithConfig(self, heap_allocator, .cooperative);
+    }
+
+    fn openSessionWithConfig(self: *const PackageHost, heap_allocator: std.mem.Allocator, config: session.Config) !session.Session {
+        return session.Session.initPackageCommand(heap_allocator, &.{}, .{
+            .io = std.testing.io,
+            .output = discarding_output.writer(),
+            .diagnostics = discarding_output.writer(),
+            .tls_trust = if (self.options.tls) .{ .ca_file = pkg_fixture.ca_file, .now = valid_cert_time } else null,
+            .project_start = self.project_start,
+            .filesystem_policy = .{ .roots = &.{.{
+                .name = "project",
+                .absolute_path = self.project,
+                .permissions = .{ .read_data = true, .inspect = true, .create = true, .replace = true },
+            }} },
+        }, config, self.grant());
+    }
+
+    /// The command shape the options describe: the vendor command when
+    /// requested, otherwise synchronization (cache created when named) or
+    /// project-only inspection.
+    fn grant(self: *const PackageHost) package_authority.PackageGrant {
+        const cache: ?[]const u8 = if (self.options.cache) self.cache else null;
+        if (self.options.vendor) return .{ .vendor = .{ .cache = cache, .project = self.project_handle } };
+        if (self.options.cache) return .{ .synchronize = .{ .cache = cache, .project = self.project_handle } };
+        return .inspect;
+    }
+
+    fn expectStack(self: *const PackageHost, source: []const u8, expected: []const u8) !void {
+        var heap: test_heap.SessionHeap = .init;
+        defer test_heap.retire(&heap);
+        var runtime = try self.openSession(heap.allocator());
+        defer runtime.deinit();
+        switch (try runtime.runUnit("<pkg-store-test>", source)) {
+            .ok => {},
+            .incomplete => return error.UnexpectedIncomplete,
+            .err => |failure| {
+                defer runtime.release(failure);
+                var rendered = try runtime.renderValue(failure);
+                defer rendered.deinit();
+                std.log.err("unexpected language error: {s}", .{rendered.bytes()});
+                return error.UnexpectedLanguageError;
+            },
+        }
+        var display = try runtime.stackDisplay();
+        defer display.deinit();
+        try std.testing.expectEqualStrings(expected, display.bytes());
+    }
+
+    fn expectError(self: *const PackageHost, source: []const u8, expected: support.ErrorCase) !void {
+        var heap: test_heap.SessionHeap = .init;
+        defer test_heap.retire(&heap);
+        var runtime = try self.openSession(heap.allocator());
+        defer runtime.deinit();
+        const failure = switch (try runtime.runUnit("<pkg-store-test>", source)) {
+            .ok, .incomplete => return error.ExpectedLanguageError,
+            .err => |item| item,
+        };
+        defer runtime.release(failure);
+        try support.expectLanguageError(failure, expected);
+    }
+};
+
+/// Session output is irrelevant to every case here; a shared discarding
+/// writer keeps the host constructors free of per-call buffers.
+const DiscardingOutput = struct {
+    buffer: [256]u8 = @splat(0),
+    sink: ?std.Io.Writer.Discarding = null,
+
+    fn writer(self: *DiscardingOutput) *std.Io.Writer {
+        if (self.sink == null) self.sink = std.Io.Writer.Discarding.init(&self.buffer);
+        return &self.sink.?.writer;
+    }
+};
+var discarding_output: DiscardingOutput = .{};
+
 const PackageOperation = enum { inspect, install };
 
 fn packageSource(
@@ -536,7 +707,7 @@ fn packageSource(
     endpoint: []const u8,
     package: []const u8,
     operation: PackageOperation,
-    destination: ?[]const u8,
+    key: ?[]const u8,
 ) ![]u8 {
     var source = std.Io.Writer.Allocating.init(allocator);
     defer source.deinit();
@@ -545,39 +716,11 @@ fn packageSource(
     switch (operation) {
         .inspect => try source.writer.writeAll(" pkg.store.inspect"),
         .install => {
-            try source.writer.writeByte(' ');
-            try appendString(&source.writer, destination.?);
+            try source.writer.writeAll(" 'cache ");
+            try appendString(&source.writer, key.?);
             try source.writer.writeAll(" pkg.store.install");
         },
     }
-    return allocator.dupe(u8, source.written());
-}
-
-fn onePathSource(path: []const u8, suffix: []const u8) ![]u8 {
-    var source = std.Io.Writer.Allocating.init(allocator);
-    defer source.deinit();
-    try appendString(&source.writer, path);
-    try source.writer.writeAll(suffix);
-    return allocator.dupe(u8, source.written());
-}
-
-fn lockSource(text: []const u8, path: []const u8) ![]u8 {
-    var source = std.Io.Writer.Allocating.init(allocator);
-    defer source.deinit();
-    try appendString(&source.writer, text);
-    try source.writer.writeByte(' ');
-    try appendString(&source.writer, path);
-    try source.writer.writeAll(" pkg.store.write-lock");
-    return allocator.dupe(u8, source.written());
-}
-
-fn newFileSource(text: []const u8, path: []const u8) ![]u8 {
-    var source = std.Io.Writer.Allocating.init(allocator);
-    defer source.deinit();
-    try appendString(&source.writer, text);
-    try source.writer.writeByte(' ');
-    try appendString(&source.writer, path);
-    try source.writer.writeAll(" pkg.store.write-new");
     return allocator.dupe(u8, source.written());
 }
 
@@ -596,90 +739,8 @@ fn appendString(writer: *std.Io.Writer, text: []const u8) !void {
     try writer.writeByte('"');
 }
 
-fn expectHostStack(source: []const u8, expected: []const u8, tls: bool) !void {
-    return expectHostStackEnviron(source, expected, tls, &.{});
-}
-
-fn expectHostStackEnviron(
-    source: []const u8,
-    expected: []const u8,
-    tls: bool,
-    environ: []const machine.Environ.Entry,
-) !void {
-    return expectHostStackEnvironProject(source, expected, tls, environ, null);
-}
-
-fn expectHostStackEnvironProject(
-    source: []const u8,
-    expected: []const u8,
-    tls: bool,
-    environ: []const machine.Environ.Entry,
-    project_start: ?[]const u8,
-) !void {
-    var heap: test_heap.SessionHeap = .init;
-    defer test_heap.retire(&heap);
-    var output_buffer: [256]u8 = undefined;
-    var output = std.Io.Writer.Discarding.init(&output_buffer);
-    var diagnostics_buffer: [256]u8 = undefined;
-    var diagnostics = std.Io.Writer.Discarding.init(&diagnostics_buffer);
-    var runtime = try session.Session.initWithHostConfig(heap.allocator(), &.{}, .{
-        .io = std.testing.io,
-        .output = &output.writer,
-        .diagnostics = &diagnostics.writer,
-        .tls_trust = if (tls) .{ .ca_file = pkg_fixture.ca_file, .now = valid_cert_time } else null,
-        .environ = environ,
-        .project_start = project_start,
-    }, .cooperative);
-    defer runtime.deinit();
-    switch (try runtime.runUnit("<pkg-store-test>", source)) {
-        .ok => {},
-        .incomplete => return error.UnexpectedIncomplete,
-        .err => |failure| {
-            defer runtime.release(failure);
-            var rendered = try runtime.renderValue(failure);
-            defer rendered.deinit();
-            std.log.err("unexpected language error: {s}", .{rendered.bytes()});
-            return error.UnexpectedLanguageError;
-        },
-    }
-    var display = try runtime.stackDisplay();
-    defer display.deinit();
-    try std.testing.expectEqualStrings(expected, display.bytes());
-}
-
-fn expectHostError(source: []const u8, expected: support.ErrorCase, tls: bool) !void {
-    return expectHostErrorEnviron(source, expected, tls, &.{});
-}
-
-fn expectHostErrorEnviron(
-    source: []const u8,
-    expected: support.ErrorCase,
-    tls: bool,
-    environ: []const machine.Environ.Entry,
-) !void {
-    var heap: test_heap.SessionHeap = .init;
-    defer test_heap.retire(&heap);
-    var output_buffer: [256]u8 = undefined;
-    var output = std.Io.Writer.Discarding.init(&output_buffer);
-    var diagnostics_buffer: [256]u8 = undefined;
-    var diagnostics = std.Io.Writer.Discarding.init(&diagnostics_buffer);
-    var runtime = try session.Session.initWithHostConfig(heap.allocator(), &.{}, .{
-        .io = std.testing.io,
-        .output = &output.writer,
-        .diagnostics = &diagnostics.writer,
-        .tls_trust = if (tls) .{ .ca_file = pkg_fixture.ca_file, .now = valid_cert_time } else null,
-        .environ = environ,
-    }, .cooperative);
-    defer runtime.deinit();
-    const failure = switch (try runtime.runUnit("<pkg-store-test>", source)) {
-        .ok, .incomplete => return error.ExpectedLanguageError,
-        .err => |item| item,
-    };
-    defer runtime.release(failure);
-    try support.expectLanguageError(failure, expected);
-}
-
 const ConcurrentResult = struct {
+    scratch: *Scratch,
     source: []const u8,
     successes: *std.atomic.Value(u32),
     io_failures: *std.atomic.Value(u32),
@@ -688,15 +749,13 @@ const ConcurrentResult = struct {
 
 fn concurrentInstall(result: *ConcurrentResult) void {
     var heap: test_heap.SessionHeap = .init;
-    var output_buffer: [256]u8 = undefined;
-    var output = std.Io.Writer.Discarding.init(&output_buffer);
-    var diagnostics_buffer: [256]u8 = undefined;
-    var diagnostics = std.Io.Writer.Discarding.init(&diagnostics_buffer);
-    var runtime = session.Session.initWithHostConfig(heap.allocator(), &.{}, .{
-        .io = std.testing.io,
-        .output = &output.writer,
-        .diagnostics = &diagnostics.writer,
-    }, .cooperative) catch {
+    var host = PackageHost.initAt(result.scratch, .{ .cache = true }) catch {
+        result.unexpected.store(true, .release);
+        test_heap.retire(&heap);
+        return;
+    };
+    defer host.deinit();
+    var runtime = host.openSession(heap.allocator()) catch {
         result.unexpected.store(true, .release);
         test_heap.retire(&heap);
         return;
@@ -725,13 +784,11 @@ fn concurrentInstall(result: *ConcurrentResult) void {
     test_heap.retire(&heap);
 }
 
-fn syncSource(manifest: []const u8, project: []const u8, suffix: []const u8) ![]u8 {
+fn syncSource(manifest: []const u8, suffix: []const u8) ![]u8 {
     var source = std.Io.Writer.Allocating.init(allocator);
     defer source.deinit();
     try appendString(&source.writer, manifest);
-    try source.writer.writeAll(" pkg.manifest.read ");
-    try appendString(&source.writer, project);
-    try source.writer.writeAll(" pkg.sync.run");
+    try source.writer.writeAll(" pkg.manifest.read pkg.sync.run");
     try source.writer.writeAll(suffix);
     return allocator.dupe(u8, source.written());
 }
@@ -790,38 +847,22 @@ fn expectStoreEntries(path: []const u8, prefixes: []const []const u8) !void {
     for (found) |present| try std.testing.expect(present);
 }
 
-fn expectPathAbsent(path: []const u8) !void {
-    _ = std.Io.Dir.cwd().statFile(std.testing.io, path, .{ .follow_symlinks = false }) catch |err| switch (err) {
-        error.FileNotFound => return,
-        else => return err,
-    };
-    return error.ExpectedPathAbsent;
-}
-
+/// A failed synchronization leaves the prior lock and an empty cache: the
+/// package Session opens the cache directory up front, so emptiness rather
+/// than absence is the observable invariant.
 const FailurePaths = struct {
-    scratch: *Scratch,
-    cache: []u8,
-    project: []u8,
+    host: *PackageHost,
 
-    fn init(scratch: *Scratch) !FailurePaths {
-        try scratch.directory.dir.createDir(std.testing.io, "project", .default_dir);
-        try scratch.directory.dir.writeFile(std.testing.io, .{
+    fn init(host: *PackageHost) !FailurePaths {
+        try host.scratch.directory.dir.writeFile(std.testing.io, .{
             .sub_path = "project/ecl.lock",
             .data = "prior lock bytes\n",
         });
-        const cache = try scratch.pathFor("cache");
-        errdefer allocator.free(cache);
-        const project = try scratch.pathFor("project");
-        return .{ .scratch = scratch, .cache = cache, .project = project };
-    }
-
-    fn deinit(self: FailurePaths) void {
-        allocator.free(self.cache);
-        allocator.free(self.project);
+        return .{ .host = host };
     }
 
     fn expectUnchanged(self: FailurePaths) !void {
-        const lock = try self.scratch.directory.dir.readFileAlloc(
+        const lock = try self.host.scratch.directory.dir.readFileAlloc(
             std.testing.io,
             "project/ecl.lock",
             allocator,
@@ -829,75 +870,60 @@ const FailurePaths = struct {
         );
         defer allocator.free(lock);
         try std.testing.expectEqualStrings("prior lock bytes\n", lock);
-        try expectPathAbsent(self.cache);
+        try expectStoreEntries(self.host.cachePath(), &.{});
     }
 };
 
 test "pkg sync: resolves transitive MVS and writes canonical lock" {
     var fixture = try HttpsFixture.start();
     defer fixture.stop();
-    var scratch = try Scratch.init();
-    defer scratch.deinit();
-    try scratch.directory.dir.createDir(std.testing.io, "project", .default_dir);
-    const cache = try scratch.pathFor("cache");
-    defer allocator.free(cache);
-    const project = try scratch.pathFor("project");
-    defer allocator.free(project);
-    const environ: []const machine.Environ.Entry = &.{.{ .name = "ECL_CACHE", .value = cache }};
+    var host = try PackageHost.init(.{ .tls = true, .cache = true });
+    defer host.deinit();
     const source = try syncSource(
         fixture.root_manifest,
-        project,
         " dup 'packages at dict.keys sort swap ['packages \"c\" 'version] at-path",
     );
     defer allocator.free(source);
-    try expectHostStackEnviron(source, "(\"a\" \"b\" \"c\") \"1.5.0\"", true, environ);
+    try host.expectStack(source, "(\"a\" \"b\" \"c\") \"1.5.0\"");
 
-    const lock = try scratch.directory.dir.readFileAlloc(std.testing.io, "project/ecl.lock", allocator, .unlimited);
+    const lock = try host.scratch.directory.dir.readFileAlloc(std.testing.io, "project/ecl.lock", allocator, .unlimited);
     defer allocator.free(lock);
     const canonical = try canonicalLockSource(lock);
     defer allocator.free(canonical);
-    try expectHostStack(canonical, "1", false);
-    try expectStoreEntries(cache, &.{ "a-1.0.0-", "b-1.0.0-", "c-1.5.0-" });
+    try host.expectStack(canonical, "1");
+    try expectStoreEntries(host.cachePath(), &.{ "a-1.0.0-", "b-1.0.0-", "c-1.5.0-" });
 }
 
 test "pkg sync: deleting lock reproduces identical bytes without refetching present entries" {
     var fixture = try HttpsFixture.start();
     defer fixture.stop();
-    var scratch = try Scratch.init();
-    defer scratch.deinit();
-    try scratch.directory.dir.createDir(std.testing.io, "project", .default_dir);
-    const cache = try scratch.pathFor("cache");
-    defer allocator.free(cache);
-    const project = try scratch.pathFor("project");
-    defer allocator.free(project);
-    const environ: []const machine.Environ.Entry = &.{.{ .name = "ECL_CACHE", .value = cache }};
-    const source = try syncSource(fixture.root_manifest, project, " pop");
+    var host = try PackageHost.init(.{ .tls = true, .cache = true });
+    defer host.deinit();
+    const source = try syncSource(fixture.root_manifest, " pop");
     defer allocator.free(source);
-    try expectHostStackEnviron(source, "", true, environ);
-    const first = try scratch.directory.dir.readFileAlloc(std.testing.io, "project/ecl.lock", allocator, .unlimited);
+    try host.expectStack(source, "");
+    const first = try host.scratch.directory.dir.readFileAlloc(std.testing.io, "project/ecl.lock", allocator, .unlimited);
     defer allocator.free(first);
-    try scratch.directory.dir.deleteFile(std.testing.io, "project/ecl.lock");
-    try expectHostStackEnviron(source, "", true, environ);
-    const second = try scratch.directory.dir.readFileAlloc(std.testing.io, "project/ecl.lock", allocator, .unlimited);
+    try host.scratch.directory.dir.deleteFile(std.testing.io, "project/ecl.lock");
+    try host.expectStack(source, "");
+    const second = try host.scratch.directory.dir.readFileAlloc(std.testing.io, "project/ecl.lock", allocator, .unlimited);
     defer allocator.free(second);
     try std.testing.expectEqualStrings(first, second);
 
     const counts = try requestCountSource(fixture.port);
     defer allocator.free(counts);
-    try expectHostStack(counts, "2 2 2 2", true);
+    try host.expectStack(counts, "2 2 2 2");
 }
 
 test "pkg sync: hash mismatch names package and hashes without store or lock" {
     var fixture = try HttpsFixture.start();
     defer fixture.stop();
-    var scratch = try Scratch.init();
-    defer scratch.deinit();
-    const paths = try FailurePaths.init(&scratch);
-    defer paths.deinit();
-    const source = try syncSource(fixture.hash_mismatch_manifest, paths.project, "");
+    var host = try PackageHost.init(.{ .tls = true, .cache = true });
+    defer host.deinit();
+    const paths = try FailurePaths.init(&host);
+    const source = try syncSource(fixture.hash_mismatch_manifest, "");
     defer allocator.free(source);
-    const environ: []const machine.Environ.Entry = &.{.{ .name = "ECL_CACHE", .value = paths.cache }};
-    try expectHostErrorEnviron(source, .{
+    try host.expectError(source, .{
         .name = "hash mismatch",
         .source = source,
         .kind = "domain",
@@ -907,41 +933,37 @@ test "pkg sync: hash mismatch names package and hashes without store or lock" {
             .{ .name = "declared-hash", .expected = .{ .string = "sha256-0000000000000000000000000000000000000000000000000000000000000000" } },
             .{ .name = "actual-hash", .expected = .{ .string = fixture.hash_mismatch_actual_hash } },
         },
-    }, true, environ);
+    });
     try paths.expectUnchanged();
 }
 
 test "pkg sync: prefix violation names offender without retained entry" {
     var fixture = try HttpsFixture.start();
     defer fixture.stop();
-    var scratch = try Scratch.init();
-    defer scratch.deinit();
-    const paths = try FailurePaths.init(&scratch);
-    defer paths.deinit();
-    const source = try syncSource(fixture.prefix_violation_manifest, paths.project, "");
+    var host = try PackageHost.init(.{ .tls = true, .cache = true });
+    defer host.deinit();
+    const paths = try FailurePaths.init(&host);
+    const source = try syncSource(fixture.prefix_violation_manifest, "");
     defer allocator.free(source);
-    const environ: []const machine.Environ.Entry = &.{.{ .name = "ECL_CACHE", .value = paths.cache }};
-    try expectHostErrorEnviron(source, .{
+    try host.expectError(source, .{
         .name = "prefix violation",
         .source = source,
         .kind = "domain",
         .message_contains = "outside export namespace `foo`",
         .data = &.{.{ .name = "package", .expected = .{ .string = "foo" } }},
-    }, true, environ);
+    });
     try paths.expectUnchanged();
 }
 
 test "pkg sync: manifest identity mismatch retains no entry or lock" {
     var fixture = try HttpsFixture.start();
     defer fixture.stop();
-    var scratch = try Scratch.init();
-    defer scratch.deinit();
-    const paths = try FailurePaths.init(&scratch);
-    defer paths.deinit();
-    const source = try syncSource(fixture.identity_mismatch_manifest, paths.project, "");
+    var host = try PackageHost.init(.{ .tls = true, .cache = true });
+    defer host.deinit();
+    const paths = try FailurePaths.init(&host);
+    const source = try syncSource(fixture.identity_mismatch_manifest, "");
     defer allocator.free(source);
-    const environ: []const machine.Environ.Entry = &.{.{ .name = "ECL_CACHE", .value = paths.cache }};
-    try expectHostErrorEnviron(source, .{
+    try host.expectError(source, .{
         .name = "identity mismatch",
         .source = source,
         .kind = "domain",
@@ -952,23 +974,21 @@ test "pkg sync: manifest identity mismatch retains no entry or lock" {
             .{ .name = "actual-name", .expected = .{ .string = "actual" } },
             .{ .name = "actual-version", .expected = .{ .string = "1.0.0" } },
         },
-    }, true, environ);
+    });
     try paths.expectUnchanged();
 }
 
 test "pkg sync: non-success HTTP names package URL and status" {
     var fixture = try HttpsFixture.start();
     defer fixture.stop();
-    var scratch = try Scratch.init();
-    defer scratch.deinit();
-    const paths = try FailurePaths.init(&scratch);
-    defer paths.deinit();
-    const source = try syncSource(fixture.non_success_manifest, paths.project, "");
+    var host = try PackageHost.init(.{ .tls = true, .cache = true });
+    defer host.deinit();
+    const paths = try FailurePaths.init(&host);
+    const source = try syncSource(fixture.non_success_manifest, "");
     defer allocator.free(source);
     const url = try std.fmt.allocPrint(allocator, "https://127.0.0.1:{d}/status/503", .{fixture.port});
     defer allocator.free(url);
-    const environ: []const machine.Environ.Entry = &.{.{ .name = "ECL_CACHE", .value = paths.cache }};
-    try expectHostErrorEnviron(source, .{
+    try host.expectError(source, .{
         .name = "non-success response",
         .source = source,
         .kind = "io",
@@ -978,65 +998,44 @@ test "pkg sync: non-success HTTP names package URL and status" {
             .{ .name = "url", .expected = .{ .string = url } },
             .{ .name = "status", .expected = .{ .int = 503 } },
         },
-    }, true, environ);
+    });
     try paths.expectUnchanged();
 }
 
-test "pkg sync: cache precedence selects ECL CACHE then XDG then HOME" {
+test "pkg sync: verification streams every selected seal and offline sync names an absent entry" {
     var fixture = try HttpsFixture.start();
     defer fixture.stop();
-    var scratch = try Scratch.init();
-    defer scratch.deinit();
-    const ecl_cache = try scratch.pathFor("ecl-cache");
-    defer allocator.free(ecl_cache);
-    const xdg_cache = try scratch.pathFor("xdg-cache");
-    defer allocator.free(xdg_cache);
-    const home = try scratch.pathFor("home");
-    defer allocator.free(home);
+    var host = try PackageHost.init(.{ .tls = true, .cache = true });
+    defer host.deinit();
+    const online = try syncSource(fixture.root_manifest, " pop");
+    defer allocator.free(online);
+    try host.expectStack(online, "");
+    const lock = try host.scratch.directory.dir.readFileAlloc(std.testing.io, "project/ecl.lock", allocator, .unlimited);
+    defer allocator.free(lock);
 
-    try scratch.directory.dir.createDir(std.testing.io, "project-ecl", .default_dir);
-    const project_ecl = try scratch.pathFor("project-ecl");
-    defer allocator.free(project_ecl);
-    const ecl_source = try syncSource(fixture.root_manifest, project_ecl, " pop");
-    defer allocator.free(ecl_source);
-    const ecl_environ: []const machine.Environ.Entry = &.{
-        .{ .name = "ECL_CACHE", .value = ecl_cache },
-        .{ .name = "XDG_CACHE_HOME", .value = xdg_cache },
-        .{ .name = "HOME", .value = home },
-    };
-    try expectHostStackEnviron(ecl_source, "", true, ecl_environ);
-    try expectStoreEntries(ecl_cache, &.{ "a-1.0.0-", "b-1.0.0-", "c-1.5.0-" });
-    try expectPathAbsent(xdg_cache);
-    try expectPathAbsent(home);
+    // Verification streams every retained seal from the cache store.
+    var verify = std.Io.Writer.Allocating.init(allocator);
+    defer verify.deinit();
+    try appendString(&verify.writer, lock);
+    try verify.writer.writeAll(" pkg.lock.read pkg.sync.verify");
+    try host.expectStack(verify.written(), "3");
 
-    try scratch.directory.dir.createDir(std.testing.io, "project-xdg", .default_dir);
-    const project_xdg = try scratch.pathFor("project-xdg");
-    defer allocator.free(project_xdg);
-    const xdg_source = try syncSource(fixture.root_manifest, project_xdg, " pop");
-    defer allocator.free(xdg_source);
-    const xdg_environ: []const machine.Environ.Entry = &.{
-        .{ .name = "ECL_CACHE", .value = "" },
-        .{ .name = "XDG_CACHE_HOME", .value = xdg_cache },
-        .{ .name = "HOME", .value = home },
-    };
-    try expectHostStackEnviron(xdg_source, "", true, xdg_environ);
-    const xdg_store = try std.fmt.allocPrint(allocator, "{s}/ecl/pkg", .{xdg_cache});
-    defer allocator.free(xdg_store);
-    try expectStoreEntries(xdg_store, &.{ "a-1.0.0-", "b-1.0.0-", "c-1.5.0-" });
-    try expectPathAbsent(home);
-
-    try scratch.directory.dir.createDir(std.testing.io, "project-home", .default_dir);
-    const project_home = try scratch.pathFor("project-home");
-    defer allocator.free(project_home);
-    const home_source = try syncSource(fixture.root_manifest, project_home, " pop");
-    defer allocator.free(home_source);
-    const home_environ: []const machine.Environ.Entry = &.{
-        .{ .name = "ECL_CACHE", .value = "" },
-        .{ .name = "XDG_CACHE_HOME", .value = "" },
-        .{ .name = "HOME", .value = home },
-    };
-    try expectHostStackEnviron(home_source, "", true, home_environ);
-    const home_store = try std.fmt.allocPrint(allocator, "{s}/.cache/ecl/pkg", .{home});
-    defer allocator.free(home_store);
-    try expectStoreEntries(home_store, &.{ "a-1.0.0-", "b-1.0.0-", "c-1.5.0-" });
+    // Offline discovery names the first absent exact entry by package,
+    // store, and key, and opens no request.
+    var offline = std.Io.Writer.Allocating.init(allocator);
+    defer offline.deinit();
+    try appendString(&offline.writer, fixture.root_manifest);
+    try offline.writer.writeAll(" pkg.manifest.read pkg.sync.run-offline pop");
+    var empty = try PackageHost.init(.{ .cache = true });
+    defer empty.deinit();
+    try empty.expectError(offline.written(), .{
+        .name = "offline missing entry",
+        .source = offline.written(),
+        .kind = "io",
+        .message_contains = "missing a package store entry",
+        .data = &.{
+            .{ .name = "package", .expected = .{ .string = "a" } },
+            .{ .name = "store", .expected = .{ .symbol = "cache" } },
+        },
+    });
 }

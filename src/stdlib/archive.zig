@@ -4,15 +4,19 @@
 //! internal byte leaf when available and validates any equivalent list, so the
 //! module never assigns language semantics to a storage representation.
 const std = @import("std");
-const builtin = @import("builtin");
 const value = @import("../value.zig");
 const heap = @import("../heap.zig");
 const env = @import("../env.zig");
+const external = @import("../external.zig");
+const fsport = @import("../filesystem_port.zig");
+const intern = @import("../intern.zig");
 const machine = @import("../machine.zig");
+const package_authority = @import("../package_authority.zig");
 const storage = @import("../kernel_storage.zig");
 const list = @import("../list.zig");
 const poll = @import("../poll.zig");
 const pkg_catalog = @import("../pkg_catalog.zig");
+const pkg_lock = @import("../pkg_lock.zig");
 
 const Value = value.Value;
 const Machine = machine.Machine;
@@ -33,8 +37,8 @@ pub const words = [_]env.BuiltinWord{
     },
     .{
         .name = "unpack-tgz",
-        .doc = "( bytes destination -- regular-file-paths ) Validate and atomically " ++
-            "extract a gzip tar into a previously absent destination.",
+        .doc = "( bytes root destination -- regular-file-paths ) Validate and atomically " ++
+            "extract a gzip tar into a previously absent destination beneath a named root.",
         .primitive = unpackTgz,
     },
 };
@@ -95,15 +99,18 @@ const Sha256Driver = struct {
 };
 
 fn unpackTgz(evaluator: *Machine) MachineError!void {
-    try evaluator.require(2);
+    try evaluator.require(3);
     var destination = try evaluator.popValue();
     errdefer destination.deinit();
-    if (!destination.borrow().isString()) return evaluator.typeError("a string destination");
+    if (!destination.borrow().isString()) return evaluator.typeError("a string destination path");
+    var root = try evaluator.popValue();
+    errdefer root.deinit();
+    if (root.borrow() != .symbol) return evaluator.typeError("a root symbol");
     var bytes_value = try evaluator.popValue();
     errdefer bytes_value.deinit();
     if (bytes_value.borrow() != .list) return evaluator.typeError("an integer byte list");
-    const io = evaluator.unit.inherited.host_io orelse {
-        const failure = evaluator.fail(.io, "archive extraction is unavailable");
+    const access = evaluator.unit.inherited.filesystem_access orelse {
+        const failure = evaluator.fail(.domain, "archive extraction is unavailable");
         evaluator.addErrorPath(destination.borrow());
         return failure;
     };
@@ -112,9 +119,13 @@ fn unpackTgz(evaluator: *Machine) MachineError!void {
     const entries = poll.ChunkList(Entry).init(evaluator.allocator());
     try evaluator.startDriver(UnpackDriver{
         .allocator = evaluator.allocator(),
-        .io = io,
+        .io = fsport.hostIo(access),
+        .authority = .{ .filesystem = access },
         .bytes_value = .init(bytes_value.take()),
-        .source = .init(.{ .unpack = .{ .destination = .init(destination.take()) } }),
+        .source = .init(.{ .unpack = .{
+            .root = .init(root.take()),
+            .destination = .init(destination.take()),
+        } }),
         .entries = .init(entries),
         .state = .{ .parsing = .{ .encode_bytes = .{
             .byte = .init(byte_encoder),
@@ -140,6 +151,7 @@ pub fn inspectPackage(evaluator: *Machine) MachineError!void {
     try evaluator.startDriver(UnpackDriver{
         .allocator = evaluator.allocator(),
         .io = null,
+        .authority = .none,
         .bytes_value = .init(bytes_value.take()),
         .source = .init(.{ .inspect = .{ .package = .init(package.take()) } }),
         .entries = .init(entries),
@@ -150,35 +162,65 @@ pub fn inspectPackage(evaluator: *Machine) MachineError!void {
     });
 }
 
+/// Resolves the `'cache`/`'vendor` store symbol a package word names against
+/// the Session's package authority. Absence of the authority, an unknown store
+/// symbol, and an unavailable store are distinct failures.
+pub fn packageStore(evaluator: *Machine, store: Value, path_value: Value) MachineError!std.Io.Dir {
+    const access = evaluator.unit.inherited.package_access orelse {
+        const failure = evaluator.fail(.domain, "package store authority is unavailable");
+        evaluator.addErrorPath(path_value);
+        return failure;
+    };
+    const kind = storeKind(store) orelse return evaluator.fail(.domain, "package store must be 'cache or 'vendor");
+    return package_authority.storeDir(access, kind) orelse {
+        const failure = evaluator.fail(
+            .io,
+            "package store is unavailable; set ECL_CACHE, XDG_CACHE_HOME, or HOME",
+        );
+        evaluator.addErrorPath(path_value);
+        return failure;
+    };
+}
+
+fn storeKind(store: Value) ?package_authority.Store {
+    if (store != .symbol) return null;
+    const name = intern.get(store.symbol);
+    inline for (std.enums.values(package_authority.Store)) |kind| {
+        if (std.mem.eql(u8, name, kind.symbol())) return kind;
+    }
+    return null;
+}
+
 /// Package installation repeats the package scan at the mutation sink before
 /// staging any member. The active word remains pkg.store.install.
 pub fn installPackage(evaluator: *Machine) MachineError!void {
-    try evaluator.require(3);
-    var destination = try evaluator.popValue();
-    errdefer destination.deinit();
-    if (!destination.borrow().isString()) return evaluator.typeError("a string destination");
+    try evaluator.require(4);
+    var key = try evaluator.popValue();
+    errdefer key.deinit();
+    if (!key.borrow().isString()) return evaluator.typeError("a string store key");
+    var store = try evaluator.popValue();
+    errdefer store.deinit();
+    if (store.borrow() != .symbol) return evaluator.typeError("a store symbol");
     var package = try evaluator.popValue();
     errdefer package.deinit();
     if (!package.borrow().isString()) return evaluator.typeError("a string package name");
     var bytes_value = try evaluator.popValue();
     errdefer bytes_value.deinit();
     if (bytes_value.borrow() != .list) return evaluator.typeError("an integer byte list");
-    const io = evaluator.unit.inherited.host_io orelse {
-        const failure = evaluator.fail(.io, "package installation is unavailable");
-        evaluator.addErrorPath(destination.borrow());
-        return failure;
-    };
+    const store_dir = try packageStore(evaluator, store.borrow(), key.borrow());
+    const access = evaluator.unit.inherited.package_access.?;
     const byte_encoder = storage.ByteVectorEncoder.init(evaluator.allocator(), bytes_value.borrow());
     const package_encoder = storage.ToUtf8Cursor.init(evaluator.allocator(), package.borrow());
-    const path_encoder = storage.ToUtf8Cursor.init(evaluator.allocator(), destination.borrow());
+    const path_encoder = storage.ToUtf8Cursor.init(evaluator.allocator(), key.borrow());
     const entries = poll.ChunkList(Entry).init(evaluator.allocator());
     try evaluator.startDriver(UnpackDriver{
         .allocator = evaluator.allocator(),
-        .io = io,
+        .io = package_authority.hostIo(access),
+        .authority = .{ .package = store_dir },
         .bytes_value = .init(bytes_value.take()),
         .source = .init(.{ .install = .{
             .package = .init(package.take()),
-            .destination = .init(destination.take()),
+            .destination = .init(key.take()),
         } }),
         .entries = .init(entries),
         .state = .{ .parsing = .{ .encode_bytes = .{
@@ -237,57 +279,6 @@ const GzipDecoder = struct {
 
 const Mode = enum { unpack, package_inspect, package_install };
 
-var next_stage_identity: std.atomic.Value(u64) = .init(1);
-
-const darwin = struct {
-    extern "c" fn renameatx_np(
-        old_dir: c_int,
-        old_path: [*:0]const u8,
-        new_dir: c_int,
-        new_path: [*:0]const u8,
-        flags: c_uint,
-    ) c_int;
-};
-
-pub fn renamePreserve(
-    parent: std.Io.Dir,
-    old_name: []const u8,
-    new_name: []const u8,
-    io: std.Io,
-) std.Io.Dir.RenamePreserveError!void {
-    if (comptime builtin.os.tag == .linux or builtin.os.tag == .windows)
-        return parent.renamePreserve(old_name, parent, new_name, io);
-    if (comptime builtin.os.tag.isDarwin()) {
-        const old_path = try std.posix.toPosixPath(old_name);
-        const new_path = try std.posix.toPosixPath(new_name);
-        while (true) switch (std.c.errno(darwin.renameatx_np(
-            parent.handle,
-            &old_path,
-            parent.handle,
-            &new_path,
-            0x00000004,
-        ))) {
-            .SUCCESS => return,
-            .INTR => continue,
-            .ACCES => return error.AccessDenied,
-            .PERM => return error.PermissionDenied,
-            .EXIST, .NOTEMPTY => return error.PathAlreadyExists,
-            .NOENT => return error.FileNotFound,
-            .NOTDIR => return error.NotDir,
-            .ISDIR => return error.IsDir,
-            .BUSY => return error.FileBusy,
-            .DQUOT => return error.DiskQuota,
-            .LOOP => return error.SymLinkLoop,
-            .MLINK => return error.LinkQuotaExceeded,
-            .NOSPC => return error.NoSpaceLeft,
-            .ROFS => return error.ReadOnlyFileSystem,
-            .XDEV => return error.CrossDevice,
-            else => return error.Unexpected,
-        };
-    }
-    return error.OperationUnsupported;
-}
-
 fn observeCleanupError(action: []const u8, err: anyerror) void {
     switch (err) {
         error.FileNotFound, error.NotDir => {},
@@ -295,39 +286,44 @@ fn observeCleanupError(action: []const u8, err: anyerror) void {
     }
 }
 
+/// Where a publication is allowed to land. Generic extraction is confined to
+/// a named Session filesystem root; package installation to a package store
+/// handle the Session's package authority retained. Inspection publishes
+/// nothing.
+const Authority = union(enum) {
+    none,
+    filesystem: *external.FilesystemAccess,
+    package: std.Io.Dir,
+};
+
 const UnpackDriver = struct {
     pub const ownership: heap.DriverOwnership = .bounded_retirement;
 
     retirement: heap.ReleaseDomain.Retirement = .{},
     allocator: std.mem.Allocator,
     io: ?std.Io,
+    authority: Authority,
     bytes_value: heap.Owned(Value),
     source: heap.Owned(SourceTarget),
     entries: heap.Owned(EntryList),
     state: State,
-    /// The store parents this install created, if any. An install that never
-    /// publishes has to leave the filesystem as it found it, and the parents
-    /// are created before the staging directory that rollback already
-    /// removes, so they are recorded here rather than in one publication
-    /// state.
-    store_parents: ?CreatedParents = null,
-
-    const CreatedParents = struct {
-        /// The parent path `createDirPath` was asked for.
-        path: []u8,
-        /// The length of the prefix of `path` that already existed. Levels
-        /// below it are the host's and must survive.
-        existing: usize,
-    };
+    /// The resolved parent directory and final name the publication targets.
+    /// Set by the resolver phase for extraction and directly from the store
+    /// handle for installation; every namespace operation is relative to it.
+    destination: ?fsport.Resolved = null,
+    /// The live-operation reservation an extraction holds from authorization
+    /// through terminal cleanup.
+    slot: ?fsport.OperationSlot = null,
 
     const Staged = struct {
         result: Value,
+        /// The private staging directory name inside the destination parent.
         path: heap.Owned([]u8),
     };
     const SourceTarget = union(enum) {
         pub const owned_disposal: heap.OwnedDisposal = .deinit;
 
-        unpack: struct { destination: heap.Owned(Value) },
+        unpack: struct { root: heap.Owned(Value), destination: heap.Owned(Value) },
         inspect: struct { package: heap.Owned(Value) },
         install: struct {
             package: heap.Owned(Value),
@@ -340,7 +336,10 @@ const UnpackDriver = struct {
             allocator: std.mem.Allocator,
         ) void {
             switch (self.*) {
-                .unpack => |*source| source.destination.deinit(releases, allocator),
+                .unpack => |*source| {
+                    source.root.deinit(releases, allocator);
+                    source.destination.deinit(releases, allocator);
+                },
                 .inspect => |*source| source.package.deinit(releases, allocator),
                 .install => |*source| {
                     source.package.deinit(releases, allocator);
@@ -486,6 +485,7 @@ const UnpackDriver = struct {
         },
     };
     const Publication = union(enum) {
+        resolve: struct { result: Value, resolver: fsport.Resolver },
         destination_check: Value,
         stage_path: Value,
         create_stage: Staged,
@@ -636,7 +636,7 @@ const UnpackDriver = struct {
                     active,
                     materialization,
                 ),
-                .release_result_inputs => |*release| self.releaseResultInputs(
+                .release_result_inputs => |*release| try self.releaseResultInputs(
                     evaluator,
                     active,
                     release,
@@ -685,11 +685,21 @@ const UnpackDriver = struct {
         };
     }
 
+    /// The canonical path text the caller supplied: a root-relative path for
+    /// extraction, a store key for installation.
     fn archiveDestination(archive: *Archive) []u8 {
         return switch (archive.target) {
             .unpack => |*path| path.borrow(),
             .install => |*install| install.destination.borrow(),
             .inspect => unreachable,
+        };
+    }
+
+    /// The resolved publication parent and final entry name.
+    fn destinationEntry(self: *UnpackDriver) @FieldType(fsport.Resolved, "entry") {
+        return switch (self.destination.?) {
+            .entry => |entry| entry,
+            .directory => unreachable,
         };
     }
 
@@ -780,6 +790,27 @@ const UnpackDriver = struct {
                     self.allocator.free(path);
                     return self.failDomain(evaluator, "destination is empty");
                 }
+                switch (self.authority) {
+                    .filesystem => |access| self.authorizeExtraction(evaluator, access, path) catch |err| {
+                        self.allocator.free(path);
+                        return err;
+                    },
+                    .package => |store_dir| {
+                        if (!pkg_lock.validStoreKey(path)) {
+                            self.allocator.free(path);
+                            return self.failDomain(evaluator, "package destination is not a canonical store key");
+                        }
+                        const name = self.allocator.dupe(u8, path) catch |err| {
+                            self.allocator.free(path);
+                            return err;
+                        };
+                        self.destination = .{ .entry = .{
+                            .parent = .{ .dir = store_dir, .owned = false },
+                            .name = name,
+                        } };
+                    },
+                    .none => unreachable,
+                }
                 const bytes = encoding.bytes.take();
                 encoding.destination.deinit(evaluator.releaseDomain(), self.allocator);
                 if (encoding.package) |*package| {
@@ -798,6 +829,27 @@ const UnpackDriver = struct {
                 return .yielded;
             },
         }
+    }
+
+    /// Grammar, root, permission, and quota checks for extraction, before any
+    /// archive byte is decompressed.
+    fn authorizeExtraction(
+        self: *UnpackDriver,
+        evaluator: *Machine,
+        access: *external.FilesystemAccess,
+        path: []const u8,
+    ) MachineError!void {
+        const class = fsport.classifyPath(path) catch
+            return self.failReason(evaluator, .domain, .invalid_path, "destination is not a canonical relative path");
+        if (class == .root)
+            return self.failReason(evaluator, .domain, .invalid_path, "destination must name a child entry, not the root");
+        const root_value = self.source.borrow().unpack.root.borrow();
+        const root = fsport.findRoot(access, root_value.symbol) orelse
+            return self.failReason(evaluator, .domain, .unknown_root, "unknown filesystem root");
+        if (!root.allows(.create))
+            return self.failReason(evaluator, .domain, .denied, "filesystem root denies create");
+        self.slot = fsport.reserveOperation(access) orelse
+            return self.failReason(evaluator, .overflow, .limit, "filesystem operation limit reached");
     }
 
     fn encodePackage(
@@ -1337,7 +1389,7 @@ const UnpackDriver = struct {
         evaluator: *Machine,
         active: *Active,
         release: *@FieldType(ScanWork, "release_result_inputs"),
-    ) machine.WorkProgress {
+    ) MachineError!machine.WorkProgress {
         if (release.release.index != release.release.built) {
             evaluator.releaseDomain().releaseValue(
                 release.release.values[release.release.index],
@@ -1345,9 +1397,30 @@ const UnpackDriver = struct {
             release.release.index += 1;
             return .yielded;
         }
+        // The resolver is constructed before the input storage is released,
+        // so an allocation failure leaves this state owning exactly what its
+        // retirement releases.
+        const publication: Publication = switch (self.authority) {
+            .filesystem => |access| publication: {
+                const root = fsport.findRoot(access, self.source.borrow().unpack.root.borrow().symbol).?;
+                const resolver = fsport.Resolver.init(
+                    self.allocator,
+                    self.io.?,
+                    root.dir(),
+                    archiveDestination(&active.archive),
+                    fsport.limitsOf(access),
+                    .no_follow_final,
+                ) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.PathTooLong => return self.failReason(evaluator, .overflow, .limit, "destination exceeds the resolver byte limit"),
+                };
+                break :publication .{ .resolve = .{ .result = release.result, .resolver = resolver } };
+            },
+            .package => .{ .destination_check = release.result },
+            .none => unreachable,
+        };
         self.allocator.free(release.release.values);
-        const result = release.result;
-        active.work = .{ .publication = .{ .destination_check = result } };
+        active.work = .{ .publication = publication };
         return .yielded;
     }
 
@@ -1359,14 +1432,33 @@ const UnpackDriver = struct {
     ) MachineError!machine.WorkProgress {
         const io = self.io.?;
         switch (publication.*) {
+            .resolve => |*resolving| switch (try resolving.resolver.step()) {
+                .pending => return .yielded,
+                .failed => |reason| return self.failReason(
+                    evaluator,
+                    if (reason == .limit) .overflow else .io,
+                    reason,
+                    reason.message(),
+                ),
+                .complete => |resolved| {
+                    resolving.resolver.deinit();
+                    const result = resolving.result;
+                    switch (resolved) {
+                        .entry => self.destination = resolved,
+                        .directory => |*handle| {
+                            var closing = handle.*;
+                            closing.close(io);
+                            publication.* = .{ .destination_check = result };
+                            return self.failReason(evaluator, .domain, .invalid_path, "destination must name a child entry, not the root");
+                        },
+                    }
+                    publication.* = .{ .destination_check = result };
+                    return .yielded;
+                },
+            },
             .destination_check => |result| {
-                if (self.operationMode() == .package_install) {
-                    const parent = std.fs.path.dirname(archiveDestination(archive)) orelse ".";
-                    try self.recordStoreParents(io, parent);
-                    std.Io.Dir.cwd().createDirPath(io, parent) catch |err|
-                        return self.failIo(evaluator, "cannot create package store parents", err);
-                }
-                std.Io.Dir.cwd().access(io, archiveDestination(archive), .{}) catch |err| switch (err) {
+                const target = self.destinationEntry();
+                _ = target.parent.dir.statFile(io, target.name, .{ .follow_symlinks = false }) catch |err| switch (err) {
                     error.FileNotFound => {
                         publication.* = .{ .stage_path = result };
                         return .yielded;
@@ -1376,22 +1468,17 @@ const UnpackDriver = struct {
                 return self.failDestinationExists(evaluator, "archive destination already exists");
             },
             .stage_path => |result| {
-                const identity = next_stage_identity.fetchAdd(1, .monotonic);
-                const destination_path = archiveDestination(archive);
-                const parent = std.fs.path.dirname(destination_path) orelse ".";
-                const basename = std.fs.path.basename(destination_path);
-                const path = try std.fmt.allocPrint(
-                    self.allocator,
-                    "{s}{c}.ecl-unpack-{x}-{s}",
-                    .{ parent, std.fs.path.sep, identity, basename },
-                );
+                var name_buffer: [24]u8 = undefined;
+                const name = fsport.stagingDirectoryName(io, &name_buffer);
+                const path = try self.allocator.dupe(u8, name);
                 publication.* = .{ .create_stage = .{
                     .result = result,
                     .path = .init(path),
                 } };
             },
             .create_stage => |*staged| {
-                std.Io.Dir.cwd().createDir(io, staged.path.borrow(), .default_dir) catch |err| switch (err) {
+                const target = self.destinationEntry();
+                target.parent.dir.createDir(io, staged.path.borrow(), .default_dir) catch |err| switch (err) {
                     error.PathAlreadyExists => {
                         const result = staged.result;
                         staged.path.deinit(evaluator.releaseDomain(), self.allocator);
@@ -1404,7 +1491,10 @@ const UnpackDriver = struct {
                 publication.* = .{ .open_stage = moved };
             },
             .open_stage => |*staged| {
-                const directory = std.Io.Dir.cwd().openDir(io, staged.path.borrow(), .{}) catch |err|
+                const target = self.destinationEntry();
+                const directory = target.parent.dir.openDir(io, staged.path.borrow(), .{
+                    .follow_symlinks = false,
+                }) catch |err|
                     return self.failIo(evaluator, "cannot open archive staging directory", err);
                 const moved = staged.*;
                 publication.* = .{ .extract = .{
@@ -1429,10 +1519,14 @@ const UnpackDriver = struct {
                                 },
                             };
                             const validation = &publication.validate_package;
+                            // The staged tree is validated through its own
+                            // open handle; the catalog it produces is
+                            // discarded, so relative artifact paths suffice.
                             validation.catalog = try evaluator.beginPackageTreeValidation(
                                 io,
                                 archivePackageName(archive),
-                                validation.staged.path.borrow(),
+                                ".",
+                                validation.dir,
                                 &validation.diagnostic,
                             );
                         } else {
@@ -1546,16 +1640,13 @@ const UnpackDriver = struct {
                 }
             },
             .commit => |*commit_state| {
-                const destination_path = archiveDestination(archive);
-                const parent_path = std.fs.path.dirname(destination_path) orelse ".";
-                var parent = std.Io.Dir.cwd().openDir(io, parent_path, .{}) catch |err|
-                    return self.failIo(evaluator, "cannot open archive destination parent", err);
-                defer parent.close(io);
-                renamePreserve(
-                    parent,
-                    std.fs.path.basename(commit_state.staged.path.borrow()),
-                    std.fs.path.basename(destination_path),
+                const target = self.destinationEntry();
+                fsport.renameNoReplace(
                     io,
+                    target.parent.dir,
+                    commit_state.staged.path.borrow(),
+                    target.parent.dir,
+                    target.name,
                 ) catch |err| switch (err) {
                     error.PathAlreadyExists => return self.failDestinationExists(
                         evaluator,
@@ -1576,6 +1667,27 @@ const UnpackDriver = struct {
     fn failDomain(self: *UnpackDriver, evaluator: *Machine, message: []const u8) MachineError {
         _ = self;
         return evaluator.fail(.domain, message);
+    }
+
+    /// Authority and resolution failures carry the same provenance the `fs`
+    /// words attach: the operation, root, path, and portable reason.
+    fn failReason(
+        self: *UnpackDriver,
+        evaluator: *Machine,
+        kind: machine.ErrorKind,
+        reason: fsport.Reason,
+        message: []const u8,
+    ) MachineError {
+        const operation = try intern.intern("unpack-tgz");
+        const reason_symbol = try intern.intern(reason.symbol());
+        const failure = evaluator.fail(kind, message);
+        const unpack = self.source.borrow().unpack;
+        evaluator.addErrorFilesystem(.{
+            .operation = .{ .symbol = operation },
+            .reason = .{ .symbol = reason_symbol },
+            .target = .{ .single = .{ .root = unpack.root.borrow(), .path = unpack.destination.borrow() } },
+        });
+        return failure;
     }
 
     fn failPackageMember(
@@ -1624,19 +1736,21 @@ const UnpackDriver = struct {
     ) void {
         const archive = takeArchive(&active.archive);
         switch (publication.*) {
-            // These three abandon the install before a staging directory
-            // exists, so the levels `.destination_check` created are already
-            // empty. Every other failing arm reaches them through rollback,
-            // which removes the stage root first.
+            .resolve => |*resolving| {
+                resolving.resolver.deinit();
+                releases.releaseValue(resolving.result);
+                self.state = .{ .cleanup_archive = archive };
+            },
+            // These abandon the publication before a staging directory
+            // exists. Every other failing arm reaches cleanup through
+            // rollback, which removes the stage root first.
             .destination_check, .stage_path => |result| {
                 releases.releaseValue(result);
-                self.removeCreatedStoreParents();
                 self.state = .{ .cleanup_archive = archive };
             },
             .create_stage => |*staged| {
                 releases.releaseValue(staged.result);
                 staged.path.deinit(releases, allocator);
-                self.removeCreatedStoreParents();
                 self.state = .{ .cleanup_archive = archive };
             },
             .open_stage => |*staged| {
@@ -1714,51 +1828,9 @@ const UnpackDriver = struct {
             },
             .published => |*path| {
                 path.deinit(releases, allocator);
-                self.releaseStoreParents();
                 self.state = .{ .cleanup_archive = archive };
             },
         }
-    }
-
-    /// Record which levels of the store parent path are ours to remove. The
-    /// probe walks up the path once, the way `createDirPath` walks down it.
-    fn recordStoreParents(
-        self: *UnpackDriver,
-        io: std.Io,
-        parent: []const u8,
-    ) error{OutOfMemory}!void {
-        if (self.store_parents != null) return;
-        var existing = parent.len;
-        while (existing != 0) {
-            if (std.Io.Dir.cwd().access(io, parent[0..existing], .{})) |_| break else |_| {}
-            existing = lastSlash(parent[0..existing]) orelse 0;
-        }
-        if (existing == parent.len) return;
-        self.store_parents = .{
-            .path = try self.allocator.dupe(u8, parent),
-            .existing = existing,
-        };
-    }
-
-    /// Remove the recorded levels deepest first. Any level that will not come
-    /// away is one another install has since put something in — the ordinary
-    /// case for a shared store root — and it and everything above it stay.
-    /// That is not a cleanup failure, so it is not reported as one.
-    fn removeCreatedStoreParents(self: *UnpackDriver) void {
-        const created = self.store_parents orelse return;
-        defer self.releaseStoreParents();
-        const io = self.io orelse return;
-        var end = created.path.len;
-        while (end > created.existing) {
-            std.Io.Dir.cwd().deleteDir(io, created.path[0..end]) catch return;
-            end = lastSlash(created.path[0..end]) orelse return;
-        }
-    }
-
-    fn releaseStoreParents(self: *UnpackDriver) void {
-        const created = self.store_parents orelse return;
-        self.allocator.free(created.path);
-        self.store_parents = null;
     }
 
     fn rollbackEntries(self: *UnpackDriver, created_count: usize) RollbackWork {
@@ -1775,9 +1847,10 @@ const UnpackDriver = struct {
         reopening: *@FieldType(State, "rollback_reopen"),
     ) bool {
         const context = &reopening.context;
-        const directory = std.Io.Dir.cwd().openDir(self.io.?, context.path.borrow(), .{}) catch |open_err| {
+        const parent = self.destinationEntry().parent.dir;
+        const directory = parent.openDir(self.io.?, context.path.borrow(), .{ .follow_symlinks = false }) catch |open_err| {
             observeCleanupError("reopen the stage", open_err);
-            std.Io.Dir.cwd().deleteDir(self.io.?, context.path.borrow()) catch |err|
+            parent.deleteDir(self.io.?, context.path.borrow()) catch |err|
                 observeCleanupError("remove an unopened stage", err);
             context.path.deinit(releases, allocator);
             const archive = takeArchive(&reopening.archive);
@@ -1852,12 +1925,9 @@ const UnpackDriver = struct {
             },
             .root => {
                 rollback.dir.close(self.io.?);
-                std.Io.Dir.cwd().deleteDir(self.io.?, rollback.context.path.borrow()) catch |err|
+                self.destinationEntry().parent.dir.deleteDir(self.io.?, rollback.context.path.borrow()) catch |err|
                     observeCleanupError("remove the stage root", err);
                 rollback.context.path.deinit(releases, allocator);
-                // The stage root sat inside them, so this is the first point
-                // at which the created store parents can be empty.
-                self.removeCreatedStoreParents();
                 const archive = takeArchive(&rollback.archive);
                 self.state = .{ .cleanup_archive = archive };
             },
@@ -2092,6 +2162,8 @@ const UnpackDriver = struct {
         self.bytes_value.deinit(releases, allocator);
         self.source.deinit(releases, allocator);
         self.entries.deinit(releases, allocator);
+        if (self.destination) |*destination| destination.deinit(allocator, self.io.?);
+        if (self.slot) |*slot| slot.release();
         allocator.destroy(self);
         return true;
     }

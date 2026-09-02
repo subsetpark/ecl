@@ -1,14 +1,17 @@
-//! Narrow filesystem authority for immutable package-store entries and locks.
+//! Narrow package-store authority over the Session's retained store handles.
 //!
 //! Archive inspection and installation delegate to archive.zig's shared
-//! hostile-input scanner. This module owns only the public capability table,
-//! destination probing, and atomic lock replacement; it exposes no raw handle,
-//! rename, or recursive-delete primitive to ECL.
+//! hostile-input scanner. Every other word here addresses one immutable entry
+//! by its canonical `<name>-<version>-<hex>` key inside the `'cache` or
+//! `'vendor` store the package authority opened at Session construction; no
+//! absolute path, raw handle, rename, or recursive-delete primitive reaches
+//! ECL, and a Session without package authority fails closed.
 const std = @import("std");
 const value = @import("../value.zig");
 const heap = @import("../heap.zig");
 const list = @import("../list.zig");
 const env = @import("../env.zig");
+const fsport = @import("../filesystem_port.zig");
 const machine = @import("../machine.zig");
 const pkg_lock = @import("../pkg_lock.zig");
 const storage = @import("../kernel_storage.zig");
@@ -18,6 +21,8 @@ const Value = value.Value;
 const Machine = machine.Machine;
 const MachineError = machine.MachineError;
 const work_quantum = machine.kernel_poll_quantum;
+/// A stored manifest larger than the lock reader's own bound is invalid data.
+const max_manifest_bytes: u64 = 16 * 1024 * 1024;
 
 pub const words = [_]env.BuiltinWord{
     .{
@@ -27,33 +32,28 @@ pub const words = [_]env.BuiltinWord{
     },
     .{
         .name = "install",
-        .doc = "( bytes package-name destination -- regular-file-paths ) Validate and atomically install an immutable package.",
+        .doc = "( bytes package-name store key -- regular-file-paths ) Validate and atomically install an immutable package under a canonical store key.",
         .primitive = archive.installPackage,
     },
     .{
         .name = "present?",
-        .doc = "( destination -- bool ) Return 1 only when an immutable package directory is present.",
+        .doc = "( store key -- bool ) Return 1 only when an immutable package directory is present under the key.",
         .primitive = present,
     },
     .{
         .name = "verify",
-        .doc = "( destination package-name hash -- ) Stream and verify an installed package's sealed source archive.",
+        .doc = "( store key package-name hash -- ) Stream and verify an installed package's sealed source archive.",
         .primitive = verify,
     },
     .{
         .name = "read-seal",
-        .doc = "( destination package-name hash -- bytes ) Verify and return an installed package's exact sealed archive bytes.",
+        .doc = "( store key package-name hash -- bytes ) Verify and return an installed package's exact sealed archive bytes.",
         .primitive = readSeal,
     },
     .{
-        .name = "write-lock",
-        .doc = "( text path -- ) Atomically replace a regular project data file while preserving it on failure.",
-        .primitive = writeLock,
-    },
-    .{
-        .name = "write-new",
-        .doc = "( text path -- ) Atomically create a project data file without replacing a racing destination.",
-        .primitive = writeNew,
+        .name = "manifest",
+        .doc = "( store key -- manifest-text ) Read an installed package's root manifest text.",
+        .primitive = manifest,
     },
     .{
         .name = "gc",
@@ -73,33 +73,33 @@ fn readSeal(evaluator: *Machine) MachineError!void {
 const SealMode = enum { verify, read };
 
 fn startSealDriver(evaluator: *Machine, mode: SealMode) MachineError!void {
-    try evaluator.require(3);
+    try evaluator.require(4);
     var hash_value = try evaluator.popValue();
     errdefer hash_value.deinit();
     if (!hash_value.borrow().isString()) return evaluator.typeError("a package hash");
     var package_value = try evaluator.popValue();
     errdefer package_value.deinit();
     if (!package_value.borrow().isString()) return evaluator.typeError("a package name");
-    var destination_value = try evaluator.popValue();
-    errdefer destination_value.deinit();
-    if (!destination_value.borrow().isString()) return evaluator.typeError("a string destination");
-    const io = evaluator.unit.inherited.host_io orelse {
-        const failure = evaluator.fail(.io, "package verification is unavailable");
-        evaluator.addErrorPath(destination_value.borrow());
-        return failure;
-    };
-    const destination_encoder = storage.ToUtf8Cursor.init(evaluator.allocator(), destination_value.borrow());
+    var key_value = try evaluator.popValue();
+    errdefer key_value.deinit();
+    if (!key_value.borrow().isString()) return evaluator.typeError("a string store key");
+    var store_value = try evaluator.popValue();
+    defer store_value.deinit();
+    if (store_value.borrow() != .symbol) return evaluator.typeError("a store symbol");
+    const store = try archive.packageStore(evaluator, store_value.borrow(), key_value.borrow());
+    const key_encoder = storage.ToUtf8Cursor.init(evaluator.allocator(), key_value.borrow());
     const package_encoder = storage.ToUtf8Cursor.init(evaluator.allocator(), package_value.borrow());
     const hash_encoder = storage.ToUtf8Cursor.init(evaluator.allocator(), hash_value.borrow());
     try evaluator.startDriver(VerifyDriver{
         .mode = mode,
         .allocator = evaluator.allocator(),
-        .io = io,
-        .destination_value = .init(destination_value.take()),
+        .io = evaluator.unit.inherited.host_io.?,
+        .store = store,
+        .key_value = .init(key_value.take()),
         .package_value = .init(package_value.take()),
         .hash_value = .init(hash_value.take()),
-        .state = .{ .encode_destination = .{
-            .destination = .init(destination_encoder),
+        .state = .{ .encode_key = .{
+            .key = .init(key_encoder),
             .package = .init(package_encoder),
             .hash = .init(hash_encoder),
         } },
@@ -115,7 +115,8 @@ const VerifyDriver = struct {
     mode: SealMode,
     allocator: std.mem.Allocator,
     io: std.Io,
-    destination_value: heap.Owned(Value),
+    store: std.Io.Dir,
+    key_value: heap.Owned(Value),
     package_value: heap.Owned(Value),
     hash_value: heap.Owned(Value),
     state: State,
@@ -123,101 +124,89 @@ const VerifyDriver = struct {
     hasher: std.crypto.hash.sha2.Sha256 = .init(.{}),
     digest: [32]u8 = @splat(0),
     rendered: [64]u8 = @splat(0),
-    const Paths = struct {
-        destination: heap.Owned([]u8),
+    const Names = struct {
+        key: heap.Owned([]u8),
         package: heap.Owned([]u8),
         hash: heap.Owned([]u8),
-        seal: heap.Owned([]u8),
 
-        fn deinit(self: *Paths, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
-            self.seal.deinit(releases, allocator);
+        fn deinit(self: *Names, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
             self.hash.deinit(releases, allocator);
             self.package.deinit(releases, allocator);
-            self.destination.deinit(releases, allocator);
+            self.key.deinit(releases, allocator);
         }
     };
     const State = union(enum) {
-        encode_destination: struct {
-            destination: heap.Owned(storage.ToUtf8Cursor),
+        encode_key: struct {
+            key: heap.Owned(storage.ToUtf8Cursor),
             package: heap.Owned(storage.ToUtf8Cursor),
             hash: heap.Owned(storage.ToUtf8Cursor),
         },
         encode_package: struct {
-            destination: heap.Owned([]u8),
+            key: heap.Owned([]u8),
             package: heap.Owned(storage.ToUtf8Cursor),
             hash: heap.Owned(storage.ToUtf8Cursor),
         },
         encode_hash: struct {
-            destination: heap.Owned([]u8),
+            key: heap.Owned([]u8),
             package: heap.Owned([]u8),
             hash: heap.Owned(storage.ToUtf8Cursor),
         },
-        prepare_open: struct {
-            destination: heap.Owned([]u8),
-            package: heap.Owned([]u8),
-            hash: heap.Owned([]u8),
-        },
-        open: Paths,
-        stat: struct { paths: Paths, file: std.Io.File },
+        open: Names,
+        stat: struct { names: Names, file: std.Io.File },
         read: struct {
-            paths: Paths,
+            names: Names,
             file: std.Io.File,
             size: u64,
             offset: u64,
             contents: ?heap.Owned([]u8),
         },
-        compare: struct { paths: Paths, contents: ?heap.Owned([]u8) },
+        compare: struct { names: Names, contents: ?heap.Owned([]u8) },
         materialize: struct {
-            paths: Paths,
+            names: Names,
             contents: heap.Owned([]u8),
             materializer: heap.Owned(list.ByteListMaterializer),
         },
-        complete: struct { paths: Paths, contents: heap.Owned([]u8) },
+        complete: struct { names: Names, contents: heap.Owned([]u8) },
 
         fn deinit(self: *State, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, io: std.Io) void {
             switch (self.*) {
-                .encode_destination => |*encode| {
+                .encode_key => |*encode| {
                     encode.hash.deinit(releases, allocator);
                     encode.package.deinit(releases, allocator);
-                    encode.destination.deinit(releases, allocator);
+                    encode.key.deinit(releases, allocator);
                 },
                 .encode_package => |*encode| {
                     encode.hash.deinit(releases, allocator);
                     encode.package.deinit(releases, allocator);
-                    encode.destination.deinit(releases, allocator);
+                    encode.key.deinit(releases, allocator);
                 },
                 .encode_hash => |*encode| {
                     encode.hash.deinit(releases, allocator);
                     encode.package.deinit(releases, allocator);
-                    encode.destination.deinit(releases, allocator);
+                    encode.key.deinit(releases, allocator);
                 },
-                .prepare_open => |*prepare| {
-                    prepare.hash.deinit(releases, allocator);
-                    prepare.package.deinit(releases, allocator);
-                    prepare.destination.deinit(releases, allocator);
-                },
-                .open => |*paths| paths.deinit(releases, allocator),
+                .open => |*names| names.deinit(releases, allocator),
                 .stat => |*stat_state| {
                     stat_state.file.close(io);
-                    stat_state.paths.deinit(releases, allocator);
+                    stat_state.names.deinit(releases, allocator);
                 },
                 .read => |*read_state| {
                     read_state.file.close(io);
                     if (read_state.contents) |*contents| contents.deinit(releases, allocator);
-                    read_state.paths.deinit(releases, allocator);
+                    read_state.names.deinit(releases, allocator);
                 },
                 .compare => |*compare_state| {
                     if (compare_state.contents) |*contents| contents.deinit(releases, allocator);
-                    compare_state.paths.deinit(releases, allocator);
+                    compare_state.names.deinit(releases, allocator);
                 },
                 .materialize => |*materialize_state| {
                     materialize_state.materializer.deinit(releases, allocator);
                     materialize_state.contents.deinit(releases, allocator);
-                    materialize_state.paths.deinit(releases, allocator);
+                    materialize_state.names.deinit(releases, allocator);
                 },
                 .complete => |*complete| {
                     complete.contents.deinit(releases, allocator);
-                    complete.paths.deinit(releases, allocator);
+                    complete.names.deinit(releases, allocator);
                 },
             }
         }
@@ -226,11 +215,10 @@ const VerifyDriver = struct {
     pub fn advance(evaluator: *Machine, self: *VerifyDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (self.state) {
-            .encode_destination => |*encode| self.encodeDestination(evaluator, encode),
+            .encode_key => |*encode| self.encodeKey(evaluator, encode),
             .encode_package => |*encode| self.encodePackage(evaluator, encode),
             .encode_hash => |*encode| self.encodeHash(evaluator, encode),
-            .prepare_open => |*prepare| self.prepareOpen(prepare),
-            .open => |*paths| self.open(evaluator, paths),
+            .open => |*names| self.open(evaluator, names),
             .stat => |*stat_state| self.stat(evaluator, stat_state),
             .read => |*read_state| self.read(evaluator, read_state),
             .compare => |*compare_state| self.compare(evaluator, compare_state),
@@ -239,26 +227,26 @@ const VerifyDriver = struct {
         };
     }
 
-    fn encodeDestination(
+    fn encodeKey(
         self: *VerifyDriver,
         evaluator: *Machine,
-        encode: *@FieldType(State, "encode_destination"),
+        encode: *@FieldType(State, "encode_key"),
     ) MachineError!machine.WorkProgress {
-        switch (encode.destination.borrowMut().advance(work_quantum) catch |err| switch (err) {
+        switch (encode.key.borrowMut().advance(work_quantum) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidCodepoint => return self.failDomain(evaluator, "package destination contains an invalid Unicode scalar"),
+            error.InvalidCodepoint => return self.failDomain(evaluator, "package store key contains an invalid Unicode scalar"),
         }) {
             .pending => return .yielded,
-            .complete => |destination| {
-                if (destination.len == 0) {
-                    self.allocator.free(destination);
-                    return self.failDomain(evaluator, "package destination is empty");
+            .complete => |key| {
+                if (!pkg_lock.validStoreKey(key)) {
+                    self.allocator.free(key);
+                    return self.failDomain(evaluator, "package store key is not canonical");
                 }
                 const package_encoder = encode.package.take();
                 const hash_encoder = encode.hash.take();
-                encode.destination.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                encode.key.deinit(evaluator.releaseDomain(), evaluator.allocator());
                 self.state = .{ .encode_package = .{
-                    .destination = .init(destination),
+                    .key = .init(key),
                     .package = .init(package_encoder),
                     .hash = .init(hash_encoder),
                 } };
@@ -282,11 +270,11 @@ const VerifyDriver = struct {
                     self.allocator.free(package);
                     return self.failDomain(evaluator, "package name is empty");
                 }
-                const destination = encode.destination.take();
+                const key = encode.key.take();
                 const hash_encoder = encode.hash.take();
                 encode.package.deinit(evaluator.releaseDomain(), evaluator.allocator());
                 self.state = .{ .encode_hash = .{
-                    .destination = .init(destination),
+                    .key = .init(key),
                     .package = .init(package),
                     .hash = .init(hash_encoder),
                 } };
@@ -310,11 +298,11 @@ const VerifyDriver = struct {
                     self.allocator.free(hash);
                     return self.failDomain(evaluator, "a package hash is sha256- and 64 lowercase hex digits");
                 }
-                const destination = encode.destination.take();
+                const key = encode.key.take();
                 const package = encode.package.take();
                 encode.hash.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                self.state = .{ .prepare_open = .{
-                    .destination = .init(destination),
+                self.state = .{ .open = .{
+                    .key = .init(key),
                     .package = .init(package),
                     .hash = .init(hash),
                 } };
@@ -323,32 +311,20 @@ const VerifyDriver = struct {
         }
     }
 
-    fn prepareOpen(
-        self: *VerifyDriver,
-        prepare: *@FieldType(State, "prepare_open"),
-    ) error{OutOfMemory}!machine.WorkProgress {
-        const seal = try std.fs.path.join(self.allocator, &.{
-            prepare.destination.borrow(),
-            archive.package_seal_name,
-        });
-        self.state = .{ .open = .{
-            .destination = .init(prepare.destination.take()),
-            .package = .init(prepare.package.take()),
-            .hash = .init(prepare.hash.take()),
-            .seal = .init(seal),
-        } };
-        return .yielded;
-    }
-
     fn open(
         self: *VerifyDriver,
         evaluator: *Machine,
-        paths: *Paths,
+        names: *Names,
     ) MachineError!machine.WorkProgress {
-        const file = std.Io.Dir.cwd().openFile(self.io, paths.seal.borrow(), .{}) catch |err|
-            return self.failIo(evaluator, "cannot open installed package archive seal", err);
-        const moved_paths = paths.*;
-        self.state = .{ .stat = .{ .paths = moved_paths, .file = file } };
+        var entry = self.store.openDir(self.io, names.key.borrow(), .{ .follow_symlinks = false }) catch |err|
+            return self.failIo(evaluator, "cannot open installed package entry", err);
+        defer entry.close(self.io);
+        const file = switch (fsport.openRegularForRead(self.io, entry, archive.package_seal_name)) {
+            .failed => |reason| return self.failIoName(evaluator, reason.message()),
+            .file => |file| file,
+        };
+        const moved_names = names.*;
+        self.state = .{ .stat = .{ .names = moved_names, .file = file } };
         return .yielded;
     }
 
@@ -359,15 +335,16 @@ const VerifyDriver = struct {
     ) MachineError!machine.WorkProgress {
         const info = stat_state.file.stat(self.io) catch |err|
             return self.failIo(evaluator, "cannot inspect installed package archive seal", err);
+        if (info.kind != .file) return self.failIoName(evaluator, "installed package archive seal is not a regular file");
         const contents: ?heap.Owned([]u8) = if (self.mode == .read) contents: {
             const length = std.math.cast(usize, info.size) orelse
                 return self.failIoName(evaluator, "installed package archive seal is too large to materialize");
             break :contents .init(try self.allocator.alloc(u8, length));
         } else null;
-        const paths = stat_state.paths;
+        const names = stat_state.names;
         const file = stat_state.file;
         self.state = .{ .read = .{
-            .paths = paths,
+            .names = names,
             .file = file,
             .size = info.size,
             .offset = 0,
@@ -382,13 +359,13 @@ const VerifyDriver = struct {
         read_state: *@FieldType(State, "read"),
     ) MachineError!machine.WorkProgress {
         if (read_state.offset == read_state.size) {
-            const paths = read_state.paths;
+            const names = read_state.names;
             const contents = read_state.contents;
             read_state.file.close(self.io);
             self.hasher.final(&self.digest);
             self.rendered = std.fmt.bytesToHex(self.digest, .lower);
             self.state = .{ .compare = .{
-                .paths = paths,
+                .names = names,
                 .contents = contents,
             } };
             return .yielded;
@@ -412,17 +389,17 @@ const VerifyDriver = struct {
         evaluator: *Machine,
         compare_state: *@FieldType(State, "compare"),
     ) MachineError!machine.WorkProgress {
-        if (!std.mem.eql(u8, compare_state.paths.hash.borrow()[7..], &self.rendered))
+        if (!std.mem.eql(u8, compare_state.names.hash.borrow()[7..], &self.rendered))
             return evaluator.failFmt(
                 .domain,
                 "package `{s}` archive seal does not match lock hash",
-                .{compare_state.paths.package.borrow()},
+                .{compare_state.names.package.borrow()},
             );
         if (self.mode == .verify) return .completed;
-        const paths = compare_state.paths;
+        const names = compare_state.names;
         const contents = compare_state.contents.?.take();
         self.state = .{ .materialize = .{
-            .paths = paths,
+            .names = names,
             .contents = .init(contents),
             .materializer = .init(.init(self.allocator, contents)),
         } };
@@ -437,14 +414,14 @@ const VerifyDriver = struct {
         return switch (try materialize_state.materializer.borrowMut().advance(work_quantum)) {
             .pending => .yielded,
             .complete => |result| complete: {
-                const paths = materialize_state.paths;
+                const names = materialize_state.names;
                 const contents = materialize_state.contents.take();
                 materialize_state.materializer.deinit(
                     evaluator.releaseDomain(),
                     evaluator.allocator(),
                 );
                 self.state = .{ .complete = .{
-                    .paths = paths,
+                    .names = names,
                     .contents = .init(contents),
                 } };
                 break :complete .{ .output = result };
@@ -463,27 +440,26 @@ const VerifyDriver = struct {
             "{s} for package `{s}`: {s}",
             .{ message, self.packageBytes(), @errorName(err) },
         );
-        evaluator.addErrorPath(self.destination_value.borrow());
+        evaluator.addErrorPath(self.key_value.borrow());
         return failure;
     }
 
     fn failIoName(self: *VerifyDriver, evaluator: *Machine, message: []const u8) MachineError {
         const failure = evaluator.failFmt(.io, "{s} for package `{s}`", .{ message, self.packageBytes() });
-        evaluator.addErrorPath(self.destination_value.borrow());
+        evaluator.addErrorPath(self.key_value.borrow());
         return failure;
     }
 
     fn packageBytes(self: *VerifyDriver) []const u8 {
         return switch (self.state) {
             .encode_hash => |*encode| encode.package.borrow(),
-            .prepare_open => |*prepare| prepare.package.borrow(),
-            .open => |*paths| paths.package.borrow(),
-            .stat => |*stat_state| stat_state.paths.package.borrow(),
-            .read => |*read_state| read_state.paths.package.borrow(),
-            .compare => |*compare_state| compare_state.paths.package.borrow(),
-            .materialize => |*materialize_state| materialize_state.paths.package.borrow(),
-            .complete => |*complete| complete.paths.package.borrow(),
-            .encode_destination, .encode_package => unreachable,
+            .open => |*names| names.package.borrow(),
+            .stat => |*stat_state| stat_state.names.package.borrow(),
+            .read => |*read_state| read_state.names.package.borrow(),
+            .compare => |*compare_state| compare_state.names.package.borrow(),
+            .materialize => |*materialize_state| materialize_state.names.package.borrow(),
+            .complete => |*complete| complete.names.package.borrow(),
+            .encode_key, .encode_package => unreachable,
         };
     }
 
@@ -495,7 +471,7 @@ const VerifyDriver = struct {
         self.state.deinit(releases, allocator, self.io);
         self.hash_value.deinit(releases, allocator);
         self.package_value.deinit(releases, allocator);
-        self.destination_value.deinit(releases, allocator);
+        self.key_value.deinit(releases, allocator);
         allocator.destroy(self);
         return true;
     }
@@ -510,20 +486,29 @@ fn isSha256(hash: []const u8) bool {
     return true;
 }
 
+/// Pops `( store key )`, validates both, and returns the store handle with
+/// the owned key value.
+fn popStoreKey(evaluator: *Machine) MachineError!struct { store: std.Io.Dir, key: heap.OwnedValue } {
+    try evaluator.require(2);
+    var key_value = try evaluator.popValue();
+    errdefer key_value.deinit();
+    if (!key_value.borrow().isString()) return evaluator.typeError("a string store key");
+    var store_value = try evaluator.popValue();
+    defer store_value.deinit();
+    if (store_value.borrow() != .symbol) return evaluator.typeError("a store symbol");
+    const store = try archive.packageStore(evaluator, store_value.borrow(), key_value.borrow());
+    return .{ .store = store, .key = key_value };
+}
+
 fn present(evaluator: *Machine) MachineError!void {
-    var path_value = try evaluator.popValue();
-    errdefer path_value.deinit();
-    if (!path_value.borrow().isString()) return evaluator.typeError("a string destination");
-    const io = evaluator.unit.inherited.host_io orelse {
-        const failure = evaluator.fail(.io, "package store inspection is unavailable");
-        evaluator.addErrorPath(path_value.borrow());
-        return failure;
-    };
-    const encoder = storage.ToUtf8Cursor.init(evaluator.allocator(), path_value.borrow());
+    var popped = try popStoreKey(evaluator);
+    errdefer popped.key.deinit();
+    const encoder = storage.ToUtf8Cursor.init(evaluator.allocator(), popped.key.borrow());
     try evaluator.startDriver(PresentDriver{
         .allocator = evaluator.allocator(),
-        .io = io,
-        .path_value = .init(path_value.take()),
+        .io = evaluator.unit.inherited.host_io.?,
+        .store = popped.store,
+        .key_value = .init(popped.key.take()),
         .encoder = .init(encoder),
     });
 }
@@ -533,29 +518,30 @@ const PresentDriver = struct {
 
     allocator: std.mem.Allocator,
     io: std.Io,
-    path_value: heap.Owned(Value),
+    store: std.Io.Dir,
+    key_value: heap.Owned(Value),
     encoder: heap.Owned(storage.ToUtf8Cursor),
-    path: ?heap.Owned([]u8) = null,
+    key: ?heap.Owned([]u8) = null,
 
     pub fn advance(evaluator: *Machine, self: *PresentDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        if (self.path == null) switch (self.encoder.borrowMut().advance(work_quantum) catch |err| switch (err) {
+        if (self.key == null) switch (self.encoder.borrowMut().advance(work_quantum) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidCodepoint => return self.failDomain(evaluator, "package destination contains an invalid Unicode scalar"),
+            error.InvalidCodepoint => return self.failDomain(evaluator, "package store key contains an invalid Unicode scalar"),
         }) {
             .pending => return .yielded,
-            .complete => |path| {
-                if (path.len == 0) {
-                    self.allocator.free(path);
-                    return self.failDomain(evaluator, "package destination is empty");
+            .complete => |key| {
+                if (!pkg_lock.validStoreKey(key)) {
+                    self.allocator.free(key);
+                    return self.failDomain(evaluator, "package store key is not canonical");
                 }
-                self.path = .init(path);
+                self.key = .init(key);
                 return .yielded;
             },
         };
-        const info = std.Io.Dir.cwd().statFile(
+        const info = self.store.statFile(
             self.io,
-            self.path.?.borrow(),
+            self.key.?.borrow(),
             .{ .follow_symlinks = false },
         ) catch |err| switch (err) {
             error.FileNotFound => return .{ .output = .{ .int = 0 } },
@@ -573,14 +559,149 @@ const PresentDriver = struct {
 
     fn failIo(self: *PresentDriver, evaluator: *Machine, message: []const u8, err: anyerror) MachineError {
         const failure = evaluator.failFmt(.io, "{s}: {s}", .{ message, @errorName(err) });
-        evaluator.addErrorPath(self.path_value.borrow());
+        evaluator.addErrorPath(self.key_value.borrow());
         return failure;
     }
 
     fn failIoName(self: *PresentDriver, evaluator: *Machine, message: []const u8) MachineError {
         const failure = evaluator.fail(.io, message);
-        evaluator.addErrorPath(self.path_value.borrow());
+        evaluator.addErrorPath(self.key_value.borrow());
         return failure;
+    }
+};
+
+fn manifest(evaluator: *Machine) MachineError!void {
+    var popped = try popStoreKey(evaluator);
+    errdefer popped.key.deinit();
+    const encoder = storage.ToUtf8Cursor.init(evaluator.allocator(), popped.key.borrow());
+    try evaluator.startDriver(ManifestDriver{
+        .allocator = evaluator.allocator(),
+        .io = evaluator.unit.inherited.host_io.?,
+        .store = popped.store,
+        .key_value = .init(popped.key.take()),
+        .state = .{ .encode = encoder },
+    });
+}
+
+/// Reads one stored root manifest through the store handle and the entry's
+/// own directory handle, never following a link at either level.
+const ManifestDriver = struct {
+    pub const ownership: heap.DriverOwnership = .bounded_retirement;
+
+    retirement: heap.ReleaseDomain.Retirement = .{},
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    store: std.Io.Dir,
+    key_value: heap.Owned(Value),
+    state: State,
+
+    const State = union(enum) {
+        encode: storage.ToUtf8Cursor,
+        open: []u8,
+        read: struct { file: std.Io.File, buffer: []u8, offset: usize },
+        text: struct { buffer: []u8, materializer: storage.Utf8Materializer },
+        complete,
+    };
+
+    pub fn advance(evaluator: *Machine, self: *ManifestDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        switch (self.state) {
+            .encode => |*encoder| switch (encoder.advance(work_quantum) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidCodepoint => return evaluator.fail(.domain, "package store key contains an invalid Unicode scalar"),
+            }) {
+                .pending => return .yielded,
+                .complete => |key| {
+                    encoder.deinit();
+                    self.state = .{ .open = key };
+                    if (!pkg_lock.validStoreKey(key))
+                        return evaluator.fail(.domain, "package store key is not canonical");
+                    return .yielded;
+                },
+            },
+            .open => |key| {
+                var entry = self.store.openDir(self.io, key, .{ .follow_symlinks = false }) catch |err|
+                    return self.failIo(evaluator, "cannot open installed package entry", err);
+                defer entry.close(self.io);
+                const file = switch (fsport.openRegularForRead(self.io, entry, "ecl.pkg")) {
+                    .failed => |reason| return self.failIoName(evaluator, reason.message()),
+                    .file => |file| file,
+                };
+                const size = switch (fsport.regularFileSize(self.io, file, max_manifest_bytes)) {
+                    .failed => |reason| {
+                        file.close(self.io);
+                        return self.failIoName(evaluator, reason.message());
+                    },
+                    .size => |size| size,
+                };
+                const buffer = self.allocator.alloc(u8, @intCast(size)) catch |err| {
+                    file.close(self.io);
+                    return err;
+                };
+                self.allocator.free(key);
+                self.state = .{ .read = .{ .file = file, .buffer = buffer, .offset = 0 } };
+                return .yielded;
+            },
+            .read => |*read| {
+                switch (fsport.readQuantum(self.io, read.file, read.buffer, &read.offset)) {
+                    .pending => return .yielded,
+                    .failed => |reason| return self.failIoName(evaluator, reason.message()),
+                    .complete => {},
+                }
+                read.file.close(self.io);
+                const buffer = read.buffer;
+                self.state = .{ .text = .{ .buffer = buffer, .materializer = .init(self.allocator, buffer) } };
+                return .yielded;
+            },
+            .text => |*text| return switch (text.materializer.advance(work_quantum) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidUtf8 => return self.failIoName(evaluator, "installed package manifest is not valid UTF-8"),
+            }) {
+                .pending => .yielded,
+                .complete => |result| complete: {
+                    text.materializer.deinit();
+                    self.allocator.free(text.buffer);
+                    self.state = .complete;
+                    break :complete .{ .output = result };
+                },
+            },
+            .complete => unreachable,
+        }
+    }
+
+    fn failIo(self: *ManifestDriver, evaluator: *Machine, message: []const u8, err: anyerror) MachineError {
+        const failure = evaluator.failFmt(.io, "{s}: {s}", .{ message, @errorName(err) });
+        evaluator.addErrorPath(self.key_value.borrow());
+        return failure;
+    }
+
+    fn failIoName(self: *ManifestDriver, evaluator: *Machine, message: []const u8) MachineError {
+        const failure = evaluator.fail(.io, message);
+        evaluator.addErrorPath(self.key_value.borrow());
+        return failure;
+    }
+
+    pub fn advanceRetirement(
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+        self: *ManifestDriver,
+    ) bool {
+        switch (self.state) {
+            .encode => |*encoder| encoder.deinit(),
+            .open => |key| allocator.free(key),
+            .read => |*read| {
+                read.file.close(self.io);
+                allocator.free(read.buffer);
+            },
+            .text => |*text| {
+                text.materializer.retire(releases);
+                allocator.free(text.buffer);
+            },
+            .complete => {},
+        }
+        self.key_value.deinit(releases, allocator);
+        allocator.destroy(self);
+        return true;
     }
 };
 
@@ -589,11 +710,12 @@ fn collectGarbage(evaluator: *Machine) MachineError!void {
     errdefer retained_value.deinit();
     if (retained_value.borrow() != .list)
         return evaluator.typeError("a list of retained package store keys");
+    const access = evaluator.unit.inherited.package_access orelse
+        return evaluator.fail(.domain, "package store authority is unavailable");
     try evaluator.startDriver(GcDriver{
         .allocator = evaluator.allocator(),
-        .io = evaluator.unit.inherited.host_io orelse {
-            return evaluator.fail(.io, "package store garbage collection is unavailable");
-        },
+        .io = @import("../package_authority.zig").hostIo(access),
+        .root = @import("../package_authority.zig").storeDir(access, .cache),
         .retained_value = .init(retained_value.take()),
         .retained = std.StringHashMap(void).init(evaluator.allocator()),
         .state = .keys_capacity,
@@ -615,40 +737,29 @@ const GcDriver = struct {
     retirement: heap.ReleaseDomain.Retirement = .{},
     allocator: std.mem.Allocator,
     io: std.Io,
+    /// The shared cache handle, borrowed from the package authority; null
+    /// when the host selected no cache or it does not exist yet.
+    root: ?std.Io.Dir,
     retained_value: heap.Owned(Value),
     retained: std.StringHashMap(void),
     retained_keys: std.ArrayList([]u8) = .empty,
     removed: usize = 0,
     state: State,
 
-    const Root = struct { path: []u8, dir: std.Io.Dir };
-    const Scan = struct { root: Root, iterator: std.Io.Dir.Iterator };
-    const CleanupRoot = union(enum) {
-        none,
-        path: []u8,
-        root: Root,
-    };
+    const Scan = struct { dir: std.Io.Dir, iterator: std.Io.Dir.Iterator };
     const State = union(enum) {
         keys_capacity,
         keys: usize,
         key: struct { index: usize, cursor: storage.ToUtf8Cursor },
-        env_ecl_start,
-        env_ecl: machine.Environ.LookupCursor,
-        env_xdg_start,
-        env_xdg: machine.Environ.LookupCursor,
-        env_home_start,
-        env_home: machine.Environ.LookupCursor,
-        open_root: []u8,
+        open_root,
         scan: Scan,
         detach: struct { scan: Scan, source: []u8 },
         open_candidate: struct { scan: Scan, trash: []u8 },
         delete_tree: struct { scan: Scan, trash: []u8, frame: *GcDeleteFrame },
         delete_root: struct { scan: Scan, trash: []u8 },
-        complete_path: []u8,
-        complete_root: Root,
-        no_environment,
-        cleanup_frame: struct { root: CleanupRoot, frame: *GcDeleteFrame },
-        cleanup_root: CleanupRoot,
+        complete,
+        cleanup_frame: *GcDeleteFrame,
+        cleanup_root,
         cleanup_keys: usize,
         cleanup_value,
         cleanup_destroy,
@@ -666,7 +777,7 @@ const GcDriver = struct {
             .keys => |index| {
                 const count: usize = @intCast(self.retained_value.borrow().list.length());
                 if (index == count) {
-                    self.state = .env_ecl_start;
+                    self.state = .open_root;
                 } else {
                     const item = list.atUnchecked(self.retained_value.borrow(), index);
                     if (!item.isString())
@@ -693,7 +804,7 @@ const GcDriver = struct {
                 .complete => |key| {
                     key_state.cursor.deinit();
                     const index = key_state.index;
-                    if (!validStoreKey(key)) {
+                    if (!pkg_lock.validStoreKey(key)) {
                         self.allocator.free(key);
                         return evaluator.failAtIndex(
                             .domain,
@@ -710,59 +821,21 @@ const GcDriver = struct {
                     self.state = .{ .keys = index + 1 };
                 },
             },
-            .env_ecl_start => self.state = .{ .env_ecl = evaluator.environLookup("ECL_CACHE") },
-            .env_ecl => |*cursor| return self.lookupEnvironment(
-                cursor,
-                .env_xdg_start,
-                .direct,
-            ),
-            .env_xdg_start => self.state = .{ .env_xdg = evaluator.environLookup("XDG_CACHE_HOME") },
-            .env_xdg => |*cursor| return self.lookupEnvironment(
-                cursor,
-                .env_home_start,
-                .xdg,
-            ),
-            .env_home_start => self.state = .{ .env_home = evaluator.environLookup("HOME") },
-            .env_home => |*cursor| return self.lookupEnvironment(
-                cursor,
-                .no_environment,
-                .home,
-            ),
-            .open_root => |path| {
-                const directory = std.Io.Dir.cwd().openDir(self.io, path, .{
-                    .follow_symlinks = false,
-                    .iterate = true,
-                }) catch |err| switch (err) {
-                    error.FileNotFound => {
-                        self.state = .{ .complete_path = path };
-                        return .yielded;
-                    },
-                    else => return self.failIo(
-                        evaluator,
-                        path,
-                        "cannot open package store for garbage collection",
-                        err,
-                    ),
+            .open_root => {
+                const root = self.root orelse {
+                    self.state = .complete;
+                    return .yielded;
                 };
-                self.state = .{ .scan = .{
-                    .root = .{ .path = path, .dir = directory },
-                    .iterator = directory.iterate(),
-                } };
+                self.state = .{ .scan = .{ .dir = root, .iterator = root.iterate() } };
             },
             .scan => |*scan_state| {
                 const entry = scan_state.iterator.next(self.io) catch |err|
-                    return self.failIo(
-                        evaluator,
-                        scan_state.root.path,
-                        "cannot enumerate package store for garbage collection",
-                        err,
-                    );
+                    return self.failIo(evaluator, "cannot enumerate package store for garbage collection", err);
                 if (entry == null) {
-                    const root = scan_state.root;
-                    self.state = .{ .complete_root = root };
+                    self.state = .complete;
                 } else if (entry.?.kind == .directory) {
                     const stale = std.mem.startsWith(u8, entry.?.name, ".ecl-gc-");
-                    if (stale or (validStoreKey(entry.?.name) and !self.retained.contains(entry.?.name))) {
+                    if (stale or (pkg_lock.validStoreKey(entry.?.name) and !self.retained.contains(entry.?.name))) {
                         const name = try self.allocator.dupe(u8, entry.?.name);
                         const scan = scan_state.*;
                         self.state = if (stale)
@@ -779,9 +852,9 @@ const GcDriver = struct {
                     ".ecl-gc-{x}-{s}",
                     .{ identity, candidate.source },
                 );
-                candidate.scan.root.dir.rename(
+                candidate.scan.dir.rename(
                     candidate.source,
-                    candidate.scan.root.dir,
+                    candidate.scan.dir,
                     trash_name,
                     self.io,
                 ) catch |err| {
@@ -794,12 +867,7 @@ const GcDriver = struct {
                             self.state = .{ .scan = scan };
                             return .yielded;
                         },
-                        else => return self.failIo(
-                            evaluator,
-                            candidate.scan.root.path,
-                            "cannot detach unreferenced package store entry",
-                            err,
-                        ),
+                        else => return self.failIo(evaluator, "cannot detach unreferenced package store entry", err),
                     }
                 };
                 self.allocator.free(candidate.source);
@@ -811,23 +879,18 @@ const GcDriver = struct {
                 } };
             },
             .open_candidate => |*candidate| {
-                const directory = candidate.scan.root.dir.openDir(self.io, candidate.trash, .{
+                const directory = candidate.scan.dir.openDir(self.io, candidate.trash, .{
                     .follow_symlinks = false,
                     .iterate = true,
                 }) catch |err| switch (err) {
                     error.FileNotFound => {
                         self.allocator.free(candidate.trash);
                         var scan = candidate.scan;
-                        scan.iterator = scan.root.dir.iterate();
+                        scan.iterator = scan.dir.iterate();
                         self.state = .{ .scan = scan };
                         return .yielded;
                     },
-                    else => return self.failIo(
-                        evaluator,
-                        candidate.scan.root.path,
-                        "cannot open detached package store entry",
-                        err,
-                    ),
+                    else => return self.failIo(evaluator, "cannot open detached package store entry", err),
                 };
                 const frame = self.allocator.create(GcDeleteFrame) catch |err| {
                     directory.close(self.io);
@@ -849,25 +912,16 @@ const GcDriver = struct {
             },
             .delete_tree => |*deletion| return self.deleteTree(evaluator, deletion),
             .delete_root => |*candidate| {
-                candidate.scan.root.dir.deleteDir(self.io, candidate.trash) catch |err| switch (err) {
+                candidate.scan.dir.deleteDir(self.io, candidate.trash) catch |err| switch (err) {
                     error.FileNotFound => {},
-                    else => return self.failIo(
-                        evaluator,
-                        candidate.scan.root.path,
-                        "cannot remove detached package store entry",
-                        err,
-                    ),
+                    else => return self.failIo(evaluator, "cannot remove detached package store entry", err),
                 };
                 self.allocator.free(candidate.trash);
                 var scan = candidate.scan;
-                scan.iterator = scan.root.dir.iterate();
+                scan.iterator = scan.dir.iterate();
                 self.state = .{ .scan = scan };
             },
-            .complete_path, .complete_root => return .{ .output = .{ .int = @intCast(self.removed) } },
-            .no_environment => return evaluator.fail(
-                .io,
-                "pkg.store.gc needs ECL_CACHE, XDG_CACHE_HOME, or HOME to select a package store",
-            ),
+            .complete => return .{ .output = .{ .int = @intCast(self.removed) } },
             .cleanup_frame,
             .cleanup_root,
             .cleanup_keys,
@@ -878,34 +932,6 @@ const GcDriver = struct {
         return .yielded;
     }
 
-    const RootKind = enum { direct, xdg, home };
-
-    fn lookupEnvironment(
-        self: *GcDriver,
-        cursor: *machine.Environ.LookupCursor,
-        missing: State,
-        kind: RootKind,
-    ) MachineError!machine.WorkProgress {
-        return switch (cursor.advance(work_quantum)) {
-            .pending => .yielded,
-            .complete => |raw| complete: {
-                const bytes = raw orelse "";
-                if (bytes.len == 0) {
-                    self.state = missing;
-                    break :complete .yielded;
-                }
-                const path = switch (kind) {
-                    .direct => try self.allocator.dupe(u8, bytes),
-                    .xdg => std.fs.path.join(self.allocator, &.{ bytes, "ecl", "pkg" }) catch
-                        return error.OutOfMemory,
-                    .home => std.fs.path.join(self.allocator, &.{ bytes, ".cache", "ecl", "pkg" }) catch
-                        return error.OutOfMemory,
-                };
-                self.state = .{ .open_root = path };
-                break :complete .yielded;
-            },
-        };
-    }
     fn deleteTree(
         self: *GcDriver,
         evaluator: *Machine,
@@ -913,22 +939,12 @@ const GcDriver = struct {
     ) MachineError!machine.WorkProgress {
         const frame = deletion.frame;
         const entry = frame.iterator.next(self.io) catch |err|
-            return self.failIo(
-                evaluator,
-                deletion.scan.root.path,
-                "cannot enumerate detached package store entry",
-                err,
-            );
+            return self.failIo(evaluator, "cannot enumerate detached package store entry", err);
         if (entry) |item| {
             if (item.kind != .directory) {
                 frame.dir.?.deleteFile(self.io, item.name) catch |err| switch (err) {
                     error.FileNotFound => {},
-                    else => return self.failIo(
-                        evaluator,
-                        deletion.scan.root.path,
-                        "cannot remove detached package file",
-                        err,
-                    ),
+                    else => return self.failIo(evaluator, "cannot remove detached package file", err),
                 };
                 return .yielded;
             }
@@ -938,12 +954,7 @@ const GcDriver = struct {
                 .iterate = true,
             }) catch |err| {
                 self.allocator.free(name);
-                return self.failIo(
-                    evaluator,
-                    deletion.scan.root.path,
-                    "cannot open detached package directory",
-                    err,
-                );
+                return self.failIo(evaluator, "cannot open detached package directory", err);
             };
             const child = self.allocator.create(GcDeleteFrame) catch |err| {
                 directory.close(self.io);
@@ -965,12 +976,7 @@ const GcDriver = struct {
         if (frame.parent) |parent| {
             parent.dir.?.deleteDir(self.io, frame.name.?) catch |err| switch (err) {
                 error.FileNotFound => {},
-                else => return self.failIo(
-                    evaluator,
-                    deletion.scan.root.path,
-                    "cannot remove detached package directory",
-                    err,
-                ),
+                else => return self.failIo(evaluator, "cannot remove detached package directory", err),
             };
             self.allocator.free(frame.name.?);
             deletion.frame = parent;
@@ -987,63 +993,35 @@ const GcDriver = struct {
     fn failIo(
         self: *GcDriver,
         evaluator: *Machine,
-        path: []const u8,
         message: []const u8,
         err: anyerror,
     ) MachineError {
         _ = self;
-        return evaluator.failFmt(.io, "{s} `{s}`: {s}", .{ message, path, @errorName(err) });
+        return evaluator.failFmt(.io, "{s} in the package cache: {s}", .{ message, @errorName(err) });
     }
 
     fn beginRetirement(self: *GcDriver) void {
         switch (self.state) {
-            .keys_capacity,
-            .keys,
-            .env_ecl_start,
-            .env_ecl,
-            .env_xdg_start,
-            .env_xdg,
-            .env_home_start,
-            .env_home,
-            .no_environment,
-            => self.state = .{ .cleanup_root = .none },
+            .keys_capacity, .keys, .open_root, .scan, .complete => self.state = .cleanup_root,
             .key => |*key_state| {
                 key_state.cursor.deinit();
-                self.state = .{ .cleanup_root = .none };
-            },
-            .open_root, .complete_path => |path| {
-                self.state = .{ .cleanup_root = .{ .path = path } };
-            },
-            .scan => |*scan| {
-                const root = scan.root;
-                self.state = .{ .cleanup_root = .{ .root = root } };
+                self.state = .cleanup_root;
             },
             .detach => |*candidate| {
                 self.allocator.free(candidate.source);
-                const root = candidate.scan.root;
-                self.state = .{ .cleanup_root = .{ .root = root } };
+                self.state = .cleanup_root;
             },
             .open_candidate => |*candidate| {
                 self.allocator.free(candidate.trash);
-                const root = candidate.scan.root;
-                self.state = .{ .cleanup_root = .{ .root = root } };
+                self.state = .cleanup_root;
             },
             .delete_tree => |*deletion| {
                 self.allocator.free(deletion.trash);
-                const root = deletion.scan.root;
-                const frame = deletion.frame;
-                self.state = .{ .cleanup_frame = .{
-                    .root = .{ .root = root },
-                    .frame = frame,
-                } };
+                self.state = .{ .cleanup_frame = deletion.frame };
             },
             .delete_root => |*candidate| {
                 self.allocator.free(candidate.trash);
-                const root = candidate.scan.root;
-                self.state = .{ .cleanup_root = .{ .root = root } };
-            },
-            .complete_root => |root| {
-                self.state = .{ .cleanup_root = .{ .root = root } };
+                self.state = .cleanup_root;
             },
             .cleanup_frame,
             .cleanup_root,
@@ -1063,48 +1041,28 @@ const GcDriver = struct {
             .keys_capacity,
             .keys,
             .key,
-            .env_ecl_start,
-            .env_ecl,
-            .env_xdg_start,
-            .env_xdg,
-            .env_home_start,
-            .env_home,
             .open_root,
             .scan,
             .detach,
             .open_candidate,
             .delete_tree,
             .delete_root,
-            .complete_path,
-            .complete_root,
-            .no_environment,
+            .complete,
             => result: {
                 self.beginRetirement();
                 break :result false;
             },
-            .cleanup_frame => |*cleanup| result: {
-                const frame = cleanup.frame;
+            .cleanup_frame => |frame| result: {
                 const parent = frame.parent;
                 if (frame.dir) |directory| directory.close(self.io);
                 if (frame.name) |name| allocator.free(name);
                 allocator.destroy(frame);
-                if (parent) |next| {
-                    cleanup.frame = next;
-                } else {
-                    const root = cleanup.root;
-                    self.state = .{ .cleanup_root = root };
-                }
+                self.state = if (parent) |next| .{ .cleanup_frame = next } else .cleanup_root;
                 break :result false;
             },
-            .cleanup_root => |*cleanup| result: {
-                switch (cleanup.*) {
-                    .none => {},
-                    .path => |path| allocator.free(path),
-                    .root => |root| {
-                        root.dir.close(self.io);
-                        allocator.free(root.path);
-                    },
-                }
+            .cleanup_root => result: {
+                // The cache handle is borrowed from the package authority and
+                // stays open for the Session.
                 self.retained.deinit();
                 self.state = .{ .cleanup_keys = 0 };
                 break :result false;
@@ -1129,427 +1087,5 @@ const GcDriver = struct {
                 return true;
             },
         };
-    }
-};
-
-fn validStoreKey(key: []const u8) bool {
-    if (key.len < 67) return false;
-    const hash_start = key.len - 64;
-    if (key[hash_start - 1] != '-') return false;
-    for (key[hash_start..]) |byte| switch (byte) {
-        '0'...'9', 'a'...'f' => {},
-        else => return false,
-    };
-    const prefix = key[0 .. hash_start - 1];
-    for (prefix, 0..) |byte, index| {
-        if (byte != '-' or index == 0 or index + 1 == prefix.len) continue;
-        if (pkg_lock.validPackageName(prefix[0..index]) and
-            pkg_lock.validVersion(prefix[index + 1 ..])) return true;
-    }
-    return false;
-}
-
-fn writeLock(evaluator: *Machine) MachineError!void {
-    return startWriteDriver(evaluator, .replace);
-}
-
-fn writeNew(evaluator: *Machine) MachineError!void {
-    return startWriteDriver(evaluator, .create);
-}
-
-const PublicationMode = enum { replace, create };
-
-fn startWriteDriver(evaluator: *Machine, mode: PublicationMode) MachineError!void {
-    try evaluator.require(2);
-    var path_value = try evaluator.popValue();
-    errdefer path_value.deinit();
-    if (!path_value.borrow().isString()) return evaluator.typeError("a string project file path");
-    var text_value = try evaluator.popValue();
-    errdefer text_value.deinit();
-    if (!text_value.borrow().isString()) return evaluator.typeError("project file text");
-    const io = evaluator.unit.inherited.host_io orelse {
-        const failure = evaluator.fail(.io, "project file publication is unavailable");
-        evaluator.addErrorPath(path_value.borrow());
-        return failure;
-    };
-    const text_encoder = storage.ToUtf8Cursor.init(evaluator.allocator(), text_value.borrow());
-    const path_encoder = storage.ToUtf8Cursor.init(evaluator.allocator(), path_value.borrow());
-    try evaluator.startDriver(WriteLockDriver{
-        .mode = mode,
-        .allocator = evaluator.allocator(),
-        .io = io,
-        .text_value = .init(text_value.take()),
-        .path_value = .init(path_value.take()),
-        .state = .{ .encode_text = .{
-            .text = .init(text_encoder),
-            .path = .init(path_encoder),
-        } },
-    });
-}
-
-var next_lock_identity: std.atomic.Value(u64) = .init(1);
-
-const WriteLockDriver = struct {
-    pub const ownership: heap.DriverOwnership = .bounded_retirement;
-
-    retirement: heap.ReleaseDomain.Retirement = .{},
-    mode: PublicationMode,
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    text_value: heap.Owned(Value),
-    path_value: heap.Owned(Value),
-    state: State,
-
-    const Paths = struct {
-        text: heap.Owned([]u8),
-        path: heap.Owned([]u8),
-
-        fn deinit(self: *Paths, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
-            self.path.deinit(releases, allocator);
-            self.text.deinit(releases, allocator);
-        }
-    };
-    const Temporary = struct {
-        paths: Paths,
-        temp_path: heap.Owned([]u8),
-
-        fn deinit(self: *Temporary, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
-            self.temp_path.deinit(releases, allocator);
-            self.paths.deinit(releases, allocator);
-        }
-    };
-    const OpenTemporary = struct {
-        temporary: Temporary,
-        file: std.Io.File,
-        offset: usize,
-    };
-    const State = union(enum) {
-        encode_text: struct {
-            text: heap.Owned(storage.ToUtf8Cursor),
-            path: heap.Owned(storage.ToUtf8Cursor),
-        },
-        encode_path: struct {
-            text: heap.Owned([]u8),
-            path: heap.Owned(storage.ToUtf8Cursor),
-        },
-        inspect_initial: Paths,
-        make_temp: Paths,
-        temp_ready: Temporary,
-        write: OpenTemporary,
-        sync_close: OpenTemporary,
-        recheck: Temporary,
-        publish: Temporary,
-        published: Temporary,
-        cleanup: Temporary,
-
-        fn deinit(
-            self: *State,
-            releases: *heap.ReleaseDomain,
-            allocator: std.mem.Allocator,
-            io: std.Io,
-        ) void {
-            switch (self.*) {
-                .encode_text => |*encode| {
-                    encode.path.deinit(releases, allocator);
-                    encode.text.deinit(releases, allocator);
-                },
-                .encode_path => |*encode| {
-                    encode.path.deinit(releases, allocator);
-                    encode.text.deinit(releases, allocator);
-                },
-                .inspect_initial, .make_temp => |*paths| paths.deinit(releases, allocator),
-                .temp_ready, .recheck, .publish, .published, .cleanup => |*temporary| temporary.deinit(releases, allocator),
-                .write, .sync_close => |*open| {
-                    open.file.close(io);
-                    open.temporary.deinit(releases, allocator);
-                },
-            }
-        }
-    };
-
-    pub fn advance(evaluator: *Machine, self: *WriteLockDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        return switch (self.state) {
-            .encode_text => |*encode| self.encodeText(evaluator, encode),
-            .encode_path => |*encode| self.encodePath(evaluator, encode),
-            .inspect_initial => |*paths| self.inspectInitial(evaluator, paths),
-            .make_temp => |*paths| self.makeTemp(paths),
-            .temp_ready => |*temporary| self.createTemp(evaluator, temporary),
-            .write => |*open| self.writeChunk(evaluator, open),
-            .sync_close => |*open| self.syncClose(evaluator, open),
-            .recheck => |*temporary| self.recheck(evaluator, temporary),
-            .publish => |*temporary| self.publish(evaluator, temporary),
-            .published, .cleanup => unreachable,
-        };
-    }
-
-    fn encodeText(
-        self: *WriteLockDriver,
-        evaluator: *Machine,
-        encode: *@FieldType(State, "encode_text"),
-    ) MachineError!machine.WorkProgress {
-        switch (encode.text.borrowMut().advance(work_quantum) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidCodepoint => return self.failDomain(evaluator, "project file text contains an invalid Unicode scalar"),
-        }) {
-            .pending => return .yielded,
-            .complete => |text| {
-                const path_encoder = encode.path.take();
-                encode.text.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                self.state = .{ .encode_path = .{
-                    .text = .init(text),
-                    .path = .init(path_encoder),
-                } };
-                return .yielded;
-            },
-        }
-    }
-
-    fn encodePath(
-        self: *WriteLockDriver,
-        evaluator: *Machine,
-        encode: *@FieldType(State, "encode_path"),
-    ) MachineError!machine.WorkProgress {
-        switch (encode.path.borrowMut().advance(work_quantum) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidCodepoint => return self.failDomain(evaluator, "project file path contains an invalid Unicode scalar"),
-        }) {
-            .pending => return .yielded,
-            .complete => |path| {
-                if (path.len == 0) {
-                    self.allocator.free(path);
-                    return self.failDomain(evaluator, "project file path is empty");
-                }
-                const text = encode.text.take();
-                encode.path.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                self.state = .{ .inspect_initial = .{
-                    .text = .init(text),
-                    .path = .init(path),
-                } };
-                return .yielded;
-            },
-        }
-    }
-
-    fn inspectInitial(
-        self: *WriteLockDriver,
-        evaluator: *Machine,
-        paths: *Paths,
-    ) MachineError!machine.WorkProgress {
-        const info = std.Io.Dir.cwd().statFile(
-            self.io,
-            paths.path.borrow(),
-            .{ .follow_symlinks = false },
-        ) catch |err| switch (err) {
-            error.FileNotFound => {
-                const moved = paths.*;
-                self.state = .{ .make_temp = moved };
-                return .yielded;
-            },
-            else => return self.failIo(evaluator, "cannot inspect project file target", err),
-        };
-        if (info.kind != .file) return self.failNotRegular(evaluator);
-        if (self.mode == .create) return self.failAlreadyExists(evaluator);
-        const moved = paths.*;
-        self.state = .{ .make_temp = moved };
-        return .yielded;
-    }
-
-    fn makeTemp(
-        self: *WriteLockDriver,
-        paths: *Paths,
-    ) error{OutOfMemory}!machine.WorkProgress {
-        const identity = next_lock_identity.fetchAdd(1, .monotonic);
-        const path = paths.path.borrow();
-        const parent = std.fs.path.dirname(path) orelse ".";
-        const temp_path = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}{c}.ecl-lock-{x}-{s}",
-            .{ parent, std.fs.path.sep, identity, std.fs.path.basename(path) },
-        );
-        const moved = paths.*;
-        self.state = .{ .temp_ready = .{
-            .paths = moved,
-            .temp_path = .init(temp_path),
-        } };
-        return .yielded;
-    }
-
-    fn createTemp(
-        self: *WriteLockDriver,
-        evaluator: *Machine,
-        temporary: *Temporary,
-    ) MachineError!machine.WorkProgress {
-        const file = std.Io.Dir.cwd().createFile(self.io, temporary.temp_path.borrow(), .{ .exclusive = true }) catch |err| switch (err) {
-            error.PathAlreadyExists => {
-                const paths = temporary.paths;
-                temporary.temp_path.deinit(evaluator.releaseDomain(), self.allocator);
-                self.state = .{ .make_temp = paths };
-                return .yielded;
-            },
-            else => return self.failIo(evaluator, "cannot create project temporary file", err),
-        };
-        const moved = temporary.*;
-        self.state = .{ .write = .{
-            .temporary = moved,
-            .file = file,
-            .offset = 0,
-        } };
-        return .yielded;
-    }
-
-    fn writeChunk(
-        self: *WriteLockDriver,
-        evaluator: *Machine,
-        open: *OpenTemporary,
-    ) MachineError!machine.WorkProgress {
-        const text = open.temporary.paths.text.borrow();
-        if (open.offset != text.len) {
-            const end = @min(open.offset + work_quantum, text.len);
-            open.file.writePositionalAll(self.io, text[open.offset..end], open.offset) catch |err|
-                return self.failIo(evaluator, "cannot write project temporary file", err);
-            open.offset = end;
-            return .yielded;
-        }
-        const moved = open.*;
-        self.state = .{ .sync_close = moved };
-        return .yielded;
-    }
-
-    fn syncClose(
-        self: *WriteLockDriver,
-        evaluator: *Machine,
-        open: *OpenTemporary,
-    ) MachineError!machine.WorkProgress {
-        open.file.sync(self.io) catch |err|
-            return self.failIo(evaluator, "cannot synchronize project temporary file", err);
-        const temporary = open.temporary;
-        open.file.close(self.io);
-        self.state = .{ .recheck = temporary };
-        return .yielded;
-    }
-
-    fn recheck(
-        self: *WriteLockDriver,
-        evaluator: *Machine,
-        temporary: *Temporary,
-    ) MachineError!machine.WorkProgress {
-        const info = std.Io.Dir.cwd().statFile(
-            self.io,
-            temporary.paths.path.borrow(),
-            .{ .follow_symlinks = false },
-        ) catch |err| switch (err) {
-            error.FileNotFound => {
-                const moved = temporary.*;
-                self.state = .{ .publish = moved };
-                return .yielded;
-            },
-            else => return self.failIo(evaluator, "cannot inspect project file target", err),
-        };
-        if (info.kind != .file) return self.failNotRegular(evaluator);
-        if (self.mode == .create) return self.failAlreadyExists(evaluator);
-        const moved = temporary.*;
-        self.state = .{ .publish = moved };
-        return .yielded;
-    }
-
-    fn publish(
-        self: *WriteLockDriver,
-        evaluator: *Machine,
-        temporary: *Temporary,
-    ) MachineError!machine.WorkProgress {
-        const path = temporary.paths.path.borrow();
-        const parent_path = std.fs.path.dirname(path) orelse ".";
-        var parent = std.Io.Dir.cwd().openDir(self.io, parent_path, .{ .follow_symlinks = false }) catch |err|
-            return self.failIo(evaluator, "cannot open project file parent", err);
-        defer parent.close(self.io);
-        const old_name = std.fs.path.basename(temporary.temp_path.borrow());
-        const new_name = std.fs.path.basename(path);
-        switch (self.mode) {
-            .replace => parent.rename(old_name, parent, new_name, self.io) catch |err|
-                return self.failIo(evaluator, "cannot publish project file", err),
-            .create => archive.renamePreserve(parent, old_name, new_name, self.io) catch |err| switch (err) {
-                error.PathAlreadyExists => return self.failAlreadyExists(evaluator),
-                else => return self.failIo(evaluator, "cannot publish project file", err),
-            },
-        }
-        const moved = temporary.*;
-        self.state = .{ .published = moved };
-        return .completed;
-    }
-
-    fn failDomain(self: *WriteLockDriver, evaluator: *Machine, message: []const u8) MachineError {
-        _ = self;
-        return evaluator.fail(.domain, message);
-    }
-
-    fn failIo(self: *WriteLockDriver, evaluator: *Machine, message: []const u8, err: anyerror) MachineError {
-        const failure = evaluator.failFmt(.io, "{s}: {s}", .{ message, @errorName(err) });
-        evaluator.addErrorPath(self.path_value.borrow());
-        return failure;
-    }
-
-    fn failAlreadyExists(self: *WriteLockDriver, evaluator: *Machine) MachineError {
-        const failure = evaluator.failFmt(
-            .io,
-            "project file `{s}` already exists",
-            .{self.pathBytes()},
-        );
-        evaluator.addErrorPath(self.path_value.borrow());
-        return failure;
-    }
-
-    fn failNotRegular(self: *WriteLockDriver, evaluator: *Machine) MachineError {
-        const failure = evaluator.failFmt(
-            .io,
-            "project file `{s}` is not a regular file",
-            .{self.pathBytes()},
-        );
-        evaluator.addErrorPath(self.path_value.borrow());
-        return failure;
-    }
-
-    fn pathBytes(self: *WriteLockDriver) []const u8 {
-        return switch (self.state) {
-            .inspect_initial, .make_temp => |*paths| paths.path.borrow(),
-            .temp_ready, .recheck, .publish, .published, .cleanup => |*temporary| temporary.paths.path.borrow(),
-            .write, .sync_close => |*open| open.temporary.paths.path.borrow(),
-            .encode_text, .encode_path => unreachable,
-        };
-    }
-
-    pub fn advanceRetirement(
-        releases: *heap.ReleaseDomain,
-        allocator: std.mem.Allocator,
-        self: *WriteLockDriver,
-    ) bool {
-        switch (self.state) {
-            .write, .sync_close => |*open| {
-                const temporary = open.temporary;
-                open.file.close(self.io);
-                self.state = .{ .cleanup = temporary };
-                return false;
-            },
-            .recheck, .publish => |*temporary| {
-                const moved = temporary.*;
-                self.state = .{ .cleanup = moved };
-                return false;
-            },
-            .cleanup => |*temporary| {
-                const moved = temporary.*;
-                std.Io.Dir.cwd().deleteFile(self.io, temporary.temp_path.borrow()) catch |err| switch (err) {
-                    error.FileNotFound => {},
-                    else => std.log.err("project file rollback could not remove its temporary file: {s}", .{@errorName(err)}),
-                };
-                self.state = .{ .published = moved };
-                return false;
-            },
-            else => {},
-        }
-        self.state.deinit(releases, allocator, self.io);
-        self.text_value.deinit(releases, allocator);
-        self.path_value.deinit(releases, allocator);
-        allocator.destroy(self);
-        return true;
     }
 };

@@ -186,12 +186,34 @@ const ErrorDataKey = enum {
     @"destination-exists",
     scope,
     package,
+    operation,
+    root,
+    reason,
+    @"source-root",
+    @"source-path",
+    @"destination-root",
+    @"destination-path",
 };
 const ErrorData = struct {
     key: ErrorDataKey,
     value: Value,
 };
 const empty_error_data = ErrorData{ .key = .needed, .value = .{ .int = 0 } };
+/// Provenance attached to one filesystem failure. Values are borrowed; the
+/// pending failure retains what it records.
+pub const FilesystemErrorData = struct {
+    operation: Value,
+    reason: Value,
+    target: union(enum) {
+        single: struct { root: Value, path: Value },
+        transfer: struct {
+            source_root: Value,
+            source_path: Value,
+            destination_root: Value,
+            destination_path: Value,
+        },
+    },
+};
 /// Zig errors carry no payload. The unit owns this allocation-free payload
 /// until an unwind materializes the language dict.
 pub const EclErr = struct {
@@ -201,7 +223,7 @@ pub const EclErr = struct {
     word: ?intern.TraceWord = null,
     trace_parent: ?intern.TraceWord = null,
     site: ?FailureSite = null,
-    data: [5]ErrorData = .{empty_error_data} ** 5,
+    data: [6]ErrorData = .{empty_error_data} ** 6,
     data_len: usize = 0,
     raised: ?Value = null,
     pub fn init(kind: ErrorKind, message: []const u8) EclErr {
@@ -370,7 +392,8 @@ const OrdinaryErrorCursor = struct {
     resolved: ResolvedTrace,
     location: ?spans.LocatedSpan,
     names: [9]u32 = .{0} ** 9,
-    data_pairs: [8]dict.Pair = .{dict.Pair{ .{ .int = 0 }, .{ .int = 0 } }} ** 8,
+    // Every recorded datum plus the three location fields.
+    data_pairs: [9]dict.Pair = .{dict.Pair{ .{ .int = 0 }, .{ .int = 0 } }} ** 9,
     outer_pairs: [5]dict.Pair = .{dict.Pair{ .{ .int = 0 }, .{ .int = 0 } }} ** 5,
     state: State = .{ .names = 0 },
 
@@ -1753,6 +1776,8 @@ pub const InheritedContext = struct {
     idiom_mode: IdiomMode = .automatic,
     phrase_recognizer: ?PhraseRecognizer = null,
     process_access: ?*external.ProcessAccess = null,
+    filesystem_access: ?*external.FilesystemAccess = null,
+    package_access: ?*external.PackageAccess = null,
 };
 
 /// Immutable HTTPS verification inputs inherited by every Unit. The CA path
@@ -2976,17 +3001,21 @@ pub const Machine = struct {
     pub fn releaseDomain(self: *const Machine) *heap.ReleaseDomain {
         return self.unit.releases;
     }
+    /// Validates a staged package tree through the directory handle the
+    /// installer already holds; `root_dir` is relative to `base_dir`.
     pub fn beginPackageTreeValidation(
         self: *const Machine,
         io: std.Io,
         package_name: []const u8,
         root_dir: []const u8,
+        base_dir: std.Io.Dir,
         diagnostic: *?[]u8,
     ) error{OutOfMemory}!pkg_catalog.Build {
         return self.unit.inherited.registry.?.beginPackageTreeValidation(
             io,
             package_name,
             root_dir,
+            base_dir,
             diagnostic,
         );
     }
@@ -4595,10 +4624,6 @@ pub const Machine = struct {
     pub fn loadFileOwned(self: *Machine, path: []u8, path_value: Value) MachineError!void {
         return self.fileTransferOwned(path, path_value, .{ .source = .call });
     }
-    /// Consumes `path`, `path_value`, and `transfer` on success and failure.
-    pub fn slurpFileOwned(self: *Machine, path: []u8, path_value: Value) MachineError!void {
-        return self.fileTransferOwned(path, path_value, .text);
-    }
     fn fileSourceOwned(
         self: *Machine,
         path: []u8,
@@ -4634,19 +4659,16 @@ pub const Machine = struct {
             } }),
         });
     }
-    /// What one read file's bytes become. Both arms are ordinary results of
-    /// the same open/size/read pipeline, so only the terminal handoff differs
-    /// and no second file driver has to repeat the bounded read phases.
+    /// What one read file's bytes become. Module loading is the only client
+    /// of this trusted host read; caller-selected file access goes through the
+    /// capability-gated `fs` module instead.
     const FileTransfer = union(enum) {
         /// Hand the bytes to the reader as source text.
         source: SourceCompletion,
-        /// Materialize the bytes as one string on the operand stack.
-        text,
 
         pub fn deinit(self: *FileTransfer, releases: *heap.ReleaseDomain) void {
             switch (self.*) {
                 .source => |*completion| completion.deinit(releases),
-                .text => {},
             }
             self.* = undefined;
         }
@@ -4656,7 +4678,6 @@ pub const Machine = struct {
                     .register => |register| register.path,
                     .push, .call, .session => null,
                 },
-                .text => null,
             };
         }
     };
@@ -4702,11 +4723,6 @@ pub const Machine = struct {
                 offset: usize,
             },
             transfer: struct { context: Context, source: heap.Owned([]u8) },
-            text: struct {
-                context: Context,
-                source: heap.Owned([]u8),
-                builder: heap.Owned(kernel_storage.Utf8Materializer),
-            },
             complete: struct { context: Context, source: heap.Owned([]u8) },
 
             pub fn deinit(
@@ -4732,11 +4748,6 @@ pub const Machine = struct {
                     .complete => |*transfer| {
                         transfer.source.deinit(releases, storage_allocator);
                         transfer.context.deinit(releases, storage_allocator);
-                    },
-                    .text => |*text| {
-                        text.builder.deinit(releases, storage_allocator);
-                        text.source.deinit(releases, storage_allocator);
-                        text.context.deinit(releases, storage_allocator);
                     },
                 }
             }
@@ -4831,21 +4842,6 @@ pub const Machine = struct {
                     return .yielded;
                 },
                 .transfer => |*transfer| {
-                    switch (transfer.context.transfer.borrow()) {
-                        .text => {
-                            const builder = kernel_storage.Utf8Materializer.init(
-                                self.allocator,
-                                transfer.source.borrow(),
-                            );
-                            self.state.borrowMut().* = .{ .text = .{
-                                .context = transfer.context.move(),
-                                .source = .init(transfer.source.take()),
-                                .builder = .init(builder),
-                            } };
-                            return .yielded;
-                        },
-                        .source => {},
-                    }
                     const path = transfer.context.path.take();
                     const source = transfer.source.take();
                     const completion = transfer.context.transfer.take().source;
@@ -4853,97 +4849,7 @@ pub const Machine = struct {
                     try evaluator.sourceOwned(path, source, completion);
                     return .detached;
                 },
-                .text => |*text| switch (text.builder.borrowMut().advance(kernel_poll_quantum) catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    error.InvalidUtf8 => return failIo(&text.context, evaluator, "file is not valid UTF-8"),
-                }) {
-                    .pending => return .yielded,
-                    .complete => |text_value| {
-                        text.builder.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                        self.state.borrowMut().* = .{ .complete = .{
-                            .context = text.context.move(),
-                            .source = .init(text.source.take()),
-                        } };
-                        return .{ .output = text_value };
-                    },
-                },
                 .complete => unreachable,
-            }
-        }
-        pub const ownership: heap.DriverOwnership = .fields;
-    };
-    /// Consumes `path`, `path_value`, and `contents` on success and failure.
-    /// Truncate-and-replace with no temporary file: a failure part-way
-    /// through can leave a partial file, which the caller sees as `'io`.
-    pub fn writeFileOwned(
-        self: *Machine,
-        path: []u8,
-        path_value: Value,
-        contents: []u8,
-    ) MachineError!void {
-        if (self.unit.inherited.host_io == null) {
-            const failure = self.fail(.io, "filesystem access is unavailable");
-            self.unit.pendingFailure().addData(.path, path_value);
-            self.unit.allocator.free(path);
-            self.unit.allocator.free(contents);
-            self.releaseDomain().releaseValue(path_value);
-            return failure;
-        }
-        try self.startDriver(FileWriteDriver{
-            .path = .init(path),
-            .path_value = .init(path_value),
-            .contents = .init(contents),
-        });
-    }
-    const FileWriteDriver = struct {
-        path: heap.Owned([]u8),
-        path_value: heap.Owned(Value),
-        contents: heap.Owned([]u8),
-        open_file: ?heap.Owned(OpenFile) = null,
-        offset: usize = 0,
-        phase: enum { open, write } = .open,
-
-        fn failIo(
-            self: *FileWriteDriver,
-            evaluator: *Machine,
-            name: []const u8,
-        ) MachineError {
-            const failure = evaluator.failFmt(
-                .io,
-                "cannot write `{s}`: {s}",
-                .{ self.path.borrow(), name },
-            );
-            evaluator.unit.pendingFailure().addData(.path, self.path_value.borrow());
-            return failure;
-        }
-        pub fn advance(evaluator: *Machine, self: *FileWriteDriver) MachineError!WorkProgress {
-            try evaluator.pollKernel();
-            const io = evaluator.unit.inherited.host_io.?;
-            switch (self.phase) {
-                .open => {
-                    const file = std.Io.Dir.cwd().createFile(io, self.path.borrow(), .{}) catch |err|
-                        return self.failIo(evaluator, @errorName(err));
-                    self.open_file = .init(.{ .io = io, .file = file });
-                    self.phase = .write;
-                    return .yielded;
-                },
-                .write => {
-                    const contents = self.contents.borrow();
-                    if (self.offset != contents.len) {
-                        const end = @min(self.offset + kernel_poll_quantum, contents.len);
-                        const written = self.open_file.?.borrow().file.writeStreaming(
-                            io,
-                            &.{},
-                            &.{contents[self.offset..end]},
-                            1,
-                        ) catch |err| return self.failIo(evaluator, @errorName(err));
-                        self.offset += written;
-                        return .yielded;
-                    }
-                    self.open_file.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                    self.open_file = null;
-                    return .completed;
-                },
             }
         }
         pub const ownership: heap.DriverOwnership = .fields;
@@ -5059,6 +4965,26 @@ pub const Machine = struct {
     /// package caller may recover after independently confirming the winner.
     pub fn addErrorDestinationExists(self: *Machine) void {
         self.unit.pendingFailure().addData(.@"destination-exists", .{ .int = 1 });
+    }
+    /// The stable data dictionary every capability-gated filesystem failure
+    /// carries: the public operation, the named root and path (or both ends of
+    /// a transfer), and a closed portable reason symbol.
+    pub fn addErrorFilesystem(self: *Machine, data: FilesystemErrorData) void {
+        const failure = self.unit.pendingFailure();
+        failure.addData(.operation, data.operation);
+        switch (data.target) {
+            .single => |single| {
+                failure.addData(.root, single.root);
+                failure.addData(.path, single.path);
+            },
+            .transfer => |transfer| {
+                failure.addData(.@"source-root", transfer.source_root);
+                failure.addData(.@"source-path", transfer.source_path);
+                failure.addData(.@"destination-root", transfer.destination_root);
+                failure.addData(.@"destination-path", transfer.destination_path);
+            },
+        }
+        failure.addData(.reason, data.reason);
     }
     /// The one absence-is-absence failure for `getenv`: an unset variable is
     /// an error carrying the requested name, never an empty string.

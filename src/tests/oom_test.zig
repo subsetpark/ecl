@@ -43,69 +43,40 @@ fn requireSelectedOomTest(source: std.builtin.SourceLocation) !void {
     if (std.mem.indexOf(u8, source.fn_name, filter) == null) return error.SkipZigTest;
 }
 
-fn archiveSource(allocator: std.mem.Allocator, destination: []const u8) ![]u8 {
+fn archiveSource(allocator: std.mem.Allocator) ![]u8 {
     var source = std.Io.Writer.Allocating.init(allocator);
     defer source.deinit();
     try appendFixtureBytes(&source.writer, archive_fixtures.valid);
-    try source.writer.writeByte(' ');
-    try appendQuoted(&source.writer, destination);
-    try source.writer.writeAll(" archive.unpack-tgz pop");
+    try source.writer.writeAll(" 'cwd \"archive\" archive.unpack-tgz pop");
     return allocator.dupe(u8, source.written());
 }
 
-fn packageStoreSource(
-    allocator: std.mem.Allocator,
-    destination: []const u8,
-    lock_path: []const u8,
-    manifest_path: []const u8,
-) ![]u8 {
+const package_a_key = "a-1.0.0-1f9aefdfdd91996e4f2f80b7f89f1ac3d8907616b74f1cf55a1a48042556738a";
+/// The lock hash of package `a` in the sync probes; the store probe verifies
+/// the seal it just installed, so it needs the fixture's real digest.
+const package_a_hash = "sha256-1f9aefdfdd91996e4f2f80b7f89f1ac3d8907616b74f1cf55a1a48042556738a";
+const package_valid_seal_hash = "sha256-0e22c7712d6b5dc9fe01542ffcc7e6c01e641aab3c7ed0021a29fbf93004f4d8";
+
+fn packageStoreSource(allocator: std.mem.Allocator) ![]u8 {
     var source = std.Io.Writer.Allocating.init(allocator);
     defer source.deinit();
     try appendFixtureBytes(&source.writer, archive_fixtures.package_valid);
     try source.writer.writeAll(" \"a\" pkg.store.inspect pop ");
     try appendFixtureBytes(&source.writer, archive_fixtures.package_valid);
-    try source.writer.writeAll(" \"a\" ");
-    try appendQuoted(&source.writer, destination);
-    try source.writer.writeAll(" pkg.store.install pop \"lock\\n\" ");
-    try appendQuoted(&source.writer, lock_path);
-    try source.writer.writeAll(" pkg.store.write-lock ");
-    try source.writer.writeAll("\"manifest\\n\" ");
-    try appendQuoted(&source.writer, manifest_path);
-    try source.writer.writeAll(" pkg.store.write-new ");
-    try appendQuoted(&source.writer, destination);
-    try source.writer.writeAll(" pkg.store.present? pop ");
-    try appendQuoted(&source.writer, destination);
-    try source.writer.writeAll(
-        " \"a\" \"sha256-1f9aefdfdd91996e4f2f80b7f89f1ac3d8907616b74f1cf55a1a48042556738a\" pkg.store.verify ",
-    );
-    try appendQuoted(&source.writer, destination);
-    try source.writer.writeAll(
-        " \"a\" \"sha256-1f9aefdfdd91996e4f2f80b7f89f1ac3d8907616b74f1cf55a1a48042556738a\" pkg.store.read-seal pop",
-    );
+    try source.writer.writeAll(" \"a\" 'cache \"" ++ package_a_key ++ "\" pkg.store.install pop ");
+    try source.writer.writeAll("'cache \"" ++ package_a_key ++ "\" pkg.store.present? pop ");
+    try source.writer.writeAll("'cache \"" ++ package_a_key ++ "\" pkg.store.manifest pop ");
+    try source.writer.writeAll("'cache \"" ++ package_a_key ++ "\" \"a\" \"" ++ package_valid_seal_hash ++ "\" pkg.store.verify ");
+    try source.writer.writeAll("'cache \"" ++ package_a_key ++ "\" \"a\" \"" ++ package_valid_seal_hash ++ "\" pkg.store.read-seal pop");
     return allocator.dupe(u8, source.written());
 }
 
-fn packageSyncSource(allocator: std.mem.Allocator, project: []const u8) ![]u8 {
-    var source = std.Io.Writer.Allocating.init(allocator);
-    defer source.deinit();
-    try source.writer.writeAll(
-        "{'format 1 'name \"r\" 'version \"0.1.0\" 'exports {} 'requires " ++
-            "{\"a\" {'package \"a\" 'version \"1.0.0\" 'url \"https://e.com/a.tgz\" " ++
-            "'hash \"sha256-1f9aefdfdd91996e4f2f80b7f89f1ac3d8907616b74f1cf55a1a48042556738a\"}}} ",
-    );
-    try appendQuoted(&source.writer, project);
-    try source.writer.writeAll(" pkg.sync.run pop");
-    return allocator.dupe(u8, source.written());
-}
+const package_sync_source =
+    "{'format 1 'name \"r\" 'version \"0.1.0\" 'exports {} 'requires " ++
+    "{\"a\" {'package \"a\" 'version \"1.0.0\" 'url \"https://e.com/a.tgz\" " ++
+    "'hash \"" ++ package_a_hash ++ "\"}}} pkg.sync.run pop";
 
-fn packageCliSource(allocator: std.mem.Allocator, project: []const u8) ![]u8 {
-    var source = std.Io.Writer.Allocating.init(allocator);
-    defer source.deinit();
-    try source.writer.writeByte('[');
-    try appendQuoted(&source.writer, project);
-    try source.writer.writeAll("] pkg.cli.tree");
-    return allocator.dupe(u8, source.written());
-}
+const package_cli_source = "[] pkg.cli.tree";
 
 const PackageScratch = struct {
     directory: std.testing.TmpDir,
@@ -774,6 +745,7 @@ const StdlibSurface = enum {
     package_store,
     package_store_gc,
     host_io,
+    filesystem,
     http,
     process,
     package_sync_module,
@@ -807,7 +779,10 @@ fn stdlibSessionAllocationProbe(
     var output = std.Io.Writer.fixed(&output_buffer);
     var diagnostics_buffer: [1024]u8 = undefined;
     var diagnostics = std.Io.Writer.fixed(&diagnostics_buffer);
-    var runtime = try session.Session.initWithHostConfig(
+    // The scratch directory is the working-directory root, the project root,
+    // and the shared cache store at once: every host surface a snippet names
+    // resolves to the same temporary directory.
+    var runtime = try session.Session.initPackageCommand(
         thread_safe_allocator,
         &.{"argument"},
         .{
@@ -826,8 +801,17 @@ fn stdlibSessionAllocationProbe(
                 .stdout_capacity = 16,
                 .stderr_capacity = 16,
             } else null,
+            .filesystem_policy = .{ .roots = &.{
+                .{ .name = "cwd", .absolute_path = scratch_path, .permissions = .all },
+                .{
+                    .name = "project",
+                    .absolute_path = scratch_path,
+                    .permissions = .{ .read_data = true, .inspect = true, .create = true, .replace = true },
+                },
+            } },
         },
         .cooperative,
+        .{ .synchronize = .{ .cache = scratch_path, .project = scratch.directory.dir } },
     );
     defer runtime.deinit();
 
@@ -916,41 +900,12 @@ fn stdlibSessionAllocationProbe(
             "[97] archive.sha256 pop",
         ),
         .archive_unpack => {
-            const archive_destination = try std.fmt.allocPrint(
-                scaffold_allocator,
-                "{s}{c}archive",
-                .{ scratch_path, std.fs.path.sep },
-            );
-            defer scaffold_allocator.free(archive_destination);
-            const archive_source = try archiveSource(scaffold_allocator, archive_destination);
+            const archive_source = try archiveSource(scaffold_allocator);
             defer scaffold_allocator.free(archive_source);
             try runOk(&runtime, "oom-archive.ecl", archive_source);
         },
         .package_store => {
-            const package_destination = try std.fmt.allocPrint(
-                scaffold_allocator,
-                "{s}{c}a-1.0.0-1f9aefdfdd91996e4f2f80b7f89f1ac3d8907616b74f1cf55a1a48042556738a",
-                .{ scratch_path, std.fs.path.sep },
-            );
-            defer scaffold_allocator.free(package_destination);
-            const lock_path = try std.fmt.allocPrint(
-                scaffold_allocator,
-                "{s}{c}ecl.lock",
-                .{ scratch_path, std.fs.path.sep },
-            );
-            defer scaffold_allocator.free(lock_path);
-            const manifest_path = try std.fmt.allocPrint(
-                scaffold_allocator,
-                "{s}{c}created.pkg",
-                .{ scratch_path, std.fs.path.sep },
-            );
-            defer scaffold_allocator.free(manifest_path);
-            const package_source = try packageStoreSource(
-                scaffold_allocator,
-                package_destination,
-                lock_path,
-                manifest_path,
-            );
+            const package_source = try packageStoreSource(scaffold_allocator);
             defer scaffold_allocator.free(package_source);
             try runOk(&runtime, "oom-pkg-store.ecl", package_source);
         },
@@ -959,28 +914,33 @@ fn stdlibSessionAllocationProbe(
             "oom-pkg-gc.ecl",
             "[\"a-1.0.0-1f9aefdfdd91996e4f2f80b7f89f1ac3d8907616b74f1cf55a1a48042556738a\"] pkg.store.gc pop",
         ),
-        .host_io => {
-            // These words allocate on the read buffer, decoded path,
-            // materialized string, and environment snapshot lookup.
-            const host_io_source = try std.fmt.allocPrint(
-                scaffold_allocator,
-                "1 \"probe\" io.debug pop " ++
-                    "\"probe\\ntext\" \"{s}{c}probe.txt\" io.spit " ++
-                    "\"{s}{c}probe.txt\" io.slurp pop " ++
-                    "\"{s}{c}probe.txt\" io.lines pop " ++
-                    "\"{s}{c}absent.txt\" (io.slurp) partial [] swap @attempt pop " ++
-                    "\"ECL_OOM_PROBE\" getenv pop " ++
-                    "[] (\"ECL_OOM_ABSENT\" getenv) @attempt pop [] (io.stdin) @attempt pop",
-                .{
-                    scratch_path, std.fs.path.sep,
-                    scratch_path, std.fs.path.sep,
-                    scratch_path, std.fs.path.sep,
-                    scratch_path, std.fs.path.sep,
-                },
-            );
-            defer scaffold_allocator.free(host_io_source);
-            try runOk(&runtime, "oom-hostio.ecl", host_io_source);
-        },
+        .host_io => try runOk(
+            &runtime,
+            "oom-hostio.ecl",
+            // Console, environment, and standard-input refusal paths.
+            "1 \"probe\" io.debug pop " ++
+                "\"ECL_OOM_PROBE\" getenv pop " ++
+                "[] (\"ECL_OOM_ABSENT\" getenv) @attempt pop [] (io.stdin) @attempt pop",
+        ),
+        .filesystem => try runOk(
+            &runtime,
+            "oom-fs.ecl",
+            // Every fs word once, through the same root: encoders, the
+            // resolver, staging, listing, metadata, and the structured
+            // failure dictionary all have Session-only allocation paths.
+            "\"pr\\n\" 'cwd \"p.txt\" fs.create-text " ++
+                "'cwd \"p.txt\" fs.read-text pop 'cwd \"p.txt\" fs.read-bytes pop " ++
+                "[7 8] 'cwd \"p.txt\" fs.replace-bytes \"z\" 'cwd \"p.txt\" fs.replace-text " ++
+                "'cwd \"p.txt\" fs.stat pop 'cwd \"p.txt\" fs.lstat pop 'cwd \"p.txt\" fs.exists? pop " ++
+                "'cwd \"d\" fs.mkdir 'cwd \"d\" fs.list pop " ++
+                "'cwd \"p.txt\" 'cwd \"d/c.txt\" fs.copy 'cwd \"d/c.txt\" \"d/m.txt\" fs.rename " ++
+                "'cwd \"d/m.txt\" fs.remove-file 'cwd \"d\" fs.remove-dir " ++
+                "[] ('cwd \"absent\" fs.read-text) @attempt pop " ++
+                "[] ('none \"x\" fs.exists?) @attempt pop " ++
+                "\"a//b/../c\" path.normalize pop (\"a\" \"b\") path.join pop " ++
+                "\"a/b.c\" path.dirname pop \"a/b.c\" path.basename pop \"a/b.c\" path.extension pop " ++
+                "\"a/b\" path.components pop \"a/b\" path.valid-relative? pop",
+        ),
         .http => try runOk(
             &runtime,
             "oom-http.ecl",
@@ -1011,21 +971,13 @@ fn stdlibSessionAllocationProbe(
             "oom-pkg-sync-module.ecl",
             "'pkg.sync ('run) import",
         ),
-        .package_sync => {
-            const sync_source = try packageSyncSource(scaffold_allocator, scratch.path);
-            defer scaffold_allocator.free(sync_source);
-            try runOk(&runtime, "oom-pkg-sync.ecl", sync_source);
-        },
+        .package_sync => try runOk(&runtime, "oom-pkg-sync.ecl", package_sync_source),
         .package_cli_module => try runOk(
             &runtime,
             "oom-pkg-cli-module.ecl",
             "'pkg.cli ('tree) import",
         ),
-        .package_cli => {
-            const cli_source = try packageCliSource(scaffold_allocator, scratch.path);
-            defer scaffold_allocator.free(cli_source);
-            try runOk(&runtime, "oom-pkg-cli.ecl", cli_source);
-        },
+        .package_cli => try runOk(&runtime, "oom-pkg-cli.ecl", package_cli_source),
     }
     return first_failure_index;
 }
@@ -1302,6 +1254,11 @@ test "oom: standard-library and host: package: store GC propagates every allocat
 test "oom: standard-library and host: host: IO propagates every allocation failure" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.host_io);
+}
+
+test "oom: standard-library and host: host: filesystem propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
+    try checkStdlibSurface(.filesystem);
 }
 
 test "oom: standard-library and host: host: HTTP propagates every allocation failure" {

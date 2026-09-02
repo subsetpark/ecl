@@ -1,6 +1,6 @@
 const std = @import("std");
 const ecl = @import("ecl");
-const AppError = error{ OutOfMemory, Io };
+const AppError = error{ OutOfMemory, Io, InvalidHostPolicy };
 const help =
     \\ecl — a homoiconic concatenative array calculator
     \\
@@ -29,6 +29,11 @@ pub fn main(init: std.process.Init) void {
         },
         error.Io => failure: {
             writeFile(init.io, .stderr, "ecl: I/O failure\n") catch
+                std.process.exit(1);
+            break :failure 1;
+        },
+        error.InvalidHostPolicy => failure: {
+            writeFile(init.io, .stderr, "ecl: host filesystem or process policy is invalid\n") catch
                 std.process.exit(1);
             break :failure 1;
         },
@@ -177,6 +182,7 @@ fn testCommand(init: std.process.Init, arguments: []const []const u8) AppError!u
                 .initial_cwd = initial_cwd,
                 .inherit_environment = true,
             },
+            .filesystem_policy = .{ .roots = &.{cwdRoot(initial_cwd)} },
         },
         .{ .worker_pool = worker_count },
     );
@@ -231,6 +237,10 @@ const package_help =
     \\    ecl pkg vendor
     \\    ecl pkg gc <lock-file> [lock-file ...]
     \\
+    \\Lock files given to gc are canonical relative paths beneath the working
+    \\directory; commands read and write project files only beneath the
+    \\discovered project root.
+    \\
 ;
 
 fn packageUsage(init: std.process.Init) AppError!u8 {
@@ -238,16 +248,27 @@ fn packageUsage(init: std.process.Init) AppError!u8 {
     return 1;
 }
 
-fn packageArguments(
-    init: std.process.Init,
-    project_root: []const u8,
-    trailing: []const []const u8,
-) AppError![]const []const u8 {
-    const result = init.arena.allocator().alloc([]const u8, trailing.len + 1) catch
-        return error.OutOfMemory;
-    result[0] = project_root;
-    @memcpy(result[1..], trailing);
-    return result;
+/// The host-selected shared package cache as an absolute path, or null when
+/// no environment variable names one. A relative selection keeps its
+/// established meaning by resolving once against the captured startup
+/// directory; evaluated package code never derives or sees this path.
+fn cacheRootFromEnviron(init: std.process.Init, startup_directory: []const u8) AppError!?[]u8 {
+    const selected = try ecl.pkg_lock.cacheRoot(init.gpa, .{
+        .ecl_cache = init.environ_map.get("ECL_CACHE"),
+        .xdg_cache_home = init.environ_map.get("XDG_CACHE_HOME"),
+        .home = init.environ_map.get("HOME"),
+    }) orelse return null;
+    if (std.fs.path.isAbsolute(selected)) return selected;
+    defer init.gpa.free(selected);
+    return std.fs.path.join(init.gpa, &.{ startup_directory, selected }) catch return error.OutOfMemory;
+}
+
+/// The sentinel slice `realPathFileAlloc` hands back must be freed as one.
+fn startupDirectory(init: std.process.Init) AppError![:0]u8 {
+    return std.Io.Dir.cwd().realPathFileAlloc(init.io, ".", init.gpa) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.Io,
+    };
 }
 
 fn packageCommand(init: std.process.Init, arguments: []const []const u8) AppError!u8 {
@@ -261,27 +282,30 @@ fn packageCommand(init: std.process.Init, arguments: []const []const u8) AppErro
             return emitIoError(init, "cannot resolve package project directory", err);
         defer init.gpa.free(cwd);
         const name = if (arguments.len == 2) arguments[1] else std.fs.path.basename(cwd);
-        const cli_args = try packageArguments(init, cwd, &.{name});
         return executeSource(
             init,
             "<pkg:init>",
             "args pkg.cli.init",
-            cli_args,
+            &.{name},
             false,
             .program_source,
             worker_count,
         );
     }
 
+    const startup = try startupDirectory(init);
+    defer init.gpa.free(startup);
     if (std.mem.eql(u8, command, "gc")) {
         if (arguments.len < 2) return packageUsage(init);
-        return executeSource(
+        const cache = try cacheRootFromEnviron(init, startup);
+        defer if (cache) |root| init.gpa.free(root);
+        return executePackageSource(
             init,
             "<pkg:gc>",
             "args pkg.cli.gc",
             arguments[1..],
-            false,
-            .program_source,
+            null,
+            .{ .collect = .{ .cache = cache } },
             worker_count,
         );
     }
@@ -316,7 +340,25 @@ fn packageCommand(init: std.process.Init, arguments: []const []const u8) AppErro
         .found => |root| root,
     };
     defer project_root.deinit();
-    const cli_args = try packageArguments(init, project_root.path(), arguments[1..]);
+    const cache = try cacheRootFromEnviron(init, startup);
+    defer if (cache) |root| init.gpa.free(root);
+    // The discovered project is trusted host input resolved once, here. The
+    // package authority reaches the vendor store only as the fixed child of
+    // this retained handle, so no path names it.
+    var project_handle = std.Io.Dir.cwd().openDir(init.io, project_root.path(), .{}) catch |err|
+        return emitIoError(init, "cannot open project root", err);
+    defer project_handle.close(init.io);
+    // Each command names exactly the stores it may touch. Mutating commands
+    // may create an absent cache; read-only commands leave absence visible.
+    const grant: ecl.package_authority.PackageGrant = if (std.mem.eql(u8, command, "add") or
+        std.mem.eql(u8, command, "sync"))
+        .{ .synchronize = .{ .cache = cache, .project = project_handle } }
+    else if (std.mem.eql(u8, command, "vendor"))
+        .{ .vendor = .{ .cache = cache, .project = project_handle } }
+    else if (std.mem.eql(u8, command, "verify"))
+        .{ .verify = .{ .cache = cache, .project = project_handle } }
+    else
+        .inspect;
     const source = if (std.mem.eql(u8, command, "add"))
         "args pkg.cli.add"
     else if (std.mem.eql(u8, command, "sync"))
@@ -329,15 +371,21 @@ fn packageCommand(init: std.process.Init, arguments: []const []const u8) AppErro
         "args pkg.cli.vendor"
     else
         "args pkg.cli.verify";
-    return executeSource(
+    return executePackageSource(
         init,
         "<pkg>",
         source,
-        cli_args,
-        false,
-        .program_source,
+        arguments[1..],
+        project_root.path(),
+        grant,
         worker_count,
     );
+}
+/// The one filesystem root every command-line Session receives: the startup
+/// working directory, captured once, with every v1 permission. Embedders get
+/// nothing by default; the CLI is the program that deliberately grants it.
+fn cwdRoot(initial_cwd: []const u8) ecl.filesystem_port.Root {
+    return .{ .name = "cwd", .absolute_path = initial_cwd, .permissions = .all };
 }
 /// One immutable view of the process environment, borrowed from the arena so
 /// the Session can copy it once at init.
@@ -497,6 +545,34 @@ fn executeSource(
     standard_input: ecl.machine.StandardInput.Availability,
     worker_count: usize,
 ) AppError!u8 {
+    return executeWith(init, source_name, source, arguments, print_stack, standard_input, worker_count, null, null);
+}
+
+/// A package command: the ordinary command-line Session plus the `'project`
+/// filesystem root and the opaque package-store authority.
+fn executePackageSource(
+    init: std.process.Init,
+    source_name: []const u8,
+    source: []const u8,
+    arguments: []const []const u8,
+    project_root: ?[]const u8,
+    grant: ecl.package_authority.PackageGrant,
+    worker_count: usize,
+) AppError!u8 {
+    return executeWith(init, source_name, source, arguments, false, .program_source, worker_count, project_root, grant);
+}
+
+fn executeWith(
+    init: std.process.Init,
+    source_name: []const u8,
+    source: []const u8,
+    arguments: []const []const u8,
+    print_stack: bool,
+    standard_input: ecl.machine.StandardInput.Availability,
+    worker_count: usize,
+    project_root: ?[]const u8,
+    package_grant: ?ecl.package_authority.PackageGrant,
+) AppError!u8 {
     var output_buffer: [4096]u8 = undefined;
     var output_writer = std.Io.File.stdout().writerStreaming(init.io, &output_buffer);
     var diagnostic_buffer: [4096]u8 = undefined;
@@ -504,25 +580,37 @@ fn executeSource(
     const initial_cwd = std.Io.Dir.cwd().realPathFileAlloc(init.io, ".", init.gpa) catch |err|
         return emitIoError(init, "cannot resolve process working directory", err);
     defer init.gpa.free(initial_cwd);
-    var session = try ecl.session.Session.initWithHostConfig(
-        init.gpa,
-        arguments,
-        .{
-            .io = init.io,
-            .output = &output_writer.interface,
-            .diagnostics = &diagnostic_writer.interface,
-            .ecl_path = init.environ_map.get("ECL_PATH"),
-            .project_start = ".",
-            .environ = try environSnapshot(init),
-            .standard_input = standard_input,
-            .process_policy = .{
-                .executables = .unrestricted,
-                .initial_cwd = initial_cwd,
-                .inherit_environment = true,
-            },
+    // SAFETY: the second slot is read only through `filesystem_roots[0..root_count]`,
+    // and `root_count` becomes 2 only after that slot is assigned below.
+    var filesystem_roots: [2]ecl.filesystem_port.Root = .{ cwdRoot(initial_cwd), undefined };
+    var root_count: usize = 1;
+    if (project_root) |path| {
+        filesystem_roots[1] = .{
+            .name = "project",
+            .absolute_path = path,
+            .permissions = .{ .read_data = true, .inspect = true, .create = true, .replace = true },
+        };
+        root_count = 2;
+    }
+    const host: ecl.session.Host = .{
+        .io = init.io,
+        .output = &output_writer.interface,
+        .diagnostics = &diagnostic_writer.interface,
+        .ecl_path = init.environ_map.get("ECL_PATH"),
+        .project_start = ".",
+        .environ = try environSnapshot(init),
+        .standard_input = standard_input,
+        .process_policy = .{
+            .executables = .unrestricted,
+            .initial_cwd = initial_cwd,
+            .inherit_environment = true,
         },
-        .{ .worker_pool = worker_count },
-    );
+        .filesystem_policy = .{ .roots = filesystem_roots[0..root_count] },
+    };
+    var session = if (package_grant) |grant|
+        try ecl.session.Session.initPackageCommand(init.gpa, arguments, host, .{ .worker_pool = worker_count }, grant)
+    else
+        try ecl.session.Session.initWithHostConfig(init.gpa, arguments, host, .{ .worker_pool = worker_count });
     defer session.deinit();
     session.setNativeDiagnostics(init.environ_map.get("ECL_NATIVE_DIAGNOSTICS") != null);
     const outcome = try session.runUnit(source_name, source);
@@ -569,6 +657,7 @@ fn repl(init: std.process.Init, worker_count: usize) AppError!u8 {
                 .initial_cwd = initial_cwd,
                 .inherit_environment = true,
             },
+            .filesystem_policy = .{ .roots = &.{cwdRoot(initial_cwd)} },
         },
         .{ .worker_pool = worker_count },
     );

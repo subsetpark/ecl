@@ -3,7 +3,7 @@
 # happens anywhere: every coercion below is requested by name.
 'table ('from-header-rows 'column 'cast 'with-column 'group-by 'aggregate) import
 
-"test/acceptance/sales.csv" io.slurp csv.parse from-header-rows 'raw set
+'cwd "test/acceptance/sales.csv" fs.read-text csv.parse from-header-rows 'raw set
 raw io.pp
 raw "amount" column io.pp
 

@@ -225,10 +225,10 @@ test "embedded definitions retain provenance and deferred words stay absent" {
         .{ .name = "pp moved to io", .source = "1 pp", .kind = "undefined-word", .word = "pp" },
         .{ .name = "print moved to io", .source = "\"x\" print", .kind = "undefined-word", .word = "print" },
         .{ .name = "inspect moved to io", .source = "1 inspect", .kind = "undefined-word", .word = "inspect" },
-        .{ .name = "lines moved to io", .source = "\"x\" lines", .kind = "undefined-word", .word = "lines" },
+        .{ .name = "no ambient lines", .source = "\"x\" lines", .kind = "undefined-word", .word = "lines" },
         .{ .name = "prin moved to io", .source = "\"x\" prin", .kind = "undefined-word", .word = "prin" },
-        .{ .name = "slurp moved to io", .source = "slurp", .kind = "undefined-word", .word = "slurp" },
-        .{ .name = "spit moved to io", .source = "spit", .kind = "undefined-word", .word = "spit" },
+        .{ .name = "no ambient slurp", .source = "slurp", .kind = "undefined-word", .word = "slurp" },
+        .{ .name = "no ambient spit", .source = "spit", .kind = "undefined-word", .word = "spit" },
         .{ .name = "getenv needs a name", .source = "getenv", .kind = "underflow", .word = "getenv" },
         .{
             .name = "stdin moved to io",

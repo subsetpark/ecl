@@ -687,6 +687,8 @@ pub fn build(b: *std.Build) void {
             "archive: unpack-tgz preserves existing destinations and has one concurrent winner",
             "pkg store: existing immutable entry wins concurrent install",
             "process:",
+            "fs: concurrent creates have exactly one winner and no staging residue",
+            "fs: cancellation before commit leaves the destination unchanged",
         },
     });
     tsan_tests.linkage = runtime_linkage;
@@ -860,6 +862,10 @@ pub fn build(b: *std.Build) void {
             "tests.archive_test.",
             "tests.random_test.",
             "tests.hostio_test.",
+            // Capability-gated filesystem words and the pure path module. Every
+            // case runs against a temporary directory through the public
+            // Session and finishes well inside the fast budget.
+            "tests.filesystem_test.",
             // Fast families inside sources that also hold heavy tests.
             "env:",
             "modules:",
@@ -952,8 +958,13 @@ pub fn build(b: *std.Build) void {
         .basename = "concurrency.md",
     });
 
+    // The assembler reads and writes through the `'cwd` filesystem root the
+    // command line grants, so it receives the build root and relativizes the
+    // absolute paths the build graph hands it beneath that root.
+    const build_root = b.build_root.path orelse b.pathFromRoot(".");
     const assemble_spec = b.addRunArtifact(exe);
     assemble_spec.addFileArg(b.path("design/spec/assemble.ecl"));
+    assemble_spec.addArg(build_root);
     const assembled_spec = assemble_spec.addOutputFileArg("SPEC.md");
     assemble_spec.addFileArg(b.path("design/SPEC.src.md"));
     assemble_spec.addArg("generated-preamble");
@@ -977,6 +988,7 @@ pub fn build(b: *std.Build) void {
 
     const check_spec_run = b.addRunArtifact(exe);
     check_spec_run.addFileArg(b.path("design/spec/assemble.ecl"));
+    check_spec_run.addArg(build_root);
     check_spec_run.addArg("--check");
     check_spec_run.addFileArg(b.path("design/SPEC.md"));
     check_spec_run.addFileArg(b.path("design/SPEC.src.md"));

@@ -1,6 +1,6 @@
 # DoD-25: RFC 8259 mapping and round-trip over a corpus with nested objects and
 # arrays, null, the booleans, integral and non-integral numbers.
-"test/acceptance/json-corpus.json" io.slurp 'corpus set
+'cwd "test/acceptance/json-corpus.json" fs.read-text 'corpus set
 
 corpus json.parse 'value set
 value io.pp

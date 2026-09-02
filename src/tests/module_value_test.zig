@@ -548,14 +548,15 @@ test "module sources: formatter and standard modules use @defm" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
     const exports = [_][]const u8{
-        "dict.from-pairs", "error.new",         "result.ok",
-        "str.upper",       "io.print",          "csv.parse",
-        "json.parse",      "table.valid?",      "http.get-bytes",
-        "proc.wait",       "archive.sha256",    "pkg.store.inspect",
-        "rng.float",       "rand.float",        "pkg.version.less?",
-        "pkg.name.valid?", "pkg.data.read-one", "pkg.manifest.read",
-        "pkg.lock.read",   "pkg.mvs.resolve",   "pkg.sync.run",
-        "pkg.cli.init",    "test.default.run",
+        "dict.from-pairs",   "error.new",         "result.ok",
+        "str.upper",         "io.print",          "csv.parse",
+        "json.parse",        "table.valid?",      "http.get-bytes",
+        "proc.wait",         "fs.read-text",      "path.normalize",
+        "archive.sha256",    "pkg.store.inspect", "rng.float",
+        "rand.float",        "pkg.version.less?", "pkg.name.valid?",
+        "pkg.data.read-one", "pkg.manifest.read", "pkg.lock.read",
+        "pkg.mvs.resolve",   "pkg.sync.run",      "pkg.cli.init",
+        "test.default.run",
     };
     for (stdlib.names(), exports) |name, qualified| {
         const source = try std.fmt.allocPrint(
@@ -579,7 +580,7 @@ test "module sources: formatter and standard modules use @defm" {
         &runtime,
         "'pkg.store.inspect doc len 0 > 'pkg.store.install doc len 0 > " ++
             "'pkg.store.present? doc len 0 > 'pkg.store.verify doc len 0 > " ++
-            "'pkg.store.write-lock doc len 0 >",
+            "'pkg.store.manifest doc len 0 >",
         "1 1 1 1 1",
     );
     try expectStack(&runtime, "\"1.2.0\" \"1.10.0\" pkg.version.less?", "1");

@@ -1,8 +1,11 @@
 //! Public behavior of the builtin archive module.
 //!
-//! Fixtures are exact hexadecimal program inputs. Tests pass only source text
-//! to Sessions, so the traceless SessionHeap remains the appropriate allocator.
+//! Fixtures are exact hexadecimal program inputs. Extraction is confined to a
+//! Session filesystem root named `'root`, so every case grants a temporary
+//! directory through `Host.filesystem_policy`. Tests pass only source text to
+//! Sessions, so the traceless SessionHeap remains the appropriate allocator.
 const std = @import("std");
+const filesystem_port = @import("../filesystem_port.zig");
 const session = @import("../session.zig");
 const support = @import("kernel_test_support.zig");
 const test_heap = @import("test_heap.zig");
@@ -76,6 +79,8 @@ fn appendString(writer: *std.Io.Writer, text: []const u8) !void {
     try writer.writeByte('"');
 }
 
+/// `[bytes] 'root "destination" archive.unpack-tgz` for a root-relative
+/// destination path.
 fn unpackSource(bytes: []const u8, destination: []const u8) ![]u8 {
     var source = std.Io.Writer.Allocating.init(allocator);
     defer source.deinit();
@@ -84,7 +89,7 @@ fn unpackSource(bytes: []const u8, destination: []const u8) ![]u8 {
         if (index != 0) try source.writer.writeByte(' ');
         try source.writer.print("{d}", .{byte});
     }
-    try source.writer.writeAll("] ");
+    try source.writer.writeAll("] 'root ");
     try appendString(&source.writer, destination);
     try source.writer.writeAll(" archive.unpack-tgz");
     return allocator.dupe(u8, source.written());
@@ -93,6 +98,9 @@ fn unpackSource(bytes: []const u8, destination: []const u8) ![]u8 {
 const Scratch = struct {
     directory: std.testing.TmpDir,
     path: [:0]u8,
+    /// Backing storage for `policy`, so the returned policy borrows this
+    /// value rather than a temporary.
+    root_storage: [1]filesystem_port.Root,
 
     fn init() !Scratch {
         var directory = std.testing.tmpDir(.{});
@@ -100,7 +108,11 @@ const Scratch = struct {
             directory.cleanup();
             return err;
         };
-        return .{ .directory = directory, .path = path };
+        return .{
+            .directory = directory,
+            .path = path,
+            .root_storage = .{.{ .name = "root", .absolute_path = path, .permissions = .all }},
+        };
     }
 
     fn deinit(self: *Scratch) void {
@@ -108,8 +120,14 @@ const Scratch = struct {
         self.directory.cleanup();
     }
 
+    /// Destinations are root-relative; the root is this directory.
     fn destination(self: *Scratch, name: []const u8) ![]u8 {
-        return std.fmt.allocPrint(allocator, "{s}{c}{s}", .{ self.path, std.fs.path.sep, name });
+        _ = self;
+        return allocator.dupe(u8, name);
+    }
+
+    fn policy(self: *const Scratch) filesystem_port.FilesystemPolicy {
+        return .{ .roots = &self.root_storage };
     }
 
     fn expectAbsent(self: *Scratch, name: []const u8) !void {
@@ -130,7 +148,7 @@ const Scratch = struct {
     }
 };
 
-fn expectIoStack(source: []const u8, expected: []const u8) !void {
+fn expectIoStack(scratch: *Scratch, source: []const u8, expected: []const u8) !void {
     var heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&heap);
     var output_buffer: [256]u8 = undefined;
@@ -140,7 +158,12 @@ fn expectIoStack(source: []const u8, expected: []const u8) !void {
     var runtime = try session.Session.initWithHostConfig(
         heap.allocator(),
         &.{},
-        .{ .io = std.testing.io, .output = &output.writer, .diagnostics = &diagnostics.writer },
+        .{
+            .io = std.testing.io,
+            .output = &output.writer,
+            .diagnostics = &diagnostics.writer,
+            .filesystem_policy = scratch.policy(),
+        },
         .cooperative,
     );
     defer runtime.deinit();
@@ -160,7 +183,7 @@ fn expectIoStack(source: []const u8, expected: []const u8) !void {
     try std.testing.expectEqualStrings(expected, display.bytes());
 }
 
-fn expectIoError(source: []const u8, expected: support.ErrorCase) !void {
+fn expectIoError(scratch: *Scratch, source: []const u8, expected: support.ErrorCase) !void {
     var heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&heap);
     var output_buffer: [256]u8 = undefined;
@@ -170,7 +193,12 @@ fn expectIoError(source: []const u8, expected: support.ErrorCase) !void {
     var runtime = try session.Session.initWithHostConfig(
         heap.allocator(),
         &.{},
-        .{ .io = std.testing.io, .output = &output.writer, .diagnostics = &diagnostics.writer },
+        .{
+            .io = std.testing.io,
+            .output = &output.writer,
+            .diagnostics = &diagnostics.writer,
+            .filesystem_policy = scratch.policy(),
+        },
         .cooperative,
     );
     defer runtime.deinit();
@@ -192,7 +220,7 @@ test "archive: unpack-tgz atomically extracts regular files and returns paths" {
     const source = try unpackSource(bytes, destination);
     defer allocator.free(source);
 
-    try expectIoStack(source, "(\"lib/main.ecl\" \"README.md\")");
+    try expectIoStack(&scratch, source, "(\"lib/main.ecl\" \"README.md\")");
     const main = try scratch.directory.dir.readFileAlloc(std.testing.io, "package/lib/main.ecl", allocator, .unlimited);
     defer allocator.free(main);
     try std.testing.expectEqualStrings("42\n", main);
@@ -206,7 +234,7 @@ test "archive: unpack-tgz atomically extracts regular files and returns paths" {
     defer allocator.free(empty_destination);
     const empty_source = try unpackSource(empty_bytes, empty_destination);
     defer allocator.free(empty_source);
-    try expectIoStack(empty_source, "()");
+    try expectIoStack(&scratch, empty_source, "()");
     var empty_directory = try scratch.directory.dir.openDir(std.testing.io, "empty", .{ .iterate = true });
     defer empty_directory.close(std.testing.io);
     var empty_iterator = empty_directory.iterate();
@@ -224,7 +252,7 @@ test "archive: unpack-tgz atomically extracts regular files and returns paths" {
         defer allocator.free(extension_source);
         const expected = try std.fmt.allocPrint(allocator, "(\"{s}\")", .{fixtures.long_path});
         defer allocator.free(expected);
-        try expectIoStack(extension_source, expected);
+        try expectIoStack(&scratch, extension_source, expected);
         const extracted = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ name, fixtures.long_path });
         defer allocator.free(extracted);
         const content = try scratch.directory.dir.readFileAlloc(std.testing.io, extracted, allocator, .unlimited);
@@ -254,7 +282,7 @@ test "archive: unpack-tgz rejects traversal malformed and over-limit archives wi
         defer allocator.free(destination);
         const source = try unpackSource(bytes, destination);
         defer allocator.free(source);
-        try expectIoError(source, .{ .name = @tagName(fixture), .source = source, .kind = "domain", .word = "archive.unpack-tgz" });
+        try expectIoError(&scratch, source, .{ .name = @tagName(fixture), .source = source, .kind = "domain", .word = "archive.unpack-tgz" });
         try scratch.expectAbsent(name);
         try scratch.expectEntryCount(0);
     }
@@ -272,7 +300,7 @@ test "archive: unpack-tgz rejects links and special nodes without publication" {
         defer allocator.free(destination);
         const source = try unpackSource(bytes, destination);
         defer allocator.free(source);
-        try expectIoError(source, .{ .name = @tagName(fixture), .source = source, .kind = "domain", .word = "archive.unpack-tgz" });
+        try expectIoError(&scratch, source, .{ .name = @tagName(fixture), .source = source, .kind = "domain", .word = "archive.unpack-tgz" });
         try scratch.expectAbsent(name);
         try scratch.expectEntryCount(0);
     }
@@ -280,6 +308,7 @@ test "archive: unpack-tgz rejects links and special nodes without publication" {
 
 const ConcurrentResult = struct {
     source: []const u8,
+    root: []const u8,
     successes: *std.atomic.Value(u32),
     io_failures: *std.atomic.Value(u32),
     unexpected: *std.atomic.Value(bool),
@@ -295,6 +324,7 @@ fn concurrentUnpack(result: *ConcurrentResult) void {
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
+        .filesystem_policy = .{ .roots = &.{.{ .name = "root", .absolute_path = result.root, .permissions = .all }} },
     }, .cooperative) catch {
         result.unexpected.store(true, .release);
         return;
@@ -335,7 +365,7 @@ test "archive: unpack-tgz preserves existing destinations and has one concurrent
     defer allocator.free(existing);
     const existing_source = try unpackSource(bytes, existing);
     defer allocator.free(existing_source);
-    try expectIoError(existing_source, .{
+    try expectIoError(&scratch, existing_source, .{
         .name = "existing destination",
         .source = existing_source,
         .kind = "io",
@@ -353,7 +383,7 @@ test "archive: unpack-tgz preserves existing destinations and has one concurrent
     var successes: std.atomic.Value(u32) = .init(0);
     var io_failures: std.atomic.Value(u32) = .init(0);
     var unexpected: std.atomic.Value(bool) = .init(false);
-    var result = ConcurrentResult{ .source = source, .successes = &successes, .io_failures = &io_failures, .unexpected = &unexpected };
+    var result = ConcurrentResult{ .source = source, .root = scratch.path, .successes = &successes, .io_failures = &io_failures, .unexpected = &unexpected };
     const first = try std.Thread.spawn(.{}, concurrentUnpack, .{&result});
     const second = try std.Thread.spawn(.{}, concurrentUnpack, .{&result});
     first.join();
@@ -385,6 +415,7 @@ test "archive: cancellation and absent host IO never publish a destination" {
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
+        .filesystem_policy = scratch.policy(),
     }, .cooperative);
     defer runtime.deinit();
     switch (try runtime.runUnit("<archive-warm>", "[] archive.sha256 pop")) {
@@ -405,13 +436,62 @@ test "archive: cancellation and absent host IO never publish a destination" {
     const unavailable_source = try unpackSource(bytes, unavailable_destination);
     defer allocator.free(unavailable_source);
     try support.expectError(.{
-        .name = "host IO absent",
+        .name = "filesystem authority absent",
         .source = unavailable_source,
-        .kind = "io",
+        .kind = "domain",
         .word = "archive.unpack-tgz",
         .message = "archive extraction is unavailable",
     });
     try scratch.expectAbsent("unavailable");
+    try scratch.expectEntryCount(0);
+
+    // A root without the create grant, an unknown root, and a non-canonical
+    // destination are refused before any archive byte is decompressed.
+    const read_only: filesystem_port.FilesystemPolicy = .{
+        .roots = &.{.{ .name = "root", .absolute_path = scratch.path, .permissions = .{ .read_data = true } }},
+    };
+    var denied_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&denied_heap);
+    var denied_runtime = try session.Session.initWithHostConfig(denied_heap.allocator(), &.{}, .{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .filesystem_policy = read_only,
+    }, .cooperative);
+    defer denied_runtime.deinit();
+    const denied_source = try unpackSource(bytes, "denied");
+    defer allocator.free(denied_source);
+    const denied = switch (try denied_runtime.runUnit("<archive-denied>", denied_source)) {
+        .err => |item| item,
+        .ok, .incomplete => return error.ExpectedLanguageError,
+    };
+    defer denied_runtime.release(denied);
+    try support.expectLanguageError(denied, .{
+        .name = "create denied",
+        .source = denied_source,
+        .kind = "domain",
+        .word = "archive.unpack-tgz",
+        .data = &.{
+            .{ .name = "root", .expected = .{ .symbol = "root" } },
+            .{ .name = "reason", .expected = .{ .symbol = "denied" } },
+        },
+    });
+    try scratch.expectAbsent("denied");
+    for ([_]struct { destination: []const u8, reason: []const u8 }{
+        .{ .destination = ".", .reason = "invalid-path" },
+        .{ .destination = "a/../b", .reason = "invalid-path" },
+        .{ .destination = "/abs", .reason = "invalid-path" },
+    }) |case| {
+        const malformed = try unpackSource(bytes, case.destination);
+        defer allocator.free(malformed);
+        try expectIoError(&scratch, malformed, .{
+            .name = case.destination,
+            .source = malformed,
+            .kind = "domain",
+            .word = "archive.unpack-tgz",
+            .data = &.{.{ .name = "reason", .expected = .{ .symbol = case.reason } }},
+        });
+    }
     try scratch.expectEntryCount(0);
 }
 
@@ -426,9 +506,29 @@ test "archive: allocation and filesystem failures never publish a destination" {
     defer allocator.free(destination);
     const source = try unpackSource(bytes, destination);
     defer allocator.free(source);
-    try expectIoError(source, .{ .name = "missing destination parent", .source = source, .kind = "io", .word = "archive.unpack-tgz" });
+    try expectIoError(&scratch, source, .{
+        .name = "missing destination parent",
+        .source = source,
+        .kind = "io",
+        .word = "archive.unpack-tgz",
+        .data = &.{.{ .name = "reason", .expected = .{ .symbol = "not-found" } }},
+    });
     try scratch.expectAbsent("missing-parent");
     try scratch.expectEntryCount(0);
+
+    // A destination whose parent is a symlink escaping the root is refused
+    // at the directory handle, not by inspecting the path text.
+    try scratch.directory.dir.symLink(std.testing.io, "..", "up", .{});
+    const escaping = try unpackSource(bytes, "up/package");
+    defer allocator.free(escaping);
+    try expectIoError(&scratch, escaping, .{
+        .name = "escaping destination parent",
+        .source = escaping,
+        .kind = "io",
+        .word = "archive.unpack-tgz",
+        .data = &.{.{ .name = "reason", .expected = .{ .symbol = "symlink-escape" } }},
+    });
+    try scratch.expectEntryCount(1);
 }
 
 test "archive: cold-loads through the builtin manifest" {

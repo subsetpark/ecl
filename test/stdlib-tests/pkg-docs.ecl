@@ -11,10 +11,11 @@
    'pkg.data.sorted-entries 'pkg.manifest.validate-requirement
    'pkg.manifest.validate 'pkg.manifest.read 'pkg.manifest.write
    'pkg.lock.validate 'pkg.lock.read 'pkg.lock.write 'pkg.lock.vendor
-   'pkg.lock.tree 'pkg.lock.why 'pkg.mvs.resolve 'pkg.sync.cache-root
-   'pkg.sync.store-key 'pkg.sync.store-path 'pkg.sync.store-keys
-   'pkg.sync.store-root 'pkg.sync.requirement 'pkg.sync.install-immutable
-   'pkg.sync.run 'pkg.sync.run-offline 'pkg.sync.verify 'pkg.cli.init
+   'pkg.lock.tree 'pkg.lock.why 'pkg.mvs.resolve
+   'pkg.sync.store-key 'pkg.sync.store-keys 'pkg.sync.store-root
+   'pkg.sync.write-project-file 'pkg.sync.requirement
+   'pkg.sync.install-immutable 'pkg.sync.run 'pkg.sync.run-offline
+   'pkg.sync.verify 'pkg.cli.init
    'pkg.cli.add 'pkg.cli.sync 'pkg.cli.sync-offline 'pkg.cli.tree
    'pkg.cli.why 'pkg.cli.verify 'pkg.cli.vendor 'pkg.cli.gc)
   documented)

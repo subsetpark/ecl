@@ -59,6 +59,45 @@ Opening a shared library executes machine code before ECL validates its
 descriptor. Every directory used for native loading is a trusted-code
 boundary.
 
+## Filesystem access
+
+Caller-selected filesystem work goes through the `fs` module and the `path`
+module documented in `STDLIB.md`. `path` is pure string manipulation over
+`/`-separated Unicode paths and applies no host convention. `fs` is a
+capability: the Session host names root directories once, each with an
+explicit permission set and shared limits, and every word names one root by
+symbol and one canonical relative path beneath it. Roots are authority names,
+not paths or transferable values; the boundary is Host versus evaluated ECL,
+and modules within one Session are not isolated from each other.
+
+The `ecl` command grants exactly one root, `'cwd`, for the working directory
+captured once at startup, with every permission. Package commands add the
+`'project` root described below. Embedded Sessions are default-deny: without a
+`FilesystemPolicy` every `fs` word raises `'domain` with reason `'unavailable`,
+and an unsatisfiable policy (a relative, missing, or non-directory root, a
+duplicate or malformed name, a zero limit, or an unsupported target) is a
+Session construction error distinct from allocation failure.
+
+Supported targets are Linux and macOS. Paths are UTF-8 slash paths; a host
+filename that is not valid UTF-8 cannot be listed and fails the whole listing.
+Backslash is an ordinary filename character. Symlinks are followed only while
+their target remains beneath the root: an absolute target, a relative target
+that would rise above the root, a loop, and an expansion limit are refused, and
+containment is enforced at the root's retained directory handle rather than by
+inspecting path text. The root handle remains the authority if the directory
+is renamed after Session construction.
+
+Created and replaced files are new inodes with the host's ordinary creation
+mode under the process umask. Ownership, permissions, timestamps, extended
+attributes, and sparse layout are not preserved by `replace-*` or `copy`.
+Publication is atomic with respect to the namespace and to failure; no
+`fsync`, crash durability, or persistence across power loss is promised.
+Concurrent external mutation may decide which ordinary result wins but can
+never redirect an operation outside the retained handles. Recursive copy or
+removal, recursive directory creation, globbing, watching, memory mapping,
+locking, link creation, permission changes, timestamps, and Windows support are
+outside this contract.
+
 ## Host-backed data contracts
 
 ### Byte lists and archives
@@ -72,7 +111,8 @@ operations continue to observe ordinary integer list elements.
 hexadecimal characters.
 
 `archive.unpack-tgz` validates a gzip-compressed tar byte list and extracts it
-beneath a previously absent destination. It accepts ustar regular files and
+beneath a previously absent destination, a canonical relative path under a
+named `fs` root that grants `create`. It accepts ustar regular files and
 directories, per-entry PAX `path` and `size` records, and GNU long-name
 records. Other PAX fields may not alter a member's path, size, or kind. The
 result contains normalized regular-file paths in archive order and omits
@@ -87,15 +127,19 @@ failures, and size disagreement raise `'domain`.
 The uncompressed tar stream is limited to 1,073,741,824 bytes and 100,000
 regular-file or directory members. Exceeding either limit raises `'domain`.
 
-Extraction uses a unique `.ecl-unpack-*` sibling staging directory. Files are
-created exclusively. Failure and cancellation remove the staging tree through
-bounded reverse-order work. A same-parent rename publishes the completed tree
-after validation and handle closure. The destination is never overwritten or
-merged. Concurrent extractors may stage independently; one may publish, and
-the others receive an `'io` destination-exists error.
+Extraction resolves the destination's parent beneath the root through the
+confined `fs` resolver, then uses a unique `.ecl-fs-*` sibling staging
+directory relative to that parent handle. Files are created exclusively.
+Failure and cancellation remove the staging tree through bounded reverse-order
+work. A same-parent no-clobber rename publishes the completed tree after
+validation and handle closure. The destination is never overwritten or merged.
+Concurrent extractors may stage independently; one may publish, and the others
+receive an `'io` destination-exists error.
 
-A non-list byte container or non-string destination raises `'type`. A byte
-outside `0..255` raises `'domain` with its zero-based `'index`. Host or
+A non-list byte container, non-symbol root, or non-string destination raises
+`'type`. A byte outside `0..255` raises `'domain` with its zero-based
+`'index`. A missing filesystem policy, unknown root, denied `create` grant, or
+non-canonical destination raises `'domain` with the `fs` failure data. Host or
 filesystem failures raise `'io` with the relevant `'path`. Failure exposes no
 partial destination and opens no member outside the staging root.
 
@@ -337,17 +381,28 @@ A store entry is the immutable directory
 `<name>-<version>-<hex>`, where `<hex>` is the package hash without its
 `sha256-` prefix. A present entry is reused and never overwritten.
 
-The shared store root is selected from the session's captured environment:
+The shared store root is selected by the host, not by evaluated code, from
+the process environment at command startup:
 
 1. nonempty `ECL_CACHE` supplies the complete root;
 2. nonempty `XDG_CACHE_HOME` supplies `$XDG_CACHE_HOME/ecl/pkg`;
 3. nonempty `HOME` supplies `$HOME/.cache/ecl/pkg`;
-4. absence of all three makes synchronization fail with `'io` before path
-   creation.
+4. absence of all three leaves the `'cache` store unavailable, and the first
+   store operation that needs it fails with `'io` naming the three variables.
 
-An empty environment value is treated as absent. `pkg.store.present?` returns
-`0` for an absent path and `1` for a real directory. Symlinks, other node
-kinds, access denial, and probe failures raise `'io` with `'path`.
+An empty environment value is treated as absent. A relative selection is
+resolved once against the working directory captured at command startup.
+Package commands that may install (`add`, `sync`) create an absent cache
+directory at startup; read-only commands leave absence visible. A
+package-command Session holds the selected cache and the project's `vendor`
+directory as retained handles behind an opaque package authority; `pkg.store`
+words name a store as `'cache` or `'vendor` and an entry by canonical key. The
+vendor store is always the entry named `vendor` directly inside the discovered
+project root, opened without following a symlink; a project whose `vendor` is
+a link is rejected when the command starts, and no store is ever opened
+behind it. `pkg.store.present?` returns `0` for an absent
+entry and `1` for a real directory. Symlinks, other node kinds, access denial,
+and probe failures raise `'io` with the key as `'path`.
 
 ### Package archives and publication
 
@@ -377,22 +432,24 @@ Each installed entry retains its source archive as a reserved seal.
 `pkg.store.read-seal` performs the same verification and returns the exact seal
 bytes. It accepts no caller-selected child path.
 
-`pkg.store.write-lock` atomically replaces a regular project data file through
-a unique sibling temporary. `pkg.store.write-new` uses the same protocol and
-publishes only when the destination remains absent. Both operations clean up
-their temporary on failure. `write-lock` preserves an existing file until
-commit; `write-new` preserves a racing destination.
+Project files are published through the `'project` filesystem root:
+`pkg.sync.write-project-file` uses `fs.create-text` for an absent file and the
+strict `fs.replace-text` otherwise, so a racing collision surfaces as the `fs`
+failure rather than becoming an upsert. Both publish through a private staging
+entry and preserve the prior file until the atomic commit.
 
 The package store exposes no general filesystem handles, recursive deletion,
-copy, rename, or caller-selected garbage-collection root.
+copy, rename, absolute path, or caller-selected garbage-collection root.
 
 ### Synchronization
 
-`pkg.sync.run` receives a root manifest and project root and performs a
-discovery pass followed by an installation pass.
+`pkg.sync.run` receives a root manifest and performs a discovery pass followed
+by an installation pass inside a package-command Session, using the store the
+project lock selects.
 
 The discovery pass visits exact requirements in canonical order. A present
-store entry supplies its manifest locally. A missing entry is fetched with
+store entry supplies its manifest locally through `pkg.store.manifest`. A
+missing entry is fetched with
 `http.get-bytes`; synchronization requires a successful status, computes the
 archive hash before inspection, validates the archive manifest, checks its
 exact package identity, and follows its requirements.
@@ -410,8 +467,8 @@ publication boundary limits retained archive memory and makes the installer
 independent of discovery state.
 
 Synchronization writes `ecl.lock` only after every selected entry is present.
-It renders the lock once and publishes it with `pkg.store.write-lock`. Failure
-preserves the previous lock. Immutable entries installed before a later
+It renders the lock once and publishes it with `pkg.sync.write-project-file`.
+Failure preserves the previous lock. Immutable entries installed before a later
 failure remain available for a subsequent run.
 
 `pkg.sync.run-offline` performs the same discovery, resolution, and
@@ -467,9 +524,11 @@ lock with `'store 'vendor`. Failure preserves the prior lock and may leave
 valid immutable entries for reuse. Repetition is idempotent.
 
 `ecl pkg gc <lock-file> [lock-file ...]` parses each named lock without
-evaluation and retains the union of their selected store keys. Collection
-derives the shared cache root from the captured environment. It preserves
-retained keys, symlinks, non-directory nodes, and unknown child names.
+evaluation and retains the union of their selected store keys. Each lock file
+is a canonical relative path beneath the working directory; an absolute or
+escaping path is a `'domain` error. Collection uses the shared cache the host
+selected at startup and preserves retained keys, symlinks, non-directory
+nodes, and unknown child names.
 
 An unretained real directory with a canonical store-key name is renamed to a
 private `.ecl-gc-*` name and deleted through bounded work without following
@@ -478,8 +537,11 @@ count includes live entries detached by the current invocation.
 
 ### Package commands
 
-`ecl pkg` dispatches to the ordinary `pkg.*` modules. Every command except
-`init` uses project discovery. `init` acts on the working directory.
+`ecl pkg` dispatches to the ordinary `pkg.*` modules inside a package-command
+Session. Every command except `init` and `gc` uses project discovery and
+grants the discovered root to evaluated code as the `'project` filesystem root
+with `read-data`, `inspect`, `create`, and `replace`; the discovered path
+itself never enters evaluated code. `init` acts on the `'cwd` root.
 
 - `init [name]` creates a format-1 manifest at version `0.1.0`. The working
   directory basename supplies the default name. Creation never replaces an
@@ -528,6 +590,11 @@ printed to standard error.
 Process status is `0` on success, the status supplied to `exit`, `1` for a
 failed unit or command usage error, and `2` for out-of-memory.
 
+Every Session the command starts receives the working directory, resolved
+once at startup, as the `'cwd` filesystem root with every permission, and an
+unrestricted process policy anchored at the same directory. The two policies
+are independent grants.
+
 The command reads these environment variables at startup:
 
 - `ECL_PATH` supplies the unmanaged module search path;
@@ -541,7 +608,8 @@ The command reads these environment variables at startup:
 ### Standard input
 
 `io.stdin` is available in `-e` and script-file modes. It reads the complete
-input stream once. Standard input carries program source in `ecl -` and in
+input stream once. There is no ambient file access: file words live in `fs`
+and act beneath the `'cwd` root. Standard input carries program source in `ecl -` and in
 non-terminal invocation with no arguments, so `io.stdin` raises `'io` in those
 modes. A second read also raises `'io`.
 

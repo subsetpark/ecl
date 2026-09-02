@@ -123,7 +123,7 @@
 
  ### test inert-data
  (-- : "Reject executable forms as data without evaluating them.")
- (("{'format 1 'name \"a\" 'version \"0.1.0\" 'requires ((\"pwned\" \"/tmp/pkg-pwned\" io.spit))}"
+ (("{'format 1 'name \"a\" 'version \"0.1.0\" 'requires ((\"pwned\" 'cwd \"pkg-pwned\" fs.create-text))}"
    pkg.manifest.read)
   'domain
   'key
