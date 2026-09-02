@@ -265,12 +265,52 @@ test "e2e: net listen under the CLI grant binds an ephemeral port and reports it
     try std.testing.expect(try std.fmt.parseInt(u16, result.stdout[start..end], 10) != 0);
 }
 
-// PENDING: Patch 4 of gameplans/net-connections.json: spawn the binary with
-// piped stdout, read the `{'address "127.0.0.1" 'port N}` handshake line,
-// connect, write `ping`, read `pong` until EOF, and expect exit 0 with the
-// echoed request bytes on stdout.
 test "e2e: net accept, read, write, and close round-trip over loopback under the CLI grant" {
-    return error.SkipZigTest;
+    // The binary announces its listener on stdout, so stdout is piped and read
+    // line by line while the process runs; `cli.runOptions` collects output
+    // only after exit and cannot drive a live peer.
+    var child = try std.process.spawn(io, .{
+        .argv = &.{
+            build_options.ecl_exe,
+            "{'address \"127.0.0.1\" 'port 0} net.listen 'l set " ++
+                "l net.local-address io.pp " ++
+                "l net.accept 'c set c 4 net.read io.pp c \"pong\" bytes net.write c net.close",
+        },
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .pipe,
+    });
+    var stdout_buffer: [512]u8 = undefined;
+    var stdout = child.stdout.?.readerStreaming(io, &stdout_buffer);
+    const handshake = (try stdout.interface.takeDelimiter('\n')) orelse return error.MissingHandshake;
+    const marker = "'port ";
+    const start = std.mem.indexOf(u8, handshake, marker).? + marker.len;
+    const end = std.mem.indexOfScalarPos(u8, handshake, start, '}').?;
+    const port = try std.fmt.parseInt(u16, handshake[start..end], 10);
+    try std.testing.expect(port != 0);
+
+    const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(port) };
+    const stream = try std.Io.net.IpAddress.connect(&address, io, .{ .mode = .stream });
+    defer stream.close(io);
+    var writer = stream.writer(io, &.{});
+    try writer.interface.writeAll("ping");
+    try writer.interface.flush();
+    var reply_buffer: [64]u8 = undefined;
+    var reader = stream.reader(io, &reply_buffer);
+    var reply: [4]u8 = undefined;
+    try reader.interface.readSliceAll(&reply);
+    try std.testing.expectEqualStrings("pong", &reply);
+    try std.testing.expectError(error.EndOfStream, reader.interface.takeByte());
+
+    const echoed = (try stdout.interface.takeDelimiter('\n')) orelse return error.MissingEcho;
+    try std.testing.expectEqualStrings("[112 105 110 103]", echoed);
+    var stderr_buffer: [512]u8 = undefined;
+    var stderr = child.stderr.?.readerStreaming(io, &stderr_buffer);
+    var stderr_sink: [512]u8 = undefined;
+    const stderr_len = try stderr.interface.readSliceShort(&stderr_sink);
+    try std.testing.expectEqualStrings("", stderr_sink[0..stderr_len]);
+    const term = try child.wait(io);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, term);
 }
 
 test "e2e: proc leader exit cleans retained and redirected descendants" {

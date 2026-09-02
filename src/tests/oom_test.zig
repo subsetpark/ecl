@@ -973,9 +973,20 @@ fn stdlibSessionAllocationProbe(
                 "[] ({'address \"127.0.0.1\" 'port 1} net.listen) @attempt pop " ++
                 "[] ({'address \"127.0.0.1\" 'port 0} net.listen net.local-address) @spawn await pop",
         ),
-        // PENDING: Patch 4 of gameplans/net-connections.json: listen and read
-        // the port back, start a Zig peer, then accept/read/write/close.
-        .net_connection => return error.SkipZigTest,
+        // A live exchange has scheduling-dependent readiness cardinality (the
+        // acceptor thread may fill the slot before or after the driver's first
+        // poll), so like the process surface it cannot be an oracle for
+        // allocation ordinals; the connection cell's own lifecycle is swept
+        // by a unit test in net_port.zig. Here every ordinal is deterministic
+        // under the cooperative scheduler: a child parks in accept with no
+        // peer, the parent closes the listener, and the child fails closed.
+        .net_connection => try runOk(
+            &runtime,
+            "oom-net-connection.ecl",
+            "{'address \"127.0.0.1\" 'port 0} net.listen 'l set " ++
+                "[] (l net.accept) @spawn 'waiting set 0 clock.sleep l net.close " ++
+                "waiting await pop [] (l net.accept) @attempt pop",
+        ),
         .time => try runOk(
             &runtime,
             "oom-time.ecl",

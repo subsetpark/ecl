@@ -786,6 +786,8 @@ pub const ListenerCell = struct {
             if (fds[1].revents != 0) break;
             if (fds[0].revents == 0) continue;
 
+            // SAFETY: accept writes the peer address into `storage` before it is
+            // read, and nothing reads it on any failure path.
             var storage: std.Io.Threaded.PosixAddress = undefined;
             var length: posix.socklen_t = @sizeOf(std.Io.Threaded.PosixAddress);
             const rc = if (builtin.os.tag == .linux)
@@ -915,6 +917,10 @@ pub const ConnectionCell = struct {
     reader_active: bool = false,
     reader_done: bool = false,
     writer_done: bool = false,
+    /// Set by `close` and `abort`: the program or its scope ended the
+    /// connection, so later reads and writes report `closed` rather than
+    /// whatever the peer did afterwards.
+    closed_locally: bool = false,
     discard_receive: bool = false,
     peer_reset: bool = false,
     io_failed: bool = false,
@@ -1102,10 +1108,11 @@ pub const ConnectionCell = struct {
             self.changed.broadcast(blockingIo());
             return .{ .data = count };
         }
-        if (self.phase != .open) return .closed;
+        if (self.closed_locally) return .closed;
         if (self.peer_reset) return .reset;
         if (self.io_failed) return .io;
         if (self.reader_done) return .eof;
+        if (self.phase != .open) return .closed;
         return .pending;
     }
 
@@ -1134,9 +1141,10 @@ pub const ConnectionCell = struct {
         std.debug.assert(node.cell == self and node.linked);
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        if (self.phase != .open) return .closed;
+        if (self.closed_locally) return .closed;
         if (self.peer_reset) return .reset;
         if (self.io_failed) return .io;
+        if (self.phase != .open) return .closed;
         if (!node.active or self.send.free() == 0) return .pending;
         const count = @min(bytes.len, self.send.free());
         self.send.push(bytes[0..count]);
@@ -1181,6 +1189,7 @@ pub const ConnectionCell = struct {
         std.Io.Threaded.mutexLock(&self.mutex);
         if (self.phase == .open) {
             self.phase = .closing;
+            self.closed_locally = true;
             self.discard_receive = true;
             self.receive.discard();
             // With no writer left to drain the ring, nothing else would ever
@@ -1195,7 +1204,8 @@ pub const ConnectionCell = struct {
     fn abort(self: *ConnectionCell) void {
         std.Io.Threaded.mutexLock(&self.mutex);
         if (self.phase != .closed) {
-            self.phase = .closing;
+            if (self.phase == .open) self.phase = .closing;
+            self.closed_locally = true;
             self.discard_receive = true;
             self.receive.discard();
             self.send.discard();
@@ -1215,13 +1225,13 @@ pub const ConnectionCell = struct {
     pub fn peerAddress(self: *ConnectionCell) ?IpAddress {
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        return if (self.phase == .open) self.peer else null;
+        return if (self.closed_locally) null else self.peer;
     }
 
     pub fn localAddress(self: *ConnectionCell) ?IpAddress {
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        return if (self.phase == .open) self.local else null;
+        return if (self.closed_locally) null else self.local;
     }
 
     /// The peer this connection was accepted from, open or closed.
@@ -1504,6 +1514,8 @@ fn connectLoopback(port: u16) !std.Io.net.Stream {
 }
 
 test "accepted connections exchange exact bytes, close gracefully, and release their reservation" {
+    // SAFETY: `init` assigns every field before any use, and `deinit` runs
+    // only after a successful `init`.
     var harness: LoopbackHarness = undefined;
     try harness.init(std.testing.allocator, .{ .receive_capacity = 8, .send_capacity = 8 });
     defer harness.deinit();
@@ -1575,6 +1587,8 @@ test "accepted connections exchange exact bytes, close gracefully, and release t
 }
 
 test "an accept cancelled after a peer connected closes the orphan and the listener closes synchronously" {
+    // SAFETY: `init` assigns every field before any use, and `deinit` runs
+    // only after a successful `init`.
     var harness: LoopbackHarness = undefined;
     try harness.init(std.testing.allocator, .{});
     defer harness.deinit();
@@ -1603,4 +1617,90 @@ test "an accept cancelled after a peer connected closes the orphan and the liste
     try std.testing.expectError(error.Closed, listener.beginAccept());
     try std.testing.expectError(error.ConnectionRefused, connectLoopback(port));
     try std.testing.expectEqual(@as(usize, 0), harness.owner.live_connections.load(.acquire));
+}
+
+/// A loopback peer for the allocation sweep: connects, writes two bytes, reads
+/// two back or observes the connection end, and closes. It allocates nothing
+/// through the swept allocator.
+const LifecyclePeer = struct {
+    thread: ?std.Thread = null,
+    port: u16 = 0,
+
+    fn start(self: *LifecyclePeer, port: u16) !void {
+        self.port = port;
+        self.thread = try std.Thread.spawn(.{}, run, .{self});
+    }
+
+    fn join(self: *LifecyclePeer) void {
+        if (self.thread) |thread| thread.join();
+        self.thread = null;
+    }
+
+    fn run(self: *LifecyclePeer) void {
+        const stream = connectLoopback(self.port) catch return;
+        defer stream.close(std.testing.io);
+        var writer = stream.writer(std.testing.io, &.{});
+        writer.interface.writeAll("hi") catch return;
+        writer.interface.flush() catch return;
+        var buffer: [16]u8 = undefined;
+        var reader = stream.reader(std.testing.io, &buffer);
+        var reply: [2]u8 = undefined;
+        reader.interface.readSliceAll(&reply) catch return;
+    }
+};
+
+/// One accept, read, write, close cycle with every readiness wait registered
+/// before its poll, so the allocation ordinals do not depend on whether the
+/// controller thread won the race: registration allocates exactly once
+/// whether or not the source is already ready.
+fn connectionLifecycle(allocator: std.mem.Allocator) !void {
+    var peer: LifecyclePeer = .{};
+    defer peer.join();
+    // SAFETY: `init` assigns every field before any use, and `deinit` runs
+    // only after a successful `init`.
+    var harness: LoopbackHarness = undefined;
+    try harness.init(allocator, .{ .receive_capacity = 8, .send_capacity = 8 });
+    defer harness.deinit();
+    const listener_port = try harness.owner.listen(harness.runtime_scheduler.worker(), &harness.root_scope, .{ .ip4 = .loopback(0) });
+    defer harness.host.domain().releaseValue(listener_port);
+    const listener = fromValue(listener_port).?;
+    try peer.start(listener.localAddress().?.getPort());
+
+    const slot = try listener.beginAccept();
+    var slot_owned = true;
+    defer if (slot_owned) listener.endAccept(slot);
+    var target: TestTarget = .{};
+    try awaitSource(listener.acceptSource(slot), &target);
+    const connection_port = switch (try listener.pollAccept(slot, harness.runtime_scheduler.worker(), &harness.root_scope)) {
+        .accepted => |port_value| port_value,
+        else => return error.UnexpectedAcceptOutcome,
+    };
+    listener.endAccept(slot);
+    slot_owned = false;
+    defer harness.host.domain().releaseValue(connection_port);
+    const connection = connectionFromValue(connection_port).?;
+
+    try connection.beginRead();
+    defer connection.endRead();
+    try awaitSource(connection.readSource(), &target);
+    var received: [2]u8 = undefined;
+    switch (connection.read(&received)) {
+        .data => |count| try std.testing.expectEqual(@as(usize, 2), count),
+        else => return error.UnexpectedReadOutcome,
+    }
+    try std.testing.expectEqualStrings("hi", &received);
+    const permit = try connection.beginWrite();
+    switch (connection.write(permit, "ok")) {
+        .written => |count| try std.testing.expectEqual(@as(usize, 2), count),
+        else => {
+            connection.abandonWrite(permit);
+            return error.UnexpectedWriteOutcome;
+        },
+    }
+    connection.finishWrite(permit);
+    connection.close();
+}
+
+test "connection lifecycle propagates every allocation failure without leaking a socket or slot" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, connectionLifecycle, .{});
 }
