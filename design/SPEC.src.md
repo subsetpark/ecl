@@ -1254,6 +1254,25 @@ outside this portable process-group guarantee. A host without an equivalent
 tree-owning backend rejects process authority rather than silently weakening
 cleanup to one PID.
 
+Inbound network listening is a fourth host capability with the same shape. A
+Session names, when it is constructed, either an exact allowlist of address
+and port pairs or an unrestricted grant, or names none and denies every
+listen; evaluated code requests one address and port, and possession of host
+I/O, filesystem, process, or outbound HTTP authority confers no listen
+authority. Addresses are IP literals compared after normalization; they are
+never resolved through a name service, so a grant cannot be widened by
+resolution. A grant whose port is zero admits only a request for an ephemeral
+port. A request the grant does not admit, or made without a grant, is
+`'domain` and never reaches the operating system.
+
+A listener is a port. Binding and listening complete before the value is
+returned, the value belongs to the creating unit's task scope, and no
+operation on a listener parks. The bound address and port are observable data;
+closing a listener, explicitly or through scope closure, is one idempotent
+transition after which the address is no longer observable and the same
+address and port may be bound again. A host bind failure is `'io` carrying the
+requested address, the requested port, and one reason from a closed vocabulary.
+
 ## Standard environment
 
 [`ENVIRONMENT.md`](ENVIRONMENT.md) defines the shipped module transports,

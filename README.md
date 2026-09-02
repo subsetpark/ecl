@@ -262,6 +262,7 @@ cannot be replaced accidentally by a file with the same name.
 | `table` | Column-oriented tables represented as ordinary dictionaries |
 | `http` | HTTP GET and POST |
 | `proc` | Capability-gated subprocess ports and bounded process execution |
+| `net` | Capability-gated TCP listeners with scope-owned sockets |
 | `rand` | Explicit-state random draws and host entropy |
 | `rng` | Durable module-state random generation |
 | `archive` | SHA-256 and atomic validated `.tgz` extraction |
@@ -295,6 +296,15 @@ deny every `fs` word unless their Host names roots and permissions through a
 directory handle without following escaping symlinks, and publish writes
 atomically. `path` manipulates path strings without touching the filesystem.
 Package commands receive a separate, nonforgeable package-store authority.
+
+Inbound listening is a capability too. The CLI grants an unrestricted listen
+policy; library Sessions deny every `net.listen` unless their Host supplies a
+`NetPolicy` naming exact address and port pairs (port `0` admits only
+ephemeral binds). `{'address "127.0.0.1" 'port 0} net.listen` returns a
+scope-owned port whose socket is already listening, `net.local-address`
+reports the bound address and kernel-assigned port, and `net.close` releases
+it early; scope closure releases it otherwise. Accepting connections belongs
+to the protocol modules built over a listener.
 
 `import` gives selected public module words bare names in the current
 environment. Every requested word must be public.
