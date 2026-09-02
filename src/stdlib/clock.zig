@@ -52,7 +52,8 @@ fn unix(evaluator: *Machine) MachineError!void {
             evaluator.addErrorReason(.{ .symbol = reason });
             return failure;
         },
-        .host => |io| @intCast(@divFloor(std.Io.Clock.real.now(io).nanoseconds, std.time.ns_per_ms)),
+        .host => |io| std.math.cast(i64, @divFloor(std.Io.Clock.real.now(io).nanoseconds, std.time.ns_per_ms)) orelse
+            return evaluator.fail(.overflow, "clock.unix left the millisecond range"),
         .fixed => |timestamp| timestamp,
         .anchored => |base| std.math.add(i64, base, scheduler(evaluator).monotonicMilliseconds()) catch
             return evaluator.fail(.overflow, "clock.unix left the millisecond range"),

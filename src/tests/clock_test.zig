@@ -108,10 +108,23 @@ fn advance(runtime: *session.Session, milliseconds: u64) !void {
 
 /// Wait until the scheduler holds exactly `count` timer entries. Progress
 /// depends only on the worker registering its sleep, not on host time, so
-/// the loop terminates as soon as that step has happened.
+/// the loop terminates as soon as that step has happened. The bound turns a
+/// worker that never registers into a diagnosed failure instead of a hang;
+/// it is far above any legitimate registration latency.
 fn awaitTimerEntries(runtime: *session.Session, count: usize) void {
-    while (runtime.schedulerTimerEntryCount() != count)
+    const max_polls: usize = 20_000;
+    var polls: usize = 0;
+    while (runtime.schedulerTimerEntryCount() != count) : (polls += 1) {
+        if (polls == max_polls) std.debug.panic(
+            "timer entries never reached {d}; observed {d}",
+            .{ count, runtime.schedulerTimerEntryCount() },
+        );
         std.Thread.yield() catch @panic("test yield failed");
+        const pause: std.Io.Clock.Duration = .{ .raw = .fromMilliseconds(1), .clock = .awake };
+        pause.sleep(std.testing.io) catch |err| switch (err) {
+            error.Canceled => {},
+        };
+    }
 }
 
 test "clock: a manual clock starts at zero and moves only when the host advances it" {
