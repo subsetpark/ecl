@@ -5,7 +5,7 @@
 
  ### test documentation
  (-- : "Require documentation for host-authority standard-library exports.")
- (('io.pp 'io.prin 'io.print 'io.inspect 'io.debug 'io.stack 'io.stdin
+ (('io.pp 'io.prin 'io.print 'io.eprint 'io.inspect 'io.debug 'io.stack 'io.stdin
    'fs.read-bytes 'fs.read-text 'fs.create-bytes 'fs.create-text
    'fs.replace-bytes 'fs.replace-text 'fs.stat 'fs.lstat 'fs.exists? 'fs.list
    'fs.mkdir 'fs.copy 'fs.rename 'fs.remove-file 'fs.remove-dir

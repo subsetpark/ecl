@@ -27,6 +27,17 @@ fn expectStack(case: Case, expected: []const u8) !void {
 }
 
 fn expectStackWithOutput(case: Case, expected: []const u8, expected_output: ?[]const u8) !void {
+    return expectStackWithStreams(case, expected, expected_output, null);
+}
+
+/// Both host writers are captured per case; a null expectation leaves that
+/// stream unasserted.
+fn expectStackWithStreams(
+    case: Case,
+    expected: []const u8,
+    expected_output: ?[]const u8,
+    expected_diagnostics: ?[]const u8,
+) !void {
     var heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&heap);
     var output = std.Io.Writer.Allocating.init(allocator);
@@ -57,6 +68,9 @@ fn expectStackWithOutput(case: Case, expected: []const u8, expected_output: ?[]c
     try std.testing.expectEqualStrings(expected, display.bytes());
     if (expected_output) |wanted| {
         try std.testing.expectEqualStrings(wanted, output.written());
+    }
+    if (expected_diagnostics) |wanted| {
+        try std.testing.expectEqualStrings(wanted, diagnostics.written());
     }
 }
 
@@ -141,6 +155,40 @@ test "hostio: inspect preserves its value" {
 
 test "hostio: debug prints a label and preserves its value" {
     try expectStackWithOutput(.{ .source = "[1 2] \"value\" io.debug" }, "[1 2]", "value: [1 2]\n");
+}
+
+test "hostio: eprint writes to the diagnostics stream and not to output" {
+    try expectStackWithStreams(.{ .source = "\"x\" io.eprint 1" }, "1", "", "x\n");
+    try expectError(.{ .source = "5 io.eprint" }, .{
+        .name = "non-string",
+        .source = "5 io.eprint",
+        .kind = "type",
+        .word = "io.eprint",
+    });
+    // `Host.diagnostics` is mandatory, so the Session with no diagnostics
+    // writer is the hostless one: an output writer alone. The line is
+    // dropped, the word succeeds, and output still receives nothing.
+    var heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&heap);
+    var output = std.Io.Writer.Allocating.init(allocator);
+    defer output.deinit();
+    var runtime = try session.Session.initWithOutput(heap.allocator(), &.{}, &output.writer);
+    defer runtime.deinit();
+    switch (try runtime.runUnit("<hostio-test>", "\"x\" io.eprint 1")) {
+        .ok => {},
+        .incomplete => return error.UnexpectedIncomplete,
+        .err => |failure| {
+            defer runtime.release(failure);
+            var rendered = try runtime.renderValue(failure);
+            defer rendered.deinit();
+            std.log.err("unexpected language error: {s}", .{rendered.bytes()});
+            return error.UnexpectedLanguageError;
+        },
+    }
+    var display = try runtime.stackDisplay();
+    defer display.deinit();
+    try std.testing.expectEqualStrings("1", display.bytes());
+    try std.testing.expectEqualStrings("", output.written());
 }
 
 test "hostio: stack prints the visible operand window without changing it" {
