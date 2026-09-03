@@ -838,8 +838,9 @@ fn auditUnsafeCasts() bool {
         @embedFile("../heap.zig"),
         &.{
             "TaskDestroyAdapter",     "PortReleaseAdapter",
-            "ModuleReleaseAdapter",   "RetirementAdapters",
-            "RetirementWakeAdapters", "CodeRetirementAdapters",
+            "PortTransferAdapter",    "ModuleReleaseAdapter",
+            "RetirementAdapters",     "RetirementWakeAdapters",
+            "CodeRetirementAdapters",
         },
     ) or failed;
     failed = auditErasedCasts(
@@ -1034,7 +1035,7 @@ fn hasForbiddenTokens(
 /// unit. Nothing in the compiler can express that, so the manifest is written
 /// down here and the audit enforces both directions — every listed word is
 /// marked, and nothing else in first-party vocabulary is.
-const unit_constructors = [_][]const u8{ "@attempt", "@spawn", "@each", "@module", "@defm", "@test" };
+const unit_constructors = [_][]const u8{ "@attempt", "@spawn", "@give", "@each", "@module", "@defm", "@test" };
 
 /// First-party ECL words that apply their quotation in a fresh unit and are
 /// therefore marked too. Each must be defined by some first-party source;

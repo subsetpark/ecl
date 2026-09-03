@@ -638,6 +638,9 @@ pub const ListenerCell = struct {
     /// Set when `close` ran before `attach` stored the membership token, so
     /// `attach` detaches at once instead of leaving the scope waiting.
     detach_on_attach: bool = false,
+    /// A membership in a destination scope, held between the two halves of a
+    /// scope transfer and swapped into `membership` only if the move commits.
+    pending_membership: ?external.ScopeMembership = null,
     waits: WaitList(ListenerCell) = .{},
     slots_first: ?*AcceptSlot = null,
     slots_last: ?*AcceptSlot = null,
@@ -717,6 +720,93 @@ pub const ListenerCell = struct {
         target: external.WakeTarget,
     ) external.RegisterError!external.RegisterResult {
         return Waits.register(self, key, target);
+    }
+
+    /// Attach this listener to `to_erased` while leaving its current
+    /// membership in place, so a caller moving several ports can still back
+    /// out. `from_erased` must be the scope that owns the listener now.
+    pub fn prepareScopeTransfer(
+        self: *ListenerCell,
+        from_erased: *anyopaque,
+        to_erased: *anyopaque,
+    ) heap.PortTransferError!void {
+        const destination: *scheduler_api.TaskScope = @ptrCast(@alignCast(to_erased));
+        std.Io.Threaded.mutexLock(&self.mutex);
+        if (self.pending_membership != null) {
+            std.Io.Threaded.mutexUnlock(&self.mutex);
+            return error.Busy;
+        }
+        if (self.state == .closed) {
+            std.Io.Threaded.mutexUnlock(&self.mutex);
+            return error.Closed;
+        }
+        const current = self.membership orelse {
+            std.Io.Threaded.mutexUnlock(&self.mutex);
+            return error.Closed;
+        };
+        if (current.owningScope() != from_erased) {
+            std.Io.Threaded.mutexUnlock(&self.mutex);
+            return error.NotOwner;
+        }
+        std.Io.Threaded.mutexUnlock(&self.mutex);
+
+        // `attachExternal` allocates and takes the destination scope's lock,
+        // so it runs outside this cell's lock: the cancellation walk takes a
+        // scope lock before a member's, and the reverse order would close a
+        // cycle between them.
+        const member = external.scopeMember(ListenerCell, self);
+        var token = destination.scheduler.attachExternal(destination, member) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.ScopeClosing => error.ScopeClosing,
+        };
+
+        std.Io.Threaded.mutexLock(&self.mutex);
+        if (self.state == .closed or self.membership == null) {
+            // Closed while the destination was being attached. Hand the new
+            // membership straight back rather than leaving the destination
+            // scope holding a member nothing will ever detach.
+            std.Io.Threaded.mutexUnlock(&self.mutex);
+            token.detach();
+            return error.Closed;
+        }
+        self.pending_membership = token;
+        std.Io.Threaded.mutexUnlock(&self.mutex);
+    }
+
+    /// Make a prepared transfer permanent: the destination scope owns the
+    /// listener and the origin scope no longer does.
+    pub fn commitScopeTransfer(self: *ListenerCell) void {
+        var release: ?external.ScopeMembership = null;
+        std.Io.Threaded.mutexLock(&self.mutex);
+        if (self.pending_membership) |pending| {
+            self.pending_membership = null;
+            if (self.state == .closed) {
+                release = pending;
+            } else {
+                release = self.membership;
+                self.membership = pending;
+            }
+        }
+        std.Io.Threaded.mutexUnlock(&self.mutex);
+        if (release) |token| {
+            var owned = token;
+            owned.detach();
+        }
+    }
+
+    /// Undo a prepared transfer, leaving the origin scope as the owner.
+    pub fn abortScopeTransfer(self: *ListenerCell) void {
+        var release: ?external.ScopeMembership = null;
+        std.Io.Threaded.mutexLock(&self.mutex);
+        if (self.pending_membership) |pending| {
+            self.pending_membership = null;
+            release = pending;
+        }
+        std.Io.Threaded.mutexUnlock(&self.mutex);
+        if (release) |token| {
+            var owned = token;
+            owned.detach();
+        }
     }
 
     fn attach(self: *ListenerCell, membership: external.ScopeMembership) void {
@@ -1138,6 +1228,9 @@ fn writePermit(node: *WriteNode) *WritePermit {
 }
 
 const readiness_read: u64 = 1;
+/// Waits for the send ring to empty, so `close` can promise that the bytes it
+/// was asked to deliver have actually left for the peer.
+const readiness_drain: u64 = 2;
 
 /// Why a connection can no longer carry bytes in a direction.
 pub const Failure = enum { closed, reset, io };
@@ -1176,6 +1269,9 @@ pub const ConnectionCell = struct {
     write_last: ?*WriteNode = null,
     waits: WaitList(ConnectionCell) = .{},
     membership: ?external.ScopeMembership = null,
+    /// A membership in a destination scope, held between the two halves of a
+    /// scope transfer and swapped into `membership` only if the move commits.
+    pending_membership: ?external.ScopeMembership = null,
 
     const Lifecycle = union(enum) {
         /// Allocated; no thread exists. The scope may already hold the member
@@ -1400,6 +1496,27 @@ pub const ConnectionCell = struct {
         return external.readinessSource(ConnectionCell, self, readiness_read);
     }
 
+    /// Nothing more will reach the peer: the queue is empty, the controller
+    /// has finished, or the socket failed and discarded what was queued.
+    fn drainedLocked(self: *const ConnectionCell) bool {
+        if (self.send.len == 0) return true;
+        return switch (self.lifecycle) {
+            .prepared, .running, .stopping => self.failure != null,
+            .terminal => true,
+        };
+    }
+
+    /// Whether every queued byte has been handed to the kernel.
+    pub fn drained(self: *ConnectionCell) bool {
+        std.Io.Threaded.mutexLock(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        return self.drainedLocked();
+    }
+
+    pub fn drainSource(self: *ConnectionCell) external.ReadinessSource {
+        return external.readinessSource(ConnectionCell, self, readiness_drain);
+    }
+
     pub fn beginWrite(self: *ConnectionCell) error{OutOfMemory}!*WritePermit {
         const node = try self.allocator.create(WriteNode);
         node.* = .{ .cell = self };
@@ -1466,6 +1583,97 @@ pub const ConnectionCell = struct {
         self.requestStop(.close);
     }
 
+    /// Attach this connection to `to_erased` while leaving its current
+    /// membership in place. `from_erased` must be the scope that owns it now.
+    pub fn prepareScopeTransfer(
+        self: *ConnectionCell,
+        from_erased: *anyopaque,
+        to_erased: *anyopaque,
+    ) heap.PortTransferError!void {
+        const destination: *scheduler_api.TaskScope = @ptrCast(@alignCast(to_erased));
+        std.Io.Threaded.mutexLock(&self.mutex);
+        if (self.pending_membership != null) {
+            std.Io.Threaded.mutexUnlock(&self.mutex);
+            return error.Busy;
+        }
+        const live = switch (self.lifecycle) {
+            .prepared, .running => true,
+            .stopping, .terminal => false,
+        };
+        if (!live) {
+            std.Io.Threaded.mutexUnlock(&self.mutex);
+            return error.Closed;
+        }
+        const current = self.membership orelse {
+            std.Io.Threaded.mutexUnlock(&self.mutex);
+            return error.Closed;
+        };
+        if (current.owningScope() != from_erased) {
+            std.Io.Threaded.mutexUnlock(&self.mutex);
+            return error.NotOwner;
+        }
+        std.Io.Threaded.mutexUnlock(&self.mutex);
+
+        // Outside this cell's lock: the cancellation walk takes a scope lock
+        // before a member's, so attaching under the cell lock would close a
+        // cycle between the two.
+        const member = external.scopeMember(ConnectionCell, self);
+        var token = destination.scheduler.attachExternal(destination, member) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.ScopeClosing => error.ScopeClosing,
+        };
+
+        std.Io.Threaded.mutexLock(&self.mutex);
+        const still_live = switch (self.lifecycle) {
+            .prepared, .running => self.membership != null,
+            .stopping, .terminal => false,
+        };
+        if (!still_live) {
+            std.Io.Threaded.mutexUnlock(&self.mutex);
+            token.detach();
+            return error.Closed;
+        }
+        self.pending_membership = token;
+        std.Io.Threaded.mutexUnlock(&self.mutex);
+    }
+
+    /// Make a prepared transfer permanent.
+    pub fn commitScopeTransfer(self: *ConnectionCell) void {
+        var release: ?external.ScopeMembership = null;
+        std.Io.Threaded.mutexLock(&self.mutex);
+        if (self.pending_membership) |pending| {
+            self.pending_membership = null;
+            const live = switch (self.lifecycle) {
+                .prepared, .running => true,
+                .stopping, .terminal => false,
+            };
+            if (live) {
+                release = self.membership;
+                self.membership = pending;
+            } else release = pending;
+        }
+        std.Io.Threaded.mutexUnlock(&self.mutex);
+        if (release) |token| {
+            var owned = token;
+            owned.detach();
+        }
+    }
+
+    /// Undo a prepared transfer, leaving the origin scope as the owner.
+    pub fn abortScopeTransfer(self: *ConnectionCell) void {
+        var release: ?external.ScopeMembership = null;
+        std.Io.Threaded.mutexLock(&self.mutex);
+        if (self.pending_membership) |pending| {
+            self.pending_membership = null;
+            release = pending;
+        }
+        std.Io.Threaded.mutexUnlock(&self.mutex);
+        if (release) |token| {
+            var owned = token;
+            owned.detach();
+        }
+    }
+
     fn abort(self: *ConnectionCell) void {
         self.requestStop(.abort);
     }
@@ -1523,6 +1731,7 @@ pub const ConnectionCell = struct {
     fn readyLocked(self: *ConnectionCell, key: u64) bool {
         if (key == readiness_read)
             return self.receive.len != 0 or self.peer_eof or self.failureLocked() != null;
+        if (key == readiness_drain) return self.drainedLocked();
         const node: *const WriteNode = @ptrFromInt(key);
         return !node.linked or (node.active and self.send.free() != 0) or self.failureLocked() != null;
     }

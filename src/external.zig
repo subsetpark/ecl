@@ -232,11 +232,21 @@ pub fn scopeMember(comptime Payload: type, payload: *Payload) ScopeMember {
 pub const ScopeMembership = struct {
     context: ?*anyopaque,
     detach_fn: *const fn (*anyopaque) void,
+    scope_fn: *const fn (*anyopaque) *anyopaque,
 
     pub fn detach(self: *ScopeMembership) void {
         const context = self.context orelse return;
         self.context = null;
         self.detach_fn(context);
+    }
+
+    /// The scope this membership is linked into, or null once detached. A
+    /// backend that transfers a resource to another scope compares this
+    /// against the scope it believes owns the resource, so a caller cannot
+    /// give away something another scope is holding.
+    pub fn owningScope(self: *const ScopeMembership) ?*anyopaque {
+        const context = self.context orelse return null;
+        return self.scope_fn(context);
     }
 };
 
@@ -245,6 +255,10 @@ fn ScopeMembershipAdapters(comptime Payload: type) type {
         fn detach(raw: *anyopaque) void {
             Payload.detachExternalMembership(@ptrCast(@alignCast(raw)));
         }
+
+        fn owningScope(raw: *anyopaque) *anyopaque {
+            return Payload.externalMembershipScope(@ptrCast(@alignCast(raw)));
+        }
     };
 }
 
@@ -252,6 +266,7 @@ pub fn scopeMembership(comptime Payload: type, payload: *Payload) ScopeMembershi
     return .{
         .context = @ptrCast(payload),
         .detach_fn = ScopeMembershipAdapters(Payload).detach,
+        .scope_fn = ScopeMembershipAdapters(Payload).owningScope,
     };
 }
 
@@ -280,6 +295,9 @@ test "external capabilities have consuming release surfaces" {
         fn detachExternalMembership(self: *@This()) void {
             self.detaches += 1;
         }
+        fn externalMembershipScope(self: *@This()) *anyopaque {
+            return @ptrCast(self);
+        }
     };
     var probe: Probe = .{};
     var member = scopeMember(Probe, &probe);
@@ -290,7 +308,9 @@ test "external capabilities have consuming release surfaces" {
     try std.testing.expectEqual(@as(usize, 1), probe.cancellations);
     try std.testing.expectEqual(@as(usize, 0), probe.refs);
     var membership = scopeMembership(Probe, &probe);
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&probe)), membership.owningScope());
     membership.detach();
     membership.detach();
     try std.testing.expectEqual(@as(usize, 1), probe.detaches);
+    try std.testing.expectEqual(@as(?*anyopaque, null), membership.owningScope());
 }

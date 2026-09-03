@@ -938,3 +938,93 @@ test "net: connection words cold-load through the builtin manifest and are docum
     );
     try support.expectStack("'net ('accept 'read 'write 'peer-address) import 1", "1");
 }
+
+/// Run a program that leaves one integer on the stack and return it.
+fn runForPort(runtime: *Runtime, program: []const u8) !u16 {
+    try runtime.run(program);
+    var display = try runtime.session.stackDisplay();
+    defer display.deinit();
+    return std.fmt.parseInt(u16, std.mem.trim(u8, display.bytes(), " \n"), 10);
+}
+
+test "net: @give moves listener ownership, so the child's end closes the socket" {
+    const capture = listen_ephemeral ++ " dup net.local-address 'port at swap ";
+    {
+        // Given away: the child owns the listener, so it dies with the child.
+        var runtime: Runtime = .{};
+        try runtime.open(.{ .net = loopback_ephemeral }, .cooperative);
+        defer runtime.close();
+        const port = try runForPort(&runtime, capture ++ "wrap [] (pop) @give await pop");
+        try std.testing.expect(port != 0);
+        try std.testing.expectEqual(Probe.refused, try probe(port));
+    }
+    {
+        // Merely passed: the caller still owns it, so it outlives the child.
+        var runtime: Runtime = .{};
+        try runtime.open(.{ .net = loopback_ephemeral }, .cooperative);
+        defer runtime.close();
+        const port = try runForPort(&runtime, capture ++ "wrap (pop) @spawn await pop");
+        try std.testing.expect(port != 0);
+        try std.testing.expectEqual(Probe.accepted, try probe(port));
+    }
+}
+
+test "net: a given listener is usable by the child and can be given onward" {
+    var runtime: Runtime = .{};
+    try runtime.open(.{ .net = loopback_ephemeral }, .cooperative);
+    defer runtime.close();
+    try runtime.run(listen_ephemeral ++
+        " wrap [] (wrap [] (net.local-address 'port at 0 >) @give await) @give await" ++
+        " 'ok at first 'ok at first");
+    var display = try runtime.session.stackDisplay();
+    defer display.deinit();
+    try std.testing.expectEqualStrings("1", std.mem.trim(u8, display.bytes(), " \n"));
+}
+
+test "net: @give refuses a port the calling unit does not own" {
+    const program = listen_ephemeral ++ " dup wrap (wrap [] (pop) @give await) @spawn await nip";
+    var runtime: Runtime = .{};
+    try runtime.open(.{ .net = loopback_ephemeral }, .cooperative);
+    defer runtime.close();
+    try runtime.run(program ++ " 'err at 'msg at");
+    var display = try runtime.session.stackDisplay();
+    defer display.deinit();
+    try std.testing.expectEqualStrings(
+        "\"@give can only give a port owned by the calling unit\"",
+        std.mem.trim(u8, display.bytes(), " \n"),
+    );
+}
+
+test "net: @give refuses a closed port and a non-port" {
+    try expectError(.{ .net = loopback_ephemeral }, listen_ephemeral ++ " dup net.close wrap [] (pop) @give", .{
+        .name = "closed",
+        .source = listen_ephemeral ++ " dup net.close wrap [] (pop) @give",
+        .kind = "domain",
+        .word = "@give",
+    });
+    try expectError(.{ .net = loopback_ephemeral }, "[1] [] (pop) @give", .{
+        .name = "non-port",
+        .source = "[1] [] (pop) @give",
+        .kind = "type",
+        .word = "@give",
+    });
+}
+
+test "net: @give refuses the same port twice and leaves it owned by the caller" {
+    var runtime: Runtime = .{};
+    try runtime.open(.{ .net = loopback_ephemeral }, .cooperative);
+    defer runtime.close();
+    try runtime.run(listen_ephemeral ++ " dup net.local-address 'port at swap" ++
+        " wrap dup cat [] (pop pop) 3 pack (@give) @attempt 'err at 'kind at");
+    var display = try runtime.session.stackDisplay();
+    defer display.deinit();
+    const shown = std.mem.trim(u8, display.bytes(), " \n");
+    try std.testing.expect(std.mem.endsWith(u8, shown, " 'domain"));
+    const port = try std.fmt.parseInt(u16, shown[0 .. shown.len - " 'domain".len], 10);
+    // The refusal left the listener where it was, so it is still bound.
+    try std.testing.expectEqual(Probe.accepted, try probe(port));
+}
+
+test "net: @give with no ports is @spawn, and the given ports are the deepest stack values" {
+    try support.expectStack("[] [40 2] (+) @give await 'ok at first", "42");
+}

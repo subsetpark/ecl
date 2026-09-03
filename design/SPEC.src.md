@@ -1211,9 +1211,14 @@ An external port created by a unit belongs to that unit's task scope. The
 scope, not the number or location of port values, owns the live external
 resource. Closing a scope stops new operations, requests cancellation, and
 does not complete until each owned resource has published a terminal state and
-released its scope membership. Returning or storing a port cannot detach it or
-transfer ownership; a port that outlives its creating scope remains an opaque
-handle to terminal state.
+released its scope membership. Returning or storing a port neither detaches it
+nor transfers ownership; a port that outlives its owning scope remains an
+opaque handle to terminal state. Ownership moves only when a unit constructor
+moves it: `@give` makes the new child's scope the owner as part of
+constructing that child, so the resource is never unowned and is never
+reachable by the child before the child owns it. Ownership governs lifetime,
+not use: any unit holding a port value may operate on it, and a unit may give
+away only a port its own scope owns.
 
 Port operations may suspend the current unit on external readiness. Such a
 suspension is an ordinary scheduler park: it consumes no worker while waiting,

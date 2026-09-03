@@ -46,7 +46,9 @@ pub const words = [_]env.BuiltinWord{
             "A listener closes at once: every accept parked on it fails 'io 'closed, connections it already accepted " ++
             "stay open, and its address and port may be bound again immediately. A connection first delivers the " ++
             "bytes already queued by write, then shuts the socket down; later reads and writes on it fail 'io 'closed. " ++
-            "A process port or non-port is 'type.",
+            "Closing a connection parks until those bytes reach the kernel or the connection fails, so a unit may " ++
+            "close and end at once without its own scope closure discarding them; cancelling the parked close " ++
+            "abandons what is still queued. A process port or non-port is 'type.",
         .primitive = close,
     },
     .{
@@ -349,11 +351,49 @@ fn failConnection(evaluator: *Machine, cell: *net_port.ConnectionCell, failure: 
     };
 }
 
+/// Closing a connection promises that the bytes already queued reach the peer,
+/// so the close is not finished until the send ring has drained. Parking here
+/// is what makes that promise true when the closing unit ends immediately
+/// afterwards, as a unit given a connection normally does: without the wait,
+/// the unit's scope closure would abort the socket and discard the queue.
+const CloseDriver = struct {
+    pub const address_stable_driver = {};
+    pub const ownership: heap.DriverOwnership = .self_owned;
+    connection: Value,
+    cell: *net_port.ConnectionCell,
+    requested: bool = false,
+
+    pub fn deinit(self: *CloseDriver, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+        _ = allocator;
+        releases.releaseValue(self.connection);
+    }
+
+    pub fn advance(evaluator: *Machine, self: *CloseDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        if (!self.requested) {
+            self.requested = true;
+            self.cell.close();
+        }
+        if (self.cell.drained()) return .completed;
+        try evaluator.park(.{ .external = self.cell.drainSource() });
+        return .yielded;
+    }
+};
+
 fn close(evaluator: *Machine) MachineError!void {
     var item = try evaluator.popValue();
-    defer item.deinit();
-    if (net_port.fromValue(item.borrow())) |cell| return cell.close();
-    if (net_port.connectionFromValue(item.borrow())) |cell| return cell.close();
+    errdefer item.deinit();
+    if (net_port.fromValue(item.borrow())) |cell| {
+        cell.close();
+        item.deinit();
+        return;
+    }
+    if (net_port.connectionFromValue(item.borrow())) |cell| {
+        const driver = try evaluator.allocator().create(CloseDriver);
+        driver.* = .{ .connection = item.take(), .cell = cell };
+        evaluator.adoptDriver(driver);
+        return;
+    }
     return evaluator.typeError("a network listener or connection");
 }
 

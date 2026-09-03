@@ -159,6 +159,32 @@ no initial values; the ambient stack never crosses the boundary. See
 # => {'ok [42]}
 ```
 
+### @give
+`( ports values quotation -- task )` — *Unit constructor.* Like `@spawn`, and
+additionally move every port in the ports list into the new unit, which owns
+them from before it starts running: the child's end closes them and the
+calling unit's end no longer does. The child stack is the given ports,
+deepest, then the explicit values. Use `[]` for no ports, which is exactly
+`@spawn`.
+
+A port may only be given by the unit that owns it, so a unit holding a port
+another unit owns cannot give it away; that is `'domain`, as is giving a
+closed port or a kind of port that cannot change owner. Process ports cannot
+be given. The move and the child's construction are one step: the port is
+never unowned, and the child never runs before it owns the port.
+
+Giving does not restrict use. The caller may still name a given port and read
+or write it, exactly as a child may use a port its parent owns; what changed
+is which unit's end closes it. See [Concurrency](SPEC.md#concurrency).
+
+#### Examples
+
+```ecl
+{'address "127.0.0.1" 'port 0} net.listen
+wrap [] (net.local-address 'port at 0 >) @give await
+# => {'ok [1]}
+```
+
 ### @test
 `( descriptor -- result )` — Test-Session-only protected invocation. Validate
 a pure descriptor returned by `tests`, late-bind its canonical module/name to
@@ -2229,7 +2255,8 @@ protocol. `accept` is the only listener word that parks.
 The listener belongs to the creating unit's task scope: scope closure closes
 the socket and releases the live-listener slot even if a listener value is
 stored elsewhere, and `close` performs the same idempotent transition early.
-There is no detach or ownership transfer. The socket is bound with address
+Ownership changes only through `@give`, which makes a new child unit the owner
+for the rest of that child's life. The socket is bound with address
 reuse, so a port that a closed connection left in `TIME_WAIT` can be bound
 again at once; two live listeners still cannot hold one address and port.
 
@@ -2239,7 +2266,8 @@ applied to a listener, and either applied to a process port or a non-port are
 `'type`. A connection belongs to the task scope of the unit that called
 `accept`, not to the listener's scope: closing that scope aborts the
 connection even while its value is retained elsewhere, and closing the
-listener leaves accepted connections open. A connection that is not accepted
+listener leaves accepted connections open. `@give` hands a connection to a
+child unit, which then owns it for the rest of its life. A connection that is not accepted
 stays in the kernel backlog; the runtime takes a connection from the backlog
 only while an `accept` is outstanding and the number of live connections is
 below the host maximum, so an idle program applies no backpressure of its own
@@ -2288,6 +2316,10 @@ address and port may be bound again once `close` returns. On a connection:
 refuse further writes, deliver the bytes already queued for the peer, then
 shut the socket down so the peer observes end of stream; later `read`,
 `write`, `peer-address`, and `local-address` calls are `'io` `'closed`.
+Closing a connection parks until those bytes have reached the kernel or the
+connection fails, which is what lets a unit close and end in the same breath
+without its own scope closure discarding them; cancelling the parked close
+abandons whatever is still queued.
 Idempotent in both cases: closing a port that is already closed, whether by
 an earlier `close` or by scope closure, does nothing and does not fail. A
 non-port, or a process port, is `'type`.
@@ -2397,7 +2429,8 @@ and stderr pipes. The child and its process group, pipe tasks, and spawning
 task-scope membership commit before the port becomes visible. The scope owns
 the live child: scope closure cancels the process group and waits for reap even
 if a port value remains stored elsewhere. There is no detach or ownership
-transfer.
+transfer: unlike a listener or a connection, a process port cannot be given to
+another unit.
 
 ### terminate
 `( port -- )` — Request ordinary termination of the process group, escalating
