@@ -1011,10 +1011,11 @@ the connection's `Endpoints` (the peer from `accept`, the local end from
 actually reached on). No other production code in `net_port.zig` calls
 `closeFd` on a connection socket or decrements the connection counter. Each
 outstanding `accept` owns an `AcceptSlot` whose state is exhaustive:
-`waiting` (holding its reservation), `ready` (holding an `AcceptedSocket`),
-`failed`, `taken`, or `closed`. `endAccept` releases whatever the slot still
-holds, so a cancelled accept can neither leak a socket nor release a slot
-twice.
+`waiting` (holding nothing: neither a socket nor a reservation), `ready`
+(holding an `AcceptedSocket`), `failed`, `taken`, or `closed`. `endAccept`
+releases whatever the slot still holds, so a cancelled accept can neither
+leak a socket nor release a slot twice, and a waiting accept costs the
+connection quota nothing.
 
 The listener gains one acceptor thread, started by the first `beginAccept`
 and never before. It waits in `poll` on the listening socket, switched to
@@ -1024,8 +1025,15 @@ wake a blocked `accept` on macOS, closing a descriptor another thread is
 blocked on is a reuse hazard everywhere, and `netAcceptPosix` treats `EAGAIN`
 as a bug, so the non-blocking socket that `poll` requires would trip it. When
 `poll` reports the socket readable, the acceptor takes the listener mutex,
-rechecks that a `waiting` slot exists, calls `accept4` while still holding the
-mutex, and moves the returned socket into that slot before unlocking. Because
+rechecks that a `waiting` slot exists, acquires a `ConnectionReservation`
+from `NetOwner` under that mutex, and only then calls `accept4`, still
+holding the mutex, and moves the returned socket and its reservation into
+that slot as one `AcceptedSocket` before unlocking (`acceptOneLocked`). When
+no reservation is available the acceptor makes no syscall: the connection
+stays in the kernel backlog, the acceptor marks itself quota-blocked, and it
+polls only its wake pipe, not the listening socket, until a release wake
+arrives, so a full quota spins no thread and takes no socket it cannot own.
+Every failure arm after the acquisition releases the reservation. Because
 `endAccept` takes the same mutex, the two cannot interleave: if the
 cancellation wins, no `accept4` runs and the connection stays in the kernel
 backlog for the next accept; if the accept wins, the socket belongs to that
@@ -1109,12 +1117,29 @@ after an explicit `close`; `write` parked until those bytes entered the ring,
 so the bound is the ring and nothing else.
 
 The connection quota (`max_live_connections`) is a second compare-exchange
-counter on `NetOwner` beside the listener quota; `NetOwner.deinit` asserts
-both are zero, which holds because Session teardown closes the root scope and
-every running controller holds the membership the scope waits on. Failures on
-a connection are `'io` with the peer's address and port and one of `'closed`,
-`'reset`, `'io`; the quota refusal is `'domain` `'limit`; the mapping has one
-owner in `net_port.zig`.
+counter on `NetOwner` beside the listener quota. It is reserved when a socket
+is taken from the backlog, never when an accept parks, so it bounds live
+connections only and `accept` has no `'limit` failure. `NetOwner` also keeps
+a registry of running acceptors: an intrusive list of listener cells that
+`beginAccept` joins once the acceptor thread has started and that
+`exitAcceptor` leaves before anything else. `releaseConnection` walks that
+list under the owner's acceptor mutex and writes one wake byte to each
+acceptor's pipe, so an acceptor blocked at the quota rechecks the counter as
+soon as any connection in the Session releases its slot. A wake byte
+therefore means "drain and recheck": the acceptor reads its stop flag under
+the listener mutex to tell shutdown from a release, and otherwise clears its
+quota-blocked mark and returns to polling the socket. The lock order is
+fixed: the owner's acceptor mutex is never taken while a listener mutex is
+held, and `releaseConnection`, which runs from finalization paths under a
+connection cell's mutex, takes only the owner mutex and signals pipes without
+touching any listener mutex. `ListenerCell.close` signals its own pipe and
+waits until the acceptor has exited, so no cell is on the registry after
+`close` returns. `NetOwner.deinit` asserts that the registry is empty and
+both counters are zero, which holds because Session teardown closes the root
+scope and every running controller holds the membership the scope waits on.
+Failures on a connection are `'io` with the peer's address and port and one
+of `'closed`, `'reset`, `'io`; the listener quota alone refuses with
+`'domain` `'limit`; the mapping has one owner in `net_port.zig`.
 
 ### Absolute deadlines govern timer races
 
