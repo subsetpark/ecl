@@ -130,15 +130,18 @@ never share one address and port.
 Accepting connections, reading, and writing are inside the contract.
 `net.accept` parks until a peer connects and returns a connection port owned
 by the accepting unit's task scope; a connection is taken from the kernel
-backlog only while an accept is outstanding. `net.read` and `net.write`
-exchange exact byte lists through bounded queues of the host capacities,
-parking on readiness without holding a worker; `net.peer-address` and
-`net.local-address` report both ends. `net.close` on a connection delivers
-queued bytes and then shuts the socket down, while scope closure aborts it.
-The live-connection maximum bounds descriptors and controller threads per
-Session; exceeding it is `'domain` with reason `'limit`. Zero for any limit
-is a Session construction error. TLS and protocol framing remain outside this
-contract; they belong to the protocol modules built over a connection.
+backlog only while an accept is outstanding and a live-connection slot is
+free. `net.read` and `net.write` exchange exact byte lists through bounded
+queues of the host capacities, parking on readiness without holding a worker;
+`net.peer-address` and `net.local-address` report both ends. `net.close` on a
+connection delivers queued bytes and then shuts the socket down, while scope
+closure aborts it. The live-connection maximum bounds descriptors and
+controller threads per Session: at the maximum `net.accept` waits, leaving
+the peer in the kernel backlog, and proceeds when a connection closes; a
+waiting accept holds no slot. Only the listener maximum is refused, as
+`'domain` with reason `'limit`. Zero for any limit is a Session construction
+error. TLS and protocol framing remain outside this contract; they belong to
+the protocol modules built over a connection.
 
 ## Clocks
 
