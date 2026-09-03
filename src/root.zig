@@ -95,6 +95,7 @@ test {
     _ = @import("tests/process_test.zig");
     _ = @import("tests/filesystem_test.zig");
     _ = @import("tests/net_test.zig");
+    _ = @import("tests/http_server_test.zig");
     _ = @import("tests/allocation_budget_test.zig");
     _ = @import("tests/kernel_numeric_test.zig");
     _ = @import("tests/kernel_sequence_test.zig");

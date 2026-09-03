@@ -756,6 +756,7 @@ const StdlibSurface = enum {
     clock,
     time,
     http,
+    http_server,
     process,
     net,
     net_connection,
@@ -812,7 +813,7 @@ fn stdlibSessionAllocationProbe(
                 .stdout_capacity = 16,
                 .stderr_capacity = 16,
             } else null,
-            .net_policy = if (surface == .net or surface == .net_connection) .{
+            .net_policy = if (surface == .net or surface == .net_connection or surface == .http_server) .{
                 .binds = .{ .exact = &.{.{ .address = "127.0.0.1", .port = 0 }} },
             } else null,
             .filesystem_policy = .{ .roots = &.{
@@ -995,6 +996,10 @@ fn stdlibSessionAllocationProbe(
                 "0 time.from-unix 1 time.from-unix time.cmp pop 3 time.seconds pop " ++
                 "[] (\"2024-02-30T00:00:00Z\" time.parse) @attempt pop",
         ),
+        // PENDING: Patch 5 of gameplans/http-server.json: listen, serve one
+        // handler, and drive one request through a loopback peer whose bytes
+        // arrive deterministically under the cooperative scheduler.
+        .http_server => return error.SkipZigTest,
         .http => try runOk(
             &runtime,
             "oom-http.ecl",
@@ -1338,6 +1343,11 @@ test "oom: standard-library and host: host: network connections propagate every 
 test "oom: standard-library and host: host: HTTP propagates every allocation failure" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.http);
+}
+
+test "oom: standard-library and host: stdlib: http server propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
+    try checkStdlibSurface(.http_server);
 }
 
 test "oom: standard-library and host: package: sync module propagates every allocation failure" {
