@@ -380,10 +380,15 @@ pub fn build(b: *std.Build) void {
         fuzz_mod.addImport("native-abi", native_abi);
         fuzz_mod.addImport("ecl-native", native_sdk);
         fuzz_mod.addOptions("native_runtime_options", native_runtime_options);
+        // The fuzz root reaches the process port, whose `waitid` binding is an
+        // explicit libc dependency on Linux; link it the way every other test
+        // module does or the campaign fails to compile before it fuzzes.
+        fuzz_mod.link_libc = true;
         const fuzz_tests = b.addTest(.{
             .root_module = fuzz_mod,
             .filters = &.{fuzz_target.test_name},
         });
+        fuzz_tests.linkage = runtime_linkage;
         // Zig 0.16's x86_64 self-hosted backend accepts -ffuzz but emits an
         // empty sanitizer-coverage PC table. Select the backend that can
         // actually provide the coverage contract instead of letting a
@@ -875,6 +880,9 @@ pub fn build(b: *std.Build) void {
             // loopback port through the public Session and probes it from the
             // test; no fixture process, no sleeps, well inside the fast budget.
             "tests.net_test.",
+            // The listener and connection controller's own unit tests: loopback
+            // sockets through the cell API without a Session, sub-second.
+            "net_port.",
             // Kind conversions and the reserved `core.` qualifier. Every case
             // is a handful of scalar words through the public Session and the
             // whole file costs well under a second.

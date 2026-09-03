@@ -265,6 +265,104 @@ test "e2e: net listen under the CLI grant binds an ephemeral port and reports it
     try std.testing.expect(try std.fmt.parseInt(u16, result.stdout[start..end], 10) != 0);
 }
 
+test "e2e: net accept, read, write, and close round-trip over loopback under the CLI grant" {
+    // The binary announces its listener on stdout, so stdout is piped and read
+    // line by line while the process runs; `cli.runOptions` collects output
+    // only after exit and cannot drive a live peer.
+    var child = try std.process.spawn(io, .{
+        .argv = &.{
+            build_options.ecl_exe,
+            "{'address \"127.0.0.1\" 'port 0} net.listen 'l set " ++
+                "l net.local-address io.pp " ++
+                "l net.accept 'c set c 4 net.read io.pp c \"pong\" bytes net.write c net.close",
+        },
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .pipe,
+    });
+    // A failure before the round trip completes would leave the binary parked
+    // in accept forever; kill it on every early exit, and let the normal path
+    // reap it below. A stall inside one of the blocking reads never reaches
+    // that defer, so a watchdog kills the child after a bound; the main path
+    // disarms it before reaping.
+    var reaped = false;
+    defer if (!reaped) child.kill(io);
+    var watchdog: NetWatchdog = .{ .pid = child.id.? };
+    try watchdog.arm();
+    defer watchdog.disarm();
+    var stdout_buffer: [512]u8 = undefined;
+    var stdout = child.stdout.?.readerStreaming(io, &stdout_buffer);
+    const handshake = (try stdout.interface.takeDelimiter('\n')) orelse return error.MissingHandshake;
+    const marker = "'port ";
+    const start = (std.mem.indexOf(u8, handshake, marker) orelse {
+        std.log.err("handshake line lacks a port: {s}", .{handshake});
+        return error.MalformedHandshake;
+    }) + marker.len;
+    const end = std.mem.indexOfScalarPos(u8, handshake, start, '}') orelse {
+        std.log.err("handshake line is unterminated: {s}", .{handshake});
+        return error.MalformedHandshake;
+    };
+    const port = try std.fmt.parseInt(u16, handshake[start..end], 10);
+    try std.testing.expect(port != 0);
+
+    const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(port) };
+    const stream = try std.Io.net.IpAddress.connect(&address, io, .{ .mode = .stream });
+    defer stream.close(io);
+    var writer = stream.writer(io, &.{});
+    try writer.interface.writeAll("ping");
+    try writer.interface.flush();
+    var reply_buffer: [64]u8 = undefined;
+    var reader = stream.reader(io, &reply_buffer);
+    var reply: [4]u8 = undefined;
+    try reader.interface.readSliceAll(&reply);
+    try std.testing.expectEqualStrings("pong", &reply);
+    try std.testing.expectError(error.EndOfStream, reader.interface.takeByte());
+
+    const echoed = (try stdout.interface.takeDelimiter('\n')) orelse return error.MissingEcho;
+    try std.testing.expectEqualStrings("[112 105 110 103]", echoed);
+    var stderr_buffer: [512]u8 = undefined;
+    var stderr = child.stderr.?.readerStreaming(io, &stderr_buffer);
+    var stderr_sink: [512]u8 = undefined;
+    const stderr_len = try stderr.interface.readSliceShort(&stderr_sink);
+    try std.testing.expectEqualStrings("", stderr_sink[0..stderr_len]);
+    watchdog.disarm();
+    const term = try child.wait(io);
+    reaped = true;
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, term);
+}
+
+/// Kills a spawned child after a bound unless disarmed first. The child's pid
+/// is copied so the thread never touches `Child` state the test is using. The
+/// value lives on the test's stack and outlives its thread, which `disarm`
+/// joins.
+const NetWatchdog = struct {
+    done: std.Io.Event = .unset,
+    pid: std.posix.pid_t,
+    thread: ?std.Thread = null,
+
+    fn arm(self: *NetWatchdog) !void {
+        self.thread = try std.Thread.spawn(.{}, watch, .{self});
+    }
+
+    fn watch(self: *NetWatchdog) void {
+        self.done.waitTimeout(io, .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(20) } }) catch |err| switch (err) {
+            error.Timeout => std.posix.kill(self.pid, .KILL) catch |kill_err| {
+                std.log.err("watchdog could not kill the stalled ecl child: {t}", .{kill_err});
+            },
+            error.Canceled => {},
+        };
+    }
+
+    /// Idempotent: stops the timer if it is still armed and waits for the
+    /// thread to exit.
+    fn disarm(self: *NetWatchdog) void {
+        const thread = self.thread orelse return;
+        self.thread = null;
+        self.done.set(io);
+        thread.join();
+    }
+};
+
 test "e2e: proc leader exit cleans retained and redirected descendants" {
     const process_exe = try absoluteProcessExe();
     defer allocator.free(process_exe);

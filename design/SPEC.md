@@ -2457,12 +2457,29 @@ port. A request the grant does not admit, or made without a grant, is
 `'domain` and never reaches the operating system.
 
 A listener is a port. Binding and listening complete before the value is
-returned, the value belongs to the creating unit's task scope, and no
-operation on a listener parks. The bound address and port are observable data;
-closing a listener, explicitly or through scope closure, is one idempotent
-transition after which the address is no longer observable and the same
-address and port may be bound again. A host bind failure is `'io` carrying the
-requested address, the requested port, and one reason from a closed vocabulary.
+returned, the value belongs to the creating unit's task scope, and accepting a
+connection is the only listener operation that parks. The bound address and
+port are observable data; closing a listener, explicitly or through scope
+closure, is one idempotent transition after which the address is no longer
+observable, every unit parked in accept on it fails, and the same address and
+port may be bound again. A host bind failure is `'io` carrying the requested
+address, the requested port, and one reason from a closed vocabulary.
+
+A connection is a port too, distinct from a listener and from a process port.
+It belongs to the task scope of the unit that accepted it, not to the
+listener's scope: closing that scope aborts the connection even while its
+value is stored elsewhere, and closing the listener leaves accepted
+connections open. A connection not yet accepted stays in the host's backlog;
+the runtime takes one only while an accept is outstanding. Reads and writes
+park on readiness under the ordinary scheduler rules, are bounded by
+host-configured queue capacities, and exchange exact byte lists. One read may
+be pending per connection; writes are serialized in arrival order with each
+call's bytes contiguous. Explicit close delivers the bytes already queued and
+then shuts the socket down; scope closure discards them and shuts down at
+once. Both ends' addresses are observable data while the connection is open.
+A peer failure is `'io` carrying the peer's address, the peer's port, and one
+reason from a closed vocabulary; a cancelled wait fails only the unit that
+was parked.
 
 ## Standard environment
 

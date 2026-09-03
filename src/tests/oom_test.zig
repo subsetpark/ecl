@@ -758,6 +758,7 @@ const StdlibSurface = enum {
     http,
     process,
     net,
+    net_connection,
     package_sync_module,
     package_sync,
     package_cli_module,
@@ -811,7 +812,7 @@ fn stdlibSessionAllocationProbe(
                 .stdout_capacity = 16,
                 .stderr_capacity = 16,
             } else null,
-            .net_policy = if (surface == .net) .{
+            .net_policy = if (surface == .net or surface == .net_connection) .{
                 .binds = .{ .exact = &.{.{ .address = "127.0.0.1", .port = 0 }} },
             } else null,
             .filesystem_policy = .{ .roots = &.{
@@ -971,6 +972,20 @@ fn stdlibSessionAllocationProbe(
                 "dup net.close net.close " ++
                 "[] ({'address \"127.0.0.1\" 'port 1} net.listen) @attempt pop " ++
                 "[] ({'address \"127.0.0.1\" 'port 0} net.listen net.local-address) @spawn await pop",
+        ),
+        // A live exchange has scheduling-dependent readiness cardinality (the
+        // acceptor thread may fill the slot before or after the driver's first
+        // poll), so like the process surface it cannot be an oracle for
+        // allocation ordinals; the connection cell's own lifecycle is swept
+        // by a unit test in net_port.zig. Here every ordinal is deterministic
+        // under the cooperative scheduler: a child parks in accept with no
+        // peer, the parent closes the listener, and the child fails closed.
+        .net_connection => try runOk(
+            &runtime,
+            "oom-net-connection.ecl",
+            "{'address \"127.0.0.1\" 'port 0} net.listen 'l set " ++
+                "[] (l net.accept) @spawn 'waiting set 0 clock.sleep l net.close " ++
+                "waiting await pop [] (l net.accept) @attempt pop",
         ),
         .time => try runOk(
             &runtime,
@@ -1313,6 +1328,11 @@ test "oom: standard-library and host: host: filesystem propagates every allocati
 test "oom: standard-library and host: host: network listeners propagate every allocation failure" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.net);
+}
+
+test "oom: standard-library and host: host: network connections propagate every allocation failure" {
+    try requireSelectedOomTest(@src());
+    try checkStdlibSurface(.net_connection);
 }
 
 test "oom: standard-library and host: host: HTTP propagates every allocation failure" {

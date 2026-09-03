@@ -1821,11 +1821,14 @@ become floats. JSON null and booleans become the ordinary symbols `'null`,
 
 ## net
 
-Host-backed TCP listeners. The module is present in every standard image, but
-binding a socket is `'domain` unless the Session host supplied listen
-authority. The CLI supplies an explicit unrestricted grant; embedding hosts
-default to none and may instead name an exact allowlist of address and port
-pairs, a maximum number of live listeners, and the kernel accept backlog.
+Host-backed TCP listeners and connections. The module is present in every
+standard image, but binding a socket is `'domain` unless the Session host
+supplied listen authority, and a program can reach a connection only through a
+listener it was allowed to bind. The CLI supplies an explicit unrestricted
+grant; embedding hosts default to none and may instead name an exact allowlist
+of address and port pairs, a maximum number of live listeners, the kernel
+accept backlog, a maximum number of live connections (default 64), and the
+receive and send capacities of each connection (default 64 KiB each).
 
 A listen configuration is a dictionary with exactly these fields:
 
@@ -1857,21 +1860,71 @@ A listener is an opaque identity capability that prints `<port:N>` and has
 type `'port`; it exposes no descriptor and cannot be passed through JSON or the
 native value ABI. `proc` words reject a listener with `'type`, and `net` words
 reject a process port with `'type`. The socket is bound and listening before
-the value is returned, so a returned listener is ready, and `local-address` is
-the whole readiness protocol. No `net` word parks. The listener belongs to the
-creating unit's task scope: scope closure closes the socket and releases the
-live-listener slot even if a listener value is stored elsewhere, and `close`
-performs the same idempotent transition early. There is no detach or ownership
-transfer. Address reuse is not requested, so two listeners can never hold one
-address and port at once. Accepting connections, reading, writing, and every
-framing limit belong to the protocol words built over a listener, not to this
-module.
+the value is returned, so a returned listener is ready, and `local-address`,
+which returns the bound endpoint without parking, is the whole readiness
+protocol. `accept` is the only listener word that parks.
+The listener belongs to the creating unit's task scope: scope closure closes
+the socket and releases the live-listener slot even if a listener value is
+stored elsewhere, and `close` performs the same idempotent transition early.
+There is no detach or ownership transfer. Address reuse is not requested, so
+two listeners can never hold one address and port at once.
+
+A connection is likewise an opaque `'port` value, disjoint from listeners and
+process ports: a listener word applied to a connection, a connection word
+applied to a listener, and either applied to a process port or a non-port are
+`'type`. A connection belongs to the task scope of the unit that called
+`accept`, not to the listener's scope: closing that scope aborts the
+connection even while its value is retained elsewhere, and closing the
+listener leaves accepted connections open. A connection that is not accepted
+stays in the kernel backlog; the runtime takes a connection from the backlog
+only while an `accept` is outstanding, so an idle program applies no
+backpressure of its own beyond the backlog. `accept` while the number of live
+connections equals the host maximum is `'domain` with `'reason` `'limit`
+before any connection leaves the backlog; closing a connection releases its
+slot. A parked `accept` holds a slot while it waits, so the maximum bounds
+live connections plus outstanding accepts, and a program with several
+accepting units needs a maximum at least that large.
+
+Bytes are ordinary integer lists whose elements are all in `0...255`, exactly
+as for process streams; the module decodes no text. Each connection has a
+bounded receive queue and a bounded send queue of the host capacities. At most
+one `read` may be pending on a connection; overlap is `'contract`. Writes are
+serialized in scheduler-arrival order and each call's bytes remain
+contiguous. Parking on a connection holds no worker. Failures on a connection
+are `'io` carrying the peer's `'address` and `'port` and one closed reason:
+`'closed` after the connection was closed locally, `'reset` when the peer has
+gone (a reset, or a write to a peer that has already closed), and `'io` for
+every other host failure, including a transmission timeout. Cancelling a unit
+parked in `accept`, `read`, or `write` fails only that unit with `'cancelled`;
+bytes the peer had already sent remain available to the next `read`, and a
+connection accepted for a cancelled `accept` is closed. There is no deadline
+on any connection word; a deadline is `@spawn` with `await-for` and `cancel`.
+TLS, framing, and every protocol limit belong to the modules built over a
+connection, not to this module.
+
+### accept
+`( listener -- connection )` — Park until a peer connects, then return the
+connection as a port owned by the calling unit's task scope. Any number of
+units may park in `accept` on one listener; each connection wakes exactly one
+of them. A closed listener, whether closed before the call or while parked, is
+`'io` with `'reason` `'closed` and the listener's address and port attached.
+Live connections at the host maximum is `'domain` with `'reason` `'limit`
+before any socket is taken from the backlog. A connection the peer aborted
+before it was accepted is skipped silently. Exhaustion of descriptors or
+socket buffers is `'io` `'resources`; any other host failure is `'io` `'io`.
+A non-listener is `'type`.
 
 ### close
-`( listener -- )` — Close the listener's socket now, release its live-listener
-slot, and detach it from its task scope. Idempotent: closing a listener that
-is already closed, whether by an earlier `close` or by scope closure, does
-nothing and does not fail. A non-listener is `'type`.
+`( port -- )` — Close a listener or a connection. On a listener: close the
+socket now, release its live-listener slot, and detach it from its task
+scope; every unit parked in `accept` on it fails `'io` `'closed`, and the same
+address and port may be bound again once `close` returns. On a connection:
+refuse further writes, deliver the bytes already queued for the peer, then
+shut the socket down so the peer observes end of stream; later `read`,
+`write`, `peer-address`, and `local-address` calls are `'io` `'closed`.
+Idempotent in both cases: closing a port that is already closed, whether by
+an earlier `close` or by scope closure, does nothing and does not fail. A
+non-port, or a process port, is `'type`.
 
 ### listen
 `( config -- listener )` — Bind and listen on the configured address and port
@@ -1879,12 +1932,37 @@ and return the listener once the socket is accepting connections at the
 kernel. Configuration, authority, and host failures are described above.
 
 ### local-address
-`( listener -- address )` — Return `{'address string 'port int}` for a bound
-listener. The address is the canonical text of the bound IP literal (dotted
-quad for IPv4; RFC 5952 form without brackets for IPv6) and the port is the
-bound port, which for an ephemeral request is the kernel-assigned port. A
-closed listener is `'io` with `'reason` `'closed` and the address and port it
-was bound to attached. A non-listener is `'type`.
+`( port -- address )` — Return `{'address string 'port int}` for the local end
+of a bound listener or an open connection. The address is the canonical text
+of the IP literal (dotted quad for IPv4; RFC 5952 form without brackets for
+IPv6) and the port is the bound port, which for an ephemeral listener is the
+kernel-assigned port. A closed listener or connection is `'io` with `'reason`
+`'closed` and the address and port it held attached. A non-port, or a process
+port, is `'type`.
+
+### peer-address
+`( connection -- address )` — Return `{'address string 'port int}` for the
+peer end of an open connection, in the same canonical text as
+`local-address`. A closed connection is `'io` with `'reason` `'closed` and the
+recorded peer address and port attached. A non-connection is `'type`.
+
+### read
+`( connection max -- bytes )` — Read at most `max` exact bytes, and at most
+the host receive capacity, parking when nothing is queued. Return `[]` only at
+stable end of stream; later reads also return `[]`. A non-connection is
+`'type`; a non-integer `max` is `'type`; a `max` that is not positive is
+`'domain`. A second read while one is pending is `'contract`. After a local
+`close` the read is `'io` `'closed`; a peer reset is `'io` `'reset`; any other
+host failure is `'io` `'io`, each with the peer's address and port attached.
+
+### write
+`( connection bytes -- )` — Queue exact bytes for the peer, parking under
+bounded send pressure. Calls are serialized in scheduler-arrival order and
+each call's bytes remain contiguous. A non-list is `'type` and an element
+outside `0...255` is `'domain`; a string must be converted with `bytes` first.
+After a local `close` the write is `'io` `'closed`; a peer that has reset or
+already closed is `'io` `'reset`; any other host failure is `'io` `'io`, each
+with the peer's address and port attached.
 
 ## proc
 

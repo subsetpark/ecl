@@ -1,16 +1,22 @@
-//! Capability-gated TCP listeners over Session-granted address and port pairs.
+//! Capability-gated TCP listeners and connections over Session-granted
+//! address and port pairs.
 //!
 //! `listen` validates its configuration, asks the Session's network owner for
 //! a bound socket, and returns an opaque port value whose socket belongs to
-//! the calling unit's task scope. `local-address` reads the bound address
-//! back, which is the whole readiness protocol for an ephemeral bind. `close`
-//! is the same idempotent transition scope closure performs. Nothing here
-//! accepts, reads, or writes; those belong to protocol words above this one.
+//! the calling unit's task scope. `accept` parks until a peer connects and
+//! returns a connection port owned by the accepting unit's scope. `read` and
+//! `write` move exact bytes through the connection's bounded rings, parking on
+//! readiness through the same scheduler drivers `proc` uses. `close` is the
+//! idempotent transition scope closure performs: immediate for a listener,
+//! after queued bytes are delivered for a connection. Framing, deadlines, and
+//! TLS belong to protocol modules above this one.
 
 const std = @import("std");
 const dict = @import("../dict.zig");
 const env = @import("../env.zig");
+const heap = @import("../heap.zig");
 const intern = @import("../intern.zig");
+const kernel_storage = @import("../kernel_storage.zig");
 const list = @import("../list.zig");
 const machine = @import("../machine.zig");
 const net_port = @import("../net_port.zig");
@@ -21,9 +27,13 @@ const MachineError = machine.MachineError;
 const Value = value.Value;
 
 pub const words = [_]env.BuiltinWord{
-    .{ .name = "close", .doc = "( listener -- ) Close a listener's socket now; idempotent, and scope closure does the same.", .primitive = close },
+    .{ .name = "accept", .doc = "( listener -- connection ) Park until a peer connects and return the connection as a scope-owned port.", .primitive = accept },
+    .{ .name = "close", .doc = "( port -- ) Close a listener now, or close a connection after its queued bytes are written; idempotent.", .primitive = close },
     .{ .name = "listen", .doc = "( config -- listener ) Bind and listen on a host-granted TCP address.", .primitive = listen },
-    .{ .name = "local-address", .doc = "( listener -- address ) Report the bound address and port as {'address string 'port int}.", .primitive = localAddress },
+    .{ .name = "local-address", .doc = "( port -- address ) Report the local address and port of a listener or connection as {'address string 'port int}.", .primitive = localAddress },
+    .{ .name = "peer-address", .doc = "( connection -- address ) Report the peer's address and port as {'address string 'port int}.", .primitive = peerAddress },
+    .{ .name = "read", .doc = "( connection max -- bytes ) Read at most max exact bytes, parking until data or EOF; [] only at EOF.", .primitive = read },
+    .{ .name = "write", .doc = "( connection bytes -- ) Queue exact bytes for the peer, parking under bounded pressure.", .primitive = write },
 };
 
 /// Longest IP literal this module accepts; the longest valid text form of an
@@ -65,6 +75,7 @@ const Reason = enum {
     resources,
     io,
     closed,
+    reset,
 };
 
 fn failNet(
@@ -79,6 +90,22 @@ fn failNet(
     const failure = evaluator.fail(kind, message);
     evaluator.addErrorNet(address, port, .{ .symbol = symbol });
     return failure;
+}
+
+/// `failNet` for a host address: renders the literal into a fresh string
+/// value that lives only as long as the failure construction needs it.
+fn failAddress(
+    evaluator: *Machine,
+    kind: machine.ErrorKind,
+    message: []const u8,
+    address: net_port.IpAddress,
+    reason: Reason,
+) MachineError {
+    var buffer: [max_address_bytes]u8 = undefined;
+    const text = formatAddress(address, &buffer);
+    const address_value = try machine.stringValue(evaluator.allocator(), evaluator.releaseDomain(), text);
+    defer evaluator.releaseDomain().releaseValue(address_value);
+    return failNet(evaluator, kind, message, address_value, .{ .int = address.getPort() }, reason);
 }
 
 /// Validate `{'address string 'port int}` in full before any authority check.
@@ -171,6 +198,10 @@ fn listenerCell(evaluator: *Machine, item: Value) MachineError!*net_port.Listene
     return net_port.fromValue(item) orelse evaluator.typeError("a network listener");
 }
 
+fn connectionCell(evaluator: *Machine, item: Value) MachineError!*net_port.ConnectionCell {
+    return net_port.connectionFromValue(item) orelse evaluator.typeError("a network connection");
+}
+
 /// Render the address text without its port: dotted quad for IPv4, RFC 5952
 /// text without brackets for IPv6.
 fn formatAddress(address: net_port.IpAddress, buffer: []u8) []const u8 {
@@ -185,27 +216,17 @@ fn formatAddress(address: net_port.IpAddress, buffer: []u8) []const u8 {
     return writer.buffered();
 }
 
-fn localAddress(evaluator: *Machine) MachineError!void {
-    var item = try evaluator.popValue();
-    defer item.deinit();
-    const cell = try listenerCell(evaluator, item.borrow());
-    var buffer: [max_address_bytes]u8 = undefined;
-    const bound = cell.localAddress() orelse {
-        const recorded = cell.recordedAddress();
-        const text = formatAddress(recorded, &buffer);
-        const address_value = try machine.stringValue(evaluator.allocator(), evaluator.releaseDomain(), text);
-        defer evaluator.releaseDomain().releaseValue(address_value);
-        return failNet(evaluator, .io, "listener is closed", address_value, .{ .int = recorded.getPort() }, .closed);
-    };
+fn pushAddress(evaluator: *Machine, address: net_port.IpAddress) MachineError!void {
     const keys = try Keys.init();
-    const text = formatAddress(bound, &buffer);
+    var buffer: [max_address_bytes]u8 = undefined;
+    const text = formatAddress(address, &buffer);
     const address_value = try machine.stringValue(evaluator.allocator(), evaluator.releaseDomain(), text);
     // The materializer retains every pair value it keeps, so this reference is
     // ours to release whether or not the dict is built.
     defer evaluator.releaseDomain().releaseValue(address_value);
     const result = try dict.fromUniquePairs(evaluator.allocator(), evaluator.releaseDomain(), &.{
         .{ .{ .symbol = keys.address }, address_value },
-        .{ .{ .symbol = keys.port }, .{ .int = bound.getPort() } },
+        .{ .{ .symbol = keys.port }, .{ .int = address.getPort() } },
     });
     evaluator.pushOwned(result) catch |err| {
         evaluator.releaseDomain().releaseValue(result);
@@ -213,9 +234,249 @@ fn localAddress(evaluator: *Machine) MachineError!void {
     };
 }
 
+/// One locked observation of a connection endpoint: the address is pushed
+/// while the connection is live and attached to the `'closed` failure once it
+/// is not, so a closed `local-address` names the local end and a closed
+/// `peer-address` names the peer.
+fn pushEndpoint(evaluator: *Machine, cell: *net_port.ConnectionCell, kind: net_port.EndpointKind) MachineError!void {
+    return switch (cell.observeEndpoint(kind)) {
+        .available => |address| pushAddress(evaluator, address),
+        .closed => |address| failAddress(evaluator, .io, "connection is closed", address, .closed),
+    };
+}
+
+fn localAddress(evaluator: *Machine) MachineError!void {
+    var item = try evaluator.popValue();
+    defer item.deinit();
+    if (net_port.fromValue(item.borrow())) |cell| {
+        const bound = cell.localAddress() orelse
+            return failAddress(evaluator, .io, "listener is closed", cell.recordedAddress(), .closed);
+        return pushAddress(evaluator, bound);
+    }
+    if (net_port.connectionFromValue(item.borrow())) |cell| return pushEndpoint(evaluator, cell, .local);
+    return evaluator.typeError("a network listener or connection");
+}
+
+fn peerAddress(evaluator: *Machine) MachineError!void {
+    var item = try evaluator.popValue();
+    defer item.deinit();
+    const cell = try connectionCell(evaluator, item.borrow());
+    return pushEndpoint(evaluator, cell, .peer);
+}
+
+/// A read or write can no longer proceed; the failure names the peer.
+fn failConnection(evaluator: *Machine, cell: *net_port.ConnectionCell, failure: net_port.Failure) MachineError {
+    const peer = switch (cell.observeEndpoint(.peer)) {
+        .available, .closed => |address| address,
+    };
+    return switch (failure) {
+        .closed => failAddress(evaluator, .io, "connection is closed", peer, .closed),
+        .reset => failAddress(evaluator, .io, "connection reset by peer", peer, .reset),
+        .io => failAddress(evaluator, .io, "connection failed", peer, .io),
+    };
+}
+
 fn close(evaluator: *Machine) MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
-    const cell = try listenerCell(evaluator, item.borrow());
-    cell.close();
+    if (net_port.fromValue(item.borrow())) |cell| return cell.close();
+    if (net_port.connectionFromValue(item.borrow())) |cell| return cell.close();
+    return evaluator.typeError("a network listener or connection");
 }
+
+fn accept(evaluator: *Machine) MachineError!void {
+    var item = try evaluator.popValue();
+    errdefer item.deinit();
+    const cell = try listenerCell(evaluator, item.borrow());
+    const slot = cell.beginAccept() catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.Closed => failAddress(evaluator, .io, "listener is closed", cell.recordedAddress(), .closed),
+        error.LiveLimit => failAddress(evaluator, .domain, "host connection limit reached", cell.recordedAddress(), .limit),
+        error.Io => failAddress(evaluator, .io, "host lacks resources to accept", cell.recordedAddress(), .resources),
+    };
+    errdefer cell.endAccept(slot);
+    const driver = try evaluator.allocator().create(AcceptDriver);
+    driver.* = .{
+        .listener = item.take(),
+        .cell = cell,
+        .slot = slot,
+    };
+    evaluator.adoptDriver(driver);
+}
+
+const AcceptDriver = struct {
+    pub const address_stable_driver = {};
+    pub const ownership: heap.DriverOwnership = .self_owned;
+    listener: Value,
+    cell: *net_port.ListenerCell,
+    slot: ?*net_port.AcceptSlot,
+
+    pub fn deinit(self: *AcceptDriver, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+        _ = allocator;
+        if (self.slot) |slot| self.cell.endAccept(slot);
+        releases.releaseValue(self.listener);
+    }
+
+    pub fn advance(evaluator: *Machine, self: *AcceptDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        const slot = self.slot.?;
+        const progress = try net_port.pollAcceptFromUnit(
+            self.cell,
+            slot,
+            evaluator.unit.scheduler.?,
+            evaluator.unit.task_scope.?,
+        );
+        return switch (progress) {
+            .pending => parked: {
+                try evaluator.park(.{ .external = self.cell.acceptSource(slot) });
+                break :parked .yielded;
+            },
+            .accepted => |port| .{ .output = port },
+            .closed => failAddress(evaluator, .io, "listener is closed", self.cell.recordedAddress(), .closed),
+            .scope_closing => evaluator.fail(.cancelled, "accepting scope is closing"),
+            .resources => failAddress(evaluator, .io, "host lacks resources to accept", self.cell.recordedAddress(), .resources),
+            .io => failAddress(evaluator, .io, "could not accept", self.cell.recordedAddress(), .io),
+        };
+    }
+};
+
+fn read(evaluator: *Machine) MachineError!void {
+    try evaluator.require(2);
+    var maximum = try evaluator.popValue();
+    defer maximum.deinit();
+    if (maximum.borrow() != .int) return evaluator.typeError("a positive byte count");
+    if (maximum.borrow().int <= 0 or maximum.borrow().int > std.math.maxInt(usize))
+        return evaluator.fail(.domain, "net.read count must be positive");
+    var connection = try evaluator.popValue();
+    errdefer connection.deinit();
+    const cell = try connectionCell(evaluator, connection.borrow());
+    const count = @min(@as(usize, @intCast(maximum.borrow().int)), cell.readCapacity());
+    cell.beginRead() catch return evaluator.fail(.contract, "connection already has a pending reader");
+    errdefer cell.endRead();
+    const buffer = try evaluator.allocator().alloc(u8, count);
+    errdefer evaluator.allocator().free(buffer);
+    const driver = try evaluator.allocator().create(ReadDriver);
+    errdefer evaluator.allocator().destroy(driver);
+    driver.* = .{
+        .allocator = evaluator.allocator(),
+        .connection = connection.take(),
+        .cell = cell,
+        .buffer = buffer,
+    };
+    evaluator.adoptDriver(driver);
+}
+
+const ReadDriver = struct {
+    pub const address_stable_driver = {};
+    pub const ownership: heap.DriverOwnership = .self_owned;
+    allocator: std.mem.Allocator,
+    connection: Value,
+    cell: *net_port.ConnectionCell,
+    buffer: []u8,
+    count: ?usize = null,
+    materializer: ?list.ByteListMaterializer = null,
+
+    pub fn deinit(self: *ReadDriver, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+        if (self.materializer) |*materializer| materializer.retire(releases);
+        self.cell.endRead();
+        allocator.free(self.buffer);
+        releases.releaseValue(self.connection);
+    }
+
+    pub fn advance(evaluator: *Machine, self: *ReadDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        if (self.count == null) switch (self.cell.read(self.buffer)) {
+            .pending => {
+                try evaluator.park(.{ .external = self.cell.readSource() });
+                return .yielded;
+            },
+            .failed => |failure| return failConnection(evaluator, self.cell, failure),
+            .eof => self.count = 0,
+            .data => |count| self.count = count,
+        };
+        if (self.materializer == null)
+            self.materializer = .init(self.allocator, self.buffer[0..self.count.?]);
+        return switch (try self.materializer.?.advance(machine.kernel_poll_quantum)) {
+            .pending => .yielded,
+            .complete => |item| complete: {
+                self.materializer.?.deinit();
+                self.materializer = null;
+                break :complete .{ .output = item };
+            },
+        };
+    }
+};
+
+fn write(evaluator: *Machine) MachineError!void {
+    try evaluator.require(2);
+    var bytes = try evaluator.popValue();
+    errdefer bytes.deinit();
+    if (bytes.borrow() != .list) return evaluator.typeError("a byte list");
+    var connection = try evaluator.popValue();
+    errdefer connection.deinit();
+    const cell = try connectionCell(evaluator, connection.borrow());
+    const permit = try cell.beginWrite();
+    errdefer cell.abandonWrite(permit);
+    const bytes_borrowed = bytes.borrow();
+    const driver = try evaluator.allocator().create(WriteDriver);
+    driver.* = .{
+        .connection = connection.take(),
+        .bytes_value = bytes.take(),
+        .encoder = .init(evaluator.allocator(), bytes_borrowed),
+        .cell = cell,
+        .permit = permit,
+    };
+    evaluator.adoptDriver(driver);
+}
+
+const WriteDriver = struct {
+    pub const address_stable_driver = {};
+    pub const ownership: heap.DriverOwnership = .self_owned;
+    connection: Value,
+    bytes_value: Value,
+    encoder: ?kernel_storage.ByteVectorEncoder,
+    bytes: ?kernel_storage.ByteVector = null,
+    cell: *net_port.ConnectionCell,
+    permit: ?*net_port.WritePermit = null,
+    offset: usize = 0,
+
+    pub fn deinit(self: *WriteDriver, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+        if (self.permit) |permit| self.cell.abandonWrite(permit);
+        if (self.encoder) |*encoder| encoder.deinit();
+        if (self.bytes) |*bytes| bytes.retire(releases, allocator);
+        releases.releaseValue(self.bytes_value);
+        releases.releaseValue(self.connection);
+    }
+
+    pub fn advance(evaluator: *Machine, self: *WriteDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        if (self.bytes == null) switch (self.encoder.?.advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidByte => return evaluator.fail(.domain, "net.write contains a value outside 0...255"),
+        }) {
+            .pending => return .yielded,
+            .complete => |bytes| {
+                self.encoder.?.deinit();
+                self.encoder = null;
+                self.bytes = bytes;
+            },
+        };
+        const source = self.bytes.?.bytes();
+        if (self.offset == source.len) {
+            self.cell.finishWrite(self.permit.?);
+            self.permit = null;
+            return .completed;
+        }
+        return switch (self.cell.write(self.permit.?, source[self.offset..])) {
+            .written => |count| progressed: {
+                self.offset += count;
+                break :progressed .yielded;
+            },
+            .failed => |failure| failConnection(evaluator, self.cell, failure),
+            .pending => parked: {
+                try evaluator.park(.{ .external = self.cell.writeSource(self.permit.?) });
+                break :parked .yielded;
+            },
+        };
+    }
+};
