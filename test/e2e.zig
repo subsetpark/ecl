@@ -282,9 +282,14 @@ test "e2e: net accept, read, write, and close round-trip over loopback under the
     });
     // A failure before the round trip completes would leave the binary parked
     // in accept forever; kill it on every early exit, and let the normal path
-    // reap it below.
+    // reap it below. A stall inside one of the blocking reads never reaches
+    // that defer, so a watchdog kills the child after a bound; the main path
+    // disarms it before reaping.
     var reaped = false;
     defer if (!reaped) child.kill(io);
+    var watchdog: NetWatchdog = .{ .pid = child.id.? };
+    try watchdog.arm();
+    defer watchdog.disarm();
     var stdout_buffer: [512]u8 = undefined;
     var stdout = child.stdout.?.readerStreaming(io, &stdout_buffer);
     const handshake = (try stdout.interface.takeDelimiter('\n')) orelse return error.MissingHandshake;
@@ -320,10 +325,43 @@ test "e2e: net accept, read, write, and close round-trip over loopback under the
     var stderr_sink: [512]u8 = undefined;
     const stderr_len = try stderr.interface.readSliceShort(&stderr_sink);
     try std.testing.expectEqualStrings("", stderr_sink[0..stderr_len]);
+    watchdog.disarm();
     const term = try child.wait(io);
     reaped = true;
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, term);
 }
+
+/// Kills a spawned child after a bound unless disarmed first. The child's pid
+/// is copied so the thread never touches `Child` state the test is using. The
+/// value lives on the test's stack and outlives its thread, which `disarm`
+/// joins.
+const NetWatchdog = struct {
+    done: std.Io.Event = .unset,
+    pid: std.posix.pid_t,
+    thread: ?std.Thread = null,
+
+    fn arm(self: *NetWatchdog) !void {
+        self.thread = try std.Thread.spawn(.{}, watch, .{self});
+    }
+
+    fn watch(self: *NetWatchdog) void {
+        self.done.waitTimeout(io, .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(20) } }) catch |err| switch (err) {
+            error.Timeout => std.posix.kill(self.pid, .KILL) catch |kill_err| {
+                std.log.err("watchdog could not kill the stalled ecl child: {t}", .{kill_err});
+            },
+            error.Canceled => {},
+        };
+    }
+
+    /// Idempotent: stops the timer if it is still armed and waits for the
+    /// thread to exit.
+    fn disarm(self: *NetWatchdog) void {
+        const thread = self.thread orelse return;
+        self.thread = null;
+        self.done.set(io);
+        thread.join();
+    }
+};
 
 test "e2e: proc leader exit cleans retained and redirected descendants" {
     const process_exe = try absoluteProcessExe();

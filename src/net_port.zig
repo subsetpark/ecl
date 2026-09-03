@@ -838,20 +838,31 @@ pub const ListenerCell = struct {
                 .{ .fd = listen_fd, .events = posix.POLL.IN, .revents = 0 },
                 .{ .fd = wake_fd, .events = posix.POLL.IN, .revents = 0 },
             };
-            _ = posix.poll(&fds, -1) catch {
-                self.failAllWaiting(.io);
-                break;
-            };
+            _ = posix.poll(&fds, -1) catch return self.exitAcceptor(.io);
             if (fds[1].revents != 0) break;
             if (fds[0].revents == 0) continue;
             self.acceptOneLocked();
         }
-        // Drop the thread's reference before announcing exit: the scope
-        // member still pins the cell, so this cannot destroy it, and the
-        // closer that detaches the member afterwards performs the last
-        // release deterministically before scope quiescence is published.
+        self.exitAcceptor(null);
+    }
+
+    /// Leave the acceptor role. The thread's reference goes first: the scope
+    /// member still pins the cell, so this cannot destroy it, and the closer
+    /// that detaches the member afterwards performs the last release before
+    /// scope quiescence is published. A host failure is published and
+    /// `running` cleared under one lock hold, so a `beginAccept` that arrives
+    /// next either sees the failure on its own slot or starts a fresh thread;
+    /// it can never append a slot no thread will ever serve.
+    fn exitAcceptor(self: *ListenerCell, failure: ?AcceptFailure) void {
         self.releaseRef();
         std.Io.Threaded.mutexLock(&self.mutex);
+        if (failure) |reason| {
+            var slot = self.slots_first;
+            while (slot) |current| : (slot = current.next) {
+                if (current.state == .waiting) current.state = .{ .failed = reason };
+            }
+            self.waits.notifyLocked(self);
+        }
         self.acceptor.running = false;
         self.changed.broadcast(blockingIo());
         std.Io.Threaded.mutexUnlock(&self.mutex);
@@ -905,17 +916,7 @@ pub const ListenerCell = struct {
         self.waits.notifyLocked(self);
     }
 
-    /// The acceptor is exiting on a host failure: every parked accept must
-    /// learn it, not only the first, or the rest would wait forever.
-    fn failAllWaiting(self: *ListenerCell, failure: AcceptFailure) void {
-        std.Io.Threaded.mutexLock(&self.mutex);
-        defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        var slot = self.slots_first;
-        while (slot) |current| : (slot = current.next) {
-            if (current.state == .waiting) current.state = .{ .failed = failure };
-        }
-        self.waits.notifyLocked(self);
-    }
+
 };
 
 fn acceptorThreadMain(cell: *ListenerCell) void {
@@ -928,6 +929,15 @@ fn acceptorThreadMain(cell: *ListenerCell) void {
 fn prepareAccepted(fd: posix.fd_t) error{Io}!IpAddress {
     if (builtin.os.tag != .linux) try setCloexec(fd);
     try setBlockingMode(fd, .non_blocking);
+    // A write to a peer that has gone away must surface as EPIPE for the
+    // controller to map, never as SIGPIPE delivered to an embedding host that
+    // kept the default disposition. Platforms without MSG_NOSIGNAL offer the
+    // socket-level switch instead; `sendFlags` covers the rest.
+    if (@hasDecl(posix.SO, "NOSIGPIPE")) {
+        const enabled: c_int = 1;
+        if (posix.system.setsockopt(fd, posix.SOL.SOCKET, posix.SO.NOSIGPIPE, &enabled, @sizeOf(c_int)) != 0)
+            return error.Io;
+    }
     // SAFETY: getsockname fills `storage` before it is read; a failure
     // returns before any read.
     var storage: std.Io.Threaded.PosixAddress = undefined;
@@ -935,6 +945,10 @@ fn prepareAccepted(fd: posix.fd_t) error{Io}!IpAddress {
     if (posix.system.getsockname(fd, &storage.any, &length) != 0) return error.Io;
     return std.Io.Threaded.addressFromPosix(&storage);
 }
+
+/// Flags for every controller send: suppress SIGPIPE where the kernel offers
+/// a per-call switch.
+const send_flags: u32 = if (@hasDecl(posix.MSG, "NOSIGNAL")) posix.MSG.NOSIGNAL else 0;
 
 fn setBlockingMode(fd: posix.fd_t, mode: enum { blocking, non_blocking }) error{Io}!void {
     const flags = posix.system.fcntl(fd, posix.F.GETFL, @as(usize, 0));
@@ -1457,7 +1471,7 @@ pub const ConnectionCell = struct {
                 std.Io.Threaded.mutexLock(&self.mutex);
                 const chunk = self.send.peek();
                 if (chunk.len != 0) {
-                    const rc = posix.system.write(socket_fd, chunk.ptr, chunk.len);
+                    const rc = posix.system.send(socket_fd, chunk.ptr, chunk.len, send_flags);
                     switch (posix.errno(rc)) {
                         .SUCCESS => {
                             self.send.consume(@intCast(rc));
