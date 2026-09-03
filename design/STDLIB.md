@@ -2117,8 +2117,9 @@ protocol. `accept` is the only listener word that parks.
 The listener belongs to the creating unit's task scope: scope closure closes
 the socket and releases the live-listener slot even if a listener value is
 stored elsewhere, and `close` performs the same idempotent transition early.
-There is no detach or ownership transfer. Address reuse is not requested, so
-two listeners can never hold one address and port at once.
+There is no detach or ownership transfer. The socket is bound with address
+reuse, so a port that a closed connection left in `TIME_WAIT` can be bound
+again at once; two live listeners still cannot hold one address and port.
 
 A connection is likewise an opaque `'port` value, disjoint from listeners and
 process ports: a listener word applied to a connection, a connection word

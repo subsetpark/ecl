@@ -124,8 +124,8 @@ allocation failure.
 Supported targets are Linux and macOS. A listener is an opaque port owned by
 the task scope that created it; the socket closes when that scope closes or
 when `net.close` runs, whichever comes first, and the same address and port
-can then be bound again. Address reuse options are not set, so two listeners
-never share one address and port.
+can then be bound again, as can a port that a closed connection left in
+`TIME_WAIT`; two live listeners still never share one address and port.
 
 Accepting connections, reading, and writing are inside the contract.
 `net.accept` parks until a peer connects and returns a connection port owned

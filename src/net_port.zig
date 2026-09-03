@@ -309,10 +309,7 @@ pub const NetOwner = struct {
         var reservation_owned = true;
         errdefer if (reservation_owned) self.releaseLive();
 
-        var server = IpAddress.listen(&normalized, self.io, .{
-            .kernel_backlog = self.policy.limits.kernel_backlog,
-            .reuse_address = false,
-        }) catch |err| return mapListenError(err);
+        var server = try bindListening(normalized, self.policy.limits.kernel_backlog);
         errdefer if (reservation_owned) server.deinit(self.io);
 
         const cell = try self.allocator.create(ListenerCell);
@@ -344,23 +341,54 @@ pub const NetOwner = struct {
     }
 };
 
-fn mapListenError(err: IpAddress.ListenError) ListenError {
-    return switch (err) {
-        error.AddressInUse => error.AddressInUse,
-        error.AddressUnavailable => error.AddressUnavailable,
-        error.NetworkDown,
-        error.SystemResources,
-        error.ProcessFdQuotaExceeded,
-        error.SystemFdQuotaExceeded,
-        => error.Resources,
-        error.AddressFamilyUnsupported,
-        error.ProtocolUnsupportedBySystem,
-        error.ProtocolUnsupportedByAddressFamily,
-        error.SocketModeUnsupported,
-        error.OptionUnsupported,
-        => error.Unsupported,
-        error.Canceled => error.Cancelled,
-        error.Unexpected => error.Io,
+/// Open, bind, and listen on one address with `SO_REUSEADDR` and nothing
+/// else. A connection this program closed first leaves its port in TIME_WAIT
+/// for a minute, and without address reuse a restarted program finds its own
+/// port "in use"; `std.Io.net.IpAddress.listen` would set `SO_REUSEPORT` as
+/// well, which lets a second live listener bind the same address and port,
+/// so the socket is opened here. Every failure closes the descriptor.
+fn bindListening(address: IpAddress, backlog: u31) ListenError!std.Io.net.Server {
+    const family = std.Io.Threaded.posixAddressFamily(&address);
+    const flags: u32 = posix.SOCK.STREAM | if (builtin.os.tag == .linux) posix.SOCK.CLOEXEC else 0;
+    const rc = posix.system.socket(family, flags, 0);
+    switch (posix.errno(rc)) {
+        .SUCCESS => {},
+        .AFNOSUPPORT, .PROTONOSUPPORT, .PROTOTYPE, .INVAL => return error.Unsupported,
+        .MFILE, .NFILE, .NOBUFS, .NOMEM => return error.Resources,
+        else => return error.Io,
+    }
+    var socket: OwnedSocket = .{ .fd = @intCast(rc) };
+    errdefer socket.close();
+    const fd = socket.fd.?;
+    if (builtin.os.tag != .linux) try setCloexec(fd);
+    const enabled: c_int = 1;
+    if (posix.system.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, &enabled, @sizeOf(c_int)) != 0)
+        return error.Io;
+    // SAFETY: `addressToPosix` writes the bytes `bind` reads, and `getsockname`
+    // overwrites them before `addressFromPosix` reads them back.
+    var storage: std.Io.Threaded.PosixAddress = undefined;
+    var length = std.Io.Threaded.addressToPosix(&address, &storage);
+    switch (posix.errno(posix.system.bind(fd, &storage.any, length))) {
+        .SUCCESS => {},
+        .ADDRINUSE => return error.AddressInUse,
+        .ADDRNOTAVAIL => return error.AddressUnavailable,
+        .AFNOSUPPORT => return error.Unsupported,
+        .NOBUFS, .NOMEM => return error.Resources,
+        else => return error.Io,
+    }
+    while (true) {
+        switch (posix.errno(posix.system.listen(fd, backlog))) {
+            .SUCCESS => break,
+            .INTR => continue,
+            .ADDRINUSE => return error.AddressInUse,
+            else => return error.Io,
+        }
+    }
+    if (posix.system.getsockname(fd, &storage.any, &length) != 0) return error.Io;
+    socket.fd = null;
+    return .{
+        .socket = .{ .handle = fd, .address = std.Io.Threaded.addressFromPosix(&storage) },
+        .options = {},
     };
 }
 

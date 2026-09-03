@@ -263,6 +263,28 @@ test "net: a bind conflict is an io failure carrying the address, port, and reas
     });
 }
 
+test "net: a port left in TIME_WAIT by a closed connection can be bound again at once" {
+    // A server that closes a connection first leaves its port in TIME_WAIT;
+    // without address reuse the next listen on that port fails for up to a
+    // minute, which is how a restarted program finds its own port "in use".
+    var runtime: Runtime = .{};
+    try runtime.open(.{ .net = unrestricted }, .cooperative);
+    defer runtime.close();
+    const port = try listenerPort(&runtime);
+    const peer = try Peer.start(port, .read_until_eof);
+    try runtime.run("l net.accept 'c set c [111 107] net.write c net.close l net.close");
+    try expectPeerBytes(peer.join(), "ok");
+    const program = try std.fmt.allocPrint(
+        allocator,
+        "{{'address \"127.0.0.1\" 'port {d}}} net.listen net.local-address 'port at",
+        .{port},
+    );
+    defer allocator.free(program);
+    try runtime.run(program);
+    var expected: [8]u8 = undefined;
+    try runtime.expectDisplay(try std.fmt.bufPrint(&expected, "{d}", .{port}));
+}
+
 test "net: config validation rejects malformed dictionaries before authority checks" {
     // No policy: a malformed config must fail on its own terms, never as
     // `'unavailable`.
