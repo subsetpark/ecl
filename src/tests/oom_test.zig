@@ -933,7 +933,7 @@ fn stdlibSessionAllocationProbe(
             &runtime,
             "oom-hostio.ecl",
             // Console, environment, and standard-input refusal paths.
-            "1 \"probe\" io.debug pop " ++
+            "\"probe\" io.eprint 1 \"probe\" io.debug pop " ++
                 "\"ECL_OOM_PROBE\" getenv pop " ++
                 "[] (\"ECL_OOM_ABSENT\" getenv) @attempt pop [] (io.stdin) @attempt pop",
         ),
@@ -996,10 +996,19 @@ fn stdlibSessionAllocationProbe(
                 "0 time.from-unix 1 time.from-unix time.cmp pop 3 time.seconds pop " ++
                 "[] (\"2024-02-30T00:00:00Z\" time.parse) @attempt pop",
         ),
-        // PENDING: Patch 5 of gameplans/http-server.json: listen, serve one
-        // handler, and drive one request through a loopback peer whose bytes
-        // arrive deterministically under the cooperative scheduler.
-        .http_server => return error.SkipZigTest,
+        // The pure words once each, then a serving unit whose acceptor parks
+        // with no peer and is cancelled at once, so every ordinal is
+        // deterministic (a live exchange cannot be an allocation oracle).
+        .http_server => try runOk(
+            &runtime,
+            "oom-http-server.ecl",
+            "{'address \"127.0.0.1\" 'port 0} net.listen 'l set " ++
+                "\"GET /a?b=1 HTTP/1.1\" http.server.parse-request-line pop " ++
+                "(\"Host: x\") http.server.parse-headers dup http.server.content-length pop pop " ++
+                "200 \"ok\" http.server.text http.server.render-response pop " ++
+                "[] (l {'max-in-flight 1} (pop http.server.not-found) http.server.@serve) @spawn " ++
+                "dup cancel await pop l net.close",
+        ),
         .http => try runOk(
             &runtime,
             "oom-http.ecl",

@@ -1035,6 +1035,11 @@ fn hasForbiddenTokens(
 /// marked, and nothing else in first-party vocabulary is.
 const unit_constructors = [_][]const u8{ "@attempt", "@spawn", "@each", "@module", "@defm", "@test" };
 
+/// First-party ECL words that apply their quotation in a fresh unit and are
+/// therefore marked too. Each must be defined by some first-party source;
+/// the compiler cannot see that either, so the audit checks both directions.
+const source_unit_constructors = [_][]const u8{"@serve"};
+
 /// Wrapped stars mean one thing in shipped vocabulary: the word returns a
 /// value supplied by dynamic execution context rather than consuming it from
 /// the operand stack. The compiler cannot express that semantic class, so the
@@ -1108,7 +1113,36 @@ fn auditUnitConstructorSpelling() bool {
             scan = end;
         }
     }
+    for (source_unit_constructors) |name| {
+        var defined = false;
+        for (first_party_definition_sources) |source| {
+            if (definesQuotedName(source, name)) defined = true;
+        }
+        if (!defined) {
+            std.log.err("unit constructors: `{s}` is listed as a source constructor but no first-party source defines it", .{name});
+            failed = true;
+        }
+    }
     return failed;
+}
+
+/// Whether `source` binds `name` with `def` or `defp`: the quoted spelling
+/// followed by whitespace and the binder, the shape every checked-in
+/// definition ends in.
+fn definesQuotedName(source: []const u8, name: []const u8) bool {
+    var scan: usize = 0;
+    while (std.mem.indexOfPos(u8, source, scan, "'")) |found| {
+        const start = found + 1;
+        const end = preludeTokenEnd(source, start);
+        scan = if (end > start) end else start + 1;
+        if (!std.mem.eql(u8, source[start..end], name)) continue;
+        var rest = end;
+        while (rest < source.len and std.ascii.isWhitespace(source[rest])) rest += 1;
+        const binder_end = preludeTokenEnd(source, rest);
+        const binder = source[rest..binder_end];
+        if (std.mem.eql(u8, binder, "def") or std.mem.eql(u8, binder, "defp")) return true;
+    }
+    return false;
 }
 
 fn auditDynamicContextSpelling() bool {
@@ -1173,6 +1207,9 @@ fn occurrences(haystack: []const u8, needle: []const u8) usize {
 
 fn isUnitConstructor(name: []const u8) bool {
     for (unit_constructors) |listed| {
+        if (std.mem.eql(u8, listed, name)) return true;
+    }
+    for (source_unit_constructors) |listed| {
         if (std.mem.eql(u8, listed, name)) return true;
     }
     return false;

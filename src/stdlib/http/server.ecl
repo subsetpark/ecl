@@ -350,4 +350,245 @@
  ('query at "http.server.query expects a string 'query" checked-string
   "&" split ("" match? not) filter {} (query-pair) fold)
  'query def
+
+ ### defp default-config
+ (-- config : "Return the serving configuration with every limit at its default.")
+ ({'max-header-bytes 32768
+   'max-body-bytes 1048576
+   'max-in-flight 128
+   'read-timeout-ms 10000
+   'on-failure (str io.eprint)})
+ 'default-config defp
+
+ ### defp config-keys
+ (-- keys : "Return the recognized configuration keys.")
+ (['max-header-bytes 'max-body-bytes 'max-in-flight 'read-timeout-ms 'on-failure])
+ 'config-keys defp
+
+ ### defp positive-int?
+ (value -- bool : "Return 1 for an int greater than zero.")
+ (dup type 'int match? (0 >) (pop 0) if)
+ 'positive-int? defp
+
+ ### defp config-entry-ok?
+ (pair -- bool : "Return 1 when a configuration entry has a value of the right kind.")
+ (dup first 'on-failure match? swap 1 at swap (type 'list match?) (positive-int?) if)
+ 'config-entry-ok? defp
+
+ ### defp checked-config
+ (config -- config : "Validate a serving configuration and fill in the defaults.")
+ (dup type 'dict match? "http.server.@serve expects a configuration dict" type-error assert
+  dup dict.keys (config-keys in?) all?
+  "http.server.@serve configuration accepts only 'max-header-bytes, 'max-body-bytes, 'max-in-flight, 'read-timeout-ms, and 'on-failure"
+  domain-error assert
+  dup dict.pairs (config-entry-ok?) all?
+  "http.server.@serve limits must be positive ints and 'on-failure a quotation" domain-error assert
+  default-config swap dict.merge)
+ 'checked-config defp
+
+ ### defp peer-text
+ (address -- text : "Format {'address 'port} as address:port, bracketing an IPv6 address.")
+ (dup 'address at dup ":" str.contains? ("[" swap cat "]" cat) () if
+  swap 'port at pair "{}:{}" str.format)
+ 'peer-text defp
+
+ ### defp peer-gone
+ (-- : "Raise the 'io error that marks a peer which sent nothing before closing.")
+ ('io error.new "peer closed before sending a request" error.with-message raise)
+ 'peer-gone defp
+
+ ### defp head-end
+ (bytes -- index : "Return the index of the first CR LF CR LF in a byte list, or -1.")
+ (4 windows ([13 10 13 10] match?) each where dup len 0 = (pop -1) (first) if)
+ 'head-end defp
+
+ ### defp read-head-step
+ (connection limit buffer -- connection limit buffer :
+  "Read more head bytes: 431 past the limit, 400 on EOF after some bytes, 'io on EOF before any.")
+ (|connection limit buffer|
+  buffer len limit > (431 "request header fields too large" framing-error) when
+  connection limit 4 + buffer len - 1 max net.read
+  dup len 0 = buffer len 0 = and (peer-gone) when
+  dup len 0 = (400 "incomplete request head" framing-error) when
+  buffer swap cat connection limit rolldown)
+ 'read-head-step defp
+
+ ### defp read-head
+ (connection limit -- connection buffer index :
+  "Read until the head terminator appears and return its index.")
+ ([] (dup head-end -1 =) (read-head-step) while nip dup head-end)
+ 'read-head defp
+
+ ### defp decode-head
+ (bytes -- text : "Decode the head as UTF-8 text; undecodable bytes are a 400.")
+ (wrap (chars) @attempt dup 'ok dict.has? ('ok at first)
+  (pop 400 "malformed request head" framing-error) if)
+ 'decode-head defp
+
+ ### defp read-body-step
+ (connection length buffer -- connection length buffer :
+  "Read more body bytes; EOF before the length is a 400.")
+ (|connection length buffer|
+  connection length buffer len - net.read
+  dup len 0 = (400 "incomplete request body" framing-error) when
+  buffer swap cat connection length rolldown)
+ 'read-body-step defp
+
+ ### defp read-body
+ (connection leftover length -- body :
+  "Complete a Content-Length body from the leftover head bytes and the connection.")
+ (swap (over over len >) (read-body-step) while swap take nip)
+ 'read-body defp
+
+ ### defp build-request
+ (connection request-line headers body -- request :
+  "Assemble the request dict handed to the handler.")
+ (|connection request-line headers body|
+  'method request-line 'method at
+  'target request-line 'target at
+  'path request-line 'path at
+  'query request-line 'query at
+  'headers headers
+  'body body
+  'peer connection net.peer-address peer-text
+  14 pack dict.from-flat)
+ 'build-request defp
+
+ ### defp read-request
+ (connection config -- request :
+  "Frame one request from the connection: head, request line, headers, and Content-Length body.")
+ (|connection config|
+  connection config 'max-header-bytes at read-head
+  (|connection buffer index| connection buffer index 4 + drop buffer index take decode-head crlf
+   split)
+  call
+  dup first parse-request-line swap rest parse-headers
+  dup "transfer-encoding" dict.has? (411 "length required" framing-error) when
+  dup content-length
+  dup config 'max-body-bytes at > (413 "content too large" framing-error) when
+  (|connection leftover request-line headers length|
+   connection request-line headers connection leftover length read-body build-request)
+  call)
+ 'read-request defp
+
+ ### defp answer
+ (connection status -- :
+  "Write the minimal text response for a status the server generates itself.")
+ (dup reason text render-response net.write)
+ 'answer defp
+
+ ### defp report
+ (config error -- : "Hand a request failure to the configured 'on-failure quotation.")
+ (swap 'on-failure at call)
+ 'report defp
+
+ ### defp write-outcome
+ (connection config result -- :
+  "Write a rendered response, or report the render failure and answer 500.")
+ (dup 'ok dict.has?
+  (nip 'ok at first net.write)
+  ('err at swap over report pop 500 answer)
+  if)
+ 'write-outcome defp
+
+ ### defp write-response
+ (connection config response -- : "Validate and write a handler's response.")
+ (wrap (render-response) @attempt write-outcome)
+ 'write-response defp
+
+ ### defp handler-success
+ (connection config values -- :
+  "Write the single response a handler left, or report and answer 500.")
+ (dup len 1 =
+  (first write-response)
+  (len wrap "handler left {} values instead of one response" str.format
+   'contract error.new swap error.with-message swap over report pop 500 answer)
+  if)
+ 'handler-success defp
+
+ ### defp run-handler
+ (connection config handler request -- : "Run the handler in a fresh unit and write its response.")
+ (wrap swap @attempt
+  dup 'ok dict.has?
+  ('ok at handler-success)
+  ('err at swap over report pop 500 answer)
+  if)
+ 'run-handler defp
+
+ ### defp read-failure
+ (connection config error -- :
+  "Answer a framing failure by status, close silently on a vanished peer, or report.")
+ (dup 'kind at
+  ['timeout (pop pop 408 answer)
+   'io (pop pop pop)
+   (dup 'data {} at-or 'status 0 at-or dup 0 =
+    (pop swap over report pop 500 answer)
+    (nip nip answer)
+    if)]
+  case)
+ 'read-failure defp
+
+ ### defp dispatch-read
+ (connection config handler reader result -- :
+  "Continue from the reader child's result or its failure.")
+ (dup 'ok dict.has?
+  (nip 'ok at first run-handler)
+  ('err at swap dup cancel await pop nip read-failure)
+  if)
+ 'dispatch-read defp
+
+ ### defp handle-connection
+ (connection config handler -- :
+  "Serve one connection: frame the request under the read deadline, run the handler, write the
+   response.")
+ (|connection config handler|
+  connection config handler
+  connection config 2 pack (read-request) @spawn
+  dup config 'read-timeout-ms at await-for
+  dispatch-read)
+ 'handle-connection defp
+
+ ### defp serve-one
+ (listener config handler -- listener config handler :
+  "Accept one connection, handle it in isolation, close it, and report any non-io failure.")
+ (|listener config handler|
+  listener net.accept
+  dup config handler 3 pack (handle-connection) @attempt
+  swap net.close
+  config swap
+  dup 'err dict.has?
+  ('err at dup 'kind at 'io match? (pop pop) (report) if)
+  (pop pop)
+  if
+  listener config handler)
+ 'serve-one defp
+
+ ### defp accept-loop
+ (listener config handler -- : "Accept and serve connections forever.")
+ ((1) (serve-one) while)
+ 'accept-loop defp
+
+ ### def @serve
+ (listener config handler -- :
+  "Serve HTTP/1.1 requests from a net listener until cancelled. The config dict may set
+   'max-header-bytes (32768), 'max-body-bytes (1048576), 'max-in-flight (128), 'read-timeout-ms
+   (10000), and 'on-failure, a ( error -- ) quotation defaulting to (str io.eprint); {} is valid.
+   Each request is framed under the read deadline, the handler ( request -- response ) runs in a
+   fresh unit, and its single well-formed response is written with Content-Length and Connection:
+   close before the connection closes. Framing failures answer 400, 411, 505, 431, 413, or 408;
+   handler failures answer 500 and reach 'on-failure; a peer that vanishes is closed silently. The
+   word fails 'type for a non-port listener, non-dict config, or non-quotation handler, 'domain for
+   an unknown key or non-positive limit, 'cancelled when cancelled, and with the accept error when
+   the listener fails. It never closes the listener.")
+ (|listener config handler|
+  listener type 'port match? "http.server.@serve expects a net listener" type-error assert
+  handler type 'list match? "http.server.@serve expects a handler quotation" type-error assert
+  listener config checked-config handler 3 pack
+  dup 1 at 'max-in-flight at swap ((accept-loop) @spawn append) partial [] rollup times
+  await-any nip
+  dup 'err dict.has?
+  ('err at raise)
+  (pop 'contract error.new "http.server acceptor returned" error.with-message raise)
+  if)
+ '@serve def
 ) 'http.server @defm
