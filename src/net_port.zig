@@ -915,8 +915,6 @@ pub const ListenerCell = struct {
         slot.state = .{ .failed = failure };
         self.waits.notifyLocked(self);
     }
-
-
 };
 
 fn acceptorThreadMain(cell: *ListenerCell) void {
