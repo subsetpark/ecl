@@ -263,17 +263,18 @@
    the given order with the name as given ({\"set-cookie\" (\"a=1\" \"b=2\")} writes two lines);
    'body a string, written as UTF-8, or a byte list of ints in 0...255. The bytes are the status
    line HTTP/1.1 status reason (an empty reason for codes outside the built-in table), the header
-   lines, Content-Length (omitted for 204), Connection: close, an empty line, and the body. A
-   non-dict is 'type; any other key set, a status outside the range, a body with status 204, 205, or
-   304, a header name that is not a token or is content-length, connection, or transfer-encoding in
-   any letter case, a header value that is not a clean string or list of them, or a body of another
-   kind is 'domain. Every byte the server writes has passed this word.")
+   lines, Content-Length (omitted for 204 and 304, whose length is not the empty body's),
+   Connection: close, an empty line, and the body. A non-dict is 'type; any other key set, a status
+   outside the range, a body with status 204, 205, or 304, a header name that is not a token or is
+   content-length, connection, or transfer-encoding in any letter case, a header value that is not a
+   clean string or list of them, or a body of another kind is 'domain. Every byte the server writes
+   has passed this word.")
  (checked-response
   (|response|
    response 'body at body-bytes
    response 'status at dup reason pair "HTTP/1.1 {} {}" str.format
    response 'headers at header-lines cons
-   response 'status at 204 = not (over len wrap "Content-Length: {}" str.format append) when
+   response 'status at [204 304] in? not (over len wrap "Content-Length: {}" str.format append) when
    "Connection: close" append "" append "" append
    crlf join bytes swap cat)
   call)
@@ -463,6 +464,10 @@
    split)
   call
   dup first parse-request-line swap rest parse-headers
+  over 'version at "HTTP/1.1" match?
+  (dup "host" () at-or len 1 = not
+   (400 "an HTTP/1.1 request needs exactly one Host header" framing-error) when)
+  when
   dup "transfer-encoding" dict.has? (411 "length required" framing-error) when
   dup content-length
   dup config 'max-body-bytes at > (413 "content too large" framing-error) when
@@ -474,7 +479,7 @@
  ### defp answer
  (connection config status -- :
   "Write the minimal text response for a status the server generates itself.")
- (dup reason http.response.text write-response)
+ (dup reason http.response.text 0 swap write-response)
  'answer defp
 
  ### defp report
@@ -493,32 +498,38 @@
  # wire has passed render-response, so an invalid response dict is data the
  # handler gets a 500 for and never a malformed wire message. The source audit
  # holds the write word to this one call site.
- (connection config response -- :
-  "Validate and encode a response in full, then write it; a rejected response is reported and
-   answered 500.")
+ (connection config head? response -- :
+  "Validate and encode a response in full, then write it, without its body when the request was
+   HEAD; a rejected response is reported and answered 500.")
  (wrap (render-response) @attempt
   dup 'ok dict.has?
-  (nip 'ok at first net.write)
-  ('err at fail-request)
+  ('ok at first swap (head-only) when nip net.write)
+  ('err at nip fail-request)
   if)
  'write-response defp
 
+ ### defp head-only
+ (bytes -- bytes : "Keep a rendered response's status line and headers, dropping the body.")
+ (dup head-end 4 + take)
+ 'head-only defp
+
  ### defp handler-success
- (connection config values -- :
+ (connection config head? values -- :
   "Write the single response a handler left, or report and answer 500.")
  (dup len 1 =
   (first write-response)
-  (len wrap "handler left {} values instead of one response" str.format
+  (nip len wrap "handler left {} values instead of one response" str.format
    'contract error.new swap error.with-message fail-request)
   if)
  'handler-success defp
 
  ### defp run-handler
- (connection config handler request -- : "Run the handler in a fresh unit and write its response.")
- (wrap swap @attempt
+ (connection config handler request -- :
+  "Run the handler in a fresh unit and write its response; a HEAD request gets no body.")
+ (dup 'method at "HEAD" match? swap wrap rolldown @attempt
   dup 'ok dict.has?
   ('ok at handler-success)
-  ('err at fail-request)
+  ('err at nip fail-request)
   if)
  'run-handler defp
 
@@ -601,13 +612,14 @@
      answered 500; a failure of the quotation itself is discarded.
    Each limit is an int greater than zero.
 
-   Requests the server cannot serve are answered with a minimal text/plain response and closed: 400
-   for a malformed request line or header, non-UTF-8 head bytes, a bad Content-Length, or end of
-   stream after some bytes; 411 for any Transfer-Encoding; 505 for a version other than HTTP/1.1 or
-   HTTP/1.0; 431 and 413 for the size limits; 408 for the deadline; 500 when the handler fails,
-   leaves other than one value, or leaves a response render-response rejects, in which case
-   'on-failure receives the error. A peer that sends nothing before closing, or resets during the
-   exchange, is closed silently.
+   A HEAD request is answered with the handler's status and headers and no body. Requests the server
+   cannot serve are answered with a minimal text/plain response and closed: 400 for a malformed
+   request line or header, an HTTP/1.1 request without exactly one Host header, non-UTF-8 head
+   bytes, a bad Content-Length, or end of stream after some bytes; 411 for any Transfer-Encoding;
+   505 for a version other than HTTP/1.1 or HTTP/1.0; 431 and 413 for the size limits; 408 for the
+   deadline; 500 when the handler fails, leaves other than one value, or leaves a response
+   render-response rejects, in which case 'on-failure receives the error. A peer that sends nothing
+   before closing, or resets during the exchange, is closed silently.
 
    A non-port listener, non-dict config, non-quotation handler, non-int limit, or non-quotation
    'on-failure is 'type; an unknown config key or a limit not greater than zero is 'domain. The word

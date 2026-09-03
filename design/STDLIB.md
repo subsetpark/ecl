@@ -1944,7 +1944,9 @@ and values may not contain CR, LF, NUL, or a control character other than
 tab, so a value built from request data cannot split the response.
 
 Framing is HTTP/1.1 with `Content-Length` bodies only; an HTTP/1.0 request is
-answered the same way. Any `Transfer-Encoding` header is answered 411 and a
+answered the same way, and only HTTP/1.1 requests must carry one `Host`
+header. A HEAD request is answered with the handler's status and headers and
+no body. Any `Transfer-Encoding` header is answered 411 and a
 version other than `HTTP/1.1` or `HTTP/1.0` is answered 505. There is no
 keep-alive: every response carries `Connection: close`, and the connection is
 closed once the response is written. TLS, chunked bodies, pipelining, and
@@ -1969,7 +1971,8 @@ The server answers a request it cannot serve with a minimal `text/plain`
 response of the status below and then closes the connection:
 
 - 400: a malformed request line; a header line without `:` or beginning with
-  space or tab (obsolete folding); non-UTF-8 bytes in the head; a
+  space or tab (obsolete folding); an HTTP/1.1 request without exactly one
+  `Host` header; non-UTF-8 bytes in the head; a
   `Content-Length` that is not a digit string or whose repeated values
   differ; end of stream after some bytes arrived but before the head or the
   body is complete.
@@ -2072,7 +2075,8 @@ A line without `:`, or one beginning with space or tab, is `'domain` with
 `( response -- bytes )` — Validate a response dictionary and return the exact
 bytes the server writes for it: `HTTP/1.1 <status> <reason>` CRLF, one
 `name: value` line per header value in the given order with the name as
-given, `Content-Length: <n>` CRLF (omitted for 204), `Connection: close` CRLF,
+given, `Content-Length: <n>` CRLF (omitted for 204 and 304, whose length is
+not the empty body's), `Connection: close` CRLF,
 CRLF, then the body bytes. The reason phrase comes from a fixed table covering 200, 201,
 204, 301, 302, 304, 400, 401, 403, 404, 405, 408, 411, 413, 431, 500, 503,
 and 505 and is empty for any other status, with the space before it always

@@ -80,7 +80,7 @@
   ["HTTP/1.1 204 No Content" "Connection: close" "" ""] crlf join
   equal
   {'status 304 'headers {} 'body ""} http.server.render-response chars
-  ["HTTP/1.1 304 Not Modified" "Content-Length: 0" "Connection: close" "" ""] crlf join
+  ["HTTP/1.1 304 Not Modified" "Connection: close" "" ""] crlf join
   equal
   ({'status 204 'headers {} 'body "x"} http.server.render-response) 'domain "empty body"
   raises-containing

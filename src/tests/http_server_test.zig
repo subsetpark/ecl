@@ -296,7 +296,7 @@ fn awaitTimerEntries(runtime: *Runtime, count: usize) void {
 const ok_response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
 const ok_row = "\"/ok\" (pop {'status 200 'headers {} 'body \"ok\"}) ";
 const not_found_default = "(pop http.response.not-found)";
-const close_listener_request = "GET /close-listener HTTP/1.1\r\n\r\n";
+const close_listener_request = "GET /close-listener HTTP/1.1\r\nHost: h\r\n\r\n";
 
 /// A serving unit under `srv`: `prelude` runs first (a gate task, say), the
 /// handler is a `case` over the path whose rows end with two that stop the
@@ -394,8 +394,14 @@ test "http server: string and byte-list bodies are written with content-length a
     const server = try Server.start(&runtime, port, "", "{}", "\"/s\" (pop {'status 200 'headers {} 'body \"ok\"}) " ++
         "\"/b\" (pop {'status 200 'headers {} 'body [111 107]}) ", not_found_default);
     errdefer server.abandon();
-    try expectResponse(try exchange(port, "GET /s HTTP/1.1\r\n\r\n"), ok_response);
-    try expectResponse(try exchange(port, "GET /b HTTP/1.1\r\n\r\n"), ok_response);
+    try expectResponse(try exchange(port, "GET /s HTTP/1.1\r\nHost: h\r\n\r\n"), ok_response);
+    try expectResponse(try exchange(port, "GET /b HTTP/1.1\r\nHost: h\r\n\r\n"), ok_response);
+    // HEAD keeps the status line and headers, including the length the body
+    // would have had, and sends no body.
+    try expectResponse(
+        try exchange(port, "HEAD /s HTTP/1.1\r\nHost: h\r\n\r\n"),
+        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n",
+    );
     try server.finish();
 }
 
@@ -407,7 +413,7 @@ test "http server: repeated response headers are written once per value" {
     const server = try Server.start(&runtime, port, "", "{}", "\"/c\" (pop {'status 200 'headers {\"Set-Cookie\" (\"a=1\" \"b=2\")} 'body \"\"}) ", not_found_default);
     errdefer server.abandon();
     try expectResponse(
-        try exchange(port, "GET /c HTTP/1.1\r\n\r\n"),
+        try exchange(port, "GET /c HTTP/1.1\r\nHost: h\r\n\r\n"),
         "HTTP/1.1 200 OK\r\nSet-Cookie: a=1\r\nSet-Cookie: b=2\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
     );
     try server.finish();
@@ -420,7 +426,7 @@ test "http server: a content-length body is delivered as an exact byte list incl
     const port = try runtime.listen("l");
     const server = try Server.start(&runtime, port, "", "{}", "\"/\" ('body at str {'status 200 'headers {} 'body \"\"} 'body rolldown put) ", not_found_default);
     errdefer server.abandon();
-    const observed = try exchange(port, "POST / HTTP/1.1\r\nContent-Length: 4\r\n\r\n" ++ [_]u8{ 0, 255, 10, 13 });
+    const observed = try exchange(port, "POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 4\r\n\r\n" ++ [_]u8{ 0, 255, 10, 13 });
     try expectStatus(observed, "HTTP/1.1 200 OK");
     try std.testing.expectEqualStrings("[0 255 10 13]", observed.body());
     try server.finish();
@@ -435,12 +441,14 @@ test "http server: malformed request lines and headers are answered 400 and clos
     const server = try Server.start(&runtime, port, "", "{}", ok_row, "(pop {'status 200 'headers {} 'body \"ok\"})");
     errdefer server.abandon();
     try expectStatus(try exchange(port, "GARBAGE\r\n\r\n"), "HTTP/1.1 400 Bad Request");
-    try expectStatus(try exchange(port, "GET / HTTP/1.1\r\nNoColon\r\n\r\n"), "HTTP/1.1 400 Bad Request");
-    try expectStatus(try exchange(port, "GET /  HTTP/1.1\r\n\r\n"), "HTTP/1.1 400 Bad Request");
-    try expectStatus(try exchange(port, "GET / HTTP/1.1\r\n folded: x\r\n\r\n"), "HTTP/1.1 400 Bad Request");
-    try expectStatus(try exchange(port, "GET / HTTP/1.1\r\nContent-Length: x\r\n\r\n"), "HTTP/1.1 400 Bad Request");
-    try expectStatus(try exchange(port, "GET / HTTP/1.1\r\nX: \xff\r\n\r\n"), "HTTP/1.1 400 Bad Request");
-    try expectResponse(try exchange(port, "GET /ok HTTP/1.1\r\n\r\n"), ok_response);
+    try expectStatus(try exchange(port, "GET / HTTP/1.1\r\nHost: h\r\nNoColon\r\n\r\n"), "HTTP/1.1 400 Bad Request");
+    try expectStatus(try exchange(port, "GET /  HTTP/1.1\r\nHost: h\r\n\r\n"), "HTTP/1.1 400 Bad Request");
+    try expectStatus(try exchange(port, "GET / HTTP/1.1\r\nHost: h\r\n folded: x\r\n\r\n"), "HTTP/1.1 400 Bad Request");
+    try expectStatus(try exchange(port, "GET / HTTP/1.1\r\nHost: h\r\nContent-Length: x\r\n\r\n"), "HTTP/1.1 400 Bad Request");
+    try expectStatus(try exchange(port, "GET / HTTP/1.1\r\nHost: h\r\nX: \xff\r\n\r\n"), "HTTP/1.1 400 Bad Request");
+    try expectStatus(try exchange(port, "GET /ok HTTP/1.1\r\n\r\n"), "HTTP/1.1 400 Bad Request");
+    try expectStatus(try exchange(port, "GET /ok HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n"), "HTTP/1.1 400 Bad Request");
+    try expectResponse(try exchange(port, "GET /ok HTTP/1.1\r\nHost: h\r\n\r\n"), ok_response);
     try server.finish();
 }
 
@@ -451,7 +459,7 @@ test "http server: chunked requests are answered 411 and unsupported versions 50
     const port = try runtime.listen("l");
     const server = try Server.start(&runtime, port, "", "{}", ok_row, not_found_default);
     errdefer server.abandon();
-    try expectStatus(try exchange(port, "POST /ok HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"), "HTTP/1.1 411 Length Required");
+    try expectStatus(try exchange(port, "POST /ok HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n"), "HTTP/1.1 411 Length Required");
     try expectStatus(try exchange(port, "GET /ok HTTP/2.0\r\n\r\n"), "HTTP/1.1 505 HTTP Version Not Supported");
     try expectResponse(try exchange(port, "GET /ok HTTP/1.0\r\n\r\n"), ok_response);
     try server.finish();
@@ -466,8 +474,8 @@ test "http server: header and body limits are answered 431 and 413" {
     errdefer server.abandon();
     const long_head = "GET /ok HTTP/1.1\r\nX: " ++ ("a" ** 100) ++ "\r\n\r\n";
     try expectStatus(try exchange(port, long_head), "HTTP/1.1 431 Request Header Fields Too Large");
-    try expectStatus(try exchange(port, "POST /ok HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello"), "HTTP/1.1 413 Content Too Large");
-    try expectResponse(try exchange(port, "POST /ok HTTP/1.1\r\nContent-Length: 4\r\n\r\nfour"), ok_response);
+    try expectStatus(try exchange(port, "POST /ok HTTP/1.1\r\nHost: h\r\nContent-Length: 5\r\n\r\nhello"), "HTTP/1.1 413 Content Too Large");
+    try expectResponse(try exchange(port, "POST /ok HTTP/1.1\r\nHost: h\r\nContent-Length: 4\r\n\r\nfour"), ok_response);
     try server.finish();
 }
 
@@ -485,7 +493,7 @@ test "http server: the read deadline answers 408 and closes" {
     awaitTimerEntries(&runtime, 1);
     try runtime.session.advanceManualClock(20);
     try expectStatus(stalled.join(), "HTTP/1.1 408 Request Timeout");
-    try expectResponse(try exchange(port, "GET /ok HTTP/1.1\r\n\r\n"), ok_response);
+    try expectResponse(try exchange(port, "GET /ok HTTP/1.1\r\nHost: h\r\n\r\n"), ok_response);
     try server.finish();
 }
 
@@ -505,9 +513,9 @@ test "http server: max-in-flight stops accepting until a request completes" {
         const gate_port = try runtime.listen("l2");
         const server = try Server.start(&runtime, port, gate_prelude, "{'max-in-flight 1}", gate_rows, not_found_default);
         errdefer server.abandon();
-        const slow = try Peer.start(port, .{ .send = "GET /slow HTTP/1.1\r\n\r\n" });
+        const slow = try Peer.start(port, .{ .send = "GET /slow HTTP/1.1\r\nHost: h\r\n\r\n" });
         slow.waitFlushed();
-        const probe = try Peer.start(port, .{ .send = "GET /probe HTTP/1.1\r\n\r\n" });
+        const probe = try Peer.start(port, .{ .send = "GET /probe HTTP/1.1\r\nHost: h\r\n\r\n" });
         probe.waitFlushed();
         const release = try Peer.start(gate_port, .connect_then_close);
         try expectSilentClose(release.join());
@@ -529,9 +537,9 @@ test "http server: max-in-flight stops accepting until a request completes" {
         const gate_port = try runtime.listen("l2");
         const server = try Server.start(&runtime, port, gate_prelude, "{'max-in-flight 2}", gate_rows, not_found_default);
         errdefer server.abandon();
-        const slow = try Peer.start(port, .{ .send = "GET /slow HTTP/1.1\r\n\r\n" });
+        const slow = try Peer.start(port, .{ .send = "GET /slow HTTP/1.1\r\nHost: h\r\n\r\n" });
         slow.waitFlushed();
-        const probe_seen = try exchange(port, "GET /probe HTTP/1.1\r\n\r\n");
+        const probe_seen = try exchange(port, "GET /probe HTTP/1.1\r\nHost: h\r\n\r\n");
         try expectStatus(probe_seen, "HTTP/1.1 200 OK");
         try std.testing.expectEqualStrings("active", probe_seen.body());
         const release = try Peer.start(gate_port, .connect_then_close);
@@ -556,11 +564,11 @@ test "http server: handler failures extra results malformed responses and reserv
         ok_row, not_found_default);
     errdefer server.abandon();
     for ([_][]const u8{ "/raise", "/extra", "/malformed", "/reserved" }) |path| {
-        const request = try std.fmt.allocPrint(allocator, "GET {s} HTTP/1.1\r\n\r\n", .{path});
+        const request = try std.fmt.allocPrint(allocator, "GET {s} HTTP/1.1\r\nHost: h\r\n\r\n", .{path});
         defer allocator.free(request);
         try expectStatus(try exchange(port, request), "HTTP/1.1 500 Internal Server Error");
     }
-    try expectResponse(try exchange(port, "GET /ok HTTP/1.1\r\n\r\n"), ok_response);
+    try expectResponse(try exchange(port, "GET /ok HTTP/1.1\r\nHost: h\r\n\r\n"), ok_response);
     try server.finish();
 }
 
@@ -572,11 +580,11 @@ test "http server: cancellation cancels in-flight requests and leaves the caller
     _ = try runtime.listen("l2");
     const server = try Server.start(&runtime, port, gate_prelude, "{}", gate_rows, not_found_default);
     errdefer server.abandon();
-    const slow = try Peer.start(port, .{ .send = "GET /slow HTTP/1.1\r\n\r\n" });
+    const slow = try Peer.start(port, .{ .send = "GET /slow HTTP/1.1\r\nHost: h\r\n\r\n" });
     slow.waitFlushed();
     // Nobody releases the gate: the slow request is in flight when the stop
     // handler cancels the serving task, so both peers see EOF and no status.
-    try expectSilentClose(try exchange(port, "GET /stop HTTP/1.1\r\n\r\n"));
+    try expectSilentClose(try exchange(port, "GET /stop HTTP/1.1\r\nHost: h\r\n\r\n"));
     try expectSilentClose(slow.join());
     try server.joinEnded();
     try runtime.expectDisplay("'cancelled 'none");
@@ -592,7 +600,7 @@ test "http server: closing the listener fails the serving unit with io closed" {
     const port = try runtime.listen("l");
     const server = try Server.start(&runtime, port, "", "{}", ok_row, not_found_default);
     errdefer server.abandon();
-    try expectResponse(try exchange(port, "GET /ok HTTP/1.1\r\n\r\n"), ok_response);
+    try expectResponse(try exchange(port, "GET /ok HTTP/1.1\r\nHost: h\r\n\r\n"), ok_response);
     try server.finish();
 }
 
@@ -605,7 +613,7 @@ test "http server: a peer that connects and closes without sending is closed sil
     errdefer server.abandon();
     const silent = try Peer.start(port, .connect_then_close);
     try expectSilentClose(silent.join());
-    try expectResponse(try exchange(port, "GET /ok HTTP/1.1\r\n\r\n"), ok_response);
+    try expectResponse(try exchange(port, "GET /ok HTTP/1.1\r\nHost: h\r\n\r\n"), ok_response);
     try server.finish();
 }
 
@@ -645,7 +653,7 @@ test "http server: concurrent requests under the worker pool are each answered e
     var started: usize = 0;
     defer for (requests[0..started]) |request| allocator.free(request);
     for (&peers, 0..) |*slot, index| {
-        requests[index] = try std.fmt.allocPrint(allocator, "GET /n/{d} HTTP/1.1\r\n\r\n", .{index});
+        requests[index] = try std.fmt.allocPrint(allocator, "GET /n/{d} HTTP/1.1\r\nHost: h\r\n\r\n", .{index});
         started += 1;
         slot.* = try Peer.start(port, .{ .send = requests[index] });
     }
