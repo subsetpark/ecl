@@ -8,7 +8,12 @@
 //! worker (socket, bind, listen, getsockname). Accepting starts one detached
 //! acceptor thread per listener on the first `accept`; it waits in `poll` on
 //! the listening socket and a wake pipe and takes a connection from the kernel
-//! backlog only while an ECL `accept` is outstanding. Each accepted socket is
+//! backlog only while an ECL `accept` is outstanding and a live-connection
+//! slot is free. The slot is acquired at `accept4` time, under the listener
+//! mutex; while the quota is full the acceptor stops polling the listening
+//! socket and waits on its wake pipe alone, which every connection release
+//! signals, so a waiting accept holds no slot and the connection stays in the
+//! kernel backlog until one frees. Each accepted socket is
 //! a `ConnectionCell` owned by the accepting unit's scope, with bounded
 //! receive and send rings serviced by exactly one controller thread that
 //! polls a non-blocking socket and a wake pipe; that thread alone owns the
@@ -78,8 +83,10 @@ pub const ListenError = error{
     Io,
 };
 
-/// Every way `beginAccept` can fail before anything parks.
-pub const AcceptError = error{ OutOfMemory, Closed, LiveLimit, Io };
+/// Every way `beginAccept` can fail before anything parks. The connection
+/// quota is not among them: a full quota parks the accept rather than failing
+/// it.
+pub const AcceptError = error{ OutOfMemory, Closed, Io };
 
 pub const AcceptProgress = union(enum) {
     pending,
@@ -176,6 +183,13 @@ const OwnedPolicy = struct {
 
 /// Session-owned authority. Units never receive this owner; they receive the
 /// opaque `external.NetAccess` and `listenFromUnit`.
+///
+/// Lock order: the acceptor registry mutex is a leaf. It is taken while
+/// holding a listener mutex (`beginAccept` registers under it) and while
+/// holding a connection cell mutex (`finalizeLocked` releases the reservation
+/// under it), and nothing is taken while it is held: `releaseConnection` only
+/// writes wake bytes. No path takes a listener mutex while holding a
+/// connection cell mutex.
 pub const NetOwner = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -183,6 +197,13 @@ pub const NetOwner = struct {
     live: std.atomic.Value(usize) = .init(0),
     live_connections: std.atomic.Value(usize) = .init(0),
     next_identity: std.atomic.Value(u64) = .init(1),
+    /// Guards the intrusive list of listeners whose acceptor thread is
+    /// running. A cell joins when its thread is spawned and leaves as the
+    /// first act of that thread's exit, so `ListenerCell.close`, which waits
+    /// for the thread to exit before closing the wake pipe, never leaves a
+    /// registered cell whose pipe is gone.
+    acceptors_mutex: std.Io.Mutex = .init,
+    acceptors_first: ?*ListenerCell = null,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, policy: NetPolicy) PolicyError!NetOwner {
         return .{
@@ -195,6 +216,7 @@ pub const NetOwner = struct {
     pub fn deinit(self: *NetOwner) void {
         std.debug.assert(self.live.load(.acquire) == 0);
         std.debug.assert(self.live_connections.load(.acquire) == 0);
+        std.debug.assert(self.acceptors_first == null);
         self.policy.deinit(self.allocator);
         self.* = undefined;
     }
@@ -231,8 +253,46 @@ pub const NetOwner = struct {
         return reserveCounter(&self.live_connections, self.policy.limits.max_live_connections);
     }
 
+    /// Free one live-connection slot and wake every running acceptor so one
+    /// that stopped polling its listening socket at the quota rechecks. The
+    /// counter is decremented before any pipe is written, so an acceptor that
+    /// fails its acquire either sees this decrement or has a wake byte queued
+    /// for it; the byte persists until drained, so the race is lossless.
+    /// Callers hold a connection cell mutex (`finalizeLocked`), a listener
+    /// mutex (`acceptOneLocked`'s failure arms), or nothing (`endAccept`'s
+    /// orphan): this takes only the registry mutex, so no order is violated.
     fn releaseConnection(self: *NetOwner) void {
         releaseCounter(&self.live_connections);
+        std.Io.Threaded.mutexLock(&self.acceptors_mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.acceptors_mutex);
+        var cell = self.acceptors_first;
+        while (cell) |current| : (cell = current.acceptor_next) {
+            signalPipe(current.acceptor.wake.?[1]);
+        }
+    }
+
+    /// Called by `beginAccept` under the listener mutex once its acceptor
+    /// thread exists; the cell's wake pipe is set for as long as it is listed.
+    fn registerAcceptor(self: *NetOwner, cell: *ListenerCell) void {
+        std.Io.Threaded.mutexLock(&self.acceptors_mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.acceptors_mutex);
+        std.debug.assert(cell.acceptor_prev == null and cell.acceptor_next == null);
+        std.debug.assert(self.acceptors_first != cell);
+        cell.acceptor_next = self.acceptors_first;
+        if (self.acceptors_first) |first| first.acceptor_prev = cell;
+        self.acceptors_first = cell;
+    }
+
+    /// Called by the acceptor thread as the first act of leaving its role,
+    /// before any lock the exit protocol takes.
+    fn unregisterAcceptor(self: *NetOwner, cell: *ListenerCell) void {
+        std.Io.Threaded.mutexLock(&self.acceptors_mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.acceptors_mutex);
+        std.debug.assert(self.acceptors_first == cell or cell.acceptor_prev != null);
+        if (cell.acceptor_prev) |previous| previous.acceptor_next = cell.acceptor_next else self.acceptors_first = cell.acceptor_next;
+        if (cell.acceptor_next) |next| next.acceptor_prev = cell.acceptor_prev;
+        cell.acceptor_prev = null;
+        cell.acceptor_next = null;
     }
 
     /// Bind and listen, attach the socket to `scope`, then publish the port.
@@ -516,13 +576,13 @@ const AcceptFailure = enum { resources, io };
 /// `beginAccept` and `endAccept`; the acceptor thread fills the first waiting
 /// slot in FIFO order, under the listener mutex, so a cancelled accept can
 /// never leave a taken socket with no owner and the acceptor never holds more
-/// sockets than there are outstanding accepts.
+/// sockets than there are outstanding accepts. A waiting slot holds no quota
+/// slot: the reservation is acquired with the socket and travels inside the
+/// `ready` state.
 pub const AcceptSlot = struct {
     previous: ?*AcceptSlot = null,
     next: ?*AcceptSlot = null,
     linked: bool = true,
-    /// Held while waiting or failed; moved into the accepted socket on fill.
-    reservation: ConnectionReservation,
     state: State = .waiting,
 
     const State = union(enum) {
@@ -555,6 +615,10 @@ pub const ListenerCell = struct {
     slots_last: ?*AcceptSlot = null,
     demand: usize = 0,
     acceptor: Acceptor = .{},
+    /// Membership in the owner's running-acceptor registry; guarded by
+    /// `NetOwner.acceptors_mutex`, never by this cell's mutex.
+    acceptor_prev: ?*ListenerCell = null,
+    acceptor_next: ?*ListenerCell = null,
 
     const State = union(enum) {
         bound: struct {
@@ -570,6 +634,10 @@ pub const ListenerCell = struct {
         running: bool = false,
         /// Set by `close` so a running acceptor exits after its next wake.
         stop: bool = false,
+        /// Set by the acceptor when a slot acquire failed at the quota: it
+        /// polls only the wake pipe until a connection release wakes it, and
+        /// the connection it saw stays in the kernel backlog.
+        quota_blocked: bool = false,
         wake: ?[2]posix.fd_t = null,
     };
 
@@ -711,8 +779,9 @@ pub const ListenerCell = struct {
         return slot.state != .waiting;
     }
 
-    /// Reserve one live-connection slot, link an accept slot, and start the
-    /// acceptor thread if it is not running. Fails before anything parks.
+    /// Link an accept slot and start the acceptor thread if it is not
+    /// running. Fails before anything parks. No quota slot is taken here:
+    /// the acceptor acquires one with the socket.
     pub fn beginAccept(self: *ListenerCell) AcceptError!*AcceptSlot {
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
@@ -720,8 +789,6 @@ pub const ListenerCell = struct {
             .bound => |*bound| bound,
             .closed => return error.Closed,
         };
-        var reservation = ConnectionReservation.acquire(self.owner) orelse return error.LiveLimit;
-        errdefer reservation.release();
         const slot = try self.allocator.create(AcceptSlot);
         errdefer self.allocator.destroy(slot);
         if (!self.acceptor.running) {
@@ -732,14 +799,18 @@ pub const ListenerCell = struct {
             self.retainRef();
             self.acceptor.running = true;
             self.acceptor.stop = false;
+            self.acceptor.quota_blocked = false;
             const thread = std.Thread.spawn(.{}, acceptorThreadMain, .{self}) catch {
                 self.acceptor.running = false;
                 self.releaseRef();
                 return error.Io;
             };
             thread.detach();
+            // The thread cannot reach `exitAcceptor` before this: its first
+            // act is to take the mutex this call still holds.
+            self.owner.registerAcceptor(self);
         }
-        slot.* = .{ .reservation = reservation.take() };
+        slot.* = .{};
         if (self.slots_last) |last| {
             last.next = slot;
             slot.previous = last;
@@ -796,9 +867,9 @@ pub const ListenerCell = struct {
         return ConnectionCell.publish(self.owner, accepted, scheduler, scope);
     }
 
-    /// Release the slot and whatever it still holds: a waiting or failed slot
-    /// releases its reservation, a ready slot closes its socket and releases
-    /// its reservation, a taken slot owns nothing.
+    /// Release the slot and whatever it still holds: a ready slot closes its
+    /// socket and releases its reservation; a waiting, failed, closed, or
+    /// taken slot owns nothing.
     pub fn endAccept(self: *ListenerCell, slot: *AcceptSlot) void {
         std.Io.Threaded.mutexLock(&self.mutex);
         std.debug.assert(slot.linked);
@@ -812,7 +883,6 @@ pub const ListenerCell = struct {
             .ready => |ready| orphan = ready,
             .waiting, .failed, .closed, .taken => {},
         }
-        slot.reservation.release();
         std.Io.Threaded.mutexUnlock(&self.mutex);
         if (orphan) |*accepted| accepted.deinit();
         self.allocator.destroy(slot);
@@ -826,6 +896,11 @@ pub const ListenerCell = struct {
         return null;
     }
 
+    /// Serve accepts until stopped. While a slot waits, poll the listening
+    /// socket for readability and the wake pipe; while quota-blocked, poll the
+    /// wake pipe alone so a connection in the backlog does not spin the
+    /// thread. A wake byte means drain and recheck: exit if `close` asked for
+    /// a stop, otherwise clear the block and look at the socket again.
     fn acceptorMain(self: *ListenerCell) void {
         while (true) {
             std.Io.Threaded.mutexLock(&self.mutex);
@@ -837,21 +912,32 @@ pub const ListenerCell = struct {
             }
             const listen_fd = self.state.bound.server.socket.handle;
             const wake_fd = self.acceptor.wake.?[0];
+            const listen_events: i16 = if (self.acceptor.quota_blocked) 0 else posix.POLL.IN;
             std.Io.Threaded.mutexUnlock(&self.mutex);
 
             var fds = [_]posix.pollfd{
-                .{ .fd = listen_fd, .events = posix.POLL.IN, .revents = 0 },
+                .{ .fd = listen_fd, .events = listen_events, .revents = 0 },
                 .{ .fd = wake_fd, .events = posix.POLL.IN, .revents = 0 },
             };
             _ = posix.poll(&fds, -1) catch return self.exitAcceptor(.io);
-            if (fds[1].revents != 0) break;
+            if (fds[1].revents != 0) {
+                drainPipe(wake_fd);
+                std.Io.Threaded.mutexLock(&self.mutex);
+                const stop = self.acceptor.stop;
+                self.acceptor.quota_blocked = false;
+                std.Io.Threaded.mutexUnlock(&self.mutex);
+                if (stop) break;
+                continue;
+            }
             if (fds[0].revents == 0) continue;
             self.acceptOneLocked();
         }
         self.exitAcceptor(null);
     }
 
-    /// Leave the acceptor role. The thread's reference goes first: the scope
+    /// Leave the acceptor role. The registry entry goes first, so no
+    /// connection release writes to a wake pipe `close` is about to close
+    /// once `running` clears. The thread's reference goes next: the scope
     /// member still pins the cell, so this cannot destroy it, and the closer
     /// that detaches the member afterwards performs the last release before
     /// scope quiescence is published. A host failure is published and
@@ -859,6 +945,7 @@ pub const ListenerCell = struct {
     /// next either sees the failure on its own slot or starts a fresh thread;
     /// it can never append a slot no thread will ever serve.
     fn exitAcceptor(self: *ListenerCell, failure: ?AcceptFailure) void {
+        self.owner.unregisterAcceptor(self);
         self.releaseRef();
         std.Io.Threaded.mutexLock(&self.mutex);
         if (failure) |reason| {
@@ -878,8 +965,11 @@ pub const ListenerCell = struct {
     /// the last slot between the readiness report and the accept: either the
     /// cancellation wins and the connection stays in the kernel backlog for
     /// the next accept, or the accept wins and the socket belongs to that
-    /// slot. The listening socket is non-blocking, so the locked syscall is
-    /// bounded.
+    /// slot. The live-connection slot is acquired here, just before the
+    /// syscall: when none is free the acceptor marks itself quota-blocked and
+    /// takes nothing, so the connection stays in the backlog until a release
+    /// wakes it. The listening socket is non-blocking, so the locked syscall
+    /// is bounded.
     fn acceptOneLocked(self: *ListenerCell) void {
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
@@ -888,6 +978,13 @@ pub const ListenerCell = struct {
             .bound => |bound| bound.server.socket.handle,
             .closed => return,
         };
+        var reservation = ConnectionReservation.acquire(self.owner) orelse {
+            self.acceptor.quota_blocked = true;
+            return;
+        };
+        // Released on every path that does not move it into the slot; the
+        // move empties it, so the release is then a no-op.
+        defer reservation.release();
         // SAFETY: accept writes the peer address into `storage` before it is
         // read, and nothing reads it on any failure path.
         var storage: std.Io.Threaded.PosixAddress = undefined;
@@ -910,7 +1007,7 @@ pub const ListenerCell = struct {
         };
         slot.state = .{ .ready = .{
             .socket = socket,
-            .reservation = slot.reservation.take(),
+            .reservation = reservation.take(),
             .endpoints = .{ .local = local, .peer = peer },
         } };
         self.waits.notifyLocked(self);
@@ -1868,6 +1965,66 @@ test "an accept cancelled after a peer connected closes the orphan and the liste
     try std.testing.expectError(error.Closed, listener.beginAccept());
     try std.testing.expectError(error.ConnectionRefused, connectLoopback(port));
     try std.testing.expectEqual(@as(usize, 0), harness.owner.live_connections.load(.acquire));
+}
+
+test "an accept blocked by the quota resumes when a connection releases its slot" {
+    // SAFETY: `init` assigns every field before any use, and `deinit` runs
+    // only after a successful `init`.
+    var harness: LoopbackHarness = undefined;
+    try harness.init(std.testing.allocator, .{ .max_live_connections = 1 });
+    defer harness.deinit();
+    const listener_port = try harness.listen(.{ .ip4 = .loopback(0) });
+    defer harness.host.domain().releaseValue(listener_port);
+    const listener = fromValue(listener_port).?;
+    const port = listener.localAddress().?.getPort();
+
+    var target: TestTarget = .{};
+    const first_peer = try connectLoopback(port);
+    defer first_peer.close(std.testing.io);
+    const first_port = try harness.acceptOne(listener, &target);
+    defer harness.host.domain().releaseValue(first_port);
+    const first = connectionFromValue(first_port).?;
+    try std.testing.expectEqual(@as(usize, 1), harness.owner.live_connections.load(.acquire));
+
+    // A second peer completes its handshake into the kernel backlog. The
+    // accept for it parks: the quota is full, so the acceptor takes nothing
+    // and the slot stays waiting however often it is polled.
+    const second_peer = try connectLoopback(port);
+    defer second_peer.close(std.testing.io);
+    var second_writer = second_peer.writer(std.testing.io, &.{});
+    try second_writer.interface.writeAll("x");
+    try second_writer.interface.flush();
+    const slot = try listener.beginAccept();
+    var slot_owned = true;
+    defer if (slot_owned) listener.endAccept(slot);
+    var spins: usize = 0;
+    while (spins < 500) : (spins += 1) {
+        try std.testing.expectEqual(
+            AcceptProgress.pending,
+            try listener.pollAccept(slot, harness.runtime_scheduler.worker(), &harness.root_scope),
+        );
+        try std.testing.expect(harness.owner.live_connections.load(.acquire) <= 1);
+        try std.Thread.yield();
+    }
+
+    // Closing the first connection frees its slot; the release wakes the
+    // acceptor, which takes the queued peer into the waiting slot.
+    first.close();
+    try awaitSource(listener.acceptSource(slot), &target);
+    const second_port = switch (try listener.pollAccept(slot, harness.runtime_scheduler.worker(), &harness.root_scope)) {
+        .accepted => |port_value| port_value,
+        else => return error.UnexpectedAcceptOutcome,
+    };
+    defer harness.host.domain().releaseValue(second_port);
+    listener.endAccept(slot);
+    slot_owned = false;
+    try std.testing.expectEqual(@as(usize, 1), harness.owner.live_connections.load(.acquire));
+    const second = connectionFromValue(second_port).?;
+    var received: [1]u8 = undefined;
+    try readExact(second, &target, &received);
+    try std.testing.expectEqualStrings("x", &received);
+    second.close();
+    try waitForZeroConnections(&harness.owner);
 }
 
 /// A loopback peer for the allocation sweep: connects, writes two bytes, reads

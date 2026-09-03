@@ -798,7 +798,7 @@ test "net: a peer reset is an io failure carrying the peer address and reason" {
     });
 }
 
-test "net: the live-connection quota refuses accept with domain limit and is released on close" {
+test "net: accept parks at the live-connection quota and proceeds when a connection closes" {
     var runtime: Runtime = .{};
     try runtime.open(.{ .net = .{
         .binds = .{ .exact = &.{.{ .address = "127.0.0.1", .port = 0 }} },
@@ -807,14 +807,19 @@ test "net: the live-connection quota refuses accept with domain limit and is rel
     defer runtime.close();
     const port = try listenerPort(&runtime);
     const first = try Peer.start(port, .read_until_eof);
-    // The child holds one connection when it asks for a second; its failure
-    // closes the scope, which releases the connection before `await` returns.
-    try runtime.run("[] (l net.accept 'c set l net.accept) @spawn await 'err at dup 'kind at swap 'data at 'reason at");
-    try runtime.expectDisplay("'domain 'limit");
+    // One connection fills the quota; a child's accept parks behind it. The
+    // child reads and closes inside its own scope, which owns the connection.
+    try runtime.run("l net.accept 'c set [] (l net.accept dup 1 net.read swap net.close) @spawn 'waiting set 0 clock.sleep");
+    // A second peer completes its handshake into the kernel backlog. The
+    // parked accept neither fails with the limit nor proceeds.
+    const second = try Peer.start(port, .{ .write_then_read_until_eof = "x" });
+    try runtime.run("waiting 0 await-for 'err at 'kind at");
+    try runtime.expectDisplay("'timeout");
+    // Closing the first connection frees the slot; the child's accept yields
+    // the queued peer and reads what it wrote.
+    try runtime.run("pop c net.close waiting await 'ok at first");
+    try runtime.expectDisplay("[120]");
     try expectPeerBytes(first.join(), "");
-    const second = try Peer.start(port, .read_until_eof);
-    try runtime.run("pop pop l net.accept 'c set c type c net.close");
-    try runtime.expectDisplay("'port");
     try expectPeerBytes(second.join(), "");
 }
 
