@@ -1129,10 +1129,11 @@ soon as any connection in the Session releases its slot. A wake byte
 therefore means "drain and recheck": the acceptor reads its stop flag under
 the listener mutex to tell shutdown from a release, and otherwise clears its
 quota-blocked mark and returns to polling the socket. The lock order is
-fixed: the owner's acceptor mutex is never taken while a listener mutex is
-held, and `releaseConnection`, which runs from finalization paths under a
-connection cell's mutex, takes only the owner mutex and signals pipes without
-touching any listener mutex. `ListenerCell.close` signals its own pipe and
+fixed with the owner's acceptor mutex as the leaf: `beginAccept` registers
+under the listener mutex, `exitAcceptor` and `releaseConnection` (which runs
+from finalization paths under a connection cell's mutex) take it beneath
+those, and nothing is ever acquired while it is held; it signals pipes and
+returns. `ListenerCell.close` signals its own pipe and
 waits until the acceptor has exited, so no cell is on the registry after
 `close` returns. `NetOwner.deinit` asserts that the registry is empty and
 both counters are zero, which holds because Session teardown closes the root
@@ -1283,6 +1284,14 @@ Their manifest, documentation, effects, provenance, and package requirements
 are validated before publication. Package discovery and synchronization are
 described in `ENVIRONMENT.md`; they enter the evaluator through the same module
 loader and bounded-driver conventions as other sources.
+
+`http.server` is the model for a protocol module in source over host ports.
+Its one effect boundary is a single private word that calls `net.write`, and
+that word takes an ordinary response dict, validates and encodes it in full
+through the public `render-response`, and only then writes; a rejected dict is
+answered 500 as data. The source audit holds the module to that one call site,
+so a malformed wire message is unreachable through the server even though a
+malformed response dict remains an ordinary value.
 
 `proc` is a builtin for the same reason as other host-backed modules: process
 creation and pipe readiness require authority and representation ECL source

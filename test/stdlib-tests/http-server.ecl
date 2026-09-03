@@ -40,8 +40,8 @@
   ((": novalue") http.server.parse-headers) 'domain 'status 400 raises-data
   (("Bad Name: x") http.server.parse-headers) 'domain 'status 400 raises-data
   (("") http.server.parse-headers) 'domain 'status 400 raises-data
-  ((7) http.server.parse-headers) 'domain 'status 400 raises-data
-  ("Host: a" http.server.parse-headers) 'domain 'status 400 raises-data
+  ((7) http.server.parse-headers) 'type "every header line to be a string" raises-containing
+  ("Host: a" http.server.parse-headers) 'type "every header line to be a string" raises-containing
   (5 http.server.parse-headers) 'type "expects a list" raises-containing)
  'headers test
 
@@ -55,7 +55,12 @@
   ({"content-length" ("x")} http.server.content-length) 'domain 'status 400 raises-data
   ({"content-length" ("-1")} http.server.content-length) 'domain 'status 400 raises-data
   ({"content-length" ("")} http.server.content-length) 'domain 'status 400 raises-data
-  ({"content-length" ("1234567890123456789")} http.server.content-length) 'domain 'status 400
+  {"content-length" ("005")} http.server.content-length 5 equal
+  {"content-length" ("1234567890123456789")} http.server.content-length 1234567890123456789 equal
+  {"content-length" ("9223372036854775807")} http.server.content-length 9223372036854775807 equal
+  ({"content-length" ("9223372036854775808")} http.server.content-length) 'domain 'status 413
+  raises-data
+  ({"content-length" ("99999999999999999999")} http.server.content-length) 'domain 'status 413
   raises-data
   (5 http.server.content-length) 'type "expects a header dict" raises-containing)
  'content-length test
@@ -103,6 +108,33 @@
   raises-containing
   ({'status 200 'headers {}} http.server.render-response) 'domain "exactly" raises-containing
   ({'status 200 'headers {'x "1"} 'body ""} http.server.render-response) 'domain "names must be"
+  raises-containing
+  ({'status 200 'headers {"" "1"} 'body ""} http.server.render-response) 'domain "names must be"
+  raises-containing
+  ({'status 200 'headers {"Bad Name" "1"} 'body ""} http.server.render-response) 'domain
+  "names must be" raises-containing
+  ({'status 200 'headers {"X:Y" "1"} 'body ""} http.server.render-response) 'domain "names must be"
+  raises-containing
+  ({'status 200 'headers {"X" "a\u{D}\u{A}Evil: yes"} 'body ""} http.server.render-response)
+  'domain
+  "without CR, LF"
+  raises-containing
+  ({'status 200 'headers {"X" ("ok" "a\u{A}b")} 'body ""} http.server.render-response)
+  'domain
+  "without CR, LF"
+  raises-containing
+  ({'status 200 'headers {"X" "a\u{0}b"} 'body ""} http.server.render-response) 'domain
+  "without CR, LF" raises-containing
+  ({'status 200 'headers {"X" "a\u{7F}b"} 'body ""} http.server.render-response) 'domain
+  "without CR, LF" raises-containing
+  {'status 200 'headers {"X-Ok_1!" ("a\tb" "c d")} 'body ""} http.server.render-response chars
+  ["HTTP/1.1 200 OK" "X-Ok_1!: a\tb" "X-Ok_1!: c d" "Content-Length: 0" "Connection: close" "" ""]
+  crlf join
+  equal
+  ({'query "next=%0D%0AX-Evil:%20yes"} http.server.query "next" at http.server.redirect
+   http.server.render-response)
+  'domain
+  "without CR, LF"
   raises-containing
   ({'status 200 'headers {"x" 1} 'body ""} http.server.render-response) 'domain "values must be"
   raises-containing

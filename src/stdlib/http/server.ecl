@@ -50,10 +50,11 @@
 
  ### def parse-request-line
  (line -- request-line :
-  "Parse `METHOD TARGET VERSION` into {'method 'target 'path 'query 'version}, splitting the target
-   at its first `?` without decoding. A line without exactly three space-separated tokens raises
-   'domain with {'status 400}; a version other than HTTP/1.1 or HTTP/1.0 raises 'domain with
-   {'status 505}.")
+  "Parse a request line such as \"GET /users?id=42 HTTP/1.1\" into {'method \"GET\" 'target
+   \"/users?id=42\" 'path \"/users\" 'query \"id=42\" 'version \"HTTP/1.1\"}: 'path and 'query are
+   the target split at its first ?, undecoded, with 'query \"\" when absent. A line without exactly
+   three space-separated tokens is 'domain with 'data {'status 400}; a version other than HTTP/1.1
+   or HTTP/1.0 is 'domain with 'data {'status 505}; a non-string is 'type.")
  ("http.server.parse-request-line expects a string" checked-string
   " " split
   dup len 3 = () (400 "malformed request line" framing-error) if
@@ -72,8 +73,7 @@
  ### defp header-line
  (headers line -- headers :
   "Fold one `name: value` line into the dict of lowercased names to value lists.")
- (dup str.str? () (400 "malformed header line" framing-error) if
-  dup len 0 = (400 "malformed header line" framing-error) when
+ (dup len 0 = (400 "malformed header line" framing-error) when
   dup first blank? (400 "obsolete line folding" framing-error) when
   dup ":" str.contains? not (400 "malformed header line" framing-error) when
   dup ":" str.index-of
@@ -87,11 +87,15 @@
 
  ### def parse-headers
  (lines -- headers :
-  "Fold a list of `name: value` lines into a dict from ASCII-lowercased name to a list of trimmed
-   values in arrival order. A line without a colon, with an empty or whitespace-padded name, or
-   beginning with a space or tab raises 'domain with {'status 400}.")
- (dup type 'list match?
-  "http.server.parse-headers expects a list of header lines" type-error assert
+  "Fold a list of header lines such as (\"Host: a\" \"X-Multi: one\" \"x-multi: two\") into a dict
+   from ASCII-lowercased name to the list of its values, trimmed of surrounding ASCII whitespace, in
+   arrival order: {\"host\" (\"a\") \"x-multi\" (\"one\" \"two\")}. A non-list, or a list with an
+   element that is not a string, is 'type. A line that has no :, has an empty name or a name
+   containing whitespace, or begins with a space or tab (obsolete line folding) is 'domain with
+   'data {'status 400}. () is {}.")
+ (dup type 'list match? "http.server.parse-headers expects a list of header lines" type-error assert
+  dup (str.str?) all? "http.server.parse-headers expects every header line to be a string"
+  type-error assert
   {} (header-line) fold)
  'parse-headers def
 
@@ -101,21 +105,35 @@
  'digit? defp
 
  ### defp decimal?
- (text -- bool : "Return 1 for a nonempty string of at most eighteen ASCII digits.")
- (dup len dup 0 > swap 18 <= and swap (digit?) all? and)
+ (text -- bool : "Return 1 for a nonempty string of ASCII digits.")
+ (dup len 0 > swap (digit?) all? and)
  'decimal? defp
+
+ ### defp strip-zeros
+ (digits -- digits : "Remove leading zeros from a digit string, keeping at least one digit.")
+ (dup (\0 = not) each where dup len 0 = (pop dup len 1 - drop) (first drop) if)
+ 'strip-zeros defp
+
+ ### defp representable?
+ (digits -- bool : "Return 1 when a zero-stripped digit string fits a signed 64-bit int.")
+ (dup len 19 < (pop 1) (dup len 19 = ("9223372036854775807" lex-cmp 1 <) (pop 0) if) if)
+ 'representable? defp
 
  ### def content-length
  (headers -- length :
-  "Return the request body length from a lowercased header dict: 0 when content-length is absent,
-   the integer when every occurrence is the same string of decimal digits, otherwise 'domain with
-   {'status 400}.")
+  "Return the request body length named by a headers dict as parse-headers builds it: 0 when
+   content-length is absent, otherwise the int that every occurrence spells ({\"content-length\"
+   (\"5\")} is 5). A value that is not a nonempty string of decimal digits, or repeated values that
+   differ, is 'domain with 'data {'status 400}; a value too large for a 64-bit int exceeds every
+   body limit and is 'domain with 'data {'status 413}; a non-dict is 'type.")
  (dup type 'dict match? "http.server.content-length expects a header dict" type-error assert
   "content-length" [] at-or
   dup len 0 =
   (pop 0)
   (dup first dup decimal? () (400 "malformed Content-Length" framing-error) if
    swap over (match?) partial all? () (400 "conflicting Content-Length values" framing-error) if
+   strip-zeros dup representable? ()
+   (413 "Content-Length exceeds the representable range" framing-error) if
    int)
   if)
  'content-length def
@@ -150,19 +168,48 @@
   dup "content-length" match? over "connection" match? or swap "transfer-encoding" match? or)
  'reserved-header? defp
 
+ ### defp token-char?
+ (char -- bool :
+  "Return 1 for an HTTP token character: a letter, digit, or one of !#$%&'*+-.^_`|~.")
+ (dup digit?
+  over dup \a >= swap \z <= and or
+  over dup \A >= swap \Z <= and or
+  swap "!#$%&'*+-.^_`|~" in? or)
+ 'token-char? defp
+
+ ### defp token?
+ (name -- bool : "Return 1 for a nonempty string of HTTP token characters.")
+ (dup str.str? (dup len 0 > swap (token-char?) all? and) (pop 0) if)
+ 'token? defp
+
+ ### defp field-char?
+ (char -- bool :
+  "Return 1 for a character allowed in a header value: tab, or anything from space up that is not
+   DEL.")
+ (dup \tab = swap dup \space >= swap 127 char = not and or)
+ 'field-char? defp
+
+ ### defp field-value?
+ (value -- bool : "Return 1 for a string whose every character may appear in a header value.")
+ (dup str.str? ((field-char?) all?) (pop 0) if)
+ 'field-value? defp
+
  ### defp header-values?
- (value -- bool : "Return 1 for a string or a list of strings.")
- (dup str.str? (pop 1) (dup type 'list match? ((str.str?) all?) (pop 0) if) if)
+ (value -- bool : "Return 1 for a header value or a list of them.")
+ (dup str.str? (field-value?) (dup type 'list match? ((field-value?) all?) (pop 0) if) if)
  'header-values? defp
 
  ### defp checked-header
- (pair -- : "Validate one [name values] header entry.")
- (dup first str.str? "http.server response header names must be strings" domain-error assert
+ (pair -- :
+  "Validate one [name values] header entry: a token name that is not reserved and clean values.")
+ (dup first token? "http.server response header names must be nonempty HTTP tokens" domain-error
+  assert
   dup first reserved-header? not
   "http.server response may not set content-length, connection, or transfer-encoding" domain-error
   assert
   1 at header-values?
-  "http.server response header values must be a string or a list of strings" domain-error assert)
+  "http.server response header values must be strings without CR, LF, NUL, or control characters, or lists of them"
+  domain-error assert)
  'checked-header defp
 
  ### defp byte?
@@ -204,11 +251,18 @@
 
  ### def render-response
  (response -- bytes :
-  "Validate a response in full and serialize it: the HTTP/1.1 status line with a reason phrase for
-   known codes, one line per header value in given order, Content-Length, Connection: close, and the
-   body. A non-dict is 'type; other than exactly 'status, 'headers, and 'body, a status outside
-   100...599, a non-string header name or value, a reserved header (content-length, connection,
-   transfer-encoding), or a body that is neither a string nor a byte list is 'domain.")
+  "Validate a response in full and serialize it to the exact bytes the server writes. The response
+   is the dict {'status 'headers 'body} with exactly those keys: 'status an int in 100...599;
+   'headers a dict from header names, nonempty strings of HTTP token characters, to a string or a
+   list of strings containing no CR, LF, NUL, or control character other than tab, written once per
+   value in the given order with the name as given ({\"set-cookie\" (\"a=1\" \"b=2\")} writes two
+   lines); 'body a string, written as UTF-8, or a byte list of ints in 0...255. The bytes are the
+   status line HTTP/1.1 status reason (an empty reason for codes outside the built-in table), the
+   header lines, Content-Length, Connection: close, an empty line, and the body. A non-dict is
+   'type; any other key set, a status outside the range, a header name that is not a token or is
+   content-length, connection, or transfer-encoding in any letter case, a header value that is not a
+   clean string or list of them, or a body of another kind is 'domain. Every byte the server writes
+   has passed this word.")
  (checked-response
   dup 'body at body-bytes swap
   dup 'status at dup reason pair "HTTP/1.1 {} {}" str.format
@@ -224,7 +278,9 @@
  'checked-status defp
 
  ### def text
- (status string -- response : "Build a text/plain UTF-8 response with the given status and body.")
+ (status string -- response :
+  "Return {'status status 'headers {\"content-type\" (\"text/plain; charset=utf-8\")} 'body string}.
+   A non-int status or non-string body is 'type.")
  ("http.server.text expects a string body" checked-string swap checked-status swap
   (|status body|
    'status status 'headers {"content-type" ("text/plain; charset=utf-8")} 'body body 6 pack
@@ -234,7 +290,9 @@
 
  ### def json
  (status value -- response :
-  "Build an application/json response whose body renders the value with json.emit.")
+  "Return {'status status 'headers {\"content-type\" (\"application/json\")} 'body text} where text
+   is the value rendered with json.emit. A non-int status is 'type; a value json.emit rejects fails
+   as json.emit does.")
  (swap checked-status swap
   (|status value|
    'status status 'headers {"content-type" ("application/json")} 'body value json.emit 6 pack
@@ -243,12 +301,14 @@
  'json def
 
  ### def empty
- (status -- response : "Build a response with no headers and an empty body.")
+ (status -- response : "Return {'status status 'headers {} 'body \"\"}. A non-int status is 'type.")
  (checked-status 'status swap 'headers {} 'body "" 6 pack dict.from-flat)
  'empty def
 
  ### def redirect
- (location -- response : "Build a 302 response whose location header names the target.")
+ (location -- response :
+  "Return {'status 302 'headers {\"location\" (location)} 'body \"\"}. A non-string location is
+   'type.")
  ("http.server.redirect expects a string location" checked-string
   (|location| 'status 302 'headers "location" location wrap pair dict.from-flat 'body "" 6 pack
    dict.from-flat)
@@ -256,7 +316,8 @@
  'redirect def
 
  ### def not-found
- (-- response : "Build the 404 text response `not found`.")
+ (-- response :
+  "Return 404 \"not found\" text, the text/plain response the server uses for an unmatched route.")
  (404 "not found" text)
  'not-found def
 
@@ -295,11 +356,16 @@
 
  ### def route
  (request routes -- response :
-  "Dispatch a request over [method pattern handler] rows. Patterns are slash paths whose `:name`
-   segments bind one nonempty path segment each into a 'params string dict added to the request. The
-   first row whose method and pattern both match has its handler applied inline; a pattern match
-   with no method match answers 405 with an allow header; no pattern match answers 404. A malformed
-   row is 'type or 'shape before any comparison.")
+  "Dispatch a request over a list of [method pattern handler] rows: method is a string compared
+   exactly against the request's 'method (\"GET\"), pattern is a slash path whose segments must
+   equal the request's 'path segments except that a segment beginning with : matches any nonempty
+   segment and binds it by name (\"/users/:id\"), and handler is a ( request -- response )
+   quotation. The first row whose method and pattern both match has its handler applied inline to
+   the request with a 'params dict of the bound segments added ({\"id\" \"42\"}). When some pattern
+   matches but no method does, the result is 405 with an allow header listing those rows' methods;
+   when no pattern matches, not-found. Middleware is composition: wrap the handler quotation. A
+   non-list routes or a row that is not a three-element list of string, string, and quotation is
+   'type or 'shape before any comparison.")
  (dup type 'list match? "http.server.route expects a list of rows" type-error assert
   dup (checked-route) for
   over 'path at route-matches
@@ -343,10 +409,12 @@
 
  ### def query
  (request -- params :
-  "Parse the request's 'query string into a dict from string keys to string values: `&` separates
-   pairs, the first `=` separates key from value, a key without `=` maps to the empty string, `%XX`
-   escapes are decoded and the result must be UTF-8, `+` is left as is, and a later duplicate key
-   replaces an earlier one. An empty query is {}. A malformed escape is 'domain.")
+  "Parse the request's 'query string (\"a=1&b=%2Fx&c\") into a dict from string keys to string
+   values ({\"a\" \"1\" \"b\" \"/x\" \"c\" \"\"}): & separates pairs, the first = separates key from
+   value, a key without = maps to the empty string, %XX escapes are decoded in keys and values and
+   the result must be UTF-8, + is left as is, and a later duplicate key replaces an earlier one. An
+   empty query is {}. A % not followed by two hex digits, or an escape sequence that is not UTF-8,
+   is 'domain; a request whose 'query is not a string is 'type.")
  ('query at "http.server.query expects a string 'query" checked-string
   "&" split ("" match? not) filter {} (query-pair) fold)
  'query def
@@ -370,19 +438,29 @@
  (dup type 'int match? (0 >) (pop 0) if)
  'positive-int? defp
 
- ### defp config-entry-ok?
- (pair -- bool : "Return 1 when a configuration entry has a value of the right kind.")
- (dup first 'on-failure match? swap 1 at swap (type 'list match?) (positive-int?) if)
- 'config-entry-ok? defp
+ ### defp config-entry-problem
+ (pair -- problem :
+  "Classify one configuration entry as 'ok, 'unknown-key, 'wrong-type, or 'out-of-range.")
+ (dup first config-keys in? not
+  (pop 'unknown-key)
+  (dup first 'on-failure match?
+   (1 at type 'list match? ('ok) ('wrong-type) if)
+   (1 at dup type 'int match? (0 > ('ok) ('out-of-range) if) (pop 'wrong-type) if)
+   if)
+  if)
+ 'config-entry-problem defp
 
  ### defp checked-config
  (config -- config : "Validate a serving configuration and fill in the defaults.")
  (dup type 'dict match? "http.server.@serve expects a configuration dict" type-error assert
-  dup dict.keys (config-keys in?) all?
+  dup dict.pairs (config-entry-problem) each
+  dup ('unknown-key match?) any? not
   "http.server.@serve configuration accepts only 'max-header-bytes, 'max-body-bytes, 'max-in-flight, 'read-timeout-ms, and 'on-failure"
   domain-error assert
-  dup dict.pairs (config-entry-ok?) all?
-  "http.server.@serve limits must be positive ints and 'on-failure a quotation" domain-error assert
+  dup ('wrong-type match?) any? not
+  "http.server.@serve limits must be ints and 'on-failure a quotation" type-error assert
+  ('out-of-range match?) any? not
+  "http.server.@serve limits must be greater than zero" domain-error assert
   default-config swap dict.merge)
  'checked-config defp
 
@@ -472,9 +550,9 @@
  'read-request defp
 
  ### defp answer
- (connection status -- :
+ (connection config status -- :
   "Write the minimal text response for a status the server generates itself.")
- (dup reason text render-response net.write)
+ (dup reason text write-response)
  'answer defp
 
  ### defp report
@@ -482,18 +560,24 @@
  (swap 'on-failure at call)
  'report defp
 
- ### defp write-outcome
- (connection config result -- :
-  "Write a rendered response, or report the render failure and answer 500.")
- (dup 'ok dict.has?
-  (nip 'ok at first net.write)
-  ('err at swap over report pop 500 answer)
-  if)
- 'write-outcome defp
+ ### defp fail-request
+ (connection config error -- : "Report a request failure to 'on-failure and answer 500.")
+ (|connection config error| config error report connection config 500 answer)
+ 'fail-request defp
 
  ### defp write-response
- (connection config response -- : "Validate and write a handler's response.")
- (wrap (render-response) @attempt write-outcome)
+ # The module's only write to a connection: every byte a server puts on the
+ # wire has passed render-response, so an invalid response dict is data the
+ # handler gets a 500 for and never a malformed wire message. The source audit
+ # holds the write word to this one call site.
+ (connection config response -- :
+  "Validate and encode a response in full, then write it; a rejected response is reported and
+   answered 500.")
+ (wrap (render-response) @attempt
+  dup 'ok dict.has?
+  (nip 'ok at first net.write)
+  ('err at fail-request)
+  if)
  'write-response defp
 
  ### defp handler-success
@@ -502,7 +586,7 @@
  (dup len 1 =
   (first write-response)
   (len wrap "handler left {} values instead of one response" str.format
-   'contract error.new swap error.with-message swap over report pop 500 answer)
+   'contract error.new swap error.with-message fail-request)
   if)
  'handler-success defp
 
@@ -511,7 +595,7 @@
  (wrap swap @attempt
   dup 'ok dict.has?
   ('ok at handler-success)
-  ('err at swap over report pop 500 answer)
+  ('err at fail-request)
   if)
  'run-handler defp
 
@@ -519,11 +603,11 @@
  (connection config error -- :
   "Answer a framing failure by status, close silently on a vanished peer, or report.")
  (dup 'kind at
-  ['timeout (pop pop 408 answer)
+  ['timeout (pop 408 answer)
    'io (pop pop pop)
    (dup 'data {} at-or 'status 0 at-or dup 0 =
-    (pop swap over report pop 500 answer)
-    (nip nip answer)
+    (pop fail-request)
+    (nip answer)
     if)]
   case)
  'read-failure defp
@@ -570,16 +654,43 @@
 
  ### def @serve
  (listener config handler -- :
-  "Serve HTTP/1.1 requests from a net listener until cancelled. The config dict may set
-   'max-header-bytes (32768), 'max-body-bytes (1048576), 'max-in-flight (128), 'read-timeout-ms
-   (10000), and 'on-failure, a ( error -- ) quotation defaulting to (str io.eprint); {} is valid.
-   Each request is framed under the read deadline, the handler ( request -- response ) runs in a
-   fresh unit, and its single well-formed response is written with Content-Length and Connection:
-   close before the connection closes. Framing failures answer 400, 411, 505, 431, 413, or 408;
-   handler failures answer 500 and reach 'on-failure; a peer that vanishes is closed silently. The
-   word fails 'type for a non-port listener, non-dict config, or non-quotation handler, 'domain for
-   an unknown key or non-positive limit, 'cancelled when cancelled, and with the accept error when
-   the listener fails. It never closes the listener.")
+  "Serve HTTP/1.1 requests from a net listener until cancelled: spawn 'max-in-flight acceptor
+   children over the listener and park. Each child accepts a connection, frames one request under
+   the read deadline, applies the handler as [request] handler @attempt in a fresh unit, writes its
+   single response with Content-Length and Connection: close, and closes the connection.
+
+   The handler is a quotation ( request -- response ). The request is the dict {'method 'target
+   'path 'query 'headers 'body 'peer}: 'method and 'target are the request-line tokens; 'path and
+   'query are the target split at the first ?, undecoded, with 'query \"\" when absent; 'headers
+   maps each ASCII-lowercased header name to the list of its trimmed values in arrival order; 'body
+   is the exact Content-Length byte list, [] when there is none; 'peer is the peer's address:port,
+   an IPv6 address in brackets. The response is the dict {'status 'headers 'body} that
+   render-response accepts; every byte written to a connection has passed render-response.
+
+   The config is a dict whose keys are all optional; {} is valid:
+   - 'max-header-bytes (32768): most head bytes accepted before the CRLFCRLF terminator; more is
+     431.
+   - 'max-body-bytes (1048576): largest Content-Length accepted; more is 413 before any body byte is
+     read.
+   - 'max-in-flight (128): number of acceptor children, each serving one connection at a time.
+   - 'read-timeout-ms (10000): deadline for reading one whole request; expiry is 408.
+   - 'on-failure ((str io.eprint)): a ( error -- ) quotation applied to the error of every request
+     answered 500.
+   Each limit is an int greater than zero.
+
+   Requests the server cannot serve are answered with a minimal text/plain response and closed: 400
+   for a malformed request line or header, non-UTF-8 head bytes, a bad Content-Length, or end of
+   stream after some bytes; 411 for any Transfer-Encoding; 505 for a version other than HTTP/1.1 or
+   HTTP/1.0; 431 and 413 for the size limits; 408 for the deadline; 500 when the handler fails,
+   leaves other than one value, or leaves a response render-response rejects, in which case
+   'on-failure receives the error. A peer that sends nothing before closing, or resets during the
+   exchange, is closed silently.
+
+   A non-port listener, non-dict config, non-quotation handler, non-int limit, or non-quotation
+   'on-failure is 'type; an unknown config key or a limit not greater than zero is 'domain. The word
+   fails 'cancelled when the serving unit is cancelled and re-raises an acceptor's 'io failure of
+   net.accept, such as 'io 'closed when the listener is closed elsewhere; either way every child is
+   quiesced by scope rules. It never closes the listener, which stays the caller's to close.")
  (|listener config handler|
   listener type 'port match? "http.server.@serve expects a net listener" type-error assert
   handler type 'list match? "http.server.@serve expects a handler quotation" type-error assert

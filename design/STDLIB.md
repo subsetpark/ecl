@@ -1792,7 +1792,10 @@ value in the given order and with the name as given; and a body that is a
 string, written as UTF-8, or a byte list. The names `content-length`,
 `connection`, and `transfer-encoding` are reserved in any letter case: the
 server writes `Content-Length` and `Connection: close` itself, and a response
-naming one of them is `'domain`.
+naming one of them is `'domain`. Header names must be nonempty HTTP tokens
+and values may not contain CR, LF, NUL, or a control character other than
+tab, so a value built from request data cannot split the response; every byte
+the server writes has passed `render-response` in its single write word.
 
 Framing is HTTP/1.1 with `Content-Length` bodies only; an HTTP/1.0 request is
 answered the same way. Any `Transfer-Encoding` header is answered 411 and a
@@ -1895,9 +1898,11 @@ limit that is not an integer or an `'on-failure` that is not a quotation is
 ### content-length
 `( headers -- int )` — Return the request body length named by a parsed
 headers dictionary: `0` when `content-length` is absent, otherwise the
-integer every occurrence spells. A value that is not a nonempty digit string,
-or repeated values that differ, is `'domain` with `'data {'status 400}`. A
-non-dictionary is `'type`.
+integer every occurrence spells, leading zeros allowed. A value that is not a
+nonempty digit string, or repeated values that differ, is `'domain` with
+`'data {'status 400}`; a value too large for a 64-bit integer exceeds every
+body limit and is `'domain` with `'data {'status 413}`. A non-dictionary is
+`'type`.
 
 ### empty
 `( status -- response )` — Return `{'status status 'headers {} 'body ""}`. A
@@ -1967,9 +1972,11 @@ body bytes. The reason phrase comes from a fixed table covering 200, 201,
 and 505 and is empty for any other status, with the space before it always
 written. A non-dictionary is `'type`. Keys other than exactly `'status`,
 `'headers`, and `'body`; a status that is not an integer in `100...599`; a
-headers value that is not a dictionary, a non-string header name, a header
-value that is neither a string nor a list of strings, a header whose
-lowercased name is `content-length`, `connection`, or `transfer-encoding`;
+headers value that is not a dictionary, a header name that is not a nonempty
+string of HTTP token characters, a header value that is neither a string nor
+a list of strings or that contains CR, LF, NUL, or a control character other
+than tab, a header whose lowercased name is `content-length`, `connection`,
+or `transfer-encoding`;
 or a body that is neither a string nor a list of integers in `0...255` is
 `'domain`.
 

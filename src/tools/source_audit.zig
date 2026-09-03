@@ -241,6 +241,7 @@ pub fn main(init: std.process.Init) !void {
     failed = auditUnsafeCasts() or failed;
     failed = auditPreludeLayout() or failed;
     failed = auditUnitConstructorSpelling() or failed;
+    failed = auditHttpServerWriteSink() or failed;
     failed = auditDynamicContextSpelling() or failed;
     failed = auditFormalValueKinds() or failed;
     if (failed) return error.SourceAuditFailed;
@@ -1143,6 +1144,37 @@ fn definesQuotedName(source: []const u8, name: []const u8) bool {
         if (std.mem.eql(u8, binder, "def") or std.mem.eql(u8, binder, "defp")) return true;
     }
     return false;
+}
+
+/// Every byte the HTTP server writes has passed `render-response`: the module
+/// calls `net.write` from exactly one private word, `write-response`, whose
+/// body validates and encodes before writing. Nothing at runtime can hold a
+/// source module to one call site, so the audit does.
+fn auditHttpServerWriteSink() bool {
+    const source = @embedFile("../stdlib/http/server.ecl");
+    var failed = false;
+    var count: usize = 0;
+    var scan: usize = 0;
+    while (std.mem.indexOfPos(u8, source, scan, "net.write")) |found| {
+        count += 1;
+        scan = found + "net.write".len;
+        const header = std.mem.lastIndexOf(u8, source[0..found], "### defp ") orelse {
+            std.log.err("http server write sink: `net.write` appears outside any definition", .{});
+            failed = true;
+            continue;
+        };
+        const name_start = header + "### defp ".len;
+        const name_end = preludeTokenEnd(source, name_start);
+        if (!std.mem.eql(u8, source[name_start..name_end], "write-response")) {
+            std.log.err("http server write sink: `net.write` appears in `{s}`; only `write-response` may write", .{source[name_start..name_end]});
+            failed = true;
+        }
+    }
+    if (count != 1) {
+        std.log.err("http server write sink: expected exactly one `net.write`, found {d}", .{count});
+        failed = true;
+    }
+    return failed;
 }
 
 fn auditDynamicContextSpelling() bool {

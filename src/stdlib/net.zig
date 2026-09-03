@@ -27,13 +27,86 @@ const MachineError = machine.MachineError;
 const Value = value.Value;
 
 pub const words = [_]env.BuiltinWord{
-    .{ .name = "accept", .doc = "( listener -- connection ) Park until a peer connects and return the connection as a scope-owned port.", .primitive = accept },
-    .{ .name = "close", .doc = "( port -- ) Close a listener now, or close a connection after its queued bytes are written; idempotent.", .primitive = close },
-    .{ .name = "listen", .doc = "( config -- listener ) Bind and listen on a host-granted TCP address.", .primitive = listen },
-    .{ .name = "local-address", .doc = "( port -- address ) Report the local address and port of a listener or connection as {'address string 'port int}.", .primitive = localAddress },
-    .{ .name = "peer-address", .doc = "( connection -- address ) Report the peer's address and port as {'address string 'port int}.", .primitive = peerAddress },
-    .{ .name = "read", .doc = "( connection max -- bytes ) Read at most max exact bytes, parking until data or EOF; [] only at EOF.", .primitive = read },
-    .{ .name = "write", .doc = "( connection bytes -- ) Queue exact bytes for the peer, parking under bounded pressure.", .primitive = write },
+    .{
+        .name = "accept",
+        .doc = "( listener -- connection ) Park until a peer connects and a live-connection slot is free, " ++
+            "then return the connection as a port owned by the accepting unit's task scope, not the listener's.\n\n" ++
+            "A connection is taken from the kernel backlog only while an accept is outstanding, so an idle program " ++
+            "applies no backpressure beyond the backlog, and at the host's live-connection maximum the accept keeps " ++
+            "waiting until a connection closes. A connection, process port, or non-port is 'type.\n\n" ++
+            "Failures are 'io carrying the listener's 'address and 'port and one 'reason: 'closed when the listener " ++
+            "was closed while the accept waited, 'resources when descriptors or buffers ran out, and 'io for any other " ++
+            "host failure. Cancelling the parked unit fails only that unit 'cancelled; a connection the host had " ++
+            "already handed to it is closed.",
+        .primitive = accept,
+    },
+    .{
+        .name = "close",
+        .doc = "( port -- ) Close a listener or a connection. Idempotent, and the same transition scope closure performs.\n\n" ++
+            "A listener closes at once: every accept parked on it fails 'io 'closed, connections it already accepted " ++
+            "stay open, and its address and port may be bound again immediately. A connection first delivers the " ++
+            "bytes already queued by write, then shuts the socket down; later reads and writes on it fail 'io 'closed. " ++
+            "A process port or non-port is 'type.",
+        .primitive = close,
+    },
+    .{
+        .name = "listen",
+        .doc = "( config -- listener ) Bind and listen on a host-granted TCP address and return the listener as a port " ++
+            "owned by the calling unit's task scope. The socket is listening before the value is returned.\n\n" ++
+            "The configuration is a dict with exactly these keys:\n" ++
+            "- 'address: a string holding an IPv4 or IPv6 literal such as \"127.0.0.1\" or \"::1\"; names are never resolved.\n" ++
+            "- 'port: an int in 0...65535; 0 requests an ephemeral port, which local-address reports.\n\n" ++
+            "A non-dict configuration is 'type; a missing, unknown, or repeated key is 'domain; a non-string 'address " ++
+            "or non-int 'port is 'type; a port outside the range or a literal that does not parse is 'domain with " ++
+            "'reason 'invalid. Authority is checked next, before the host is reached: 'domain with 'reason " ++
+            "'unavailable when the Session has no listen grant, 'denied when no grant entry admits the address and " ++
+            "port (a grant entry with port 0 admits only port 0), and 'limit at the host's listener maximum. A host " ++
+            "bind or listen failure is 'io with 'reason 'in-use, 'unavailable (the address is not local), " ++
+            "'resources, 'unsupported, or 'io. Every failure carries the requested 'address and 'port.",
+        .primitive = listen,
+    },
+    .{
+        .name = "local-address",
+        .doc = "( port -- address ) Return the local end of a listener or connection as {'address string 'port int}.\n\n" ++
+            "For a listener bound with port 0 this is the ephemeral port the kernel assigned; for a connection " ++
+            "accepted on a wildcard listener it is the address the connection was actually reached on. A closed " ++
+            "listener or connection is 'io with 'reason 'closed carrying the recorded local address; a process port " ++
+            "or non-port is 'type.",
+        .primitive = localAddress,
+    },
+    .{
+        .name = "peer-address",
+        .doc = "( connection -- address ) Return the peer's end of a connection as {'address string 'port int}.\n\n" ++
+            "A closed connection is 'io with 'reason 'closed carrying the peer's address; a listener, process port, " ++
+            "or non-port is 'type.",
+        .primitive = peerAddress,
+    },
+    .{
+        .name = "read",
+        .doc = "( connection max -- bytes ) Read at most max bytes from a connection, parking until data arrives, and " ++
+            "return them as an exact byte list of ints in 0...255.\n\n" ++
+            "Each call returns at most max and at most the host receive capacity bytes, so a message may take several " ++
+            "reads. [] is returned only at stable end of stream, and again on every later read. Decode text with " ++
+            "chars. max must be an int greater than zero (otherwise 'type or 'domain); a non-connection is 'type; a " ++
+            "second read while one is pending on the same connection is 'contract.\n\n" ++
+            "Failures are 'io carrying the peer's 'address and 'port and one 'reason: 'closed after the connection " ++
+            "was closed by close or by its scope, 'reset when the peer has gone, and 'io for any other host failure. " ++
+            "Cancelling the parked unit fails only that unit 'cancelled; bytes the peer already sent stay available " ++
+            "to the next read.",
+        .primitive = read,
+    },
+    .{
+        .name = "write",
+        .doc = "( connection bytes -- ) Queue an exact byte list for the peer, parking while the host send capacity is " ++
+            "full or an earlier write on the connection is still queued.\n\n" ++
+            "bytes is a list of ints in 0...255; encode a string with bytes first. Writes on one connection are " ++
+            "delivered in arrival order and each call's bytes stay contiguous. The word returns once the bytes are " ++
+            "queued, not once the peer has read them; close delivers whatever is still queued. A non-list is 'type " ++
+            "and an element outside 0...255 is 'domain.\n\n" ++
+            "Failures are 'io carrying the peer's 'address and 'port and one 'reason: 'closed after the connection " ++
+            "was closed locally, 'reset when the peer has closed or reset, and 'io for any other host failure.",
+        .primitive = write,
+    },
 };
 
 /// Longest IP literal this module accepts; the longest valid text form of an

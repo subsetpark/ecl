@@ -5,8 +5,10 @@
 //! wire through a Zig-side `Peer` thread: it connects to the bound port,
 //! writes its request bytes verbatim, and reads until EOF into a 4 KiB buffer,
 //! so the oracle is the exact byte sequence the server put on the socket.
-//! Peers synchronize by bytes on the socket, never by sleeping; the one timed
-//! case (the read deadline) configures a 20 ms deadline and waits for EOF.
+//! Peers synchronize by bytes on the socket, never by sleeping. Every Session
+//! runs under a manual scheduler clock, so the read-deadline case advances
+//! the clock itself once the reader's timer is registered instead of waiting
+//! on host time.
 //!
 //! `@serve` blocks until cancelled, and `requestCancellation` cannot wake a
 //! parked root unit, so each serving program runs on a `Runner` thread while
@@ -48,6 +50,7 @@ const Runtime = struct {
             .output = &self.output.?.writer,
             .diagnostics = &self.diagnostics.?.writer,
             .net_policy = policy,
+            .clock = .{ .monotonic = .manual },
         }, config);
     }
 
@@ -266,6 +269,26 @@ fn exchange(port: u16, request: []const u8) !Observed {
     return peer.join();
 }
 
+/// Wait until the scheduler holds exactly `count` timer entries. Progress
+/// depends only on the serving unit registering its deadline, never on host
+/// time; the bound turns a deadline that is never registered into a diagnosed
+/// failure instead of a hang.
+fn awaitTimerEntries(runtime: *Runtime, count: usize) void {
+    const max_polls: usize = 20_000;
+    var polls: usize = 0;
+    while (runtime.session.schedulerTimerEntryCount() != count) : (polls += 1) {
+        if (polls == max_polls) std.debug.panic(
+            "timer entries never reached {d}; observed {d}",
+            .{ count, runtime.session.schedulerTimerEntryCount() },
+        );
+        std.Thread.yield() catch @panic("test yield failed");
+        const pause: std.Io.Clock.Duration = .{ .raw = .fromMilliseconds(1), .clock = .awake };
+        pause.sleep(io) catch |err| switch (err) {
+            error.Canceled => {},
+        };
+    }
+}
+
 const ok_response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
 const ok_row = "\"/ok\" (pop {'status 200 'headers {} 'body \"ok\"}) ";
 const not_found_default = "(pop http.server.not-found)";
@@ -449,7 +472,13 @@ test "http server: the read deadline answers 408 and closes" {
     const port = try runtime.listen("l");
     const server = try Server.start(&runtime, port, "", "{'read-timeout-ms 20}", ok_row, not_found_default);
     errdefer server.abandon();
-    try expectStatus(try exchange(port, "GET /ok HTTP/1.1\r\nHost:"), "HTTP/1.1 408 Request Timeout");
+    // The peer never finishes its head. Once the connection child has
+    // registered the reader's deadline, the clock moves past it.
+    const stalled = try Peer.start(port, .{ .send = "GET /ok HTTP/1.1\r\nHost:" });
+    stalled.waitFlushed();
+    awaitTimerEntries(&runtime, 1);
+    try runtime.session.advanceManualClock(20);
+    try expectStatus(stalled.join(), "HTTP/1.1 408 Request Timeout");
     try expectResponse(try exchange(port, "GET /ok HTTP/1.1\r\n\r\n"), ok_response);
     try server.finish();
 }
@@ -583,15 +612,16 @@ test "http server: configuration and listener arguments are validated before ser
             "[] (l {'bogus 1} (1) http.server.@serve) @attempt 'err at 'kind at " ++
             "[] (l {'max-in-flight 0} (1) http.server.@serve) @attempt 'err at 'kind at " ++
             "[] (l {'read-timeout-ms -1} (1) http.server.@serve) @attempt 'err at 'kind at " ++
+            "[] (l {'max-in-flight \"8\"} (1) http.server.@serve) @attempt 'err at 'kind at " ++
             "[] (l {'on-failure 5} (1) http.server.@serve) @attempt 'err at 'kind at " ++
             "[] (l {} 7 http.server.@serve) @attempt 'err at 'kind at",
     );
-    try runtime.expectDisplay("'type 'type 'domain 'domain 'domain 'domain 'type");
+    try runtime.expectDisplay("'type 'type 'domain 'domain 'domain 'type 'type 'type");
     // A connection is a port too, but not a listener: the acceptor's accept
     // fails 'type and the serving unit fails with it.
     const silent = try Peer.start(port, .connect_then_close);
     try expectSilentClose(silent.join());
-    try runtime.run("pop pop pop pop pop pop pop l net.accept 'c set [] (c {} (1) http.server.@serve) @attempt 'err at 'kind at");
+    try runtime.run("pop pop pop pop pop pop pop pop l net.accept 'c set [] (c {} (1) http.server.@serve) @attempt 'err at 'kind at");
     try runtime.expectDisplay("'type");
 }
 
