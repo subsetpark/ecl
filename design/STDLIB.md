@@ -1881,7 +1881,9 @@ only while an `accept` is outstanding, so an idle program applies no
 backpressure of its own beyond the backlog. `accept` while the number of live
 connections equals the host maximum is `'domain` with `'reason` `'limit`
 before any connection leaves the backlog; closing a connection releases its
-slot.
+slot. A parked `accept` holds a slot while it waits, so the maximum bounds
+live connections plus outstanding accepts, and a program with several
+accepting units needs a maximum at least that large.
 
 Bytes are ordinary integer lists whose elements are all in `0...255`, exactly
 as for process streams; the module decodes no text. Each connection has a

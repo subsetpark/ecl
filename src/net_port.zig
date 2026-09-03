@@ -434,14 +434,19 @@ fn WaitList(comptime Cell: type) type {
             wait.linked.store(false, .release);
         }
 
-        /// Called with the cell lock held.
+        /// Called with the cell lock held. The wake happens while the wait
+        /// is still linked: a concurrent `cancelReadiness` then sees `linked`
+        /// and must take this mutex before it can destroy the wait, so the
+        /// target cannot be freed out from under the call. Delivery never
+        /// cancels the registration on the waking thread, so holding the lock
+        /// across the wake cannot deadlock.
         fn notifyLocked(self: *Self, cell: *Cell) void {
             var wait = self.first;
             while (wait) |candidate| {
                 const next = candidate.next;
                 if (cell.readyLocked(candidate.key)) {
-                    self.unlinkLocked(candidate);
                     candidate.target.wake(.ready);
+                    self.unlinkLocked(candidate);
                 }
                 wait = next;
             }
