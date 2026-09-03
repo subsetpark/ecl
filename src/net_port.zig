@@ -839,18 +839,22 @@ pub const ListenerCell = struct {
                 .{ .fd = wake_fd, .events = posix.POLL.IN, .revents = 0 },
             };
             _ = posix.poll(&fds, -1) catch {
-                self.failFirstWaiting(.io);
+                self.failAllWaiting(.io);
                 break;
             };
             if (fds[1].revents != 0) break;
             if (fds[0].revents == 0) continue;
             self.acceptOneLocked();
         }
+        // Drop the thread's reference before announcing exit: the scope
+        // member still pins the cell, so this cannot destroy it, and the
+        // closer that detaches the member afterwards performs the last
+        // release deterministically before scope quiescence is published.
+        self.releaseRef();
         std.Io.Threaded.mutexLock(&self.mutex);
         self.acceptor.running = false;
         self.changed.broadcast(blockingIo());
         std.Io.Threaded.mutexUnlock(&self.mutex);
-        self.releaseRef();
     }
 
     /// Accept one connection into the first waiting slot, or accept nothing.
@@ -901,11 +905,16 @@ pub const ListenerCell = struct {
         self.waits.notifyLocked(self);
     }
 
-    fn failFirstWaiting(self: *ListenerCell, failure: AcceptFailure) void {
+    /// The acceptor is exiting on a host failure: every parked accept must
+    /// learn it, not only the first, or the rest would wait forever.
+    fn failAllWaiting(self: *ListenerCell, failure: AcceptFailure) void {
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        const slot = self.firstWaitingLocked() orelse return;
-        self.failSlotLocked(slot, failure);
+        var slot = self.slots_first;
+        while (slot) |current| : (slot = current.next) {
+            if (current.state == .waiting) current.state = .{ .failed = failure };
+        }
+        self.waits.notifyLocked(self);
     }
 };
 
@@ -1128,11 +1137,13 @@ pub const ConnectionCell = struct {
         std.debug.assert(self.lifecycle != .running);
         const membership = self.finalizeLocked(reason);
         std.Io.Threaded.mutexUnlock(&self.mutex);
+        // Same order as the controller: the publisher's reference goes first
+        // while the member (if any) still pins the cell.
+        self.releaseRef();
         if (membership) |token| {
             var owned = token;
             owned.detach();
         }
-        self.releaseRef();
     }
 
     /// Close the descriptor and the wake pipe, release the reservation,
@@ -1440,14 +1451,13 @@ pub const ConnectionCell = struct {
                 std.Io.Threaded.mutexUnlock(&self.mutex);
             }
             if (interest.write and (revents & posix.POLL.OUT != 0 or exceptional)) {
+                // The lock is held across the syscall: the socket is
+                // non-blocking so the write is bounded, and a stop request
+                // that discards the ring cannot slip between peek and consume.
                 std.Io.Threaded.mutexLock(&self.mutex);
                 const chunk = self.send.peek();
-                const count = @min(chunk.len, block.len);
-                @memcpy(block[0..count], chunk[0..count]);
-                std.Io.Threaded.mutexUnlock(&self.mutex);
-                if (count != 0) {
-                    const rc = posix.system.write(socket_fd, &block, count);
-                    std.Io.Threaded.mutexLock(&self.mutex);
+                if (chunk.len != 0) {
+                    const rc = posix.system.write(socket_fd, chunk.ptr, chunk.len);
                     switch (posix.errno(rc)) {
                         .SUCCESS => {
                             self.send.consume(@intCast(rc));
@@ -1456,8 +1466,8 @@ pub const ConnectionCell = struct {
                         .AGAIN, .INTR => {},
                         else => |code| self.noteFailureLocked(code),
                     }
-                    std.Io.Threaded.mutexUnlock(&self.mutex);
                 }
+                std.Io.Threaded.mutexUnlock(&self.mutex);
             }
         };
         // Shut down before closing so the peer observes an orderly FIN (or
@@ -1466,11 +1476,15 @@ pub const ConnectionCell = struct {
         std.Io.Threaded.mutexLock(&self.mutex);
         const membership = self.finalizeLocked(finalize_reason);
         std.Io.Threaded.mutexUnlock(&self.mutex);
+        // Drop the thread's reference while the scope member still pins the
+        // cell, then detach: the member's release is the last one and it
+        // happens before the scope publishes quiescence, so teardown and the
+        // allocation sweep never observe a cell the thread has yet to drop.
+        self.releaseRef();
         if (membership) |token| {
             var owned = token;
             owned.detach();
         }
-        self.releaseRef();
     }
 };
 
@@ -1648,18 +1662,18 @@ fn readExact(connection: *ConnectionCell, target: *TestTarget, destination: []u8
 
 fn writeAll(connection: *ConnectionCell, target: *TestTarget, bytes: []const u8) !void {
     const permit = try connection.beginWrite();
+    var permit_owned = true;
+    defer if (permit_owned) connection.abandonWrite(permit);
     var offset: usize = 0;
     while (offset != bytes.len) {
         switch (connection.write(permit, bytes[offset..])) {
             .written => |count| offset += count,
             .pending => try awaitSource(connection.writeSource(permit), target),
-            .failed => {
-                connection.abandonWrite(permit);
-                return error.UnexpectedWriteOutcome;
-            },
+            .failed => return error.UnexpectedWriteOutcome,
         }
     }
     connection.finishWrite(permit);
+    permit_owned = false;
 }
 
 fn waitForZeroConnections(owner: *NetOwner) !void {

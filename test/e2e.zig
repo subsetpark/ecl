@@ -280,12 +280,23 @@ test "e2e: net accept, read, write, and close round-trip over loopback under the
         .stdout = .pipe,
         .stderr = .pipe,
     });
+    // A failure before the round trip completes would leave the binary parked
+    // in accept forever; kill it on every early exit, and let the normal path
+    // reap it below.
+    var reaped = false;
+    defer if (!reaped) child.kill(io);
     var stdout_buffer: [512]u8 = undefined;
     var stdout = child.stdout.?.readerStreaming(io, &stdout_buffer);
     const handshake = (try stdout.interface.takeDelimiter('\n')) orelse return error.MissingHandshake;
     const marker = "'port ";
-    const start = std.mem.indexOf(u8, handshake, marker).? + marker.len;
-    const end = std.mem.indexOfScalarPos(u8, handshake, start, '}').?;
+    const start = (std.mem.indexOf(u8, handshake, marker) orelse {
+        std.log.err("handshake line lacks a port: {s}", .{handshake});
+        return error.MalformedHandshake;
+    }) + marker.len;
+    const end = std.mem.indexOfScalarPos(u8, handshake, start, '}') orelse {
+        std.log.err("handshake line is unterminated: {s}", .{handshake});
+        return error.MalformedHandshake;
+    };
     const port = try std.fmt.parseInt(u16, handshake[start..end], 10);
     try std.testing.expect(port != 0);
 
@@ -310,6 +321,7 @@ test "e2e: net accept, read, write, and close round-trip over loopback under the
     const stderr_len = try stderr.interface.readSliceShort(&stderr_sink);
     try std.testing.expectEqualStrings("", stderr_sink[0..stderr_len]);
     const term = try child.wait(io);
+    reaped = true;
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, term);
 }
 

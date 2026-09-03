@@ -928,9 +928,10 @@ one entry per step, and releases the quota slot last, so a task scope or
 Session cannot publish quiescence while an operation still owns any of them.
 The filesystem read, write, and publication primitives run on the worker in
 these bounded quanta, the same convention the archive and package-store
-drivers already use; only process pipes and network connections use detached
-controller threads, and a network listener owns a socket and starts one
-acceptor thread only when a unit first parks in `accept`.
+drivers already use; only process pipes and network ports (listeners and
+connections) use detached controller threads, and a network listener owns a
+socket and starts its one acceptor thread only when a unit first parks in
+`accept`.
 
 Every failure maps a host error to one closed reason vocabulary at the
 `filesystem_port` boundary and attaches the operation, root, path (or both

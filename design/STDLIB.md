@@ -1860,8 +1860,9 @@ A listener is an opaque identity capability that prints `<port:N>` and has
 type `'port`; it exposes no descriptor and cannot be passed through JSON or the
 native value ABI. `proc` words reject a listener with `'type`, and `net` words
 reject a process port with `'type`. The socket is bound and listening before
-the value is returned, so a returned listener is ready, and `local-address` is
-the whole readiness protocol. `accept` is the only listener word that parks.
+the value is returned, so a returned listener is ready, and `local-address`,
+which returns the bound endpoint without parking, is the whole readiness
+protocol. `accept` is the only listener word that parks.
 The listener belongs to the creating unit's task scope: scope closure closes
 the socket and releases the live-listener slot even if a listener value is
 stored elsewhere, and `close` performs the same idempotent transition early.

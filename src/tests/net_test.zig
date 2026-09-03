@@ -539,13 +539,18 @@ const Peer = struct {
             },
         }
         while (true) {
-            const count = reader.interface.readSliceShort(observed.received[observed.received_len..]) catch break;
-            if (count == 0) break;
+            const count = reader.interface.readSliceShort(observed.received[observed.received_len..]) catch |err| {
+                // A reset or any other read failure is not an orderly close.
+                observed.failure = err;
+                return observed;
+            };
+            if (count == 0) {
+                observed.eof = true;
+                return observed;
+            }
             observed.received_len += count;
-            if (observed.received_len == observed.received.len) break;
+            if (observed.received_len == observed.received.len) return observed;
         }
-        observed.eof = true;
-        return observed;
     }
 };
 
