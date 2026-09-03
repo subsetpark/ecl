@@ -1033,7 +1033,7 @@ no reservation is available the acceptor makes no syscall: the connection
 stays in the kernel backlog, the acceptor marks itself quota-blocked, and it
 polls only its wake pipe, not the listening socket, until a release wake
 arrives, so a full quota spins no thread and takes no socket it cannot own.
-Every failure arm after the acquisition releases the reservation. Because
+Because
 `endAccept` takes the same mutex, the two cannot interleave: if the
 cancellation wins, no `accept4` runs and the connection stays in the kernel
 backlog for the next accept; if the accept wins, the socket belongs to that
@@ -1119,27 +1119,19 @@ so the bound is the ring and nothing else.
 The connection quota (`max_live_connections`) is a second compare-exchange
 counter on `NetOwner` beside the listener quota. It is reserved when a socket
 is taken from the backlog, never when an accept parks, so it bounds live
-connections only and `accept` has no `'limit` failure. `NetOwner` also keeps
-a registry of running acceptors: an intrusive list of listener cells that
-`beginAccept` joins once the acceptor thread has started and that
-`exitAcceptor` leaves before anything else. `releaseConnection` walks that
-list under the owner's acceptor mutex and writes one wake byte to each
-acceptor's pipe, so an acceptor blocked at the quota rechecks the counter as
-soon as any connection in the Session releases its slot. A wake byte
-therefore means "drain and recheck": the acceptor reads its stop flag under
-the listener mutex to tell shutdown from a release, and otherwise clears its
-quota-blocked mark and returns to polling the socket. The lock order is
-fixed with the owner's acceptor mutex as the leaf: `beginAccept` registers
-under the listener mutex, `exitAcceptor` and `releaseConnection` (which runs
-from finalization paths under a connection cell's mutex) take it beneath
-those, and nothing is ever acquired while it is held; it signals pipes and
-returns. `ListenerCell.close` signals its own pipe and
-waits until the acceptor has exited, so no cell is on the registry after
-`close` returns. `NetOwner.deinit` asserts that the registry is empty and
-both counters are zero, which holds because Session teardown closes the root
-scope and every running controller holds the membership the scope waits on.
-Failures on a connection are `'io` with the peer's address and port and one
-of `'closed`, `'reset`, `'io`; the listener quota alone refuses with
+connections only and `accept` has no `'limit` failure. `NetOwner` keeps a
+registry of running acceptors, and `releaseConnection` wakes each of them
+through its pipe, so an acceptor blocked at the quota rechecks the counter as
+soon as any connection in the Session releases its slot; a wake byte means
+"drain and recheck", and only the stop flag distinguishes shutdown from a
+release. The registry mutex is the leaf of the lock order: it is taken
+beneath listener and connection cell mutexes, and nothing is acquired while
+it is held. `ListenerCell.close` waits for its acceptor to exit, so no cell is
+on the registry after `close` returns, and `NetOwner.deinit` asserts an empty
+registry and zero counters, which holds because Session teardown closes the
+root scope and every running controller holds the membership the scope waits
+on. Failures on a connection are `'io` with the peer's address and port and
+one of `'closed`, `'reset`, `'io`; the listener quota alone refuses with
 `'domain` `'limit`; the mapping has one owner in `net_port.zig`.
 
 ### Absolute deadlines govern timer races
@@ -1285,13 +1277,11 @@ are validated before publication. Package discovery and synchronization are
 described in `ENVIRONMENT.md`; they enter the evaluator through the same module
 loader and bounded-driver conventions as other sources.
 
-`http.server` is the model for a protocol module in source over host ports.
-Its one effect boundary is a single private word that calls `net.write`, and
-that word takes an ordinary response dict, validates and encodes it in full
-through the public `render-response`, and only then writes; a rejected dict is
-answered 500 as data. The source audit holds the module to that one call site,
-so a malformed wire message is unreachable through the server even though a
-malformed response dict remains an ordinary value.
+`http.server` shows the shape of a protocol module in source over host ports:
+one effect boundary, a single private word that validates and encodes a whole
+response before writing it, which the source audit holds to that one call
+site. Malformed response values stay ordinary data; malformed wire output is
+unreachable.
 
 `proc` is a builtin for the same reason as other host-backed modules: process
 creation and pipe readiness require authority and representation ECL source

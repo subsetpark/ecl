@@ -48,6 +48,12 @@ in those guides rather than expanding this index with incident-specific history.
 - This application is still in its design phase. When a defect exposes a weak
   ownership, lifetime, publication, scheduling, or authority seam, revise the
   representation and document the invariant in `design/INTERPRETER.md`.
+- Design documents keep one altitude each. `design/SPEC.md` states observable
+  contracts, `design/STDLIB.md` states what a program observes of a word
+  (shapes, limits, failures), and `design/INTERPRETER.md` states invariants and
+  the representation that carries them. Write a change at the level of the
+  surrounding section; do not transcribe every mechanism, name, or status code.
+  Implementation narrative belongs in code comments.
 - Run every build, test, or script with stdin closed and under a bounded timeout.
   Capture the command's exit status immediately, before `tail`, `grep`, or any
   other helper. A silent command is not evidence that the intended test ran.

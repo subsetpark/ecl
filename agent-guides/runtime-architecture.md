@@ -28,6 +28,10 @@ publication, reclamation, or architectural enforcement. The short rules in
   claims aligned while it is in use; do not add or maintain the gameplan as a
   repository artifact. Acceptance must show that every producer and consumer
   uses the new seam and that invalid states are unavailable in all build modes.
+- Write that update at the altitude of its section: the invariant, the
+  representation that carries it, and the mechanism only where the section
+  already names mechanisms. A design document is not a changelog; a reader
+  should not be able to reconstruct the patch series from it.
 - Raise a representation ceiling when a strong type boundary honestly needs
   the space. Never weaken or compress away the type boundary merely to satisfy
   a historical frame-size limit; update and explain the ceiling.

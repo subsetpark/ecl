@@ -1794,17 +1794,14 @@ string, written as UTF-8, or a byte list. The names `content-length`,
 server writes `Content-Length` and `Connection: close` itself, and a response
 naming one of them is `'domain`. Header names must be nonempty HTTP tokens
 and values may not contain CR, LF, NUL, or a control character other than
-tab, so a value built from request data cannot split the response; every byte
-the server writes has passed `render-response` in its single write word.
+tab, so a value built from request data cannot split the response.
 
 Framing is HTTP/1.1 with `Content-Length` bodies only; an HTTP/1.0 request is
 answered the same way. Any `Transfer-Encoding` header is answered 411 and a
 version other than `HTTP/1.1` or `HTTP/1.0` is answered 505. There is no
 keep-alive: every response carries `Connection: close`, and the connection is
-closed once the response is written. The head is located by its CRLFCRLF
-terminator on the raw bytes before any decoding, so a binary body that
-arrives with the head is never decoded as text. TLS, chunked bodies,
-pipelining, and upgrades belong to a proxy in front of the server.
+closed once the response is written. TLS, chunked bodies, pipelining, and
+upgrades belong to a proxy in front of the server.
 
 The `@serve` configuration is a dictionary whose keys are all optional; `{}`
 is valid. Each limit is an integer greater than zero.
@@ -1851,14 +1848,10 @@ or multi-valued result, a malformed response — answers 500 and applies the
 in-flight request are unaffected. Every response the server writes, whether
 the handler's or its own, is validated in full before any byte is written.
 
-`@serve` spawns `'max-in-flight` acceptor children. Each loops: `net.accept`,
-read and frame the request, apply the handler, write the response, `net.close`
-the connection, so every connection belongs to the scope of the child that
-accepted it and is closed on every path. While every acceptor is busy no
-`net.accept` is outstanding and further connections wait in the kernel
-backlog; the host's live-connection maximum is a second, waiting bound at
-which `net.accept` itself parks. The read deadline is a reader child under
-`await-for`, cancelled on expiry.
+`@serve` serves up to `'max-in-flight` connections at a time, each in a child
+unit that owns its connection, so a connection is closed on every path.
+Beyond that bound, and at the host's live-connection maximum, further
+connections wait in the kernel backlog.
 
 `@serve` does not return. The serving unit ends only when it is cancelled,
 failing `'cancelled`, or when an acceptor's `net.accept` fails `'io` (a
@@ -1886,12 +1879,12 @@ l {'read-timeout-ms 5000} (handler) http.server.@serve
 ### @serve
 `( listener config handler -- )` — *Unit constructor*, contract
 `( request -- response )` enforced per request. Validate the arguments,
-fill the configuration defaults, spawn `'max-in-flight` acceptor children
-over the listener, and park. A non-port listener, a non-dictionary
+fill the configuration defaults, and serve the listener until the unit ends.
+A non-port listener, a non-dictionary
 configuration, or a non-quotation handler is `'type`; an unknown
 configuration key or a limit that is not greater than zero is `'domain`; a
 limit that is not an integer or an `'on-failure` that is not a quotation is
-`'type`. Validation completes before any child is spawned. The word fails
+`'type`. Validation completes before any request is accepted. The word fails
 `'cancelled` when the serving unit is cancelled and re-raises an acceptor's
 `'io` failure of `net.accept`; it never closes the listener.
 
