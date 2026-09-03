@@ -971,10 +971,18 @@ fn setCloexec(fd: posix.fd_t) error{Io}!void {
 }
 
 /// Wake a controller blocked in `poll`. The pipe is non-blocking; a full pipe
-/// already carries a pending wake, so `EAGAIN` needs nothing.
+/// already carries a pending wake, so `EAGAIN` needs nothing, but a write
+/// interrupted before the byte landed must be retried or the close and
+/// cancellation paths that rely on this wake would wait forever.
 fn signalPipe(write_end: posix.fd_t) void {
     const byte = [_]u8{0};
-    _ = posix.system.write(write_end, &byte, 1);
+    while (true) {
+        const rc = posix.system.write(write_end, &byte, 1);
+        switch (posix.errno(rc)) {
+            .INTR => continue,
+            else => return,
+        }
+    }
 }
 
 fn drainPipe(read_end: posix.fd_t) void {
