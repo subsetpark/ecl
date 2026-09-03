@@ -331,6 +331,17 @@ test "e2e: net accept, read, write, and close round-trip over loopback under the
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, term);
 }
 
+// PENDING: Patch 5 of gameplans/http-server.json: spawn the binary with piped
+// stdout serving a `/health` handler that answers `"ok"`, read the
+// `{'address "127.0.0.1" 'port N}` handshake line, connect a raw peer that
+// writes `GET /health HTTP/1.1\r\nHost: h\r\n\r\n`, and read `HTTP/1.1 200 OK`,
+// `Content-Length: 2`, `Connection: close`, the body `ok`, then EOF. The server
+// never stops on its own, so the test kills the child afterwards under the
+// `NetWatchdog` bound.
+test "e2e: http server answers a loopback GET under the CLI grant" {
+    return error.SkipZigTest;
+}
+
 /// Kills a spawned child after a bound unless disarmed first. The child's pid
 /// is copied so the thread never touches `Child` state the test is using. The
 /// value lives on the test's stack and outlives its thread, which `disarm`

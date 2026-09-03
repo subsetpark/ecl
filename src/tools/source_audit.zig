@@ -205,6 +205,7 @@ const test_files = [_][]const u8{
     "tests/net_test.zig",
     "tests/clock_test.zig",
     "tests/conversion_test.zig",
+    "tests/http_server_test.zig",
 };
 const repository_verification_files = [_][]const u8{
     "build.zig",
