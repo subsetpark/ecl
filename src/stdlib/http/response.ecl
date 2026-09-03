@@ -162,15 +162,15 @@
  ### def with-header
  (response name value -- response :
   "Return the response with a value added under the header name exactly as given: a string or a list
-   of strings, appended to any values already under that name. A non-string name or a bad value is
-   'type.")
+   of strings, appended to any values already under that name, an existing string value counting as
+   one. A non-string name or a bad value is 'type.")
  (dup header-values? "http.response.with-header expects a string or a list of strings" type-error
   assert
   dup str.str? (wrap) () if
   swap checked-name
   (|response value name|
-   response checked 'headers at name () at-or dup dup str.str? swap len 0 > and (wrap) () if value
-   cat
+   response checked 'headers at name over over dict.has? (at dup str.str? (wrap) when) (pop pop ())
+   if value cat
    response 'headers at name rolldown put
    response 'headers rolldown put)
   call)

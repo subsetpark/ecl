@@ -403,6 +403,52 @@
  (4 windows ([13 10 13 10] match?) each where dup len 0 = (pop -1) (first) if)
  'head-end defp
 
+ ### defp hex-digit?
+ (char -- bool : "Return 1 for an ASCII hexadecimal digit.")
+ (dup digit? over dup \a >= swap \f <= and or swap dup \A >= swap \F <= and or)
+ 'hex-digit? defp
+
+ ### defp host-char?
+ (char -- bool :
+  "Return 1 for a character allowed in a registered host name: unreserved, sub-delims, or %.")
+ (dup digit?
+  over dup \a >= swap \z <= and or
+  over dup \A >= swap \Z <= and or
+  swap "-._~!$&'()*+,;=%" in? or)
+ 'host-char? defp
+
+ ### defp ip-literal-char?
+ (char -- bool : "Return 1 for a character allowed inside an IP-literal's brackets.")
+ (dup hex-digit? swap ":." in? or)
+ 'ip-literal-char? defp
+
+ ### defp port?
+ (text -- bool : "Return 1 for a possibly empty string of digits.")
+ ((digit?) all?)
+ 'port? defp
+
+ ### defp bracketed-host?
+ (value -- bool : "Return 1 for [IP-literal] with an optional :port.")
+ ("]" split dup len 2 =
+  (dup first 1 drop dup len 0 > swap (ip-literal-char?) all? and
+   swap 1 at dup "" match? swap dup ":" str.starts? (1 drop port?) (pop 0) if or
+   and)
+  (pop 0)
+  if)
+ 'bracketed-host? defp
+
+ ### defp host-value?
+ (value -- bool :
+  "Return 1 for a Host value of the form uri-host with an optional :port, as RFC 9112 admits.")
+ (dup "[" str.starts?
+  (bracketed-host?)
+  (dup ":" str.contains?
+   (":" split dup len 2 = (dup first (host-char?) all? swap 1 at port? and) (pop 0) if)
+   ((host-char?) all?)
+   if)
+  if)
+ 'host-value? defp
+
  ### defp read-head-step
  (connection limit buffer -- connection limit buffer :
   "Read more head bytes: 431 past the limit, 400 on EOF after some bytes, 'io on EOF before any.")
@@ -465,8 +511,9 @@
   call
   dup first parse-request-line swap rest parse-headers
   over 'version at "HTTP/1.1" match?
-  (dup "host" () at-or len 1 = not
-   (400 "an HTTP/1.1 request needs exactly one Host header" framing-error) when)
+  (dup "host" () at-or dup len 1 = swap (host-value?) all? and not
+   (400 "an HTTP/1.1 request needs exactly one well-formed Host header" framing-error)
+   when)
   when
   dup "transfer-encoding" dict.has? (411 "length required" framing-error) when
   dup content-length
@@ -614,12 +661,12 @@
 
    A HEAD request is answered with the handler's status and headers and no body. Requests the server
    cannot serve are answered with a minimal text/plain response and closed: 400 for a malformed
-   request line or header, an HTTP/1.1 request without exactly one Host header, non-UTF-8 head
-   bytes, a bad Content-Length, or end of stream after some bytes; 411 for any Transfer-Encoding;
-   505 for a version other than HTTP/1.1 or HTTP/1.0; 431 and 413 for the size limits; 408 for the
-   deadline; 500 when the handler fails, leaves other than one value, or leaves a response
-   render-response rejects, in which case 'on-failure receives the error. A peer that sends nothing
-   before closing, or resets during the exchange, is closed silently.
+   request line or header, an HTTP/1.1 request without exactly one well-formed Host header,
+   non-UTF-8 head bytes, a bad Content-Length, or end of stream after some bytes; 411 for any
+   Transfer-Encoding; 505 for a version other than HTTP/1.1 or HTTP/1.0; 431 and 413 for the size
+   limits; 408 for the deadline; 500 when the handler fails, leaves other than one value, or leaves
+   a response render-response rejects, in which case 'on-failure receives the error. A peer that
+   sends nothing before closing, or resets during the exchange, is closed silently.
 
    A non-port listener, non-dict config, non-quotation handler, non-int limit, or non-quotation
    'on-failure is 'type; an unknown config key or a limit not greater than zero is 'domain. The word

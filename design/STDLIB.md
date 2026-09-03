@@ -1815,7 +1815,8 @@ is not valid UTF-8 is `'domain`, as for `chars`.
 ### valid?
 `( value -- bool )` — Return 1 for a request dictionary: the seven keys with
 string method, target, path, query, and peer, a headers dictionary from
-string names to lists of strings, and a byte-list body, plus an optional
+ASCII-lowercased string names to lists of strings, and a byte-list body, plus
+an optional
 `'params` dictionary of string names to string values. Never raises.
 
 ### with-body
@@ -1894,7 +1895,8 @@ byte-list body; another kind is `'type`.
 ### with-header
 `( response name value -- response )` — Return the response with a value
 added under the header name exactly as given: a string or a list of strings,
-appended to any values already under that name.
+appended to any values already under that name; an existing string value,
+even the empty string, counts as one.
 
 ### with-headers
 `( response headers -- response )` — Return the response with a headers
@@ -1972,7 +1974,8 @@ response of the status below and then closes the connection:
 
 - 400: a malformed request line; a header line without `:` or beginning with
   space or tab (obsolete folding); an HTTP/1.1 request without exactly one
-  `Host` header; non-UTF-8 bytes in the head; a
+  `Host` header of the form `uri-host [":" port]`; non-UTF-8 bytes in the
+  head; a
   `Content-Length` that is not a digit string or whose repeated values
   differ; end of stream after some bytes arrived but before the head or the
   body is complete.

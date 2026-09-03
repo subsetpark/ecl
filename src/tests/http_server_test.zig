@@ -448,6 +448,16 @@ test "http server: malformed request lines and headers are answered 400 and clos
     try expectStatus(try exchange(port, "GET / HTTP/1.1\r\nHost: h\r\nX: \xff\r\n\r\n"), "HTTP/1.1 400 Bad Request");
     try expectStatus(try exchange(port, "GET /ok HTTP/1.1\r\n\r\n"), "HTTP/1.1 400 Bad Request");
     try expectStatus(try exchange(port, "GET /ok HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n"), "HTTP/1.1 400 Bad Request");
+    for ([_][]const u8{ "example.com:bad", "[::1", "a b", "h:80:81", "[::1]x" }) |host| {
+        const request = try std.fmt.allocPrint(allocator, "GET /ok HTTP/1.1\r\nHost: {s}\r\n\r\n", .{host});
+        defer allocator.free(request);
+        try expectStatus(try exchange(port, request), "HTTP/1.1 400 Bad Request");
+    }
+    for ([_][]const u8{ "example.com", "example.com:8080", "127.0.0.1:80", "[::1]:8080", "[::1]", "" }) |host| {
+        const request = try std.fmt.allocPrint(allocator, "GET /ok HTTP/1.1\r\nHost: {s}\r\n\r\n", .{host});
+        defer allocator.free(request);
+        try expectResponse(try exchange(port, request), ok_response);
+    }
     try expectResponse(try exchange(port, "GET /ok HTTP/1.1\r\nHost: h\r\n\r\n"), ok_response);
     try server.finish();
 }

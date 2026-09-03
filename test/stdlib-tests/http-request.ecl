@@ -41,6 +41,8 @@
   http.request.valid? 1 equal
   {'method "GET" 'target "/" 'path "/" 'query "" 'headers {"host" "h"} 'body [] 'peer "p"}
   http.request.valid? 0 equal
+  {'method "GET" 'target "/" 'path "/" 'query "" 'headers {"Host" ("h")} 'body [] 'peer "p"}
+  http.request.valid? 0 equal
   {'method "GET" 'target "/" 'path "/" 'query "" 'headers {} 'body "x" 'peer "p"}
   http.request.valid? 0 equal
   {'method "GET" 'target "/" 'path "/" 'query "" 'headers {} 'body [300] 'peer "p"}

@@ -21,12 +21,12 @@
 
  ### defp header-pair?
  (pair -- bool :
-  "Return 1 for a [name values] entry with a string name and a list of string values.")
- (dup first str.str? (1 at string-list?) (pop 0) if)
+  "Return 1 for a [name values] entry with a lowercased string name and a list of string values.")
+ (dup first dup str.str? (dup str.lower match?) (pop 0) if (1 at string-list?) (pop 0) if)
  'header-pair? defp
 
  ### defp headers?
- (value -- bool : "Return 1 for a dict from string names to lists of strings.")
+ (value -- bool : "Return 1 for a dict from ASCII-lowercased string names to lists of strings.")
  (dup type 'dict match? (dict.pairs (header-pair?) all?) (pop 0) if)
  'headers? defp
 
@@ -49,9 +49,9 @@
  ### def valid?
  (value -- bool :
   "Return 1 when a value is a request dict: 'method, 'target, 'path, 'query, 'headers, 'body, and
-   'peer, with string method, target, path, query, and peer, a headers dict from string names to
-   lists of strings, and a byte-list body, plus an optional 'params dict of string names to string
-   values as http.server.route binds it. Never raises.")
+   'peer, with string method, target, path, query, and peer, a headers dict from ASCII-lowercased
+   string names to lists of strings, and a byte-list body, plus an optional 'params dict of string
+   names to string values as http.server.route binds it. Never raises.")
  (dup type 'dict match?
   (dup 'params {} at-or params?
    swap ['params] dict.drop

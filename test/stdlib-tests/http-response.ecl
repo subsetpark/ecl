@@ -88,6 +88,8 @@
   greeting "X" "d" http.response.with-header "X" ("e" "f") http.response.with-header 'headers at "X"
   at
   ("d" "e" "f") equal
+  {'status 200 'headers {"x" ""} 'body ""} "x" "v" http.response.with-header 'headers at
+  {"x" ("" "v")} equal
   greeting "Content-Type" "z" http.response.with-header "content-type" http.response.header
   ("text/plain; charset=utf-8" "z") equal
   greeting {"X" "z" "content-type" "y"} http.response.with-headers 'headers at
