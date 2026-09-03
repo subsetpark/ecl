@@ -149,11 +149,14 @@ test "multiline documentation is normalized and see prints annotation and canoni
         "(: \"Only docs.\") (42) 'answer def " ++
         "(: \"  First line wraps\n    softly.\n\n  - One\n    continues\n  - Two.\") (1) 'multiline def " ++
         "'multiline doc \"First line wraps softly.\n\n- One continues\n- Two.\" match? " ++
-        "'square see 'answer see");
+        "'square see 'answer see 'multiline see");
     try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
+    // `see` writes documentation as prose: its paragraph and item breaks are
+    // real line breaks, not the `\n` the canonical string rendering spells.
     try std.testing.expectEqualStrings(
         "(x -- y : \"Square a numeric value.\") (dup *)\n" ++
-            "(: \"Only docs.\") (42)\n",
+            "(: \"Only docs.\") (42)\n" ++
+            "(: \"First line wraps softly.\n\n- One continues\n- Two.\") (1)\n",
         output.written(),
     );
 }

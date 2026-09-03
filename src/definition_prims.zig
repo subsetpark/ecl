@@ -809,32 +809,17 @@ const SeeDriver = struct {
 
     const Context = struct {
         resolved: heap.Owned(machine.Resolution),
-        annotation: ?heap.Owned(Value),
 
         fn deinit(
             self: *Context,
             releases: *heap.ReleaseDomain,
             allocator: std.mem.Allocator,
         ) void {
-            if (self.annotation) |*annotation| annotation.deinit(releases, allocator);
             self.resolved.deinit(releases, allocator);
         }
     };
-    const AnnotationBuild = struct {
-        resolved: heap.Owned(machine.Resolution),
-        items: heap.Owned([]Value),
-        effect_count: usize,
-        index: usize,
-    };
     const State = union(enum) {
         resolve: heap.Owned(machine.ResolutionCursor),
-        annotation_allocate: heap.Owned(machine.Resolution),
-        annotation_copy: AnnotationBuild,
-        annotation_materialize: struct {
-            resolved: heap.Owned(machine.Resolution),
-            items: heap.Owned([]Value),
-            materializer: heap.Owned(list.ValueMaterializer),
-        },
         plan: struct {
             context: Context,
             step: u8,
@@ -852,16 +837,6 @@ const SeeDriver = struct {
         ) void {
             switch (self.*) {
                 .resolve => |*cursor| cursor.deinit(releases, allocator),
-                .annotation_allocate => |*resolved| resolved.deinit(releases, allocator),
-                .annotation_copy => |*annotation| {
-                    annotation.items.deinit(releases, allocator);
-                    annotation.resolved.deinit(releases, allocator);
-                },
-                .annotation_materialize => |*annotation| {
-                    annotation.materializer.deinit(releases, allocator);
-                    annotation.items.deinit(releases, allocator);
-                    annotation.resolved.deinit(releases, allocator);
-                },
                 .plan => |*plan| plan.context.deinit(releases, allocator),
                 .render => |*context| context.deinit(releases, allocator),
                 .format => |*format_state| {
@@ -895,11 +870,26 @@ const SeeDriver = struct {
     ) error{OutOfMemory}!void {
         const resolved = plan.context.resolved.borrow();
         switch (plan.step) {
-            0 => if (plan.context.annotation) |*annotation|
-                try self.add(.{ .value = annotation.borrow() })
-            else if (resolved.lease.effect) |effect|
+            // The annotation is written piecewise so the documentation keeps
+            // its line breaks: the effect words render canonically, the
+            // string as prose.
+            0 => if (resolved.lease.doc) |document| {
+                try self.add(.{ .bytes = "(" });
+                if (resolved.lease.effect) |effect| {
+                    const header = effect.header();
+                    const count: usize = @intCast(header.length());
+                    var index: usize = 0;
+                    while (index < count) : (index += 1) {
+                        try self.add(.{ .value = list.atUnchecked(.{ .list = header }, index) });
+                        try self.add(.{ .bytes = " " });
+                    }
+                }
+                try self.add(.{ .bytes = ": " });
+                try self.add(.{ .document = .{ .list = env.documentationHeader(document) } });
+                try self.add(.{ .bytes = ")" });
+            } else if (resolved.lease.effect) |effect|
                 try self.add(.{ .value = .{ .list = effect.header() } }),
-            1 => if (plan.context.annotation != null or resolved.lease.effect != null)
+            1 => if (resolved.lease.doc != null or resolved.lease.effect != null)
                 try self.add(.{ .bytes = " " }),
             2 => switch (resolved.lease.binding) {
                 .word => |word_body| if (resolved.lease.source) |source|
@@ -968,64 +958,8 @@ const SeeDriver = struct {
                         .resolved => |resolution| resolution,
                     };
                     cursor.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                    self.state.borrowMut().* = if (resolved.lease.doc != null)
-                        .{ .annotation_allocate = .init(resolved) }
-                    else
-                        .{ .plan = .{
-                            .context = .{ .resolved = .init(resolved), .annotation = null },
-                            .step = 0,
-                            .requirement_index = 0,
-                            .requirement_separator = false,
-                        } };
-                },
-            },
-            .annotation_allocate => |*resolved| {
-                const effect_count: usize = if (resolved.borrow().lease.effect) |effect|
-                    @intCast(effect.header().length())
-                else
-                    0;
-                const items = try evaluator.allocator().alloc(Value, effect_count + 2);
-                self.state.borrowMut().* = .{ .annotation_copy = .{
-                    .resolved = .init(resolved.take()),
-                    .items = .init(items),
-                    .effect_count = effect_count,
-                    .index = 0,
-                } };
-            },
-            .annotation_copy => |*annotation| {
-                if (annotation.index != annotation.effect_count) {
-                    annotation.items.borrow()[annotation.index] = list.atUnchecked(
-                        .{ .list = annotation.resolved.borrow().lease.effect.?.header() },
-                        annotation.index,
-                    );
-                    annotation.index += 1;
-                    continue;
-                }
-                annotation.items.borrow()[annotation.effect_count] = .{ .word = .{ .name = try intern.intern(":") } };
-                annotation.items.borrow()[annotation.effect_count + 1] = .{
-                    .list = env.documentationHeader(annotation.resolved.borrow().lease.doc.?),
-                };
-                const materializer = list.ValueMaterializer.init(
-                    evaluator.allocator(),
-                    annotation.items.borrow(),
-                );
-                self.state.borrowMut().* = .{ .annotation_materialize = .{
-                    .resolved = .init(annotation.resolved.take()),
-                    .items = .init(annotation.items.take()),
-                    .materializer = .init(materializer),
-                } };
-            },
-            .annotation_materialize => |*annotation| switch (try annotation.materializer.borrowMut().advance(1)) {
-                .pending => return .yielded,
-                .complete => |annotation_value| {
-                    const resolved = annotation.resolved.take();
-                    annotation.materializer.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                    annotation.items.deinit(evaluator.releaseDomain(), evaluator.allocator());
                     self.state.borrowMut().* = .{ .plan = .{
-                        .context = .{
-                            .resolved = .init(resolved),
-                            .annotation = .init(annotation_value),
-                        },
+                        .context = .{ .resolved = .init(resolved) },
                         .step = 0,
                         .requirement_index = 0,
                         .requirement_separator = false,
