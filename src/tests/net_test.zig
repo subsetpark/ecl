@@ -441,6 +441,8 @@ const Script = union(enum) {
     write_then_read_until_eof: []const u8,
     /// Connect, write the bytes, then close at once so the server sees EOF.
     write_then_close: []const u8,
+    /// Connect and close at once, sending nothing.
+    connect_then_close,
     /// Connect, wait for one sync byte, write the bytes, then read until EOF.
     sync_then_write: []const u8,
     /// Connect, wait for one sync byte, then close with SO_LINGER zero so the
@@ -511,6 +513,12 @@ const Peer = struct {
             .write_then_close => |payload| {
                 try writer.interface.writeAll(payload);
                 try writer.interface.flush();
+                stream.close(io);
+                closed = true;
+                observed.eof = true;
+                return observed;
+            },
+            .connect_then_close => {
                 stream.close(io);
                 closed = true;
                 observed.eof = true;
@@ -644,6 +652,40 @@ test "net: peer-address and local-address describe both ends of a connection" {
         .word = "net.peer-address",
         .data = &.{ reason("closed"), closed_data[0], closed_data[1] },
     });
+    // The closed local-address names the local end, never the peer.
+    const local_data = addressData("127.0.0.1", port);
+    try runtime.runError("c net.local-address", .{
+        .name = "closed connection local end",
+        .source = "c net.local-address",
+        .kind = "io",
+        .word = "net.local-address",
+        .data = &.{ reason("closed"), local_data[0], local_data[1] },
+    });
+}
+
+test "net: a connection on a wildcard listener reports the endpoint it was reached on" {
+    var runtime: Runtime = .{};
+    try runtime.open(.{ .net = .{ .binds = .{ .exact = &.{.{ .address = "0.0.0.0", .port = 0 }} } } }, .cooperative);
+    defer runtime.close();
+    try runtime.run("{'address \"0.0.0.0\" 'port 0} net.listen 'l set l net.local-address 'port at");
+    var display = try runtime.session.stackDisplay();
+    defer display.deinit();
+    const port = try std.fmt.parseInt(u16, std.mem.trim(u8, display.bytes(), " \n"), 10);
+    const peer = try Peer.start(port, .read_until_eof);
+    try runtime.run("pop l net.accept 'c set c net.local-address 'address at c net.close");
+    try runtime.expectDisplay("\"127.0.0.1\"");
+    try expectPeerBytes(peer.join(), "");
+}
+
+test "net: a peer that closes at once yields a connection at EOF" {
+    var runtime: Runtime = .{};
+    try runtime.open(.{ .net = loopback_ephemeral }, .cooperative);
+    defer runtime.close();
+    const port = try listenerPort(&runtime);
+    const peer = try Peer.start(port, .connect_then_close);
+    try expectPeerBytes(peer.join(), "");
+    try runtime.run("l net.accept 'c set c 4 net.read c 4 net.read c net.peer-address 'address at c net.close");
+    try runtime.expectDisplay("[] [] \"127.0.0.1\"");
 }
 
 test "net: a connection belongs to the accepting unit's scope and closes with it" {
@@ -740,6 +782,15 @@ test "net: a peer reset is an io failure carrying the peer address and reason" {
         .word = "net.read",
         .data = &.{ reason("reset"), data[0], data[1] },
     });
+    // A connection the peer tore down is terminal: its endpoints are no
+    // longer observable as live addresses.
+    try runtime.runError("c net.peer-address", .{
+        .name = "peer-address after reset",
+        .source = "c net.peer-address",
+        .kind = "io",
+        .word = "net.peer-address",
+        .data = &.{ reason("closed"), data[0], data[1] },
+    });
 }
 
 test "net: the live-connection quota refuses accept with domain limit and is released on close" {
@@ -767,8 +818,15 @@ test "net: cancelling a parked accept or read leaves the listener and connection
     try runtime.open(.{ .net = loopback_ephemeral }, .cooperative);
     defer runtime.close();
     const port = try listenerPort(&runtime);
-    try runtime.run("[] (l net.accept) @spawn dup cancel await 'err at 'kind at");
+    // The cancelled accept had the acceptor waiting in poll; the connection
+    // that arrives afterwards must stay in the kernel backlog, unreset, until
+    // the next accept takes it.
+    try runtime.run("[] (l net.accept) @spawn 'waiting set 0 clock.sleep waiting dup cancel await 'err at 'kind at");
     try runtime.expectDisplay("'cancelled");
+    const early = try Peer.start(port, .{ .write_then_read_until_eof = "q" });
+    try runtime.run("pop l net.accept 'e set e 1 net.read e net.close");
+    try runtime.expectDisplay("[113]");
+    try expectPeerBytes(early.join(), "");
     const peer = try Peer.start(port, .{ .sync_then_write = "abcd" });
     try runtime.run("pop l net.accept 'c set [] (c 4 net.read) @spawn 0 clock.sleep dup cancel await 'err at 'kind at");
     try runtime.expectDisplay("'cancelled");

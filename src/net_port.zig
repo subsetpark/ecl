@@ -10,9 +10,11 @@
 //! the listening socket and a wake pipe and takes a connection from the kernel
 //! backlog only while an ECL `accept` is outstanding. Each accepted socket is
 //! a `ConnectionCell` owned by the accepting unit's scope, with bounded
-//! receive and send rings serviced by a reader and a writer thread, exactly
-//! the process-port controller model. Closing is one idempotent transition
-//! shared by the `close` word and scope cancellation.
+//! receive and send rings serviced by exactly one controller thread that
+//! polls a non-blocking socket and a wake pipe; that thread alone owns the
+//! descriptor, the quota slot, and the scope membership until it publishes
+//! the terminal state. Closing is one idempotent transition shared by the
+//! `close` word and scope cancellation.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -92,17 +94,13 @@ pub const ReadProgress = union(enum) {
     pending,
     data: usize,
     eof,
-    closed,
-    reset,
-    io,
+    failed: Failure,
 };
 
 pub const WriteProgress = union(enum) {
     pending,
     written: usize,
-    closed,
-    reset,
-    io,
+    failed: Failure,
 };
 
 pub fn backendSupported() bool {
@@ -306,9 +304,9 @@ fn mapListenError(err: IpAddress.ListenError) ListenError {
     };
 }
 
-/// Bounded byte queue shared by the connection's rings. Identical in contract
-/// to the process port's ring; duplicated rather than exported so the two
-/// controllers stay independently reviewable.
+/// Bounded byte queue for the connection's rings. Identical in contract to
+/// the process port's ring, plus a peek/consume pair so the controller can
+/// hand the kernel a contiguous chunk and retire only what was written.
 const Ring = struct {
     bytes: []u8,
     head: usize = 0,
@@ -337,6 +335,18 @@ const Ring = struct {
         return count;
     }
 
+    /// The longest contiguous run of queued bytes starting at the head.
+    fn peek(self: *const Ring) []const u8 {
+        const first = @min(self.len, self.bytes.len - self.head);
+        return self.bytes[self.head..][0..first];
+    }
+
+    fn consume(self: *Ring, count: usize) void {
+        std.debug.assert(count <= self.len);
+        self.head = (self.head + count) % self.bytes.len;
+        self.len -= count;
+    }
+
     fn discard(self: *Ring) void {
         self.head = 0;
         self.len = 0;
@@ -344,10 +354,12 @@ const Ring = struct {
 };
 
 /// A keyed list of registered readiness waits over one cell type. The cell
-/// supplies `mutex`, `waits`, `retainRef`, `releaseRef`, `readyLocked(key)`,
-/// and `wakeReasonLocked(key)`. Targets stay retained until their
-/// registration is consumed, so waking under the cell lock closes the only
-/// cancellation/use-after-free race.
+/// supplies `mutex`, `waits`, `retainRef`, `releaseRef`, and
+/// `readyLocked(key)`. Targets stay retained until their registration is
+/// consumed, so waking under the cell lock closes the only
+/// cancellation/use-after-free race. Every wake is `.ready`: a socket failure
+/// is a change in the cell's observable state that the driver polls, not a
+/// failure of the wait mechanism.
 fn WaitList(comptime Cell: type) type {
     return struct {
         const Self = @This();
@@ -392,10 +404,9 @@ fn WaitList(comptime Cell: type) type {
             };
             std.Io.Threaded.mutexLock(&cell.mutex);
             if (cell.readyLocked(key)) {
-                const reason = cell.wakeReasonLocked(key);
                 std.Io.Threaded.mutexUnlock(&cell.mutex);
                 cell.allocator.destroy(wait);
-                return .{ .ready = reason };
+                return .{ .ready = .ready };
             }
             target.retain();
             cell.retainRef();
@@ -430,7 +441,7 @@ fn WaitList(comptime Cell: type) type {
                 const next = candidate.next;
                 if (cell.readyLocked(candidate.key)) {
                     self.unlinkLocked(candidate);
-                    candidate.target.wake(cell.wakeReasonLocked(candidate.key));
+                    candidate.target.wake(.ready);
                 }
                 wait = next;
             }
@@ -438,23 +449,84 @@ fn WaitList(comptime Cell: type) type {
     };
 }
 
+/// A descriptor that is closed exactly once. Nothing else in this file calls
+/// `closeFd` on a connection socket.
+const OwnedSocket = struct {
+    fd: ?posix.fd_t,
+
+    fn close(self: *OwnedSocket) void {
+        const fd = self.fd orelse return;
+        self.fd = null;
+        std.Io.Threaded.closeFd(fd);
+    }
+};
+
+/// One live-connection quota slot, released exactly once. Nothing else in
+/// this file decrements the connection counter.
+const ConnectionReservation = struct {
+    owner: ?*NetOwner,
+
+    fn acquire(owner: *NetOwner) ?ConnectionReservation {
+        if (!owner.reserveConnection()) return null;
+        return .{ .owner = owner };
+    }
+
+    fn release(self: *ConnectionReservation) void {
+        const owner = self.owner orelse return;
+        self.owner = null;
+        owner.releaseConnection();
+    }
+
+    fn take(self: *ConnectionReservation) ConnectionReservation {
+        const moved = self.*;
+        self.owner = null;
+        return moved;
+    }
+};
+
+/// Both ends of a connection, captured at acceptance: the peer from `accept`
+/// and the local end from `getsockname`, so a wildcard listener's connection
+/// still reports the address it is actually reachable on.
+const Endpoints = struct {
+    local: IpAddress,
+    peer: IpAddress,
+};
+
+/// An accepted socket together with the authority it carries. Moving it into
+/// a connection transfers both; dropping it releases both.
+const AcceptedSocket = struct {
+    socket: OwnedSocket,
+    reservation: ConnectionReservation,
+    endpoints: Endpoints,
+
+    fn deinit(self: *AcceptedSocket) void {
+        self.socket.close();
+        self.reservation.release();
+    }
+};
+
+const AcceptFailure = enum { resources, io };
+
 /// One outstanding `accept`. The word-side driver owns the slot between
-/// `beginAccept` and `endAccept`; the acceptor thread fills the first unfilled
-/// slot in FIFO order, so the acceptor never holds more sockets than there are
-/// outstanding accepts.
+/// `beginAccept` and `endAccept`; the acceptor thread fills the first waiting
+/// slot in FIFO order, under the listener mutex, so a cancelled accept can
+/// never leave a taken socket with no owner and the acceptor never holds more
+/// sockets than there are outstanding accepts.
 pub const AcceptSlot = struct {
     previous: ?*AcceptSlot = null,
     next: ?*AcceptSlot = null,
     linked: bool = true,
-    reservation_held: bool = true,
-    outcome: union(enum) {
-        unfilled,
-        socket: struct { fd: posix.fd_t, peer: IpAddress },
+    /// Held while waiting or failed; moved into the accepted socket on fill.
+    reservation: ConnectionReservation,
+    state: State = .waiting,
+
+    const State = union(enum) {
+        waiting,
+        ready: AcceptedSocket,
+        failed: AcceptFailure,
         taken,
-        resources,
-        io,
         closed,
-    } = .unfilled,
+    };
 };
 
 /// One bound-or-closed socket. The reference count is shared by the port
@@ -573,10 +645,7 @@ pub const ListenerCell = struct {
             .bound => |bound| {
                 if (self.acceptor.running) {
                     self.acceptor.stop = true;
-                    if (self.acceptor.wake) |wake| {
-                        const byte = [_]u8{0};
-                        _ = posix.system.write(wake[1], &byte, 1);
-                    }
+                    if (self.acceptor.wake) |wake| signalPipe(wake[1]);
                     self.changed.broadcast(blockingIo());
                     while (self.acceptor.running)
                         self.changed.waitUncancelable(blockingIo(), &self.mutex);
@@ -592,7 +661,7 @@ pub const ListenerCell = struct {
                 self.owner.releaseLive();
                 var slot = self.slots_first;
                 while (slot) |current| : (slot = current.next) {
-                    if (current.outcome == .unfilled) current.outcome = .closed;
+                    if (current.state == .waiting) current.state = .closed;
                 }
                 self.waits.notifyLocked(self);
                 if (self.membership) |token| {
@@ -634,13 +703,7 @@ pub const ListenerCell = struct {
     fn readyLocked(self: *ListenerCell, key: u64) bool {
         _ = self;
         const slot: *const AcceptSlot = @ptrFromInt(key);
-        return slot.outcome != .unfilled;
-    }
-
-    fn wakeReasonLocked(self: *ListenerCell, key: u64) external.Wake {
-        _ = self;
-        _ = key;
-        return .ready;
+        return slot.state != .waiting;
     }
 
     /// Reserve one live-connection slot, link an accept slot, and start the
@@ -652,16 +715,15 @@ pub const ListenerCell = struct {
             .bound => |*bound| bound,
             .closed => return error.Closed,
         };
-        if (!self.owner.reserveConnection()) return error.LiveLimit;
-        errdefer self.owner.releaseConnection();
+        var reservation = ConnectionReservation.acquire(self.owner) orelse return error.LiveLimit;
+        errdefer reservation.release();
         const slot = try self.allocator.create(AcceptSlot);
         errdefer self.allocator.destroy(slot);
-        slot.* = .{};
         if (!self.acceptor.running) {
             if (self.acceptor.wake == null) {
-                self.acceptor.wake = std.Io.Threaded.pipe2(.{ .CLOEXEC = true }) catch return error.Io;
+                self.acceptor.wake = std.Io.Threaded.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true }) catch return error.Io;
             }
-            setNonBlocking(bound.server.socket.handle) catch return error.Io;
+            setBlockingMode(bound.server.socket.handle, .non_blocking) catch return error.Io;
             self.retainRef();
             self.acceptor.running = true;
             self.acceptor.stop = false;
@@ -672,6 +734,7 @@ pub const ListenerCell = struct {
             };
             thread.detach();
         }
+        slot.* = .{ .reservation = reservation.take() };
         if (self.slots_last) |last| {
             last.next = slot;
             slot.previous = last;
@@ -687,7 +750,7 @@ pub const ListenerCell = struct {
     }
 
     /// Take the socket filled into this slot, build the connection cell
-    /// attached to `scope`, and publish its port. A filled slot yields a
+    /// attached to `scope`, and publish its port. A ready slot yields a
     /// connection even after the listener closed: the accepted socket is
     /// independent of the listening one.
     pub fn pollAccept(
@@ -697,8 +760,8 @@ pub const ListenerCell = struct {
         scope: *scheduler_api.TaskScope,
     ) error{OutOfMemory}!AcceptProgress {
         std.Io.Threaded.mutexLock(&self.mutex);
-        const accepted, const local = switch (slot.outcome) {
-            .unfilled => {
+        const accepted = switch (slot.state) {
+            .waiting => {
                 std.Io.Threaded.mutexUnlock(&self.mutex);
                 return .pending;
             },
@@ -706,36 +769,31 @@ pub const ListenerCell = struct {
                 std.Io.Threaded.mutexUnlock(&self.mutex);
                 return .closed;
             },
-            .resources => {
+            .failed => |failure| {
                 std.Io.Threaded.mutexUnlock(&self.mutex);
-                return .resources;
+                return switch (failure) {
+                    .resources => .resources,
+                    .io => .io,
+                };
             },
-            .io, .taken => {
+            .taken => {
                 std.Io.Threaded.mutexUnlock(&self.mutex);
                 return .io;
             },
-            .socket => |socket| taken: {
-                slot.outcome = .taken;
-                std.debug.assert(slot.reservation_held);
-                slot.reservation_held = false;
-                break :taken .{ socket, self.recordedAddressLocked() };
+            .ready => |ready| taken: {
+                slot.state = .taken;
+                break :taken ready;
             },
         };
         std.Io.Threaded.mutexUnlock(&self.mutex);
-        // From here the reservation and the descriptor belong to the
-        // connection being built; every failure releases both exactly once.
-        return ConnectionCell.publish(self.owner, accepted.fd, accepted.peer, local, scheduler, scope);
+        // The descriptor and the reservation now belong to the connection
+        // being published; every failure inside releases both exactly once.
+        return ConnectionCell.publish(self.owner, accepted, scheduler, scope);
     }
 
-    fn recordedAddressLocked(self: *ListenerCell) IpAddress {
-        return switch (self.state) {
-            .bound => |bound| bound.address,
-            .closed => |address| address,
-        };
-    }
-
-    /// Release the slot and its reservation; a filled, untaken socket is
-    /// closed here, which is how a cancelled accept never leaks a connection.
+    /// Release the slot and whatever it still holds: a waiting or failed slot
+    /// releases its reservation, a ready slot closes its socket and releases
+    /// its reservation, a taken slot owns nothing.
     pub fn endAccept(self: *ListenerCell, slot: *AcceptSlot) void {
         std.Io.Threaded.mutexLock(&self.mutex);
         std.debug.assert(slot.linked);
@@ -744,20 +802,21 @@ pub const ListenerCell = struct {
         slot.linked = false;
         std.debug.assert(self.demand != 0);
         self.demand -= 1;
-        const orphan: ?posix.fd_t = switch (slot.outcome) {
-            .socket => |socket| socket.fd,
-            else => null,
-        };
-        if (slot.reservation_held) self.owner.releaseConnection();
+        var orphan: ?AcceptedSocket = null;
+        switch (slot.state) {
+            .ready => |ready| orphan = ready,
+            .waiting, .failed, .closed, .taken => {},
+        }
+        slot.reservation.release();
         std.Io.Threaded.mutexUnlock(&self.mutex);
-        if (orphan) |fd| std.Io.Threaded.closeFd(fd);
+        if (orphan) |*accepted| accepted.deinit();
         self.allocator.destroy(slot);
     }
 
-    fn firstUnfilledLocked(self: *ListenerCell) ?*AcceptSlot {
+    fn firstWaitingLocked(self: *ListenerCell) ?*AcceptSlot {
         var slot = self.slots_first;
         while (slot) |current| : (slot = current.next) {
-            if (current.outcome == .unfilled) return current;
+            if (current.state == .waiting) return current;
         }
         return null;
     }
@@ -765,7 +824,7 @@ pub const ListenerCell = struct {
     fn acceptorMain(self: *ListenerCell) void {
         while (true) {
             std.Io.Threaded.mutexLock(&self.mutex);
-            while (!self.acceptor.stop and self.state == .bound and self.firstUnfilledLocked() == null)
+            while (!self.acceptor.stop and self.state == .bound and self.firstWaitingLocked() == null)
                 self.changed.waitUncancelable(blockingIo(), &self.mutex);
             if (self.acceptor.stop or self.state != .bound) {
                 std.Io.Threaded.mutexUnlock(&self.mutex);
@@ -780,50 +839,12 @@ pub const ListenerCell = struct {
                 .{ .fd = wake_fd, .events = posix.POLL.IN, .revents = 0 },
             };
             _ = posix.poll(&fds, -1) catch {
-                self.fillFirstUnfilled(.io);
+                self.failFirstWaiting(.io);
                 break;
             };
             if (fds[1].revents != 0) break;
             if (fds[0].revents == 0) continue;
-
-            // SAFETY: accept writes the peer address into `storage` before it is
-            // read, and nothing reads it on any failure path.
-            var storage: std.Io.Threaded.PosixAddress = undefined;
-            var length: posix.socklen_t = @sizeOf(std.Io.Threaded.PosixAddress);
-            const rc = if (builtin.os.tag == .linux)
-                posix.system.accept4(listen_fd, &storage.any, &length, posix.SOCK.CLOEXEC)
-            else
-                posix.system.accept(listen_fd, &storage.any, &length);
-            switch (posix.errno(rc)) {
-                .SUCCESS => {
-                    const fd: posix.fd_t = @intCast(rc);
-                    if (builtin.os.tag != .linux) setCloexec(fd) catch {
-                        std.Io.Threaded.closeFd(fd);
-                        self.fillFirstUnfilled(.io);
-                        continue;
-                    };
-                    setBlocking(fd) catch {
-                        std.Io.Threaded.closeFd(fd);
-                        self.fillFirstUnfilled(.io);
-                        continue;
-                    };
-                    const peer = std.Io.Threaded.addressFromPosix(&storage);
-                    std.Io.Threaded.mutexLock(&self.mutex);
-                    if (self.firstUnfilledLocked()) |slot| {
-                        slot.outcome = .{ .socket = .{ .fd = fd, .peer = peer } };
-                        self.waits.notifyLocked(self);
-                        std.Io.Threaded.mutexUnlock(&self.mutex);
-                    } else {
-                        // Every acceptor was cancelled between poll and
-                        // accept; the connection has no owner.
-                        std.Io.Threaded.mutexUnlock(&self.mutex);
-                        std.Io.Threaded.closeFd(fd);
-                    }
-                },
-                .AGAIN, .INTR, .CONNABORTED => continue,
-                .MFILE, .NFILE, .NOBUFS, .NOMEM => self.fillFirstUnfilled(.resources),
-                else => self.fillFirstUnfilled(.io),
-            }
+            self.acceptOneLocked();
         }
         std.Io.Threaded.mutexLock(&self.mutex);
         self.acceptor.running = false;
@@ -832,15 +853,59 @@ pub const ListenerCell = struct {
         self.releaseRef();
     }
 
-    fn fillFirstUnfilled(self: *ListenerCell, failure: enum { resources, io }) void {
+    /// Accept one connection into the first waiting slot, or accept nothing.
+    /// The syscall runs under the listener mutex so `endAccept` cannot remove
+    /// the last slot between the readiness report and the accept: either the
+    /// cancellation wins and the connection stays in the kernel backlog for
+    /// the next accept, or the accept wins and the socket belongs to that
+    /// slot. The listening socket is non-blocking, so the locked syscall is
+    /// bounded.
+    fn acceptOneLocked(self: *ListenerCell) void {
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        const slot = self.firstUnfilledLocked() orelse return;
-        slot.outcome = switch (failure) {
-            .resources => .resources,
-            .io => .io,
+        const slot = self.firstWaitingLocked() orelse return;
+        const listen_fd = switch (self.state) {
+            .bound => |bound| bound.server.socket.handle,
+            .closed => return,
         };
+        // SAFETY: accept writes the peer address into `storage` before it is
+        // read, and nothing reads it on any failure path.
+        var storage: std.Io.Threaded.PosixAddress = undefined;
+        var length: posix.socklen_t = @sizeOf(std.Io.Threaded.PosixAddress);
+        const rc = if (builtin.os.tag == .linux)
+            posix.system.accept4(listen_fd, &storage.any, &length, posix.SOCK.CLOEXEC)
+        else
+            posix.system.accept(listen_fd, &storage.any, &length);
+        switch (posix.errno(rc)) {
+            .SUCCESS => {},
+            .AGAIN, .INTR, .CONNABORTED => return,
+            .MFILE, .NFILE, .NOBUFS, .NOMEM => return self.failSlotLocked(slot, .resources),
+            else => return self.failSlotLocked(slot, .io),
+        }
+        var socket: OwnedSocket = .{ .fd = @intCast(rc) };
+        const peer = std.Io.Threaded.addressFromPosix(&storage);
+        const local = prepareAccepted(socket.fd.?) catch {
+            socket.close();
+            return self.failSlotLocked(slot, .io);
+        };
+        slot.state = .{ .ready = .{
+            .socket = socket,
+            .reservation = slot.reservation.take(),
+            .endpoints = .{ .local = local, .peer = peer },
+        } };
         self.waits.notifyLocked(self);
+    }
+
+    fn failSlotLocked(self: *ListenerCell, slot: *AcceptSlot, failure: AcceptFailure) void {
+        slot.state = .{ .failed = failure };
+        self.waits.notifyLocked(self);
+    }
+
+    fn failFirstWaiting(self: *ListenerCell, failure: AcceptFailure) void {
+        std.Io.Threaded.mutexLock(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        const slot = self.firstWaitingLocked() orelse return;
+        self.failSlotLocked(slot, failure);
     }
 };
 
@@ -848,15 +913,18 @@ fn acceptorThreadMain(cell: *ListenerCell) void {
     cell.acceptorMain();
 }
 
-fn setNonBlocking(fd: posix.fd_t) error{Io}!void {
-    return setBlockingMode(fd, .non_blocking);
-}
-
-/// BSD kernels hand an accepted socket the listening socket's O_NONBLOCK, and
-/// the controller threads rely on blocking reads and writes, so every accepted
-/// descriptor is switched back explicitly.
-fn setBlocking(fd: posix.fd_t) error{Io}!void {
-    return setBlockingMode(fd, .blocking);
+/// Make an accepted descriptor close-on-exec and non-blocking (BSD kernels
+/// inherit the listener's flags, Linux does not; both are set explicitly) and
+/// read back its local endpoint.
+fn prepareAccepted(fd: posix.fd_t) error{Io}!IpAddress {
+    if (builtin.os.tag != .linux) try setCloexec(fd);
+    try setBlockingMode(fd, .non_blocking);
+    // SAFETY: getsockname fills `storage` before it is read; a failure
+    // returns before any read.
+    var storage: std.Io.Threaded.PosixAddress = undefined;
+    var length: posix.socklen_t = @sizeOf(std.Io.Threaded.PosixAddress);
+    if (posix.system.getsockname(fd, &storage.any, &length) != 0) return error.Io;
+    return std.Io.Threaded.addressFromPosix(&storage);
 }
 
 fn setBlockingMode(fd: posix.fd_t, mode: enum { blocking, non_blocking }) error{Io}!void {
@@ -874,6 +942,22 @@ fn setBlockingMode(fd: posix.fd_t, mode: enum { blocking, non_blocking }) error{
 fn setCloexec(fd: posix.fd_t) error{Io}!void {
     if (posix.errno(posix.system.fcntl(fd, posix.F.SETFD, @as(usize, posix.FD_CLOEXEC))) != .SUCCESS)
         return error.Io;
+}
+
+/// Wake a controller blocked in `poll`. The pipe is non-blocking; a full pipe
+/// already carries a pending wake, so `EAGAIN` needs nothing.
+fn signalPipe(write_end: posix.fd_t) void {
+    const byte = [_]u8{0};
+    _ = posix.system.write(write_end, &byte, 1);
+}
+
+fn drainPipe(read_end: posix.fd_t) void {
+    var sink: [64]u8 = undefined;
+    while (true) {
+        const rc = posix.system.read(read_end, &sink, sink.len);
+        if (posix.errno(rc) != .SUCCESS or rc == 0) return;
+        if (@as(usize, @intCast(rc)) < sink.len) return;
+    }
 }
 
 const WriteNode = struct {
@@ -896,75 +980,84 @@ fn writePermit(node: *WriteNode) *WritePermit {
 
 const readiness_read: u64 = 1;
 
-/// One accepted TCP connection. Phases are exhaustive: `open` accepts reads
-/// and writes; `closing` refuses new writes while the writer drains queued
-/// bytes and then shuts the socket down; `closed` is published by the final
-/// controller lease after the descriptor is closed and the quota released.
+/// Why a connection can no longer carry bytes in a direction.
+pub const Failure = enum { closed, reset, io };
+
+pub const EndpointKind = enum { local, peer };
+
+pub const EndpointObservation = union(enum) {
+    available: IpAddress,
+    closed: IpAddress,
+};
+
+/// One accepted TCP connection with exactly one controller thread. The
+/// controller owns the descriptor, the quota reservation, and the scope
+/// membership token from the moment it starts until it publishes `terminal`;
+/// scheduler workers touch only the rings, the flags, and the wait list. A
+/// non-blocking socket and a wake pipe let one `poll` serve both directions,
+/// so there is no second thread to race the first one's cleanup.
 pub const ConnectionCell = struct {
     allocator: std.mem.Allocator,
-    io: std.Io,
-    owner: *NetOwner,
     identity: u64,
     refs: std.atomic.Value(usize) = .init(1),
     mutex: std.Io.Mutex = .init,
-    changed: std.Io.Condition = .init,
-    phase: Phase = .open,
-    socket: posix.fd_t,
-    peer: IpAddress,
-    local: IpAddress,
+    lifecycle: Lifecycle = .prepared,
+    socket: OwnedSocket,
+    reservation: ConnectionReservation,
+    endpoints: Endpoints,
+    wake: [2]posix.fd_t,
     receive: Ring,
     send: Ring,
     reader_active: bool = false,
-    reader_done: bool = false,
-    writer_done: bool = false,
-    /// Set by `close` and `abort`: the program or its scope ended the
-    /// connection, so later reads and writes report `closed` rather than
-    /// whatever the peer did afterwards.
-    closed_locally: bool = false,
-    discard_receive: bool = false,
-    peer_reset: bool = false,
-    io_failed: bool = false,
-    shutdown_issued: bool = false,
+    /// The peer has finished sending; queued bytes remain readable.
+    peer_eof: bool = false,
+    /// The socket failed; set once, never cleared.
+    failure: ?Failure = null,
     write_first: ?*WriteNode = null,
     write_last: ?*WriteNode = null,
     waits: WaitList(ConnectionCell) = .{},
-    leases: usize = 0,
     membership: ?external.ScopeMembership = null,
 
-    const Phase = enum { open, closing, closed };
+    const Lifecycle = union(enum) {
+        /// Allocated; no thread exists. The scope may already hold the member
+        /// (attachment and the start decision happen under one lock hold).
+        prepared,
+        /// The controller thread owns the socket.
+        running,
+        /// A stop was requested; the controller finishes and finalizes.
+        stopping: StopReason,
+        /// The descriptor is closed and the reservation released.
+        terminal: StopReason,
+    };
+
+    const StopReason = enum {
+        /// `close`: deliver queued bytes, then shut down.
+        close,
+        /// Scope cancellation or a publication failure: discard and shut down.
+        abort,
+        /// The socket failed; `failure` names why, and reads and writes
+        /// report that reason rather than `closed`.
+        failed,
+    };
+
     const Waits = WaitList(ConnectionCell);
 
-    /// Build the cell around an accepted descriptor, start both controller
-    /// threads, attach to the accepting scope, and publish the port. Owns the
-    /// descriptor and the caller's connection reservation on every path.
+    /// Build the cell, attach it to the accepting scope, start the controller,
+    /// and publish the port, in that order, so no thread exists before the
+    /// scope can wait for it. Owns `accepted` on every path.
     fn publish(
         owner: *NetOwner,
-        fd: posix.fd_t,
-        peer: IpAddress,
-        local: IpAddress,
+        accepted: AcceptedSocket,
         scheduler: *const scheduler_api.WorkerScheduler,
         scope: *scheduler_api.TaskScope,
     ) error{OutOfMemory}!AcceptProgress {
-        const cell = create(owner, fd, peer, local) catch |err| {
-            std.Io.Threaded.closeFd(fd);
-            owner.releaseConnection();
-            return err;
+        const cell = prepare(owner, accepted) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Resources => return .resources,
         };
-        // The reader lease is taken before the thread exists so a spawn
-        // failure has nothing to unwind but the lease itself.
-        if (!cell.startThread(readerThreadMain)) {
-            cell.retireWithoutThreads();
-            return .resources;
-        }
-        if (!cell.startThread(writerThreadMain)) {
-            cell.abort();
-            cell.releaseRef();
-            return .resources;
-        }
         const member = external.scopeMember(ConnectionCell, cell);
         const membership = scheduler.attachExternal(scope, member) catch |err| {
-            cell.abort();
-            cell.releaseRef();
+            cell.retireUnstarted(.abort);
             return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 error.ScopeClosing => .scope_closing,
@@ -972,9 +1065,30 @@ pub const ConnectionCell = struct {
         };
         std.Io.Threaded.mutexLock(&cell.mutex);
         cell.membership = membership;
-        const already_final = cell.leases == 0;
-        std.Io.Threaded.mutexUnlock(&cell.mutex);
-        if (already_final) cell.detachMembershipNow();
+        // The scope may have started cancelling between the attach and this
+        // lock; then no thread starts and the cell retires here, so the scope
+        // never waits on a controller that does not exist.
+        if (cell.lifecycle == .stopping) {
+            std.Io.Threaded.mutexUnlock(&cell.mutex);
+            cell.retireUnstarted(.abort);
+            return .scope_closing;
+        }
+        std.debug.assert(cell.lifecycle == .prepared);
+        // Start under the lock: a cancellation from here on sees `running`
+        // and signals the controller through the wake pipe.
+        cell.retainRef();
+        cell.lifecycle = .running;
+        const spawned = std.Thread.spawn(.{}, controllerThreadMain, .{cell}) catch null;
+        if (spawned) |thread| {
+            thread.detach();
+            std.Io.Threaded.mutexUnlock(&cell.mutex);
+        } else {
+            cell.lifecycle = .prepared;
+            std.Io.Threaded.mutexUnlock(&cell.mutex);
+            cell.releaseRef();
+            cell.retireUnstarted(.abort);
+            return .resources;
+        }
         const port = heap.createPort(ConnectionCell, owner.allocator, cell.identity, cell) catch {
             cell.abort();
             cell.releaseRef();
@@ -983,52 +1097,58 @@ pub const ConnectionCell = struct {
         return .{ .accepted = port };
     }
 
-    fn create(owner: *NetOwner, fd: posix.fd_t, peer: IpAddress, local: IpAddress) error{OutOfMemory}!*ConnectionCell {
+    fn prepare(owner: *NetOwner, accepted_value: AcceptedSocket) error{ OutOfMemory, Resources }!*ConnectionCell {
+        var accepted = accepted_value;
+        errdefer accepted.deinit();
         const cell = try owner.allocator.create(ConnectionCell);
         errdefer owner.allocator.destroy(cell);
         const receive = try owner.allocator.alloc(u8, owner.policy.limits.receive_capacity);
         errdefer owner.allocator.free(receive);
         const send = try owner.allocator.alloc(u8, owner.policy.limits.send_capacity);
+        errdefer owner.allocator.free(send);
+        const wake = std.Io.Threaded.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true }) catch return error.Resources;
         cell.* = .{
             .allocator = owner.allocator,
-            .io = owner.io,
-            .owner = owner,
             .identity = owner.next_identity.fetchAdd(1, .monotonic),
-            .socket = fd,
-            .peer = peer,
-            .local = local,
+            .socket = accepted.socket,
+            .reservation = accepted.reservation,
+            .endpoints = accepted.endpoints,
+            .wake = wake,
             .receive = .{ .bytes = receive },
             .send = .{ .bytes = send },
         };
         return cell;
     }
 
-    /// Reclaim a cell no thread ever ran: close the descriptor, release the
-    /// reservation, and drop the initial reference.
-    fn retireWithoutThreads(self: *ConnectionCell) void {
+    /// Finish a cell whose controller never started: close everything,
+    /// publish `terminal`, detach any membership, and drop the initial
+    /// reference.
+    fn retireUnstarted(self: *ConnectionCell, reason: StopReason) void {
         std.Io.Threaded.mutexLock(&self.mutex);
-        std.debug.assert(self.leases == 0 and self.phase == .open);
-        std.Io.Threaded.closeFd(self.socket);
-        self.owner.releaseConnection();
-        self.phase = .closed;
+        std.debug.assert(self.lifecycle != .running);
+        const membership = self.finalizeLocked(reason);
         std.Io.Threaded.mutexUnlock(&self.mutex);
+        if (membership) |token| {
+            var owned = token;
+            owned.detach();
+        }
         self.releaseRef();
     }
 
-    fn startThread(self: *ConnectionCell, comptime function: anytype) bool {
-        std.Io.Threaded.mutexLock(&self.mutex);
-        self.leases += 1;
-        std.Io.Threaded.mutexUnlock(&self.mutex);
-        self.retainRef();
-        const thread = std.Thread.spawn(.{}, function, .{self}) catch {
-            std.Io.Threaded.mutexLock(&self.mutex);
-            self.leases -= 1;
-            std.Io.Threaded.mutexUnlock(&self.mutex);
-            self.releaseRef();
-            return false;
-        };
-        thread.detach();
-        return true;
+    /// Close the descriptor and the wake pipe, release the reservation,
+    /// publish `terminal`, wake every waiter, and hand back the membership
+    /// token for the caller to detach outside the lock. Runs exactly once.
+    fn finalizeLocked(self: *ConnectionCell, reason: StopReason) ?external.ScopeMembership {
+        std.debug.assert(self.lifecycle != .terminal);
+        self.socket.close();
+        self.reservation.release();
+        std.Io.Threaded.closeFd(self.wake[0]);
+        std.Io.Threaded.closeFd(self.wake[1]);
+        self.lifecycle = .{ .terminal = reason };
+        self.waits.notifyLocked(self);
+        const membership = self.membership;
+        self.membership = null;
+        return membership;
     }
 
     fn retainRef(self: *ConnectionCell) void {
@@ -1041,7 +1161,7 @@ pub const ConnectionCell = struct {
         std.debug.assert(old != 0);
         if (old != 1) return;
         _ = self.refs.load(.acquire);
-        std.debug.assert(self.phase == .closed);
+        std.debug.assert(self.lifecycle == .terminal);
         std.debug.assert(self.membership == null);
         std.debug.assert(self.waits.first == null and self.write_first == null);
         self.allocator.free(self.receive.bytes);
@@ -1061,8 +1181,7 @@ pub const ConnectionCell = struct {
         self.releaseRef();
     }
 
-    /// Scope closure: discard queued output, shut the socket down now so
-    /// both threads return, and let the final lease publish `closed`.
+    /// Scope closure: discard queued output and shut the socket down now.
     pub fn cancelExternalMember(self: *ConnectionCell) void {
         self.abort();
     }
@@ -1100,19 +1219,19 @@ pub const ConnectionCell = struct {
         return self.receive.bytes.len;
     }
 
+    /// Queued bytes first; then the reason nothing more can arrive; then EOF;
+    /// otherwise pending. Local closure outranks a later peer failure.
     pub fn read(self: *ConnectionCell, destination: []u8) ReadProgress {
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
         if (self.receive.len != 0) {
+            const was_full = self.receive.free() == 0;
             const count = self.receive.pop(destination);
-            self.changed.broadcast(blockingIo());
+            if (was_full) self.signalLocked();
             return .{ .data = count };
         }
-        if (self.closed_locally) return .closed;
-        if (self.peer_reset) return .reset;
-        if (self.io_failed) return .io;
-        if (self.reader_done) return .eof;
-        if (self.phase != .open) return .closed;
+        if (self.failureLocked()) |failure| return .{ .failed = failure };
+        if (self.peer_eof) return .eof;
         return .pending;
     }
 
@@ -1141,14 +1260,11 @@ pub const ConnectionCell = struct {
         std.debug.assert(node.cell == self and node.linked);
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        if (self.closed_locally) return .closed;
-        if (self.peer_reset) return .reset;
-        if (self.io_failed) return .io;
-        if (self.phase != .open) return .closed;
+        if (self.failureLocked()) |failure| return .{ .failed = failure };
         if (!node.active or self.send.free() == 0) return .pending;
         const count = @min(bytes.len, self.send.free());
         self.send.push(bytes[0..count]);
-        self.changed.broadcast(blockingIo());
+        self.signalLocked();
         return .{ .written = count };
     }
 
@@ -1182,172 +1298,173 @@ pub const ConnectionCell = struct {
         self.allocator.destroy(node);
     }
 
-    /// Graceful close: refuse new writes, drain queued bytes, then shut the
-    /// socket down. Idempotent. Queued input is discarded because no read can
-    /// observe it after this transition.
+    /// Graceful close: refuse new writes, let the controller deliver queued
+    /// bytes, then shut the socket down. Idempotent. Queued input is dropped
+    /// because no read can observe it after this transition.
     pub fn close(self: *ConnectionCell) void {
-        std.Io.Threaded.mutexLock(&self.mutex);
-        if (self.phase == .open) {
-            self.phase = .closing;
-            self.closed_locally = true;
-            self.discard_receive = true;
-            self.receive.discard();
-            // With no writer left to drain the ring, nothing else would ever
-            // shut the socket down and release a blocked reader.
-            if (self.writer_done) self.shutdownLocked();
-            self.changed.broadcast(blockingIo());
-            self.waits.notifyLocked(self);
-        }
-        std.Io.Threaded.mutexUnlock(&self.mutex);
+        self.requestStop(.close);
     }
 
     fn abort(self: *ConnectionCell) void {
+        self.requestStop(.abort);
+    }
+
+    fn requestStop(self: *ConnectionCell, reason: StopReason) void {
         std.Io.Threaded.mutexLock(&self.mutex);
-        if (self.phase != .closed) {
-            if (self.phase == .open) self.phase = .closing;
-            self.closed_locally = true;
-            self.discard_receive = true;
-            self.receive.discard();
-            self.send.discard();
-            self.shutdownLocked();
-            self.changed.broadcast(blockingIo());
-            self.waits.notifyLocked(self);
+        switch (self.lifecycle) {
+            // No controller exists yet: the publisher, which is about to take
+            // this lock, observes `stopping` and retires the cell itself.
+            .prepared => self.lifecycle = .{ .stopping = reason },
+            .running => {
+                self.lifecycle = .{ .stopping = reason };
+                self.receive.discard();
+                if (reason == .abort) self.send.discard();
+                self.signalLocked();
+                self.waits.notifyLocked(self);
+            },
+            .stopping => |current| if (reason == .abort and current == .close) {
+                self.lifecycle = .{ .stopping = .abort };
+                self.send.discard();
+                self.signalLocked();
+                self.waits.notifyLocked(self);
+            },
+            .terminal => {},
         }
         std.Io.Threaded.mutexUnlock(&self.mutex);
     }
 
-    fn shutdownLocked(self: *ConnectionCell) void {
-        if (self.shutdown_issued or self.phase == .closed) return;
-        self.shutdown_issued = true;
-        _ = posix.system.shutdown(self.socket, posix.SHUT.RDWR);
+    fn signalLocked(self: *ConnectionCell) void {
+        if (self.lifecycle == .running or self.lifecycle == .stopping) signalPipe(self.wake[1]);
     }
 
-    pub fn peerAddress(self: *ConnectionCell) ?IpAddress {
-        std.Io.Threaded.mutexLock(&self.mutex);
-        defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        return if (self.closed_locally) null else self.peer;
+    /// Why no more bytes can move, or null while the connection is live.
+    fn failureLocked(self: *const ConnectionCell) ?Failure {
+        switch (self.lifecycle) {
+            .stopping, .terminal => |reason| switch (reason) {
+                .close, .abort => return .closed,
+                .failed => return self.failure orelse .io,
+            },
+            .prepared, .running => {},
+        }
+        return self.failure;
     }
 
-    pub fn localAddress(self: *ConnectionCell) ?IpAddress {
+    pub fn observeEndpoint(self: *ConnectionCell, kind: EndpointKind) EndpointObservation {
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        return if (self.closed_locally) null else self.local;
-    }
-
-    /// The peer this connection was accepted from, open or closed.
-    pub fn recordedPeer(self: *ConnectionCell) IpAddress {
-        std.Io.Threaded.mutexLock(&self.mutex);
-        defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        return self.peer;
+        const address = switch (kind) {
+            .local => self.endpoints.local,
+            .peer => self.endpoints.peer,
+        };
+        return if (self.failureLocked() == null) .{ .available = address } else .{ .closed = address };
     }
 
     fn readyLocked(self: *ConnectionCell, key: u64) bool {
         if (key == readiness_read)
-            return self.receive.len != 0 or self.reader_done or self.peer_reset or
-                self.io_failed or self.phase != .open;
+            return self.receive.len != 0 or self.peer_eof or self.failureLocked() != null;
         const node: *const WriteNode = @ptrFromInt(key);
-        return !node.linked or (node.active and self.send.free() != 0) or
-            self.phase != .open or self.peer_reset or self.io_failed;
+        return !node.linked or (node.active and self.send.free() != 0) or self.failureLocked() != null;
     }
 
-    fn wakeReasonLocked(self: *ConnectionCell, key: u64) external.Wake {
-        _ = key;
-        return if (self.io_failed) .io else .ready;
+    fn noteFailureLocked(self: *ConnectionCell, code: posix.E) void {
+        if (self.failure != null) return;
+        self.failure = switch (code) {
+            .CONNRESET, .PIPE, .NOTCONN => .reset,
+            else => .io,
+        };
+        self.send.discard();
+        self.waits.notifyLocked(self);
     }
 
-    fn noteFailureLocked(self: *ConnectionCell, err: anyerror) void {
-        switch (err) {
-            error.ConnectionResetByPeer, error.SocketUnconnected, error.ConnectionRefused => self.peer_reset = true,
-            else => self.io_failed = true,
-        }
+    const Interest = struct { read: bool, write: bool, finalize: ?StopReason };
+
+    fn interestLocked(self: *ConnectionCell) Interest {
+        return switch (self.lifecycle) {
+            .running => if (self.failure != null)
+                .{ .read = false, .write = false, .finalize = .failed }
+            else
+                .{ .read = !self.peer_eof and self.receive.free() != 0, .write = self.send.len != 0, .finalize = null },
+            .stopping => |reason| switch (reason) {
+                .abort, .failed => .{ .read = false, .write = false, .finalize = reason },
+                .close => if (self.send.len == 0 or self.failure != null)
+                    .{ .read = false, .write = false, .finalize = .close }
+                else
+                    .{ .read = false, .write = true, .finalize = null },
+            },
+            .prepared, .terminal => unreachable,
+        };
     }
 
-    fn readerMain(self: *ConnectionCell) void {
+    fn controllerMain(self: *ConnectionCell) void {
         var block: [4096]u8 = undefined;
-        while (true) {
+        const finalize_reason: StopReason = loop: while (true) {
             std.Io.Threaded.mutexLock(&self.mutex);
-            while (self.receive.free() == 0 and !self.discard_receive)
-                self.changed.waitUncancelable(blockingIo(), &self.mutex);
-            const discarding = self.discard_receive;
-            const capacity = if (discarding) block.len else @min(block.len, self.receive.free());
+            const interest = self.interestLocked();
+            const socket_fd = self.socket.fd.?;
+            const wake_fd = self.wake[0];
+            const read_capacity = @min(block.len, self.receive.free());
             std.Io.Threaded.mutexUnlock(&self.mutex);
-            var chunks = [_][]u8{block[0..capacity]};
-            const count = self.io.vtable.netRead(self.io.userdata, self.socket, &chunks) catch |err| {
-                std.Io.Threaded.mutexLock(&self.mutex);
-                self.noteFailureLocked(err);
-                std.Io.Threaded.mutexUnlock(&self.mutex);
-                break;
+            if (interest.finalize) |reason| break :loop reason;
+
+            var events: i16 = 0;
+            if (interest.read) events |= posix.POLL.IN;
+            if (interest.write) events |= posix.POLL.OUT;
+            var fds = [_]posix.pollfd{
+                .{ .fd = wake_fd, .events = posix.POLL.IN, .revents = 0 },
+                .{ .fd = if (events != 0) socket_fd else -1, .events = events, .revents = 0 },
             };
-            if (count == 0) break;
-            std.Io.Threaded.mutexLock(&self.mutex);
-            if (!self.discard_receive) self.receive.push(block[0..count]);
-            self.waits.notifyLocked(self);
-            std.Io.Threaded.mutexUnlock(&self.mutex);
-        }
-        std.Io.Threaded.mutexLock(&self.mutex);
-        self.reader_done = true;
-        self.changed.broadcast(blockingIo());
-        self.waits.notifyLocked(self);
-        std.Io.Threaded.mutexUnlock(&self.mutex);
-        self.releaseLease();
-    }
-
-    fn writerMain(self: *ConnectionCell) void {
-        var block: [4096]u8 = undefined;
-        while (true) {
-            std.Io.Threaded.mutexLock(&self.mutex);
-            while (self.send.len == 0 and self.phase == .open and !self.peer_reset and !self.io_failed)
-                self.changed.waitUncancelable(blockingIo(), &self.mutex);
-            if (self.send.len == 0 or self.peer_reset or self.io_failed) {
+            _ = posix.poll(&fds, -1) catch {
+                std.Io.Threaded.mutexLock(&self.mutex);
+                self.noteFailureLocked(.IO);
                 std.Io.Threaded.mutexUnlock(&self.mutex);
-                break;
+                continue;
+            };
+            if (fds[0].revents != 0) drainPipe(wake_fd);
+            const revents = fds[1].revents;
+            if (revents == 0) continue;
+            const exceptional = revents & (posix.POLL.ERR | posix.POLL.HUP | posix.POLL.NVAL) != 0;
+            if (interest.read and (revents & posix.POLL.IN != 0 or exceptional)) {
+                const rc = posix.system.read(socket_fd, &block, read_capacity);
+                std.Io.Threaded.mutexLock(&self.mutex);
+                switch (posix.errno(rc)) {
+                    .SUCCESS => if (rc == 0) {
+                        self.peer_eof = true;
+                        self.waits.notifyLocked(self);
+                    } else {
+                        if (self.lifecycle == .running) self.receive.push(block[0..@intCast(rc)]);
+                        self.waits.notifyLocked(self);
+                    },
+                    .AGAIN, .INTR => {},
+                    else => |code| self.noteFailureLocked(code),
+                }
+                std.Io.Threaded.mutexUnlock(&self.mutex);
             }
-            const count = self.send.pop(&block);
-            self.waits.notifyLocked(self);
-            std.Io.Threaded.mutexUnlock(&self.mutex);
-            var written: usize = 0;
-            const failed = while (written != count) {
-                const empty: []const u8 = &.{};
-                written += self.io.vtable.netWrite(self.io.userdata, self.socket, block[written..count], &.{empty}, 0) catch |err| {
+            if (interest.write and (revents & posix.POLL.OUT != 0 or exceptional)) {
+                std.Io.Threaded.mutexLock(&self.mutex);
+                const chunk = self.send.peek();
+                const count = @min(chunk.len, block.len);
+                @memcpy(block[0..count], chunk[0..count]);
+                std.Io.Threaded.mutexUnlock(&self.mutex);
+                if (count != 0) {
+                    const rc = posix.system.write(socket_fd, &block, count);
                     std.Io.Threaded.mutexLock(&self.mutex);
-                    self.noteFailureLocked(err);
-                    self.send.discard();
-                    self.waits.notifyLocked(self);
+                    switch (posix.errno(rc)) {
+                        .SUCCESS => {
+                            self.send.consume(@intCast(rc));
+                            self.waits.notifyLocked(self);
+                        },
+                        .AGAIN, .INTR => {},
+                        else => |code| self.noteFailureLocked(code),
+                    }
                     std.Io.Threaded.mutexUnlock(&self.mutex);
-                    break true;
-                };
-            } else false;
-            if (failed) break;
-        }
+                }
+            }
+        };
+        // Shut down before closing so the peer observes an orderly FIN (or
+        // RST for an abort with unread data) rather than a silent vanish.
+        _ = posix.system.shutdown(self.socket.fd.?, posix.SHUT.RDWR);
         std.Io.Threaded.mutexLock(&self.mutex);
-        // Draining finished (or can never finish): shut the socket down so
-        // the reader observes EOF and the peer sees the close.
-        if (self.phase != .open) self.shutdownLocked();
-        self.writer_done = true;
-        self.changed.broadcast(blockingIo());
-        self.waits.notifyLocked(self);
-        std.Io.Threaded.mutexUnlock(&self.mutex);
-        self.releaseLease();
-    }
-
-    /// Drop one controller lease. The final lease closes the descriptor,
-    /// releases the connection reservation, publishes `closed`, and detaches
-    /// scope membership, in that order, so scope quiescence cannot overtake
-    /// either thread.
-    fn releaseLease(self: *ConnectionCell) void {
-        var membership: ?external.ScopeMembership = null;
-        std.Io.Threaded.mutexLock(&self.mutex);
-        std.debug.assert(self.leases != 0);
-        self.leases -= 1;
-        const final = self.leases == 0;
-        if (final) {
-            std.Io.Threaded.closeFd(self.socket);
-            self.owner.releaseConnection();
-            self.phase = .closed;
-            self.waits.notifyLocked(self);
-            membership = self.membership;
-            self.membership = null;
-        }
+        const membership = self.finalizeLocked(finalize_reason);
         std.Io.Threaded.mutexUnlock(&self.mutex);
         if (membership) |token| {
             var owned = token;
@@ -1355,27 +1472,10 @@ pub const ConnectionCell = struct {
         }
         self.releaseRef();
     }
-
-    /// Both threads finished before `publish` stored the membership token;
-    /// detach it now so the scope never waits on a cell that is already closed.
-    fn detachMembershipNow(self: *ConnectionCell) void {
-        std.Io.Threaded.mutexLock(&self.mutex);
-        const membership = self.membership;
-        self.membership = null;
-        std.Io.Threaded.mutexUnlock(&self.mutex);
-        if (membership) |token| {
-            var owned = token;
-            owned.detach();
-        }
-    }
 };
 
-fn readerThreadMain(cell: *ConnectionCell) void {
-    cell.readerMain();
-}
-
-fn writerThreadMain(cell: *ConnectionCell) void {
-    cell.writerMain();
+fn controllerThreadMain(cell: *ConnectionCell) void {
+    cell.controllerMain();
 }
 
 pub fn listenFromUnit(
@@ -1506,11 +1606,68 @@ const LoopbackHarness = struct {
         self.owner.deinit();
         self.host.cleanup().drain();
     }
+
+    fn listen(self: *LoopbackHarness, address: IpAddress) !Value {
+        return self.owner.listen(self.runtime_scheduler.worker(), &self.root_scope, address);
+    }
+
+    /// Accept one connection through the slot protocol, waiting on its
+    /// readiness source first so the ordinals do not depend on timing.
+    fn acceptOne(self: *LoopbackHarness, listener: *ListenerCell, target: *TestTarget) !Value {
+        const slot = try listener.beginAccept();
+        var slot_owned = true;
+        defer if (slot_owned) listener.endAccept(slot);
+        try awaitSource(listener.acceptSource(slot), target);
+        const port = switch (try listener.pollAccept(slot, self.runtime_scheduler.worker(), &self.root_scope)) {
+            .accepted => |port_value| port_value,
+            else => return error.UnexpectedAcceptOutcome,
+        };
+        listener.endAccept(slot);
+        slot_owned = false;
+        return port;
+    }
 };
 
 fn connectLoopback(port: u16) !std.Io.net.Stream {
     const address: IpAddress = .{ .ip4 = .loopback(port) };
     return IpAddress.connect(&address, std.testing.io, .{ .mode = .stream });
+}
+
+fn readExact(connection: *ConnectionCell, target: *TestTarget, destination: []u8) !void {
+    var filled: usize = 0;
+    try connection.beginRead();
+    defer connection.endRead();
+    while (filled != destination.len) {
+        try awaitSource(connection.readSource(), target);
+        switch (connection.read(destination[filled..])) {
+            .data => |count| filled += count,
+            else => return error.UnexpectedReadOutcome,
+        }
+    }
+}
+
+fn writeAll(connection: *ConnectionCell, target: *TestTarget, bytes: []const u8) !void {
+    const permit = try connection.beginWrite();
+    var offset: usize = 0;
+    while (offset != bytes.len) {
+        switch (connection.write(permit, bytes[offset..])) {
+            .written => |count| offset += count,
+            .pending => try awaitSource(connection.writeSource(permit), target),
+            .failed => {
+                connection.abandonWrite(permit);
+                return error.UnexpectedWriteOutcome;
+            },
+        }
+    }
+    connection.finishWrite(permit);
+}
+
+fn waitForZeroConnections(owner: *NetOwner) !void {
+    var spins: usize = 0;
+    while (owner.live_connections.load(.acquire) != 0) : (spins += 1) {
+        if (spins == 100_000) return error.ConnectionNeverReleased;
+        try std.Thread.yield();
+    }
 }
 
 test "accepted connections exchange exact bytes, close gracefully, and release their reservation" {
@@ -1519,51 +1676,28 @@ test "accepted connections exchange exact bytes, close gracefully, and release t
     var harness: LoopbackHarness = undefined;
     try harness.init(std.testing.allocator, .{ .receive_capacity = 8, .send_capacity = 8 });
     defer harness.deinit();
-    const listener_port = try harness.owner.listen(harness.runtime_scheduler.worker(), &harness.root_scope, .{ .ip4 = .loopback(0) });
+    const listener_port = try harness.listen(.{ .ip4 = .loopback(0) });
     defer harness.host.domain().releaseValue(listener_port);
     const listener = fromValue(listener_port).?;
     const port = listener.localAddress().?.getPort();
 
-    const slot = try listener.beginAccept();
-    const peer = try connectLoopback(port);
     var target: TestTarget = .{};
-    try awaitSource(listener.acceptSource(slot), &target);
-    const connection_port = switch (try listener.pollAccept(slot, harness.runtime_scheduler.worker(), &harness.root_scope)) {
-        .accepted => |port_value| port_value,
-        else => return error.UnexpectedAcceptOutcome,
-    };
-    listener.endAccept(slot);
+    const peer = try connectLoopback(port);
+    const connection_port = try harness.acceptOne(listener, &target);
     defer harness.host.domain().releaseValue(connection_port);
     const connection = connectionFromValue(connection_port).?;
     try std.testing.expect(fromValue(connection_port) == null);
     try std.testing.expectEqual(@as(usize, 1), harness.owner.live_connections.load(.acquire));
+    try std.testing.expectEqual(port, connection.observeEndpoint(.local).available.getPort());
 
     var peer_writer = peer.writer(std.testing.io, &.{});
     try peer_writer.interface.writeAll("abcdefghij");
     var received: [10]u8 = undefined;
-    var filled: usize = 0;
-    try connection.beginRead();
-    while (filled != received.len) {
-        switch (connection.read(received[filled..])) {
-            .data => |count| filled += count,
-            .pending => try awaitSource(connection.readSource(), &target),
-            else => return error.UnexpectedReadOutcome,
-        }
-    }
-    connection.endRead();
+    try readExact(connection, &target, &received);
     try std.testing.expectEqualStrings("abcdefghij", &received);
 
-    const permit = try connection.beginWrite();
     const outgoing = "0123456789ab";
-    var offset: usize = 0;
-    while (offset != outgoing.len) {
-        switch (connection.write(permit, outgoing[offset..])) {
-            .written => |count| offset += count,
-            .pending => try awaitSource(connection.writeSource(permit), &target),
-            else => return error.UnexpectedWriteOutcome,
-        }
-    }
-    connection.finishWrite(permit);
+    try writeAll(connection, &target, outgoing);
     connection.close();
     connection.close();
     var peer_buffer: [64]u8 = undefined;
@@ -1574,16 +1708,94 @@ test "accepted connections exchange exact bytes, close gracefully, and release t
     try std.testing.expectError(error.EndOfStream, peer_reader.interface.takeByte());
     peer.close(std.testing.io);
 
-    // The final lease publishes closed and releases the reservation.
-    var settled = false;
-    var spins: usize = 0;
-    while (!settled and spins < 10_000) : (spins += 1) {
-        settled = harness.owner.live_connections.load(.acquire) == 0;
-        if (!settled) std.Thread.yield() catch {};
-    }
-    try std.testing.expect(settled);
-    try std.testing.expect(connection.peerAddress() == null);
-    try std.testing.expectEqual(ReadProgress.closed, connection.read(&received));
+    try waitForZeroConnections(&harness.owner);
+    try std.testing.expect(connection.observeEndpoint(.peer) == .closed);
+    try std.testing.expectEqual(ReadProgress{ .failed = .closed }, connection.read(&received));
+}
+
+test "a peer that closes at once yields a connection at EOF whose endpoints stay observable" {
+    // SAFETY: `init` assigns every field before any use, and `deinit` runs
+    // only after a successful `init`.
+    var harness: LoopbackHarness = undefined;
+    try harness.init(std.testing.allocator, .{});
+    defer harness.deinit();
+    const listener_port = try harness.listen(.{ .ip4 = .loopback(0) });
+    defer harness.host.domain().releaseValue(listener_port);
+    const listener = fromValue(listener_port).?;
+    var target: TestTarget = .{};
+    const peer = try connectLoopback(listener.localAddress().?.getPort());
+    peer.close(std.testing.io);
+    const connection_port = try harness.acceptOne(listener, &target);
+    defer harness.host.domain().releaseValue(connection_port);
+    const connection = connectionFromValue(connection_port).?;
+    try connection.beginRead();
+    try awaitSource(connection.readSource(), &target);
+    var scratch: [4]u8 = undefined;
+    try std.testing.expectEqual(ReadProgress.eof, connection.read(&scratch));
+    connection.endRead();
+    try std.testing.expect(connection.observeEndpoint(.peer) == .available);
+    // The controller stays alive until the program closes: EOF is not
+    // termination.
+    try std.testing.expectEqual(@as(usize, 1), harness.owner.live_connections.load(.acquire));
+    connection.close();
+    try waitForZeroConnections(&harness.owner);
+}
+
+test "a wildcard listener's connection reports the endpoint it was reached on" {
+    // SAFETY: `init` assigns every field before any use, and `deinit` runs
+    // only after a successful `init`.
+    var harness: LoopbackHarness = undefined;
+    try harness.init(std.testing.allocator, .{});
+    defer harness.deinit();
+    const listener_port = try harness.listen(.{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = 0 } });
+    defer harness.host.domain().releaseValue(listener_port);
+    const listener = fromValue(listener_port).?;
+    var target: TestTarget = .{};
+    const peer = try connectLoopback(listener.localAddress().?.getPort());
+    defer peer.close(std.testing.io);
+    const connection_port = try harness.acceptOne(listener, &target);
+    defer harness.host.domain().releaseValue(connection_port);
+    const connection = connectionFromValue(connection_port).?;
+    const local = connection.observeEndpoint(.local).available;
+    try std.testing.expectEqualSlices(u8, &.{ 127, 0, 0, 1 }, &local.ip4.bytes);
+    try std.testing.expectEqual(listener.localAddress().?.getPort(), local.getPort());
+    connection.close();
+    try waitForZeroConnections(&harness.owner);
+}
+
+test "a cancelled accept leaves a later connection in the backlog for the next accept" {
+    // SAFETY: `init` assigns every field before any use, and `deinit` runs
+    // only after a successful `init`.
+    var harness: LoopbackHarness = undefined;
+    try harness.init(std.testing.allocator, .{});
+    defer harness.deinit();
+    const listener_port = try harness.listen(.{ .ip4 = .loopback(0) });
+    defer harness.host.domain().releaseValue(listener_port);
+    const listener = fromValue(listener_port).?;
+    const port = listener.localAddress().?.getPort();
+
+    // Park an accept so the acceptor is in poll, then cancel it before any
+    // peer exists. The acceptor must not take the connection that follows.
+    const cancelled = try listener.beginAccept();
+    listener.endAccept(cancelled);
+    const peer = try connectLoopback(port);
+    var peer_writer = peer.writer(std.testing.io, &.{});
+    try peer_writer.interface.writeAll("x");
+    try peer_writer.interface.flush();
+
+    var target: TestTarget = .{};
+    const connection_port = try harness.acceptOne(listener, &target);
+    defer harness.host.domain().releaseValue(connection_port);
+    const connection = connectionFromValue(connection_port).?;
+    var received: [1]u8 = undefined;
+    try readExact(connection, &target, &received);
+    try std.testing.expectEqualStrings("x", &received);
+    connection.close();
+    var peer_buffer: [8]u8 = undefined;
+    var peer_reader = peer.reader(std.testing.io, &peer_buffer);
+    try std.testing.expectError(error.EndOfStream, peer_reader.interface.takeByte());
+    peer.close(std.testing.io);
+    try waitForZeroConnections(&harness.owner);
 }
 
 test "an accept cancelled after a peer connected closes the orphan and the listener closes synchronously" {
@@ -1592,7 +1804,7 @@ test "an accept cancelled after a peer connected closes the orphan and the liste
     var harness: LoopbackHarness = undefined;
     try harness.init(std.testing.allocator, .{});
     defer harness.deinit();
-    const listener_port = try harness.owner.listen(harness.runtime_scheduler.worker(), &harness.root_scope, .{ .ip4 = .loopback(0) });
+    const listener_port = try harness.listen(.{ .ip4 = .loopback(0) });
     defer harness.host.domain().releaseValue(listener_port);
     const listener = fromValue(listener_port).?;
     const port = listener.localAddress().?.getPort();
@@ -1661,43 +1873,20 @@ fn connectionLifecycle(allocator: std.mem.Allocator) !void {
     var harness: LoopbackHarness = undefined;
     try harness.init(allocator, .{ .receive_capacity = 8, .send_capacity = 8 });
     defer harness.deinit();
-    const listener_port = try harness.owner.listen(harness.runtime_scheduler.worker(), &harness.root_scope, .{ .ip4 = .loopback(0) });
+    const listener_port = try harness.listen(.{ .ip4 = .loopback(0) });
     defer harness.host.domain().releaseValue(listener_port);
     const listener = fromValue(listener_port).?;
     try peer.start(listener.localAddress().?.getPort());
 
-    const slot = try listener.beginAccept();
-    var slot_owned = true;
-    defer if (slot_owned) listener.endAccept(slot);
     var target: TestTarget = .{};
-    try awaitSource(listener.acceptSource(slot), &target);
-    const connection_port = switch (try listener.pollAccept(slot, harness.runtime_scheduler.worker(), &harness.root_scope)) {
-        .accepted => |port_value| port_value,
-        else => return error.UnexpectedAcceptOutcome,
-    };
-    listener.endAccept(slot);
-    slot_owned = false;
+    const connection_port = try harness.acceptOne(listener, &target);
     defer harness.host.domain().releaseValue(connection_port);
     const connection = connectionFromValue(connection_port).?;
 
-    try connection.beginRead();
-    defer connection.endRead();
-    try awaitSource(connection.readSource(), &target);
     var received: [2]u8 = undefined;
-    switch (connection.read(&received)) {
-        .data => |count| try std.testing.expectEqual(@as(usize, 2), count),
-        else => return error.UnexpectedReadOutcome,
-    }
+    try readExact(connection, &target, &received);
     try std.testing.expectEqualStrings("hi", &received);
-    const permit = try connection.beginWrite();
-    switch (connection.write(permit, "ok")) {
-        .written => |count| try std.testing.expectEqual(@as(usize, 2), count),
-        else => {
-            connection.abandonWrite(permit);
-            return error.UnexpectedWriteOutcome;
-        },
-    }
-    connection.finishWrite(permit);
+    try writeAll(connection, &target, "ok");
     connection.close();
 }
 

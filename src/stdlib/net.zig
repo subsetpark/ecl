@@ -234,6 +234,17 @@ fn pushAddress(evaluator: *Machine, address: net_port.IpAddress) MachineError!vo
     };
 }
 
+/// One locked observation of a connection endpoint: the address is pushed
+/// while the connection is live and attached to the `'closed` failure once it
+/// is not, so a closed `local-address` names the local end and a closed
+/// `peer-address` names the peer.
+fn pushEndpoint(evaluator: *Machine, cell: *net_port.ConnectionCell, kind: net_port.EndpointKind) MachineError!void {
+    return switch (cell.observeEndpoint(kind)) {
+        .available => |address| pushAddress(evaluator, address),
+        .closed => |address| failAddress(evaluator, .io, "connection is closed", address, .closed),
+    };
+}
+
 fn localAddress(evaluator: *Machine) MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
@@ -242,11 +253,7 @@ fn localAddress(evaluator: *Machine) MachineError!void {
             return failAddress(evaluator, .io, "listener is closed", cell.recordedAddress(), .closed);
         return pushAddress(evaluator, bound);
     }
-    if (net_port.connectionFromValue(item.borrow())) |cell| {
-        const local = cell.localAddress() orelse
-            return failAddress(evaluator, .io, "connection is closed", cell.recordedPeer(), .closed);
-        return pushAddress(evaluator, local);
-    }
+    if (net_port.connectionFromValue(item.borrow())) |cell| return pushEndpoint(evaluator, cell, .local);
     return evaluator.typeError("a network listener or connection");
 }
 
@@ -254,9 +261,19 @@ fn peerAddress(evaluator: *Machine) MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
     const cell = try connectionCell(evaluator, item.borrow());
-    const peer = cell.peerAddress() orelse
-        return failAddress(evaluator, .io, "connection is closed", cell.recordedPeer(), .closed);
-    return pushAddress(evaluator, peer);
+    return pushEndpoint(evaluator, cell, .peer);
+}
+
+/// A read or write can no longer proceed; the failure names the peer.
+fn failConnection(evaluator: *Machine, cell: *net_port.ConnectionCell, failure: net_port.Failure) MachineError {
+    const peer = switch (cell.observeEndpoint(.peer)) {
+        .available, .closed => |address| address,
+    };
+    return switch (failure) {
+        .closed => failAddress(evaluator, .io, "connection is closed", peer, .closed),
+        .reset => failAddress(evaluator, .io, "connection reset by peer", peer, .reset),
+        .io => failAddress(evaluator, .io, "connection failed", peer, .io),
+    };
 }
 
 fn close(evaluator: *Machine) MachineError!void {
@@ -373,9 +390,7 @@ const ReadDriver = struct {
                 try evaluator.park(.{ .external = self.cell.readSource() });
                 return .yielded;
             },
-            .closed => return failAddress(evaluator, .io, "connection is closed", self.cell.recordedPeer(), .closed),
-            .reset => return failAddress(evaluator, .io, "connection reset by peer", self.cell.recordedPeer(), .reset),
-            .io => return failAddress(evaluator, .io, "connection read failed", self.cell.recordedPeer(), .io),
+            .failed => |failure| return failConnection(evaluator, self.cell, failure),
             .eof => self.count = 0,
             .data => |count| self.count = count,
         };
@@ -457,9 +472,7 @@ const WriteDriver = struct {
                 self.offset += count;
                 break :progressed .yielded;
             },
-            .closed => failAddress(evaluator, .io, "connection is closed", self.cell.recordedPeer(), .closed),
-            .reset => failAddress(evaluator, .io, "connection reset by peer", self.cell.recordedPeer(), .reset),
-            .io => failAddress(evaluator, .io, "connection write failed", self.cell.recordedPeer(), .io),
+            .failed => |failure| failConnection(evaluator, self.cell, failure),
             .pending => parked: {
                 try evaluator.park(.{ .external = self.cell.writeSource(self.permit.?) });
                 break :parked .yielded;
