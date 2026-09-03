@@ -291,7 +291,6 @@ fn accept(evaluator: *Machine) MachineError!void {
     const slot = cell.beginAccept() catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.Closed => failAddress(evaluator, .io, "listener is closed", cell.recordedAddress(), .closed),
-        error.LiveLimit => failAddress(evaluator, .domain, "host connection limit reached", cell.recordedAddress(), .limit),
         error.Io => failAddress(evaluator, .io, "host lacks resources to accept", cell.recordedAddress(), .resources),
     };
     errdefer cell.endAccept(slot);
