@@ -2,6 +2,7 @@
 const std = @import("std");
 const heap = @import("heap.zig");
 const env = @import("env.zig");
+const list = @import("list.zig");
 const intern = @import("intern.zig");
 const poll = @import("poll.zig");
 const printer = @import("print.zig");
@@ -15,6 +16,10 @@ pub const Action = union(enum) {
     /// than interning a third, because this sink is already a byte stream.
     trace_word: intern.TraceWord,
     value: value.Value,
+    /// A documentation string written as prose: quoted, with only the quote
+    /// and backslash escaped, so its line breaks reach the reader intact.
+    /// Canonical rendering would spell them `\n`.
+    document: value.Value,
 };
 
 pub const VisibleNameRoot = union(enum) {
@@ -140,6 +145,8 @@ pub const VisibleNameCursor = struct {
 };
 
 pub const PlanProgress = poll.Progress(void);
+/// Characters of documentation written per plan step.
+const document_slice: usize = 256;
 pub const PlanCursor = struct {
     allocator: std.mem.Allocator,
     actions: []const Action,
@@ -179,6 +186,7 @@ pub const PlanCursor = struct {
                 .bytes => |bytes| try self.writeBytes(writer, bytes),
                 .name => |name| try self.writeBytes(writer, intern.get(name)),
                 .trace_word => |word| try self.writeTraceWord(writer, word),
+                .document => |item| try self.writeDocument(writer, item),
             }
         }
         return if (self.action_index == self.actions.len and self.renderer == null)
@@ -197,6 +205,36 @@ pub const PlanCursor = struct {
         if (end != bytes.len) return false;
         self.byte_index = 0;
         return true;
+    }
+    /// Write a documentation string in bounded slices, `byte_index` counting
+    /// characters. The opening quote goes out with the first slice and the
+    /// closing quote with the last.
+    fn writeDocument(self: *PlanCursor, writer: *std.Io.Writer, item: value.Value) std.Io.Writer.Error!void {
+        const count: usize = @intCast(item.list.length());
+        if (self.byte_index == 0) try writer.writeByte('"');
+        var written: usize = 0;
+        while (self.byte_index < count and written < document_slice) : (written += 1) {
+            const codepoint = list.atUnchecked(item, self.byte_index).char;
+            switch (codepoint) {
+                '"' => try writer.writeAll("\\\""),
+                '\\' => try writer.writeAll("\\\\"),
+                else => {
+                    var encoded: [4]u8 = undefined;
+                    const length = std.unicode.utf8Encode(@intCast(codepoint), &encoded) catch {
+                        try writer.print("\\u{{{x}}}", .{codepoint});
+                        self.byte_index += 1;
+                        continue;
+                    };
+                    try writer.writeAll(encoded[0..length]);
+                },
+            }
+            self.byte_index += 1;
+        }
+        if (self.byte_index == count) {
+            try writer.writeByte('"');
+            self.byte_index = 0;
+            self.action_index += 1;
+        }
     }
     fn writeBytes(self: *PlanCursor, writer: *std.Io.Writer, bytes: []const u8) std.Io.Writer.Error!void {
         if (try self.writeSegment(writer, bytes)) self.action_index += 1;

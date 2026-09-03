@@ -1011,10 +1011,11 @@ the connection's `Endpoints` (the peer from `accept`, the local end from
 actually reached on). No other production code in `net_port.zig` calls
 `closeFd` on a connection socket or decrements the connection counter. Each
 outstanding `accept` owns an `AcceptSlot` whose state is exhaustive:
-`waiting` (holding its reservation), `ready` (holding an `AcceptedSocket`),
-`failed`, `taken`, or `closed`. `endAccept` releases whatever the slot still
-holds, so a cancelled accept can neither leak a socket nor release a slot
-twice.
+`waiting` (holding nothing: neither a socket nor a reservation), `ready`
+(holding an `AcceptedSocket`), `failed`, `taken`, or `closed`. `endAccept`
+releases whatever the slot still holds, so a cancelled accept can neither
+leak a socket nor release a slot twice, and a waiting accept costs the
+connection quota nothing.
 
 The listener gains one acceptor thread, started by the first `beginAccept`
 and never before. It waits in `poll` on the listening socket, switched to
@@ -1024,8 +1025,15 @@ wake a blocked `accept` on macOS, closing a descriptor another thread is
 blocked on is a reuse hazard everywhere, and `netAcceptPosix` treats `EAGAIN`
 as a bug, so the non-blocking socket that `poll` requires would trip it. When
 `poll` reports the socket readable, the acceptor takes the listener mutex,
-rechecks that a `waiting` slot exists, calls `accept4` while still holding the
-mutex, and moves the returned socket into that slot before unlocking. Because
+rechecks that a `waiting` slot exists, acquires a `ConnectionReservation`
+from `NetOwner` under that mutex, and only then calls `accept4`, still
+holding the mutex, and moves the returned socket and its reservation into
+that slot as one `AcceptedSocket` before unlocking (`acceptOneLocked`). When
+no reservation is available the acceptor makes no syscall: the connection
+stays in the kernel backlog, the acceptor marks itself quota-blocked, and it
+polls only its wake pipe, not the listening socket, until a release wake
+arrives, so a full quota spins no thread and takes no socket it cannot own.
+Because
 `endAccept` takes the same mutex, the two cannot interleave: if the
 cancellation wins, no `accept4` runs and the connection stays in the kernel
 backlog for the next accept; if the accept wins, the socket belongs to that
@@ -1109,12 +1117,22 @@ after an explicit `close`; `write` parked until those bytes entered the ring,
 so the bound is the ring and nothing else.
 
 The connection quota (`max_live_connections`) is a second compare-exchange
-counter on `NetOwner` beside the listener quota; `NetOwner.deinit` asserts
-both are zero, which holds because Session teardown closes the root scope and
-every running controller holds the membership the scope waits on. Failures on
-a connection are `'io` with the peer's address and port and one of `'closed`,
-`'reset`, `'io`; the quota refusal is `'domain` `'limit`; the mapping has one
-owner in `net_port.zig`.
+counter on `NetOwner` beside the listener quota. It is reserved when a socket
+is taken from the backlog, never when an accept parks, so it bounds live
+connections only and `accept` has no `'limit` failure. `NetOwner` keeps a
+registry of running acceptors, and `releaseConnection` wakes each of them
+through its pipe, so an acceptor blocked at the quota rechecks the counter as
+soon as any connection in the Session releases its slot; a wake byte means
+"drain and recheck", and only the stop flag distinguishes shutdown from a
+release. The registry mutex is the leaf of the lock order: it is taken
+beneath listener and connection cell mutexes, and nothing is acquired while
+it is held. `ListenerCell.close` waits for its acceptor to exit, so no cell is
+on the registry after `close` returns, and `NetOwner.deinit` asserts an empty
+registry and zero counters, which holds because Session teardown closes the
+root scope and every running controller holds the membership the scope waits
+on. Failures on a connection are `'io` with the peer's address and port and
+one of `'closed`, `'reset`, `'io`; the listener quota alone refuses with
+`'domain` `'limit`; the mapping has one owner in `net_port.zig`.
 
 ### Absolute deadlines govern timer races
 
@@ -1258,6 +1276,12 @@ Their manifest, documentation, effects, provenance, and package requirements
 are validated before publication. Package discovery and synchronization are
 described in `ENVIRONMENT.md`; they enter the evaluator through the same module
 loader and bounded-driver conventions as other sources.
+
+`http.server` shows the shape of a protocol module in source over host ports:
+one effect boundary, a single private word that validates and encodes a whole
+response before writing it, which the source audit holds to that one call
+site. Malformed response values stay ordinary data; malformed wire output is
+unreachable.
 
 `proc` is a builtin for the same reason as other host-backed modules: process
 creation and pipe readiness require authority and representation ECL source

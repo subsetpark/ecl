@@ -331,6 +331,77 @@ test "e2e: net accept, read, write, and close round-trip over loopback under the
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, term);
 }
 
+// PENDING: Patch 5 of gameplans/http-server.json: spawn the binary with piped
+// stdout serving a `/health` handler that answers `"ok"`, read the
+// `{'address "127.0.0.1" 'port N}` handshake line, connect a raw peer that
+// writes `GET /health HTTP/1.1\r\nHost: h\r\n\r\n`, and read `HTTP/1.1 200 OK`,
+// `Content-Length: 2`, `Connection: close`, the body `ok`, then EOF. The server
+// never stops on its own, so the test kills the child afterwards under the
+// `NetWatchdog` bound.
+test "e2e: http server answers a loopback GET under the CLI grant" {
+    // The binary announces its listener on stdout and then serves forever, so
+    // stdout is piped and read line by line while the process runs, and the
+    // child is killed once the round trip has been observed.
+    var child = try std.process.spawn(io, .{
+        .argv = &.{
+            build_options.ecl_exe,
+            "{'address \"127.0.0.1\" 'port 0} net.listen 'l set " ++
+                "l net.local-address io.pp " ++
+                "l {} (pop 200 \"ok\" http.response.text) http.server.@serve",
+        },
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .pipe,
+    });
+    var killed = false;
+    defer if (!killed) child.kill(io);
+    var watchdog: NetWatchdog = .{ .pid = child.id.? };
+    try watchdog.arm();
+    defer watchdog.disarm();
+    var stdout_buffer: [512]u8 = undefined;
+    var stdout = child.stdout.?.readerStreaming(io, &stdout_buffer);
+    const handshake = (try stdout.interface.takeDelimiter('\n')) orelse return error.MissingHandshake;
+    const marker = "'port ";
+    const start = (std.mem.indexOf(u8, handshake, marker) orelse {
+        std.log.err("handshake line lacks a port: {s}", .{handshake});
+        return error.MalformedHandshake;
+    }) + marker.len;
+    const end = std.mem.indexOfScalarPos(u8, handshake, start, '}') orelse {
+        std.log.err("handshake line is unterminated: {s}", .{handshake});
+        return error.MalformedHandshake;
+    };
+    const port = try std.fmt.parseInt(u16, handshake[start..end], 10);
+    try std.testing.expect(port != 0);
+
+    const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(port) };
+    const stream = try std.Io.net.IpAddress.connect(&address, io, .{ .mode = .stream });
+    defer stream.close(io);
+    var writer = stream.writer(io, &.{});
+    try writer.interface.writeAll("GET /health HTTP/1.1\r\nHost: h\r\n\r\n");
+    try writer.interface.flush();
+    var reply_buffer: [1024]u8 = undefined;
+    var reader = stream.reader(io, &reply_buffer);
+    var reply: [1024]u8 = undefined;
+    var reply_len: usize = 0;
+    while (true) {
+        const count = try reader.interface.readSliceShort(reply[reply_len..]);
+        if (count == 0) break;
+        reply_len += count;
+        if (reply_len == reply.len) return error.ReplyTooLong;
+    }
+    try std.testing.expectEqualStrings(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/plain; charset=utf-8\r\n" ++
+            "Content-Length: 2\r\nConnection: close\r\n\r\nok",
+        reply[0..reply_len],
+    );
+
+    // The serving word never returns on its own; stderr must still be silent
+    // up to the moment the child is killed.
+    watchdog.disarm();
+    child.kill(io);
+    killed = true;
+}
+
 /// Kills a spawned child after a bound unless disarmed first. The child's pid
 /// is copied so the thread never touches `Child` state the test is using. The
 /// value lives on the test's stack and outlives its thread, which `disarm`

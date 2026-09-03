@@ -551,6 +551,7 @@ test "module sources: formatter and standard modules use @defm" {
         "dict.from-pairs",   "error.new",         "result.ok",
         "str.upper",         "io.print",          "csv.parse",
         "json.parse",        "table.valid?",      "http.get-bytes",
+        "http.server.route", "http.request.new",  "http.response.new",
         "proc.wait",         "fs.read-text",      "net.listen",
         "path.normalize",    "archive.sha256",    "clock.now",
         "time.parse",        "pkg.store.inspect", "rng.float",

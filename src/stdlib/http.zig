@@ -32,20 +32,33 @@ pub const words = [_]env.BuiltinWord{
     // is checked the instant the primitive returns.
     .{
         .name = "get",
-        .doc = "( url headers -- response ) Fetch a url with caller-supplied headers, " ++
-            "returning {'status 'headers 'body}. Use {} for no headers.",
+        .doc = "( url headers -- response ) Fetch a url with GET, following redirects, and return " ++
+            "{'status int 'headers dict 'body string}.\n\n" ++
+            "url is a string. headers is a dict of request headers whose keys and values are strings, such as " ++
+            "{\"accept\" \"application/json\"}; use {} for none. A non-string url, a non-dict headers, or a " ++
+            "non-string header name or value is 'type. In the response, 'headers maps each header name the server " ++
+            "sent to its value, keeping the last value of a repeated header, and 'body is the decoded text. A " ++
+            "non-2xx status is an ordinary response, not an error.\n\n" ++
+            "A transport or protocol failure, and a Session without network access, is 'io carrying the url in " ++
+            "'path. The request occupies the calling unit's worker until it completes; there is no deadline.",
         .primitive = get,
     },
     .{
         .name = "get-bytes",
-        .doc = "( url headers -- response ) Fetch a url like get, returning " ++
-            "the response body as an exact list of byte integers.",
+        .doc = "( url headers -- response ) Fetch a url exactly as get does, but return 'body as the exact response " ++
+            "octets in a byte list of ints in 0...255 instead of decoded text.\n\n" ++
+            "Arguments, redirects, response headers, and failures are those of get. Use this for archives and other " ++
+            "binary content, and chars to decode a body known to be UTF-8.",
         .primitive = getBytes,
     },
     .{
         .name = "post",
-        .doc = "( url headers body -- response ) Post a body to a url with " ++
-            "caller-supplied headers, returning {'status 'headers 'body}.",
+        .doc = "( url headers body -- response ) Post a string body to a url with the given request headers and " ++
+            "return {'status int 'headers dict 'body string}.\n\n" ++
+            "url and body are strings, encoded as UTF-8; headers is a dict of string names to string values, {} for " ++
+            "none, and carries any content type the server expects. A non-string url or body, a non-dict headers, or " ++
+            "a non-string header name or value is 'type. Redirects are not followed: a 3xx status is returned as an " ++
+            "ordinary response. Response headers, body decoding, and 'io failures are those of get.",
         .primitive = post,
     },
 };

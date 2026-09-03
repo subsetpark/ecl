@@ -2470,16 +2470,25 @@ It belongs to the task scope of the unit that accepted it, not to the
 listener's scope: closing that scope aborts the connection even while its
 value is stored elsewhere, and closing the listener leaves accepted
 connections open. A connection not yet accepted stays in the host's backlog;
-the runtime takes one only while an accept is outstanding. Reads and writes
-park on readiness under the ordinary scheduler rules, are bounded by
-host-configured queue capacities, and exchange exact byte lists. One read may
-be pending per connection; writes are serialized in arrival order with each
-call's bytes contiguous. Explicit close delivers the bytes already queued and
-then shuts the socket down; scope closure discards them and shuts down at
-once. Both ends' addresses are observable data while the connection is open.
-A peer failure is `'io` carrying the peer's address, the peer's port, and one
-reason from a closed vocabulary; a cancelled wait fails only the unit that
-was parked.
+the runtime takes one only while an accept is outstanding and a
+live-connection slot is available. Reads and writes park on readiness under
+the ordinary scheduler rules, are bounded by host-configured queue
+capacities, and exchange exact byte lists. One read may be pending per
+connection; writes are serialized in arrival order with each call's bytes
+contiguous. Explicit close delivers the bytes already queued and then shuts
+the socket down; scope closure discards them and shuts down at once. Both
+ends' addresses are observable data while the connection is open. A peer
+failure is `'io` carrying the peer's address, the peer's port, and one reason
+from a closed vocabulary; a cancelled wait fails only the unit that was
+parked.
+
+A serving word built over connections applies its handler in a fresh unit per
+request under the checked one-result contract. A request's framing failure,
+or its handler's failure or ill-formed result, is data to the serving word
+and affects only that request. The serving unit ends only by cancellation or
+by a fatal failure of accept; either ending quiesces its children by the
+ordinary scope rules, and the serving word never closes a listener it did not
+create.
 
 ## Standard environment
 

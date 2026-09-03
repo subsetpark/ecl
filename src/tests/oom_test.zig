@@ -756,6 +756,7 @@ const StdlibSurface = enum {
     clock,
     time,
     http,
+    http_server,
     process,
     net,
     net_connection,
@@ -812,7 +813,7 @@ fn stdlibSessionAllocationProbe(
                 .stdout_capacity = 16,
                 .stderr_capacity = 16,
             } else null,
-            .net_policy = if (surface == .net or surface == .net_connection) .{
+            .net_policy = if (surface == .net or surface == .net_connection or surface == .http_server) .{
                 .binds = .{ .exact = &.{.{ .address = "127.0.0.1", .port = 0 }} },
             } else null,
             .filesystem_policy = .{ .roots = &.{
@@ -932,7 +933,7 @@ fn stdlibSessionAllocationProbe(
             &runtime,
             "oom-hostio.ecl",
             // Console, environment, and standard-input refusal paths.
-            "1 \"probe\" io.debug pop " ++
+            "\"probe\" io.eprint 1 \"probe\" io.debug pop " ++
                 "\"ECL_OOM_PROBE\" getenv pop " ++
                 "[] (\"ECL_OOM_ABSENT\" getenv) @attempt pop [] (io.stdin) @attempt pop",
         ),
@@ -994,6 +995,21 @@ fn stdlibSessionAllocationProbe(
                 "dup time.to-utc time.from-utc pop dup 5 time.add time.diff pop " ++
                 "0 time.from-unix 1 time.from-unix time.cmp pop 3 time.seconds pop " ++
                 "[] (\"2024-02-30T00:00:00Z\" time.parse) @attempt pop",
+        ),
+        // The pure words once each, then a serving unit whose acceptor parks
+        // with no peer and is cancelled at once, so every ordinal is
+        // deterministic (a live exchange cannot be an allocation oracle).
+        .http_server => try runOk(
+            &runtime,
+            "oom-http-server.ecl",
+            "{'address \"127.0.0.1\" 'port 0} net.listen 'l set " ++
+                "\"GET /a?b=1 HTTP/1.1\" http.server.parse-request-line pop " ++
+                "(\"Host: x\") http.server.parse-headers dup http.server.content-length pop pop " ++
+                "200 \"ok\" http.response.text dup \"content-type\" http.response.header pop " ++
+                "http.server.render-response pop " ++
+                "\"GET\" \"/a?b=1\" http.request.new dup http.request.query pop \"x\" \"y\" http.request.with-header pop " ++
+                "[] (l {'max-in-flight 1} (pop http.response.not-found) http.server.@serve) @spawn " ++
+                "0 clock.sleep dup cancel await pop l net.close",
         ),
         .http => try runOk(
             &runtime,
@@ -1338,6 +1354,11 @@ test "oom: standard-library and host: host: network connections propagate every 
 test "oom: standard-library and host: host: HTTP propagates every allocation failure" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.http);
+}
+
+test "oom: standard-library and host: stdlib: http server propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
+    try checkStdlibSurface(.http_server);
 }
 
 test "oom: standard-library and host: package: sync module propagates every allocation failure" {

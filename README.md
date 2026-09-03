@@ -263,6 +263,8 @@ cannot be replaced accidentally by a file with the same name.
 | `http` | HTTP GET and POST |
 | `proc` | Capability-gated subprocess ports and bounded process execution |
 | `net` | Capability-gated TCP listeners and connections with scope-owned sockets |
+| `http.server` | Bounded HTTP/1.1 serving over `net` listeners |
+| `http.request`, `http.response` | Building, reading, and updating the request and response dictionaries |
 | `rand` | Explicit-state random draws and host entropy |
 | `rng` | Durable module-state random generation |
 | `archive` | SHA-256 and atomic validated `.tgz` extraction |
@@ -309,7 +311,10 @@ connects and returns a connection owned by the accepting unit's scope;
 `net.peer-address` names the other end, and `net.close` on a connection
 delivers queued bytes before shutting the socket down. Hosts bound live
 connections and queue capacities. Protocol framing and TLS belong to the
-modules built over a connection.
+modules built over a connection. `http.server.@serve` is the ECL HTTP/1.1
+server over those words: it frames each request, runs the handler in a fresh
+unit, answers framing and handler failures with a status, and never closes
+the listener it is given.
 
 `import` gives selected public module words bare names in the current
 environment. Every requested word must be public.

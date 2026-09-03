@@ -693,6 +693,7 @@ pub fn build(b: *std.Build) void {
             "pkg store: existing immutable entry wins concurrent install",
             "process:",
             "net:",
+            "http server:",
             "fs: concurrent creates have exactly one winner and no staging residue",
             "fs: cancellation before commit leaves the destination unchanged",
         },
@@ -880,6 +881,11 @@ pub fn build(b: *std.Build) void {
             // loopback port through the public Session and probes it from the
             // test; no fixture process, no sleeps, well inside the fast budget.
             "tests.net_test.",
+            // The `http.@serve` server module. Every case serves loopback
+            // sockets through the public Session and reads the wire from a
+            // peer thread; one case waits out a 20 ms read deadline, none
+            // sleeps, and there is no fixture process.
+            "tests.http_server_test.",
             // The listener and connection controller's own unit tests: loopback
             // sockets through the cell API without a Session, sub-second.
             "net_port.",

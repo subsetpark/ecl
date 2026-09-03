@@ -18,5 +18,8 @@
   "stdlib.test.pkg-mvs" ["pkg-mvs.ecl"]
   "stdlib.test.pkg-docs" ["pkg-docs.ecl"]
   "stdlib.test.pkg-shadow" ["pkg-shadow.ecl"]
-  "stdlib.test.host-surfaces" ["host-surfaces.ecl"]}
+  "stdlib.test.host-surfaces" ["host-surfaces.ecl"]
+  "stdlib.test.http-server" ["http-server.ecl"]
+  "stdlib.test.http-request" ["http-request.ecl"]
+  "stdlib.test.http-response" ["http-response.ecl"]}
  'requires {}}

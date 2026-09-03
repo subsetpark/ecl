@@ -1761,6 +1761,362 @@ from a Unicode character before hashing.
 `( url headers body -- response )` — Post a body with caller-supplied headers
 and return the same response shape and errors as `get`.
 
+## http.request
+
+Words over the request dictionary an `http.server` handler receives,
+`{'method 'target 'path 'query 'headers 'body 'peer}`, optionally carrying the
+`'params` dictionary `http.server.route` binds. They build a request, read its
+headers and query by name, decode its body, and return updated copies; the
+original is never changed. A word given a value that is not a request
+dictionary, or a name that is not a string, is `'type`.
+
+### header
+`( request name -- values )` — Return the list of values of a header, matching
+the name regardless of letter case, or `()` when it is absent.
+
+### header?
+`( request name -- bool )` — Return 1 when the request carries the header under
+any letter case.
+
+### json
+`( request -- value )` — Return the body parsed as JSON: `chars` then
+`json.parse`, failing as they do.
+
+### new
+`( method target -- request )` — Return a request with the method and target,
+`'path` and `'query` split from the target at its first `?` (`'query` `""`
+when absent), `{}` headers, `[]` body, and `""` peer. A non-string method or
+target is `'type`.
+
+### param
+`( request name -- value )` — Return the route parameter bound under the name.
+A request without that parameter is `'domain`.
+
+### query
+`( request -- dict )` — Return the request's `'query` string as a dictionary
+from string keys to string values: `&`-separated pairs, each split at its
+first `=`, a pair without `=` mapping its key to `""`, empty pieces ignored,
+and a later duplicate key replacing an earlier one. `%XX` escapes are decoded
+in keys and values and the decoded text must be valid UTF-8; `+` is left as
+it is. An empty query is `{}`. A `%` not followed by two hexadecimal digits,
+or a decoded key or value that is not valid UTF-8, is `'domain`.
+
+#### Examples
+
+```ecl
+"GET" "/?a=1&b=%2Fx&c" http.request.new http.request.query
+# => {"a" "1" "b" "/x" "c" ""}
+```
+
+### text
+`( request -- string )` — Return the body decoded as UTF-8 text; a body that
+is not valid UTF-8 is `'domain`, as for `chars`.
+
+### valid?
+`( value -- bool )` — Return 1 for a request dictionary: the seven keys with
+string method, target, path, query, and peer, a headers dictionary from
+ASCII-lowercased string names to lists of strings, and a byte-list body, plus
+an optional
+`'params` dictionary of string names to string values. Never raises.
+
+### with-body
+`( request body -- request )` — Return the request with a new body: a byte
+list as given, or a string encoded as UTF-8. Another kind is `'type`.
+
+### with-header
+`( request name value -- request )` — Return the request with a value added
+under the ASCII-lowercased name: a string or a list of strings, appended to
+the values already there. A bad value is `'type`.
+
+### with-param
+`( request name value -- request )` — Return the request with a route
+parameter bound under the name, as `route` does. A non-string value is
+`'type`.
+
+## http.response
+
+Words over the response dictionary `{'status 'headers 'body}`: the value
+`http.get` and `http.post` return and the value an `http.server` handler
+leaves. They build a response, read its headers by name regardless of letter
+case, classify its status, and return updated copies. `valid?` accepts every
+well-shaped value; the wire rules a server enforces (no 1xx, reserved header
+names, no CR or LF) belong to `http.server.render-response`. A word given a
+value that is not a response dictionary, a status outside `100...599`, or a
+name that is not a string is `'type`.
+
+### class
+`( response -- int )` — Return the status class: 2 for `200...299`, 4 for
+`400...499`, and so on.
+
+### header
+`( response name -- values )` — Return every value of a header as a list,
+matching the name regardless of letter case and in dictionary order; a string
+value counts as one. `()` when the header is absent.
+
+### header?
+`( response name -- bool )` — Return 1 when the response carries the header
+under any letter case.
+
+### json
+`( status value -- response )` — Return a response whose body is the value
+rendered with `json.emit` and whose headers are
+`{"content-type" ("application/json")}`. A value `json.emit` rejects fails as
+`json.emit` does.
+
+### new
+`( status -- response )` — Return `{'status status 'headers {} 'body ""}`.
+
+### not-found
+`( -- response )` — Return `404 "not found" text`.
+
+### ok?
+`( response -- bool )` — Return 1 for a status in `200...299`.
+
+### redirect
+`( location -- response )` — Return a 302 response with
+`{"location" (location)}` as its headers and an empty body. A non-string
+location is `'type`.
+
+### text
+`( status string -- response )` — Return a response with the string as its
+body and `{"content-type" ("text/plain; charset=utf-8")}` as its headers. A
+non-string body is `'type`.
+
+### valid?
+`( value -- bool )` — Return 1 for a response dictionary: exactly `'status`,
+`'headers`, and `'body`, with an integer status in `100...599`, a headers
+dictionary from string names to a string or a list of strings, and a string
+or byte-list body. Never raises.
+
+### with-body
+`( response body -- response )` — Return the response with a new string or
+byte-list body; another kind is `'type`.
+
+### with-header
+`( response name value -- response )` — Return the response with a value
+added under the header name exactly as given: a string or a list of strings,
+appended to any values already under that name; an existing string value,
+even the empty string, counts as one.
+
+### with-headers
+`( response headers -- response )` — Return the response with a headers
+dictionary merged over its own; a right-hand name replaces a left-hand one
+exactly. A value that is not a dictionary of string names to header values is
+`'type`.
+
+### with-status
+`( response status -- response )` — Return the response with a new status.
+
+## http.server
+
+HTTP/1.1 serving over `net` connections, defined in ECL. The module holds no
+authority of its own: `@serve` takes a listener the program already obtained
+through `net.listen`, so a Session that cannot bind cannot serve, and every
+socket operation is one of the `net` words. The parsers, the response
+renderer, and `route` take and return ordinary values and never touch a
+connection, so they can be used and tested without a socket. Requests and
+responses are the dictionaries `http.request` and `http.response` build and
+read.
+
+A request is the dictionary
+`{'method 'target 'path 'query 'headers 'body 'peer}`:
+
+- `'method` and `'target` are the first two tokens of the request line, as
+  strings;
+- `'path` and `'query` are the target split at the first `?`, undecoded;
+  `'query` is `""` when the target has no `?`;
+- `'headers` is a dictionary from ASCII-lowercased header name to the list of
+  its trimmed values in arrival order, so a repeated header keeps every value;
+- `'body` is the exact byte list named by `Content-Length`, `[]` when the
+  request has none; and
+- `'peer` is the peer's `address:port` formatted from `net.peer-address`,
+  with an IPv6 address in brackets.
+
+A response is the dictionary `{'status 'headers 'body}` with exactly those
+keys: an integer status in `200...599`, since interim 1xx responses are not
+served, with an empty body when the status is 204, 205, or 304; a headers
+dictionary whose keys are
+strings and whose values are a string or a list of strings, written once per
+value in the given order and with the name as given; and a body that is a
+string, written as UTF-8, or a byte list. The names `content-length`,
+`connection`, and `transfer-encoding` are reserved in any letter case: the
+server writes `Content-Length` and `Connection: close` itself, and a response
+naming one of them is `'domain`. Header names must be nonempty HTTP tokens
+and values may not contain CR, LF, NUL, or a control character other than
+tab, so a value built from request data cannot split the response.
+
+Framing is HTTP/1.1 with `Content-Length` bodies only; an HTTP/1.0 request is
+answered the same way, and only HTTP/1.1 requests must carry one `Host`
+header. A HEAD request is answered with the handler's status and headers and
+no body. Any `Transfer-Encoding` header is answered 411 and a
+version other than `HTTP/1.1` or `HTTP/1.0` is answered 505. There is no
+keep-alive: every response carries `Connection: close`, and the connection is
+closed once the response is written. TLS, chunked bodies, pipelining, and
+upgrades belong to a proxy in front of the server.
+
+The `@serve` configuration is a dictionary whose keys are all optional; `{}`
+is valid. Each limit is an integer greater than zero.
+
+- `'max-header-bytes` (default `32768`): the most bytes accepted before the
+  CRLFCRLF that ends the head; more is 431.
+- `'max-body-bytes` (default `1048576`): the largest `Content-Length`
+  accepted; a larger one is 413 before any body byte is read.
+- `'max-in-flight` (default `128`): the number of acceptor children, each
+  handling one connection at a time.
+- `'read-timeout-ms` (default `10000`): the deadline for reading one whole
+  request, head and body; expiry is 408.
+- `'on-failure` (default `(str io.eprint)`): a quotation `( error -- )`
+  applied to the error dictionary of every request the server answers 500; a
+  failure of the quotation itself is discarded.
+
+The server answers a request it cannot serve with a minimal `text/plain`
+response of the status below and then closes the connection:
+
+- 400: a malformed request line; a header line without `:` or beginning with
+  space or tab (obsolete folding); an HTTP/1.1 request without exactly one
+  `Host` header of the form `uri-host [":" port]`; non-UTF-8 bytes in the
+  head; a
+  `Content-Length` that is not a digit string or whose repeated values
+  differ; end of stream after some bytes arrived but before the head or the
+  body is complete.
+- 408: `'read-timeout-ms` elapses while the request is being read.
+- 411: any `Transfer-Encoding` header.
+- 413: `Content-Length` exceeds `'max-body-bytes`.
+- 431: `'max-header-bytes` is exceeded before the head ends.
+- 500: the handler fails, leaves other than exactly one value, or leaves a
+  response `render-response` rejects.
+- 505: a version other than `HTTP/1.1` or `HTTP/1.0`.
+
+A peer that connects and closes without sending a byte, or that resets or
+otherwise fails during the read or the write, is closed silently: nothing is
+written and `'on-failure` is not applied.
+
+The handler is a quotation with the contract `( request -- response )`. Each
+request applies it as `[request] handler @attempt` in a fresh unit, so a
+handler's failure is data to the server and the ambient stack never crosses
+the boundary. A successful handler leaves exactly one value, and that value
+must satisfy `render-response`. Any other outcome — a raised error, an empty
+or multi-valued result, a malformed response — answers 500 and applies the
+`'on-failure` quotation to the error dictionary (for a wrong result count, a
+`'contract` error naming the observed count); the serving unit and every other
+in-flight request are unaffected. Every response the server writes, whether
+the handler's or its own, is validated in full before any byte is written.
+
+`@serve` serves up to `'max-in-flight` connections at a time, each in a child
+unit that owns its connection, so a connection is closed on every path.
+Beyond that bound, and at the host's live-connection maximum, further
+connections wait in the kernel backlog.
+
+`@serve` does not return. The serving unit ends only when it is cancelled,
+failing `'cancelled`, or when an acceptor's `net.accept` fails `'io` (a
+listener closed elsewhere is `'io` `'closed`), in which case that error is
+raised from `@serve`. Either ending cancels and quiesces every acceptor,
+reader, and handler child by the ordinary scope rules and closes every
+connection those children own. The listener itself is untouched: `@serve`
+never calls `net.close` on the listener it was given, which stays the
+caller's to close explicitly or through its own scope and may be served
+again.
+
+#### Examples
+
+```ecl
+{'address "127.0.0.1" 'port 8080} net.listen 'l def
+
+([["GET" "/health" (pop 200 "ok" http.response.text)]
+  ["GET" "/users/:id" ("id" http.request.param 200 swap http.response.text)]]
+ http.server.route)
+'handler def
+
+l {'read-timeout-ms 5000} (handler) http.server.@serve
+```
+
+### @serve
+`( listener config handler -- )` — *Unit constructor*, contract
+`( request -- response )` enforced per request. Validate the arguments,
+fill the configuration defaults, and serve the listener until the unit ends.
+A non-port listener, a non-dictionary
+configuration, or a non-quotation handler is `'type`; an unknown
+configuration key or a limit that is not greater than zero is `'domain`; a
+limit that is not an integer or an `'on-failure` that is not a quotation is
+`'type`. Validation completes before any request is accepted. The word fails
+`'cancelled` when the serving unit is cancelled and re-raises an acceptor's
+`'io` failure of `net.accept`; it never closes the listener.
+
+### content-length
+`( headers -- int )` — Return the request body length named by a parsed
+headers dictionary: `0` when `content-length` is absent, otherwise the
+integer every occurrence spells, leading zeros allowed. A value that is not a
+nonempty digit string, or repeated values that differ, is `'domain` with
+`'data {'status 400}`; a value too large for a 64-bit integer exceeds every
+body limit and is `'domain` with `'data {'status 413}`. A non-dictionary is
+`'type`.
+
+### parse-headers
+`( lines -- dict )` — Parse a list of header-line strings into a dictionary
+from ASCII-lowercased name to the list of trimmed values in arrival order,
+so `("Host: a" "host: b")` yields `{"host" ("a" "b")}`. The name is the text
+before the first `:`, the value the rest with surrounding whitespace removed.
+A line without `:`, or one beginning with space or tab, is `'domain` with
+`'data {'status 400}`. A non-list or a non-string line is `'type`.
+
+### parse-request-line
+`( line -- dict )` — Parse a request line into
+`{'method 'target 'path 'query 'version}`: three space-separated tokens,
+`'path` and `'query` the target split at the first `?` undecoded, `'query`
+`""` when there is no `?`. Any other token count is `'domain` with
+`'data {'status 400}`; a version other than `HTTP/1.1` or `HTTP/1.0` is
+`'domain` with `'data {'status 505}`. A non-string is `'type`.
+
+#### Examples
+
+```ecl
+"GET /a?b=1 HTTP/1.1" http.server.parse-request-line
+# => {'method "GET" 'target "/a?b=1" 'path "/a" 'query "b=1" 'version "HTTP/1.1"}
+```
+
+### render-response
+`( response -- bytes )` — Validate a response dictionary and return the exact
+bytes the server writes for it: `HTTP/1.1 <status> <reason>` CRLF, one
+`name: value` line per header value in the given order with the name as
+given, `Content-Length: <n>` CRLF (omitted for 204 and 304, whose length is
+not the empty body's), `Connection: close` CRLF,
+CRLF, then the body bytes. The reason phrase comes from a fixed table covering 200, 201,
+204, 301, 302, 304, 400, 401, 403, 404, 405, 408, 411, 413, 431, 500, 503,
+and 505 and is empty for any other status, with the space before it always
+written. A non-dictionary is `'type`. Keys other than exactly `'status`,
+`'headers`, and `'body`; a status that is not an integer in `200...599`; a
+nonempty body with status 204, 205, or 304; a
+headers value that is not a dictionary, a header name that is not a nonempty
+string of HTTP token characters, a header value that is neither a string nor
+a list of strings or that contains CR, LF, NUL, or a control character other
+than tab, a header whose lowercased name is `content-length`, `connection`,
+or `transfer-encoding`;
+or a body that is neither a string nor a list of integers in `0...255` is
+`'domain`.
+
+#### Examples
+
+```ecl
+{'status 200 'headers {"set-cookie" ("a=1" "b=2")} 'body "ok"}
+http.server.render-response chars
+# => "HTTP/1.1 200 OK\u{D}\u{A}set-cookie: a=1\u{D}\u{A}set-cookie: b=2\u{D}\u{A}Content-Length: 2\u{D}\u{A}Connection: close\u{D}\u{A}\u{D}\u{A}ok"
+```
+
+### route
+`( request routes -- response )` — *Inline.* Dispatch a request over a list
+of `[method pattern handler]` rows. A pattern is a slash path whose segments
+must equal the request's `'path` segments one for one, except that a segment
+beginning with `:` binds any nonempty path segment under its name in a
+string dictionary. The first row whose pattern and method both match has the
+request, with `'params` set to that dictionary, passed to its handler, which
+is applied inline with the contract `( request -- response )`; middleware is
+`compose`. When some pattern matches but no matching row's method does, the
+result is `405 "method not allowed" text` with an `allow` header joining the
+matching rows' methods with `,`; when no pattern matches, the result is
+`not-found`. Every row is checked before any comparison: a row that is not a
+list of three elements is `'shape`, and a non-string method, non-string
+pattern, or non-quotation handler is `'type`.
+
 ## io
 
 ### debug
@@ -1768,6 +2124,13 @@ and return the same response shape and errors as `get`.
 pretty-printed representation plus newline, leaving the value on the stack.
 Semantically `io.prin ": " io.prin io.inspect`; a non-string label is the
 same `'type` failure as `io.prin`.
+
+### eprint
+`( string -- )` — Write a string followed by a newline to the Session's
+diagnostics stream: standard error under the command line, the host's
+diagnostics writer when embedded, and never standard output. When the host
+supplies no diagnostics writer the string is dropped and the word succeeds.
+Non-string is `'type`; a failed write is `'io`.
 
 ### inspect
 `( value -- value )` — Pretty-print a value while leaving it on the stack;
@@ -1866,8 +2229,9 @@ protocol. `accept` is the only listener word that parks.
 The listener belongs to the creating unit's task scope: scope closure closes
 the socket and releases the live-listener slot even if a listener value is
 stored elsewhere, and `close` performs the same idempotent transition early.
-There is no detach or ownership transfer. Address reuse is not requested, so
-two listeners can never hold one address and port at once.
+There is no detach or ownership transfer. The socket is bound with address
+reuse, so a port that a closed connection left in `TIME_WAIT` can be bound
+again at once; two live listeners still cannot hold one address and port.
 
 A connection is likewise an opaque `'port` value, disjoint from listeners and
 process ports: a listener word applied to a connection, a connection word
@@ -1877,13 +2241,14 @@ applied to a listener, and either applied to a process port or a non-port are
 connection even while its value is retained elsewhere, and closing the
 listener leaves accepted connections open. A connection that is not accepted
 stays in the kernel backlog; the runtime takes a connection from the backlog
-only while an `accept` is outstanding, so an idle program applies no
-backpressure of its own beyond the backlog. `accept` while the number of live
-connections equals the host maximum is `'domain` with `'reason` `'limit`
-before any connection leaves the backlog; closing a connection releases its
-slot. A parked `accept` holds a slot while it waits, so the maximum bounds
-live connections plus outstanding accepts, and a program with several
-accepting units needs a maximum at least that large.
+only while an `accept` is outstanding and the number of live connections is
+below the host maximum, so an idle program applies no backpressure of its own
+beyond the backlog. At the maximum every `accept` keeps waiting, its peer
+stays in the backlog, and it proceeds once a connection closes and releases
+its slot. A waiting `accept` holds no slot: the maximum bounds live
+connections only, and any number of units may accept concurrently under any
+maximum. `accept` fails only `'io` (`'closed`, `'resources`, or `'io`) or
+`'cancelled`; the `'limit` refusal belongs to `listen` alone.
 
 Bytes are ordinary integer lists whose elements are all in `0...255`, exactly
 as for process streams; the module decodes no text. Each connection has a
@@ -1908,8 +2273,9 @@ connection as a port owned by the calling unit's task scope. Any number of
 units may park in `accept` on one listener; each connection wakes exactly one
 of them. A closed listener, whether closed before the call or while parked, is
 `'io` with `'reason` `'closed` and the listener's address and port attached.
-Live connections at the host maximum is `'domain` with `'reason` `'limit`
-before any socket is taken from the backlog. A connection the peer aborted
+While live connections equal the host maximum the word keeps waiting, its
+peer stays in the kernel backlog, and it proceeds when any connection in the
+Session closes; it never fails `'domain` `'limit`. A connection the peer aborted
 before it was accepted is skipped silently. Exhaustion of descriptors or
 socket buffers is `'io` `'resources`; any other host failure is `'io` `'io`.
 A non-listener is `'type`.

@@ -75,6 +75,18 @@ const modules = [_]Module{
         .text = @embedFile("stdlib/table.ecl"),
     } } },
     .{ .name = "http", .entry = .{ .builtin = &http_module.words } },
+    .{ .name = "http.server", .entry = .{ .source = .{
+        .name = "<stdlib:http.server>",
+        .text = @embedFile("stdlib/http/server.ecl"),
+    } } },
+    .{ .name = "http.request", .entry = .{ .source = .{
+        .name = "<stdlib:http.request>",
+        .text = @embedFile("stdlib/http/request.ecl"),
+    } } },
+    .{ .name = "http.response", .entry = .{ .source = .{
+        .name = "<stdlib:http.response>",
+        .text = @embedFile("stdlib/http/response.ecl"),
+    } } },
     .{ .name = "proc", .entry = .{ .builtin = &proc_module.words } },
     .{ .name = "fs", .entry = .{ .builtin = &fs_module.words } },
     .{ .name = "net", .entry = .{ .builtin = &net_module.words } },

@@ -205,6 +205,7 @@ const test_files = [_][]const u8{
     "tests/net_test.zig",
     "tests/clock_test.zig",
     "tests/conversion_test.zig",
+    "tests/http_server_test.zig",
 };
 const repository_verification_files = [_][]const u8{
     "build.zig",
@@ -240,6 +241,7 @@ pub fn main(init: std.process.Init) !void {
     failed = auditUnsafeCasts() or failed;
     failed = auditPreludeLayout() or failed;
     failed = auditUnitConstructorSpelling() or failed;
+    failed = auditHttpServerWriteSink() or failed;
     failed = auditDynamicContextSpelling() or failed;
     failed = auditFormalValueKinds() or failed;
     if (failed) return error.SourceAuditFailed;
@@ -1034,6 +1036,11 @@ fn hasForbiddenTokens(
 /// marked, and nothing else in first-party vocabulary is.
 const unit_constructors = [_][]const u8{ "@attempt", "@spawn", "@each", "@module", "@defm", "@test" };
 
+/// First-party ECL words that apply their quotation in a fresh unit and are
+/// therefore marked too. Each must be defined by some first-party source;
+/// the compiler cannot see that either, so the audit checks both directions.
+const source_unit_constructors = [_][]const u8{"@serve"};
+
 /// Wrapped stars mean one thing in shipped vocabulary: the word returns a
 /// value supplied by dynamic execution context rather than consuming it from
 /// the operand stack. The compiler cannot express that semantic class, so the
@@ -1054,6 +1061,9 @@ const first_party_definition_sources = [_][:0]const u8{
     @embedFile("../stdlib/pkg/sync.ecl"),
     @embedFile("../stdlib/pkg/cli.ecl"),
     @embedFile("../stdlib/path.ecl"),
+    @embedFile("../stdlib/http/server.ecl"),
+    @embedFile("../stdlib/http/request.ecl"),
+    @embedFile("../stdlib/http/response.ecl"),
     @embedFile("../stdlib/test/default.ecl"),
 };
 
@@ -1105,6 +1115,75 @@ fn auditUnitConstructorSpelling() bool {
             }
             scan = end;
         }
+    }
+    for (source_unit_constructors) |name| {
+        var defined = false;
+        for (first_party_definition_sources) |source| {
+            if (definesQuotedName(source, name)) defined = true;
+        }
+        if (!defined) {
+            std.log.err("unit constructors: `{s}` is listed as a source constructor but no first-party source defines it", .{name});
+            failed = true;
+        }
+    }
+    return failed;
+}
+
+/// Whether `source` binds `name` with `def` or `defp`: the quoted spelling
+/// followed by whitespace and the binder, the shape every checked-in
+/// definition ends in.
+fn definesQuotedName(source: []const u8, name: []const u8) bool {
+    var scan: usize = 0;
+    while (std.mem.indexOfPos(u8, source, scan, "'")) |found| {
+        const start = found + 1;
+        const end = preludeTokenEnd(source, start);
+        scan = if (end > start) end else start + 1;
+        if (!std.mem.eql(u8, source[start..end], name)) continue;
+        var rest = end;
+        while (rest < source.len and std.ascii.isWhitespace(source[rest])) rest += 1;
+        const binder_end = preludeTokenEnd(source, rest);
+        const binder = source[rest..binder_end];
+        if (std.mem.eql(u8, binder, "def") or std.mem.eql(u8, binder, "defp")) return true;
+    }
+    return false;
+}
+
+/// Every byte the HTTP server writes has passed `render-response`: the module
+/// calls `net.write` from exactly one private word, `write-response`, whose
+/// body validates and encodes before writing. Nothing at runtime can hold a
+/// source module to one call site, so the audit does.
+fn auditHttpServerWriteSink() bool {
+    const source = @embedFile("../stdlib/http/server.ecl");
+    var failed = false;
+    var count: usize = 0;
+    var scan: usize = 0;
+    while (std.mem.indexOfPos(u8, source, scan, "net.write")) |found| {
+        scan = found + "net.write".len;
+        // A comment line is prose, not a call site.
+        const line_start = if (std.mem.lastIndexOfScalar(u8, source[0..found], '\n')) |newline| newline + 1 else 0;
+        const line_text = std.mem.trimStart(u8, source[line_start..found], " ");
+        if (line_text.len > 0 and line_text[0] == '#') continue;
+        count += 1;
+        // The immediately enclosing definition, public or private: whichever
+        // navigation header is nearest above the occurrence.
+        const public_header = std.mem.lastIndexOf(u8, source[0..found], "### def ");
+        const private_header = std.mem.lastIndexOf(u8, source[0..found], "### defp ");
+        const private_wins = if (private_header) |private| (public_header == null or private > public_header.?) else false;
+        if (!private_wins) {
+            std.log.err("http server write sink: `net.write` appears outside `write-response`", .{});
+            failed = true;
+            continue;
+        }
+        const name_start = private_header.? + "### defp ".len;
+        const name_end = preludeTokenEnd(source, name_start);
+        if (!std.mem.eql(u8, source[name_start..name_end], "write-response")) {
+            std.log.err("http server write sink: `net.write` appears in `{s}`; only `write-response` may write", .{source[name_start..name_end]});
+            failed = true;
+        }
+    }
+    if (count != 1) {
+        std.log.err("http server write sink: expected exactly one `net.write` call site, found {d}", .{count});
+        failed = true;
     }
     return failed;
 }
@@ -1171,6 +1250,9 @@ fn occurrences(haystack: []const u8, needle: []const u8) usize {
 
 fn isUnitConstructor(name: []const u8) bool {
     for (unit_constructors) |listed| {
+        if (std.mem.eql(u8, listed, name)) return true;
+    }
+    for (source_unit_constructors) |listed| {
         if (std.mem.eql(u8, listed, name)) return true;
     }
     return false;
