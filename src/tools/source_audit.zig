@@ -1054,6 +1054,7 @@ const first_party_definition_sources = [_][:0]const u8{
     @embedFile("../stdlib/pkg/sync.ecl"),
     @embedFile("../stdlib/pkg/cli.ecl"),
     @embedFile("../stdlib/path.ecl"),
+    @embedFile("../stdlib/http/server.ecl"),
     @embedFile("../stdlib/test/default.ecl"),
 };
 
