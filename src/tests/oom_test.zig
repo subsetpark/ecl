@@ -1005,8 +1005,10 @@ fn stdlibSessionAllocationProbe(
             "{'address \"127.0.0.1\" 'port 0} net.listen 'l set " ++
                 "\"GET /a?b=1 HTTP/1.1\" http.server.parse-request-line pop " ++
                 "(\"Host: x\") http.server.parse-headers dup http.server.content-length pop pop " ++
-                "200 \"ok\" http.server.text http.server.render-response pop " ++
-                "[] (l {'max-in-flight 1} (pop http.server.not-found) http.server.@serve) @spawn " ++
+                "200 \"ok\" http.response.text dup \"content-type\" http.response.header pop " ++
+                "http.server.render-response pop " ++
+                "\"GET\" \"/a?b=1\" http.request.new dup http.request.query pop \"x\" \"y\" http.request.with-header pop " ++
+                "[] (l {'max-in-flight 1} (pop http.response.not-found) http.server.@serve) @spawn " ++
                 "0 clock.sleep dup cancel await pop l net.close",
         ),
         .http => try runOk(

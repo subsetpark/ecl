@@ -347,7 +347,7 @@ test "e2e: http server answers a loopback GET under the CLI grant" {
             build_options.ecl_exe,
             "{'address \"127.0.0.1\" 'port 0} net.listen 'l set " ++
                 "l net.local-address io.pp " ++
-                "l {} (pop 200 \"ok\" http.server.text) http.server.@serve",
+                "l {} (pop 200 \"ok\" http.response.text) http.server.@serve",
         },
         .stdin = .ignore,
         .stdout = .pipe,

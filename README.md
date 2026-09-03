@@ -264,6 +264,7 @@ cannot be replaced accidentally by a file with the same name.
 | `proc` | Capability-gated subprocess ports and bounded process execution |
 | `net` | Capability-gated TCP listeners and connections with scope-owned sockets |
 | `http.server` | Bounded HTTP/1.1 serving over `net` listeners |
+| `http.request`, `http.response` | Building, reading, and updating the request and response dictionaries |
 | `rand` | Explicit-state random draws and host entropy |
 | `rng` | Durable module-state random generation |
 | `archive` | SHA-256 and atomic validated `.tgz` extraction |

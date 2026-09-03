@@ -1,5 +1,6 @@
 ### module http.server
-# HTTP/1.1 framing, response construction, and routing over `net` connections.
+# HTTP/1.1 framing, routing, and serving over `net` connections; request and
+# response values are built and read with http.request and http.response.
 # The module holds no host authority of its own: `@serve` reaches sockets only
 # through the listener its caller bound. Framing failures are `'domain` errors
 # whose `'data` carries the `'status` the server answers with, so the connection
@@ -278,55 +279,6 @@
   call)
  'render-response def
 
- ### defp checked-status
- (status -- status : "Return an int status or raise 'type.")
- (dup type 'int match? "http.server response constructors expect an int status" type-error assert)
- 'checked-status defp
-
- ### def text
- (status string -- response :
-  "Return {'status status 'headers {\"content-type\" (\"text/plain; charset=utf-8\")} 'body string}.
-   A non-int status or non-string body is 'type.")
- ("http.server.text expects a string body" checked-string swap checked-status swap
-  (|status body|
-   'status status 'headers {"content-type" ("text/plain; charset=utf-8")} 'body body 6 pack
-   dict.from-flat)
-  call)
- 'text def
-
- ### def json
- (status value -- response :
-  "Return {'status status 'headers {\"content-type\" (\"application/json\")} 'body text} where text
-   is the value rendered with json.emit. A non-int status is 'type; a value json.emit rejects fails
-   as json.emit does.")
- (swap checked-status swap
-  (|status value|
-   'status status 'headers {"content-type" ("application/json")} 'body value json.emit 6 pack
-   dict.from-flat)
-  call)
- 'json def
-
- ### def empty
- (status -- response : "Return {'status status 'headers {} 'body \"\"}. A non-int status is 'type.")
- (checked-status 'status swap 'headers {} 'body "" 6 pack dict.from-flat)
- 'empty def
-
- ### def redirect
- (location -- response :
-  "Return {'status 302 'headers {\"location\" (location)} 'body \"\"}. A non-string location is
-   'type.")
- ("http.server.redirect expects a string location" checked-string
-  (|location| 'status 302 'headers "location" location wrap pair dict.from-flat 'body "" 6 pack
-   dict.from-flat)
-  call)
- 'redirect def
-
- ### def not-found
- (-- response :
-  "Return 404 \"not found\" text, the text/plain response the server uses for an unmatched route.")
- (404 "not found" text)
- 'not-found def
-
  ### defp checked-route
  (row -- : "Validate one [method pattern handler] route row.")
  (dup type 'list match? "http.server.route expects [method pattern handler] rows" type-error assert
@@ -369,61 +321,25 @@
    quotation. The first row whose method and pattern both match has its handler applied inline to
    the request with a 'params dict of the bound segments added ({\"id\" \"42\"}). When some pattern
    matches but no method does, the result is 405 with an allow header listing those rows' methods;
-   when no pattern matches, not-found. Middleware is composition: wrap the handler quotation. A
-   non-list routes or a row that is not a three-element list of string, string, and quotation is
-   'type or 'shape before any comparison.")
+   when no pattern matches, http.response.not-found. Middleware is composition: wrap the handler
+   quotation. A non-list routes or a row that is not a three-element list of string, string, and
+   quotation is 'type or 'shape before any comparison.")
  (dup type 'list match? "http.server.route expects a list of rows" type-error assert
   dup (checked-route) for
   over 'path at route-matches
   dup len 0 =
-  (pop pop not-found)
+  (pop pop http.response.not-found)
   (over 'method at over swap (|row method| row 0 at method match?) partial filter
    dup len 0 =
    (pop (0 at) each ", " join "allow" swap wrap pair dict.from-flat
-    405 "method not allowed" text swap over 'headers at swap dict.merge 'headers swap put nip)
+    405 "method not allowed" http.response.text swap over 'headers at swap dict.merge 'headers swap
+    put nip)
    (nip first over 'path at over 1 at match-pattern nip
     (|request row params| request 'params params put row 2 at call)
     call)
    if)
   if)
  'route def
-
- ### defp hex-digit?
- (char -- bool : "Return 1 for an ASCII hexadecimal digit.")
- (dup digit? over dup \a >= swap \f <= and or swap dup \A >= swap \F <= and or)
- 'hex-digit? defp
-
- ### defp decode-escape
- (part -- bytes : "Decode the leading %XX of a split part and append the rest as UTF-8.")
- (dup len 2 >= "http.server.query found a truncated percent escape" domain-error assert
-  dup 2 take dup (hex-digit?) all?
-  "http.server.query found a malformed percent escape" domain-error assert
-  "0x" swap cat int wrap swap 2 drop bytes cat)
- 'decode-escape defp
-
- ### defp percent-decode
- (text -- text :
-  "Decode %XX escapes into UTF-8 text; malformed escapes and invalid UTF-8 are 'domain.")
- ("%" split dup first bytes swap rest (decode-escape) each raze cat chars)
- 'percent-decode defp
-
- ### defp query-pair
- (params part -- params :
-  "Decode one key=value part into the params dict; later keys replace earlier.")
- ("=" split dup first percent-decode swap rest "=" join percent-decode put)
- 'query-pair defp
-
- ### def query
- (request -- params :
-  "Parse the request's 'query string (\"a=1&b=%2Fx&c\") into a dict from string keys to string
-   values ({\"a\" \"1\" \"b\" \"/x\" \"c\" \"\"}): & separates pairs, the first = separates key from
-   value, a key without = maps to the empty string, %XX escapes are decoded in keys and values and
-   the result must be UTF-8, + is left as is, and a later duplicate key replaces an earlier one. An
-   empty query is {}. A % not followed by two hex digits, or an escape sequence that is not UTF-8,
-   is 'domain; a request whose 'query is not a string is 'type.")
- ('query at "http.server.query expects a string 'query" checked-string
-  "&" split ("" match? not) filter {} (query-pair) fold)
- 'query def
 
  ### defp default-config
  (-- config : "Return the serving configuration with every limit at its default.")
@@ -558,7 +474,7 @@
  ### defp answer
  (connection config status -- :
   "Write the minimal text response for a status the server generates itself.")
- (dup reason text write-response)
+ (dup reason http.response.text write-response)
  'answer defp
 
  ### defp report

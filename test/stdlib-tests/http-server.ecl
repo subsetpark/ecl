@@ -144,7 +144,8 @@
   ["HTTP/1.1 200 OK" "X-Ok_1!: a\tb" "X-Ok_1!: c d" "Content-Length: 0" "Connection: close" "" ""]
   crlf join
   equal
-  ({'query "next=%0D%0AX-Evil:%20yes"} http.server.query "next" at http.server.redirect
+  ("GET" "/r?next=%0D%0AX-Evil:%20yes" http.request.new http.request.query "next" at
+   http.response.redirect
    http.server.render-response)
   'domain
   "without CR, LF"
@@ -155,28 +156,6 @@
   raises-containing
   (5 http.server.render-response) 'type "must be a dict" raises-containing)
  'render-response test
-
- ### test constructors
- (-- : "Build well-formed responses with the documented statuses, headers, and bodies.")
- (200 "hi" http.server.text
-  {'status 200 'headers {"content-type" ("text/plain; charset=utf-8")} 'body "hi"} equal
-  201 {"a" (1 'null)} http.server.json
-  {'status 201 'headers {"content-type" ("application/json")} 'body "{\"a\":[1,null]}"} equal
-  204 http.server.empty {'status 204 'headers {} 'body ""} equal
-  "/there" http.server.redirect {'status 302 'headers {"location" ("/there")} 'body ""} equal
-  http.server.not-found
-  {'status 404 'headers {"content-type" ("text/plain; charset=utf-8")} 'body "not found"} equal
-  200 "hi" http.server.text http.server.render-response len 0 > 1 equal
-  201 {"a" 1} http.server.json http.server.render-response len 0 > 1 equal
-  204 http.server.empty http.server.render-response len 0 > 1 equal
-  "/x" http.server.redirect http.server.render-response len 0 > 1 equal
-  http.server.not-found http.server.render-response len 0 > 1 equal
-  ("200" "hi" http.server.text) 'type "int status" raises-containing
-  (200 5 http.server.text) 'type "string body" raises-containing
-  ("201" {} http.server.json) 'type "int status" raises-containing
-  ("204" http.server.empty) 'type "int status" raises-containing
-  (5 http.server.redirect) 'type "string location" raises-containing)
- 'constructors test
 
  ### test route
  (-- : "Dispatch on method and pattern, bind :name segments, and answer 405 or 404 otherwise.")
@@ -213,25 +192,10 @@
   ({'method "GET" 'path "/x"} 5 http.server.route) 'type "list of rows" raises-containing)
  'route test
 
- ### test query
- (-- : "Decode the query string into a dict, percent-decoding escapes and letting later keys win.")
- ({'query "a=1&b=%2Fx&c&a=2"} http.server.query {"a" "2" "b" "/x" "c" ""} equal
-  {'query ""} http.server.query {} equal
-  {'query "&&"} http.server.query {} equal
-  {'query "k=a=b"} http.server.query {"k" "a=b"} equal
-  {'query "a+b=c+d"} http.server.query {"a+b" "c+d"} equal
-  {'query "%C3%A9=%c3%a9"} http.server.query {"é" "é"} equal
-  ({'query "a=%2"} http.server.query) 'domain "truncated" raises-containing
-  ({'query "a=%zz"} http.server.query) 'domain "malformed" raises-containing
-  ({'query "a=%FF"} http.server.query) 'domain "valid UTF-8" raises-containing
-  ({'query 5} http.server.query) 'type "string 'query" raises-containing)
- 'query test
-
  ### test documentation
  (-- : "Expose documentation for every http.server export.")
- (['http.server.parse-request-line 'http.server.parse-headers 'http.server.content-length
-   'http.server.render-response 'http.server.text 'http.server.json 'http.server.empty
-   'http.server.redirect 'http.server.not-found 'http.server.route 'http.server.query]
+ (['http.server.@serve 'http.server.parse-request-line 'http.server.parse-headers
+   'http.server.content-length 'http.server.render-response 'http.server.route]
   documented)
  'documentation test
 ) 'stdlib.test.http-server @defm

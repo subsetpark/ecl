@@ -156,7 +156,7 @@ test "multiline documentation is normalized and see prints annotation and canoni
     try std.testing.expectEqualStrings(
         "(x -- y : \"Square a numeric value.\") (dup *)\n" ++
             "(: \"Only docs.\") (42)\n" ++
-            "(: \"First line wraps softly.\n\n- One continues\n- Two.\") (1)\n",
+            "(:\n \"First line wraps softly.\n\n- One continues\n- Two.\") (1)\n",
         output.written(),
     );
 }

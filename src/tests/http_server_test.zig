@@ -295,7 +295,7 @@ fn awaitTimerEntries(runtime: *Runtime, count: usize) void {
 
 const ok_response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
 const ok_row = "\"/ok\" (pop {'status 200 'headers {} 'body \"ok\"}) ";
-const not_found_default = "(pop http.server.not-found)";
+const not_found_default = "(pop http.response.not-found)";
 const close_listener_request = "GET /close-listener HTTP/1.1\r\n\r\n";
 
 /// A serving unit under `srv`: `prelude` runs first (a gate task, say), the
@@ -314,8 +314,8 @@ const Server = struct {
         const program = try std.fmt.allocPrint(
             allocator,
             "{s} [] (l {s} (dup 'path at [{s}" ++
-                "\"/close-listener\" (pop l net.close 204 http.server.empty) " ++
-                "\"/stop\" (pop srv cancel 204 http.server.empty) " ++
+                "\"/close-listener\" (pop l net.close 204 http.response.new) " ++
+                "\"/stop\" (pop srv cancel 204 http.response.new) " ++
                 "{s}] case) http.server.@serve) @spawn 'srv set " ++
                 "srv await 'err at dup 'kind at swap 'data {{}} at-or 'reason 'none at-or",
             .{ prelude, config, rows, default_row },
@@ -660,8 +660,9 @@ test "http server: concurrent requests under the worker pool are each answered e
 
 test "http server: words cold-load through the embedded manifest and are documented" {
     try support.expectStack(
-        "'http.server.@serve doc len 0 > 'http.server.text doc len 0 > 'http.server.route doc len 0 > 'http.server.query doc len 0 >",
-        "1 1 1 1",
+        "'http.server.@serve doc len 0 > 'http.server.route doc len 0 > 'http.server.render-response doc len 0 > " ++
+            "'http.request.query doc len 0 > 'http.response.text doc len 0 >",
+        "1 1 1 1 1",
     );
-    try support.expectStack("'http.server ('@serve 'text 'route) import 1", "1");
+    try support.expectStack("'http.server ('@serve 'route) import 'http.response ('text) import 'http.request ('query) import 1", "1");
 }
