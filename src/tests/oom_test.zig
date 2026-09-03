@@ -1007,7 +1007,7 @@ fn stdlibSessionAllocationProbe(
                 "(\"Host: x\") http.server.parse-headers dup http.server.content-length pop pop " ++
                 "200 \"ok\" http.server.text http.server.render-response pop " ++
                 "[] (l {'max-in-flight 1} (pop http.server.not-found) http.server.@serve) @spawn " ++
-                "dup cancel await pop l net.close",
+                "0 clock.sleep dup cancel await pop l net.close",
         ),
         .http => try runOk(
             &runtime,

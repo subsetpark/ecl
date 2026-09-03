@@ -1786,7 +1786,9 @@ A request is the dictionary
   with an IPv6 address in brackets.
 
 A response is the dictionary `{'status 'headers 'body}` with exactly those
-keys: an integer status in `100...599`; a headers dictionary whose keys are
+keys: an integer status in `200...599`, since interim 1xx responses are not
+served, with an empty body when the status is 204, 205, or 304; a headers
+dictionary whose keys are
 strings and whose values are a string or a list of strings, written once per
 value in the given order and with the name as given; and a body that is a
 string, written as UTF-8, or a byte list. The names `content-length`,
@@ -1815,7 +1817,8 @@ is valid. Each limit is an integer greater than zero.
 - `'read-timeout-ms` (default `10000`): the deadline for reading one whole
   request, head and body; expiry is 408.
 - `'on-failure` (default `(str io.eprint)`): a quotation `( error -- )`
-  applied to the error dictionary of every request the server answers 500.
+  applied to the error dictionary of every request the server answers 500; a
+  failure of the quotation itself is discarded.
 
 The server answers a request it cannot serve with a minimal `text/plain`
 response of the status below and then closes the connection:
@@ -1959,12 +1962,13 @@ location is `'type`.
 `( response -- bytes )` — Validate a response dictionary and return the exact
 bytes the server writes for it: `HTTP/1.1 <status> <reason>` CRLF, one
 `name: value` line per header value in the given order with the name as
-given, `Content-Length: <n>` CRLF, `Connection: close` CRLF, CRLF, then the
-body bytes. The reason phrase comes from a fixed table covering 200, 201,
+given, `Content-Length: <n>` CRLF (omitted for 204), `Connection: close` CRLF,
+CRLF, then the body bytes. The reason phrase comes from a fixed table covering 200, 201,
 204, 301, 302, 304, 400, 401, 403, 404, 405, 408, 411, 413, 431, 500, 503,
 and 505 and is empty for any other status, with the space before it always
 written. A non-dictionary is `'type`. Keys other than exactly `'status`,
-`'headers`, and `'body`; a status that is not an integer in `100...599`; a
+`'headers`, and `'body`; a status that is not an integer in `200...599`; a
+nonempty body with status 204, 205, or 304; a
 headers value that is not a dictionary, a header name that is not a nonempty
 string of HTTP token characters, a header value that is neither a string nor
 a list of strings or that contains CR, LF, NUL, or a control character other

@@ -77,8 +77,21 @@
   [1 2 255] cat
   equal
   {'status 204 'headers {} 'body ""} http.server.render-response chars
-  ["HTTP/1.1 204 No Content" "Content-Length: 0" "Connection: close" "" ""] crlf join
+  ["HTTP/1.1 204 No Content" "Connection: close" "" ""] crlf join
   equal
+  {'status 304 'headers {} 'body ""} http.server.render-response chars
+  ["HTTP/1.1 304 Not Modified" "Content-Length: 0" "Connection: close" "" ""] crlf join
+  equal
+  ({'status 204 'headers {} 'body "x"} http.server.render-response) 'domain "empty body"
+  raises-containing
+  ({'status 205 'headers {} 'body [1]} http.server.render-response) 'domain "empty body"
+  raises-containing
+  ({'status 304 'headers {} 'body "x"} http.server.render-response) 'domain "empty body"
+  raises-containing
+  ({'status 100 'headers {} 'body ""} http.server.render-response) 'domain "200...599"
+  raises-containing
+  ({'status 199 'headers {} 'body ""} http.server.render-response) 'domain "200...599"
+  raises-containing
   {'status 200 'headers {} 'body "hé"} http.server.render-response chars
   ["HTTP/1.1 200 OK" "Content-Length: 3" "Connection: close" "" "hé"] crlf join
   equal
@@ -94,11 +107,11 @@
   'domain
   "content-length, connection, or transfer-encoding"
   raises-containing
-  ({'status 600 'headers {} 'body "ok"} http.server.render-response) 'domain "100...599"
+  ({'status 600 'headers {} 'body "ok"} http.server.render-response) 'domain "200...599"
   raises-containing
-  ({'status 99 'headers {} 'body "ok"} http.server.render-response) 'domain "100...599"
+  ({'status 99 'headers {} 'body "ok"} http.server.render-response) 'domain "200...599"
   raises-containing
-  ({'status "200" 'headers {} 'body "ok"} http.server.render-response) 'domain "100...599"
+  ({'status "200" 'headers {} 'body "ok"} http.server.render-response) 'domain "200...599"
   raises-containing
   ({'status 200 'headers {} 'body 7} http.server.render-response) 'domain "body must be"
   raises-containing

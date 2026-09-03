@@ -1156,14 +1156,23 @@ fn auditHttpServerWriteSink() bool {
     var count: usize = 0;
     var scan: usize = 0;
     while (std.mem.indexOfPos(u8, source, scan, "net.write")) |found| {
-        count += 1;
         scan = found + "net.write".len;
-        const header = std.mem.lastIndexOf(u8, source[0..found], "### defp ") orelse {
-            std.log.err("http server write sink: `net.write` appears outside any definition", .{});
+        // A comment line is prose, not a call site.
+        const line_start = if (std.mem.lastIndexOfScalar(u8, source[0..found], '\n')) |newline| newline + 1 else 0;
+        const line_text = std.mem.trimStart(u8, source[line_start..found], " ");
+        if (line_text.len > 0 and line_text[0] == '#') continue;
+        count += 1;
+        // The immediately enclosing definition, public or private: whichever
+        // navigation header is nearest above the occurrence.
+        const public_header = std.mem.lastIndexOf(u8, source[0..found], "### def ");
+        const private_header = std.mem.lastIndexOf(u8, source[0..found], "### defp ");
+        const private_wins = if (private_header) |private| (public_header == null or private > public_header.?) else false;
+        if (!private_wins) {
+            std.log.err("http server write sink: `net.write` appears outside `write-response`", .{});
             failed = true;
             continue;
-        };
-        const name_start = header + "### defp ".len;
+        }
+        const name_start = private_header.? + "### defp ".len;
         const name_end = preludeTokenEnd(source, name_start);
         if (!std.mem.eql(u8, source[name_start..name_end], "write-response")) {
             std.log.err("http server write sink: `net.write` appears in `{s}`; only `write-response` may write", .{source[name_start..name_end]});
@@ -1171,7 +1180,7 @@ fn auditHttpServerWriteSink() bool {
         }
     }
     if (count != 1) {
-        std.log.err("http server write sink: expected exactly one `net.write`, found {d}", .{count});
+        std.log.err("http server write sink: expected exactly one `net.write` call site, found {d}", .{count});
         failed = true;
     }
     return failed;

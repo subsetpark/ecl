@@ -104,6 +104,9 @@ const Runner = struct {
     program: []const u8,
     thread: ?std.Thread = null,
     failure: ?anyerror = null,
+    /// Set once the program has returned, so a teardown path can tell a
+    /// server that is still serving from one that already ended.
+    done: std.atomic.Value(bool) = .init(false),
 
     fn start(self: *Runner) !void {
         self.thread = try std.Thread.spawn(.{}, run, .{self});
@@ -113,6 +116,7 @@ const Runner = struct {
         self.runtime.run(self.program) catch |err| {
             self.failure = err;
         };
+        self.done.store(true, .release);
     }
 
     fn join(self: *Runner) !void {
@@ -342,7 +346,9 @@ const Server = struct {
     /// never outlives the Session.
     fn abandon(self: *Server) void {
         defer self.destroy();
-        _ = exchange(self.port, close_listener_request) catch |err| {
+        // A server that already ended has nobody accepting, so a request to
+        // it would never see EOF; only a live one needs closing.
+        if (!self.runner.done.load(.acquire)) _ = exchange(self.port, close_listener_request) catch |err| {
             std.log.err("abandoned server could not be closed: {t}", .{err});
         };
         self.runner.join() catch |err| {
@@ -542,7 +548,8 @@ test "http server: handler failures extra results malformed responses and reserv
     try runtime.open(loopback_ephemeral, .cooperative);
     defer runtime.close();
     const port = try runtime.listen("l");
-    const server = try Server.start(&runtime, port, "", "{}", "\"/raise\" (pop {'kind 'boom} raise) " ++
+    // The hook itself fails on every report; the server must contain that too.
+    const server = try Server.start(&runtime, port, "", "{'on-failure (pop {'kind 'hook-failed} raise)}", "\"/raise\" (pop {'kind 'boom} raise) " ++
         "\"/extra\" (pop 1 2) " ++
         "\"/malformed\" (pop 7) " ++
         "\"/reserved\" (pop {'status 200 'headers {\"content-length\" \"1\"} 'body \"x\"}) " ++
@@ -564,6 +571,7 @@ test "http server: cancellation cancels in-flight requests and leaves the caller
     const port = try runtime.listen("l");
     _ = try runtime.listen("l2");
     const server = try Server.start(&runtime, port, gate_prelude, "{}", gate_rows, not_found_default);
+    errdefer server.abandon();
     const slow = try Peer.start(port, .{ .send = "GET /slow HTTP/1.1\r\n\r\n" });
     slow.waitFlushed();
     // Nobody releases the gate: the slow request is in flight when the stop

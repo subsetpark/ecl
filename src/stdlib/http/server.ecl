@@ -227,12 +227,15 @@
  (dup type 'dict match? "http.server response must be a dict" type-error assert
   dup ['status 'headers 'body] dict.keys-exactly?
   "http.server response needs exactly 'status, 'headers, and 'body" domain-error assert
-  dup 'status at dup type 'int match? (dup 100 >= swap 599 <= and) (pop 0) if
-  "http.server response status must be an int in 100...599" domain-error assert
+  dup 'status at dup type 'int match? (dup 200 >= swap 599 <= and) (pop 0) if
+  "http.server response status must be an int in 200...599; interim 1xx responses are not served"
+  domain-error assert
   dup 'headers at dup type 'dict match? "http.server response headers must be a dict" domain-error
   assert
   dict.pairs (checked-header) for
-  dup 'body at body? "http.server response body must be a string or a byte list" domain-error assert)
+  dup 'body at body? "http.server response body must be a string or a byte list" domain-error assert
+  dup 'status at [204 205 304] in? not over 'body at len 0 = or
+  "http.server response with status 204, 205, or 304 must have an empty body" domain-error assert)
  'checked-response defp
 
  ### defp header-lines
@@ -252,24 +255,27 @@
  ### def render-response
  (response -- bytes :
   "Validate a response in full and serialize it to the exact bytes the server writes. The response
-   is the dict {'status 'headers 'body} with exactly those keys: 'status an int in 100...599;
-   'headers a dict from header names, nonempty strings of HTTP token characters, to a string or a
-   list of strings containing no CR, LF, NUL, or control character other than tab, written once per
-   value in the given order with the name as given ({\"set-cookie\" (\"a=1\" \"b=2\")} writes two
-   lines); 'body a string, written as UTF-8, or a byte list of ints in 0...255. The bytes are the
-   status line HTTP/1.1 status reason (an empty reason for codes outside the built-in table), the
-   header lines, Content-Length, Connection: close, an empty line, and the body. A non-dict is
-   'type; any other key set, a status outside the range, a header name that is not a token or is
-   content-length, connection, or transfer-encoding in any letter case, a header value that is not a
-   clean string or list of them, or a body of another kind is 'domain. Every byte the server writes
-   has passed this word.")
+   is the dict {'status 'headers 'body} with exactly those keys: 'status an int in 200...599, since
+   interim 1xx responses are not served, with an empty body when it is 204, 205, or 304; 'headers a
+   dict from header names, nonempty strings of HTTP token characters, to a string or a list of
+   strings containing no CR, LF, NUL, or control character other than tab, written once per value in
+   the given order with the name as given ({\"set-cookie\" (\"a=1\" \"b=2\")} writes two lines);
+   'body a string, written as UTF-8, or a byte list of ints in 0...255. The bytes are the status
+   line HTTP/1.1 status reason (an empty reason for codes outside the built-in table), the header
+   lines, Content-Length (omitted for 204), Connection: close, an empty line, and the body. A
+   non-dict is 'type; any other key set, a status outside the range, a body with status 204, 205, or
+   304, a header name that is not a token or is content-length, connection, or transfer-encoding in
+   any letter case, a header value that is not a clean string or list of them, or a body of another
+   kind is 'domain. Every byte the server writes has passed this word.")
  (checked-response
-  dup 'body at body-bytes swap
-  dup 'status at dup reason pair "HTTP/1.1 {} {}" str.format
-  swap 'headers at header-lines cons
-  over len wrap "Content-Length: {}" str.format append
-  "Connection: close" append "" append "" append
-  crlf join bytes swap cat)
+  (|response|
+   response 'body at body-bytes
+   response 'status at dup reason pair "HTTP/1.1 {} {}" str.format
+   response 'headers at header-lines cons
+   response 'status at 204 = not (over len wrap "Content-Length: {}" str.format append) when
+   "Connection: close" append "" append "" append
+   crlf join bytes swap cat)
+  call)
  'render-response def
 
  ### defp checked-status
@@ -556,8 +562,9 @@
  'answer defp
 
  ### defp report
- (config error -- : "Hand a request failure to the configured 'on-failure quotation.")
- (swap 'on-failure at call)
+ (config error -- :
+  "Hand a request failure to the configured 'on-failure quotation; its own failure is discarded.")
+ (wrap swap 'on-failure at @attempt pop)
  'report defp
 
  ### defp fail-request
@@ -675,7 +682,7 @@
    - 'max-in-flight (128): number of acceptor children, each serving one connection at a time.
    - 'read-timeout-ms (10000): deadline for reading one whole request; expiry is 408.
    - 'on-failure ((str io.eprint)): a ( error -- ) quotation applied to the error of every request
-     answered 500.
+     answered 500; a failure of the quotation itself is discarded.
    Each limit is an int greater than zero.
 
    Requests the server cannot serve are answered with a minimal text/plain response and closed: 400
