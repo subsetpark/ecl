@@ -174,6 +174,11 @@ closed port or the same port twice. The move and the child's construction are
 one step: the port is never unowned, and the child never runs before it owns
 the port.
 
+At most 16 ports may be given at once; more is `'domain`. That limit is
+checked before the list's elements are examined, so an oversized list of
+non-ports reports the limit rather than the element type. The ports list is
+otherwise validated in order, and a list holding a non-port is `'type`.
+
 Giving does not restrict use. The caller may still name a given port and read
 or write it, exactly as a child may use a port its parent owns; what changed
 is which unit's end closes it. See [Concurrency](SPEC.md#concurrency).

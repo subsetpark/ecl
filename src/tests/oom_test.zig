@@ -760,6 +760,7 @@ const StdlibSurface = enum {
     process,
     net,
     net_connection,
+    net_give,
     package_sync_module,
     package_sync,
     package_cli_module,
@@ -813,7 +814,8 @@ fn stdlibSessionAllocationProbe(
                 .stdout_capacity = 16,
                 .stderr_capacity = 16,
             } else null,
-            .net_policy = if (surface == .net or surface == .net_connection or surface == .http_server) .{
+            .net_policy = if (surface == .net or surface == .net_connection or
+                surface == .net_give or surface == .http_server) .{
                 .binds = .{ .exact = &.{.{ .address = "127.0.0.1", .port = 0 }} },
             } else null,
             .filesystem_policy = .{ .roots = &.{
@@ -987,6 +989,19 @@ fn stdlibSessionAllocationProbe(
             "{'address \"127.0.0.1\" 'port 0} net.listen 'l set " ++
                 "[] (l net.accept) @spawn 'waiting set 0 clock.sleep l net.close " ++
                 "waiting await pop [] (l net.accept) @attempt pop",
+        ),
+        // Every ordinal is deterministic: two binds, one closed, then a give
+        // whose second port refuses after the first is already prepared, so
+        // the rollback path runs, and finally a give that commits and whose
+        // child scope closes what it was given.
+        .net_give => try runOk(
+            &runtime,
+            "oom-give.ecl",
+            "{'address \"127.0.0.1\" 'port 0} net.listen 'a set " ++
+                "{'address \"127.0.0.1\" 'port 0} net.listen 'b set b net.close " ++
+                "[] (a b 2 pack [] (pop pop) @give) @attempt pop " ++
+                "[] (a a 2 pack [] (pop pop) @give) @attempt pop " ++
+                "a wrap [] (pop) @give await pop",
         ),
         .time => try runOk(
             &runtime,
@@ -1264,6 +1279,11 @@ test "oom: standard-library and host: package: locked project module propagates 
 test "oom: standard-library and host: stdlib: clock propagates every allocation failure" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.clock);
+}
+
+test "oom: standard-library and host: stdlib: @give propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
+    try checkStdlibSurface(.net_give);
 }
 
 test "oom: standard-library and host: stdlib: time propagates every allocation failure" {
