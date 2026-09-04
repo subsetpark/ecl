@@ -2,7 +2,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const value = @import("value.zig");
-const env = @import("env.zig");
 const machine = @import("machine.zig");
 
 pub const Value = value.Value;
@@ -265,11 +264,3 @@ pub const Context = struct {
         return self.evaluator.conformError(left, right);
     }
 };
-
-pub fn installPrimitive(
-    core: *env.BuildingEnv,
-    comptime name: []const u8,
-    primitive: env.PrimitiveImpl,
-) error{OutOfMemory}!void {
-    try core.installBuiltin(name, primitive);
-}

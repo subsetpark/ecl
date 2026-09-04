@@ -17,27 +17,26 @@ const MachineError = machine.MachineError;
 const Application = machine.IsolatedApplication;
 const ApplicationStep = machine.ApplicationStep;
 const StackWindow = machine.StackWindow;
-const Definition = struct { name: []const u8, primitive: env.PrimitiveImpl };
 
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
-    const definitions = comptime [_]Definition{
-        .{ .name = "call", .primitive = call },
-        .{ .name = "if", .primitive = ifWord },
-        .{ .name = "while", .primitive = whileWord },
-        .{ .name = "linrec", .primitive = linrec },
-        .{ .name = "times", .primitive = times },
-        .{ .name = "cond", .primitive = cond },
-        .{ .name = "each", .primitive = each },
-        .{ .name = "zip-with", .primitive = zipWith },
-        .{ .name = "for", .primitive = forWord },
-        .{ .name = "fold", .primitive = fold },
-        .{ .name = "scan", .primitive = scan },
-        .{ .name = "stencil", .primitive = stencil },
-        .{ .name = "unfold", .primitive = unfold },
-        .{ .name = "infra", .primitive = infra },
-        .{ .name = "update", .primitive = update },
+    const definitions = comptime [_]env.BuiltinWord{
+        .{ .name = "call", .primitive = call, .effect = "quotation -- ...", .doc = "Run a quotation on the current stack." },
+        .{ .name = "if", .primitive = ifWord, .effect = "bool then else -- ...", .doc = "Run one of two quotations according to a 0/1 boolean condition." },
+        .{ .name = "while", .primitive = whileWord, .effect = "cond body -- ...", .doc = "Run a body while a destructively inspected, checkpointed stack condition has boolean 1 on top." },
+        .{ .name = "linrec", .primitive = linrec, .effect = "predicate base pre post -- ...", .doc = "Run explicit linear recursion with checkpointed predicates and inline pre/post work." },
+        .{ .name = "times", .primitive = times, .effect = "n quotation -- ...", .doc = "Run a quotation the requested nonnegative number of times." },
+        .{ .name = "cond", .primitive = cond, .effect = "clauses -- ...", .doc = "Run the first action whose checkpointed stack test has boolean 1 on top, or the final else quotation." },
+        .{ .name = "each", .primitive = each, .effect = "collection quotation -- collection", .doc = "Apply a one-input, one-output quotation independently to each list element or dictionary value, preserving dictionary keys." },
+        .{ .name = "zip-with", .primitive = zipWith, .effect = "left right quotation -- list", .doc = "Apply a two-input, one-output quotation across two conforming lists." },
+        .{ .name = "for", .primitive = forWord, .effect = "collection quotation --", .doc = "Apply a one-input, zero-output quotation to each list element or dictionary value in order." },
+        .{ .name = "fold", .primitive = fold, .effect = "list accumulator quotation -- accumulator", .doc = "Reduce a list from the supplied accumulator with a binary quotation." },
+        .{ .name = "scan", .primitive = scan, .effect = "list accumulator quotation -- list", .doc = "Return the successive accumulator values produced while reducing a list." },
+        .{ .name = "stencil", .primitive = stencil, .effect = "list width quotation -- list", .doc = "Apply a one-input, one-output quotation independently to each overlapping window of a positive width." },
+        .{ .name = "unfold", .primitive = unfold, .effect = "state predicate step -- state list", .doc = "Generate values while a one-input predicate holds; the step returns the next state and one output." },
+        .{ .name = "infra", .primitive = infra, .effect = "list quotation -- list", .doc = "Run a quotation with a list's elements as its isolated stack and collect the results." },
+        .{ .name = "update", .primitive = update, .effect = "collection selector quotation -- collection", .doc = "Apply a unary quotation at list positions through a pervasive selector, or at one whole-value dictionary key." },
     };
-    try core.installBuiltins(definitions);
+    try core.installBuiltins(&definitions);
 }
 
 fn call(evaluator: *Machine) MachineError!void {

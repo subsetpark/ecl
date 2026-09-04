@@ -19,38 +19,40 @@ const test_prims = @import("test_prims.zig");
 const Value = value.Value;
 const Machine = machine.Machine;
 const MachineError = machine.MachineError;
-const Definition = struct {
-    name: []const u8,
-    primitive: env.PrimitiveImpl,
-};
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
-    const definitions = comptime [_]Definition{
-        .{ .name = "dup", .primitive = dup },
-        .{ .name = "swap", .primitive = swap },
-        .{ .name = "pop", .primitive = pop },
-        .{ .name = "stack", .primitive = stack },
-        .{ .name = "cons", .primitive = cons },
-        .{ .name = "match?", .primitive = match },
-        .{ .name = "type", .primitive = typeWord },
-        .{ .name = "execute", .primitive = execute },
-        .{ .name = "parse", .primitive = parse },
-        .{ .name = "chars", .primitive = chars },
-        .{ .name = "bytes", .primitive = bytesWord },
-        .{ .name = "symbol", .primitive = symbolWord },
-        .{ .name = "intern", .primitive = internWord },
-        .{ .name = "int", .primitive = intWord },
-        .{ .name = "float", .primitive = floatWord },
-        .{ .name = "char", .primitive = charWord },
-        .{ .name = "@attempt", .primitive = attempt },
-        .{ .name = "raise", .primitive = raise },
-        .{ .name = "args", .primitive = args },
-        .{ .name = "exit", .primitive = exit },
-        .{ .name = "getenv", .primitive = getenv },
-        .{ .name = "_ll", .primitive = bindLocals },
-        .{ .name = "_gl", .primitive = readLocal },
-        .{ .name = "_dl", .primitive = unbindLocals },
+    const definitions = comptime [_]env.BuiltinWord{
+        .{ .name = "dup", .primitive = dup, .effect = "x -- x x", .doc = "Duplicate the top stack value." },
+        .{ .name = "swap", .primitive = swap, .effect = "x y -- y x", .doc = "Exchange the top two stack values." },
+        .{ .name = "pop", .primitive = pop, .effect = "x --", .doc = "Discard the top stack value." },
+        .{ .name = "stack", .primitive = stack, .effect = null, .doc = "Copy the visible operand stack into a bottom-to-top list while leaving every original value in place." },
+        .{ .name = "cons", .primitive = cons, .effect = "value list -- list", .doc = "Prepend a value or executable form to a list." },
+        .{ .name = "match?", .primitive = match, .effect = "left right -- bool", .doc = "Return whether two complete values are structurally equal." },
+        .{ .name = "type", .primitive = typeWord, .effect = "value -- type", .doc = "Return the value kind as a symbol." },
+        .{ .name = "execute", .primitive = execute, .effect = "word -- ...", .doc = "Execute a word through ordinary name resolution and dispatch." },
+        .{ .name = "parse", .primitive = parse, .effect = "string -- quotation", .doc = "Parse source text into an unevaluated quotation." },
+        .{ .name = "chars", .primitive = chars, .effect = "value -- string", .doc = "Return a value's text content as a string: a string unchanged, a symbol or word spelling, " ++
+            "a char as a one-element string, or a byte list decoded as UTF-8." },
+        .{ .name = "bytes", .primitive = bytesWord, .effect = "value -- bytes", .doc = "Encode a string as UTF-8 into a byte list, or return a byte list unchanged." },
+        .{ .name = "symbol", .primitive = symbolWord, .effect = "value -- symbol", .doc = "Return a symbol or word as a symbol, or the already-interned symbol a string spells; " ++
+            "a spelling that was never interned is 'domain." },
+        .{ .name = "intern", .primitive = internWord, .effect = "value -- symbol", .doc = "Return a symbol or word as a symbol, or create the symbol a string spells, growing the " ++
+            "process-lifetime name table when it is new." },
+        .{ .name = "int", .primitive = intWord, .effect = "value -- int", .doc = "Return an int unchanged, a char's codepoint, or the value of an integer-literal string." },
+        .{ .name = "float", .primitive = floatWord, .effect = "value -- float", .doc = "Return a float unchanged, an int as a float, or the value of a numeric-literal string." },
+        .{ .name = "char", .primitive = charWord, .effect = "value -- char", .doc = "Return a char unchanged, the char with an int's codepoint, or the single char of a one-char string." },
+        .{ .name = "@attempt", .primitive = attempt, .effect = "values quotation -- result", .doc = "Run a body with an explicit initial stack in a fresh unit and return an ok or error result dictionary; observationally `@spawn await`." },
+        .{ .name = "raise", .primitive = raise, .effect = "error --", .doc = "Raise a language error from an error dictionary." },
+        .{ .name = "args", .primitive = args, .effect = "-- arguments", .doc = "Return the process arguments as a list of strings." },
+        .{ .name = "exit", .primitive = exit, .effect = "status --", .doc = "Request root-session termination with the given exit status." },
+        .{ .name = "getenv", .primitive = getenv, .effect = "name -- string", .doc = "Return an environment variable's value from the session snapshot." },
+        .{ .name = "_ll", .primitive = bindLocals, .effect = "... n --", .doc = "Move the top n values into the head-binder locals, last name first. " ++
+            "The reader emits this; write `|a b|` instead." },
+        .{ .name = "_gl", .primitive = readLocal, .effect = "n -- x", .doc = "Copy head-binder local n, counting from the most recently bound name. " ++
+            "The reader emits this; write the local's name instead." },
+        .{ .name = "_dl", .primitive = unbindLocals, .effect = "n --", .doc = "Discard the top n head-binder locals. The reader emits this at the end " ++
+            "of a binder body." },
     };
-    try core.installBuiltins(definitions);
+    try core.installBuiltins(&definitions);
     try combinators.install(core);
     try kernels.install(core);
     try module_prims.install(core);

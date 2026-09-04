@@ -13,14 +13,13 @@ const scheduler_api = @import("scheduler.zig");
 const Value = value.Value;
 const Machine = machine.Machine;
 const MachineError = machine.MachineError;
-const Definition = struct { name: []const u8, primitive: env.PrimitiveImpl };
 
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
-    const definitions = comptime [_]Definition{
-        .{ .name = "tests", .primitive = discover },
-        .{ .name = "@test", .primitive = invoke },
+    const definitions = comptime [_]env.BuiltinWord{
+        .{ .name = "tests", .primitive = discover, .effect = "-- descriptors", .doc = "Return deterministic pure descriptors for canonical registered module tests; available only in a test Session." },
+        .{ .name = "@test", .primitive = invoke, .effect = "descriptor -- result", .doc = "Invoke a discovered test in a fresh isolated unit with its registered module's private home and durable state; available only in a test Session." },
     };
-    try core.installBuiltins(definitions);
+    try core.installBuiltins(&definitions);
 }
 
 const DescriptorKeys = struct {

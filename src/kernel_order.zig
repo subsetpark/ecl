@@ -22,8 +22,16 @@ const Op = support.OrderOp;
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     inline for (std.meta.fields(Op)) |field| {
         const operation: Op = @enumFromInt(field.value);
-        try support.installPrimitive(core, operation.spelling(), bind(operation));
+        try core.installBuiltin(definition(operation));
     }
+}
+
+fn definition(comptime operation: Op) env.BuiltinWord {
+    return switch (operation) {
+        .cmp => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "left right -- ordering", .doc = "Return -1, 0, or 1 for the whole-value order of two comparable values." },
+        .grade => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- indices", .doc = "Return the stable ascending sort permutation of a comparable list." },
+        .group => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- dict", .doc = "Group equal list values into a dictionary of zero-based index lists." },
+    };
 }
 
 fn bind(comptime operation: Op) env.PrimitiveImpl {

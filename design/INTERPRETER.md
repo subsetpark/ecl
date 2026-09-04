@@ -1312,7 +1312,15 @@ The placement rule is:
 
 Hosted modules combine source definitions with narrowly registered builtins.
 Their manifest, documentation, effects, provenance, and package requirements
-are validated before publication. Package discovery and synchronization are
+are validated before publication. Core and hosted builtin words use one
+complete declaration carrying implementation, spelling, effect, and
+documentation. Installation validates that declaration and publishes its
+metadata directly; primitive families own their declarations, and kernel
+spellings remain owned by their closed operation enums. The source audit
+checks semantic spelling conventions across all classified production sources;
+documentation completeness and effect syntax are compile-time requirements.
+
+Package discovery and synchronization are
 described in `ENVIRONMENT.md`; they enter the evaluator through the same module
 loader and bounded-driver conventions as other sources. Host-side lock and
 catalog validation share one inert-record decoder for exact fields, required
