@@ -358,15 +358,13 @@ fn failConnection(evaluator: *Machine, cell: *net_port.ConnectionCell, failure: 
 /// the unit's scope closure would abort the socket and discard the queue.
 const CloseDriver = struct {
     pub const address_stable_driver = {};
-    pub const ownership: heap.DriverOwnership = .self_owned;
-    connection: Value,
+    /// Field ownership rather than self-owned construction: `startDriver`
+    /// retires a still-uninstalled driver's fields when its allocation fails,
+    /// so closing a connection needs no bespoke cleanup path of its own.
+    pub const ownership: heap.DriverOwnership = .fields;
+    connection: heap.Owned(Value),
     cell: *net_port.ConnectionCell,
     requested: bool = false,
-
-    pub fn deinit(self: *CloseDriver, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
-        _ = allocator;
-        releases.releaseValue(self.connection);
-    }
 
     pub fn advance(evaluator: *Machine, self: *CloseDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
@@ -389,10 +387,10 @@ fn close(evaluator: *Machine) MachineError!void {
         return;
     }
     if (net_port.connectionFromValue(item.borrow())) |cell| {
-        const driver = try evaluator.allocator().create(CloseDriver);
-        driver.* = .{ .connection = item.take(), .cell = cell };
-        evaluator.adoptDriver(driver);
-        return;
+        return evaluator.startDriver(CloseDriver{
+            .connection = .init(item.take()),
+            .cell = cell,
+        });
     }
     return evaluator.typeError("a network listener or connection");
 }

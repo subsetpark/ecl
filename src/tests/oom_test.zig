@@ -984,10 +984,14 @@ fn stdlibSessionAllocationProbe(
         // under the cooperative scheduler: a child parks in accept with no
         // peer, the parent closes the listener, and the child fails closed.
         // These probes are ECL source only and `net` has no outbound connect
-        // word, so no program here can hold a connection: the driver that
-        // `net.close` installs for one, and the drain wait it registers, are
-        // swept by `connectionLifecycle` in net_port.zig instead, which can
-        // supply a real peer and still keep its ordinals deterministic.
+        // word, so no program here can hold a connection, which is why the
+        // connection words' drivers are not reachable from any allocation
+        // probe. The drain wait `net.close` parks on is swept instead by
+        // `connectionLifecycle` in net_port.zig, which can supply a real peer
+        // and still keep its ordinals deterministic. The close driver itself
+        // takes field ownership, so `startDriver` retires it on allocation
+        // failure through machinery the core probes already sweep; `accept`,
+        // `read`, and `write` still construct theirs by hand.
         .net_connection => try runOk(
             &runtime,
             "oom-net-connection.ecl",

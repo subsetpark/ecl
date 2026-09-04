@@ -2241,8 +2241,10 @@ const LifecyclePeer = struct {
 /// One accept, read, write, close, drain cycle with every readiness wait
 /// registered before its poll, so the allocation ordinals do not depend on
 /// whether the controller thread won the race: registration allocates exactly
-/// once whether or not the source is already ready. The drain wait is what
-/// `net.close` installs for a connection, so its allocation is swept here.
+/// once whether or not the source is already ready. The drain wait below is
+/// the one `net.close` parks on, so its allocation is swept here; the
+/// primitive's own driver is not reachable from this cell-level harness, and
+/// no longer needs to be (see the note beside the connection OOM surface).
 fn connectionLifecycle(allocator: std.mem.Allocator) !void {
     var peer: LifecyclePeer = .{};
     defer peer.join();
