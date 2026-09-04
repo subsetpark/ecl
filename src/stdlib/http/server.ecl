@@ -356,11 +356,6 @@
  (['max-header-bytes 'max-body-bytes 'max-in-flight 'read-timeout-ms 'on-failure])
  'config-keys defp
 
- ### defp positive-int?
- (value -- bool : "Return 1 for an int greater than zero.")
- (dup type 'int match? (0 >) (pop 0) if)
- 'positive-int? defp
-
  ### defp config-entry-problem
  (pair -- problem :
   "Classify one configuration entry as 'ok, 'unknown-key, 'wrong-type, or 'out-of-range.")

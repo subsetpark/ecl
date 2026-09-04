@@ -380,17 +380,6 @@ pub fn fromValuesGeneric(
     return result;
 }
 
-pub fn fromValuesGenericCode(
-    allocator: std.mem.Allocator,
-    source: []const Value,
-    provenance_namespace: heap.CodeProvenanceNamespace,
-) error{OutOfMemory}!Value {
-    var cursor = GenericValueMaterializer.initCode(allocator, source, provenance_namespace);
-    const result = try poll.driveFallible(Value, &cursor, .{std.math.maxInt(usize)});
-    cursor.deinit();
-    return result;
-}
-
 pub fn fromI64Slice(
     allocator: std.mem.Allocator,
     source: []const i64,

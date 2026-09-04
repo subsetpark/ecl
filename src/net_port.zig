@@ -756,10 +756,16 @@ pub const ListenerCell = struct {
         };
 
         std.Io.Threaded.mutexLock(&self.mutex);
-        if (self.ownership != .owned) {
-            // Closed while the destination was being attached. Hand the new
-            // membership straight back rather than leaving the destination
-            // scope holding a member nothing will ever detach.
+        // Re-check the owner, not just that there is one: the origin observed
+        // before the attach is the one this move was authorized against, so a
+        // listener that closed or changed hands in the meantime hands the new
+        // membership straight back rather than leaving the destination scope
+        // holding a member nothing will ever detach.
+        const still_owned = switch (self.ownership) {
+            .owned => |current| current.owningScope() == from_erased,
+            .none, .transferring => false,
+        };
+        if (!still_owned) {
             std.Io.Threaded.mutexUnlock(&self.mutex);
             token.detach();
             return error.Closed;
@@ -1592,8 +1598,13 @@ pub const ConnectionCell = struct {
         };
 
         std.Io.Threaded.mutexLock(&self.mutex);
+        // The owner is re-checked, not just its presence: the origin observed
+        // before the attach is the one this move was authorized against.
         const still_live = switch (self.lifecycle) {
-            .prepared, .running => self.ownership == .owned,
+            .prepared, .running => switch (self.ownership) {
+                .owned => |current| current.owningScope() == from_erased,
+                .none, .transferring => false,
+            },
             .stopping, .terminal => false,
         };
         if (!still_live) {

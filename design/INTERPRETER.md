@@ -91,6 +91,11 @@ recorded in `PERFORMANCE.md`.
 
 `Session` is the public interpreter object and the root of every runtime
 lifetime. It is an opaque, movable handle to heap-stable `SessionCore` state.
+The package root is a closed façade over that Session-facing API. First-party
+executables and verification tools use a separate build-private aggregation,
+so a declaration made public for cross-file implementation use cannot become
+an embedding API accidentally; compile-time validation closes the façade over
+its explicit declaration set.
 That state owns:
 
 - the host allocator and `ReleaseDomain`;

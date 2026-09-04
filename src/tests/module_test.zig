@@ -336,17 +336,6 @@ test "reflection: words is sorted unique and private-safe" {
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, rendered, "zebra"));
 }
 
-fn containsCandidate(items: []const []const u8, expected: []const u8) bool {
-    for (items) |item| if (std.mem.eql(u8, item, expected)) return true;
-    return false;
-}
-
-fn expectSortedUnique(items: []const []const u8) !void {
-    for (items[1..], items[0..items.len -| 1]) |current, previous| {
-        try std.testing.expect(std.mem.order(u8, previous, current) == .lt);
-    }
-}
-
 fn expectInternMissing(bytes: []const u8) !void {
     var lookup = intern.lookupCursor(bytes);
     while (true) switch (lookup.advance()) {

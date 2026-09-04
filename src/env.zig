@@ -648,10 +648,6 @@ pub const ShapeLease = struct {
     lease: ShapePublisher.Lease,
     shape: ?*const Shape,
 
-    fn nameCount(self: *const ShapeLease) usize {
-        return if (self.shape) |shape| shape.names.count() else 0;
-    }
-
     pub fn deinit(self: *ShapeLease) void {
         const environment = @constCast(self.environment.target());
         if (self.lease.deinit()) {

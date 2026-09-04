@@ -737,7 +737,6 @@ pub fn writeQuantum(
     return .pending;
 }
 
-pub const StageError = error{ OutOfMemory, Unsupported };
 const staging_attempts = 4;
 
 /// One private sibling staging entry inside a resolved parent. Its name is

@@ -1,5 +1,5 @@
 const std = @import("std");
-const ecl = @import("ecl");
+const ecl = @import("ecl-internal");
 
 const allocator = std.testing.allocator;
 

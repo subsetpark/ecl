@@ -9,7 +9,7 @@
 //! Both walk directories rather than lists, so a new module or fixture cannot
 //! evade them.
 const std = @import("std");
-const ecl = @import("ecl");
+const ecl = @import("ecl-internal");
 
 /// Every checked-in ECL source, wherever it lives, is canonically formatted.
 const format_roots = [_][]const u8{ "src", "test" };

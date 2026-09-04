@@ -154,15 +154,6 @@ fn appendFixtureBytes(writer: *std.Io.Writer, encoded: []const u8) !void {
     try writer.writeByte(']');
 }
 
-fn appendQuoted(writer: *std.Io.Writer, text: []const u8) !void {
-    try writer.writeByte('"');
-    for (text) |byte| {
-        if (byte == '\\' or byte == '"') try writer.writeByte('\\');
-        try writer.writeByte(byte);
-    }
-    try writer.writeByte('"');
-}
-
 const LockedAllocator = struct {
     child: std.mem.Allocator,
     mutex: std.Io.Mutex = .init,

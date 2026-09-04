@@ -428,7 +428,6 @@ const InitializingPort = opaque {};
 const InitializingModule = opaque {};
 const UniqueHeader = opaque {};
 pub const UniqueList = opaque {};
-pub const UniqueDict = opaque {};
 
 /// Makes copy-on-write ownership visible to callers. `in_place` aliases the
 /// caller's existing owner; `replacement` is one additional owned root.
@@ -811,11 +810,6 @@ fn claimUniqueHeader(header: *Header) ?*UniqueHeader {
 }
 
 pub fn claimUniqueList(handle: *ListHandle) ?*UniqueList {
-    const unique = claimUniqueHeader(mutableHeader(handle)) orelse return null;
-    return @ptrCast(@alignCast(unique));
-}
-
-pub fn claimUniqueDict(handle: *DictHandle) ?*UniqueDict {
     const unique = claimUniqueHeader(mutableHeader(handle)) orelse return null;
     return @ptrCast(@alignCast(unique));
 }
@@ -2622,18 +2616,6 @@ pub fn adoptListRepresentationDeferred(
     releases: *ReleaseDomain,
     dest: *UniqueList,
     source: *UniqueList,
-) void {
-    adoptRepresentationDeferred(
-        releases,
-        @ptrCast(@alignCast(dest)),
-        @ptrCast(@alignCast(source)),
-    );
-}
-
-pub fn adoptDictRepresentationDeferred(
-    releases: *ReleaseDomain,
-    dest: *UniqueDict,
-    source: *UniqueDict,
 ) void {
     adoptRepresentationDeferred(
         releases,

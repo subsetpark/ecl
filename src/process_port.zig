@@ -704,10 +704,16 @@ fn prepareProcessTransfer(
     };
 
     std.Io.Threaded.mutexLock(&cell.mutex);
-    if (cell.group_state == .retired or cell.controllers.ownership != .owned) {
-        // Retired while the destination was being attached: the final lease
-        // has taken the old token, so hand the new one straight back rather
-        // than leaving the destination scope holding a member nothing detaches.
+    // Re-check the owner, not just that there is one: the origin observed
+    // before the attach is the one this move was authorized against. A process
+    // that retired in the meantime has had its token taken by the final lease,
+    // so hand the new one straight back rather than leaving the destination
+    // scope holding a member nothing detaches.
+    const still_owned = cell.group_state != .retired and switch (cell.controllers.ownership) {
+        .owned => |current| current.owningScope() == from_erased,
+        .none, .transferring => false,
+    };
+    if (!still_owned) {
         std.Io.Threaded.mutexUnlock(&cell.mutex);
         token.detach();
         return error.Closed;

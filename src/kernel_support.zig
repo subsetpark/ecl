@@ -31,28 +31,6 @@ pub fn targetHasNativePackedI64Multiply() bool {
     };
 }
 
-/// The fault vocabulary the scalar semantics raise and the block mask carries.
-/// Kernel families share this so a rescan reports exactly what the scalar path
-/// reports.
-pub const Fault = error{ Type, Overflow, Domain, ShiftCount };
-
-pub fn faultKind(fault: Fault) machine.ErrorKind {
-    return switch (fault) {
-        error.Type => .type,
-        error.Overflow => .overflow,
-        error.Domain, error.ShiftCount => .domain,
-    };
-}
-
-pub fn faultMessage(fault: Fault) []const u8 {
-    return switch (fault) {
-        error.Type => "kernel received incompatible scalar operands",
-        error.Overflow => "kernel arithmetic overflow",
-        error.Domain => "kernel arithmetic is outside its domain",
-        error.ShiftCount => "a shift count must be from 0 to 63",
-    };
-}
-
 pub const BinaryOp = enum {
     add,
     sub,
