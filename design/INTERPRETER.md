@@ -1307,7 +1307,9 @@ Hosted modules combine source definitions with narrowly registered builtins.
 Their manifest, documentation, effects, provenance, and package requirements
 are validated before publication. Package discovery and synchronization are
 described in `ENVIRONMENT.md`; they enter the evaluator through the same module
-loader and bounded-driver conventions as other sources.
+loader and bounded-driver conventions as other sources. Host-side lock and
+catalog validation share one inert-record decoder for exact fields, required
+values, and owned text; each owner retains its own schema and input limits.
 
 `http.server` shows the shape of a protocol module in source over host ports:
 one effect boundary, a single private word that validates and encodes a whole

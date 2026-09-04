@@ -55,13 +55,13 @@ const source_groups = [_]SourceGroup{
     // opaque rendered result rather than folding those lifetime boundaries
     // into Session internals.
     .{ .production = true, .files = &.{
-        "env.zig", "modules.zig", "snapshot.zig", "module_prims.zig", "reflection.zig", "session.zig", "project.zig", "pkg_catalog.zig", "pkg_lock.zig",
+        "env.zig", "modules.zig", "snapshot.zig", "module_prims.zig", "reflection.zig", "session.zig", "project.zig", "pkg_catalog.zig", "pkg_lock.zig", "package_data.zig",
     }, .sources = &.{
         @embedFile("../env.zig"),        @embedFile("../modules.zig"),
         @embedFile("../snapshot.zig"),   @embedFile("../module_prims.zig"),
         @embedFile("../reflection.zig"), @embedFile("../session.zig"),
         @embedFile("../project.zig"),    @embedFile("../pkg_catalog.zig"),
-        @embedFile("../pkg_lock.zig"),
+        @embedFile("../pkg_lock.zig"),   @embedFile("../package_data.zig"),
     } },
     // The embedded prelude loader and the embedded stdlib manifest are one
     // bootstrap surface: both hand constant source to the ordinary reader.
