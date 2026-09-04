@@ -179,10 +179,6 @@ fn give(evaluator: *Machine) MachineError!void {
             ),
             error.ScopeClosing => evaluator.fail(.cancelled, "the new unit's scope is closing"),
             error.Closed => evaluator.fail(.domain, "@give cannot give a closed port"),
-            error.Unsupported => evaluator.fail(
-                .domain,
-                "@give cannot give this kind of port to another unit",
-            ),
             error.Busy => evaluator.fail(.domain, "@give cannot give the same port twice"),
             error.OutOfMemory => error.OutOfMemory,
         },

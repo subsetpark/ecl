@@ -167,11 +167,12 @@ calling unit's end no longer does. The child stack is the given ports,
 deepest, then the explicit values. Use `[]` for no ports, which is exactly
 `@spawn`.
 
-A port may only be given by the unit that owns it, so a unit holding a port
-another unit owns cannot give it away; that is `'domain`, as is giving a
-closed port or a kind of port that cannot change owner. Process ports cannot
-be given. The move and the child's construction are one step: the port is
-never unowned, and the child never runs before it owns the port.
+Every kind of port can be given: listeners, connections, and process ports
+alike. A port may only be given by the unit that owns it, so a unit holding a
+port another unit owns cannot give it away; that is `'domain`, as is giving a
+closed port or the same port twice. The move and the child's construction are
+one step: the port is never unowned, and the child never runs before it owns
+the port.
 
 Giving does not restrict use. The caller may still name a given port and read
 or write it, exactly as a child may use a port its parent owns; what changed
@@ -2428,9 +2429,9 @@ run-only fields are rejected by `spawn`.
 and stderr pipes. The child and its process group, pipe tasks, and spawning
 task-scope membership commit before the port becomes visible. The scope owns
 the live child: scope closure cancels the process group and waits for reap even
-if a port value remains stored elsewhere. There is no detach or ownership
-transfer: unlike a listener or a connection, a process port cannot be given to
-another unit.
+if a port value remains stored elsewhere. Returning or storing the port does
+not detach it; `@give` is the one way to change owner, and the unit it is
+given to kills the group when it ends.
 
 ### terminate
 `( port -- )` — Request ordinary termination of the process group, escalating

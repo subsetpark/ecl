@@ -597,6 +597,9 @@ const ControllerGroup = struct {
     /// decrement is published only after that lease has dropped its cell pin.
     leases: usize = 0,
     membership: ?external.ScopeMembership = null,
+    /// A membership in a destination scope, held between the two halves of a
+    /// scope transfer and swapped into `membership` only if the move commits.
+    pending_membership: ?external.ScopeMembership = null,
     cell: *ProcessCell,
 
     fn initialLease(self: *ControllerGroup) ControllerLease {
@@ -656,6 +659,84 @@ const ControllerLease = struct {
         group.releasePinned(cell);
     }
 };
+
+/// Attach this process port to `to_erased` while leaving its current
+/// membership in place. `from_erased` must be the scope that owns it now.
+/// The process group, its controller threads, and its pipes are internal to
+/// the cell rather than separate scope members, so this one membership is the
+/// whole of what the owning scope holds.
+fn prepareProcessTransfer(
+    cell: *ProcessCell,
+    from_erased: *anyopaque,
+    to_erased: *anyopaque,
+) heap.PortTransferError!void {
+    const destination: *scheduler_api.TaskScope = @ptrCast(@alignCast(to_erased));
+    std.Io.Threaded.mutexLock(&cell.mutex);
+    if (cell.controllers.pending_membership != null) {
+        std.Io.Threaded.mutexUnlock(&cell.mutex);
+        return error.Busy;
+    }
+    if (cell.group_state == .retired) {
+        std.Io.Threaded.mutexUnlock(&cell.mutex);
+        return error.Closed;
+    }
+    const current = cell.controllers.membership orelse {
+        std.Io.Threaded.mutexUnlock(&cell.mutex);
+        return error.Closed;
+    };
+    if (current.owningScope() != from_erased) {
+        std.Io.Threaded.mutexUnlock(&cell.mutex);
+        return error.NotOwner;
+    }
+    std.Io.Threaded.mutexUnlock(&cell.mutex);
+
+    // Outside the cell lock: the cancellation walk takes a scope lock before a
+    // member's, so attaching under the cell lock would close a cycle.
+    const member = external.scopeMember(ProcessCell, cell);
+    var token = destination.scheduler.attachExternal(destination, member) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.ScopeClosing => error.ScopeClosing,
+    };
+
+    std.Io.Threaded.mutexLock(&cell.mutex);
+    if (cell.group_state == .retired or cell.controllers.membership == null) {
+        // Retired while the destination was being attached: the final lease
+        // has taken the old token, so hand the new one straight back rather
+        // than leaving the destination holding a member nothing detaches.
+        std.Io.Threaded.mutexUnlock(&cell.mutex);
+        token.detach();
+        return error.Closed;
+    }
+    cell.controllers.pending_membership = token;
+    std.Io.Threaded.mutexUnlock(&cell.mutex);
+}
+
+fn commitProcessTransfer(cell: *ProcessCell) void {
+    var release: ?external.ScopeMembership = null;
+    std.Io.Threaded.mutexLock(&cell.mutex);
+    if (cell.controllers.pending_membership) |pending| {
+        cell.controllers.pending_membership = null;
+        if (cell.group_state == .retired) {
+            release = pending;
+        } else {
+            release = cell.controllers.membership;
+            cell.controllers.membership = pending;
+        }
+    }
+    std.Io.Threaded.mutexUnlock(&cell.mutex);
+    if (release) |token| detachMembership(token);
+}
+
+fn abortProcessTransfer(cell: *ProcessCell) void {
+    var release: ?external.ScopeMembership = null;
+    std.Io.Threaded.mutexLock(&cell.mutex);
+    if (cell.controllers.pending_membership) |pending| {
+        cell.controllers.pending_membership = null;
+        release = pending;
+    }
+    std.Io.Threaded.mutexUnlock(&cell.mutex);
+    if (release) |token| detachMembership(token);
+}
 
 pub const WritePermit = opaque {};
 
@@ -826,6 +907,22 @@ pub const ProcessCell = struct {
 
     pub fn releasePort(self: *ProcessCell) void {
         self.releaseRef();
+    }
+
+    pub fn prepareScopeTransfer(
+        self: *ProcessCell,
+        from_erased: *anyopaque,
+        to_erased: *anyopaque,
+    ) heap.PortTransferError!void {
+        return prepareProcessTransfer(self, from_erased, to_erased);
+    }
+
+    pub fn commitScopeTransfer(self: *ProcessCell) void {
+        commitProcessTransfer(self);
+    }
+
+    pub fn abortScopeTransfer(self: *ProcessCell) void {
+        abortProcessTransfer(self);
     }
 
     pub fn retainReadiness(self: *ProcessCell) void {

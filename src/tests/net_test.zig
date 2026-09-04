@@ -1025,6 +1025,27 @@ test "net: @give refuses the same port twice and leaves it owned by the caller" 
     try std.testing.expectEqual(Probe.accepted, try probe(port));
 }
 
+test "net: a process port is givable too, and dies with the unit it was given to" {
+    const fixture_path = try processFixturePath();
+    defer allocator.free(fixture_path);
+    var runtime: Runtime = .{};
+    try runtime.open(.{ .process = .{ .executables = .{ .exact = &.{fixture_path} } } }, .cooperative);
+    defer runtime.close();
+    const program = try std.fmt.allocPrint(
+        allocator,
+        "'proc ('spawn 'wait) import {{'executable \"{s}\" 'args (\"block\")}} spawn" ++
+            " dup wrap [] (pop) @give await pop wait 'kind at",
+        .{fixture_path},
+    );
+    defer allocator.free(program);
+    // The child owns the process, so its end kills the group: the wait the
+    // caller then performs completes instead of blocking on a live child.
+    try runtime.run(program);
+    var display = try runtime.session.stackDisplay();
+    defer display.deinit();
+    try std.testing.expectEqualStrings("'signaled", std.mem.trim(u8, display.bytes(), " \n"));
+}
+
 test "net: @give with no ports is @spawn, and the given ports are the deepest stack values" {
     try support.expectStack("[] [40 2] (+) @give await 'ok at first", "42");
 }

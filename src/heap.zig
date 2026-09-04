@@ -366,6 +366,13 @@ const ProbePort = struct {
     fn releasePort(self: *ProbePort) void {
         self.releases += 1;
     }
+
+    // A probe holds no scope membership, so there is nothing to move.
+    fn prepareScopeTransfer(_: *ProbePort, _: *anyopaque, _: *anyopaque) PortTransferError!void {
+        return error.Closed;
+    }
+    fn commitScopeTransfer(_: *ProbePort) void {}
+    fn abortScopeTransfer(_: *ProbePort) void {}
 };
 
 fn portCapabilityFailureProbe(allocator: std.mem.Allocator) !void {
@@ -388,6 +395,11 @@ fn portCapabilityFailureProbe(allocator: std.mem.Allocator) !void {
 test "port payload projection rejects a foreign backend" {
     const ForeignPort = struct {
         fn releasePort(_: *@This()) void {}
+        fn prepareScopeTransfer(_: *@This(), _: *anyopaque, _: *anyopaque) PortTransferError!void {
+            return error.Closed;
+        }
+        fn commitScopeTransfer(_: *@This()) void {}
+        fn abortScopeTransfer(_: *@This()) void {}
     };
     var cleanup = testing.Cleanup.init(std.testing.allocator);
     defer cleanup.deinit();
@@ -513,8 +525,6 @@ pub const PortTransferError = error{
     NotOwner,
     /// The port is already closed, so there is no live resource to move.
     Closed,
-    /// This kind of port cannot change owning scope at all.
-    Unsupported,
     /// A move of this port is already prepared and not yet finished, so a
     /// second one would strand the first destination's membership.
     Busy,
@@ -551,7 +561,7 @@ const PortStorage = struct {
     identity: u64,
     payload: *anyopaque,
     release: *const fn (*anyopaque) void,
-    prepare_transfer: ?*const fn (*anyopaque, *anyopaque, *anyopaque) PortTransferError!PortTransfer,
+    prepare_transfer: *const fn (*anyopaque, *anyopaque, *anyopaque) PortTransferError!PortTransfer,
 };
 
 /// A module value owns exactly one release of an opaque semantic payload.
@@ -1148,7 +1158,7 @@ fn allocPortHeader(
     identity: u64,
     payload: *anyopaque,
     release: *const fn (*anyopaque) void,
-    prepare_transfer: ?*const fn (*anyopaque, *anyopaque, *anyopaque) PortTransferError!PortTransfer,
+    prepare_transfer: *const fn (*anyopaque, *anyopaque, *anyopaque) PortTransferError!PortTransfer,
 ) error{OutOfMemory}!*InitializingPort {
     const obj = try allocator.create(Object);
     errdefer allocator.destroy(obj);
@@ -1197,12 +1207,14 @@ fn PortTransferAdapter(comptime Payload: type) type {
     };
 }
 
-/// Derived only for port payloads that declare the transfer steps; a payload
-/// without them yields a port that cannot change owning scope.
+/// Every port kind must be able to change owning scope. This is deliberately
+/// not optional: a payload that omits the transfer steps fails to compile
+/// here rather than becoming a second class of port that `@give` refuses.
 fn portPrepareTransfer(
     comptime Payload: type,
-) ?*const fn (*anyopaque, *anyopaque, *anyopaque) PortTransferError!PortTransfer {
-    if (!@hasDecl(Payload, "prepareScopeTransfer")) return null;
+) *const fn (*anyopaque, *anyopaque, *anyopaque) PortTransferError!PortTransfer {
+    if (!@hasDecl(Payload, "prepareScopeTransfer"))
+        @compileError(@typeName(Payload) ++ " is a port payload and must declare prepareScopeTransfer, commitScopeTransfer, and abortScopeTransfer");
     return PortTransferAdapter(Payload).prepare;
 }
 
@@ -1234,8 +1246,7 @@ pub fn preparePortTransfer(
     to: *anyopaque,
 ) PortTransferError!PortTransfer {
     const storage = portStorage(header);
-    const prepare = storage.prepare_transfer orelse return error.Unsupported;
-    return prepare(storage.payload, from, to);
+    return storage.prepare_transfer(storage.payload, from, to);
 }
 
 fn portStorage(header: *const PortHandle) *const PortStorage {
