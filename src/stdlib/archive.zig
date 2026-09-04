@@ -2230,13 +2230,6 @@ fn validPackageName(name: []const u8) bool {
     return true;
 }
 
-fn packageOwns(package: []const u8, module_name: []const u8) bool {
-    if (std.mem.eql(u8, package, module_name)) return true;
-    return module_name.len > package.len and
-        std.mem.startsWith(u8, module_name, package) and
-        module_name[package.len] == '.';
-}
-
 fn lastSlash(path: []const u8) ?usize {
     return std.mem.lastIndexOfScalar(u8, path, '/');
 }

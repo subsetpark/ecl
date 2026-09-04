@@ -124,6 +124,7 @@ const entries = [_]Metadata{
     .{ .name = "load", .effect = "path --", .text = "Read and evaluate a source file as one transactional unit." },
 
     .{ .name = "@spawn", .effect = "values quotation -- task", .text = "Run a quotation with an explicit initial stack concurrently in a fresh child unit." },
+    .{ .name = "@give", .effect = "ports values quotation -- task", .text = "Run a quotation concurrently in a fresh child unit that owns the given ports: the child unit closes them when it ends, and the calling unit no longer does." },
     .{ .name = "await", .effect = "task -- result", .text = "Wait for a task and return its success or error result." },
     .{ .name = "cancel", .effect = "task --", .text = "Request cancellation of a task, doing nothing if it is already complete." },
     .{ .name = "tasks", .effect = "-- tasks", .text = "Return pending descendant tasks in deterministic spawn order." },

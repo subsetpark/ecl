@@ -342,7 +342,12 @@ pub const ProcessOwner = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.ScopeClosing => return error.ScopeClosing,
         };
-        cell.controllers.membership = membership;
+        // `attachExternal` has already linked the cell into the scope, so a
+        // cancellation walk can reach it from another thread: publish the
+        // ownership under the lock, as ConnectionCell.publish does.
+        std.Io.Threaded.mutexLock(&cell.mutex);
+        cell.controllers.ownership = .{ .owned = membership };
+        std.Io.Threaded.mutexUnlock(&cell.mutex);
 
         cell.start(supervisor_lease) catch return error.Io;
         supervisor_lease_owned = false;
@@ -596,7 +601,7 @@ const ControllerGroup = struct {
     /// Protected by `cell.mutex` after the initial lease is issued. A count
     /// decrement is published only after that lease has dropped its cell pin.
     leases: usize = 0,
-    membership: ?external.ScopeMembership = null,
+    ownership: external.Ownership = .none,
     cell: *ProcessCell,
 
     fn initialLease(self: *ControllerGroup) ControllerLease {
@@ -622,7 +627,7 @@ const ControllerGroup = struct {
     /// Consumes `cell`'s reference owned by one lease. Nonfinal releases drop
     /// that pin before making the smaller count observable to the supervisor.
     fn releasePinned(self: *ControllerGroup, cell: *ProcessCell) void {
-        var membership: ?external.ScopeMembership = null;
+        var detached: external.Ownership.Detached = .{};
         std.Io.Threaded.mutexLock(&cell.mutex);
         std.debug.assert(self.cell == cell);
         std.debug.assert(self.leases != 0);
@@ -635,12 +640,13 @@ const ControllerGroup = struct {
         }
         if (cell.group_state != .retired) @panic("process scope detached before group retirement");
         self.leases = 0;
-        membership = self.membership;
-        self.membership = null;
+        // A process that retires mid-transfer detaches the destination too:
+        // that membership never became authoritative.
+        detached = self.ownership.release();
         std.Io.Threaded.mutexUnlock(&cell.mutex);
 
         cell.releaseRef();
-        if (membership) |token| detachMembership(token);
+        detached.detachAll();
     }
 };
 
@@ -656,6 +662,79 @@ const ControllerLease = struct {
         group.releasePinned(cell);
     }
 };
+
+/// Attach this process port to `to_erased` while leaving its current
+/// membership in place. `from_erased` must be the scope that owns it now.
+/// The process group, its controller threads, and its pipes are internal to
+/// the cell rather than separate scope members, so this one membership is the
+/// whole of what the owning scope holds.
+fn prepareProcessTransfer(
+    cell: *ProcessCell,
+    from_erased: *anyopaque,
+    to_erased: *anyopaque,
+) heap.PortTransferError!void {
+    const destination: *scheduler_api.TaskScope = @ptrCast(@alignCast(to_erased));
+    std.Io.Threaded.mutexLock(&cell.mutex);
+    if (cell.group_state == .retired) {
+        std.Io.Threaded.mutexUnlock(&cell.mutex);
+        return error.Closed;
+    }
+    switch (cell.controllers.ownership) {
+        .none => {
+            std.Io.Threaded.mutexUnlock(&cell.mutex);
+            return error.Closed;
+        },
+        .transferring => {
+            std.Io.Threaded.mutexUnlock(&cell.mutex);
+            return error.Busy;
+        },
+        .owned => |current| if (current.owningScope() != from_erased) {
+            std.Io.Threaded.mutexUnlock(&cell.mutex);
+            return error.NotOwner;
+        },
+    }
+    std.Io.Threaded.mutexUnlock(&cell.mutex);
+
+    // Outside the cell lock: the cancellation walk takes a scope lock before a
+    // member's, so attaching under the cell lock would close a cycle.
+    const member = external.scopeMember(ProcessCell, cell);
+    var token = destination.scheduler.attachExternal(destination, member) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.ScopeClosing => error.ScopeClosing,
+    };
+
+    std.Io.Threaded.mutexLock(&cell.mutex);
+    // Re-check the owner, not just that there is one: the origin observed
+    // before the attach is the one this move was authorized against. A process
+    // that retired in the meantime has had its token taken by the final lease,
+    // so hand the new one straight back rather than leaving the destination
+    // scope holding a member nothing detaches.
+    const still_owned = cell.group_state != .retired and switch (cell.controllers.ownership) {
+        .owned => |current| current.owningScope() == from_erased,
+        .none, .transferring => false,
+    };
+    if (!still_owned) {
+        std.Io.Threaded.mutexUnlock(&cell.mutex);
+        token.detach();
+        return error.Closed;
+    }
+    cell.controllers.ownership.beginTransfer(token);
+    std.Io.Threaded.mutexUnlock(&cell.mutex);
+}
+
+fn commitProcessTransfer(cell: *ProcessCell) void {
+    std.Io.Threaded.mutexLock(&cell.mutex);
+    var detached = cell.controllers.ownership.commitTransfer();
+    std.Io.Threaded.mutexUnlock(&cell.mutex);
+    detached.detachAll();
+}
+
+fn abortProcessTransfer(cell: *ProcessCell) void {
+    std.Io.Threaded.mutexLock(&cell.mutex);
+    var detached = cell.controllers.ownership.abortTransfer();
+    std.Io.Threaded.mutexUnlock(&cell.mutex);
+    detached.detachAll();
+}
 
 pub const WritePermit = opaque {};
 
@@ -779,7 +858,19 @@ pub const ProcessCell = struct {
     }
 
     fn start(self: *ProcessCell, lease: ControllerLease) error{Io}!void {
-        self.phase = .running;
+        // The scope member is linked before the supervisor exists, so a
+        // cancellation walk may already have moved the phase to `closing` and
+        // signalled the group. Take the lock and leave that transition in
+        // place: an unconditional write here would lose it and leave the cell
+        // claiming to run a process that is already being torn down. The lock
+        // is released before the thread starts, so the supervisor observes
+        // whichever phase won rather than waiting on this one.
+        std.Io.Threaded.mutexLock(&self.mutex);
+        switch (self.phase) {
+            .constructing => self.phase = .running,
+            .running, .closing, .terminal, .reaped => {},
+        }
+        std.Io.Threaded.mutexUnlock(&self.mutex);
         const thread = std.Thread.spawn(.{}, supervisorThreadMain, .{ self, lease }) catch return error.Io;
         thread.detach();
     }
@@ -826,6 +917,22 @@ pub const ProcessCell = struct {
 
     pub fn releasePort(self: *ProcessCell) void {
         self.releaseRef();
+    }
+
+    pub fn prepareScopeTransfer(
+        self: *ProcessCell,
+        from_erased: *anyopaque,
+        to_erased: *anyopaque,
+    ) heap.PortTransferError!void {
+        return prepareProcessTransfer(self, from_erased, to_erased);
+    }
+
+    pub fn commitScopeTransfer(self: *ProcessCell) void {
+        commitProcessTransfer(self);
+    }
+
+    pub fn abortScopeTransfer(self: *ProcessCell) void {
+        abortProcessTransfer(self);
     }
 
     pub fn retainReadiness(self: *ProcessCell) void {
@@ -1555,11 +1662,6 @@ fn escalationMain(
         error.Canceled => {},
     };
     cell.escalateKill(escalation);
-}
-
-fn detachMembership(membership: external.ScopeMembership) void {
-    var owned = membership;
-    owned.detach();
 }
 
 fn supervisorThreadMain(cell: *ProcessCell, lease_value: ControllerLease) void {

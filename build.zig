@@ -40,6 +40,15 @@ pub fn build(b: *std.Build) void {
     // First-party stdlib modules are authored against the public SDK and
     // linked into the shipped image, so the runtime module imports it too.
     mod.addImport("ecl-native", native_sdk);
+    const internal_mod = b.createModule(.{
+        .root_source_file = b.path("src/internal.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    internal_mod.link_libc = true;
+    internal_mod.addImport("native-abi", native_abi);
+    internal_mod.addImport("ecl-native", native_sdk);
+    internal_mod.addOptions("session_options", runtime_options);
     const native_sample = b.createModule(.{
         .root_source_file = b.path("test/native/sample.zig"),
         .target = target,
@@ -171,7 +180,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    exe_mod.addImport("ecl", mod);
+    exe_mod.addImport("ecl-internal", internal_mod);
     const exe = b.addExecutable(.{
         .name = "ecl",
         .root_module = exe_mod,
@@ -267,6 +276,16 @@ pub fn build(b: *std.Build) void {
     run_tests.step.dependOn(&fixture_files.step);
     const test_step = b.step("test", "Run the ecl test suite");
     test_step.dependOn(&run_tests.step);
+    const public_api_mod = b.createModule(.{
+        .root_source_file = b.path("test/public_api.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    public_api_mod.addImport("ecl", mod);
+    const public_api_tests = b.addTest(.{ .root_module = public_api_mod });
+    public_api_tests.linkage = runtime_linkage;
+    const run_public_api_tests = b.addRunArtifact(public_api_tests);
+    test_step.dependOn(&run_public_api_tests.step);
     const run_ecl_tests = b.addRunArtifact(exe);
     run_ecl_tests.addArg("test");
     run_ecl_tests.setCwd(b.path("test/stdlib-tests"));
@@ -477,7 +496,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    bench_mod.addImport("ecl", mod);
+    bench_mod.addImport("ecl-internal", internal_mod);
     bench_mod.link_libc = true;
     const bench_exe = b.addExecutable(.{ .name = "ecl-bench-kernels", .root_module = bench_mod });
     const run_bench = b.addRunArtifact(bench_exe);
@@ -493,7 +512,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    workdriver_bench_mod.addImport("ecl", mod);
+    workdriver_bench_mod.addImport("ecl-internal", internal_mod);
     workdriver_bench_mod.link_libc = true;
     const workdriver_bench_exe = b.addExecutable(.{
         .name = "ecl-bench-workdrivers",
@@ -507,7 +526,7 @@ pub fn build(b: *std.Build) void {
     instrumented_options.addOption(usize, "default_worker_count", 1);
     instrumented_options.addOption(bool, "instrument_root_execution", true);
     const instrumented_ecl = b.createModule(.{
-        .root_source_file = b.path("src/root.zig"),
+        .root_source_file = b.path("src/internal.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -520,7 +539,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    workdriver_counter_mod.addImport("ecl", instrumented_ecl);
+    workdriver_counter_mod.addImport("ecl-internal", instrumented_ecl);
     workdriver_counter_mod.link_libc = true;
     const workdriver_counter_exe = b.addExecutable(.{
         .name = "ecl-bench-workdriver-counters",
@@ -709,7 +728,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    differential_mod.addImport("ecl", mod);
+    differential_mod.addImport("ecl-internal", internal_mod);
     const differential_tests = b.addTest(.{ .root_module = differential_mod });
     const run_differential = b.addRunArtifact(differential_tests);
     const differential_step = b.step("differential", "Compare automatic and generic idiom execution");
@@ -797,6 +816,7 @@ pub fn build(b: *std.Build) void {
         reference_mod,
         oom_mod,
         scheduler_shell_mod,
+        public_api_mod,
     };
     const analysis_step = b.step(
         "check",
@@ -913,6 +933,7 @@ pub fn build(b: *std.Build) void {
         "Run the fast core test tier (the test half of `precommit`)",
     );
     precommit_test_step.dependOn(&run_precommit_tests.step);
+    precommit_test_step.dependOn(&run_public_api_tests.step);
 
     // Zig sources are canonically formatted; so is every checked-in ECL source,
     // and every standard module still ends in `@defm`. All of it is cheap
@@ -926,7 +947,7 @@ pub fn build(b: *std.Build) void {
         .target = b.graph.host,
         .optimize = .Debug,
     });
-    ecl_source_mod.addImport("ecl", mod);
+    ecl_source_mod.addImport("ecl-internal", internal_mod);
     ecl_source_mod.link_libc = true;
     const ecl_source_exe = b.addExecutable(.{
         .name = "ecl-source-check",
@@ -1113,6 +1134,7 @@ pub fn build(b: *std.Build) void {
     precommit_step.dependOn(b.getInstallStep());
     precommit_step.dependOn(analysis_step);
     precommit_step.dependOn(&run_precommit_tests.step);
+    precommit_step.dependOn(&run_public_api_tests.step);
 }
 
 fn addCapturedTestRun(

@@ -861,20 +861,6 @@ pub fn classify(operation: Operation, left: Operand, right: ?Operand) ?KernelCla
     return null;
 }
 
-/// The number of dispatch points the registry covers; the closure test compares
-/// its own independent count against this.
-pub fn domainPointCount() usize {
-    var total: usize = 0;
-    for (all_operations) |operation| {
-        if (operation.arity() == .one) {
-            total += aggregate_domain.len;
-        } else {
-            total += domain_size * domain_size - atom_domain.len * atom_domain.len;
-        }
-    }
-    return total;
-}
-
 fn validateClosedCoverage() void {
     @setEvalBranchQuota(20_000_000);
     for (all_operations) |operation| {

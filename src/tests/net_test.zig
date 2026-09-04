@@ -938,3 +938,129 @@ test "net: connection words cold-load through the builtin manifest and are docum
     );
     try support.expectStack("'net ('accept 'read 'write 'peer-address) import 1", "1");
 }
+
+/// Run a program that leaves one integer on the stack and return it.
+fn runForPort(runtime: *Runtime, program: []const u8) !u16 {
+    try runtime.run(program);
+    var display = try runtime.session.stackDisplay();
+    defer display.deinit();
+    return std.fmt.parseInt(u16, std.mem.trim(u8, display.bytes(), " \n"), 10);
+}
+
+test "net: @give moves listener ownership, so the child's end closes the socket" {
+    const capture = listen_ephemeral ++ " dup net.local-address 'port at swap ";
+    {
+        // Given away: the child owns the listener, so it dies with the child.
+        var runtime: Runtime = .{};
+        try runtime.open(.{ .net = loopback_ephemeral }, .cooperative);
+        defer runtime.close();
+        const port = try runForPort(&runtime, capture ++ "wrap [] (pop) @give await pop");
+        try std.testing.expect(port != 0);
+        try std.testing.expectEqual(Probe.refused, try probe(port));
+    }
+    {
+        // Merely passed: the caller still owns it, so it outlives the child.
+        var runtime: Runtime = .{};
+        try runtime.open(.{ .net = loopback_ephemeral }, .cooperative);
+        defer runtime.close();
+        const port = try runForPort(&runtime, capture ++ "wrap (pop) @spawn await pop");
+        try std.testing.expect(port != 0);
+        try std.testing.expectEqual(Probe.accepted, try probe(port));
+    }
+}
+
+test "net: a given listener is usable by the child and can be given onward" {
+    var runtime: Runtime = .{};
+    try runtime.open(.{ .net = loopback_ephemeral }, .cooperative);
+    defer runtime.close();
+    try runtime.run(listen_ephemeral ++
+        " wrap [] (wrap [] (net.local-address 'port at 0 >) @give await) @give await" ++
+        " 'ok at first 'ok at first");
+    var display = try runtime.session.stackDisplay();
+    defer display.deinit();
+    try std.testing.expectEqualStrings("1", std.mem.trim(u8, display.bytes(), " \n"));
+}
+
+test "net: @give refuses a port the calling unit does not own" {
+    const program = listen_ephemeral ++ " dup wrap (wrap [] (pop) @give await) @spawn await nip";
+    var runtime: Runtime = .{};
+    try runtime.open(.{ .net = loopback_ephemeral }, .cooperative);
+    defer runtime.close();
+    try runtime.run(program ++ " 'err at 'msg at");
+    var display = try runtime.session.stackDisplay();
+    defer display.deinit();
+    try std.testing.expectEqualStrings(
+        "\"@give can only give a port owned by the calling unit\"",
+        std.mem.trim(u8, display.bytes(), " \n"),
+    );
+}
+
+test "net: @give refuses a closed port and a non-port" {
+    try expectError(.{ .net = loopback_ephemeral }, listen_ephemeral ++ " dup net.close wrap [] (pop) @give", .{
+        .name = "closed",
+        .source = listen_ephemeral ++ " dup net.close wrap [] (pop) @give",
+        .kind = "domain",
+        .word = "@give",
+    });
+    try expectError(.{ .net = loopback_ephemeral }, "[1] [] (pop) @give", .{
+        .name = "non-port",
+        .source = "[1] [] (pop) @give",
+        .kind = "type",
+        .word = "@give",
+    });
+}
+
+test "net: @give refuses the same port twice and leaves it owned by the caller" {
+    var runtime: Runtime = .{};
+    try runtime.open(.{ .net = loopback_ephemeral }, .cooperative);
+    defer runtime.close();
+    try runtime.run(listen_ephemeral ++ " dup net.local-address 'port at swap" ++
+        " wrap dup cat [] (pop pop) 3 pack (@give) @attempt 'err at 'kind at");
+    var display = try runtime.session.stackDisplay();
+    defer display.deinit();
+    const shown = std.mem.trim(u8, display.bytes(), " \n");
+    try std.testing.expect(std.mem.endsWith(u8, shown, " 'domain"));
+    const port = try std.fmt.parseInt(u16, shown[0 .. shown.len - " 'domain".len], 10);
+    // The refusal left the listener where it was, so it is still bound.
+    try std.testing.expectEqual(Probe.accepted, try probe(port));
+}
+
+test "net: a process port is givable too, and dies with the unit it was given to" {
+    const fixture_path = try processFixturePath();
+    defer allocator.free(fixture_path);
+    var runtime: Runtime = .{};
+    try runtime.open(.{ .process = .{ .executables = .{ .exact = &.{fixture_path} } } }, .cooperative);
+    defer runtime.close();
+    const program = try std.fmt.allocPrint(
+        allocator,
+        "'proc ('spawn 'wait) import {{'executable \"{s}\" 'args (\"block\")}} spawn" ++
+            " dup wrap [] (pop) @give await pop wait 'kind at",
+        .{fixture_path},
+    );
+    defer allocator.free(program);
+    // The child owns the process, so its end kills the group: the wait the
+    // caller then performs completes instead of blocking on a live child.
+    try runtime.run(program);
+    var display = try runtime.session.stackDisplay();
+    defer display.deinit();
+    try std.testing.expectEqualStrings("'signaled", std.mem.trim(u8, display.bytes(), " \n"));
+}
+
+test "net: @give with no ports is @spawn, and the given ports are the deepest stack values" {
+    try support.expectStack("[] [40 2] (+) @give await 'ok at first", "42");
+}
+
+test "net: @give bounds its port list before doing any per-port work" {
+    // The cap is checked ahead of the element scan, so the whole transaction
+    // stays inside one scheduler step whatever the caller passes.
+    const over = "[1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17] [] (pop) @give";
+    try support.expectStack(
+        "[] (" ++ over ++ ") @attempt 'err at 'kind at",
+        "'domain",
+    );
+    const at_limit = "[1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16] [] (pop) @give";
+    try support.expectStack(
+        "[] (" ++ at_limit ++ ") @attempt 'err at 'kind at",
+        "'type",
+    );
+}

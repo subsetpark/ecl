@@ -1119,6 +1119,10 @@ const ExternalNode = struct {
         // node; list unlink consumed the first one.
         self.release();
     }
+
+    pub fn externalMembershipScope(self: *ExternalNode) *anyopaque {
+        return @ptrCast(self.scope);
+    }
 };
 
 const CancellationWork = union(enum) {
@@ -1277,6 +1281,56 @@ pub const SpawnSite = union(enum) {
     module: *modules.ModuleHome,
 };
 
+/// Moves external resources from the spawning scope into the child's scope as
+/// part of constructing the child, so a resource is never unowned and never
+/// visible to the child before it is owned by the child's scope. The scheduler
+/// knows nothing about what is being moved: `prepare` attaches to the new
+/// scope while leaving the originals in place, `commit` swaps them in and
+/// releases the originals, and `abort` undoes a prepare when a later step of
+/// the spawn fails.
+pub const ScopeTransfer = struct {
+    context: *anyopaque,
+    prepare_fn: *const fn (*anyopaque, *TaskScope) ScopeTransferError!void,
+    commit_fn: *const fn (*anyopaque) void,
+    abort_fn: *const fn (*anyopaque) void,
+};
+
+/// The scheduler learns only that a transfer refused. Which resource refused
+/// and why is recorded by the caller in its own transfer context, so the
+/// language-level error can name the port and the reason.
+pub const ScopeTransferError = error{ OutOfMemory, Transfer };
+
+fn ScopeTransferAdapters(comptime Context: type) type {
+    return struct {
+        fn prepare(raw: *anyopaque, destination: *TaskScope) ScopeTransferError!void {
+            const context: *Context = @ptrCast(@alignCast(raw));
+            return Context.prepareScopeTransfer(context, destination);
+        }
+
+        fn commit(raw: *anyopaque) void {
+            const context: *Context = @ptrCast(@alignCast(raw));
+            Context.commitScopeTransfer(context);
+        }
+
+        fn abort(raw: *anyopaque) void {
+            const context: *Context = @ptrCast(@alignCast(raw));
+            Context.abortScopeTransfer(context);
+        }
+    };
+}
+
+/// Erase a typed transfer context into the three steps `spawn` drives. The
+/// context outlives the spawn call, which is the caller's obligation.
+pub fn scopeTransfer(comptime Context: type, context: *Context) ScopeTransfer {
+    const adapters = ScopeTransferAdapters(Context);
+    return .{
+        .context = @ptrCast(context),
+        .prepare_fn = adapters.prepare,
+        .commit_fn = adapters.commit,
+        .abort_fn = adapters.abort,
+    };
+}
+
 pub const SpawnRequest = struct {
     parent_unit: *machine.Unit,
     site: SpawnSite,
@@ -1285,9 +1339,13 @@ pub const SpawnRequest = struct {
     /// Which constructor made this child, so an underflow against its floor
     /// can name the word the caller actually wrote.
     constructor: machine.UnitConstructor = .spawn,
+    /// Resources the child's scope must own before the child can run.
+    transfer: ?ScopeTransfer = null,
 };
 
 pub const SpawnError = error{ OutOfMemory, Io };
+/// `spawn` additionally refuses when a requested resource transfer refuses.
+pub const SpawnTransferError = SpawnError || error{Transfer};
 pub const ExternalAttachError = error{ OutOfMemory, ScopeClosing };
 
 const WorkerState = struct {
@@ -1428,7 +1486,7 @@ pub const WorkerScheduler = enum(usize) {
         state_.timer_threads.store(1, .release);
     }
 
-    pub fn spawn(self: *const WorkerScheduler, parent: *TaskScope, request: SpawnRequest) SpawnError!Value {
+    pub fn spawn(self: *const WorkerScheduler, parent: *TaskScope, request: SpawnRequest) SpawnTransferError!Value {
         try self.ensureStarted();
         const state_ = self.privateState();
         const cell = try self.allocator().create(TaskCell);
@@ -1476,10 +1534,19 @@ pub const WorkerScheduler = enum(usize) {
             },
         }
         try machine.initialize(unit, request.quotation, request.initial_stack);
+        // Attach the moved resources to the child's scope while the scope is
+        // still private: nothing can reach it, so a failure here unwinds by
+        // dropping the new memberships and the originals never moved.
+        if (request.transfer) |transfer| try transfer.prepare_fn(transfer.context, &cell.scope);
+        errdefer if (request.transfer) |transfer| transfer.abort_fn(transfer.context);
         const identity = state_.next_identity.fetchAdd(1, .monotonic);
         const header = try heap.createTask(TaskCell, self.allocator(), identity, cell);
         cell.header_state = .{ .published = header };
         cell.publication = .{ .active = execution };
+        // Past this point the spawn cannot fail, so the swap is safe to make
+        // permanent: the child's scope owns the resources and the spawning
+        // scope no longer does.
+        if (request.transfer) |transfer| transfer.commit_fn(transfer.context);
 
         std.Io.Threaded.mutexLock(&state_.tree_mutex);
         std.Io.Threaded.mutexLock(&parent.mutex);

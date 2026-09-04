@@ -6562,17 +6562,38 @@ pub const InitialStack = union(enum) {
     borrowed_seeds: *Header,
     /// `@each` with shared seeds: the element deepest and the seeds above it.
     borrowed_element_and_seeds: struct { element: Value, seeds: *Header },
+    /// `@give`'s moved ports deepest, then the explicit seed values. Both are
+    /// materialized in bounded slices rather than concatenated up front.
+    borrowed_pair: struct { deep: *Header, seeds: *Header },
 };
 
 pub fn initialize(unit: *Unit, code: *Header, initial_stack: InitialStack) error{OutOfMemory}!void {
     std.debug.assert(unit.frames.items.len == 0);
     std.debug.assert(unit.terminal == .evaluating);
     std.debug.assert(unit.current == null);
+    if (initial_stack == .borrowed_pair) {
+        const pair = initial_stack.borrowed_pair;
+        heap.incRef(pair.deep);
+        heap.incRef(pair.seeds);
+        var evaluator = Machine{ .unit = unit };
+        try evaluator.startDriver(ChildSeedDriver{
+            .materializer = .init(.initPair(pair.deep, pair.seeds)),
+        });
+        heap.incRef(code);
+        unit.current = .{
+            .code = code,
+            .ip = 0,
+            .site = .root(unit),
+            .traced_word = no_word,
+        };
+        return;
+    }
     const element: ?Value, const seeds: ?*Header = switch (initial_stack) {
         .empty => .{ null, null },
         .borrowed_element => |item| .{ item, null },
         .borrowed_seeds => |items| .{ null, items },
         .borrowed_element_and_seeds => |both| .{ both.element, both.seeds },
+        .borrowed_pair => unreachable,
     };
     // One element is O(1) and goes on now, deepest. Explicit seeds are
     // user-sized, so the Unit is instead handed a driver that materializes them
@@ -9053,12 +9074,22 @@ fn advanceRegistration(
 /// state machine. Capacity for a granted slice is secured before its first
 /// append, so allocation failure adds none of that slice; an earlier prefix is
 /// ordinary stack ownership and retires with its boundary or Unit.
+/// Materializes one or two seed lists onto a fresh child's stack in bounded
+/// slices. `deep`, when present, is materialized first and therefore ends up
+/// beneath `seeds`: `@give` uses it for the ports it moves, so no caller has
+/// to build a concatenated list eagerly to seed a child.
 const SeedMaterializer = struct {
+    deep: ?heap.Owned(*Header) = null,
     seeds: heap.Owned(*Header),
     next: usize = 0,
+    deep_done: bool = false,
 
     fn init(seeds: *Header) SeedMaterializer {
-        return .{ .seeds = .init(seeds) };
+        return .{ .seeds = .init(seeds), .deep_done = true };
+    }
+
+    fn initPair(deep: *Header, seeds: *Header) SeedMaterializer {
+        return .{ .deep = .init(deep), .seeds = .init(seeds) };
     }
 
     pub fn deinit(
@@ -9066,6 +9097,8 @@ const SeedMaterializer = struct {
         releases: *heap.ReleaseDomain,
         allocator: std.mem.Allocator,
     ) void {
+        if (self.deep) |*deep| deep.deinit(releases, allocator);
+        self.deep = null;
         self.seeds.deinit(releases, allocator);
         self.next = 0;
     }
@@ -9075,12 +9108,27 @@ const SeedMaterializer = struct {
         unit: *Unit,
         budget: usize,
     ) error{OutOfMemory}!bool {
-        const seeds = self.seeds.borrow();
-        const count: usize = @intCast(seeds.length());
+        if (!self.deep_done) {
+            if (try self.copy(unit, self.deep.?.borrow(), budget)) {
+                self.deep_done = true;
+                self.next = 0;
+            }
+            return false;
+        }
+        return self.copy(unit, self.seeds.borrow(), budget);
+    }
+
+    fn copy(
+        self: *SeedMaterializer,
+        unit: *Unit,
+        source: *Header,
+        budget: usize,
+    ) error{OutOfMemory}!bool {
+        const count: usize = @intCast(source.length());
         const end = @min(self.next + budget, count);
         try unit.stack.ensureUnusedCapacity(unit.allocator, end - self.next);
         for (self.next..end) |index| {
-            const item = list.atUnchecked(.{ .list = seeds }, index);
+            const item = list.atUnchecked(.{ .list = source }, index);
             unit.stack.appendAssumeCapacity(item);
             heap.retainValue(item);
         }

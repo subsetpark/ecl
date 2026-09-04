@@ -1,127 +1,96 @@
-//! ecl's value, reader, frame-machine, environment, and module surfaces,
-//! including the public library aggregation and cross-layer test root.
-pub const version = "0.1.0";
-pub const value = @import("value.zig");
-pub const poll = @import("poll.zig");
-pub const heap = @import("heap.zig");
-pub const intern = @import("intern.zig");
-pub const list = @import("list.zig");
-pub const equal = @import("equal.zig");
-pub const dict = @import("dict.zig");
-pub const print = @import("print.zig");
-pub const lexer = @import("lexer.zig");
-pub const binder = @import("binder.zig");
-pub const reader = @import("reader.zig");
-pub const formatter = @import("formatter.zig");
-pub const line_editor = @import("line_editor.zig");
-pub const spans = @import("spans.zig");
-pub const project = @import("project.zig");
-pub const pkg_lock = @import("pkg_lock.zig");
-pub const env = @import("env.zig");
-pub const native_abi = @import("native-abi");
-pub const native_descriptor = @import("native_descriptor.zig");
-pub const native_module = @import("native_module.zig");
-pub const native_call = @import("native_call.zig");
-pub const modules = @import("modules.zig");
-pub const machine = @import("machine.zig");
-pub const prims = @import("prims.zig");
-pub const combinators = @import("combinators.zig");
-pub const idioms = @import("idioms.zig");
-pub const prelude = @import("prelude.zig");
-pub const stdlib = @import("stdlib.zig");
-pub const kernels = @import("kernels.zig");
-pub const kernel_random = @import("kernel_random.zig");
-pub const session = @import("session.zig");
-pub const console = @import("console.zig");
-pub const scheduler = @import("scheduler.zig");
-const external = @import("external.zig");
-const process_port = @import("process_port.zig");
-pub const ProcessPolicy = process_port.ProcessPolicy;
-pub const filesystem_port = @import("filesystem_port.zig");
-pub const FilesystemPolicy = filesystem_port.FilesystemPolicy;
-pub const net_port = @import("net_port.zig");
-pub const NetPolicy = net_port.NetPolicy;
-pub const package_authority = @import("package_authority.zig");
-pub const directory_order = @import("directory_order.zig");
-pub const task_prims = @import("task_prims.zig");
-pub const test_prims = @import("test_prims.zig");
+//! Package-facing Zig API.
+//!
+//! The implementation aggregation remains private so a declaration made
+//! public for cross-file use does not silently become part of this API.
+const std = @import("std");
+const internal = @import("internal.zig");
+
+pub const version = internal.version;
+
+pub const Value = internal.value.Value;
+pub const ValueTag = internal.value.Tag;
+pub const HeapKind = internal.value.HeapKind;
+
+pub const Session = internal.session.Session;
+pub const SessionInitError = internal.session.InitError;
+pub const UnitOutcome = internal.session.UnitOutcome;
+pub const SessionConfig = internal.session.Config;
+pub const default_worker_count = internal.session.default_worker_count;
+pub const TlsTrustOverride = internal.session.TlsTrustOverride;
+pub const WallClockPolicy = internal.session.WallClockPolicy;
+pub const ClockPolicy = internal.session.ClockPolicy;
+pub const Host = internal.session.Host;
+pub const CompletionSet = internal.session.CompletionSet;
+pub const RenderedText = internal.session.RenderedText;
+pub const RootPreloadProgress = internal.session.RootPreloadProgress;
+pub const EditorTerminal = internal.session.EditorTerminal;
+pub const RowTerminal = internal.session.RowTerminal;
+pub const CompletionObserve = internal.session.CompletionObserve;
+
+pub const EnvironmentEntry = internal.machine.Environ.Entry;
+pub const StandardInputAvailability = internal.machine.StandardInput.Availability;
+pub const MonotonicClockSource = internal.scheduler.ClockSource;
+
+pub const ProcessPolicy = internal.process_port.ProcessPolicy;
+pub const ExecutablePolicy = internal.process_port.ExecutablePolicy;
+
+pub const FilesystemPolicy = internal.filesystem_port.FilesystemPolicy;
+pub const FilesystemRoot = internal.filesystem_port.Root;
+pub const FilesystemPermission = internal.filesystem_port.Permission;
+pub const FilesystemPermissions = internal.filesystem_port.Permissions;
+pub const FilesystemLimits = internal.filesystem_port.Limits;
+
+pub const NetPolicy = internal.net_port.NetPolicy;
+pub const NetBind = internal.net_port.Bind;
+pub const NetBindPolicy = internal.net_port.BindPolicy;
+pub const NetLimits = internal.net_port.Limits;
+
+const public_declarations = [_][]const u8{
+    "version",
+    "Value",
+    "ValueTag",
+    "HeapKind",
+    "Session",
+    "SessionInitError",
+    "UnitOutcome",
+    "SessionConfig",
+    "default_worker_count",
+    "TlsTrustOverride",
+    "WallClockPolicy",
+    "ClockPolicy",
+    "Host",
+    "CompletionSet",
+    "RenderedText",
+    "RootPreloadProgress",
+    "EditorTerminal",
+    "RowTerminal",
+    "CompletionObserve",
+    "EnvironmentEntry",
+    "StandardInputAvailability",
+    "MonotonicClockSource",
+    "ProcessPolicy",
+    "ExecutablePolicy",
+    "FilesystemPolicy",
+    "FilesystemRoot",
+    "FilesystemPermission",
+    "FilesystemPermissions",
+    "FilesystemLimits",
+    "NetPolicy",
+    "NetBind",
+    "NetBindPolicy",
+    "NetLimits",
+};
+
+comptime {
+    const declarations = std.meta.declarations(@This());
+    if (declarations.len != public_declarations.len)
+        @compileError("the package API must match its closed declaration list");
+    for (declarations, public_declarations) |actual, expected| {
+        if (!std.mem.eql(u8, actual.name, expected))
+            @compileError("the package API must match its closed declaration list");
+    }
+}
+
 test {
-    _ = value;
-    _ = poll;
-    _ = heap;
-    _ = intern;
-    _ = list;
-    _ = equal;
-    _ = dict;
-    _ = print;
-    _ = lexer;
-    _ = binder;
-    _ = reader;
-    _ = formatter;
-    _ = line_editor;
-    _ = spans;
-    _ = project;
-    _ = env;
-    _ = native_abi;
-    _ = native_descriptor;
-    _ = native_module;
-    _ = native_call;
-    _ = modules;
-    _ = machine;
-    _ = prims;
-    _ = combinators;
-    _ = idioms;
-    _ = prelude;
-    _ = stdlib;
-    _ = kernels;
-    _ = kernel_random;
-    _ = session;
-    _ = console;
-    _ = scheduler;
-    _ = external;
-    _ = process_port;
-    _ = filesystem_port;
-    _ = net_port;
-    _ = package_authority;
-    _ = directory_order;
-    _ = task_prims;
-    _ = test_prims;
-    _ = @import("tests/value_test.zig");
-    _ = @import("tests/reader_test.zig");
-    _ = @import("tests/machine_test.zig");
-    _ = @import("tests/module_test.zig");
-    _ = @import("tests/module_source_test.zig");
-    _ = @import("tests/test_language_test.zig");
-    _ = @import("tests/process_test.zig");
-    _ = @import("tests/filesystem_test.zig");
-    _ = @import("tests/net_test.zig");
-    _ = @import("tests/http_server_test.zig");
-    _ = @import("tests/allocation_budget_test.zig");
-    _ = @import("tests/kernel_numeric_test.zig");
-    _ = @import("tests/kernel_sequence_test.zig");
-    _ = @import("tests/kernel_order_test.zig");
-    _ = @import("tests/kernel_dict_text_test.zig");
-    _ = @import("tests/combinator_test.zig");
-    _ = @import("tests/prelude_test.zig");
-    _ = @import("tests/definition_test.zig");
-    _ = @import("tests/formatter_test.zig");
-    _ = @import("tests/concurrency_test.zig");
-    _ = @import("tests/line_editor_test.zig");
-    _ = @import("tests/native_test.zig");
-    _ = @import("tests/fuzz_test.zig");
-    _ = @import("tests/stateful_module_test.zig");
-    _ = @import("tests/module_value_test.zig");
-    _ = @import("tests/unit_input_test.zig");
-    _ = @import("tests/stdlib_test.zig");
-    _ = @import("tests/hostio_test.zig");
-    _ = @import("tests/pkg_sync_test.zig");
-    _ = @import("tests/archive_test.zig");
-    _ = @import("tests/http_test.zig");
-    _ = @import("tests/random_test.zig");
-    _ = @import("tests/clock_test.zig");
-    _ = @import("tests/conversion_test.zig");
-    _ = @import("tests/kernel_typed_test.zig");
-    // The typed kernel machinery keeps its own probes; nothing in production
-    // dispatch references it yet, so the test build needs this to analyze it.
-    _ = @import("kernel_flat.zig");
+    _ = internal;
 }

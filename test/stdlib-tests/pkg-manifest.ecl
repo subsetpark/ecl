@@ -5,14 +5,6 @@
  ('equal 'raises 'raises-containing 'raises-data 'documented)
  import
 
- ### defp hash-a
- "sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
- 'hash-a setp
-
- ### defp hash-b
- "sha256-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
- 'hash-b setp
-
  ### defp manifest-text
  "{'format 1 'name \"my.proj\" 'version \"0.1.0\" 'exports {\"my.proj\" [\"**/*\"]} 'requires {\"foo\" {'package \"foo\" 'version \"1.2.0\" 'url \"https://e.com/f.tgz\" 'hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}}}"
  'manifest-text setp

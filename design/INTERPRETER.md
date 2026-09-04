@@ -91,6 +91,11 @@ recorded in `PERFORMANCE.md`.
 
 `Session` is the public interpreter object and the root of every runtime
 lifetime. It is an opaque, movable handle to heap-stable `SessionCore` state.
+The package root is a closed façade over that Session-facing API. First-party
+executables and verification tools use a separate build-private aggregation,
+so a declaration made public for cross-file implementation use cannot become
+an embedding API accidentally; compile-time validation closes the façade over
+its explicit declaration set.
 That state owns:
 
 - the host allocator and `ReleaseDomain`;
@@ -424,11 +429,24 @@ lifetime. A port heap object retains a process cell so terminal observations
 remain safe. A separate `ControllerGroup` issues one lease to every detached
 supervisor, pipe, timeout, and escalation thread and owns the spawning
 `TaskScope` membership. The final controller lease is released only after its
-thread's process-cell reference, and only that final release detaches scope
-membership. The process-cell reference count therefore describes value and
-readiness observation, never controller quiescence. Dropping the last port
-value cannot orphan a live child, retaining a port cannot detach it from scope
-closure, and Session teardown cannot overtake a detached controller thread.
+thread's process-cell reference, and only that final release detaches whatever
+membership the port holds by then. The process-cell reference count therefore
+describes value and readiness observation, never controller quiescence.
+Dropping the last port value cannot orphan a live child, retaining a port
+cannot detach it from scope closure, and Session teardown cannot overtake a
+detached controller thread.
+
+Which scope holds that membership can change. A live external resource is a
+member of exactly one task scope at a time, and a closed one is a member of
+none; the membership a port holds is the whole of what its owning scope owns
+on its behalf. `@give` is the only thing that moves one, and it moves it as a
+transaction against the scope of a unit being constructed: the destination is
+attached while the origin still holds its own membership, so the resource is
+never unowned and is never reachable by the new unit before that unit's scope
+owns it, and the swap becomes permanent only once the spawn can no longer
+fail. A refused or abandoned move detaches the destination's membership and
+leaves the origin's untouched. Every port kind implements this, which the heap
+requires at compile time so no port can become one that cannot be moved.
 
 ## 4. Words, environments, and modules
 

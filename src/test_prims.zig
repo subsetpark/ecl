@@ -313,6 +313,8 @@ const InvocationDriver = struct {
                             .io,
                             "could not start scheduler workers for @test",
                         ),
+                        // @test requests no resource transfer.
+                        error.Transfer => unreachable,
                     };
                     const allocator = evaluator.allocator();
                     const releases = evaluator.releaseDomain();

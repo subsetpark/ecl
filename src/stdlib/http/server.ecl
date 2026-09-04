@@ -356,11 +356,6 @@
  (['max-header-bytes 'max-body-bytes 'max-in-flight 'read-timeout-ms 'on-failure])
  'config-keys defp
 
- ### defp positive-int?
- (value -- bool : "Return 1 for an int greater than zero.")
- (dup type 'int match? (0 >) (pop 0) if)
- 'positive-int? defp
-
  ### defp config-entry-problem
  (pair -- problem :
   "Classify one configuration entry as 'ok, 'unknown-key, 'wrong-type, or 'out-of-range.")
@@ -613,32 +608,58 @@
   dispatch-read)
  'handle-connection defp
 
- ### defp serve-one
- (listener config handler -- listener config handler :
-  "Accept one connection, handle it in isolation, close it, and report any non-io failure.")
- (|listener config handler|
-  listener net.accept
-  dup config handler 3 pack (handle-connection) @attempt
-  swap net.close
+ ### defp serve-connection
+ (connection config handler -- :
+  "Serve one connection this unit owns: frame and answer one request, close the connection, and
+   report any non-io failure through 'on-failure.")
+ (|connection config handler|
+  connection config handler 3 pack (handle-connection) @attempt
+  connection net.close
   config swap
   dup 'err dict.has?
   ('err at dup 'kind at 'io match? (pop pop) (report) if)
   (pop pop)
-  if
-  listener config handler)
- 'serve-one defp
+  if)
+ 'serve-connection defp
+
+ ### defp accept-one
+ (listener config handler tasks -- listener config handler tasks :
+  "Accept one connection and give it to a child unit that owns it for its whole life.")
+ (|listener config handler tasks|
+  listener config handler
+  tasks
+  listener net.accept wrap config handler 2 pack (serve-connection) @give
+  append)
+ 'accept-one defp
+
+ ### defp reap-one
+ (tasks -- tasks :
+  "Park until some child unit finishes, then drop it from the live set. Its result is discarded:
+   serve-connection reports its own failures.")
+ (dup await-any pop del)
+ 'reap-one defp
+
+ ### defp serve-step
+ (listener config handler tasks -- listener config handler tasks :
+  "Wait for a free slot when the in-flight cap is reached, then accept one more connection.")
+ (|listener config handler tasks|
+  listener config handler
+  tasks dup len config 'max-in-flight at >= (reap-one) when
+  accept-one)
+ 'serve-step defp
 
  ### defp accept-loop
- (listener config handler -- : "Accept and serve connections forever.")
- ((1) (serve-one) while)
+ (listener config handler -- :
+  "Accept and serve connections forever, with at most 'max-in-flight connections in flight.")
+ ([] (1) (serve-step) while)
  'accept-loop defp
 
  ### def @serve
  (listener config handler -- :
-  "Serve HTTP/1.1 requests from a net listener until cancelled: spawn 'max-in-flight acceptor
-   children over the listener and park. Each child accepts a connection, frames one request under
-   the read deadline, applies the handler as [request] handler @attempt in a fresh unit, writes its
-   single response with Content-Length and Connection: close, and closes the connection.
+  "Serve HTTP/1.1 requests from a net listener until cancelled: accept in a loop and give each
+   connection to a child unit that owns it. The child frames one request under the read deadline,
+   applies the handler as [request] handler @attempt in a fresh unit, writes its single response
+   with Content-Length and Connection: close, and closes the connection.
 
    The handler is a quotation ( request -- response ). The request is the dict {'method 'target
    'path 'query 'headers 'body 'peer}: 'method and 'target are the request-line tokens; 'path and
@@ -653,7 +674,7 @@
      431.
    - 'max-body-bytes (1048576): largest Content-Length accepted; more is 413 before any body byte is
      read.
-   - 'max-in-flight (128): number of acceptor children, each serving one connection at a time.
+   - 'max-in-flight (128): most connections served at once; accepting waits for a free slot.
    - 'read-timeout-ms (10000): deadline for reading one whole request; expiry is 408.
    - 'on-failure ((str io.eprint)): a ( error -- ) quotation applied to the error of every request
      answered 500; a failure of the quotation itself is discarded.
@@ -670,18 +691,13 @@
 
    A non-port listener, non-dict config, non-quotation handler, non-int limit, or non-quotation
    'on-failure is 'type; an unknown config key or a limit not greater than zero is 'domain. The word
-   fails 'cancelled when the serving unit is cancelled and re-raises an acceptor's 'io failure of
-   net.accept, such as 'io 'closed when the listener is closed elsewhere; either way every child is
-   quiesced by scope rules. It never closes the listener, which stays the caller's to close.")
+   fails 'cancelled when the serving unit is cancelled and re-raises an 'io failure of net.accept,
+   such as 'io 'closed when the listener is closed elsewhere; either way every child is quiesced by
+   scope rules and every connection a child owns is closed with it. It never closes the listener,
+   which stays the caller's to close.")
  (|listener config handler|
   listener type 'port match? "http.server.@serve expects a net listener" type-error assert
   handler type 'list match? "http.server.@serve expects a handler quotation" type-error assert
-  listener config checked-config handler 3 pack
-  dup 1 at 'max-in-flight at swap ((accept-loop) @spawn append) partial [] rollup times
-  await-any nip
-  dup 'err dict.has?
-  ('err at raise)
-  (pop 'contract error.new "http.server acceptor returned" error.with-message raise)
-  if)
+  listener config checked-config handler accept-loop)
  '@serve def
 ) 'http.server @defm

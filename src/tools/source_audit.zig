@@ -41,12 +41,12 @@ const source_groups = [_]SourceGroup{
     // The native-continuation union carries park, join, cleanup, and work
     // combinations as exhaustive variants rather than five side-band fields.
     .{ .production = true, .files = &.{
-        "machine.zig", "task_join_core.zig", "resolution_core.zig", "spans.zig", "prims.zig", "test_prims.zig", "root.zig",
+        "machine.zig", "task_join_core.zig", "resolution_core.zig", "spans.zig", "prims.zig", "test_prims.zig", "root.zig", "internal.zig",
     }, .sources = &.{
         @embedFile("../machine.zig"),         @embedFile("../task_join_core.zig"),
         @embedFile("../resolution_core.zig"), @embedFile("../spans.zig"),
         @embedFile("../prims.zig"),           @embedFile("../test_prims.zig"),
-        @embedFile("../root.zig"),
+        @embedFile("../root.zig"),            @embedFile("../internal.zig"),
     } },
     // Snapshot-safe lookup, publication, and reflection now expose explicit
     // cursor state so scheduler suspension is represented instead of hidden
@@ -229,6 +229,7 @@ const repository_verification_files = [_][]const u8{
     "test/http_fixture_server.zig",
     "test/pkg_lock_fixture.zig",
     "test/process_fixture.zig",
+    "test/public_api.zig",
 };
 pub fn main(init: std.process.Init) !void {
     var failed = false;
@@ -838,8 +839,9 @@ fn auditUnsafeCasts() bool {
         @embedFile("../heap.zig"),
         &.{
             "TaskDestroyAdapter",     "PortReleaseAdapter",
-            "ModuleReleaseAdapter",   "RetirementAdapters",
-            "RetirementWakeAdapters", "CodeRetirementAdapters",
+            "PortTransferAdapter",    "ModuleReleaseAdapter",
+            "RetirementAdapters",     "RetirementWakeAdapters",
+            "CodeRetirementAdapters",
         },
     ) or failed;
     failed = auditErasedCasts(
@@ -1034,7 +1036,7 @@ fn hasForbiddenTokens(
 /// unit. Nothing in the compiler can express that, so the manifest is written
 /// down here and the audit enforces both directions — every listed word is
 /// marked, and nothing else in first-party vocabulary is.
-const unit_constructors = [_][]const u8{ "@attempt", "@spawn", "@each", "@module", "@defm", "@test" };
+const unit_constructors = [_][]const u8{ "@attempt", "@spawn", "@give", "@each", "@module", "@defm", "@test" };
 
 /// First-party ECL words that apply their quotation in a fresh unit and are
 /// therefore marked too. Each must be defined by some first-party source;
@@ -1236,16 +1238,6 @@ fn auditDynamicContextSpelling() bool {
         }
     }
     return failed;
-}
-
-fn occurrences(haystack: []const u8, needle: []const u8) usize {
-    var count: usize = 0;
-    var index: usize = 0;
-    while (std.mem.indexOfPos(u8, haystack, index, needle)) |found| {
-        count += 1;
-        index = found + needle.len;
-    }
-    return count;
 }
 
 fn isUnitConstructor(name: []const u8) bool {

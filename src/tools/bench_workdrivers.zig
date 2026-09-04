@@ -6,7 +6,7 @@
 //! of the wall/CPU baseline it is intended to explain.
 const std = @import("std");
 const builtin = @import("builtin");
-const ecl = @import("ecl");
+const ecl = @import("ecl-internal");
 
 const CountingAllocator = struct {
     backing: std.mem.Allocator,

@@ -17,7 +17,7 @@
 //! representation the dispatch already knew — is recorded in the workstream's
 //! verified-current-state inventory instead.
 const std = @import("std");
-const ecl = @import("ecl");
+const ecl = @import("ecl-internal");
 
 /// Wraps the session allocator to count what the run actually asked for. The
 /// counters are the point: they do not vary with the machine.

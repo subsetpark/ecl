@@ -366,6 +366,13 @@ const ProbePort = struct {
     fn releasePort(self: *ProbePort) void {
         self.releases += 1;
     }
+
+    // A probe holds no scope membership, so there is nothing to move.
+    fn prepareScopeTransfer(_: *ProbePort, _: *anyopaque, _: *anyopaque) PortTransferError!void {
+        return error.Closed;
+    }
+    fn commitScopeTransfer(_: *ProbePort) void {}
+    fn abortScopeTransfer(_: *ProbePort) void {}
 };
 
 fn portCapabilityFailureProbe(allocator: std.mem.Allocator) !void {
@@ -388,6 +395,11 @@ fn portCapabilityFailureProbe(allocator: std.mem.Allocator) !void {
 test "port payload projection rejects a foreign backend" {
     const ForeignPort = struct {
         fn releasePort(_: *@This()) void {}
+        fn prepareScopeTransfer(_: *@This(), _: *anyopaque, _: *anyopaque) PortTransferError!void {
+            return error.Closed;
+        }
+        fn commitScopeTransfer(_: *@This()) void {}
+        fn abortScopeTransfer(_: *@This()) void {}
     };
     var cleanup = testing.Cleanup.init(std.testing.allocator);
     defer cleanup.deinit();
@@ -416,7 +428,6 @@ const InitializingPort = opaque {};
 const InitializingModule = opaque {};
 const UniqueHeader = opaque {};
 pub const UniqueList = opaque {};
-pub const UniqueDict = opaque {};
 
 /// Makes copy-on-write ownership visible to callers. `in_place` aliases the
 /// caller's existing owner; `replacement` is one additional owned root.
@@ -504,10 +515,52 @@ pub const TaskStorage = struct {
 /// A port value owns one reference to an opaque external cell. The cell's
 /// semantic owner supplies `releasePort`; the heap never observes its backend
 /// state or confuses value-reference lifetime with live-resource lifetime.
+/// Why a port refused to change owning scope.
+pub const PortTransferError = error{
+    OutOfMemory,
+    /// The destination scope is closing, so it cannot accept the resource.
+    ScopeClosing,
+    /// The scope named as the current owner does not hold this port.
+    NotOwner,
+    /// The port is already closed, so there is no live resource to move.
+    Closed,
+    /// A move of this port is already prepared and not yet finished, so a
+    /// second one would strand the first destination's membership.
+    Busy,
+};
+
+/// Consuming authority to finish one prepared change of owning scope, handed
+/// out only by `preparePortTransfer` and only once the destination already
+/// holds the resource. Holding one is the sole way to commit or abandon that
+/// move, so no caller can commit a move it did not prepare, and consuming the
+/// token makes a second commit or abort inert. Scope pointers are opaque
+/// here: the heap does not know what a task scope is.
+pub const PortTransfer = struct {
+    context: ?*anyopaque,
+    commit_fn: *const fn (*anyopaque) void,
+    abort_fn: *const fn (*anyopaque) void,
+
+    /// Make the move permanent: the destination scope owns the port and the
+    /// origin scope no longer does.
+    pub fn commit(self: *PortTransfer) void {
+        const context = self.context orelse return;
+        self.context = null;
+        self.commit_fn(context);
+    }
+
+    /// Abandon the move, leaving the origin scope as the owner.
+    pub fn abort(self: *PortTransfer) void {
+        const context = self.context orelse return;
+        self.context = null;
+        self.abort_fn(context);
+    }
+};
+
 const PortStorage = struct {
     identity: u64,
     payload: *anyopaque,
     release: *const fn (*anyopaque) void,
+    prepare_transfer: *const fn (*anyopaque, *anyopaque, *anyopaque) PortTransferError!PortTransfer,
 };
 
 /// A module value owns exactly one release of an opaque semantic payload.
@@ -757,11 +810,6 @@ fn claimUniqueHeader(header: *Header) ?*UniqueHeader {
 }
 
 pub fn claimUniqueList(handle: *ListHandle) ?*UniqueList {
-    const unique = claimUniqueHeader(mutableHeader(handle)) orelse return null;
-    return @ptrCast(@alignCast(unique));
-}
-
-pub fn claimUniqueDict(handle: *DictHandle) ?*UniqueDict {
     const unique = claimUniqueHeader(mutableHeader(handle)) orelse return null;
     return @ptrCast(@alignCast(unique));
 }
@@ -1104,11 +1152,17 @@ fn allocPortHeader(
     identity: u64,
     payload: *anyopaque,
     release: *const fn (*anyopaque) void,
+    prepare_transfer: *const fn (*anyopaque, *anyopaque, *anyopaque) PortTransferError!PortTransfer,
 ) error{OutOfMemory}!*InitializingPort {
     const obj = try allocator.create(Object);
     errdefer allocator.destroy(obj);
     const storage = try allocator.create(PortStorage);
-    storage.* = .{ .identity = identity, .payload = payload, .release = release };
+    storage.* = .{
+        .identity = identity,
+        .payload = payload,
+        .release = release,
+        .prepare_transfer = prepare_transfer,
+    };
     obj.* = .{
         .header = HeaderImpl.init(.port, identity),
         .capacity = 0,
@@ -1129,6 +1183,40 @@ fn PortReleaseAdapter(comptime Payload: type) type {
     };
 }
 
+fn PortTransferAdapter(comptime Payload: type) type {
+    return struct {
+        fn prepare(raw: *anyopaque, from: *anyopaque, to: *anyopaque) PortTransferError!PortTransfer {
+            const payload: *Payload = @ptrCast(@alignCast(raw));
+            try Payload.prepareScopeTransfer(payload, from, to);
+            return .{ .context = raw, .commit_fn = commit, .abort_fn = abort };
+        }
+        fn commit(raw: *anyopaque) void {
+            const payload: *Payload = @ptrCast(@alignCast(raw));
+            Payload.commitScopeTransfer(payload);
+        }
+        fn abort(raw: *anyopaque) void {
+            const payload: *Payload = @ptrCast(@alignCast(raw));
+            Payload.abortScopeTransfer(payload);
+        }
+    };
+}
+
+/// Every port kind must be able to change owning scope. This is deliberately
+/// not optional: a payload that omits the transfer steps fails to compile
+/// here rather than becoming a second class of port that `@give` refuses.
+fn portPrepareTransfer(
+    comptime Payload: type,
+) *const fn (*anyopaque, *anyopaque, *anyopaque) PortTransferError!PortTransfer {
+    inline for (.{ "prepareScopeTransfer", "commitScopeTransfer", "abortScopeTransfer" }) |step| {
+        if (!@hasDecl(Payload, step))
+            @compileError(@typeName(Payload) ++ " is a port payload and must declare " ++ step ++
+                "; every port kind has to answer whether it can change owning unit");
+    }
+    // Each step's signature is checked by the adapter that takes its address:
+    // a payload whose steps do not match fails there, naming the step.
+    return PortTransferAdapter(Payload).prepare;
+}
+
 /// Wraps one already-owned external-cell reference in an opaque port value.
 /// On failure the caller retains the reference; on success final value release
 /// calls `releasePort` exactly once.
@@ -1143,8 +1231,21 @@ pub fn createPort(
         identity,
         @ptrCast(payload),
         PortReleaseAdapter(Payload).release,
+        portPrepareTransfer(Payload),
     );
     return .{ .port = publishPort(initializing) };
+}
+
+/// Attach the port to `to` while leaving `from` as its owner, and return the
+/// authority to finish or abandon the move. The payload never leaves the
+/// heap: callers move ports without ever holding a backend pointer.
+pub fn preparePortTransfer(
+    header: *const PortHandle,
+    from: *anyopaque,
+    to: *anyopaque,
+) PortTransferError!PortTransfer {
+    const storage = portStorage(header);
+    return storage.prepare_transfer(storage.payload, from, to);
 }
 
 fn portStorage(header: *const PortHandle) *const PortStorage {
@@ -2515,18 +2616,6 @@ pub fn adoptListRepresentationDeferred(
     releases: *ReleaseDomain,
     dest: *UniqueList,
     source: *UniqueList,
-) void {
-    adoptRepresentationDeferred(
-        releases,
-        @ptrCast(@alignCast(dest)),
-        @ptrCast(@alignCast(source)),
-    );
-}
-
-pub fn adoptDictRepresentationDeferred(
-    releases: *ReleaseDomain,
-    dest: *UniqueDict,
-    source: *UniqueDict,
 ) void {
     adoptRepresentationDeferred(
         releases,

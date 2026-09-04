@@ -1,5 +1,5 @@
 const std = @import("std");
-const ecl = @import("ecl");
+const ecl = @import("ecl-internal");
 const AppError = error{ OutOfMemory, Io, InvalidHostPolicy };
 const help =
     \\ecl — a homoiconic concatenative array calculator
