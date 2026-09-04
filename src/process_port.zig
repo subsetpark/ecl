@@ -858,7 +858,19 @@ pub const ProcessCell = struct {
     }
 
     fn start(self: *ProcessCell, lease: ControllerLease) error{Io}!void {
-        self.phase = .running;
+        // The scope member is linked before the supervisor exists, so a
+        // cancellation walk may already have moved the phase to `closing` and
+        // signalled the group. Take the lock and leave that transition in
+        // place: an unconditional write here would lose it and leave the cell
+        // claiming to run a process that is already being torn down. The lock
+        // is released before the thread starts, so the supervisor observes
+        // whichever phase won rather than waiting on this one.
+        std.Io.Threaded.mutexLock(&self.mutex);
+        switch (self.phase) {
+            .constructing => self.phase = .running,
+            .running, .closing, .terminal, .reaped => {},
+        }
+        std.Io.Threaded.mutexUnlock(&self.mutex);
         const thread = std.Thread.spawn(.{}, supervisorThreadMain, .{ self, lease }) catch return error.Io;
         thread.detach();
     }
