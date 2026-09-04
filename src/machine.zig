@@ -2309,7 +2309,7 @@ fn inlineDriverCapable(comptime Driver: type) bool {
     if (heap.validateDriverOwnership(Driver) != .fields)
         @compileError(@typeName(Driver) ++ " inline driver storage requires field ownership");
     if (@sizeOf(Driver) > Unit.driver_slot_len)
-        @compileError(@typeName(Driver) ++ " exceeds the unit inline driver slot");
+        @compileError(std.fmt.comptimePrint("{s} ({d} bytes) exceeds the unit inline driver slot ({d} bytes)", .{ @typeName(Driver), @sizeOf(Driver), Unit.driver_slot_len }));
     if (@alignOf(Driver) > Unit.driver_slot_align)
         @compileError(@typeName(Driver) ++ " exceeds the unit inline driver alignment");
     return true;
@@ -2960,9 +2960,10 @@ pub const Unit = struct {
         try self.lifetime.adopt(self.allocator, owned);
     }
     /// Sized to the drivers that opt in, checked by `inlineDriverCapable`.
-    /// Raising it trades unit footprint, which every task pays, for covering a
-    /// wider driver; measure before doing so.
-    pub const driver_slot_len = 640;
+    /// The idiom driver with its owned lexical cursor is 648 bytes on the
+    /// 64-bit targets. Round to the slot alignment, preserving its complete
+    /// ownership state without falling back to a per-dispatch allocation.
+    pub const driver_slot_len = 656;
     pub const driver_slot_align = 16;
 
     fn acquireInlineDriver(self: *Unit, comptime Driver: type) ?*Driver {
@@ -7884,9 +7885,7 @@ pub const ResolutionCursor = struct {
         /// an interned atom and then resolved in core alone, never in the
         /// registry.
         core_export,
-        scope,
-        direct,
-        core,
+        lexical,
         complete,
     };
     /// The phases are sequential and their cursors are mutually exclusive, so
@@ -7905,15 +7904,15 @@ pub const ResolutionCursor = struct {
         binding_validation: intern.NamespaceCursor,
         catalog: pkg_lock.LookupCursor,
         acquisition: modules.Registry.AcquireCursor,
-        direct: env.DirectLookupCursor,
+        lexical: resolution_core.LexicalCursor,
         export_lookup: modules.ModuleResolveCursor,
 
-        /// Only the three leased cursors own anything; the interning and
-        /// name-validation cursors are pure position.
+        /// Leased lookup cursors own storage; interning and name validation
+        /// carry only traversal positions.
         fn deinit(self: *Work) void {
             switch (self.*) {
                 .acquisition => |*cursor| cursor.deinit(),
-                .direct => |*cursor| cursor.deinit(),
+                .lexical => |*cursor| cursor.deinit(),
                 .export_lookup => |*cursor| cursor.deinit(),
                 .catalog => |*cursor| cursor.deinit(),
                 .none, .dot, .atom, .module_validation, .binding_validation => {},
@@ -7941,10 +7940,6 @@ pub const ResolutionCursor = struct {
     /// report `.qualified` instead, because a dotted name never searched the
     /// activation's own chain at all.
     plain_chain: LookupChain,
-    /// The scope whose environment the in-flight `.direct` lookup is reading.
-    /// `scope` has already advanced to its parent by then, so the searched
-    /// scope has to be kept separately to be reported.
-    searched_scope: ?*env.Scope = null,
     generation: ?modules.GenerationLease = null,
     /// The reference this dispatch's borrow acquired, if it had to acquire one.
     /// It rides here so the pin taken at the borrow is the *only* one: it is
@@ -8046,8 +8041,7 @@ pub const ResolutionCursor = struct {
     /// dispatch, and the unconditional `pin`/`retain` must never appear here —
     /// it is a `fetchAdd` that asserts on a zero refcount and resurrects a
     /// destroyed object in ReleaseFast.
-    fn homeForLocalHit(self: *ResolutionCursor) ?*modules.ModuleHome {
-        const searched = self.searched_scope orelse return self.current_home;
+    fn homeForLocalHit(self: *ResolutionCursor, searched: *env.Scope) ?*modules.ModuleHome {
         const image_home = modules.homeForModuleRootScope(searched) orelse
             return self.current_home;
         // A double-registered image entered through either name stays
@@ -8064,9 +8058,10 @@ pub const ResolutionCursor = struct {
         self: *ResolutionCursor,
         lease: env.BindingLease,
         captured_cell: ?env.BindingCellHandle,
+        searched_scope: *env.Scope,
     ) Resolution {
         const local = lease.traceWord();
-        const home = if (local == null) null else self.homeForLocalHit();
+        const home = if (local == null) null else self.homeForLocalHit(searched_scope);
         var cell = captured_cell;
         const cache = cache: {
             const scope_id = self.local_cache_scope orelse {
@@ -8093,7 +8088,7 @@ pub const ResolutionCursor = struct {
             // A module-local hit resolves against its image, which the home
             // supplies; anything else resolves against the scope it was found
             // in.
-            .defining_scope = if (home != null) null else self.searched_scope,
+            .defining_scope = if (home != null) null else searched_scope,
             .call_site_cache = cache,
         };
     }
@@ -8160,8 +8155,8 @@ pub const ResolutionCursor = struct {
                         self.work = .{ .atom = intern.lookupCursor(self.spelling[0..dot_index]) };
                         self.phase = .prefix;
                     } else {
-                        self.work.deinit();
-                        self.phase = .scope;
+                        self.work = .{ .lexical = .init(self.core, self.scope, self.word, self.local_cache_scope != null) };
+                        self.phase = .lexical;
                     }
                     break :result .pending;
                 },
@@ -8308,64 +8303,32 @@ pub const ResolutionCursor = struct {
                         self.phase = .complete;
                         break :result .{ .complete = .{ .unresolved = .core } };
                     };
-                    self.work = .{ .direct = self.core.directLookupCursor(export_name) };
-                    self.phase = .core;
+                    self.work = .{ .lexical = .init(self.core, null, export_name, false) };
+                    self.phase = .lexical;
                     break :result .pending;
                 },
             },
-            .scope => result: {
-                const current = self.scope orelse {
-                    self.work = .{ .direct = self.core.directLookupCursor(self.word) };
-                    self.phase = .core;
-                    break :result .pending;
-                };
-                self.scope = current.parent;
-                if (current.environmentOrNull()) |environment| {
-                    self.searched_scope = current;
-                    var direct = environment.directLookupCursor(self.word);
-                    if (self.local_cache_scope != null) direct.captureCell();
-                    self.work = .{ .direct = direct };
-                    self.phase = .direct;
-                }
-                break :result .pending;
-            },
-            .direct => switch (self.work.direct.advance()) {
+            .lexical => switch (self.work.lexical.advance()) {
                 .pending => .pending,
-                .complete => |maybe_lease| result: {
-                    const captured_cell = if (maybe_lease != null)
-                        self.work.direct.takeCell()
-                    else
-                        null;
-                    self.work.deinit();
-                    if (maybe_lease) |lease| {
-                        self.phase = .complete;
-                        break :result .{ .complete = .{
-                            .resolved = self.directResult(lease, captured_cell),
-                        } };
-                    }
-                    self.searched_scope = null;
-                    self.phase = .scope;
-                    break :result .pending;
-                },
-            },
-            .core => switch (self.work.direct.advance()) {
-                .pending => .pending,
-                .complete => |maybe_lease| result: {
+                .complete => result: {
                     self.work.deinit();
                     self.phase = .complete;
-                    var lease = maybe_lease orelse
-                        break :result .{ .complete = .{ .unresolved = self.plain_chain } };
-                    if (lease.visibility == .private) {
-                        lease.deinit();
-                        break :result .{ .complete = .{ .unresolved = self.plain_chain } };
-                    }
-                    break :result .{ .complete = .{ .resolved = .{
-                        .lease = lease,
-                        .execution_generation = null,
-                        .home = null,
-                        .trace_word = .plain(self.word),
-                        .origin = .core,
-                    } } };
+                    break :result .{ .complete = .{ .unresolved = self.plain_chain } };
+                },
+                .item => |candidate| result: {
+                    self.work.deinit();
+                    self.phase = .complete;
+                    const resolved: Resolution = switch (candidate.location) {
+                        .scope => |scope| self.directResult(candidate.lease, candidate.cell, scope),
+                        .core => .{
+                            .lease = candidate.lease,
+                            .execution_generation = null,
+                            .home = null,
+                            .trace_word = .plain(self.word),
+                            .origin = .core,
+                        },
+                    };
+                    break :result .{ .complete = .{ .resolved = resolved } };
                 },
             },
             .complete => unreachable,
@@ -8375,19 +8338,16 @@ pub const ResolutionCursor = struct {
 
 pub const ShadowProgress = poll_api.Progress([]intern.TraceWord);
 pub const ShadowCursor = struct {
-    const Phase = enum { dot, scope, direct, core, materialize, complete };
-    /// The same reservation `ResolutionCursor.Work` removes, for the same
-    /// reason: these phase cursors are mutually exclusive. The walk itself is
-    /// not shared with that cursor — this one records every hit and keeps
-    /// going, where resolution stops at the first and takes ownership of it.
+    const Phase = enum { dot, lexical, materialize, complete };
+    /// Only the active parser or lexical walk occupies continuation storage.
     const Work = union(enum) {
         none,
         dot: intern.DotCursor,
-        direct: env.DirectLookupCursor,
+        lexical: resolution_core.LexicalCursor,
 
         fn deinit(self: *Work) void {
             switch (self.*) {
-                .direct => |*cursor| cursor.deinit(),
+                .lexical => |*cursor| cursor.deinit(),
                 .none, .dot => {},
             }
             self.* = .none;
@@ -8401,7 +8361,7 @@ pub const ShadowCursor = struct {
     work: Work,
     scope: ?*env.Scope,
     current_home: ?*modules.ModuleHome,
-    search: resolution_core.Search = .searching,
+    seen_winner: bool = false,
     found: poll_api.ChunkList(intern.TraceWord),
     output: ?[]intern.TraceWord = null,
     iterator: ?poll_api.ChunkList(intern.TraceWord).Iterator = null,
@@ -8425,17 +8385,10 @@ pub const ShadowCursor = struct {
         self.found.retire(self.releases);
         self.* = undefined;
     }
-    fn record(
-        self: *ShadowCursor,
-        trace_word: intern.TraceWord,
-        origin: ResolutionOrigin,
-    ) error{OutOfMemory}!void {
-        const decision = resolution_core.consider(self.search, .{ .trace_word = trace_word, .origin = origin });
-        self.search = decision.next;
-        switch (decision.command) {
-            .winner => {},
-            .shadow => |shadow| try self.found.append(shadow.trace_word),
-        }
+    fn record(self: *ShadowCursor, trace_word: intern.TraceWord) error{OutOfMemory}!void {
+        if (self.seen_winner) {
+            try self.found.append(trace_word);
+        } else self.seen_winner = true;
     }
     pub fn advance(self: *ShadowCursor) error{OutOfMemory}!ShadowProgress {
         return switch (self.phase) {
@@ -8448,55 +8401,29 @@ pub const ShadowCursor = struct {
                         self.phase = .complete;
                         break :result .{ .complete = self.takeOutput() };
                     }
-                    self.phase = .scope;
+                    self.work = .{ .lexical = .init(self.core, self.scope, self.word, false) };
+                    self.phase = .lexical;
                     break :result .pending;
                 },
             },
-            .scope => result: {
-                const current = self.scope orelse {
-                    self.work = .{ .direct = self.core.directLookupCursor(self.word) };
-                    self.phase = .core;
-                    break :result .pending;
-                };
-                self.scope = current.parent;
-                if (current.environmentOrNull()) |environment| {
-                    self.work = .{ .direct = environment.directLookupCursor(self.word) };
-                    self.phase = .direct;
-                }
-                break :result .pending;
-            },
-            .direct => switch (self.work.direct.advance()) {
+            .lexical => switch (self.work.lexical.advance()) {
                 .pending => .pending,
-                .complete => |maybe_lease| result: {
-                    self.work.deinit();
-                    if (maybe_lease) |loaded| {
-                        var lease = loaded;
-                        defer lease.deinit();
-                        // Same reasoning as `directResult`: a module-local
-                        // binding reached lexically belongs to the image this
-                        // activation is running, so the invoking home spells it.
-                        const home = if (lease.traceWord() == null) null else self.current_home;
-                        if (home) |resolved|
-                            try self.record(
-                                homeTraceWord(resolved, lease.traceWord().?),
-                                .module,
-                            )
-                        else
-                            try self.record(.plain(self.word), .direct);
-                    }
-                    self.phase = .scope;
+                .item => |loaded| result: {
+                    var candidate = loaded;
+                    defer candidate.deinit();
+                    const lease = candidate.lease;
+                    const home = switch (candidate.location) {
+                        .core => null,
+                        .scope => if (lease.traceWord() == null) null else self.current_home,
+                    };
+                    try self.record(if (home) |resolved|
+                        homeTraceWord(resolved, lease.traceWord().?)
+                    else
+                        .plain(self.word));
                     break :result .pending;
                 },
-            },
-            .core => switch (self.work.direct.advance()) {
-                .pending => .pending,
-                .complete => |maybe_lease| result: {
+                .complete => result: {
                     self.work.deinit();
-                    if (maybe_lease) |loaded| {
-                        var lease = loaded;
-                        defer lease.deinit();
-                        if (lease.visibility == .public) try self.record(.plain(self.word), .core);
-                    }
                     self.output = try self.allocator.alloc(intern.TraceWord, self.found.count);
                     self.iterator = self.found.iterator();
                     self.phase = .materialize;

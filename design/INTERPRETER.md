@@ -503,6 +503,13 @@ diagnostic identity travel in the same snapshot. Readers acquire leases;
 writers build before taking the publication lock, validate and swap in constant
 time, and retire the old snapshot after unlocking.
 
+Execution and shadow inspection consume the same bounded lexical candidate
+walk: the written or current scope chain, followed by public core bindings.
+Each candidate carries its location and owned binding lease; execution may
+also request a captured cell for its cache. Execution consumes the first hit,
+while shadow inspection continues through later hits. Qualified loading,
+generation pins, and execution authority remain outside that shared walk.
+
 ### An execution site correlates three contexts
 
 An activation needs three related but non-identical facts:
