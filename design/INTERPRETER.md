@@ -855,6 +855,13 @@ node's final release decrements the scope's child count and publishes
 quiescence. Scheduler and allocator teardown therefore cannot overtake the
 cleanup performed by a membership callback.
 
+Process and network registrations share one keyed wait-list lifetime protocol.
+Each registration retains its backend and wake target until consuming
+cancellation. Notification delivers the wake while the registration is still
+linked under the backend lock, then unlinks it; cancellation cannot release
+either owner during delivery. Backend predicates and wake reasons remain local
+to the resource whose state they observe.
+
 A native work driver that must wait carries its driver and park request in one
 exhaustive continuation variant. This is the external equivalent of the task
 join/work cleanup states: no side-band pointer can outlive the stack window or
