@@ -1213,8 +1213,13 @@ fn PortTransferAdapter(comptime Payload: type) type {
 fn portPrepareTransfer(
     comptime Payload: type,
 ) *const fn (*anyopaque, *anyopaque, *anyopaque) PortTransferError!PortTransfer {
-    if (!@hasDecl(Payload, "prepareScopeTransfer"))
-        @compileError(@typeName(Payload) ++ " is a port payload and must declare prepareScopeTransfer, commitScopeTransfer, and abortScopeTransfer");
+    inline for (.{ "prepareScopeTransfer", "commitScopeTransfer", "abortScopeTransfer" }) |step| {
+        if (!@hasDecl(Payload, step))
+            @compileError(@typeName(Payload) ++ " is a port payload and must declare " ++ step ++
+                "; every port kind has to answer whether it can change owning unit");
+    }
+    // Each step's signature is checked by the adapter that takes its address:
+    // a payload whose steps do not match fails there, naming the step.
     return PortTransferAdapter(Payload).prepare;
 }
 

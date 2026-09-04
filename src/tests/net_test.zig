@@ -1049,3 +1049,18 @@ test "net: a process port is givable too, and dies with the unit it was given to
 test "net: @give with no ports is @spawn, and the given ports are the deepest stack values" {
     try support.expectStack("[] [40 2] (+) @give await 'ok at first", "42");
 }
+
+test "net: @give bounds its port list before doing any per-port work" {
+    // The cap is checked ahead of the element scan, so the whole transaction
+    // stays inside one scheduler step whatever the caller passes.
+    const over = "[1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17] [] (pop) @give";
+    try support.expectStack(
+        "[] (" ++ over ++ ") @attempt 'err at 'kind at",
+        "'domain",
+    );
+    const at_limit = "[1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16] [] (pop) @give";
+    try support.expectStack(
+        "[] (" ++ at_limit ++ ") @attempt 'err at 'kind at",
+        "'type",
+    );
+}

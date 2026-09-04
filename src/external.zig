@@ -250,6 +250,93 @@ pub const ScopeMembership = struct {
     }
 };
 
+/// Which task scope owns one external resource. A live resource is a member
+/// of exactly one scope, a closed one of none, and `transferring` is the one
+/// window inside a `@give` where the destination is already attached and the
+/// origin has not yet let go. States such as closed-with-a-pending-move or
+/// live-with-no-owner are not representable.
+pub const Ownership = union(enum) {
+    none,
+    owned: ScopeMembership,
+    transferring: struct { origin: ScopeMembership, destination: ScopeMembership },
+
+    /// Memberships a caller must detach after leaving its lock.
+    pub const Detached = struct {
+        first: ?ScopeMembership = null,
+        second: ?ScopeMembership = null,
+
+        pub fn detachAll(self: *Detached) void {
+            if (self.first) |token| {
+                var owned = token;
+                owned.detach();
+                self.first = null;
+            }
+            if (self.second) |token| {
+                var owned = token;
+                owned.detach();
+                self.second = null;
+            }
+        }
+    };
+
+    /// The scope that owns the resource now, or null when none does. During a
+    /// transfer this is still the origin: the move is not yet authoritative.
+    pub fn owningScope(self: Ownership) ?*anyopaque {
+        return switch (self) {
+            .none => null,
+            .owned => |current| current.owningScope(),
+            .transferring => |both| both.origin.owningScope(),
+        };
+    }
+
+    pub fn live(self: Ownership) bool {
+        return self != .none;
+    }
+
+    /// Give up every membership. A resource closing mid-transfer detaches the
+    /// destination too, since that membership never became authoritative.
+    pub fn release(self: *Ownership) Detached {
+        defer self.* = .none;
+        return switch (self.*) {
+            .none => .{},
+            .owned => |current| .{ .first = current },
+            .transferring => |both| .{ .first = both.origin, .second = both.destination },
+        };
+    }
+
+    /// Attach a prepared destination. Only an owned resource may begin one.
+    pub fn beginTransfer(self: *Ownership, destination: ScopeMembership) void {
+        // Read the origin out before assigning: the assignment writes into
+        // `self` in place, so the tag would change under a payload expression
+        // that still referred to the old field.
+        const origin = self.owned;
+        self.* = .{ .transferring = .{ .origin = origin, .destination = destination } };
+    }
+
+    /// The destination becomes the owner; the origin's membership is returned
+    /// for the caller to detach. Anything but a transfer is left alone.
+    pub fn commitTransfer(self: *Ownership) Detached {
+        switch (self.*) {
+            .transferring => |both| {
+                self.* = .{ .owned = both.destination };
+                return .{ .first = both.origin };
+            },
+            else => return .{},
+        }
+    }
+
+    /// The origin stays the owner; the destination's membership is returned.
+    pub fn abortTransfer(self: *Ownership) Detached {
+        switch (self.*) {
+            .transferring => |both| {
+                self.* = .{ .owned = both.origin };
+                return .{ .first = both.destination };
+            },
+            else => return .{},
+        }
+    }
+};
+
 fn ScopeMembershipAdapters(comptime Payload: type) type {
     return struct {
         fn detach(raw: *anyopaque) void {

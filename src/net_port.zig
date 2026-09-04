@@ -634,13 +634,10 @@ pub const ListenerCell = struct {
     mutex: std.Io.Mutex = .init,
     changed: std.Io.Condition = .init,
     state: State,
-    membership: ?external.ScopeMembership = null,
+    ownership: external.Ownership = .none,
     /// Set when `close` ran before `attach` stored the membership token, so
     /// `attach` detaches at once instead of leaving the scope waiting.
     detach_on_attach: bool = false,
-    /// A membership in a destination scope, held between the two halves of a
-    /// scope transfer and swapped into `membership` only if the move commits.
-    pending_membership: ?external.ScopeMembership = null,
     waits: WaitList(ListenerCell) = .{},
     slots_first: ?*AcceptSlot = null,
     slots_last: ?*AcceptSlot = null,
@@ -685,7 +682,7 @@ pub const ListenerCell = struct {
         if (old != 1) return;
         _ = self.refs.load(.acquire);
         std.debug.assert(self.state == .closed);
-        std.debug.assert(self.membership == null);
+        std.debug.assert(self.ownership == .none);
         std.debug.assert(self.slots_first == null and self.waits.first == null);
         self.allocator.destroy(self);
     }
@@ -732,21 +729,19 @@ pub const ListenerCell = struct {
     ) heap.PortTransferError!void {
         const destination: *scheduler_api.TaskScope = @ptrCast(@alignCast(to_erased));
         std.Io.Threaded.mutexLock(&self.mutex);
-        if (self.pending_membership != null) {
-            std.Io.Threaded.mutexUnlock(&self.mutex);
-            return error.Busy;
-        }
-        if (self.state == .closed) {
-            std.Io.Threaded.mutexUnlock(&self.mutex);
-            return error.Closed;
-        }
-        const current = self.membership orelse {
-            std.Io.Threaded.mutexUnlock(&self.mutex);
-            return error.Closed;
-        };
-        if (current.owningScope() != from_erased) {
-            std.Io.Threaded.mutexUnlock(&self.mutex);
-            return error.NotOwner;
+        switch (self.ownership) {
+            .none => {
+                std.Io.Threaded.mutexUnlock(&self.mutex);
+                return error.Closed;
+            },
+            .transferring => {
+                std.Io.Threaded.mutexUnlock(&self.mutex);
+                return error.Busy;
+            },
+            .owned => |current| if (current.owningScope() != from_erased) {
+                std.Io.Threaded.mutexUnlock(&self.mutex);
+                return error.NotOwner;
+            },
         }
         std.Io.Threaded.mutexUnlock(&self.mutex);
 
@@ -761,7 +756,7 @@ pub const ListenerCell = struct {
         };
 
         std.Io.Threaded.mutexLock(&self.mutex);
-        if (self.state == .closed or self.membership == null) {
+        if (self.ownership != .owned) {
             // Closed while the destination was being attached. Hand the new
             // membership straight back rather than leaving the destination
             // scope holding a member nothing will ever detach.
@@ -769,44 +764,25 @@ pub const ListenerCell = struct {
             token.detach();
             return error.Closed;
         }
-        self.pending_membership = token;
+        self.ownership.beginTransfer(token);
         std.Io.Threaded.mutexUnlock(&self.mutex);
     }
 
     /// Make a prepared transfer permanent: the destination scope owns the
     /// listener and the origin scope no longer does.
     pub fn commitScopeTransfer(self: *ListenerCell) void {
-        var release: ?external.ScopeMembership = null;
         std.Io.Threaded.mutexLock(&self.mutex);
-        if (self.pending_membership) |pending| {
-            self.pending_membership = null;
-            if (self.state == .closed) {
-                release = pending;
-            } else {
-                release = self.membership;
-                self.membership = pending;
-            }
-        }
+        var detached = self.ownership.commitTransfer();
         std.Io.Threaded.mutexUnlock(&self.mutex);
-        if (release) |token| {
-            var owned = token;
-            owned.detach();
-        }
+        detached.detachAll();
     }
 
     /// Undo a prepared transfer, leaving the origin scope as the owner.
     pub fn abortScopeTransfer(self: *ListenerCell) void {
-        var release: ?external.ScopeMembership = null;
         std.Io.Threaded.mutexLock(&self.mutex);
-        if (self.pending_membership) |pending| {
-            self.pending_membership = null;
-            release = pending;
-        }
+        var detached = self.ownership.abortTransfer();
         std.Io.Threaded.mutexUnlock(&self.mutex);
-        if (release) |token| {
-            var owned = token;
-            owned.detach();
-        }
+        detached.detachAll();
     }
 
     fn attach(self: *ListenerCell, membership: external.ScopeMembership) void {
@@ -818,8 +794,8 @@ pub const ListenerCell = struct {
             owned.detach();
             return;
         }
-        std.debug.assert(self.membership == null);
-        self.membership = membership;
+        std.debug.assert(self.ownership == .none);
+        self.ownership = .{ .owned = membership };
         std.Io.Threaded.mutexUnlock(&self.mutex);
     }
 
@@ -830,7 +806,7 @@ pub const ListenerCell = struct {
     /// wake byte has already satisfied, and it keeps close synchronous so the
     /// address may be bound again the moment this returns.
     pub fn close(self: *ListenerCell) void {
-        var membership: ?external.ScopeMembership = null;
+        var detached: external.Ownership.Detached = .{};
         std.Io.Threaded.mutexLock(&self.mutex);
         switch (self.state) {
             .bound => |bound| {
@@ -855,9 +831,8 @@ pub const ListenerCell = struct {
                     if (current.state == .waiting) current.state = .closed;
                 }
                 self.waits.notifyLocked(self);
-                if (self.membership) |token| {
-                    membership = token;
-                    self.membership = null;
+                if (self.ownership.live()) {
+                    detached = self.ownership.release();
                 } else {
                     self.detach_on_attach = true;
                 }
@@ -865,10 +840,7 @@ pub const ListenerCell = struct {
             .closed => {},
         }
         std.Io.Threaded.mutexUnlock(&self.mutex);
-        if (membership) |token| {
-            var owned = token;
-            owned.detach();
-        }
+        detached.detachAll();
     }
 
     /// The bound address, or null once closed.
@@ -1268,10 +1240,7 @@ pub const ConnectionCell = struct {
     write_first: ?*WriteNode = null,
     write_last: ?*WriteNode = null,
     waits: WaitList(ConnectionCell) = .{},
-    membership: ?external.ScopeMembership = null,
-    /// A membership in a destination scope, held between the two halves of a
-    /// scope transfer and swapped into `membership` only if the move commits.
-    pending_membership: ?external.ScopeMembership = null,
+    ownership: external.Ownership = .none,
 
     const Lifecycle = union(enum) {
         /// Allocated; no thread exists. The scope may already hold the member
@@ -1319,7 +1288,7 @@ pub const ConnectionCell = struct {
             };
         };
         std.Io.Threaded.mutexLock(&cell.mutex);
-        cell.membership = membership;
+        cell.ownership = .{ .owned = membership };
         // The scope may have started cancelling between the attach and this
         // lock; then no thread starts and the cell retires here, so the scope
         // never waits on a controller that does not exist.
@@ -1381,21 +1350,18 @@ pub const ConnectionCell = struct {
     fn retireUnstarted(self: *ConnectionCell, reason: StopReason) void {
         std.Io.Threaded.mutexLock(&self.mutex);
         std.debug.assert(self.lifecycle != .running);
-        const membership = self.finalizeLocked(reason);
+        var detached = self.finalizeLocked(reason);
         std.Io.Threaded.mutexUnlock(&self.mutex);
         // Same order as the controller: the publisher's reference goes first
         // while the member (if any) still pins the cell.
         self.releaseRef();
-        if (membership) |token| {
-            var owned = token;
-            owned.detach();
-        }
+        detached.detachAll();
     }
 
     /// Close the descriptor and the wake pipe, release the reservation,
     /// publish `terminal`, wake every waiter, and hand back the membership
     /// token for the caller to detach outside the lock. Runs exactly once.
-    fn finalizeLocked(self: *ConnectionCell, reason: StopReason) ?external.ScopeMembership {
+    fn finalizeLocked(self: *ConnectionCell, reason: StopReason) external.Ownership.Detached {
         std.debug.assert(self.lifecycle != .terminal);
         self.socket.close();
         self.reservation.release();
@@ -1403,9 +1369,9 @@ pub const ConnectionCell = struct {
         std.Io.Threaded.closeFd(self.wake[1]);
         self.lifecycle = .{ .terminal = reason };
         self.waits.notifyLocked(self);
-        const membership = self.membership;
-        self.membership = null;
-        return membership;
+        // A connection that dies mid-transfer detaches the destination too:
+        // that membership never became authoritative.
+        return self.ownership.release();
     }
 
     fn retainRef(self: *ConnectionCell) void {
@@ -1419,7 +1385,7 @@ pub const ConnectionCell = struct {
         if (old != 1) return;
         _ = self.refs.load(.acquire);
         std.debug.assert(self.lifecycle == .terminal);
-        std.debug.assert(self.membership == null);
+        std.debug.assert(self.ownership == .none);
         std.debug.assert(self.waits.first == null and self.write_first == null);
         self.allocator.free(self.receive.bytes);
         self.allocator.free(self.send.bytes);
@@ -1592,10 +1558,6 @@ pub const ConnectionCell = struct {
     ) heap.PortTransferError!void {
         const destination: *scheduler_api.TaskScope = @ptrCast(@alignCast(to_erased));
         std.Io.Threaded.mutexLock(&self.mutex);
-        if (self.pending_membership != null) {
-            std.Io.Threaded.mutexUnlock(&self.mutex);
-            return error.Busy;
-        }
         const live = switch (self.lifecycle) {
             .prepared, .running => true,
             .stopping, .terminal => false,
@@ -1604,13 +1566,19 @@ pub const ConnectionCell = struct {
             std.Io.Threaded.mutexUnlock(&self.mutex);
             return error.Closed;
         }
-        const current = self.membership orelse {
-            std.Io.Threaded.mutexUnlock(&self.mutex);
-            return error.Closed;
-        };
-        if (current.owningScope() != from_erased) {
-            std.Io.Threaded.mutexUnlock(&self.mutex);
-            return error.NotOwner;
+        switch (self.ownership) {
+            .none => {
+                std.Io.Threaded.mutexUnlock(&self.mutex);
+                return error.Closed;
+            },
+            .transferring => {
+                std.Io.Threaded.mutexUnlock(&self.mutex);
+                return error.Busy;
+            },
+            .owned => |current| if (current.owningScope() != from_erased) {
+                std.Io.Threaded.mutexUnlock(&self.mutex);
+                return error.NotOwner;
+            },
         }
         std.Io.Threaded.mutexUnlock(&self.mutex);
 
@@ -1625,7 +1593,7 @@ pub const ConnectionCell = struct {
 
         std.Io.Threaded.mutexLock(&self.mutex);
         const still_live = switch (self.lifecycle) {
-            .prepared, .running => self.membership != null,
+            .prepared, .running => self.ownership == .owned,
             .stopping, .terminal => false,
         };
         if (!still_live) {
@@ -1633,45 +1601,24 @@ pub const ConnectionCell = struct {
             token.detach();
             return error.Closed;
         }
-        self.pending_membership = token;
+        self.ownership.beginTransfer(token);
         std.Io.Threaded.mutexUnlock(&self.mutex);
     }
 
     /// Make a prepared transfer permanent.
     pub fn commitScopeTransfer(self: *ConnectionCell) void {
-        var release: ?external.ScopeMembership = null;
         std.Io.Threaded.mutexLock(&self.mutex);
-        if (self.pending_membership) |pending| {
-            self.pending_membership = null;
-            const live = switch (self.lifecycle) {
-                .prepared, .running => true,
-                .stopping, .terminal => false,
-            };
-            if (live) {
-                release = self.membership;
-                self.membership = pending;
-            } else release = pending;
-        }
+        var detached = self.ownership.commitTransfer();
         std.Io.Threaded.mutexUnlock(&self.mutex);
-        if (release) |token| {
-            var owned = token;
-            owned.detach();
-        }
+        detached.detachAll();
     }
 
     /// Undo a prepared transfer, leaving the origin scope as the owner.
     pub fn abortScopeTransfer(self: *ConnectionCell) void {
-        var release: ?external.ScopeMembership = null;
         std.Io.Threaded.mutexLock(&self.mutex);
-        if (self.pending_membership) |pending| {
-            self.pending_membership = null;
-            release = pending;
-        }
+        var detached = self.ownership.abortTransfer();
         std.Io.Threaded.mutexUnlock(&self.mutex);
-        if (release) |token| {
-            var owned = token;
-            owned.detach();
-        }
+        detached.detachAll();
     }
 
     fn abort(self: *ConnectionCell) void {
@@ -1833,17 +1780,14 @@ pub const ConnectionCell = struct {
         // RST for an abort with unread data) rather than a silent vanish.
         _ = posix.system.shutdown(self.socket.fd.?, posix.SHUT.RDWR);
         std.Io.Threaded.mutexLock(&self.mutex);
-        const membership = self.finalizeLocked(finalize_reason);
+        var detached = self.finalizeLocked(finalize_reason);
         std.Io.Threaded.mutexUnlock(&self.mutex);
         // Drop the thread's reference while the scope member still pins the
         // cell, then detach: the member's release is the last one and it
         // happens before the scope publishes quiescence, so teardown and the
         // allocation sweep never observe a cell the thread has yet to drop.
         self.releaseRef();
-        if (membership) |token| {
-            var owned = token;
-            owned.detach();
-        }
+        detached.detachAll();
     }
 };
 

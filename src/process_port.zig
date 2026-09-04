@@ -342,7 +342,7 @@ pub const ProcessOwner = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.ScopeClosing => return error.ScopeClosing,
         };
-        cell.controllers.membership = membership;
+        cell.controllers.ownership = .{ .owned = membership };
 
         cell.start(supervisor_lease) catch return error.Io;
         supervisor_lease_owned = false;
@@ -596,10 +596,7 @@ const ControllerGroup = struct {
     /// Protected by `cell.mutex` after the initial lease is issued. A count
     /// decrement is published only after that lease has dropped its cell pin.
     leases: usize = 0,
-    membership: ?external.ScopeMembership = null,
-    /// A membership in a destination scope, held between the two halves of a
-    /// scope transfer and swapped into `membership` only if the move commits.
-    pending_membership: ?external.ScopeMembership = null,
+    ownership: external.Ownership = .none,
     cell: *ProcessCell,
 
     fn initialLease(self: *ControllerGroup) ControllerLease {
@@ -625,7 +622,7 @@ const ControllerGroup = struct {
     /// Consumes `cell`'s reference owned by one lease. Nonfinal releases drop
     /// that pin before making the smaller count observable to the supervisor.
     fn releasePinned(self: *ControllerGroup, cell: *ProcessCell) void {
-        var membership: ?external.ScopeMembership = null;
+        var detached: external.Ownership.Detached = .{};
         std.Io.Threaded.mutexLock(&cell.mutex);
         std.debug.assert(self.cell == cell);
         std.debug.assert(self.leases != 0);
@@ -638,12 +635,13 @@ const ControllerGroup = struct {
         }
         if (cell.group_state != .retired) @panic("process scope detached before group retirement");
         self.leases = 0;
-        membership = self.membership;
-        self.membership = null;
+        // A process that retires mid-transfer detaches the destination too:
+        // that membership never became authoritative.
+        detached = self.ownership.release();
         std.Io.Threaded.mutexUnlock(&cell.mutex);
 
         cell.releaseRef();
-        if (membership) |token| detachMembership(token);
+        detached.detachAll();
     }
 };
 
@@ -672,21 +670,23 @@ fn prepareProcessTransfer(
 ) heap.PortTransferError!void {
     const destination: *scheduler_api.TaskScope = @ptrCast(@alignCast(to_erased));
     std.Io.Threaded.mutexLock(&cell.mutex);
-    if (cell.controllers.pending_membership != null) {
-        std.Io.Threaded.mutexUnlock(&cell.mutex);
-        return error.Busy;
-    }
     if (cell.group_state == .retired) {
         std.Io.Threaded.mutexUnlock(&cell.mutex);
         return error.Closed;
     }
-    const current = cell.controllers.membership orelse {
-        std.Io.Threaded.mutexUnlock(&cell.mutex);
-        return error.Closed;
-    };
-    if (current.owningScope() != from_erased) {
-        std.Io.Threaded.mutexUnlock(&cell.mutex);
-        return error.NotOwner;
+    switch (cell.controllers.ownership) {
+        .none => {
+            std.Io.Threaded.mutexUnlock(&cell.mutex);
+            return error.Closed;
+        },
+        .transferring => {
+            std.Io.Threaded.mutexUnlock(&cell.mutex);
+            return error.Busy;
+        },
+        .owned => |current| if (current.owningScope() != from_erased) {
+            std.Io.Threaded.mutexUnlock(&cell.mutex);
+            return error.NotOwner;
+        },
     }
     std.Io.Threaded.mutexUnlock(&cell.mutex);
 
@@ -699,43 +699,30 @@ fn prepareProcessTransfer(
     };
 
     std.Io.Threaded.mutexLock(&cell.mutex);
-    if (cell.group_state == .retired or cell.controllers.membership == null) {
+    if (cell.group_state == .retired or cell.controllers.ownership != .owned) {
         // Retired while the destination was being attached: the final lease
         // has taken the old token, so hand the new one straight back rather
-        // than leaving the destination holding a member nothing detaches.
+        // than leaving the destination scope holding a member nothing detaches.
         std.Io.Threaded.mutexUnlock(&cell.mutex);
         token.detach();
         return error.Closed;
     }
-    cell.controllers.pending_membership = token;
+    cell.controllers.ownership.beginTransfer(token);
     std.Io.Threaded.mutexUnlock(&cell.mutex);
 }
 
 fn commitProcessTransfer(cell: *ProcessCell) void {
-    var release: ?external.ScopeMembership = null;
     std.Io.Threaded.mutexLock(&cell.mutex);
-    if (cell.controllers.pending_membership) |pending| {
-        cell.controllers.pending_membership = null;
-        if (cell.group_state == .retired) {
-            release = pending;
-        } else {
-            release = cell.controllers.membership;
-            cell.controllers.membership = pending;
-        }
-    }
+    var detached = cell.controllers.ownership.commitTransfer();
     std.Io.Threaded.mutexUnlock(&cell.mutex);
-    if (release) |token| detachMembership(token);
+    detached.detachAll();
 }
 
 fn abortProcessTransfer(cell: *ProcessCell) void {
-    var release: ?external.ScopeMembership = null;
     std.Io.Threaded.mutexLock(&cell.mutex);
-    if (cell.controllers.pending_membership) |pending| {
-        cell.controllers.pending_membership = null;
-        release = pending;
-    }
+    var detached = cell.controllers.ownership.abortTransfer();
     std.Io.Threaded.mutexUnlock(&cell.mutex);
-    if (release) |token| detachMembership(token);
+    detached.detachAll();
 }
 
 pub const WritePermit = opaque {};
