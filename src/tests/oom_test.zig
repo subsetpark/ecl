@@ -983,6 +983,11 @@ fn stdlibSessionAllocationProbe(
         // by a unit test in net_port.zig. Here every ordinal is deterministic
         // under the cooperative scheduler: a child parks in accept with no
         // peer, the parent closes the listener, and the child fails closed.
+        // These probes are ECL source only and `net` has no outbound connect
+        // word, so no program here can hold a connection: the driver that
+        // `net.close` installs for one, and the drain wait it registers, are
+        // swept by `connectionLifecycle` in net_port.zig instead, which can
+        // supply a real peer and still keep its ordinals deterministic.
         .net_connection => try runOk(
             &runtime,
             "oom-net-connection.ecl",

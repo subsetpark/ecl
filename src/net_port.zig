@@ -2238,10 +2238,11 @@ const LifecyclePeer = struct {
     }
 };
 
-/// One accept, read, write, close cycle with every readiness wait registered
-/// before its poll, so the allocation ordinals do not depend on whether the
-/// controller thread won the race: registration allocates exactly once
-/// whether or not the source is already ready.
+/// One accept, read, write, close, drain cycle with every readiness wait
+/// registered before its poll, so the allocation ordinals do not depend on
+/// whether the controller thread won the race: registration allocates exactly
+/// once whether or not the source is already ready. The drain wait is what
+/// `net.close` installs for a connection, so its allocation is swept here.
 fn connectionLifecycle(allocator: std.mem.Allocator) !void {
     var peer: LifecyclePeer = .{};
     defer peer.join();
@@ -2265,6 +2266,13 @@ fn connectionLifecycle(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqualStrings("hi", &received);
     try writeAll(connection, &target, "ok");
     connection.close();
+    // `net.close` promises the queued bytes reach the peer, which it keeps by
+    // parking on this source until the ring empties. Register unconditionally
+    // before the first poll, exactly as the reads and writes above do: that is
+    // what makes the wait's allocation happen on every run rather than only
+    // when the controller has not already drained.
+    try awaitSource(connection.drainSource(), &target);
+    while (!connection.drained()) try awaitSource(connection.drainSource(), &target);
 }
 
 test "connection lifecycle propagates every allocation failure without leaking a socket or slot" {
