@@ -395,51 +395,7 @@ fn bindListening(address: IpAddress, backlog: u31) ListenError!std.Io.net.Server
 /// Bounded byte queue for the connection's rings. Identical in contract to
 /// the process port's ring, plus a peek/consume pair so the controller can
 /// hand the kernel a contiguous chunk and retire only what was written.
-const Ring = struct {
-    bytes: []u8,
-    head: usize = 0,
-    len: usize = 0,
-
-    fn free(self: *const Ring) usize {
-        return self.bytes.len - self.len;
-    }
-
-    fn push(self: *Ring, source: []const u8) void {
-        std.debug.assert(source.len <= self.free());
-        const tail = (self.head + self.len) % self.bytes.len;
-        const first = @min(source.len, self.bytes.len - tail);
-        @memcpy(self.bytes[tail..][0..first], source[0..first]);
-        @memcpy(self.bytes[0 .. source.len - first], source[first..]);
-        self.len += source.len;
-    }
-
-    fn pop(self: *Ring, destination: []u8) usize {
-        const count = @min(destination.len, self.len);
-        const first = @min(count, self.bytes.len - self.head);
-        @memcpy(destination[0..first], self.bytes[self.head..][0..first]);
-        @memcpy(destination[first..count], self.bytes[0 .. count - first]);
-        self.head = (self.head + count) % self.bytes.len;
-        self.len -= count;
-        return count;
-    }
-
-    /// The longest contiguous run of queued bytes starting at the head.
-    fn peek(self: *const Ring) []const u8 {
-        const first = @min(self.len, self.bytes.len - self.head);
-        return self.bytes[self.head..][0..first];
-    }
-
-    fn consume(self: *Ring, count: usize) void {
-        std.debug.assert(count <= self.len);
-        self.head = (self.head + count) % self.bytes.len;
-        self.len -= count;
-    }
-
-    fn discard(self: *Ring) void {
-        self.head = 0;
-        self.len = 0;
-    }
-};
+const Ring = @import("byte_ring.zig").Ring;
 
 const WaitList = external.WaitList;
 

@@ -862,6 +862,13 @@ linked under the backend lock, then unlinks it; cancellation cannot release
 either owner during delivery. Backend predicates and wake reasons remain local
 to the resource whose state they observe.
 
+Process pipes and sockets use the same fixed-capacity byte queue and bounded
+transfer drivers. A read owns its active reader through materialization. A
+write's encoding and transfer phases each own the ordered write ticket;
+completion consumes it and leaves only buffer cleanup. Backend adapters map
+resource failures and readiness into those shared transitions, preserving
+backend-specific error data and shutdown semantics.
+
 A native work driver that must wait carries its driver and park request in one
 exhaustive continuation variant. This is the external equivalent of the task
 join/work cleanup states: no side-band pointer can outlive the stack window or

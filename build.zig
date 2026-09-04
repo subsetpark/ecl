@@ -909,6 +909,7 @@ pub fn build(b: *std.Build) void {
             // The listener and connection controller's own unit tests: loopback
             // sockets through the cell API without a Session, sub-second.
             "net_port.",
+            "byte_ring.test.",
             // Kind conversions and the reserved `core.` qualifier. Every case
             // is a handful of scalar words through the public Session and the
             // whole file costs well under a second.
