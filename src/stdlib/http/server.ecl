@@ -637,16 +637,11 @@
   append)
  'accept-one defp
 
- ### defp drop-at
- (items index -- items : "Return the list without the element at the index.")
- (|items index| items index take items index 1 + drop cat)
- 'drop-at defp
-
  ### defp reap-one
  (tasks -- tasks :
   "Park until some child unit finishes, then drop it from the live set. Its result is discarded:
    serve-connection reports its own failures.")
- (dup await-any pop drop-at)
+ (dup await-any pop del)
  'reap-one defp
 
  ### defp serve-step

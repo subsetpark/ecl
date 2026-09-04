@@ -342,7 +342,12 @@ pub const ProcessOwner = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.ScopeClosing => return error.ScopeClosing,
         };
+        // `attachExternal` has already linked the cell into the scope, so a
+        // cancellation walk can reach it from another thread: publish the
+        // ownership under the lock, as ConnectionCell.publish does.
+        std.Io.Threaded.mutexLock(&cell.mutex);
         cell.controllers.ownership = .{ .owned = membership };
+        std.Io.Threaded.mutexUnlock(&cell.mutex);
 
         cell.start(supervisor_lease) catch return error.Io;
         supervisor_lease_owned = false;
@@ -1639,11 +1644,6 @@ fn escalationMain(
         error.Canceled => {},
     };
     cell.escalateKill(escalation);
-}
-
-fn detachMembership(membership: external.ScopeMembership) void {
-    var owned = membership;
-    owned.detach();
 }
 
 fn supervisorThreadMain(cell: *ProcessCell, lease_value: ControllerLease) void {
