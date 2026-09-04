@@ -115,7 +115,7 @@ fn unpackTgz(evaluator: *Machine) MachineError!void {
         return failure;
     };
     const byte_encoder = storage.ByteVectorEncoder.init(evaluator.allocator(), bytes_value.borrow());
-    const path_encoder = storage.ToUtf8Cursor.init(evaluator.allocator(), destination.borrow());
+    const path_encoder = storage.StringEncoder.init(evaluator.allocator(), destination.borrow());
     const entries = poll.ChunkList(Entry).init(evaluator.allocator());
     try evaluator.startDriver(UnpackDriver{
         .allocator = evaluator.allocator(),
@@ -146,7 +146,7 @@ pub fn inspectPackage(evaluator: *Machine) MachineError!void {
     errdefer bytes_value.deinit();
     if (bytes_value.borrow() != .list) return evaluator.typeError("an integer byte list");
     const byte_encoder = storage.ByteVectorEncoder.init(evaluator.allocator(), bytes_value.borrow());
-    const package_encoder = storage.ToUtf8Cursor.init(evaluator.allocator(), package.borrow());
+    const package_encoder = storage.StringEncoder.init(evaluator.allocator(), package.borrow());
     const entries = poll.ChunkList(Entry).init(evaluator.allocator());
     try evaluator.startDriver(UnpackDriver{
         .allocator = evaluator.allocator(),
@@ -210,8 +210,8 @@ pub fn installPackage(evaluator: *Machine) MachineError!void {
     const store_dir = try packageStore(evaluator, store.borrow(), key.borrow());
     const access = evaluator.unit.inherited.package_access.?;
     const byte_encoder = storage.ByteVectorEncoder.init(evaluator.allocator(), bytes_value.borrow());
-    const package_encoder = storage.ToUtf8Cursor.init(evaluator.allocator(), package.borrow());
-    const path_encoder = storage.ToUtf8Cursor.init(evaluator.allocator(), key.borrow());
+    const package_encoder = storage.StringEncoder.init(evaluator.allocator(), package.borrow());
+    const path_encoder = storage.StringEncoder.init(evaluator.allocator(), key.borrow());
     const entries = poll.ChunkList(Entry).init(evaluator.allocator());
     try evaluator.startDriver(UnpackDriver{
         .allocator = evaluator.allocator(),
@@ -349,11 +349,11 @@ const UnpackDriver = struct {
         }
     };
     const EncodeTarget = union(enum) {
-        unpack: heap.Owned(storage.ToUtf8Cursor),
-        inspect: heap.Owned(storage.ToUtf8Cursor),
+        unpack: heap.Owned(storage.StringEncoder),
+        inspect: heap.Owned(storage.StringEncoder),
         install: struct {
-            destination: heap.Owned(storage.ToUtf8Cursor),
-            package: heap.Owned(storage.ToUtf8Cursor),
+            destination: heap.Owned(storage.StringEncoder),
+            package: heap.Owned(storage.StringEncoder),
         },
     };
     const EncodedTarget = union(enum) {
@@ -446,13 +446,13 @@ const UnpackDriver = struct {
         },
         encode_destination: struct {
             bytes: heap.Owned(storage.ByteVector),
-            destination: heap.Owned(storage.ToUtf8Cursor),
-            package: ?heap.Owned(storage.ToUtf8Cursor),
+            destination: heap.Owned(storage.StringEncoder),
+            package: ?heap.Owned(storage.StringEncoder),
         },
         encode_package: struct {
             bytes: heap.Owned(storage.ByteVector),
             destination: ?heap.Owned([]u8),
-            package: heap.Owned(storage.ToUtf8Cursor),
+            package: heap.Owned(storage.StringEncoder),
         },
         allocate_tar: EncodedInputs,
         allocate_decoder: struct { inputs: EncodedInputs, tar: heap.Owned([]u8) },

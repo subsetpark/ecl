@@ -288,7 +288,7 @@ fn begin(evaluator: *Machine, operation: Operation) MachineError!void {
         return failInputs(evaluator, .domain, .unavailable, operation, symbols, &inputs);
     const driver = try evaluator.allocator().create(Driver);
     errdefer evaluator.allocator().destroy(driver);
-    const path_cursor = kernel_storage.ToUtf8Cursor.init(evaluator.allocator(), inputs.path);
+    const path_cursor = kernel_storage.StringEncoder.init(evaluator.allocator(), inputs.path);
     driver.* = .{
         .allocator = evaluator.allocator(),
         .io = fsport.hostIo(access),
@@ -458,8 +458,8 @@ const Driver = struct {
         buffer: []u8,
     };
     const State = union(enum) {
-        encode_path: kernel_storage.ToUtf8Cursor,
-        encode_second_path: kernel_storage.ToUtf8Cursor,
+        encode_path: kernel_storage.StringEncoder,
+        encode_second_path: kernel_storage.StringEncoder,
         encode_text: kernel_storage.StringEncoder,
         encode_bytes: kernel_storage.ByteVectorEncoder,
         authorize,
@@ -536,7 +536,7 @@ const Driver = struct {
     fn encodePath(
         self: *Driver,
         evaluator: *Machine,
-        cursor: *kernel_storage.ToUtf8Cursor,
+        cursor: *kernel_storage.StringEncoder,
         which: Which,
     ) MachineError!machine.WorkProgress {
         switch (cursor.advance(work_quantum) catch |err| switch (err) {

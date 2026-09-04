@@ -224,7 +224,7 @@ pub const TextMaterializer = struct {
     }
 };
 
-pub const StringEncodeResult = union(enum) { pending, complete: []u8 };
+pub const StringEncodeResult = poll.Progress([]u8);
 
 /// An exact byte view over an ordinary ECL integer list. Packed byte leaves
 /// stay borrowed through a retained typed reader; equivalent list
@@ -315,6 +315,10 @@ pub const ByteVectorEncoder = struct {
 
 /// Exact-size resumable encoding for language strings. The first pass counts
 /// bytes and validates scalars; the second writes one codepoint per step.
+/// Each advance processes at most `budget` codepoints and completes at most
+/// one pass. Phase transitions do not charge a codepoint; even empty strings
+/// take a count turn and a fill turn. Completion transfers the buffer to the
+/// caller, while deinit frees any unfinished buffer.
 pub const StringEncoder = struct {
     allocator: std.mem.Allocator,
     string: Value,
@@ -377,64 +381,6 @@ pub const StringEncoder = struct {
             },
             .complete => unreachable,
         }
-    }
-};
-
-pub const ToUtf8Progress = poll.Progress([]u8);
-pub const ToUtf8Cursor = struct {
-    allocator: std.mem.Allocator,
-    string: Value,
-    phase: enum { count, fill, complete } = .count,
-    index: usize = 0,
-    byte_count: usize = 0,
-    bytes: ?[]u8 = null,
-    output_index: usize = 0,
-    pub fn init(allocator: std.mem.Allocator, string: Value) ToUtf8Cursor {
-        std.debug.assert(string.isString());
-        return .{ .allocator = allocator, .string = string };
-    }
-    pub fn deinit(self: *ToUtf8Cursor) void {
-        if (self.bytes) |bytes| self.allocator.free(bytes);
-        self.* = undefined;
-    }
-    pub fn advance(self: *ToUtf8Cursor, budget: usize) (error{ OutOfMemory, InvalidCodepoint })!ToUtf8Progress {
-        var remaining = budget;
-        const count: usize = @intCast(self.string.list.length());
-        while (remaining != 0) : (remaining -= 1) switch (self.phase) {
-            .count => if (self.index != count) {
-                var encoded: [4]u8 = undefined;
-                const codepoint = @import("list.zig").atUnchecked(self.string, self.index).char;
-                const length = std.unicode.utf8Encode(
-                    value.unicodeScalar(codepoint) orelse return error.InvalidCodepoint,
-                    &encoded,
-                ) catch return error.InvalidCodepoint;
-                self.byte_count = std.math.add(usize, self.byte_count, length) catch
-                    return error.OutOfMemory;
-                self.index += 1;
-            } else {
-                self.bytes = try self.allocator.alloc(u8, self.byte_count);
-                self.index = 0;
-                self.phase = .fill;
-            },
-            .fill => if (self.index != count) {
-                var encoded: [4]u8 = undefined;
-                const codepoint = @import("list.zig").atUnchecked(self.string, self.index).char;
-                const length = std.unicode.utf8Encode(
-                    value.unicodeScalar(codepoint) orelse return error.InvalidCodepoint,
-                    &encoded,
-                ) catch return error.InvalidCodepoint;
-                @memcpy(self.bytes.?[self.output_index..][0..length], encoded[0..length]);
-                self.output_index += length;
-                self.index += 1;
-            } else {
-                const result = self.bytes.?;
-                self.bytes = null;
-                self.phase = .complete;
-                return .{ .complete = result };
-            },
-            .complete => unreachable,
-        };
-        return .pending;
     }
 };
 

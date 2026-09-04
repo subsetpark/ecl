@@ -935,7 +935,7 @@ fn asDict(item: Value) ValidationError!*value.DictHandle {
 
 fn ownedUtf8(allocator: std.mem.Allocator, item: Value) ValidationError![]u8 {
     if (!item.isString()) return error.Invalid;
-    var cursor = storage.ToUtf8Cursor.init(allocator, item);
+    var cursor = storage.StringEncoder.init(allocator, item);
     defer cursor.deinit();
     while (true) switch (cursor.advance(65_536) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,

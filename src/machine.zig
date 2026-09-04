@@ -3047,7 +3047,7 @@ pub fn PathActionDriver(
         const Self = @This();
         pub const ownership: heap.DriverOwnership = .fields;
         path_value: heap.Owned(Value),
-        encoder: heap.Owned(kernel_storage.ToUtf8Cursor),
+        encoder: heap.Owned(kernel_storage.StringEncoder),
         path: ?heap.Owned([]u8) = null,
 
         pub fn advance(evaluator: *Machine, self: *Self) MachineError!WorkProgress {

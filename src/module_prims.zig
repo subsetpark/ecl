@@ -698,7 +698,7 @@ fn load(evaluator: *Machine) MachineError!void {
     var path_value = try evaluator.popValue();
     defer path_value.deinit();
     if (!path_value.borrow().isString()) return evaluator.typeError("a string path");
-    const encoder = kernel_storage.ToUtf8Cursor.init(evaluator.allocator(), path_value.borrow());
+    const encoder = kernel_storage.StringEncoder.init(evaluator.allocator(), path_value.borrow());
     try evaluator.startDriver(LoadPathDriver{
         .path_value = .init(path_value.take()),
         .encoder = .init(encoder),

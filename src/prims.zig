@@ -319,7 +319,7 @@ fn parse(evaluator: *Machine) MachineError!void {
 const ParseDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     source_value: heap.Owned(Value),
-    encoder: heap.Owned(kernel_storage.ToUtf8Cursor),
+    encoder: heap.Owned(kernel_storage.StringEncoder),
     source: ?heap.Owned([]u8) = null,
     pub fn advance(evaluator: *Machine, self: *ParseDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
@@ -438,7 +438,7 @@ fn bytesWord(evaluator: *Machine) MachineError!void {
     defer item.deinit();
     if (item.borrow() != .list) return evaluator.typeError("a string or byte list");
     if (item.borrow().isString()) {
-        const encoder = kernel_storage.ToUtf8Cursor.init(evaluator.allocator(), item.borrow());
+        const encoder = kernel_storage.StringEncoder.init(evaluator.allocator(), item.borrow());
         return evaluator.startDriver(StringBytesDriver{
             .source_value = .init(item.take()),
             .encoder = .init(encoder),
@@ -454,7 +454,7 @@ fn bytesWord(evaluator: *Machine) MachineError!void {
 const StringBytesDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     source_value: heap.Owned(Value),
-    encoder: heap.Owned(kernel_storage.ToUtf8Cursor),
+    encoder: heap.Owned(kernel_storage.StringEncoder),
     encoded: ?heap.Owned([]u8) = null,
     materializer: ?heap.Owned(list.ByteListMaterializer) = null,
 
@@ -519,7 +519,7 @@ fn startSymbolConversion(evaluator: *Machine, mode: SymbolConversion) MachineErr
         .word => |word| try evaluator.pushOwned(.{ .symbol = word.name }),
         .list => {
             if (!item.borrow().isString()) return evaluator.typeError("a string, symbol, or word");
-            const encoder = kernel_storage.ToUtf8Cursor.init(evaluator.allocator(), item.borrow());
+            const encoder = kernel_storage.StringEncoder.init(evaluator.allocator(), item.borrow());
             try evaluator.startDriver(SymbolConversionDriver{
                 .source_value = .init(item.take()),
                 .encoder = .init(encoder),
@@ -535,7 +535,7 @@ fn startSymbolConversion(evaluator: *Machine, mode: SymbolConversion) MachineErr
 const SymbolConversionDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     source_value: heap.Owned(Value),
-    encoder: heap.Owned(kernel_storage.ToUtf8Cursor),
+    encoder: heap.Owned(kernel_storage.StringEncoder),
     mode: SymbolConversion,
     spelling: ?heap.Owned([]u8) = null,
     validation: ?lexer.SymbolCursor = null,
@@ -997,7 +997,7 @@ fn getenv(evaluator: *Machine) MachineError!void {
     var name_value = try evaluator.popValue();
     defer name_value.deinit();
     if (!name_value.borrow().isString()) return evaluator.typeError("a string variable name");
-    const encoder = kernel_storage.ToUtf8Cursor.init(evaluator.allocator(), name_value.borrow());
+    const encoder = kernel_storage.StringEncoder.init(evaluator.allocator(), name_value.borrow());
     try evaluator.startDriver(GetenvDriver{
         .name_value = .init(name_value.take()),
         .encoder = .init(encoder),
@@ -1007,7 +1007,7 @@ fn getenv(evaluator: *Machine) MachineError!void {
 const GetenvDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     name_value: heap.Owned(Value),
-    encoder: heap.Owned(kernel_storage.ToUtf8Cursor),
+    encoder: heap.Owned(kernel_storage.StringEncoder),
     name: ?heap.Owned([]u8) = null,
     lookup: ?machine.Environ.LookupCursor = null,
     text: ?heap.Owned(kernel_storage.Utf8Materializer) = null,
