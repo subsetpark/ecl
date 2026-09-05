@@ -66,24 +66,45 @@ fn serve(request: *std.http.Server.Request, allocator: std.mem.Allocator) !void 
             },
         });
     }
+    if (std.mem.eql(u8, target, "/redirect-echo")) {
+        return request.respond("", .{
+            .status = .temporary_redirect,
+            .extra_headers = &.{.{ .name = "location", .value = "/echo" }},
+        });
+    }
     if (std.mem.eql(u8, target, "/echo")) {
         // Echo the request body and one caller header, so a POST test can see
         // that both actually crossed the wire.
         // Headers must be read before the body reader is initialized; doing
         // it the other way round trips the same head-invalidation assertion
         // the client side documents.
-        var echoed: []const u8 = "";
+        var echoed: std.ArrayList(u8) = .empty;
+        var probe_count: usize = 0;
         var iterator = request.iterateHeaders();
         while (iterator.next()) |header| {
-            if (std.ascii.eqlIgnoreCase(header.name, "x-probe")) echoed = header.value;
+            if (std.ascii.eqlIgnoreCase(header.name, "x-probe")) {
+                probe_count += 1;
+                if (echoed.items.len != 0) try echoed.append(allocator, ',');
+                try echoed.appendSlice(allocator, header.value);
+            }
         }
         var body_buffer: [8192]u8 = undefined;
         const reader = request.readerExpectNone(&body_buffer);
         const body = try reader.allocRemaining(allocator, .limited(1 << 20));
-        const payload = try std.fmt.allocPrint(allocator, "{s}|{s}", .{ echoed, body });
+        const payload = try std.fmt.allocPrint(
+            allocator,
+            "{s}|{d}|{s}|{s}",
+            .{ @tagName(request.head.method), probe_count, echoed.items, body },
+        );
         return request.respond(payload, .{
             .extra_headers = &.{.{ .name = "x-fixture", .value = "echo" }},
         });
+    }
+    if (std.mem.eql(u8, target, "/echo-bytes")) {
+        var body_buffer: [8192]u8 = undefined;
+        const reader = request.readerExpectNone(&body_buffer);
+        const body = try reader.allocRemaining(allocator, .limited(1 << 20));
+        return request.respond(body, .{});
     }
     return request.respond("not found\n", .{ .status = .not_found });
 }

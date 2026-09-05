@@ -250,11 +250,20 @@ right column.
 
 ### HTTP
 
-The HTTP module is a client. Requests follow redirects and perform content
-decoding. Responses have the shape
-`{'status int, 'headers dict, 'body value}`. `http.get` and `http.post` return
-the body as a string. `http.get-bytes` returns decoded response octets as a
-byte list. Transfer framing and compressed wire bytes are not exposed.
+The HTTP module is a client with content decoding. Responses have the shape
+`{'status int, 'headers dict, 'body value}`. `http.get`, `http.post`, and
+`http.send` return the body as a string. `http.get-bytes` returns decoded
+response octets as a byte list. Transfer framing and compressed wire bytes are
+not exposed.
+
+Each client word consumes one partial or complete `http.request` dictionary
+with a required `'target` URL. `http.get` and `http.get-bytes` supply GET and
+follow redirects for bodyless requests; `http.post` supplies POST, an empty
+body, and no redirect following. `http.send` requires the request's own
+`'method` and does not follow redirects. Request fields override method,
+headers, and exact body bytes without changing the Session's network
+authority. POST, PUT, and PATCH admit bodies; a nonempty body with another
+method is `'domain`.
 
 Connection refusal, TLS failure, invalid URLs, and protocol errors raise
 `'io` with the URL in `'path`. Every HTTP status is returned as response data.

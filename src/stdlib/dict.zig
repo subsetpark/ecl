@@ -6,6 +6,7 @@
 //! the core combinator backend, while the one host helper needed by the hosted
 //! `merge-with` fold is private, so no implementation primitive leaks through
 //! qualified lookup, import, invocation, or reflection.
+const std = @import("std");
 const value = @import("../value.zig");
 const heap = @import("../heap.zig");
 const list = @import("../list.zig");
@@ -15,6 +16,8 @@ const machine = @import("../machine.zig");
 const combinators = @import("../combinators.zig");
 const dict_kernels = @import("../kernel_dict_text.zig");
 const dict_storage = @import("../dict.zig");
+const poll = @import("../poll.zig");
+const support = @import("../kernel_support.zig");
 
 const Value = value.Value;
 const Machine = machine.Machine;
@@ -48,7 +51,7 @@ pub const words = [_]env.BuiltinWord{
     },
     .{
         .name = "at",
-        .doc = "( dict keys -- values ) Return values for a key list in request order, failing if any key is absent.",
+        .doc = "( dict selector -- values ) Return values through a pervasive dictionary-key selector, preserving its nested shape and failing if any key is absent.",
         .primitive = valuesAt,
     },
     .{
@@ -83,7 +86,7 @@ pub const words = [_]env.BuiltinWord{
     },
     .{
         .name = "update",
-        .doc = "( dict keys quotation -- dict ) Apply a unary quotation at each requested whole-value key without reordering entries.",
+        .doc = "( dict selector quotation -- dict ) Apply a unary quotation through a pervasive dictionary-key selector without reordering entries.",
         .primitive = combinators.updateDictKeysForModule,
     },
     .{
@@ -112,9 +115,9 @@ pub const words = [_]env.BuiltinWord{
         .primitive = take,
     },
     .{
-        .name = "drop",
-        .doc = "( dict keys -- dict ) Remove named entries in dictionary order, ignoring missing keys.",
-        .primitive = drop,
+        .name = "del",
+        .doc = "( dict selector -- dict ) Remove keys through a pervasive selector, ignoring missing keys and preserving dictionary order.",
+        .primitive = del,
     },
     .{
         .name = "split",
@@ -183,28 +186,194 @@ fn pairs(evaluator: *Machine) MachineError!void {
 
 fn valuesAt(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
-    var keys = try evaluator.popList();
-    defer keys.deinit();
+    var selector = try evaluator.popList();
+    defer selector.deinit();
     var dictionary = try evaluator.popDict();
     defer dictionary.deinit();
-    // This module's public `at` shadows core `at` in quotations scheduled in
-    // the module home. A singleton path enters core-authored `at-path`, whose
-    // sealed body resolves scalar `at` against core. Besides avoiding recursive
-    // `dict.at`, wrapping preserves a structural list as one whole-value key.
-    var lookup = try quotation(evaluator, &.{
-        try word("swap"),
-        try word("wrap"),
-        try word("at-path"),
-    });
-    defer lookup.deinit();
-    return call(evaluator, &.{
-        keys.borrow(),
+    const cursor = try DictAtCursor.init(
+        evaluator.releaseDomain(),
+        evaluator.allocator(),
         dictionary.borrow(),
-        lookup.borrow(),
-        try word("partial"),
-        try word("each"),
+        selector.borrow(),
+    );
+    try evaluator.startDriver(DictAtDriver{
+        .dictionary = .init(dictionary.take()),
+        .selector = .init(selector.take()),
+        .cursor = .init(cursor),
     });
 }
+
+const DictAtCursor = struct {
+    pub const owned_disposal: heap.OwnedDisposal = .retire;
+
+    const Build = struct {
+        selector: Value,
+        depth: usize,
+        values: heap.OwnedValueBuffer,
+        index: usize = 0,
+        waiting: bool = false,
+        materializer: ?list.ValueMaterializer = null,
+        result: ?Value = null,
+    };
+    const Frame = union(enum) {
+        node: struct { selector: Value, depth: usize },
+        build: Build,
+        finding: dict_storage.FindCursor,
+    };
+
+    releases: *heap.ReleaseDomain,
+    allocator: std.mem.Allocator,
+    dictionary: Value,
+    frames: poll.ChunkStack(Frame),
+    last: ?Value = null,
+
+    fn init(
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+        dictionary: Value,
+        selector: Value,
+    ) error{OutOfMemory}!DictAtCursor {
+        var frames = poll.ChunkStack(Frame).init(allocator);
+        errdefer frames.deinit();
+        try frames.push(.{ .node = .{ .selector = selector, .depth = 0 } });
+        return .{
+            .releases = releases,
+            .allocator = allocator,
+            .dictionary = dictionary,
+            .frames = frames,
+        };
+    }
+
+    pub fn retire(self: *DictAtCursor, releases: *heap.ReleaseDomain) void {
+        if (self.last) |last| releases.releaseValue(last);
+        while (self.frames.pop()) |frame| self.retireFrame(frame, releases);
+        self.frames.retire(releases);
+    }
+
+    fn retireFrame(self: *DictAtCursor, frame: Frame, releases: *heap.ReleaseDomain) void {
+        switch (frame) {
+            .node => {},
+            .finding => |*finder_value| {
+                var finder = finder_value.*;
+                finder.deinit();
+            },
+            .build => |build_value| {
+                var build = build_value;
+                if (build.materializer) |*materializer| materializer.retire(releases);
+                build.values.deinit();
+                if (build.result) |result| releases.releaseValue(result);
+            },
+        }
+        _ = self;
+    }
+
+    fn advance(self: *DictAtCursor, evaluator: *Machine, budget: usize) MachineError!poll.Progress(Value) {
+        var remaining = budget;
+        while (remaining != 0) : (remaining -= 1) {
+            var frame = self.frames.pop() orelse {
+                const result = self.last.?;
+                self.last = null;
+                return .{ .complete = result };
+            };
+            var frame_owned_locally = true;
+            errdefer if (frame_owned_locally)
+                self.retireFrame(frame, evaluator.releaseDomain());
+            switch (frame) {
+                .node => |node| {
+                    if (node.selector == .list) {
+                        if (node.depth >= support.max_depth)
+                            return evaluator.fail(.domain, "dict.at selector nesting exceeds 256 levels");
+                        var values = try heap.OwnedValueBuffer.init(
+                            self.releases,
+                            @intCast(node.selector.list.length()),
+                        );
+                        errdefer values.deinit();
+                        try self.frames.reserve(1);
+                        self.frames.pushReserved(.{ .build = .{
+                            .selector = node.selector,
+                            .depth = node.depth + 1,
+                            .values = values.take(),
+                        } });
+                    } else {
+                        try self.frames.push(.{ .finding = dict_storage.FindCursor.initHeader(
+                            self.allocator,
+                            self.dictionary.dict,
+                            node.selector,
+                        ) });
+                    }
+                },
+                .finding => |*finder| switch (try finder.advance(1)) {
+                    .pending => {
+                        try self.frames.push(frame);
+                        frame_owned_locally = false;
+                    },
+                    .complete => |found| {
+                        finder.deinit();
+                        frame_owned_locally = false;
+                        const result = found orelse
+                            return evaluator.fail(.domain, "dict.at could not find the dict key");
+                        heap.retainValue(result);
+                        self.last = result;
+                    },
+                },
+                .build => |*build| {
+                    if (build.result) |result| {
+                        build.values.deinit();
+                        build.result = null;
+                        self.last = result;
+                        continue;
+                    }
+                    if (build.waiting) {
+                        build.values.appendOwned(self.last.?);
+                        self.last = null;
+                        build.index += 1;
+                        build.waiting = false;
+                    }
+                    if (build.index != build.values.capacity()) {
+                        build.waiting = true;
+                        try self.frames.reserve(2);
+                        self.frames.pushReserved(.{ .build = build.* });
+                        self.frames.pushReserved(.{ .node = .{
+                            .selector = list.atUnchecked(build.selector, build.index),
+                            .depth = build.depth,
+                        } });
+                        continue;
+                    }
+                    if (build.materializer == null)
+                        build.materializer = .init(self.allocator, build.values.values());
+                    try self.frames.reserve(1);
+                    switch (try build.materializer.?.advance(remaining)) {
+                        .pending => {
+                            self.frames.pushReserved(.{ .build = build.* });
+                            return .pending;
+                        },
+                        .complete => |result| {
+                            build.result = result;
+                            self.frames.pushReserved(.{ .build = build.* });
+                            return .pending;
+                        },
+                    }
+                },
+            }
+        }
+        return .pending;
+    }
+};
+
+const DictAtDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+    dictionary: heap.Owned(Value),
+    selector: heap.Owned(Value),
+    cursor: heap.Owned(DictAtCursor),
+
+    pub fn advance(evaluator: *Machine, self: *DictAtDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        return switch (try self.cursor.borrowMut().advance(evaluator, machine.kernel_poll_quantum)) {
+            .pending => .yielded,
+            .complete => |result| .{ .output = result },
+        };
+    }
+};
 
 fn fromFlat(evaluator: *Machine) MachineError!void {
     var entries = try evaluator.popValue();
@@ -454,7 +623,7 @@ fn reject(evaluator: *Machine) MachineError!void {
 
 fn selectKeys(evaluator: *Machine, reject_matches: bool) MachineError!void {
     try evaluator.require(2);
-    var keys = try evaluator.popValue();
+    var keys = try evaluator.popList();
     defer keys.deinit();
     var dictionary = try evaluator.popDict();
     defer dictionary.deinit();
@@ -476,9 +645,140 @@ fn take(evaluator: *Machine) MachineError!void {
     return selectKeys(evaluator, false);
 }
 
-fn drop(evaluator: *Machine) MachineError!void {
-    return selectKeys(evaluator, true);
+fn del(evaluator: *Machine) MachineError!void {
+    try evaluator.require(2);
+    var selector = try evaluator.popList();
+    defer selector.deinit();
+    var dictionary = try evaluator.popDict();
+    defer dictionary.deinit();
+    const count: usize = @intCast(dictionary.borrow().dict.length());
+    const removed = try evaluator.allocator().alloc(bool, count);
+    var removed_owned_locally = true;
+    errdefer if (removed_owned_locally) evaluator.allocator().free(removed);
+    var cursor = try support.PervasiveSelectorCursor.init(
+        evaluator.allocator(),
+        selector.borrow(),
+    );
+    var cursor_owned_locally = true;
+    errdefer if (cursor_owned_locally) cursor.retire(evaluator.releaseDomain());
+    removed_owned_locally = false;
+    cursor_owned_locally = false;
+    try evaluator.startDriver(DictDelDriver{
+        .dictionary = .init(dictionary.take()),
+        .selector = .init(selector.take()),
+        .removed = .init(removed),
+        .selector_cursor = .init(cursor),
+    });
 }
+
+const DictDelDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+
+    const Phase = enum { initialize, find, copy, materialize };
+
+    dictionary: heap.Owned(Value),
+    selector: heap.Owned(Value),
+    removed: heap.Owned([]bool),
+    selector_cursor: ?heap.Owned(support.PervasiveSelectorCursor),
+    finder: ?heap.Owned(dict_storage.FindCursor) = null,
+    pairs: ?heap.Owned([]dict_storage.Pair) = null,
+    materializer: ?heap.Owned(dict_storage.Materializer) = null,
+    phase: Phase = .initialize,
+    index: usize = 0,
+    removed_count: usize = 0,
+    destination_index: usize = 0,
+
+    pub fn advance(evaluator: *Machine, self: *DictDelDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        var budget: usize = machine.kernel_poll_quantum;
+        while (budget != 0) switch (self.phase) {
+            .initialize => {
+                if (self.index == self.removed.borrow().len) {
+                    self.index = 0;
+                    self.phase = .find;
+                    continue;
+                }
+                self.removed.borrow()[self.index] = false;
+                self.index += 1;
+                budget -= 1;
+            },
+            .find => {
+                if (self.finder == null) {
+                    const selector_progress = try self.selector_cursor.?.borrowMut().advanceOne();
+                    budget -= 1;
+                    switch (selector_progress) {
+                        .pending => continue,
+                        .depth_exceeded => return evaluator.fail(.domain, "dict.del selector nesting exceeds 256 levels"),
+                        .leaf => |key| self.finder = .init(dict_storage.FindCursor.initHeader(
+                            evaluator.allocator(),
+                            self.dictionary.borrow().dict,
+                            key,
+                        )),
+                        .complete => {
+                            self.selector_cursor.?.deinit(
+                                evaluator.releaseDomain(),
+                                evaluator.allocator(),
+                            );
+                            self.selector_cursor = null;
+                            self.pairs = .init(try evaluator.allocator().alloc(
+                                dict_storage.Pair,
+                                self.removed.borrow().len - self.removed_count,
+                            ));
+                            self.phase = .copy;
+                            continue;
+                        },
+                    }
+                }
+                if (budget == 0) return .yielded;
+                const find_progress = try self.finder.?.borrowMut().advance(1);
+                budget -= 1;
+                switch (find_progress) {
+                    .pending => {},
+                    .complete => {
+                        if (self.finder.?.borrow().foundIndex()) |position| {
+                            if (!self.removed.borrow()[position]) {
+                                self.removed.borrow()[position] = true;
+                                self.removed_count += 1;
+                            }
+                        }
+                        self.finder.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        self.finder = null;
+                    },
+                }
+            },
+            .copy => {
+                if (self.index == self.removed.borrow().len) {
+                    self.materializer = .init(try dict_storage.Materializer.init(
+                        evaluator.allocator(),
+                        self.pairs.?.borrow(),
+                        false,
+                    ));
+                    self.phase = .materialize;
+                    continue;
+                }
+                if (!self.removed.borrow()[self.index]) {
+                    self.pairs.?.borrow()[self.destination_index] = .{
+                        dict_storage.keyAt(self.dictionary.borrow().dict, self.index),
+                        dict_storage.valueAt(self.dictionary.borrow().dict, self.index),
+                    };
+                    self.destination_index += 1;
+                }
+                self.index += 1;
+                budget -= 1;
+            },
+            .materialize => return switch (try self.materializer.?.borrowMut().advance(budget)) {
+                .pending => .yielded,
+                .duplicate_key => unreachable,
+                .complete => |result| completed: {
+                    self.materializer.?.borrowMut().deinit();
+                    self.materializer = null;
+                    break :completed .{ .output = result };
+                },
+            },
+        };
+        return .yielded;
+    }
+};
 
 fn split(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
@@ -492,7 +792,7 @@ fn split(evaluator: *Machine) MachineError!void {
         try word("dict.take"),
         dictionary.borrow(),
         keys.borrow(),
-        try word("dict.drop"),
+        try word("dict.del"),
     });
 }
 

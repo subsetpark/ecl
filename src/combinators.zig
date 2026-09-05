@@ -911,8 +911,8 @@ const IterationState = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-const UpdatePolicy = enum { pervasive_selector, atomic_key_list };
-const UpdateMode = enum { list_selector, dictionary_key, dictionary_keys };
+const UpdatePolicy = enum { core_selector, dictionary_selector, dictionary_key_list };
+const UpdateMode = enum { list_selector, dictionary_key, dictionary_keys, dictionary_key_list };
 const UpdatePhase = enum {
     count_positions,
     fill_positions,
@@ -922,76 +922,6 @@ const UpdatePhase = enum {
     fill_pairs,
     materialize_list,
     materialize_dict,
-};
-
-const SelectorProgress = union(enum) { pending, position: usize, complete };
-const SelectorCursor = struct {
-    pub const owned_disposal: heap.OwnedDisposal = .retire;
-
-    const Frame = union(enum) {
-        node: struct { selector: Value, depth: usize },
-        children: struct { selectors: Value, depth: usize, index: usize },
-    };
-
-    frames: poll.ChunkStack(Frame),
-    collection_count: usize,
-
-    fn init(
-        allocator: std.mem.Allocator,
-        selector: Value,
-        collection_count: usize,
-    ) error{OutOfMemory}!SelectorCursor {
-        var frames = poll.ChunkStack(Frame).init(allocator);
-        errdefer frames.deinit();
-        try frames.push(.{ .node = .{ .selector = selector, .depth = 0 } });
-        return .{ .frames = frames, .collection_count = collection_count };
-    }
-
-    pub fn retire(self: *SelectorCursor, releases: *heap.ReleaseDomain) void {
-        self.frames.retire(releases);
-    }
-
-    fn advanceOne(self: *SelectorCursor, evaluator: *Machine) MachineError!SelectorProgress {
-        const frame = self.frames.pop() orelse return .complete;
-        return switch (frame) {
-            .node => |node| node_result: {
-                if (node.selector == .list) {
-                    if (node.depth >= support.max_depth)
-                        return evaluator.fail(.domain, "update selector nesting exceeds 256 levels");
-                    try self.frames.push(.{ .children = .{
-                        .selectors = node.selector,
-                        .depth = node.depth + 1,
-                        .index = 0,
-                    } });
-                    break :node_result .pending;
-                }
-                if (node.selector != .int)
-                    return evaluator.typeError("an integer list index");
-                if (node.selector.int < 0)
-                    return evaluator.fail(.domain, "update index is negative");
-                const position = std.math.cast(usize, node.selector.int) orelse
-                    return evaluator.fail(.domain, "update index is out of bounds");
-                if (position >= self.collection_count)
-                    return evaluator.fail(.domain, "update index is out of bounds");
-                break :node_result .{ .position = position };
-            },
-            .children => |children| children_result: {
-                if (children.index == children.selectors.list.length())
-                    break :children_result .pending;
-                try self.frames.reserve(2);
-                self.frames.pushReserved(.{ .children = .{
-                    .selectors = children.selectors,
-                    .depth = children.depth,
-                    .index = children.index + 1,
-                } });
-                self.frames.pushReserved(.{ .node = .{
-                    .selector = list.atUnchecked(children.selectors, children.index),
-                    .depth = children.depth,
-                } });
-                break :children_result .pending;
-            },
-        };
-    }
 };
 
 const UpdateState = struct {
@@ -1005,8 +935,9 @@ const UpdateState = struct {
     values: heap.Owned(heap.OwnedValueBuffer),
     positions: ?heap.Owned([]usize) = null,
     pairs: ?heap.Owned([]dict.Pair) = null,
-    selector_cursor: ?heap.Owned(SelectorCursor) = null,
+    selector_cursor: ?heap.Owned(support.PervasiveSelectorCursor) = null,
     finder: ?heap.Owned(dict.FindCursor) = null,
+    requested_key: ?Value = null,
     list_materializer: ?heap.Owned(list.ValueMaterializer) = null,
     dict_materializer: ?heap.Owned(dict.Materializer) = null,
     phase: UpdatePhase,
@@ -1016,13 +947,6 @@ const UpdateState = struct {
     application_index: usize = 0,
     site: machine.ApplicationSite,
     word: intern.TraceWord,
-
-    fn requestedKey(self: *const UpdateState, index: usize) Value {
-        return if (self.mode == .dictionary_keys)
-            list.atUnchecked(self.selector.borrow(), index)
-        else
-            self.selector.borrow();
-    }
 };
 
 const UpdateApplication = struct {
@@ -1105,6 +1029,16 @@ const UpdateWorkDriver = struct {
         return .completed;
     }
 
+    fn listPosition(evaluator: *Machine, state: *const UpdateState, selector: Value) MachineError!usize {
+        if (selector != .int) return evaluator.typeError("an integer list index");
+        if (selector.int < 0) return evaluator.fail(.domain, "update index is negative");
+        const position = std.math.cast(usize, selector.int) orelse
+            return evaluator.fail(.domain, "update index is out of bounds");
+        if (position >= state.collection.borrow().list.length())
+            return evaluator.fail(.domain, "update index is out of bounds");
+        return position;
+    }
+
     pub fn advance(evaluator: *Machine, self: *UpdateWorkDriver) MachineError!machine.WorkProgress {
         const state = self.state.borrow();
         evaluator.setActiveWord(state.word);
@@ -1112,31 +1046,43 @@ const UpdateWorkDriver = struct {
         var budget: usize = machine.kernel_poll_quantum;
         while (budget != 0) switch (state.phase) {
             .count_positions => {
-                const progress = try state.selector_cursor.?.borrowMut().advanceOne(evaluator);
+                const progress = try state.selector_cursor.?.borrowMut().advanceOne();
                 budget -= 1;
                 switch (progress) {
                     .pending => {},
-                    .position => state.position_count += 1,
+                    .depth_exceeded => return evaluator.fail(
+                        .domain,
+                        if (state.mode == .dictionary_keys)
+                            "dict.update selector nesting exceeds 256 levels"
+                        else
+                            "update selector nesting exceeds 256 levels",
+                    ),
+                    .leaf => |selector| {
+                        if (state.mode == .list_selector)
+                            _ = try listPosition(evaluator, state, selector);
+                        state.position_count += 1;
+                    },
                     .complete => {
                         state.selector_cursor.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                         state.selector_cursor = null;
                         state.positions = .init(try evaluator.allocator().alloc(usize, state.position_count));
-                        state.selector_cursor = .init(try SelectorCursor.init(
+                        state.selector_cursor = .init(try support.PervasiveSelectorCursor.init(
                             evaluator.allocator(),
                             state.selector.borrow(),
-                            @intCast(state.collection.borrow().list.length()),
                         ));
-                        state.phase = .fill_positions;
+                        state.phase = if (state.mode == .list_selector) .fill_positions else .find_positions;
                     },
                 }
             },
             .fill_positions => {
-                const progress = try state.selector_cursor.?.borrowMut().advanceOne(evaluator);
+                const progress = try state.selector_cursor.?.borrowMut().advanceOne();
                 budget -= 1;
                 switch (progress) {
                     .pending => {},
-                    .position => |position| {
-                        state.positions.?.borrow()[state.position_index] = position;
+                    .depth_exceeded => return evaluator.fail(.domain, "update selector nesting exceeds 256 levels"),
+                    .leaf => |selector| {
+                        state.positions.?.borrow()[state.position_index] =
+                            try listPosition(evaluator, state, selector);
                         state.position_index += 1;
                     },
                     .complete => {
@@ -1148,15 +1094,41 @@ const UpdateWorkDriver = struct {
             },
             .find_positions => {
                 const positions = state.positions.?.borrow();
-                if (state.position_index == positions.len) {
-                    state.phase = .copy_values;
-                    continue;
+                if (state.finder == null) {
+                    if (state.mode == .dictionary_keys) {
+                        const selector_progress = try state.selector_cursor.?.borrowMut().advanceOne();
+                        budget -= 1;
+                        switch (selector_progress) {
+                            .pending => continue,
+                            .depth_exceeded => return evaluator.fail(.domain, "dict.update selector nesting exceeds 256 levels"),
+                            .leaf => |key| state.requested_key = key,
+                            .complete => {
+                                state.selector_cursor.?.deinit(
+                                    evaluator.releaseDomain(),
+                                    evaluator.allocator(),
+                                );
+                                state.selector_cursor = null;
+                                state.phase = .copy_values;
+                                continue;
+                            },
+                        }
+                    } else {
+                        if (state.position_index == positions.len) {
+                            state.phase = .copy_values;
+                            continue;
+                        }
+                        state.requested_key = if (state.mode == .dictionary_key_list)
+                            list.atUnchecked(state.selector.borrow(), state.position_index)
+                        else
+                            state.selector.borrow();
+                    }
+                    state.finder = .init(dict.FindCursor.initHeader(
+                        evaluator.allocator(),
+                        state.collection.borrow().dict,
+                        state.requested_key.?,
+                    ));
                 }
-                if (state.finder == null) state.finder = .init(dict.FindCursor.initHeader(
-                    evaluator.allocator(),
-                    state.collection.borrow().dict,
-                    state.requestedKey(state.position_index),
-                ));
+                if (budget == 0) return .yielded;
                 const progress = try state.finder.?.borrowMut().advance(1);
                 budget -= 1;
                 switch (progress) {
@@ -1167,6 +1139,7 @@ const UpdateWorkDriver = struct {
                         positions[state.position_index] = state.finder.?.borrow().foundIndex().?;
                         state.finder.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                         state.finder = null;
+                        state.requested_key = null;
                         state.position_index += 1;
                     },
                 }
@@ -1233,11 +1206,11 @@ const UpdateWorkDriver = struct {
 };
 
 fn update(evaluator: *Machine) MachineError!void {
-    return startUpdate(evaluator, .pervasive_selector);
+    return startUpdate(evaluator, .core_selector);
 }
 
 pub fn updateDictKeysForModule(evaluator: *Machine) MachineError!void {
-    return startUpdate(evaluator, .atomic_key_list);
+    return startUpdate(evaluator, .dictionary_selector);
 }
 
 fn startUpdate(evaluator: *Machine, policy: UpdatePolicy) MachineError!void {
@@ -1273,16 +1246,20 @@ fn startUpdateOwned(
     defer collection.deinit();
 
     const mode: UpdateMode = switch (collection.borrow()) {
-        .list => if (policy == .pervasive_selector) .list_selector else return evaluator.typeError("a dict"),
-        .dict => if (policy == .pervasive_selector) .dictionary_key else .dictionary_keys,
-        else => return evaluator.typeError(if (policy == .pervasive_selector) "a list or dict" else "a dict"),
+        .list => if (policy == .core_selector) .list_selector else return evaluator.typeError("a dict"),
+        .dict => switch (policy) {
+            .core_selector => .dictionary_key,
+            .dictionary_selector => .dictionary_keys,
+            .dictionary_key_list => .dictionary_key_list,
+        },
+        else => return evaluator.typeError(if (policy == .core_selector) "a list or dict" else "a dict"),
     };
-    if (policy == .atomic_key_list and selector.borrow() != .list)
-        return evaluator.typeError("a key list");
+    if (policy != .core_selector and selector.borrow() != .list)
+        return evaluator.typeError("a dictionary selector list");
 
     const collection_count: usize = switch (mode) {
         .list_selector => @intCast(collection.borrow().list.length()),
-        .dictionary_key, .dictionary_keys => @intCast(collection.borrow().dict.length()),
+        .dictionary_key, .dictionary_keys, .dictionary_key_list => @intCast(collection.borrow().dict.length()),
     };
     var values = try heap.OwnedValueBuffer.init(evaluator.releaseDomain(), collection_count);
     defer values.deinit();
@@ -1293,7 +1270,9 @@ fn startUpdateOwned(
     defer expected.deinit();
     const initial_phase: UpdatePhase = switch (mode) {
         .list_selector => if (selector.borrow() == .list) .count_positions else .copy_values,
-        .dictionary_key, .dictionary_keys => .find_positions,
+        .dictionary_key => .find_positions,
+        .dictionary_keys => .count_positions,
+        .dictionary_key_list => .find_positions,
     };
 
     const state = try evaluator.allocator().create(UpdateState);
@@ -1317,10 +1296,9 @@ fn startUpdateOwned(
 
     if (mode == .list_selector) {
         if (state.selector.borrow() == .list) {
-            state.selector_cursor = .init(try SelectorCursor.init(
+            state.selector_cursor = .init(try support.PervasiveSelectorCursor.init(
                 evaluator.allocator(),
                 state.selector.borrow(),
-                collection_count,
             ));
             state.phase = .count_positions;
         } else {
@@ -1336,14 +1314,21 @@ fn startUpdateOwned(
             state.positions.?.borrow()[0] = position;
             state.phase = .copy_values;
         }
-    } else {
-        const key_count: usize = if (mode == .dictionary_keys)
+    } else if (mode == .dictionary_key or mode == .dictionary_key_list) {
+        const position_count: usize = if (mode == .dictionary_key_list)
             @intCast(state.selector.borrow().list.length())
         else
             1;
-        state.positions = .init(try evaluator.allocator().alloc(usize, key_count));
+        state.positions = .init(try evaluator.allocator().alloc(usize, position_count));
         state.pairs = .init(try evaluator.allocator().alloc(dict.Pair, collection_count));
         state.phase = .find_positions;
+    } else {
+        state.pairs = .init(try evaluator.allocator().alloc(dict.Pair, collection_count));
+        state.selector_cursor = .init(try support.PervasiveSelectorCursor.init(
+            evaluator.allocator(),
+            state.selector.borrow(),
+        ));
+        state.phase = .count_positions;
     }
     state_owner = null;
     try evaluator.startDriver(UpdateWorkDriver{ .state = .init(state) });
@@ -1857,7 +1842,7 @@ fn startUnaryIteration(evaluator: *Machine, kind: IterationKind) MachineError!vo
         defer selector.deinit();
         return startUpdateOwned(
             evaluator,
-            .atomic_key_list,
+            .dictionary_key_list,
             input.take(),
             selector.take(),
             quotation.take(),

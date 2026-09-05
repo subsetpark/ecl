@@ -11,7 +11,7 @@
    'fs.mkdir 'fs.copy 'fs.rename 'fs.remove-file 'fs.remove-dir
    'path.join 'path.normalize 'path.dirname 'path.basename 'path.extension
    'path.absolute? 'path.relative? 'path.components 'path.valid-relative?
-   'http.get 'http.get-bytes 'http.post
+   'http.get 'http.get-bytes 'http.post 'http.send
    'clock.unix
    'net.listen 'net.local-address 'net.close
    'net.accept 'net.read 'net.write 'net.peer-address

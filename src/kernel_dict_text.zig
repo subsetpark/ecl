@@ -34,7 +34,7 @@ pub fn formatForIdiom(evaluator: *Machine) MachineError!void {
 fn definition(comptime operation: Op) ?env.BuiltinWord {
     return switch (operation) {
         .put => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "collection selector value -- collection", .doc = "Functionally replace list positions through a pervasive selector, or one whole-value dictionary key." },
-        .del => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "collection key -- collection", .doc = "Functionally remove an in-bounds list index or a dictionary key; a missing dictionary key is unchanged." },
+        .del => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "collection selector -- collection", .doc = "Functionally remove list positions through a pervasive selector, or one whole-value dictionary key; a missing dictionary key is unchanged." },
         .split => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "string separator -- parts", .doc = "Split a string at every occurrence of a separator; an empty separator yields its Unicode scalar strings." },
         .join => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "strings separator -- string", .doc = "Join a list of strings with a separator string." },
         .str => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "value -- string", .doc = "Return the canonical printed representation of a value as a string." },
@@ -718,6 +718,27 @@ fn delPrimitive(evaluator: *Machine) MachineError!void {
             });
         },
         .list => {
+            if (key.borrow() == .list) {
+                const count: usize = @intCast(collection.borrow().list.length());
+                const removed = try evaluator.allocator().alloc(bool, count);
+                var removed_owned_locally = true;
+                errdefer if (removed_owned_locally) evaluator.allocator().free(removed);
+                var selector_cursor = try support.PervasiveSelectorCursor.init(
+                    evaluator.allocator(),
+                    key.borrow(),
+                );
+                var cursor_owned_locally = true;
+                errdefer if (cursor_owned_locally) selector_cursor.retire(evaluator.releaseDomain());
+                removed_owned_locally = false;
+                cursor_owned_locally = false;
+                try evaluator.startDriver(PervasiveDelDriver{
+                    .collection = .init(collection.take()),
+                    .selector = .init(key.take()),
+                    .removed = .init(removed),
+                    .selector_cursor = .init(selector_cursor),
+                });
+                return;
+            }
             if (key.borrow() != .int) return evaluator.typeError("an integer list index");
             if (key.borrow().int < 0) return evaluator.fail(.domain, "del index is negative");
             const index = std.math.cast(usize, key.borrow().int) orelse
@@ -735,6 +756,96 @@ fn delPrimitive(evaluator: *Machine) MachineError!void {
         .int, .float, .char, .symbol, .word, .task, .module, .port => return evaluator.typeError("a list or dict"),
     }
 }
+
+const PervasiveDelDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+
+    const Phase = enum { initialize, validate, copy, materialize };
+
+    collection: heap.Owned(Value),
+    selector: heap.Owned(Value),
+    removed: heap.Owned([]bool),
+    selector_cursor: ?heap.Owned(support.PervasiveSelectorCursor),
+    values: ?heap.Owned([]Value) = null,
+    materializer: ?heap.Owned(list.ValueMaterializer) = null,
+    phase: Phase = .initialize,
+    index: usize = 0,
+    removed_count: usize = 0,
+    destination_index: usize = 0,
+
+    pub fn advance(evaluator: *Machine, self: *PervasiveDelDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        var budget: usize = machine.kernel_poll_quantum;
+        while (budget != 0) switch (self.phase) {
+            .initialize => {
+                if (self.index == self.removed.borrow().len) {
+                    self.index = 0;
+                    self.phase = .validate;
+                    continue;
+                }
+                self.removed.borrow()[self.index] = false;
+                self.index += 1;
+                budget -= 1;
+            },
+            .validate => {
+                budget -= 1;
+                switch (try self.selector_cursor.?.borrowMut().advanceOne()) {
+                    .pending => {},
+                    .depth_exceeded => return evaluator.fail(.domain, "del selector nesting exceeds 256 levels"),
+                    .leaf => |selector| {
+                        if (selector != .int)
+                            return evaluator.typeError("an integer list index");
+                        if (selector.int < 0)
+                            return evaluator.fail(.domain, "del index is negative");
+                        const position = std.math.cast(usize, selector.int) orelse
+                            return evaluator.fail(.domain, "del index is out of bounds");
+                        if (position >= self.removed.borrow().len)
+                            return evaluator.fail(.domain, "del index is out of bounds");
+                        if (!self.removed.borrow()[position]) {
+                            self.removed.borrow()[position] = true;
+                            self.removed_count += 1;
+                        }
+                    },
+                    .complete => {
+                        self.selector_cursor.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        self.selector_cursor = null;
+                        self.values = .init(try evaluator.allocator().alloc(
+                            Value,
+                            self.removed.borrow().len - self.removed_count,
+                        ));
+                        self.phase = .copy;
+                    },
+                }
+            },
+            .copy => {
+                if (self.index == self.removed.borrow().len) {
+                    self.materializer = .init(list.ValueMaterializer.init(
+                        evaluator.allocator(),
+                        self.values.?.borrow(),
+                    ));
+                    self.phase = .materialize;
+                    continue;
+                }
+                if (!self.removed.borrow()[self.index]) {
+                    self.values.?.borrow()[self.destination_index] =
+                        list.atUnchecked(self.collection.borrow(), self.index);
+                    self.destination_index += 1;
+                }
+                self.index += 1;
+                budget -= 1;
+            },
+            .materialize => return switch (try self.materializer.?.borrowMut().advance(budget)) {
+                .pending => .yielded,
+                .complete => |result| completed: {
+                    self.materializer.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    self.materializer = null;
+                    break :completed .{ .output = result };
+                },
+            },
+        };
+        return .yielded;
+    }
+};
 
 const ListDelDriver = struct {
     /// One list rebuilt without an indexed element, then it publishes.

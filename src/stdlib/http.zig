@@ -28,15 +28,19 @@ const MachineError = machine.MachineError;
 
 pub const words = [_]env.BuiltinWord{
     // As with `json`, the stack shape is prose rather than a declared effect:
-    // both words hand their work to a scheduler driver, and a declared effect
+    // these words hand their work to a scheduler driver, and a declared effect
     // is checked the instant the primitive returns.
     .{
         .name = "get",
-        .doc = "( url headers -- response ) Fetch a url with GET, following redirects, and return " ++
+        .doc = "( request -- response ) Fetch a partial or complete http.request with GET defaults, following " ++
+            "redirects for bodyless requests, and return " ++
             "{'status int 'headers dict 'body string}.\n\n" ++
-            "url is a string. headers is a dict of request headers whose keys and values are strings, such as " ++
-            "{\"accept\" \"application/json\"}; use {} for none. A non-string url, a non-dict headers, or a " ++
-            "non-string header name or value is 'type. In the response, 'headers maps each header name the server " ++
+            "request is a dictionary under the http.request contract and must carry a string 'target URL. Its " ++
+            "optional 'method overrides GET; optional 'headers maps lowercased string names to lists of string " ++
+            "values, each sent in order; and optional 'body is an exact byte list for POST, PUT, or PATCH. A " ++
+            "nonempty body with another method is 'domain. Other request fields are " ++
+            "validated but do not affect the outbound exchange. A malformed request is 'type, and an unsupported " ++
+            "method is 'domain. In the response, 'headers maps each header name the server " ++
             "sent to its value, keeping the last value of a repeated header, and 'body is the decoded text. A " ++
             "non-2xx status is an ordinary response, not an error.\n\n" ++
             "A transport or protocol failure, and a Session without network access, is 'io carrying the url in " ++
@@ -45,7 +49,7 @@ pub const words = [_]env.BuiltinWord{
     },
     .{
         .name = "get-bytes",
-        .doc = "( url headers -- response ) Fetch a url exactly as get does, but return 'body as the exact response " ++
+        .doc = "( request -- response ) Fetch a request exactly as get does, but return 'body as the exact response " ++
             "octets in a byte list of ints in 0...255 instead of decoded text.\n\n" ++
             "Arguments, redirects, response headers, and failures are those of get. Use this for archives and other " ++
             "binary content, and chars to decode a body known to be UTF-8.",
@@ -53,13 +57,21 @@ pub const words = [_]env.BuiltinWord{
     },
     .{
         .name = "post",
-        .doc = "( url headers body -- response ) Post a string body to a url with the given request headers and " ++
+        .doc = "( request -- response ) Fetch a partial or complete http.request with POST defaults and " ++
             "return {'status int 'headers dict 'body string}.\n\n" ++
-            "url and body are strings, encoded as UTF-8; headers is a dict of string names to string values, {} for " ++
-            "none, and carries any content type the server expects. A non-string url or body, a non-dict headers, or " ++
-            "a non-string header name or value is 'type. Redirects are not followed: a 3xx status is returned as an " ++
-            "ordinary response. Response headers, body decoding, and 'io failures are those of get.",
+            "request has the same contract as for get. Its optional 'method overrides POST, and POST supplies an " ++
+            "empty request body when 'body is absent. Redirects are not followed: a 3xx status is returned as an " ++
+            "ordinary response. Response headers, body decoding, validation, and 'io failures are those of get.",
         .primitive = post,
+    },
+    .{
+        .name = "send",
+        .doc = "( request -- response ) Send a complete http.request and return " ++
+            "{'status int 'headers dict 'body string}.\n\n" ++
+            "Unlike get and post, send supplies no method default: request must carry string 'method and 'target " ++
+            "fields. Headers, body bytes, response decoding, validation, and 'io failures are those of get. " ++
+            "Redirects are not followed, so send preserves the request method across exactly one exchange.",
+        .primitive = send,
     },
 };
 
@@ -67,51 +79,99 @@ pub const words = [_]env.BuiltinWord{
 const redirect_buffer_bytes: usize = 8 * 1024;
 
 fn get(evaluator: *Machine) MachineError!void {
-    return begin(evaluator, .GET, .text);
+    return begin(evaluator, .{ .method = .GET, .follow_redirects = true }, .text);
 }
 
 fn getBytes(evaluator: *Machine) MachineError!void {
-    return begin(evaluator, .GET, .bytes);
+    return begin(evaluator, .{ .method = .GET, .follow_redirects = true }, .bytes);
 }
 
 fn post(evaluator: *Machine) MachineError!void {
-    return begin(evaluator, .POST, .text);
+    return begin(evaluator, .{ .method = .POST }, .text);
+}
+
+fn send(evaluator: *Machine) MachineError!void {
+    return begin(evaluator, .{}, .text);
 }
 
 const ResponseMode = enum { text, bytes };
 
-fn begin(evaluator: *Machine, method: std.http.Method, response_mode: ResponseMode) MachineError!void {
-    const sends_body = method == .POST;
-    try evaluator.require(if (sends_body) 3 else 2);
-    var body: ?heap.OwnedValue = null;
-    errdefer if (body) |*owned| owned.deinit();
-    if (sends_body) {
-        body = try evaluator.popValue();
-        if (!body.?.borrow().isString())
-            return evaluator.typeError("a string request body");
-    }
-    var headers = try evaluator.popValue();
-    errdefer headers.deinit();
-    if (headers.borrow() != .dict) return evaluator.typeError("a dict of request headers");
-    var url = try evaluator.popValue();
-    errdefer url.deinit();
-    if (!url.borrow().isString()) return evaluator.typeError("a string url");
+const RequestDefaults = struct {
+    method: ?std.http.Method = null,
+    follow_redirects: bool = false,
+};
+
+const RequestFields = struct {
+    method: ?Value = null,
+    target: ?Value = null,
+    headers: ?Value = null,
+    body: ?Value = null,
+    params: ?Value = null,
+};
+
+fn begin(evaluator: *Machine, defaults: RequestDefaults, response_mode: ResponseMode) MachineError!void {
+    var request = try evaluator.popValue();
+    errdefer request.deinit();
+    const fields = try requestFields(evaluator, request.borrow());
+    const method = defaults.method orelse required_method: {
+        if (fields.method == null)
+            return evaluator.typeError("a request with a string 'method");
+        // The request driver parses and replaces this placeholder before it
+        // opens the URL. Requiring the field here keeps a missing method from
+        // silently acquiring a transport-level default.
+        break :required_method .GET;
+    };
+    const target = fields.target orelse return evaluator.typeError("a request with a string 'target URL");
     if (evaluator.unit.inherited.host_io == null) {
         const failure = evaluator.fail(.io, "network access is unavailable");
-        evaluator.addErrorPath(url.borrow());
+        evaluator.addErrorPath(target);
         return failure;
     }
-    const url_encoder = kernel_storage.StringEncoder.init(evaluator.allocator(), url.borrow());
     try evaluator.startDriver(RequestDriver{
         .allocator = evaluator.allocator(),
         .method = method,
+        .follow_redirects = defaults.follow_redirects,
         .response_mode = response_mode,
         .tls_trust = evaluator.unit.inherited.tls_trust,
-        .url_value = .init(url.take()),
-        .headers_value = .init(headers.take()),
-        .body_value = if (body) |*owned| .init(owned.take()) else null,
-        .state = .{ .url = url_encoder },
+        .request_value = .init(request.take()),
+        .fields = fields,
+        .state = .start,
     });
+}
+
+fn requestFields(evaluator: *Machine, request: Value) MachineError!RequestFields {
+    if (request != .dict) return evaluator.typeError("a request dict");
+    if (request.dict.length() > 8)
+        return evaluator.typeError("a request dict with only recognized fields");
+    var fields: RequestFields = .{};
+    for (0..@as(usize, @intCast(request.dict.length()))) |index| {
+        const key = dict.keyAt(request.dict, index);
+        if (key != .symbol) return evaluator.typeError("symbol request field names");
+        const item = dict.valueAt(request.dict, index);
+        const name = intern.get(key.symbol);
+        if (std.mem.eql(u8, name, "method")) {
+            if (!item.isString()) return evaluator.typeError("a string request 'method");
+            fields.method = item;
+        } else if (std.mem.eql(u8, name, "target")) {
+            if (!item.isString()) return evaluator.typeError("a string request 'target");
+            fields.target = item;
+        } else if (std.mem.eql(u8, name, "path") or
+            std.mem.eql(u8, name, "query") or
+            std.mem.eql(u8, name, "peer"))
+        {
+            if (!item.isString()) return evaluator.typeError("string request 'path, 'query, and 'peer fields");
+        } else if (std.mem.eql(u8, name, "headers")) {
+            if (item != .dict) return evaluator.typeError("a request 'headers dict");
+            fields.headers = item;
+        } else if (std.mem.eql(u8, name, "body")) {
+            if (item != .list or item.isString()) return evaluator.typeError("a request 'body byte list");
+            fields.body = item;
+        } else if (std.mem.eql(u8, name, "params")) {
+            if (item != .dict) return evaluator.typeError("a request 'params dict");
+            fields.params = item;
+        } else return evaluator.typeError("a request dict with only recognized fields");
+    }
+    return fields;
 }
 
 /// One owned name/value pair of bytes, on either side of the exchange.
@@ -125,16 +185,16 @@ const RequestDriver = struct {
     retirement: heap.ReleaseDomain.Retirement = .{},
     allocator: std.mem.Allocator,
     method: std.http.Method,
+    follow_redirects: bool,
     response_mode: ResponseMode,
     tls_trust: ?machine.TlsTrust,
-    url_value: heap.Owned(Value),
-    headers_value: heap.Owned(Value),
-    body_value: ?heap.Owned(Value),
+    request_value: heap.Owned(Value),
+    fields: RequestFields,
     state: State,
 
     const RequestData = struct {
         url: []u8,
-        body: ?[]u8 = null,
+        body: ?kernel_storage.ByteVector = null,
         fields: std.ArrayList(Field) = .empty,
     };
     const ExchangeData = struct {
@@ -159,28 +219,34 @@ const RequestDriver = struct {
         body: u32,
     };
     const State = union(enum) {
+        start,
+        params: usize,
+        method: kernel_storage.StringEncoder,
         url: kernel_storage.StringEncoder,
         request_headers: struct { request: RequestData, index: usize = 0 },
         request_header_name: struct {
             request: RequestData,
             index: usize,
+            value_index: usize,
             encoder: kernel_storage.StringEncoder,
         },
         request_header_value: struct {
             request: RequestData,
             index: usize,
+            value_index: usize,
             name: []u8,
             encoder: kernel_storage.StringEncoder,
         },
         request_header_append: struct {
             request: RequestData,
             index: usize,
+            value_index: usize,
             name: []u8,
             value: []u8,
         },
         request_body: struct {
             request: RequestData,
-            encoder: kernel_storage.StringEncoder,
+            encoder: kernel_storage.ByteVectorEncoder,
         },
         exchange: ExchangeData,
         response_headers: HeaderBuild,
@@ -234,15 +300,40 @@ const RequestDriver = struct {
         cleanup_results_body: struct { exchange: ExchangeData, body: Value },
         cleanup_exchange: ExchangeData,
         cleanup_request: RequestData,
-        cleanup_url_value,
-        cleanup_headers_value,
-        cleanup_body_value,
+        cleanup_request_value,
         cleanup_destroy,
     };
 
     pub fn advance(evaluator: *Machine, self: *RequestDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         switch (self.state) {
+            .start => if (self.fields.params != null) {
+                self.state = .{ .params = 0 };
+            } else self.beginMethod(),
+            .params => |*index| {
+                const params = self.fields.params.?.dict;
+                const count: usize = @intCast(params.length());
+                if (index.* == count) {
+                    self.beginMethod();
+                } else {
+                    if (!dict.keyAt(params, index.*).isString() or
+                        !dict.valueAt(params, index.*).isString())
+                        return evaluator.typeError("request 'params string names and values");
+                    index.* += 1;
+                }
+            },
+            .method => |*encoder| switch (try advanceEncoder(evaluator, encoder)) {
+                .pending => {},
+                .complete => |bytes| {
+                    encoder.deinit();
+                    defer self.allocator.free(bytes);
+                    self.method = std.meta.stringToEnum(std.http.Method, bytes) orelse {
+                        self.state = .cleanup_request_value;
+                        return evaluator.fail(.domain, "unsupported HTTP request method");
+                    };
+                    self.beginUrl();
+                },
+            },
             .url => |*encoder| switch (try advanceEncoder(evaluator, encoder)) {
                 .pending => {},
                 .complete => |bytes| {
@@ -253,23 +344,33 @@ const RequestDriver = struct {
                 },
             },
             .request_headers => |*headers| {
-                const header_dict = self.headers_value.borrow().dict;
+                const header_value = self.fields.headers orelse {
+                    const request = headers.request;
+                    self.beginBody(request);
+                    return .yielded;
+                };
+                const header_dict = header_value.dict;
                 const count: usize = @intCast(dict.keysOf(header_dict).list.length());
                 if (headers.index == count) {
                     const request = headers.request;
-                    if (self.body_value) |*body| self.state = .{ .request_body = .{
-                        .request = request,
-                        .encoder = .init(self.allocator, body.borrow()),
-                    } } else self.state = .{ .exchange = .{ .request = request } };
+                    self.beginBody(request);
                 } else {
                     const key = dict.keyAt(header_dict, headers.index);
                     if (!key.isString())
                         return evaluator.typeError("request header names to be strings");
+                    const values = dict.valueAt(header_dict, headers.index);
+                    if (values != .list)
+                        return evaluator.typeError("request header values to be lists of strings");
+                    if (values.list.length() == 0) {
+                        headers.index += 1;
+                        return .yielded;
+                    }
                     const request = headers.request;
                     const index = headers.index;
                     self.state = .{ .request_header_name = .{
                         .request = request,
                         .index = index,
+                        .value_index = 0,
                         .encoder = .init(self.allocator, key),
                     } };
                 }
@@ -277,17 +378,24 @@ const RequestDriver = struct {
             .request_header_name => |*header| switch (try advanceEncoder(evaluator, &header.encoder)) {
                 .pending => {},
                 .complete => |name| {
-                    const item = dict.valueAt(self.headers_value.borrow().dict, header.index);
+                    for (name) |char| if (std.ascii.isUpper(char)) {
+                        self.allocator.free(name);
+                        return evaluator.typeError("lowercased request header names");
+                    };
+                    const values = dict.valueAt(self.fields.headers.?.dict, header.index).list;
+                    const item = list.atUnchecked(.{ .list = values }, header.value_index);
                     if (!item.isString()) {
                         self.allocator.free(name);
-                        return evaluator.typeError("request header values to be strings");
+                        return evaluator.typeError("request header values to be lists of strings");
                     }
                     header.encoder.deinit();
                     const request = header.request;
                     const index = header.index;
+                    const value_index = header.value_index;
                     self.state = .{ .request_header_value = .{
                         .request = request,
                         .index = index,
+                        .value_index = value_index,
                         .name = name,
                         .encoder = .init(self.allocator, item),
                     } };
@@ -299,10 +407,12 @@ const RequestDriver = struct {
                     header.encoder.deinit();
                     const request = header.request;
                     const index = header.index;
+                    const value_index = header.value_index;
                     const name = header.name;
                     self.state = .{ .request_header_append = .{
                         .request = request,
                         .index = index,
+                        .value_index = value_index,
                         .name = name,
                         .value = value_bytes,
                     } };
@@ -314,10 +424,29 @@ const RequestDriver = struct {
                     .value = header.value,
                 });
                 const request = header.request;
-                const index = header.index + 1;
-                self.state = .{ .request_headers = .{ .request = request, .index = index } };
+                const values = dict.valueAt(self.fields.headers.?.dict, header.index).list;
+                const next_value = header.value_index + 1;
+                if (next_value == @as(usize, @intCast(values.length()))) {
+                    self.state = .{ .request_headers = .{
+                        .request = request,
+                        .index = header.index + 1,
+                    } };
+                } else {
+                    const key = dict.keyAt(self.fields.headers.?.dict, header.index);
+                    self.state = .{ .request_header_name = .{
+                        .request = request,
+                        .index = header.index,
+                        .value_index = next_value,
+                        .encoder = .init(self.allocator, key),
+                    } };
+                }
             },
-            .request_body => |*body| switch (try advanceEncoder(evaluator, &body.encoder)) {
+            .request_body => |*body| switch (body.encoder.advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidByte => return evaluator.typeError(
+                    "request 'body values to be integers from 0 through 255",
+                ),
+            }) {
                 .pending => {},
                 .complete => |bytes| {
                     body.encoder.deinit();
@@ -519,13 +648,30 @@ const RequestDriver = struct {
             .cleanup_results_body,
             .cleanup_exchange,
             .cleanup_request,
-            .cleanup_url_value,
-            .cleanup_headers_value,
-            .cleanup_body_value,
+            .cleanup_request_value,
             .cleanup_destroy,
             => unreachable,
         }
         return .yielded;
+    }
+
+    fn beginMethod(self: *RequestDriver) void {
+        if (self.fields.method) |method| {
+            self.state = .{ .method = .init(self.allocator, method) };
+        } else self.beginUrl();
+    }
+
+    fn beginUrl(self: *RequestDriver) void {
+        self.state = .{ .url = .init(self.allocator, self.fields.target.?) };
+    }
+
+    fn beginBody(self: *RequestDriver, request: RequestData) void {
+        if (self.fields.body) |body| {
+            self.state = .{ .request_body = .{
+                .request = request,
+                .encoder = .init(self.allocator, body),
+            } };
+        } else self.state = .{ .exchange = .{ .request = request } };
     }
 
     fn advanceEncoder(
@@ -552,7 +698,7 @@ const RequestDriver = struct {
             "cannot reach `{s}`: {s}",
             .{ url, name },
         );
-        evaluator.addErrorPath(self.url_value.borrow());
+        evaluator.addErrorPath(self.fields.target.?);
         return failure;
     }
 
@@ -586,14 +732,19 @@ const RequestDriver = struct {
                 else => return self.failIo(evaluator, exchange_data.request.url, @errorName(err)),
             };
         }
-        const sends_body = exchange_data.request.body != null;
+        const sends_body = self.method.requestHasBody();
+        if (!sends_body) if (exchange_data.request.body) |*body| {
+            if (body.bytes().len != 0)
+                return evaluator.fail(.domain, "HTTP request method does not admit a body");
+        };
         var request = client.request(self.method, uri, .{
-            .redirect_behavior = if (sends_body) .unhandled else @enumFromInt(3),
+            .redirect_behavior = if (self.follow_redirects and !sends_body) @enumFromInt(3) else .unhandled,
             .extra_headers = extra,
         }) catch |err| return self.failIo(evaluator, exchange_data.request.url, @errorName(err));
         defer request.deinit();
 
-        if (exchange_data.request.body) |payload| {
+        if (sends_body) {
+            const payload = if (exchange_data.request.body) |*body| body.bytes() else &.{};
             request.transfer_encoding = .{ .content_length = payload.len };
             var body = request.sendBodyUnflushed(&.{}) catch |err|
                 return self.failIo(evaluator, exchange_data.request.url, @errorName(err));
@@ -666,9 +817,14 @@ const RequestDriver = struct {
 
     fn beginRetirement(self: *RequestDriver, releases: *heap.ReleaseDomain) void {
         switch (self.state) {
+            .start, .params => self.state = .cleanup_request_value,
+            .method => |*encoder| {
+                encoder.deinit();
+                self.state = .cleanup_request_value;
+            },
             .url => |*encoder| {
                 encoder.deinit();
-                self.state = .cleanup_url_value;
+                self.state = .cleanup_request_value;
             },
             .request_headers => |*headers| {
                 const request = headers.request;
@@ -762,9 +918,7 @@ const RequestDriver = struct {
             .cleanup_results_body,
             .cleanup_exchange,
             .cleanup_request,
-            .cleanup_url_value,
-            .cleanup_headers_value,
-            .cleanup_body_value,
+            .cleanup_request_value,
             .cleanup_destroy,
             => unreachable,
         }
@@ -786,6 +940,9 @@ const RequestDriver = struct {
         self: *RequestDriver,
     ) bool {
         return switch (self.state) {
+            .start,
+            .params,
+            .method,
             .url,
             .request_headers,
             .request_header_name,
@@ -865,24 +1022,13 @@ const RequestDriver = struct {
                     break :result false;
                 }
                 cleanup.fields.deinit(self.allocator);
-                if (cleanup.body) |body| self.allocator.free(body);
+                if (cleanup.body) |*body| body.retire(releases, self.allocator);
                 self.allocator.free(cleanup.url);
-                self.state = .cleanup_url_value;
+                self.state = .cleanup_request_value;
                 break :result false;
             },
-            .cleanup_url_value => result: {
-                self.url_value.deinit(releases, storage_allocator);
-                self.state = .cleanup_headers_value;
-                break :result false;
-            },
-            .cleanup_headers_value => result: {
-                self.headers_value.deinit(releases, storage_allocator);
-                self.state = .cleanup_body_value;
-                break :result false;
-            },
-            .cleanup_body_value => result: {
-                if (self.body_value) |*owned| owned.deinit(releases, storage_allocator);
-                self.body_value = null;
+            .cleanup_request_value => result: {
+                self.request_value.deinit(releases, storage_allocator);
                 self.state = .cleanup_destroy;
                 break :result false;
             },

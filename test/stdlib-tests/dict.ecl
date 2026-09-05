@@ -27,12 +27,12 @@
  'observations test
 
  ### test gathering
- (-- : "Gather requested whole-value keys in caller order with duplicates.")
+ (-- : "Gather through pervasive key selectors in caller shape and order.")
  ({'a 1 'b 2 'c 3} ['c 'a 'c] dict.at [3 1 3] equal
-  {[1 2] 9 'a 1} [[1 2] 'a] dict.at [9 1] equal
+  {'a 1 'b 2 'c 3} [['c 'a] 'b] dict.at [[3 1] 2] equal
   {'a 1} [] dict.at () equal
   {[1 2] 9} [1 2] at 9 equal
-  ({'a 1} ['a 'missing] dict.at)
+  ({'a 1} [['a 'missing]] dict.at)
   'domain
   "could not find the dict key"
   raises-containing
@@ -41,11 +41,11 @@
  'gathering test
 
  ### test updates
- (-- : "Transform requested values without reordering dictionary keys.")
+ (-- : "Transform pervasive key selections without reordering dictionary keys.")
  ({'a 1 'b 2 'c 3} ['b 'a] (10 *) dict.update
   {'a 10 'b 20 'c 3} equal
-  {[1 2] 9 'a 1} [[1 2] 'a] (1 +) dict.update
-  {[1 2] 10 'a 2} equal
+  {'a 1 'b 2} [['a 'b] 'a] (1 +) dict.update
+  {'a 3 'b 3} equal
   {'a 1} ['a 'a] (1 +) dict.update {'a 3} equal
   {'a 1} [] (missing) dict.update {'a 1} equal
   ({'a 1} ['a 'b] (10 *) dict.update) 'domain 'dict.update raises-word
@@ -81,10 +81,12 @@
  ({'a 1 'b 2 'c 3} (nip 2 >) dict.filter {'c 3} equal
   {'a 1 'b 2 'c 3} (nip 2 >) dict.reject {'a 1 'b 2} equal
   {'a 1 'b 2 'c 3} ['c 'missing 'a] dict.take {'a 1 'c 3} equal
-  {'a 1 'b 2 'c 3} ['b 'missing] dict.drop {'a 1 'c 3} equal
+  {'a 1 'b 2 'c 3} ['b 'missing] dict.del {'a 1 'c 3} equal
+  {1 "one" 2 "two" 3 "three"} [[1 3] 1] dict.del {2 "two"} equal
   {'a 1 'b 2 'c 3} ['c 'a] dict.split
   {'b 2} equal
-  {'a 1 'c 3} equal)
+  {'a 1 'c 3} equal
+  ({'a 1} 'a dict.del) 'type 'dict.del raises-word)
  'selection test
 
  ### test merging
@@ -107,7 +109,7 @@
    'dict.merge 'dict.from-flat 'dict.from-lists 'dict.from-pairs
    'dict.from-keys 'dict.keys-exactly? 'dict.update 'dict.update-or
    'dict.map 'dict.filter 'dict.reject 'dict.take
-   'dict.drop 'dict.split 'dict.merge-with]
+   'dict.del 'dict.split 'dict.merge-with]
   documented)
  'documentation test
 ) 'stdlib.test.dict @defm

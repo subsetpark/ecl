@@ -34,8 +34,11 @@
  'construction test
 
  ### test validity
- (-- : "Accept the request shape with or without route params and refuse each malformed shape.")
- ("GET" "/" http.request.new http.request.valid? 1 equal
+ (-- : "Accept partial and complete requests and refuse unknown or malformed fields.")
+ ({} http.request.valid? 1 equal
+  {'target "https://example.test"} http.request.valid? 1 equal
+  {'method "PATCH" 'headers {"x" ("a" "b")} 'body [0 255]} http.request.valid? 1 equal
+  "GET" "/" http.request.new http.request.valid? 1 equal
   "GET" "/" http.request.new "id" "1" http.request.with-param http.request.valid? 1 equal
   {'method "GET" 'target "/" 'path "/" 'query "" 'headers {"host" ("h")} 'body [1 2] 'peer "p"}
   http.request.valid? 1 equal
@@ -51,13 +54,19 @@
   0 equal
   {'method "GET" 'target "/" 'path "/" 'query "" 'headers {} 'body [] 'peer "p" 'params {"a" 1}}
   http.request.valid? 0 equal
-  {'method "GET" 'target "/" 'path "/" 'headers {} 'body [] 'peer "p"} http.request.valid? 0 equal
+  {'method "GET" 'target "/" 'path "/" 'headers {} 'body [] 'peer "p"} http.request.valid? 1 equal
+  {'target "/" 'extra 1} http.request.valid? 0 equal
+  {'headers {"x" "v"}} http.request.valid? 0 equal
+  {'body [256]} http.request.valid? 0 equal
+  {'params {"id" 1}} http.request.valid? 0 equal
   5 http.request.valid? 0 equal)
  'validity test
 
  ### test headers
  (-- : "Read and add headers under lowercased names, keeping repeated values in order.")
  (multi-header-request "X-MULTI" http.request.header ("one" "two" "three") equal
+  {} "host" http.request.header () equal
+  {} "x" "v" http.request.with-header 'headers at {"x" ("v")} equal
   multi-header-request 'headers at {"x-multi" ("one" "two" "three")} equal
   multi-header-request "host" http.request.header () equal
   multi-header-request "x-multi" http.request.header? 1 equal
@@ -68,13 +77,14 @@
   'type
   "string or a list of strings"
   raises-containing
-  ({'method "GET"} "x" http.request.header) 'type "request dict" raises-containing)
+  ({'headers {"x" "bad"}} "x" http.request.header) 'type "request dict" raises-containing)
  'headers test
 
  ### test query
  (-- : "Decode the query string into a dict, percent-decoding escapes and letting later keys win.")
  ("GET" "/?a=1&b=%2Fx&c&a=2" http.request.new http.request.query {"a" "2" "b" "/x" "c" ""} equal
   "GET" "/" http.request.new http.request.query {} equal
+  {} http.request.query {} equal
   "GET" "/?&&" http.request.new http.request.query {} equal
   "GET" "/?k=a=b" http.request.new http.request.query {"k" "a=b"} equal
   "GET" "/?a+b=c+d" http.request.new http.request.query {"a+b" "c+d"} equal
@@ -100,6 +110,7 @@
  ### test bodies
  (-- : "Replace and decode bodies as bytes, text, and JSON.")
  (posted 'body at [104 195 169] equal
+  {} http.request.text "" equal
   posted http.request.text "h\u{E9}" equal
   posted [97 98] http.request.with-body http.request.text "ab" equal
   posted "{\"a\":[1,null]}" http.request.with-body http.request.json {"a" (1 'null)} equal
