@@ -27,7 +27,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "times", .primitive = times, .effect = "n quotation -- ...", .doc = "Run a quotation the requested nonnegative number of times." },
         .{ .name = "cond", .primitive = cond, .effect = "clauses -- ...", .doc = "Run the first action whose checkpointed stack test has boolean 1 on top, or the final else quotation." },
         .{ .name = "each", .primitive = each, .effect = "collection quotation -- collection", .doc = "Apply a one-input, one-output quotation independently to each list element or dictionary value, preserving dictionary keys." },
-        .{ .name = "zip-with", .primitive = zipWith, .effect = "left right quotation -- list", .doc = "Apply a two-input, one-output quotation across two conforming lists." },
+        .{ .name = "zip-with", .primitive = zipWith, .effect = "left right quotation -- list", .doc = "Apply a two-input, one-output quotation across two conforming lists, or broadcast a scalar across a list." },
         .{ .name = "for", .primitive = forWord, .effect = "collection quotation --", .doc = "Apply a one-input, zero-output quotation to each list element or dictionary value in order." },
         .{ .name = "fold", .primitive = fold, .effect = "list accumulator quotation -- accumulator", .doc = "Reduce a list from the supplied accumulator with a binary quotation." },
         .{ .name = "scan", .primitive = scan, .effect = "list accumulator quotation -- list", .doc = "Return the successive accumulator values produced while reducing a list." },
