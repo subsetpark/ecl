@@ -497,34 +497,7 @@ fn observeLeaderTermination(group: *OwnedGroup) error{Io}!void {
     }
 }
 
-const Ring = struct {
-    bytes: []u8,
-    head: usize = 0,
-    len: usize = 0,
-
-    fn free(self: *const Ring) usize {
-        return self.bytes.len - self.len;
-    }
-
-    fn push(self: *Ring, source: []const u8) void {
-        std.debug.assert(source.len <= self.free());
-        const tail = (self.head + self.len) % self.bytes.len;
-        const first = @min(source.len, self.bytes.len - tail);
-        @memcpy(self.bytes[tail..][0..first], source[0..first]);
-        @memcpy(self.bytes[0 .. source.len - first], source[first..]);
-        self.len += source.len;
-    }
-
-    fn pop(self: *Ring, destination: []u8) usize {
-        const count = @min(destination.len, self.len);
-        const first = @min(count, self.bytes.len - self.head);
-        @memcpy(destination[0..first], self.bytes[self.head..][0..first]);
-        @memcpy(destination[first..count], self.bytes[0 .. count - first]);
-        self.head = (self.head + count) % self.bytes.len;
-        self.len -= count;
-        return count;
-    }
-};
+const Ring = @import("byte_ring.zig").Ring;
 
 const ProcessPhase = union(enum) {
     constructing,
@@ -774,28 +747,6 @@ const readiness_terminal: u64 = 3;
 const readiness_run_tag: u64 = 4;
 const readiness_pointer_mask: u64 = ~@as(u64, 7);
 
-const ReadyWait = struct {
-    allocator: std.mem.Allocator,
-    cell: *ProcessCell,
-    key: u64,
-    target: external.WakeTarget,
-    previous: ?*ReadyWait = null,
-    next: ?*ReadyWait = null,
-    linked: std.atomic.Value(bool) = .init(false),
-
-    pub fn cancelReadiness(self: *ReadyWait) void {
-        const cell = self.cell;
-        if (self.linked.load(.acquire)) {
-            std.Io.Threaded.mutexLock(&cell.mutex);
-            if (self.linked.load(.monotonic)) cell.unlinkReadyLocked(self);
-            std.Io.Threaded.mutexUnlock(&cell.mutex);
-        }
-        self.target.release();
-        cell.releaseRef();
-        self.allocator.destroy(self);
-    }
-};
-
 pub const ProcessCell = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -821,8 +772,7 @@ pub const ProcessCell = struct {
     stderr_reader_active: bool = false,
     write_first: ?*WriteNode = null,
     write_last: ?*WriteNode = null,
-    ready_first: ?*ReadyWait = null,
-    ready_last: ?*ReadyWait = null,
+    waits: external.WaitList(ProcessCell) = .{},
     timeout_done: std.Io.Event = .unset,
     timed_out: bool = false,
     run_observation: RunObservation = .{},
@@ -901,7 +851,7 @@ pub const ProcessCell = struct {
         if (old != 1) return;
         _ = self.refs.load(.acquire);
         std.debug.assert(self.phase == .reaped);
-        std.debug.assert(self.ready_first == null and self.write_first == null);
+        std.debug.assert(self.waits.first == null and self.write_first == null);
         self.allocator.free(self.stdin.bytes);
         self.allocator.free(self.stdout.bytes);
         self.allocator.free(self.stderr.bytes);
@@ -978,26 +928,7 @@ pub const ProcessCell = struct {
         key: u64,
         target: external.WakeTarget,
     ) external.RegisterError!external.RegisterResult {
-        const wait = try self.allocator.create(ReadyWait);
-        errdefer self.allocator.destroy(wait);
-        wait.* = .{
-            .allocator = self.allocator,
-            .cell = self,
-            .key = key,
-            .target = target,
-        };
-        std.Io.Threaded.mutexLock(&self.mutex);
-        if (self.readyLocked(key)) {
-            const reason = self.wakeReasonLocked(key);
-            std.Io.Threaded.mutexUnlock(&self.mutex);
-            self.allocator.destroy(wait);
-            return .{ .ready = reason };
-        }
-        target.retain();
-        self.retainRef();
-        self.linkReadyLocked(wait);
-        std.Io.Threaded.mutexUnlock(&self.mutex);
-        return .{ .registered = external.readinessRegistration(ReadyWait, wait) };
+        return external.WaitList(ProcessCell).register(self, key, target);
     }
 
     pub fn beginWrite(self: *ProcessCell) error{OutOfMemory}!*WritePermit {
@@ -1366,7 +1297,7 @@ pub const ProcessCell = struct {
         std.Io.Threaded.mutexUnlock(&self.mutex);
     }
 
-    fn readyLocked(self: *ProcessCell, key: u64) bool {
+    pub fn readyLocked(self: *ProcessCell, key: u64) bool {
         if (key & ~readiness_pointer_mask == readiness_run_tag) {
             const pointer = key & readiness_pointer_mask;
             const observation: *const RunObservation = @ptrFromInt(pointer);
@@ -1393,7 +1324,7 @@ pub const ProcessCell = struct {
             self.input != .open or self.io_failed;
     }
 
-    fn wakeReasonLocked(self: *ProcessCell, key: u64) external.Wake {
+    pub fn wakeReasonLocked(self: *ProcessCell, key: u64) external.Wake {
         if (key & ~readiness_pointer_mask == readiness_run_tag) return .ready;
         return if (self.io_failed) .io else .ready;
     }
@@ -1413,39 +1344,8 @@ pub const ProcessCell = struct {
         return edges;
     }
 
-    fn linkReadyLocked(self: *ProcessCell, wait: *ReadyWait) void {
-        std.debug.assert(!wait.linked.load(.monotonic));
-        if (self.ready_last) |last| {
-            last.next = wait;
-            wait.previous = last;
-        } else self.ready_first = wait;
-        self.ready_last = wait;
-        wait.linked.store(true, .release);
-    }
-
-    fn unlinkReadyLocked(self: *ProcessCell, wait: *ReadyWait) void {
-        std.debug.assert(wait.linked.load(.monotonic));
-        if (wait.previous) |previous| previous.next = wait.next else self.ready_first = wait.next;
-        if (wait.next) |next| next.previous = wait.previous else self.ready_last = wait.previous;
-        wait.previous = null;
-        wait.next = null;
-        wait.linked.store(false, .release);
-    }
-
-    /// Called with the cell lock held. Targets remain retained until their
-    /// registration is consumed, so waking under this lock closes the only
-    /// cancellation/use-after-free race without borrowing backend state back
-    /// through the callback.
     fn notifyReadyLocked(self: *ProcessCell) void {
-        var wait = self.ready_first;
-        while (wait) |candidate| {
-            const next = candidate.next;
-            if (self.readyLocked(candidate.key)) {
-                self.unlinkReadyLocked(candidate);
-                candidate.target.wake(self.wakeReasonLocked(candidate.key));
-            }
-            wait = next;
-        }
+        self.waits.notifyLocked(self);
     }
 
     fn supervisorMain(self: *ProcessCell) void {
@@ -1723,19 +1623,6 @@ test "process policy rejects ambient and relative executable selection before sp
     try std.testing.expectError(error.InvalidSpec, owner.validateSpec(.{ .executable = "program" }));
     try std.testing.expectError(error.Denied, owner.validateSpec(.{ .executable = "/other/program" }));
     try owner.validateSpec(.{ .executable = "/allowed/program" });
-}
-
-test "bounded ring preserves exact binary order across wrap" {
-    var storage: [5]u8 = undefined;
-    var ring = Ring{ .bytes = &storage };
-    ring.push(&.{ 0, 255, 2, 3 });
-    var first: [3]u8 = undefined;
-    try std.testing.expectEqual(@as(usize, 3), ring.pop(&first));
-    try std.testing.expectEqualSlices(u8, &.{ 0, 255, 2 }, &first);
-    ring.push(&.{ 4, 5, 6 });
-    var rest: [4]u8 = undefined;
-    try std.testing.expectEqual(@as(usize, 4), ring.pop(&rest));
-    try std.testing.expectEqualSlices(u8, &.{ 3, 4, 5, 6 }, &rest);
 }
 
 test "dormant controller reaps a direct child before scope detachment" {

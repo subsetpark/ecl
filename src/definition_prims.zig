@@ -17,7 +17,6 @@ const Value = value.Value;
 const Machine = machine.Machine;
 const MachineError = machine.MachineError;
 const Mode = enum { def, defp, test_declaration };
-const Definition = struct { name: []const u8, primitive: env.PrimitiveImpl };
 
 fn bind(comptime mode: Mode) env.PrimitiveImpl {
     return struct {
@@ -28,17 +27,17 @@ fn bind(comptime mode: Mode) env.PrimitiveImpl {
 }
 
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
-    const definitions = comptime [_]Definition{
-        .{ .name = "def", .primitive = bind(.def) },
-        .{ .name = "defp", .primitive = bind(.defp) },
-        .{ .name = "test", .primitive = bind(.test_declaration) },
-        .{ .name = "unset", .primitive = unbind },
-        .{ .name = "undef", .primitive = unbind },
-        .{ .name = "doc", .primitive = doc },
-        .{ .name = "which", .primitive = which },
-        .{ .name = "see", .primitive = see },
+    const definitions = comptime [_]env.BuiltinWord{
+        .{ .name = "def", .primitive = bind(.def), .effect = null, .doc = "Bind a quotation to a public word, with optional effect and documentation metadata." },
+        .{ .name = "defp", .primitive = bind(.defp), .effect = null, .doc = "Bind a quotation to a private module word, with optional effect and documentation metadata." },
+        .{ .name = "test", .primitive = bind(.test_declaration), .effect = null, .doc = "Declare a module-private executable test at a direct module construction root, with optional effect and documentation metadata." },
+        .{ .name = "unset", .primitive = unbind, .effect = "name --", .doc = "Remove a binding from the current scope; do nothing when that scope does not bind the name." },
+        .{ .name = "undef", .primitive = unbind, .effect = "name --", .doc = "Remove a binding from the current scope; an alias of unset." },
+        .{ .name = "doc", .primitive = doc, .effect = "name -- string", .doc = "Return the canonical documentation string of a resolved binding." },
+        .{ .name = "which", .primitive = which, .effect = "name --", .doc = "Print where a word resolves and any bindings it shadows." },
+        .{ .name = "see", .primitive = see, .effect = "name --", .doc = "Print the standard-formatted annotation and body of a binding." },
     };
-    try core.installBuiltins(definitions);
+    try core.installBuiltins(&definitions);
 }
 
 const Annotation = struct {

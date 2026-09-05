@@ -23,15 +23,35 @@ const ScalarUnary = *const fn (Value) ScalarError!Value;
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     inline for (std.meta.fields(BinaryOp)) |field| {
         const operation: BinaryOp = @enumFromInt(field.value);
-        if (operation == .mod or operation == .ne or operation == .le or operation == .ge or
-            operation == .and_word or operation == .or_word) continue;
-        try support.installPrimitive(core, operation.spelling(), bindBinary(operation));
+        if (comptime binaryDefinition(operation)) |word| try core.installBuiltin(word);
     }
     inline for (std.meta.fields(UnaryOp)) |field| {
         const operation: UnaryOp = @enumFromInt(field.value);
-        if (operation == .neg or operation == .abs) continue;
-        try support.installPrimitive(core, operation.spelling(), bindUnary(operation));
+        if (comptime unaryDefinition(operation)) |word| try core.installBuiltin(word);
     }
+}
+
+fn binaryDefinition(comptime operation: BinaryOp) ?env.BuiltinWord {
+    return switch (operation) {
+        .add => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Add numeric values or conforming numeric arrays pervasively." },
+        .sub => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Subtract numeric or character values or conforming arrays pervasively." },
+        .mul => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Multiply numeric values or conforming numeric arrays pervasively." },
+        .div => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Divide numeric values or conforming numeric arrays pervasively, returning floats." },
+        .int_div => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Compute checked integer division pervasively." },
+        .atan2 => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "y x -- z", .doc = "Compute the two-argument arctangent of numeric values pervasively." },
+        .pow => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Raise numbers to powers pervasively, returning floats." },
+        .min => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Return the lesser of two comparable values pervasively." },
+        .max => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Return the greater of two comparable values pervasively." },
+        .eq => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Compare conforming values for pervasive equality, producing boolean masks." },
+        .lt => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Compare conforming values pervasively for ascending order." },
+        .gt => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Compare conforming values pervasively for descending order." },
+        .band => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Bitwise and over integer bit patterns pervasively." },
+        .bor => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Bitwise or over integer bit patterns pervasively." },
+        .bxor => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Bitwise exclusive or over integer bit patterns pervasively." },
+        .bsl => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x count -- y", .doc = "Shift an integer pattern left, truncating bits off the top." },
+        .bsr => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x count -- y", .doc = "Shift an integer pattern right, filling zeros from the top." },
+        .mod, .ne, .le, .ge, .and_word, .or_word => null,
+    };
 }
 
 fn bindBinary(comptime operation: BinaryOp) env.PrimitiveImpl {
@@ -44,6 +64,22 @@ fn bindBinary(comptime operation: BinaryOp) env.PrimitiveImpl {
 
 pub fn binaryPrimitiveFor(comptime operation: BinaryOp) env.PrimitiveImpl {
     return bindBinary(operation);
+}
+
+fn unaryDefinition(comptime operation: UnaryOp) ?env.BuiltinWord {
+    return switch (operation) {
+        .sqrt => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Return square roots of numeric values pervasively." },
+        .floor => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- integer", .doc = "Round numeric values downward pervasively to integers." },
+        .ceil => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- integer", .doc = "Round numeric values upward pervasively to integers." },
+        .round => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- integer", .doc = "Round numeric values to nearest integers pervasively." },
+        .exp => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Return natural exponentials of numeric values pervasively." },
+        .log => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Return natural logarithms of numeric values pervasively." },
+        .sin => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Return sines of numeric values pervasively." },
+        .cos => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Return cosines of numeric values pervasively." },
+        .not_word => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "bool -- bool", .doc = "Invert boolean 0 and 1 values pervasively." },
+        .bnot => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Invert every bit of an integer pattern pervasively." },
+        .neg, .abs => null,
+    };
 }
 
 fn bindUnary(comptime operation: UnaryOp) env.PrimitiveImpl {

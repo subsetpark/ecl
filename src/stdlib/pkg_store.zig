@@ -87,9 +87,9 @@ fn startSealDriver(evaluator: *Machine, mode: SealMode) MachineError!void {
     defer store_value.deinit();
     if (store_value.borrow() != .symbol) return evaluator.typeError("a store symbol");
     const store = try archive.packageStore(evaluator, store_value.borrow(), key_value.borrow());
-    const key_encoder = storage.ToUtf8Cursor.init(evaluator.allocator(), key_value.borrow());
-    const package_encoder = storage.ToUtf8Cursor.init(evaluator.allocator(), package_value.borrow());
-    const hash_encoder = storage.ToUtf8Cursor.init(evaluator.allocator(), hash_value.borrow());
+    const key_encoder = storage.StringEncoder.init(evaluator.allocator(), key_value.borrow());
+    const package_encoder = storage.StringEncoder.init(evaluator.allocator(), package_value.borrow());
+    const hash_encoder = storage.StringEncoder.init(evaluator.allocator(), hash_value.borrow());
     try evaluator.startDriver(VerifyDriver{
         .mode = mode,
         .allocator = evaluator.allocator(),
@@ -137,19 +137,19 @@ const VerifyDriver = struct {
     };
     const State = union(enum) {
         encode_key: struct {
-            key: heap.Owned(storage.ToUtf8Cursor),
-            package: heap.Owned(storage.ToUtf8Cursor),
-            hash: heap.Owned(storage.ToUtf8Cursor),
+            key: heap.Owned(storage.StringEncoder),
+            package: heap.Owned(storage.StringEncoder),
+            hash: heap.Owned(storage.StringEncoder),
         },
         encode_package: struct {
             key: heap.Owned([]u8),
-            package: heap.Owned(storage.ToUtf8Cursor),
-            hash: heap.Owned(storage.ToUtf8Cursor),
+            package: heap.Owned(storage.StringEncoder),
+            hash: heap.Owned(storage.StringEncoder),
         },
         encode_hash: struct {
             key: heap.Owned([]u8),
             package: heap.Owned([]u8),
-            hash: heap.Owned(storage.ToUtf8Cursor),
+            hash: heap.Owned(storage.StringEncoder),
         },
         open: Names,
         stat: struct { names: Names, file: std.Io.File },
@@ -503,7 +503,7 @@ fn popStoreKey(evaluator: *Machine) MachineError!struct { store: std.Io.Dir, key
 fn present(evaluator: *Machine) MachineError!void {
     var popped = try popStoreKey(evaluator);
     errdefer popped.key.deinit();
-    const encoder = storage.ToUtf8Cursor.init(evaluator.allocator(), popped.key.borrow());
+    const encoder = storage.StringEncoder.init(evaluator.allocator(), popped.key.borrow());
     try evaluator.startDriver(PresentDriver{
         .allocator = evaluator.allocator(),
         .io = evaluator.unit.inherited.host_io.?,
@@ -520,7 +520,7 @@ const PresentDriver = struct {
     io: std.Io,
     store: std.Io.Dir,
     key_value: heap.Owned(Value),
-    encoder: heap.Owned(storage.ToUtf8Cursor),
+    encoder: heap.Owned(storage.StringEncoder),
     key: ?heap.Owned([]u8) = null,
 
     pub fn advance(evaluator: *Machine, self: *PresentDriver) MachineError!machine.WorkProgress {
@@ -573,7 +573,7 @@ const PresentDriver = struct {
 fn manifest(evaluator: *Machine) MachineError!void {
     var popped = try popStoreKey(evaluator);
     errdefer popped.key.deinit();
-    const encoder = storage.ToUtf8Cursor.init(evaluator.allocator(), popped.key.borrow());
+    const encoder = storage.StringEncoder.init(evaluator.allocator(), popped.key.borrow());
     try evaluator.startDriver(ManifestDriver{
         .allocator = evaluator.allocator(),
         .io = evaluator.unit.inherited.host_io.?,
@@ -596,7 +596,7 @@ const ManifestDriver = struct {
     state: State,
 
     const State = union(enum) {
-        encode: storage.ToUtf8Cursor,
+        encode: storage.StringEncoder,
         open: []u8,
         read: struct { file: std.Io.File, buffer: []u8, offset: usize },
         text: struct { buffer: []u8, materializer: storage.Utf8Materializer },
@@ -750,7 +750,7 @@ const GcDriver = struct {
     const State = union(enum) {
         keys_capacity,
         keys: usize,
-        key: struct { index: usize, cursor: storage.ToUtf8Cursor },
+        key: struct { index: usize, cursor: storage.StringEncoder },
         open_root,
         scan: Scan,
         detach: struct { scan: Scan, source: []u8 },

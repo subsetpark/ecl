@@ -9,7 +9,6 @@ const list = @import("list.zig");
 const intern = @import("intern.zig");
 const machine = @import("machine.zig");
 const native_module = @import("native_module.zig");
-const primitive_docs = @import("primitive_docs.zig");
 const snapshot_api = @import("snapshot.zig");
 const reader_types = @import("reader_types.zig");
 /// In-tree primitives use Machine's ergonomic error helpers. This binding
@@ -177,6 +176,25 @@ pub const BuiltinWord = struct {
     effect: ?[]const u8 = null,
     primitive: PrimitiveImpl,
 };
+
+pub fn assertStaticBuiltin(comptime word: BuiltinWord) void {
+    assertStaticNamespace(word.name);
+    if (word.doc.len == 0) @compileError("empty builtin documentation: " ++ word.name);
+    if (word.effect) |effect| validateBuiltinEffect(word.name, effect);
+}
+
+fn validateBuiltinEffect(comptime name: []const u8, comptime effect: []const u8) void {
+    if (effect.len == 0 or effect[0] == ' ' or effect[effect.len - 1] == ' ') {
+        @compileError("invalid primitive effect: " ++ name);
+    }
+    for (effect[1..], effect[0 .. effect.len - 1]) |byte, previous| {
+        if (byte == ' ' and previous == ' ') @compileError("invalid primitive effect spacing: " ++ name);
+    }
+    var separators: usize = 0;
+    var iterator = std.mem.tokenizeScalar(u8, effect, ' ');
+    while (iterator.next()) |token| separators += @intFromBool(std.mem.eql(u8, token, "--"));
+    if (separators != 1) @compileError("primitive effect requires exactly one separator: " ++ name);
+}
 
 pub const ModulePublication = union(enum) {
     word: struct {
@@ -2131,57 +2149,30 @@ pub const BuildingEnv = struct {
             .binding = .{ .word = body },
         });
     }
-    pub fn installBuiltin(
-        self: *BuildingEnv,
-        comptime name: []const u8,
-        primitive: PrimitiveImpl,
-    ) error{OutOfMemory}!void {
-        comptime assertStaticNamespace(name);
-        const raw_name = intern.internReservedNamespace(name) catch |err| switch (err) {
+    pub fn installBuiltin(self: *BuildingEnv, comptime definition: BuiltinWord) error{OutOfMemory}!void {
+        comptime assertStaticBuiltin(definition);
+        const install_name = intern.internReservedNamespace(definition.name) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidName => unreachable,
         };
-        return self.installBuiltinBinding(
-            raw_name,
-            name,
-            .{ .builtin = primitive },
-        );
-    }
-    fn installBuiltinBinding(
-        self: *BuildingEnv,
-        install_name: intern.NamespaceName,
-        comptime name: []const u8,
-        binding: Binding,
-    ) error{OutOfMemory}!void {
         const core = &self.target.privateState().core;
-        const metadata = comptime primitive_docs.forName(name);
-        const document_value = try machine.stringValue(
-            core.allocator,
-            core.releases,
-            metadata.text,
-        );
+        const document_value = try machine.stringValue(core.allocator, core.releases, definition.doc);
         defer core.releases.releaseValue(document_value);
-        const builtin_effect: ?BuiltinEffect = if (metadata.effect) |source|
+        const builtin_effect: ?BuiltinEffect = if (definition.effect) |source|
             try self.builtinEffect(source)
         else
             null;
-        defer if (builtin_effect) |effect| {
-            core.releases.releaseValue(effect.value);
-        };
-        try self.target.installCoreSpec(
-            install_name,
-            .{
-                .binding = binding,
-                .effect = if (builtin_effect) |effect| effect.validated else null,
-                .doc = documentation(document_value.list).?,
-            },
-        );
+        defer if (builtin_effect) |effect| core.releases.releaseValue(effect.value);
+        try self.target.installCoreSpec(install_name, .{
+            .binding = .{ .builtin = definition.primitive },
+            .effect = if (builtin_effect) |effect| effect.validated else null,
+            .doc = documentation(document_value.list).?,
+        });
     }
-    pub fn installBuiltins(self: *BuildingEnv, comptime definitions: anytype) error{OutOfMemory}!void {
+    pub fn installBuiltins(self: *BuildingEnv, comptime definitions: []const BuiltinWord) error{OutOfMemory}!void {
         comptime {
-            @setEvalBranchQuota(4000);
+            @setEvalBranchQuota(100_000);
             for (definitions, 0..) |definition, index| {
-                assertStaticNamespace(definition.name);
                 for (definitions[0..index]) |prior| {
                     if (std.mem.eql(u8, prior.name, definition.name)) {
                         @compileError("duplicate builtin namespace name: " ++ definition.name);
@@ -2190,7 +2181,7 @@ pub const BuildingEnv = struct {
             }
         }
         inline for (definitions) |definition| {
-            try self.installBuiltin(definition.name, definition.primitive);
+            try self.installBuiltin(definition);
         }
     }
     pub fn runtime(self: *BuildingEnv) *Env {

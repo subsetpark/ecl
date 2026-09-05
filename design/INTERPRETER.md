@@ -503,6 +503,13 @@ diagnostic identity travel in the same snapshot. Readers acquire leases;
 writers build before taking the publication lock, validate and swap in constant
 time, and retire the old snapshot after unlocking.
 
+Execution and shadow inspection consume the same bounded lexical candidate
+walk: the written or current scope chain, followed by public core bindings.
+Each candidate carries its location and owned binding lease; execution may
+also request a captured cell for its cache. Execution consumes the first hit,
+while shadow inspection continues through later hits. Qualified loading,
+generation pins, and execution authority remain outside that shared walk.
+
 ### An execution site correlates three contexts
 
 An activation needs three related but non-identical facts:
@@ -854,6 +861,20 @@ cancellation-cursor reference and the member capability itself; only that
 node's final release decrements the scope's child count and publishes
 quiescence. Scheduler and allocator teardown therefore cannot overtake the
 cleanup performed by a membership callback.
+
+Process and network registrations share one keyed wait-list lifetime protocol.
+Each registration retains its backend and wake target until consuming
+cancellation. Notification delivers the wake while the registration is still
+linked under the backend lock, then unlinks it; cancellation cannot release
+either owner during delivery. Backend predicates and wake reasons remain local
+to the resource whose state they observe.
+
+Process pipes and sockets use the same fixed-capacity byte queue and bounded
+transfer drivers. A read owns its active reader through materialization. A
+write's encoding and transfer phases each own the ordered write ticket;
+completion consumes it and leaves only buffer cleanup. Backend adapters map
+resource failures and readiness into those shared transitions, preserving
+backend-specific error data and shutdown semantics.
 
 A native work driver that must wait carries its driver and park request in one
 exhaustive continuation variant. This is the external equivalent of the task
@@ -1291,9 +1312,19 @@ The placement rule is:
 
 Hosted modules combine source definitions with narrowly registered builtins.
 Their manifest, documentation, effects, provenance, and package requirements
-are validated before publication. Package discovery and synchronization are
+are validated before publication. Core and hosted builtin words use one
+complete declaration carrying implementation, spelling, effect, and
+documentation. Installation validates that declaration and publishes its
+metadata directly; primitive families own their declarations, and kernel
+spellings remain owned by their closed operation enums. The source audit
+checks semantic spelling conventions across all classified production sources;
+documentation completeness and effect syntax are compile-time requirements.
+
+Package discovery and synchronization are
 described in `ENVIRONMENT.md`; they enter the evaluator through the same module
-loader and bounded-driver conventions as other sources.
+loader and bounded-driver conventions as other sources. Host-side lock and
+catalog validation share one inert-record decoder for exact fields, required
+values, and owned text; each owner retains its own schema and input limits.
 
 `http.server` shows the shape of a protocol module in source over host ports:
 one effect boundary, a single private word that validates and encodes a whole

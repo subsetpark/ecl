@@ -24,12 +24,9 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    mod.link_libc = true;
-    mod.addImport("native-abi", native_abi);
     const runtime_options = b.addOptions();
     runtime_options.addOption(usize, "default_worker_count", 1);
     runtime_options.addOption(bool, "instrument_root_execution", false);
-    mod.addOptions("session_options", runtime_options);
 
     const native_sdk = b.addModule("ecl-native", .{
         .root_source_file = b.path("src/native/sdk.zig"),
@@ -37,18 +34,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     native_sdk.addImport("ecl-native-abi", native_abi);
-    // First-party stdlib modules are authored against the public SDK and
-    // linked into the shipped image, so the runtime module imports it too.
-    mod.addImport("ecl-native", native_sdk);
+    configureRuntime(mod, native_abi, native_sdk, runtime_options);
     const internal_mod = b.createModule(.{
         .root_source_file = b.path("src/internal.zig"),
         .target = target,
         .optimize = optimize,
     });
-    internal_mod.link_libc = true;
-    internal_mod.addImport("native-abi", native_abi);
-    internal_mod.addImport("ecl-native", native_sdk);
-    internal_mod.addOptions("session_options", runtime_options);
+    configureRuntime(internal_mod, native_abi, native_sdk, runtime_options);
     const native_sample = b.createModule(.{
         .root_source_file = b.path("test/native/sample.zig"),
         .target = target,
@@ -247,6 +239,21 @@ pub fn build(b: *std.Build) void {
     const repl_step = b.step("test-repl", "Run the real REPL under a PTY");
     repl_step.dependOn(&repl_tests.step);
 
+    const test_imports = [_]std.Build.Module.Import{
+        .{ .name = "minish", .module = minish },
+        .{ .name = "native-sample", .module = native_sample },
+    };
+    const host_fixture_inputs = [_]FixtureInput{
+        .{ .name = "native_fixture_options", .options = native_fixture_options },
+        .{ .name = "archive_fixture_options", .options = archive_fixture_options },
+        .{ .name = "process_fixture_options", .options = process_fixture_options },
+    };
+    const test_fixture_inputs = host_fixture_inputs ++ [_]FixtureInput{
+        .{ .name = "native_runtime_options", .options = native_runtime_options },
+        .{ .name = "http_fixture_options", .options = http_fixture_options },
+        .{ .name = "pkg_fixture_options", .options = pkg_fixture_options },
+    };
+
     const test_mod = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -255,18 +262,8 @@ pub fn build(b: *std.Build) void {
     const test_options = b.addOptions();
     test_options.addOption(usize, "default_worker_count", 1);
     test_options.addOption(bool, "instrument_root_execution", false);
-    test_mod.addOptions("session_options", test_options);
-    test_mod.addImport("minish", minish);
-    test_mod.addImport("native-abi", native_abi);
-    test_mod.addImport("ecl-native", native_sdk);
-    test_mod.addImport("native-sample", native_sample);
-    test_mod.addOptions("native_fixture_options", native_fixture_options);
-    test_mod.addOptions("native_runtime_options", native_runtime_options);
-    test_mod.addOptions("http_fixture_options", http_fixture_options);
-    test_mod.addOptions("pkg_fixture_options", pkg_fixture_options);
-    test_mod.addOptions("archive_fixture_options", archive_fixture_options);
-    test_mod.addOptions("process_fixture_options", process_fixture_options);
-    test_mod.link_libc = true;
+    configureRuntime(test_mod, native_abi, native_sdk, test_options);
+    addTestInputs(test_mod, &test_imports, &test_fixture_inputs);
     const tests = b.addTest(.{ .root_module = test_mod });
     tests.linkage = runtime_linkage;
     // Minish writes a passing summary to stderr. Run the two property-bearing
@@ -395,14 +392,8 @@ pub fn build(b: *std.Build) void {
             // panics and sanitizer crashes still retain their diagnostics.
             .error_tracing = false,
         });
-        fuzz_mod.addOptions("session_options", test_options);
-        fuzz_mod.addImport("native-abi", native_abi);
-        fuzz_mod.addImport("ecl-native", native_sdk);
+        configureRuntime(fuzz_mod, native_abi, native_sdk, test_options);
         fuzz_mod.addOptions("native_runtime_options", native_runtime_options);
-        // The fuzz root reaches the process port, whose `waitid` binding is an
-        // explicit libc dependency on Linux; link it the way every other test
-        // module does or the campaign fails to compile before it fuzzes.
-        fuzz_mod.link_libc = true;
         const fuzz_tests = b.addTest(.{
             .root_module = fuzz_mod,
             .filters = &.{fuzz_target.test_name},
@@ -426,13 +417,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = .ReleaseSafe,
     });
-    oom_mod.addOptions("session_options", test_options);
-    oom_mod.addImport("native-abi", native_abi);
-    oom_mod.addImport("ecl-native", native_sdk);
-    oom_mod.addOptions("native_fixture_options", native_fixture_options);
-    oom_mod.addOptions("archive_fixture_options", archive_fixture_options);
-    oom_mod.addOptions("process_fixture_options", process_fixture_options);
-    oom_mod.link_libc = true;
+    configureRuntime(oom_mod, native_abi, native_sdk, test_options);
+    addTestInputs(oom_mod, &.{}, &host_fixture_inputs);
     const oom_tests = b.addTest(.{
         .root_module = oom_mod,
         // Compile one stable artifact for every OOM family. Runtime selection
@@ -530,10 +516,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    instrumented_ecl.link_libc = true;
-    instrumented_ecl.addImport("native-abi", native_abi);
-    instrumented_ecl.addImport("ecl-native", native_sdk);
-    instrumented_ecl.addOptions("session_options", instrumented_options);
+    configureRuntime(instrumented_ecl, native_abi, native_sdk, instrumented_options);
     const workdriver_counter_mod = b.createModule(.{
         .root_source_file = b.path("src/tools/bench_workdrivers.zig"),
         .target = target,
@@ -654,18 +637,8 @@ pub fn build(b: *std.Build) void {
         const worker_options = b.addOptions();
         worker_options.addOption(usize, "default_worker_count", worker_count);
         worker_options.addOption(bool, "instrument_root_execution", false);
-        worker_test_mod.addOptions("session_options", worker_options);
-        worker_test_mod.addImport("minish", minish);
-        worker_test_mod.addImport("native-abi", native_abi);
-        worker_test_mod.addImport("ecl-native", native_sdk);
-        worker_test_mod.addImport("native-sample", native_sample);
-        worker_test_mod.addOptions("native_fixture_options", native_fixture_options);
-        worker_test_mod.addOptions("native_runtime_options", native_runtime_options);
-        worker_test_mod.addOptions("http_fixture_options", http_fixture_options);
-        worker_test_mod.addOptions("pkg_fixture_options", pkg_fixture_options);
-        worker_test_mod.addOptions("archive_fixture_options", archive_fixture_options);
-        worker_test_mod.addOptions("process_fixture_options", process_fixture_options);
-        worker_test_mod.link_libc = true;
+        configureRuntime(worker_test_mod, native_abi, native_sdk, worker_options);
+        addTestInputs(worker_test_mod, &test_imports, &test_fixture_inputs);
         const worker_tests = b.addTest(.{
             .root_module = worker_test_mod,
             .filters = &.{"concurrency:"},
@@ -688,18 +661,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .sanitize_thread = tsan_supported,
     });
-    tsan_mod.addOptions("session_options", test_options);
-    tsan_mod.addImport("minish", minish);
-    tsan_mod.addImport("native-abi", native_abi);
-    tsan_mod.addImport("ecl-native", native_sdk);
-    tsan_mod.addImport("native-sample", native_sample);
-    tsan_mod.addOptions("native_fixture_options", native_fixture_options);
-    tsan_mod.addOptions("native_runtime_options", native_runtime_options);
-    tsan_mod.addOptions("http_fixture_options", http_fixture_options);
-    tsan_mod.addOptions("pkg_fixture_options", pkg_fixture_options);
-    tsan_mod.addOptions("archive_fixture_options", archive_fixture_options);
-    tsan_mod.addOptions("process_fixture_options", process_fixture_options);
-    tsan_mod.link_libc = true;
+    configureRuntime(tsan_mod, native_abi, native_sdk, test_options);
+    addTestInputs(tsan_mod, &test_imports, &test_fixture_inputs);
     const tsan_tests = b.addTest(.{
         .root_module = tsan_mod,
         .filters = &.{
@@ -909,6 +872,7 @@ pub fn build(b: *std.Build) void {
             // The listener and connection controller's own unit tests: loopback
             // sockets through the cell API without a Session, sub-second.
             "net_port.",
+            "byte_ring.test.",
             // Kind conversions and the reserved `core.` qualifier. Every case
             // is a handful of scalar words through the public Session and the
             // whole file costs well under a second.
@@ -1146,4 +1110,31 @@ fn addCapturedTestRun(
     run.addArtifactArg(tests);
     run.addArg(b.fmt("--seed=0x{x}", .{b.graph.random_seed}));
     return run;
+}
+
+fn configureRuntime(
+    module: *std.Build.Module,
+    abi: *std.Build.Module,
+    sdk: *std.Build.Module,
+    options: *std.Build.Step.Options,
+) void {
+    // Every runtime root reaches the ports (libc) and first-party stdlib (SDK).
+    module.link_libc = true;
+    module.addImport("native-abi", abi);
+    module.addImport("ecl-native", sdk);
+    module.addOptions("session_options", options);
+}
+
+const FixtureInput = struct {
+    name: []const u8,
+    options: *std.Build.Step.Options,
+};
+
+fn addTestInputs(
+    module: *std.Build.Module,
+    imports: []const std.Build.Module.Import,
+    fixtures: []const FixtureInput,
+) void {
+    for (imports) |import| module.addImport(import.name, import.module);
+    for (fixtures) |fixture| module.addOptions(fixture.name, fixture.options);
 }

@@ -395,152 +395,9 @@ fn bindListening(address: IpAddress, backlog: u31) ListenError!std.Io.net.Server
 /// Bounded byte queue for the connection's rings. Identical in contract to
 /// the process port's ring, plus a peek/consume pair so the controller can
 /// hand the kernel a contiguous chunk and retire only what was written.
-const Ring = struct {
-    bytes: []u8,
-    head: usize = 0,
-    len: usize = 0,
+const Ring = @import("byte_ring.zig").Ring;
 
-    fn free(self: *const Ring) usize {
-        return self.bytes.len - self.len;
-    }
-
-    fn push(self: *Ring, source: []const u8) void {
-        std.debug.assert(source.len <= self.free());
-        const tail = (self.head + self.len) % self.bytes.len;
-        const first = @min(source.len, self.bytes.len - tail);
-        @memcpy(self.bytes[tail..][0..first], source[0..first]);
-        @memcpy(self.bytes[0 .. source.len - first], source[first..]);
-        self.len += source.len;
-    }
-
-    fn pop(self: *Ring, destination: []u8) usize {
-        const count = @min(destination.len, self.len);
-        const first = @min(count, self.bytes.len - self.head);
-        @memcpy(destination[0..first], self.bytes[self.head..][0..first]);
-        @memcpy(destination[first..count], self.bytes[0 .. count - first]);
-        self.head = (self.head + count) % self.bytes.len;
-        self.len -= count;
-        return count;
-    }
-
-    /// The longest contiguous run of queued bytes starting at the head.
-    fn peek(self: *const Ring) []const u8 {
-        const first = @min(self.len, self.bytes.len - self.head);
-        return self.bytes[self.head..][0..first];
-    }
-
-    fn consume(self: *Ring, count: usize) void {
-        std.debug.assert(count <= self.len);
-        self.head = (self.head + count) % self.bytes.len;
-        self.len -= count;
-    }
-
-    fn discard(self: *Ring) void {
-        self.head = 0;
-        self.len = 0;
-    }
-};
-
-/// A keyed list of registered readiness waits over one cell type. The cell
-/// supplies `mutex`, `waits`, `retainRef`, `releaseRef`, and
-/// `readyLocked(key)`. Targets stay retained until their registration is
-/// consumed, so waking under the cell lock closes the only
-/// cancellation/use-after-free race. Every wake is `.ready`: a socket failure
-/// is a change in the cell's observable state that the driver polls, not a
-/// failure of the wait mechanism.
-fn WaitList(comptime Cell: type) type {
-    return struct {
-        const Self = @This();
-
-        pub const Wait = struct {
-            allocator: std.mem.Allocator,
-            cell: *Cell,
-            key: u64,
-            target: external.WakeTarget,
-            previous: ?*Wait = null,
-            next: ?*Wait = null,
-            linked: std.atomic.Value(bool) = .init(false),
-
-            pub fn cancelReadiness(self: *Wait) void {
-                const cell = self.cell;
-                if (self.linked.load(.acquire)) {
-                    std.Io.Threaded.mutexLock(&cell.mutex);
-                    if (self.linked.load(.monotonic)) cell.waits.unlinkLocked(self);
-                    std.Io.Threaded.mutexUnlock(&cell.mutex);
-                }
-                self.target.release();
-                cell.releaseRef();
-                self.allocator.destroy(self);
-            }
-        };
-
-        first: ?*Wait = null,
-        last: ?*Wait = null,
-
-        fn register(
-            cell: *Cell,
-            key: u64,
-            target: external.WakeTarget,
-        ) external.RegisterError!external.RegisterResult {
-            const wait = try cell.allocator.create(Wait);
-            errdefer cell.allocator.destroy(wait);
-            wait.* = .{
-                .allocator = cell.allocator,
-                .cell = cell,
-                .key = key,
-                .target = target,
-            };
-            std.Io.Threaded.mutexLock(&cell.mutex);
-            if (cell.readyLocked(key)) {
-                std.Io.Threaded.mutexUnlock(&cell.mutex);
-                cell.allocator.destroy(wait);
-                return .{ .ready = .ready };
-            }
-            target.retain();
-            cell.retainRef();
-            cell.waits.linkLocked(wait);
-            std.Io.Threaded.mutexUnlock(&cell.mutex);
-            return .{ .registered = external.readinessRegistration(Wait, wait) };
-        }
-
-        fn linkLocked(self: *Self, wait: *Wait) void {
-            std.debug.assert(!wait.linked.load(.monotonic));
-            if (self.last) |last| {
-                last.next = wait;
-                wait.previous = last;
-            } else self.first = wait;
-            self.last = wait;
-            wait.linked.store(true, .release);
-        }
-
-        fn unlinkLocked(self: *Self, wait: *Wait) void {
-            std.debug.assert(wait.linked.load(.monotonic));
-            if (wait.previous) |previous| previous.next = wait.next else self.first = wait.next;
-            if (wait.next) |next| next.previous = wait.previous else self.last = wait.previous;
-            wait.previous = null;
-            wait.next = null;
-            wait.linked.store(false, .release);
-        }
-
-        /// Called with the cell lock held. The wake happens while the wait
-        /// is still linked: a concurrent `cancelReadiness` then sees `linked`
-        /// and must take this mutex before it can destroy the wait, so the
-        /// target cannot be freed out from under the call. Delivery never
-        /// cancels the registration on the waking thread, so holding the lock
-        /// across the wake cannot deadlock.
-        fn notifyLocked(self: *Self, cell: *Cell) void {
-            var wait = self.first;
-            while (wait) |candidate| {
-                const next = candidate.next;
-                if (cell.readyLocked(candidate.key)) {
-                    candidate.target.wake(.ready);
-                    self.unlinkLocked(candidate);
-                }
-                wait = next;
-            }
-        }
-    };
-}
+const WaitList = external.WaitList;
 
 /// A descriptor that is closed exactly once. Nothing else in this file calls
 /// `closeFd` on a connection socket.
@@ -869,7 +726,11 @@ pub const ListenerCell = struct {
         };
     }
 
-    fn readyLocked(self: *ListenerCell, key: u64) bool {
+    pub fn wakeReasonLocked(_: *ListenerCell, _: u64) external.Wake {
+        return .ready;
+    }
+
+    pub fn readyLocked(self: *ListenerCell, key: u64) bool {
         _ = self;
         const slot: *const AcceptSlot = @ptrFromInt(key);
         return slot.state != .waiting;
@@ -1686,7 +1547,11 @@ pub const ConnectionCell = struct {
         return if (self.failureLocked() == null) .{ .available = address } else .{ .closed = address };
     }
 
-    fn readyLocked(self: *ConnectionCell, key: u64) bool {
+    pub fn wakeReasonLocked(_: *ConnectionCell, _: u64) external.Wake {
+        return .ready;
+    }
+
+    pub fn readyLocked(self: *ConnectionCell, key: u64) bool {
         if (key == readiness_read)
             return self.receive.len != 0 or self.peer_eof or self.failureLocked() != null;
         if (key == readiness_drain) return self.drainedLocked();

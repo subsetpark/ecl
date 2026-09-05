@@ -22,9 +22,27 @@ const Op = support.SequenceOp;
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     inline for (std.meta.fields(Op)) |field| {
         const operation: Op = @enumFromInt(field.value);
-        if (operation == .reverse or operation == .first or operation == .rest) continue;
-        try support.installPrimitive(core, operation.spelling(), bind(operation));
+        if (comptime definition(operation)) |word| try core.installBuiltin(word);
     }
+}
+
+fn definition(comptime operation: Op) ?env.BuiltinWord {
+    return switch (operation) {
+        .at => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "collection key -- value", .doc = "Select a list index or dictionary key, pervading over list indices." },
+        .where => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "counts -- indices", .doc = "Expand integer counts into their replicated zero-based indices." },
+        .first_where => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "counts -- index", .doc = "Return the first index with a positive count, or the count-list length when none exists; counts after the first hit are not inspected." },
+        .in_word => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "value list -- bool", .doc = "Test whole-value membership, pervading over the sought value and never into the list." },
+        .raze => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- list", .doc = "Flatten one level of a list." },
+        .cat => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "left right -- list", .doc = "Concatenate two lists." },
+        .take => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list count -- list", .doc = "Take a signed number of list elements, cycling when necessary." },
+        .drop => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list count -- list", .doc = "Drop a signed number of elements from a list." },
+        .range => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "bound -- list", .doc = "Return the integers from zero through one less than a nonnegative bound." },
+        .shape => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- shape", .doc = "Return the dimensions of a rectangular list." },
+        .len => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- count", .doc = "Return a list's top-level element count." },
+        .flip => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- list", .doc = "Transpose a rectangular list." },
+        .reshape => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list shape -- list", .doc = "Cycle list data into the requested rectangular shape." },
+        .reverse, .first, .rest => null,
+    };
 }
 
 fn bind(comptime operation: Op) env.PrimitiveImpl {

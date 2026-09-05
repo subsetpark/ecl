@@ -55,13 +55,13 @@ const source_groups = [_]SourceGroup{
     // opaque rendered result rather than folding those lifetime boundaries
     // into Session internals.
     .{ .production = true, .files = &.{
-        "env.zig", "modules.zig", "snapshot.zig", "module_prims.zig", "reflection.zig", "session.zig", "project.zig", "pkg_catalog.zig", "pkg_lock.zig",
+        "env.zig", "modules.zig", "snapshot.zig", "module_prims.zig", "reflection.zig", "session.zig", "project.zig", "pkg_catalog.zig", "pkg_lock.zig", "package_data.zig",
     }, .sources = &.{
         @embedFile("../env.zig"),        @embedFile("../modules.zig"),
         @embedFile("../snapshot.zig"),   @embedFile("../module_prims.zig"),
         @embedFile("../reflection.zig"), @embedFile("../session.zig"),
         @embedFile("../project.zig"),    @embedFile("../pkg_catalog.zig"),
-        @embedFile("../pkg_lock.zig"),
+        @embedFile("../pkg_lock.zig"),   @embedFile("../package_data.zig"),
     } },
     // The embedded prelude loader and the embedded stdlib manifest are one
     // bootstrap surface: both hand constant source to the ordinary reader.
@@ -101,12 +101,6 @@ const source_groups = [_]SourceGroup{
     }, .sources = &.{
         @embedFile("../definition_prims.zig"), @embedFile("../doc.zig"),
     } },
-    // Names, reflective prose, and fixed effects are one compile-time registry.
-    .{ .production = true, .files = &.{
-        "primitive_docs.zig",
-    }, .sources = &.{
-        @embedFile("../primitive_docs.zig"),
-    } },
     // The editor owns raw-terminal restoration, scalar-safe mutation, and
     // atomic locked history as separate nominal states.
     .{ .production = true, .files = &.{
@@ -141,14 +135,15 @@ const source_groups = [_]SourceGroup{
     // vocabulary in external.zig and are opened only by their Session-owned
     // owner.
     .{ .production = true, .files = &.{
-        "scheduler.zig", "scheduler_core.zig", "external.zig", "process_port.zig", "console.zig", "task_prims.zig", "filesystem_port.zig", "package_authority.zig", "directory_order.zig",
-        "net_port.zig",
+        "scheduler.zig", "scheduler_core.zig", "external.zig",      "process_port.zig", "console.zig", "task_prims.zig", "filesystem_port.zig", "package_authority.zig", "directory_order.zig",
+        "net_port.zig",  "byte_ring.zig",      "port_transfer.zig",
     }, .sources = &.{
         @embedFile("../scheduler.zig"),       @embedFile("../scheduler_core.zig"),
         @embedFile("../external.zig"),        @embedFile("../process_port.zig"),
         @embedFile("../console.zig"),         @embedFile("../task_prims.zig"),
         @embedFile("../filesystem_port.zig"), @embedFile("../package_authority.zig"),
         @embedFile("../directory_order.zig"), @embedFile("../net_port.zig"),
+        @embedFile("../byte_ring.zig"),       @embedFile("../port_transfer.zig"),
     } },
     // The installed author SDK, its sized ABI records, validation, loader,
     // and transactional-call boundary form one separately rooted component.
@@ -1069,42 +1064,61 @@ const first_party_definition_sources = [_][:0]const u8{
     @embedFile("../stdlib/test/default.ecl"),
 };
 
-fn auditUnitConstructorSpelling() bool {
+/// Metadata is required by BuiltinWord and validated by its installer.
+/// This audit owns only the semantic spelling convention the compiler cannot
+/// infer. Scan parsed tokens from every production source, including escaped
+/// string literals, without treating comments or documentation as declarations.
+fn auditBuiltinMarks(comptime expected: []const []const u8, comptime kind: enum { unit, dynamic }) bool {
+    var found = [_]bool{false} ** expected.len;
     var failed = false;
-    const installers = [_][:0]const u8{
-        @embedFile("../prims.zig"),
-        @embedFile("../task_prims.zig"),
-        @embedFile("../module_prims.zig"),
-        @embedFile("../test_prims.zig"),
+    const allocator = std.heap.page_allocator;
+    for (source_groups) |group| {
+        if (!group.production) continue;
+        for (group.sources) |source| {
+            var tree = std.zig.Ast.parse(allocator, source, .zig) catch {
+                std.log.err("builtin marks: cannot parse production source", .{});
+                return true;
+            };
+            defer tree.deinit(allocator);
+            if (tree.errors.len != 0) {
+                std.log.err("builtin marks: malformed production source", .{});
+                failed = true;
+                continue;
+            }
+            const tags = tree.tokens.items(.tag);
+            for (0..tags.len -| 3) |index| {
+                if (tags[index] != .period or tags[index + 1] != .identifier or
+                    tags[index + 2] != .equal or tags[index + 3] != .string_literal) continue;
+                if (!std.mem.eql(u8, tree.tokenSlice(@intCast(index + 1)), "name")) continue;
+                const name = std.zig.string_literal.parseAlloc(allocator, tree.tokenSlice(@intCast(index + 3))) catch {
+                    std.log.err("builtin marks: invalid name literal", .{});
+                    failed = true;
+                    continue;
+                };
+                defer allocator.free(name);
+                for (expected, 0..) |required, required_index| {
+                    if (std.mem.eql(u8, name, required)) found[required_index] = true;
+                }
+                const invalid = switch (kind) {
+                    .unit => std.mem.startsWith(u8, name, "@") and !isUnitConstructor(name),
+                    .dynamic => wrappedStars(name) and !isDynamicContextWord(name),
+                };
+                if (invalid) {
+                    std.log.err("builtin marks: unexpected {s} spelling `{s}`", .{ @tagName(kind), name });
+                    failed = true;
+                }
+            }
+        }
+    }
+    for (found, expected) |present, name| if (!present) {
+        std.log.err("builtin marks: missing declaration for `{s}`", .{name});
+        failed = true;
     };
-    const documentation = @embedFile("../primitive_docs.zig");
-    for (unit_constructors) |name| {
-        var installed = false;
-        for (installers) |source| {
-            if (installedPrimitiveName(source, name)) installed = true;
-        }
-        if (!installed) {
-            std.log.err("unit constructors: `{s}` is not installed under that spelling", .{name});
-            failed = true;
-        }
-        if (!installedPrimitiveName(documentation, name)) {
-            std.log.err("unit constructors: `{s}` has no documentation entry", .{name});
-            failed = true;
-        }
-    }
-    // The other direction: a marked word that constructs no unit teaches the
-    // reader a rule the vocabulary then breaks.
-    var index: usize = 0;
-    while (std.mem.indexOfPos(u8, documentation, index, ".name = \"@")) |found| {
-        const start = found + ".name = \"".len;
-        const end = std.mem.indexOfScalarPos(u8, documentation, start, '"') orelse documentation.len;
-        const name = documentation[start..end];
-        if (!isUnitConstructor(name)) {
-            std.log.err("unit constructors: primitive `{s}` is marked but constructs no unit", .{name});
-            failed = true;
-        }
-        index = end;
-    }
+    return failed;
+}
+
+fn auditUnitConstructorSpelling() bool {
+    var failed = auditBuiltinMarks(&unit_constructors, .unit);
     for (first_party_definition_sources) |source| {
         var scan: usize = 0;
         while (std.mem.indexOfPos(u8, source, scan, "'@")) |found| {
@@ -1191,39 +1205,7 @@ fn auditHttpServerWriteSink() bool {
 }
 
 fn auditDynamicContextSpelling() bool {
-    var failed = false;
-    const installers = [_][:0]const u8{
-        @embedFile("../prims.zig"),
-        @embedFile("../task_prims.zig"),
-        @embedFile("../module_prims.zig"),
-    };
-    const documentation = @embedFile("../primitive_docs.zig");
-    for (dynamic_context_words) |name| {
-        var installed = false;
-        for (installers) |source| {
-            if (installedPrimitiveName(source, name)) installed = true;
-        }
-        if (!installed) {
-            std.log.err("dynamic context: `{s}` is not installed under that spelling", .{name});
-            failed = true;
-        }
-        if (!installedPrimitiveName(documentation, name)) {
-            std.log.err("dynamic context: `{s}` has no documentation entry", .{name});
-            failed = true;
-        }
-    }
-    var index: usize = 0;
-    while (std.mem.indexOfPos(u8, documentation, index, ".name = \"*")) |found| {
-        const start = found + ".name = \"".len;
-        const end = std.mem.indexOfScalarPos(u8, documentation, start, '"') orelse
-            documentation.len;
-        const name = documentation[start..end];
-        if (wrappedStars(name) and !isDynamicContextWord(name)) {
-            std.log.err("dynamic context: primitive `{s}` uses wrapped stars", .{name});
-            failed = true;
-        }
-        index = end;
-    }
+    var failed = auditBuiltinMarks(&dynamic_context_words, .dynamic);
     for (first_party_definition_sources) |source| {
         var scan: usize = 0;
         while (std.mem.indexOfPos(u8, source, scan, "'*")) |found| {

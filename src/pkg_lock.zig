@@ -8,7 +8,7 @@ const value = @import("value.zig");
 const heap = @import("heap.zig");
 const reader = @import("reader.zig");
 const dict = @import("dict.zig");
-const storage = @import("kernel_storage.zig");
+const data = @import("package_data.zig");
 const intern = @import("intern.zig");
 const project = @import("project.zig");
 const pkg_catalog = @import("pkg_catalog.zig");
@@ -406,10 +406,10 @@ fn discoverLock(
                 for (entries[0..initialized_entries]) |*entry| entry.deinit(allocator);
                 allocator.free(entries);
             }
-            const top = asDict(parsed.values()[0]) catch @panic("validated lock lost its dictionary shape");
-            const root_name = ownedUtf8(
+            const top = data.asDict(parsed.values()[0]) catch @panic("validated lock lost its dictionary shape");
+            const root_name = data.ownedUtf8(
                 allocator,
-                field(top, "root") catch @panic("validated lock lost its root field"),
+                data.field(top, "root") catch @panic("validated lock lost its root field"),
             ) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.Invalid => unreachable,
@@ -534,30 +534,30 @@ fn fillVisibility(
     entries: []Entry,
     root_index: usize,
 ) ValidationError!void {
-    const top = try asDict(item);
-    const requires = try asDict(try field(top, "requires"));
+    const top = try data.asDict(item);
+    const requires = try data.asDict(try data.field(top, "requires"));
     const root_name = entries[root_index].name;
     const requirer_count: usize = @intCast(requires.length());
     for (0..requirer_count) |requirer_index| {
-        const requirer_name = try ownedUtf8(allocator, dict.keyAt(requires, requirer_index));
+        const requirer_name = try data.ownedUtf8(allocator, dict.keyAt(requires, requirer_index));
         defer allocator.free(requirer_name);
         const entry_index = if (std.mem.eql(u8, requirer_name, root_name))
             root_index
         else
             findEntryIndex(entries[0..root_index], requirer_name) orelse return error.Invalid;
         if (entries[entry_index].requires.len != 0) return error.Invalid;
-        const edges = try asDict(dict.valueAt(requires, requirer_index));
+        const edges = try data.asDict(dict.valueAt(requires, requirer_index));
         const edge_count: usize = @intCast(edges.length());
         const visible = try allocator.alloc(pkg_catalog.PackageId, edge_count + 1);
         errdefer allocator.free(visible);
         visible[0] = @enumFromInt(@as(u32, @intCast(entry_index)));
         var built: usize = 1;
         for (0..edge_count) |edge_index| {
-            const edge = try exactFields(
+            const edge = try data.exactFields(
                 dict.valueAt(edges, edge_index),
                 &.{ "package", "version" },
             );
-            const required_name = try ownedUtf8(allocator, try field(edge, "package"));
+            const required_name = try data.ownedUtf8(allocator, try data.field(edge, "package"));
             defer allocator.free(required_name);
             const required_index = findEntryIndex(entries[0..root_index], required_name) orelse
                 return error.Invalid;
@@ -596,7 +596,7 @@ fn invalidSnapshot(
     return projectLock(owned);
 }
 
-const ValidationError = error{ Invalid, OutOfMemory };
+const ValidationError = data.ValidationError;
 
 fn validateLock(
     host: *const heap.HostCleanup,
@@ -605,15 +605,15 @@ fn validateLock(
     cache: CacheInputs,
 ) ValidationError![]Entry {
     const allocator = host.allocator();
-    const header = try asDict(item);
+    const header = try data.asDict(item);
     const vendored = switch (header.length()) {
         4 => cache_lock: {
-            _ = try exactFields(item, &.{ "format", "root", "packages", "requires" });
+            _ = try data.exactFields(item, &.{ "format", "root", "packages", "requires" });
             break :cache_lock false;
         },
         5 => vendor_lock: {
-            const top = try exactFields(item, &.{ "format", "root", "store", "packages", "requires" });
-            const store = try field(top, "store");
+            const top = try data.exactFields(item, &.{ "format", "root", "store", "packages", "requires" });
+            const store = try data.field(top, "store");
             if (store != .symbol or !std.mem.eql(u8, intern.get(store.symbol), "vendor"))
                 return error.Invalid;
             break :vendor_lock true;
@@ -621,15 +621,15 @@ fn validateLock(
         else => return error.Invalid,
     };
     const top = header;
-    const format = try field(top, "format");
+    const format = try data.field(top, "format");
     if (format != .int or format.int != 1) return error.Invalid;
-    const root_value = try field(top, "root");
-    const root = try ownedUtf8(allocator, root_value);
+    const root_value = try data.field(top, "root");
+    const root = try data.ownedUtf8(allocator, root_value);
     defer allocator.free(root);
     if (!validPackageName(root)) return error.Invalid;
 
-    const packages_value = try field(top, "packages");
-    const packages = try asDict(packages_value);
+    const packages_value = try data.field(top, "packages");
+    const packages = try data.asDict(packages_value);
     var entries: std.ArrayList(Entry) = .empty;
     errdefer {
         for (entries.items) |*entry| entry.deinit(allocator);
@@ -644,20 +644,20 @@ fn validateLock(
     const package_count: usize = @intCast(packages.length());
     try entries.ensureTotalCapacity(allocator, package_count);
     for (0..package_count) |index| {
-        const name = try ownedUtf8(allocator, dict.keyAt(packages, index));
+        const name = try data.ownedUtf8(allocator, dict.keyAt(packages, index));
         errdefer allocator.free(name);
         if (!validPackageName(name)) return error.Invalid;
-        const selection = try exactFields(
+        const selection = try data.exactFields(
             dict.valueAt(packages, index),
             &.{ "version", "url", "hash" },
         );
-        const version = try ownedUtf8(allocator, try field(selection, "version"));
+        const version = try data.ownedUtf8(allocator, try data.field(selection, "version"));
         errdefer allocator.free(version);
         if (!validVersion(version)) return error.Invalid;
-        const url = try ownedUtf8(allocator, try field(selection, "url"));
+        const url = try data.ownedUtf8(allocator, try data.field(selection, "url"));
         defer allocator.free(url);
         if (!validUrl(url)) return error.Invalid;
-        const hash = try ownedUtf8(allocator, try field(selection, "hash"));
+        const hash = try data.ownedUtf8(allocator, try data.field(selection, "hash"));
         defer allocator.free(hash);
         if (!validHash(hash)) return error.Invalid;
         const store_dir = if (store_root) |root_path|
@@ -676,28 +676,28 @@ fn validateLock(
         });
     }
 
-    const requires = try asDict(try field(top, "requires"));
+    const requires = try data.asDict(try data.field(top, "requires"));
     var found_root = false;
     const requirer_count: usize = @intCast(requires.length());
     for (0..requirer_count) |requirer_index| {
-        const requirer = try ownedUtf8(allocator, dict.keyAt(requires, requirer_index));
+        const requirer = try data.ownedUtf8(allocator, dict.keyAt(requires, requirer_index));
         defer allocator.free(requirer);
         if (!validPackageName(requirer)) return error.Invalid;
         found_root = found_root or std.mem.eql(u8, requirer, root);
-        const minimums = try asDict(dict.valueAt(requires, requirer_index));
+        const minimums = try data.asDict(dict.valueAt(requires, requirer_index));
         const minimum_count: usize = @intCast(minimums.length());
         for (0..minimum_count) |minimum_index| {
-            const alias = try ownedUtf8(allocator, dict.keyAt(minimums, minimum_index));
+            const alias = try data.ownedUtf8(allocator, dict.keyAt(minimums, minimum_index));
             defer allocator.free(alias);
             if (!validPackageName(alias)) return error.Invalid;
-            const edge = try exactFields(
+            const edge = try data.exactFields(
                 dict.valueAt(minimums, minimum_index),
                 &.{ "package", "version" },
             );
-            const required_name = try ownedUtf8(allocator, try field(edge, "package"));
+            const required_name = try data.ownedUtf8(allocator, try data.field(edge, "package"));
             defer allocator.free(required_name);
             if (!validPackageName(required_name)) return error.Invalid;
-            const minimum = try ownedUtf8(allocator, try field(edge, "version"));
+            const minimum = try data.ownedUtf8(allocator, try data.field(edge, "version"));
             defer allocator.free(minimum);
             if (!validVersion(minimum)) return error.Invalid;
             const selected = findEntry(entries.items, required_name) orelse return error.Invalid;
@@ -706,50 +706,6 @@ fn validateLock(
     }
     if (!found_root) return error.Invalid;
     return entries.toOwnedSlice(allocator);
-}
-
-fn exactFields(item: Value, names: []const []const u8) ValidationError!*value.DictHandle {
-    const header = try asDict(item);
-    if (header.length() != names.len) return error.Invalid;
-    for (0..names.len) |index| {
-        const key = dict.keyAt(header, index);
-        if (key != .symbol) return error.Invalid;
-        var known = false;
-        for (names) |name| known = known or std.mem.eql(u8, intern.get(key.symbol), name);
-        if (!known) return error.Invalid;
-    }
-    for (names) |name| _ = try field(header, name);
-    return header;
-}
-
-fn field(header: *value.DictHandle, name: []const u8) ValidationError!Value {
-    const count: usize = @intCast(header.length());
-    for (0..count) |index| {
-        const key = dict.keyAt(header, index);
-        if (key == .symbol and std.mem.eql(u8, intern.get(key.symbol), name))
-            return dict.valueAt(header, index);
-    }
-    return error.Invalid;
-}
-
-fn asDict(item: Value) ValidationError!*value.DictHandle {
-    return switch (item) {
-        .dict => |header| header,
-        else => error.Invalid,
-    };
-}
-
-fn ownedUtf8(allocator: std.mem.Allocator, item: Value) ValidationError![]u8 {
-    if (!item.isString()) return error.Invalid;
-    var cursor = storage.ToUtf8Cursor.init(allocator, item);
-    defer cursor.deinit();
-    while (true) switch (cursor.advance(65_536) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.InvalidCodepoint => return error.Invalid,
-    }) {
-        .pending => {},
-        .complete => |bytes| return bytes,
-    };
 }
 
 /// The one host-side cache selection: `ECL_CACHE`, then `XDG_CACHE_HOME/ecl/pkg`,

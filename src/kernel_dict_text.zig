@@ -23,13 +23,23 @@ const Op = support.TextOp;
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     inline for (std.meta.fields(Op)) |field| {
         const operation: Op = @enumFromInt(field.value);
-        if (operation == .format) continue;
-        try support.installPrimitive(core, operation.spelling(), bind(operation));
+        if (comptime definition(operation)) |word| try core.installBuiltin(word);
     }
 }
 
 pub fn formatForIdiom(evaluator: *Machine) MachineError!void {
     return formatPrimitive(evaluator);
+}
+
+fn definition(comptime operation: Op) ?env.BuiltinWord {
+    return switch (operation) {
+        .put => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "collection selector value -- collection", .doc = "Functionally replace list positions through a pervasive selector, or one whole-value dictionary key." },
+        .del => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "collection key -- collection", .doc = "Functionally remove an in-bounds list index or a dictionary key; a missing dictionary key is unchanged." },
+        .split => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "string separator -- parts", .doc = "Split a string at every occurrence of a separator; an empty separator yields its Unicode scalar strings." },
+        .join => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "strings separator -- string", .doc = "Join a list of strings with a separator string." },
+        .str => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "value -- string", .doc = "Return the canonical printed representation of a value as a string." },
+        .format => null,
+    };
 }
 
 fn bind(comptime operation: Op) env.PrimitiveImpl {

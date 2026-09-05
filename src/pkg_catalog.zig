@@ -9,7 +9,7 @@ const value = @import("value.zig");
 const heap = @import("heap.zig");
 const reader = @import("reader.zig");
 const dict = @import("dict.zig");
-const storage = @import("kernel_storage.zig");
+const data = @import("package_data.zig");
 const intern = @import("intern.zig");
 
 const Value = value.Value;
@@ -362,14 +362,14 @@ const Builder = struct {
     }
 
     fn parseManifest(self: *Builder, path: []const u8, item: Value) BuildError!Manifest {
-        const top = exactFields(item, &.{ "format", "name", "version", "exports", "requires" }) catch
+        const top = data.exactFields(item, &.{ "format", "name", "version", "exports", "requires" }) catch
             return self.fail("package manifest `{s}` does not have the exact format-1 fields", .{path});
-        const format = field(top, "format") catch @panic("exact manifest lost its format field");
+        const format = data.field(top, "format") catch @panic("exact manifest lost its format field");
         if (format != .int or format.int != 1)
             return self.fail("package manifest `{s}` has an unsupported format", .{path});
-        const name = ownedUtf8(
+        const name = data.ownedUtf8(
             self.allocator,
-            field(top, "name") catch @panic("exact manifest lost its name field"),
+            data.field(top, "name") catch @panic("exact manifest lost its name field"),
         ) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Invalid => return self.fail("package manifest `{s}` has a non-string name", .{path}),
@@ -377,17 +377,17 @@ const Builder = struct {
         errdefer self.allocator.free(name);
         if (!validCanonicalName(name))
             return self.fail("package manifest `{s}` has a non-canonical name", .{path});
-        const version = ownedUtf8(
+        const version = data.ownedUtf8(
             self.allocator,
-            field(top, "version") catch @panic("exact manifest lost its version field"),
+            data.field(top, "version") catch @panic("exact manifest lost its version field"),
         ) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Invalid => return self.fail("package manifest `{s}` has a non-string version", .{path}),
         };
         errdefer self.allocator.free(version);
 
-        const exports_dict = asDict(
-            field(top, "exports") catch @panic("exact manifest lost its exports field"),
+        const exports_dict = data.asDict(
+            data.field(top, "exports") catch @panic("exact manifest lost its exports field"),
         ) catch
             return self.fail("package manifest `{s}` exports must be a dict", .{path});
         var exports: std.ArrayList(Export) = .empty;
@@ -398,7 +398,7 @@ const Builder = struct {
         const export_count: usize = @intCast(exports_dict.length());
         try exports.ensureTotalCapacity(self.allocator, export_count);
         for (0..export_count) |index| {
-            const namespace = ownedUtf8(self.allocator, dict.keyAt(exports_dict, index)) catch |err| switch (err) {
+            const namespace = data.ownedUtf8(self.allocator, dict.keyAt(exports_dict, index)) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.Invalid => return self.fail("package manifest `{s}` has a non-string export namespace", .{path}),
             };
@@ -426,7 +426,7 @@ const Builder = struct {
                 self.allocator.free(globs);
             }
             for (0..glob_count) |glob_index| {
-                const glob = ownedUtf8(
+                const glob = data.ownedUtf8(
                     self.allocator,
                     @import("list.zig").atUnchecked(.{ .list = glob_list }, glob_index),
                 ) catch |err| switch (err) {
@@ -477,8 +477,8 @@ const Builder = struct {
         name: []const u8,
         top: *value.DictHandle,
     ) BuildError!void {
-        const requires = asDict(
-            field(top, "requires") catch @panic("exact manifest lost its requires field"),
+        const requires = data.asDict(
+            data.field(top, "requires") catch @panic("exact manifest lost its requires field"),
         ) catch
             return self.fail("package manifest `{s}` requires must be a dict", .{path});
         const count: usize = @intCast(requires.length());
@@ -489,7 +489,7 @@ const Builder = struct {
         }
         try required.ensureTotalCapacity(self.allocator, count);
         for (0..count) |index| {
-            const alias = ownedUtf8(self.allocator, dict.keyAt(requires, index)) catch |err| switch (err) {
+            const alias = data.ownedUtf8(self.allocator, dict.keyAt(requires, index)) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.Invalid => return self.fail(
                     "package manifest `{s}` has a non-string requirement alias",
@@ -501,7 +501,7 @@ const Builder = struct {
                 "package manifest `{s}` requirement alias `{s}` is not a canonical package name",
                 .{ path, alias },
             );
-            const requirement = exactFields(
+            const requirement = data.exactFields(
                 dict.valueAt(requires, index),
                 &.{ "package", "version", "url", "hash" },
             ) catch return self.fail(
@@ -558,9 +558,9 @@ const Builder = struct {
         requirement: *value.DictHandle,
         key: []const u8,
     ) BuildError![]u8 {
-        return ownedUtf8(
+        return data.ownedUtf8(
             self.allocator,
-            field(requirement, key) catch @panic("exact requirement lost a field"),
+            data.field(requirement, key) catch @panic("exact requirement lost a field"),
         ) catch |err| switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.Invalid => self.fail(
@@ -899,49 +899,4 @@ fn validSegment(segment: []const u8) bool {
     for (segment[1..]) |byte| if (!((byte >= 'a' and byte <= 'z') or
         (byte >= '0' and byte <= '9') or byte == '-')) return false;
     return true;
-}
-
-const ValidationError = error{ Invalid, OutOfMemory };
-
-fn exactFields(item: Value, names: []const []const u8) ValidationError!*value.DictHandle {
-    const header = try asDict(item);
-    if (header.length() != names.len) return error.Invalid;
-    for (0..@as(usize, @intCast(header.length()))) |index| {
-        const key = dict.keyAt(header, index);
-        if (key != .symbol) return error.Invalid;
-        var known = false;
-        for (names) |name| known = known or std.mem.eql(u8, intern.get(key.symbol), name);
-        if (!known) return error.Invalid;
-    }
-    for (names) |name| _ = try field(header, name);
-    return header;
-}
-
-fn field(header: *value.DictHandle, name: []const u8) ValidationError!Value {
-    for (0..@as(usize, @intCast(header.length()))) |index| {
-        const key = dict.keyAt(header, index);
-        if (key == .symbol and std.mem.eql(u8, intern.get(key.symbol), name))
-            return dict.valueAt(header, index);
-    }
-    return error.Invalid;
-}
-
-fn asDict(item: Value) ValidationError!*value.DictHandle {
-    return switch (item) {
-        .dict => |header| header,
-        else => error.Invalid,
-    };
-}
-
-fn ownedUtf8(allocator: std.mem.Allocator, item: Value) ValidationError![]u8 {
-    if (!item.isString()) return error.Invalid;
-    var cursor = storage.ToUtf8Cursor.init(allocator, item);
-    defer cursor.deinit();
-    while (true) switch (cursor.advance(65_536) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.InvalidCodepoint => return error.Invalid,
-    }) {
-        .pending => {},
-        .complete => |bytes| return bytes,
-    };
 }

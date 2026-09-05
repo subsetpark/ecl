@@ -7,6 +7,107 @@
 
 const std = @import("std");
 
+/// A keyed list of registered readiness waits over one cell type. The cell
+/// supplies a mutex, this wait list, retained readiness ownership, and locked
+/// readiness/reason observations. Registration owns both the cell and target
+/// until consuming cancellation. A wake runs while linked under the cell lock;
+/// cancellation cannot release either owner until that wake has returned.
+/// Backends determine the wake reason; delivery never cancels inline.
+pub fn WaitList(comptime Cell: type) type {
+    return struct {
+        const Self = @This();
+
+        pub const Wait = struct {
+            allocator: std.mem.Allocator,
+            cell: *Cell,
+            key: u64,
+            target: WakeTarget,
+            previous: ?*Wait = null,
+            next: ?*Wait = null,
+            linked: std.atomic.Value(bool) = .init(false),
+
+            pub fn cancelReadiness(self: *Wait) void {
+                const cell = self.cell;
+                if (self.linked.load(.acquire)) {
+                    std.Io.Threaded.mutexLock(&cell.mutex);
+                    if (self.linked.load(.monotonic)) cell.waits.unlinkLocked(self);
+                    std.Io.Threaded.mutexUnlock(&cell.mutex);
+                }
+                self.target.release();
+                cell.releaseReadiness();
+                self.allocator.destroy(self);
+            }
+        };
+
+        first: ?*Wait = null,
+        last: ?*Wait = null,
+
+        pub fn register(
+            cell: *Cell,
+            key: u64,
+            target: WakeTarget,
+        ) RegisterError!RegisterResult {
+            const wait = try cell.allocator.create(Wait);
+            errdefer cell.allocator.destroy(wait);
+            wait.* = .{
+                .allocator = cell.allocator,
+                .cell = cell,
+                .key = key,
+                .target = target,
+            };
+            std.Io.Threaded.mutexLock(&cell.mutex);
+            if (cell.readyLocked(key)) {
+                const reason = cell.wakeReasonLocked(key);
+                std.Io.Threaded.mutexUnlock(&cell.mutex);
+                cell.allocator.destroy(wait);
+                return .{ .ready = reason };
+            }
+            target.retain();
+            cell.retainReadiness();
+            cell.waits.linkLocked(wait);
+            std.Io.Threaded.mutexUnlock(&cell.mutex);
+            return .{ .registered = readinessRegistration(Wait, wait) };
+        }
+
+        fn linkLocked(self: *Self, wait: *Wait) void {
+            std.debug.assert(!wait.linked.load(.monotonic));
+            if (self.last) |last| {
+                last.next = wait;
+                wait.previous = last;
+            } else self.first = wait;
+            self.last = wait;
+            wait.linked.store(true, .release);
+        }
+
+        fn unlinkLocked(self: *Self, wait: *Wait) void {
+            std.debug.assert(wait.linked.load(.monotonic));
+            if (wait.previous) |previous| previous.next = wait.next else self.first = wait.next;
+            if (wait.next) |next| next.previous = wait.previous else self.last = wait.previous;
+            wait.previous = null;
+            wait.next = null;
+            wait.linked.store(false, .release);
+        }
+
+        /// Called with the cell lock held. The wake happens while the wait
+        /// is still linked: a concurrent `cancelReadiness` then sees `linked`
+        /// and must take this mutex before it can destroy the wait, so the
+        /// target cannot be freed out from under the call. Delivery never
+        /// cancels the registration on the waking thread, so holding the lock
+        /// across the wake cannot deadlock.
+        pub fn notifyLocked(self: *Self, cell: *Cell) void {
+            var wait = self.first;
+            while (wait) |candidate| {
+                const next = candidate.next;
+                if (cell.readyLocked(candidate.key)) {
+                    candidate.target.wake(cell.wakeReasonLocked(candidate.key));
+                    self.unlinkLocked(candidate);
+                }
+                wait = next;
+            }
+        }
+    };
+}
+
 /// Nominal proof that a Session granted process creation authority. Concrete
 /// controller ownership and policy remain private to `process_port.zig`.
 pub const ProcessAccess = opaque {};

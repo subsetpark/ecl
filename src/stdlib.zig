@@ -160,9 +160,7 @@ comptime {
                 if (words.len == 0)
                     @compileError("embedded builtin module has no words: " ++ module.name);
                 for (words) |word| {
-                    if (word.doc.len == 0)
-                        @compileError("embedded builtin word is undocumented: " ++ word.name);
-                    env.assertStaticNamespace(word.name);
+                    env.assertStaticBuiltin(word);
                 }
             },
         }

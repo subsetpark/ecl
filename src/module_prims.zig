@@ -14,30 +14,29 @@ const kernel_storage = @import("kernel_storage.zig");
 const Value = value.Value;
 const Machine = machine.Machine;
 const MachineError = machine.MachineError;
-const Definition = struct { name: []const u8, primitive: env.PrimitiveImpl };
 /// Removal advances one owner transition per cursor step. Keep its scheduler
 /// slice small enough that cancellation can run after the directory close edge
 /// while a user-sized durable stack is still retiring.
 const removal_poll_quantum: usize = 256;
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     try definition_prims.install(core);
-    const definitions = comptime [_]Definition{
-        .{ .name = "@module", .primitive = moduleWord },
-        .{ .name = "register", .primitive = registerWord },
-        .{ .name = "@defm", .primitive = defmWord },
-        .{ .name = "unmodule", .primitive = unmoduleWord },
-        .{ .name = "*file*", .primitive = fileWord },
-        .{ .name = "*module*", .primitive = moduleNameWord },
-        .{ .name = "within", .primitive = withinWord },
-        .{ .name = "without", .primitive = withoutWord },
-        .{ .name = "import", .primitive = importWord },
-        .{ .name = "alias", .primitive = aliasModule },
-        .{ .name = "qualify", .primitive = qualify },
-        .{ .name = "invoke", .primitive = invoke },
-        .{ .name = "words", .primitive = words },
-        .{ .name = "load", .primitive = load },
+    const definitions = comptime [_]env.BuiltinWord{
+        .{ .name = "@module", .primitive = moduleWord, .effect = "values body -- module", .doc = "Evaluate a module body with an explicit initial stack in a fresh unit and return its definitions as an anonymous immutable module value." },
+        .{ .name = "register", .primitive = registerWord, .effect = "module module-name --", .doc = "Register a module value under a canonical name, creating that registration or replacing its code while keeping its durable state." },
+        .{ .name = "@defm", .primitive = defmWord, .effect = "values body module-name --", .doc = "Evaluate a module body with an explicit initial stack and register the resulting module value under a name; exactly `@module` followed by `register`." },
+        .{ .name = "unmodule", .primitive = unmoduleWord, .effect = "module-name --", .doc = "Close, quiesce, and retire a registered module named by a symbol." },
+        .{ .name = "*file*", .primitive = fileWord, .effect = "-- string", .doc = "Return the source name dynamically supplied by the currently executing reader-authored occurrence." },
+        .{ .name = "*module*", .primitive = moduleNameWord, .effect = "-- module-name", .doc = "Return the canonical registration name dynamically supplied by the current module activation." },
+        .{ .name = "within", .primitive = withinWord, .effect = "quotation -- ...", .doc = "Run a quotation against a private draft of the home module's durable stack and publish the result." },
+        .{ .name = "without", .primitive = withoutWord, .effect = null, .doc = "Move the draft's top value onto the pending outputs a within application returns to its caller." },
+        .{ .name = "import", .primitive = importWord, .effect = "module-name q --", .doc = "Import a list of public module attributes under their own names, preserving effects and documentation." },
+        .{ .name = "alias", .primitive = aliasModule, .effect = "short name --", .doc = "Register a short alias for a qualified module name." },
+        .{ .name = "qualify", .primitive = qualify, .effect = "module-name binding-name -- qualified-word", .doc = "Construct an executable qualified word without reparsing source text." },
+        .{ .name = "invoke", .primitive = invoke, .effect = "module binding-name -- ...", .doc = "Call one public export of a module value, which carries no name to qualify." },
+        .{ .name = "words", .primitive = words, .effect = "--", .doc = "Print the visible dictionary in sorted order." },
+        .{ .name = "load", .primitive = load, .effect = "path --", .doc = "Read and evaluate a source file as one transactional unit." },
     };
-    try core.installBuiltins(definitions);
+    try core.installBuiltins(&definitions);
 }
 /// Construction alone: seeds initialize the construction stack, the body
 /// builds an anonymous immutable image, and the program decides later whether,
@@ -698,7 +697,7 @@ fn load(evaluator: *Machine) MachineError!void {
     var path_value = try evaluator.popValue();
     defer path_value.deinit();
     if (!path_value.borrow().isString()) return evaluator.typeError("a string path");
-    const encoder = kernel_storage.ToUtf8Cursor.init(evaluator.allocator(), path_value.borrow());
+    const encoder = kernel_storage.StringEncoder.init(evaluator.allocator(), path_value.borrow());
     try evaluator.startDriver(LoadPathDriver{
         .path_value = .init(path_value.take()),
         .encoder = .init(encoder),

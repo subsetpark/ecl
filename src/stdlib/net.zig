@@ -12,11 +12,11 @@
 //! TLS belong to protocol modules above this one.
 
 const std = @import("std");
+const transfer = @import("../port_transfer.zig");
 const dict = @import("../dict.zig");
 const env = @import("../env.zig");
 const heap = @import("../heap.zig");
 const intern = @import("../intern.zig");
-const kernel_storage = @import("../kernel_storage.zig");
 const list = @import("../list.zig");
 const machine = @import("../machine.zig");
 const net_port = @import("../net_port.zig");
@@ -469,50 +469,32 @@ fn read(evaluator: *Machine) MachineError!void {
     errdefer evaluator.allocator().destroy(driver);
     driver.* = .{
         .allocator = evaluator.allocator(),
-        .connection = connection.take(),
-        .cell = cell,
+        .port = connection.take(),
+        .backend = .{ .cell = cell },
         .buffer = buffer,
     };
     evaluator.adoptDriver(driver);
 }
 
-const ReadDriver = struct {
-    pub const address_stable_driver = {};
-    pub const ownership: heap.DriverOwnership = .self_owned;
-    allocator: std.mem.Allocator,
-    connection: Value,
-    cell: *net_port.ConnectionCell,
-    buffer: []u8,
-    count: ?usize = null,
-    materializer: ?list.ByteListMaterializer = null,
+const ReadDriver = transfer.ReadDriver(ReadBackend);
 
-    pub fn deinit(self: *ReadDriver, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
-        if (self.materializer) |*materializer| materializer.retire(releases);
+const ReadBackend = struct {
+    cell: *net_port.ConnectionCell,
+
+    pub fn endRead(self: ReadBackend) void {
         self.cell.endRead();
-        allocator.free(self.buffer);
-        releases.releaseValue(self.connection);
     }
 
-    pub fn advance(evaluator: *Machine, self: *ReadDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        if (self.count == null) switch (self.cell.read(self.buffer)) {
-            .pending => {
-                try evaluator.park(.{ .external = self.cell.readSource() });
-                return .yielded;
-            },
-            .failed => |failure| return failConnection(evaluator, self.cell, failure),
-            .eof => self.count = 0,
-            .data => |count| self.count = count,
-        };
-        if (self.materializer == null)
-            self.materializer = .init(self.allocator, self.buffer[0..self.count.?]);
-        return switch (try self.materializer.?.advance(machine.kernel_poll_quantum)) {
-            .pending => .yielded,
-            .complete => |item| complete: {
-                self.materializer.?.deinit();
-                self.materializer = null;
-                break :complete .{ .output = item };
-            },
+    pub fn readSource(self: ReadBackend) @import("../external.zig").ReadinessSource {
+        return self.cell.readSource();
+    }
+
+    pub fn read(self: ReadBackend, evaluator: *Machine, buffer: []u8) MachineError!transfer.ReadProgress {
+        return switch (self.cell.read(buffer)) {
+            .pending => .pending,
+            .eof => .eof,
+            .data => |count| .{ .data = count },
+            .failed => |failure| failConnection(evaluator, self.cell, failure),
         };
     }
 };
@@ -527,66 +509,23 @@ fn write(evaluator: *Machine) MachineError!void {
     const cell = try connectionCell(evaluator, connection.borrow());
     const permit = try cell.beginWrite();
     errdefer cell.abandonWrite(permit);
-    const bytes_borrowed = bytes.borrow();
     const driver = try evaluator.allocator().create(WriteDriver);
-    driver.* = .{
-        .connection = connection.take(),
-        .bytes_value = bytes.take(),
-        .encoder = .init(evaluator.allocator(), bytes_borrowed),
-        .cell = cell,
-        .permit = permit,
-    };
+    driver.* = .init(evaluator.allocator(), connection.take(), bytes.take(), .{ .cell = cell }, permit);
     evaluator.adoptDriver(driver);
 }
 
-const WriteDriver = struct {
-    pub const address_stable_driver = {};
-    pub const ownership: heap.DriverOwnership = .self_owned;
-    connection: Value,
-    bytes_value: Value,
-    encoder: ?kernel_storage.ByteVectorEncoder,
-    bytes: ?kernel_storage.ByteVector = null,
+const WriteDriver = transfer.WriteDriver(WriteBackend);
+
+const WriteBackend = struct {
+    pub const WritePermit = net_port.WritePermit;
+    pub const invalid_byte_message = "net.write contains a value outside 0...255";
     cell: *net_port.ConnectionCell,
-    permit: ?*net_port.WritePermit = null,
-    offset: usize = 0,
 
-    pub fn deinit(self: *WriteDriver, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
-        if (self.permit) |permit| self.cell.abandonWrite(permit);
-        if (self.encoder) |*encoder| encoder.deinit();
-        if (self.bytes) |*bytes| bytes.retire(releases, allocator);
-        releases.releaseValue(self.bytes_value);
-        releases.releaseValue(self.connection);
-    }
-
-    pub fn advance(evaluator: *Machine, self: *WriteDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        if (self.bytes == null) switch (self.encoder.?.advance(machine.kernel_poll_quantum) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidByte => return evaluator.fail(.domain, "net.write contains a value outside 0...255"),
-        }) {
-            .pending => return .yielded,
-            .complete => |bytes| {
-                self.encoder.?.deinit();
-                self.encoder = null;
-                self.bytes = bytes;
-            },
-        };
-        const source = self.bytes.?.bytes();
-        if (self.offset == source.len) {
-            self.cell.finishWrite(self.permit.?);
-            self.permit = null;
-            return .completed;
-        }
-        return switch (self.cell.write(self.permit.?, source[self.offset..])) {
-            .written => |count| progressed: {
-                self.offset += count;
-                break :progressed .yielded;
-            },
+    pub fn write(self: WriteBackend, evaluator: *Machine, permit: *WritePermit, bytes: []const u8) MachineError!transfer.WriteProgress {
+        return switch (self.cell.write(permit, bytes)) {
+            .pending => .pending,
+            .written => |count| .{ .written = count },
             .failed => |failure| failConnection(evaluator, self.cell, failure),
-            .pending => parked: {
-                try evaluator.park(.{ .external = self.cell.writeSource(self.permit.?) });
-                break :parked .yielded;
-            },
         };
     }
 };

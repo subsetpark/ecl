@@ -11,21 +11,20 @@ const scheduler_api = @import("scheduler.zig");
 const Value = value.Value;
 const Machine = machine.Machine;
 const MachineError = machine.MachineError;
-const Definition = struct { name: []const u8, primitive: env.PrimitiveImpl };
 const par_each_work_quantum: usize = 256;
 
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
-    const definitions = comptime [_]Definition{
-        .{ .name = "@spawn", .primitive = spawn },
-        .{ .name = "@give", .primitive = give },
-        .{ .name = "await", .primitive = await },
-        .{ .name = "cancel", .primitive = cancel },
-        .{ .name = "tasks", .primitive = tasks },
-        .{ .name = "await-any", .primitive = awaitAny },
-        .{ .name = "await-for", .primitive = awaitFor },
-        .{ .name = "@each", .primitive = parEach },
+    const definitions = comptime [_]env.BuiltinWord{
+        .{ .name = "@spawn", .primitive = spawn, .effect = "values quotation -- task", .doc = "Run a quotation with an explicit initial stack concurrently in a fresh child unit." },
+        .{ .name = "@give", .primitive = give, .effect = "ports values quotation -- task", .doc = "Run a quotation concurrently in a fresh child unit that owns the given ports: the child unit closes them when it ends, and the calling unit no longer does." },
+        .{ .name = "await", .primitive = await, .effect = "task -- result", .doc = "Wait for a task and return its success or error result." },
+        .{ .name = "cancel", .primitive = cancel, .effect = "task --", .doc = "Request cancellation of a task, doing nothing if it is already complete." },
+        .{ .name = "tasks", .primitive = tasks, .effect = "-- tasks", .doc = "Return pending descendant tasks in deterministic spawn order." },
+        .{ .name = "await-any", .primitive = awaitAny, .effect = "tasks -- index result", .doc = "Wait for any task in a nonempty list and return its index and result." },
+        .{ .name = "await-for", .primitive = awaitFor, .effect = "task milliseconds -- result", .doc = "Wait up to a nonnegative number of milliseconds for a task result." },
+        .{ .name = "@each", .primitive = parEach, .effect = "sequence values quotation -- results", .doc = "Apply a quotation with an explicit shared initial stack concurrently in one fresh unit per element and return one result per element in input order." },
     };
-    try core.installBuiltins(definitions);
+    try core.installBuiltins(&definitions);
 }
 
 fn scheduler(evaluator: *Machine) *const scheduler_api.WorkerScheduler {
