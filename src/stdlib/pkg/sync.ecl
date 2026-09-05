@@ -69,7 +69,7 @@
  ### defp fetch-body
  (package requirement -- body : "Fetch and hash-check one exact package archive.")
  (|package requirement|
-  requirement 'url at {} http.get-bytes
+  'target requirement 'url at pair dict.from-flat http.get-bytes
   package requirement 'url at success-response
   'body at
   package requirement 'hash at hash-checked)
@@ -84,7 +84,7 @@
   version pkg.version.validate pop
   url pkg.name.url?
   'domain error.new "pkg add expects an https url" error.with-message assert
-  url {} http.get-bytes package url success-response 'body at
+  'target url pair dict.from-flat http.get-bytes package url success-response 'body at
   dup archive.sha256 "sha256-" swap cat
   package version url
   requirement-checked)

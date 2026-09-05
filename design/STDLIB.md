@@ -469,10 +469,13 @@ optional effect and documentation metadata. A top-level `defp` is an
 error.
 
 ### del
-`( collection key -- collection )` — Functionally remove an in-bounds list
-index or a dictionary key. List indices must be nonnegative integers within
-the list; an invalid index is `'domain`. A missing dictionary key leaves the
-dictionary unchanged.
+`( collection selector -- collection )` — Functionally remove list positions
+through a pervasive selector, or one whole-value dictionary key. List selector
+leaves are nonnegative in-bounds integer positions in the original list;
+duplicates remove a position once, and the relative order of retained elements
+is unchanged. An empty selector returns the list unchanged. A missing
+dictionary key leaves the dictionary unchanged. Use `dict.del` to remove a
+pervasive selection of dictionary keys.
 
 ### dip
 `( x q -- … x )` — *Inline.* Run a quotation beneath a protected top
@@ -1462,19 +1465,23 @@ These operations preserve the language's immutable, insertion-ordered
 dictionary semantics. The constructor family accepts flat adjacent entries,
 parallel key/value lists, association lists, or one shared value for a key
 list. All constructors reject duplicate keys instead of silently choosing a
-winner.
+winner. Core `at`, `put`, `update`, and `del` treat a dictionary selector as
+one whole-value key. Their `dict.at`, `dict.update`, and `dict.del` counterparts
+instead pervade through nested list selectors; use the core forms to address a
+dictionary key that is itself a list.
 
 ### at
-`( dict keys -- values )` — Look up every whole-value key in the requested
-key list and return the corresponding values in request order. Duplicate keys
-produce duplicate values. An absent key is `'domain`; the operation never
-silently drops a request. A structural list in `keys` is one dictionary key,
-while core `at` remains the scalar operation for looking up a structural list
-key directly.
+`( dict selector -- values )` — Look up every leaf of a nested list selector
+and preserve the selector's shape and request order in the result. Duplicate
+keys produce duplicate values. An absent key is `'domain`; the operation never
+silently drops a request. Core `at` is the whole-value operation for looking up
+a structural list key directly.
 
-### drop
-`( dict keys -- dict )` — Remove entries named by a key list, ignoring absent
-keys and preserving the relative order of every retained entry.
+### del
+`( dict selector -- dict )` — Remove entries named by the leaves of a nested
+list selector, ignoring absent and duplicate keys and preserving the relative
+order of every retained entry. Core `del` removes one whole-value key,
+including a key that is itself a list.
 
 ### filter
 `( dict predicate -- dict )` — Call a `( key value -- bool )` predicate in
@@ -1576,12 +1583,12 @@ keys. Output follows dictionary order independently of the requested key-list
 order.
 
 ### update
-`( dict keys quotation -- dict )` — Apply an isolated `( value -- value )`
-quotation to every requested whole-value key without moving entries. Keys are
-processed in request order, so duplicates observe earlier updates. A structural
-list in `keys` is one dictionary key. All keys are validated before the
-quotation is first applied; an absent key is `'domain`, and an empty request
-returns the dictionary unchanged.
+`( dict selector quotation -- dict )` — Apply an isolated `( value -- value )`
+quotation to every leaf of a nested list selector without moving entries. Keys
+are processed in pervasive request order, so duplicates observe earlier
+updates. All keys are validated before the quotation is first applied; an
+absent key is `'domain`, and an empty selector returns the dictionary
+unchanged. Core `update` addresses one whole-value key, including a list key.
 
 ### update-or
 `( dict key default quotation -- dict )` — Update an existing value as
@@ -1777,30 +1784,45 @@ dangling link is `'not-found`.
 ## http
 
 ### get
-`( url headers -- response )` — Fetch a URL with caller-supplied headers;
-use `{}` for none. Return `{'status int, 'headers dict, 'body string}`. A
-transport or protocol failure is `'io` carrying the URL in `'path`; a non-2xx
-status is an ordinary response.
+`( request -- response )` — Fetch a partial or complete `http.request` value,
+using GET and redirect following as defaults. The request must carry a string
+`'target` URL. An optional `'method` overrides GET, optional `'headers` are
+sent once per value in list order, and an optional byte-list `'body` is sent
+exactly for POST, PUT, or PATCH. A nonempty body with another method is
+`'domain`. Return `{'status int, 'headers dict, 'body string}`. A transport or
+protocol failure is `'io` carrying the URL in `'path`; a non-2xx status is an
+ordinary response.
 
 ### get-bytes
-`( url headers -- response )` — Perform the same GET as `get`, including
+`( request -- response )` — Perform the same request as `get`, including
 redirects and content decoding, but return `'body` as the exact ordered octets
 in an ordinary integer byte list. Status and headers retain the same types.
 This is the binary ingress used for archives; no byte is decoded to or encoded
 from a Unicode character before hashing.
 
 ### post
-`( url headers body -- response )` — Post a body with caller-supplied headers
-and return the same response shape and errors as `get`.
+`( request -- response )` — Fetch the same request value as `get`, using POST,
+an empty body, and no redirect following as defaults. An optional `'method`
+or `'body` overrides those request defaults. Return the same response shape
+and errors as `get`.
+
+### send
+`( request -- response )` — Send a complete `http.request` value. Unlike `get`
+and `post`, this word supplies no method default: both string `'method` and
+`'target` fields are required. Redirects are not followed. Return the same
+response shape and errors as `get`.
 
 ## http.request
 
-Words over the request dictionary an `http.server` handler receives,
-`{'method 'target 'path 'query 'headers 'body 'peer}`, optionally carrying the
-`'params` dictionary `http.server.route` binds. They build a request, read its
-headers and query by name, decode its body, and return updated copies; the
-original is never changed. A word given a value that is not a request
-dictionary, or a name that is not a string, is `'type`.
+Words over partial or complete request dictionaries. Recognized optional
+fields are `'method`, `'target`, `'path`, `'query`, `'headers`, `'body`,
+`'peer`, and `'params`. `http.server` handlers receive every field except
+`'params`, which `http.server.route` may add; outbound `http.get` and
+`http.post` accept partial values and apply their documented defaults, while
+`http.send` consumes a complete value. The words here build a complete
+request, read absent headers/query/body using empty defaults, and return
+updated copies; the original is never changed. A word given a malformed
+request dictionary, or a name that is not a string, is `'type`.
 
 ### header
 `( request name -- values )` — Return the list of values of a header, matching
@@ -1845,11 +1867,11 @@ or a decoded key or value that is not valid UTF-8, is `'domain`.
 is not valid UTF-8 is `'domain`, as for `chars`.
 
 ### valid?
-`( value -- bool )` — Return 1 for a request dictionary: the seven keys with
-string method, target, path, query, and peer, a headers dictionary from
-ASCII-lowercased string names to lists of strings, and a byte-list body, plus
-an optional
-`'params` dictionary of string names to string values. Never raises.
+`( value -- bool )` — Return 1 for a partial or complete request dictionary
+containing only recognized fields: string method, target, path, query, and
+peer; a headers dictionary from ASCII-lowercased string names to lists of
+strings; a byte-list body; and a params dictionary from string names to string
+values. Every field is optional. Never raises.
 
 ### with-body
 `( request body -- request )` — Return the request with a new body: a byte
@@ -1868,13 +1890,13 @@ parameter bound under the name, as `route` does. A non-string value is
 ## http.response
 
 Words over the response dictionary `{'status 'headers 'body}`: the value
-`http.get` and `http.post` return and the value an `http.server` handler
-leaves. They build a response, read its headers by name regardless of letter
-case, classify its status, and return updated copies. `valid?` accepts every
-well-shaped value; the wire rules a server enforces (no 1xx, reserved header
-names, no CR or LF) belong to `http.server.render-response`. A word given a
-value that is not a response dictionary, a status outside `100...599`, or a
-name that is not a string is `'type`.
+`http.get`, `http.post`, and `http.send` return and the value an `http.server`
+handler leaves. They build a response, read its headers by name regardless of
+letter case, classify its status, and return updated copies. `valid?` accepts
+every well-shaped value; the wire rules a server enforces (no 1xx, reserved
+header names, no CR or LF) belong to `http.server.render-response`. A word
+given a value that is not a response dictionary, a status outside `100...599`,
+or a name that is not a string is `'type`.
 
 ### class
 `( response -- int )` — Return the status class: 2 for `200...299`, 4 for

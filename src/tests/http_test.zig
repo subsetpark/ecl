@@ -17,8 +17,8 @@ test "http: HTTPS get-bytes preserves arbitrary response octets" {
     defer fixture.stop();
     try expectTlsStack(
         fixture.port,
-        "\"https://127.0.0.1:{d}/redirect-bytes\" {{}} http.get-bytes 'body at " ++
-            "\"https://127.0.0.1:{d}/gzip-bytes\" {{}} http.get-bytes 'body at",
+        "{{'target \"https://127.0.0.1:{d}/redirect-bytes\"}} http.get-bytes 'body at " ++
+            "{{'target \"https://127.0.0.1:{d}/gzip-bytes\"}} http.get-bytes 'body at",
         "[0 1 127 128 255 195 40] [0 1 127 128 255 195 40]",
         valid_cert_time,
     );
@@ -32,7 +32,7 @@ test "http: custom TLS trust uses fixed verification time" {
     // here proves Client used the supplied time rather than the wall clock.
     const source = try std.fmt.allocPrint(
         allocator,
-        "\"https://127.0.0.1:{d}/bytes\" {{}} http.get-bytes",
+        "{{'target \"https://127.0.0.1:{d}/bytes\"}} http.get-bytes",
         .{fixture.port},
     );
     defer allocator.free(source);
@@ -223,14 +223,14 @@ test "http: get returns a response dict from the fixture server" {
     // dict of response headers, and the body as a string.
     try expectStack(
         fixture.port,
-        "\"http://127.0.0.1:{d}/hello\" {{}} http.get " ++
+        "\"GET\" \"http://127.0.0.1:{d}/hello\" http.request.new http.send " ++
             "dup 'status at swap dup 'body at swap 'headers at \"x-fixture\" at",
         "200 \"hello, world\\n\" \"hello\"",
     );
     // A non-2xx status returns as an ordinary value without raising an error.
     try expectStack(
         fixture.port,
-        "\"http://127.0.0.1:{d}/nope\" {{}} http.get 'status at",
+        "{{'target \"http://127.0.0.1:{d}/nope\"}} http.get 'status at",
         "404",
     );
 }
@@ -243,7 +243,7 @@ test "http: repeated response headers keep the last value" {
     defer fixture.stop();
     try expectStack(
         fixture.port,
-        "\"http://127.0.0.1:{d}/duplicate\" {{}} http.get " ++
+        "{{'target \"http://127.0.0.1:{d}/duplicate\"}} http.get " ++
             "'headers at \"x-repeated\" at",
         "\"last\"",
     );
@@ -259,9 +259,38 @@ test "http: post sends headers and body" {
     // assertion proves both crossed the wire.
     try expectStack(
         fixture.port,
-        "\"http://127.0.0.1:{d}/echo\" {{\"x-probe\" \"probed\"}} \"payload\" http.post " ++
+        "{{'target \"http://127.0.0.1:{d}/echo\" 'headers {{\"x-probe\" (\"probed\")}} " ++
+            "'body [112 97 121 108 111 97 100]}} http.post " ++
             "dup 'status at swap dup 'body at swap 'headers at \"x-fixture\" at",
-        "200 \"probed|payload\" \"echo\"",
+        "200 \"POST|probed|payload\" \"echo\"",
+    );
+}
+
+test "http: request fields override get defaults and preserve repeated headers and body bytes" {
+    var fixture = Fixture.start(39547) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+    defer fixture.stop();
+    try expectStack(
+        fixture.port,
+        "{{'target \"http://127.0.0.1:{d}/echo\" 'method \"PATCH\" " ++
+            "'headers {{\"x-probe\" (\"one\" \"two\")}} 'body [112 97 121 108 111 97 100]}} " ++
+            "http.get 'body at",
+        "\"PATCH|one,two|payload\"",
+    );
+    try expectStack(
+        fixture.port,
+        "{{'target \"http://127.0.0.1:{d}/echo-bytes\" 'method \"POST\" 'body [0 1 127 128 255]}} " ++
+            "http.get-bytes 'body at",
+        "[0 1 127 128 255]",
+    );
+    try expectStack(
+        fixture.port,
+        "\"PATCH\" \"http://127.0.0.1:{d}/echo\" http.request.new " ++
+            "\"x-probe\" \"sent\" http.request.with-header " ++
+            "[115 101 110 100] http.request.with-body http.send 'body at",
+        "\"PATCH|sent|send\"",
     );
 }
 
@@ -294,7 +323,7 @@ test "http: refused connection is an io error" {
             // Port 1 is privileged and unbound, so this fails fast rather
             // than waiting on a deadline the v1 client does not have.
             .name = "a refused connection",
-            .source = "\"http://127.0.0.1:1/nope\" {} http.get",
+            .source = "{'target \"http://127.0.0.1:1/nope\"} http.get",
             .kind = "io",
             .word = "http.get",
             .message_contains = "cannot reach",
@@ -302,45 +331,108 @@ test "http: refused connection is an io error" {
         },
         .{
             .name = "a refused connection on post",
-            .source = "\"http://127.0.0.1:1/nope\" {} \"body\" http.post",
+            .source = "{'target \"http://127.0.0.1:1/nope\"} http.post",
             .kind = "io",
             .word = "http.post",
             .message_contains = "cannot reach",
         },
         .{
             .name = "an unparseable url",
-            .source = "\"not a url\" {} http.get",
+            .source = "{'target \"not a url\"} http.get",
             .kind = "io",
             .word = "http.get",
             .message_contains = "InvalidUrl",
         },
         .{
-            .name = "a non-string url",
-            .source = "5 {} http.get",
+            .name = "a non-request value",
+            .source = "5 http.get",
             .kind = "type",
             .word = "http.get",
-            .message_contains = "string url",
+            .message_contains = "request dict",
+        },
+        .{
+            .name = "a missing target",
+            .source = "{} http.get",
+            .kind = "type",
+            .word = "http.get",
+            .message_contains = "'target URL",
+        },
+        .{
+            .name = "send requires a method",
+            .source = "{'target \"http://127.0.0.1:1/x\"} http.send",
+            .kind = "type",
+            .word = "http.send",
+            .message_contains = "string 'method",
+        },
+        .{
+            .name = "a non-string target",
+            .source = "{'target 5} http.get",
+            .kind = "type",
+            .word = "http.get",
+            .message_contains = "string request 'target",
         },
         .{
             .name = "non-dict headers",
-            .source = "\"http://x\" 5 http.get",
+            .source = "{'target \"http://x\" 'headers 5} http.get",
             .kind = "type",
             .word = "http.get",
-            .message_contains = "dict of request headers",
+            .message_contains = "'headers dict",
         },
         .{
-            .name = "a non-string body",
-            .source = "\"http://x\" {} 5 http.post",
+            .name = "a non-list body",
+            .source = "{'target \"http://x\" 'body \"body\"} http.post",
             .kind = "type",
             .word = "http.post",
-            .message_contains = "string request body",
+            .message_contains = "'body byte list",
+        },
+        .{
+            .name = "an invalid body byte",
+            .source = "{'target \"http://x\" 'body [300]} http.post",
+            .kind = "type",
+            .word = "http.post",
+            .message_contains = "integers from 0 through 255",
+        },
+        .{
+            .name = "a body on a method that does not admit one",
+            .source = "{'target \"http://x\" 'body [1]} http.get",
+            .kind = "domain",
+            .word = "http.get",
+            .message_contains = "does not admit a body",
         },
         .{
             .name = "non-string header names",
-            .source = "\"http://127.0.0.1:1/x\" {5 \"v\"} http.get",
+            .source = "{'target \"http://127.0.0.1:1/x\" 'headers {5 (\"v\")}} http.get",
             .kind = "type",
             .word = "http.get",
             .message_contains = "header names",
+        },
+        .{
+            .name = "non-list header values",
+            .source = "{'target \"http://127.0.0.1:1/x\" 'headers {\"x\" \"v\"}} http.get",
+            .kind = "type",
+            .word = "http.get",
+            .message_contains = "lists of strings",
+        },
+        .{
+            .name = "uppercase header names",
+            .source = "{'target \"http://127.0.0.1:1/x\" 'headers {\"X\" (\"v\")}} http.get",
+            .kind = "type",
+            .word = "http.get",
+            .message_contains = "lowercased",
+        },
+        .{
+            .name = "an unsupported method override",
+            .source = "{'target \"http://127.0.0.1:1/x\" 'method \"BREW\"} http.get",
+            .kind = "domain",
+            .word = "http.get",
+            .message_contains = "unsupported HTTP request method",
+        },
+        .{
+            .name = "an unknown request field",
+            .source = "{'target \"http://127.0.0.1:1/x\" 'timeout 1} http.get",
+            .kind = "type",
+            .word = "http.get",
+            .message_contains = "recognized fields",
         },
     }) |case| expectHostError(case.source, case) catch |err| {
         std.log.err("http case `{s}` failed", .{case.name});
@@ -350,7 +442,7 @@ test "http: refused connection is an io error" {
     // filesystem gate is.
     try support.expectErrors(&.{.{
         .name = "absent host IO",
-        .source = "\"http://127.0.0.1:1/x\" {} http.get",
+        .source = "{'target \"http://127.0.0.1:1/x\"} http.get",
         .kind = "io",
         .word = "http.get",
         .message = "network access is unavailable",

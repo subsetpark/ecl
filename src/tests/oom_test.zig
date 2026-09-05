@@ -526,7 +526,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "[1 2] reverse pop [1 2] [0 1] at pop [3 1] 2 4 rand.ints pop pop " ++
             // Scalar and flat-list needles reach both typed membership drivers.
             "1 [1 2] in? pop [1 3] [1 2] in? pop [1 2] dup 0 9 put pop pop " ++
-            "[1 2] [0 1] [3 4] put pop [1 2] [0 1] (1 +) update pop " ++
+            "[1 2] [0 1] [3 4] put pop [1 2] [0 1] (1 +) update pop [1 2] [0 1] del pop " ++
             "[1 2] [3] reshape pop " ++
             "{'rows ([10 20] [30 40])} ['rows 1 0] at-path pop",
     );
@@ -859,12 +859,13 @@ fn stdlibSessionAllocationProbe(
         .dict => try runOk(
             &runtime,
             "oom-dict.ecl",
-            "[['a 1] ['b 2]] dict.from-pairs dup dict.keys pop dup dict.vals pop " ++
+            "[1 2] [0 1] del pop " ++
+                "[['a 1] ['b 2]] dict.from-pairs dup dict.keys pop dup dict.vals pop " ++
                 "dup 'a dict.has? pop dup ['b 'a] dict.at pop dup {} dict.merge dup dict.pairs dict.from-pairs pop " ++
                 "dup ['a 'b] dict.keys-exactly? pop dup ['a] (1 +) dict.update " ++
                 "dup 'c 0 (1 +) dict.update-or dup (nip) dict.map dup (1 +) each " ++
                 "dup (pop pop 1) dict.filter dup (pop pop 0) dict.reject dup ['a] dict.take " ++
-                "dup ['a] dict.drop dup ['a] dict.split pop pop " ++
+                "dup ['a] dict.del dup ['a] dict.split pop pop " ++
                 "{'a 2} (|key left right| key pop left right +) dict.merge-with pop " ++
                 "['a 'b] 0 dict.from-keys pop",
         ),
@@ -1029,8 +1030,9 @@ fn stdlibSessionAllocationProbe(
         .http => try runOk(
             &runtime,
             "oom-http.ecl",
-            "[] (\"http://127.0.0.1:1/x\" {} http.get) @attempt pop " ++
-                "[] (\"http://127.0.0.1:1/x\" {} http.get-bytes) @attempt pop",
+            "[] ({'target \"http://127.0.0.1:1/x\"} http.get) @attempt pop " ++
+                "[] ({'target \"http://127.0.0.1:1/x\"} http.get-bytes) @attempt pop " ++
+                "[] (\"GET\" \"http://127.0.0.1:1/x\" http.request.new http.send) @attempt pop",
         ),
         .process => {
             // A successful live capture has scheduling-dependent readiness

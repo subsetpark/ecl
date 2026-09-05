@@ -53,6 +53,30 @@ test "dict-text: put pervades over list selectors with conforming replacements" 
     });
 }
 
+test "dict-text: del removes original list positions through pervasive selectors" {
+    try helper.expectStack(
+        "[10 20 30 40 50] [3 4] del " ++
+            "[10 20 30 40 50] [[4 1] 4] del " ++
+            "[10 20] [] del " ++
+            "{[1 2] 9 'a 1} [1 2] del",
+        "[10 20 30] [10 30 40] [10 20] {'a 1}",
+    );
+    try helper.expectErrors(&.{
+        .{
+            .name = "del selector leaves must be integer indices",
+            .source = "[1 2] [0 'a] del",
+            .kind = "type",
+            .word = "del",
+        },
+        .{
+            .name = "del selector leaves must be in bounds",
+            .source = "[1 2] [0 2] del",
+            .kind = "domain",
+            .word = "del",
+        },
+    });
+}
+
 test "dict-text: dict.from-lists and polymorphic list updates" {
     try helper.expectStack(
         "1 type 1.0 type \\a type 'a type (missing) first type [] type {} type " ++
@@ -215,6 +239,10 @@ test "dict-text: large updates yield through the public runtime" {
     try std.testing.expect((try runtime.runUnit("<test>", "69999 del pop")) == .ok);
     try std.testing.expect(runtime.lastPolls() >= 1);
 
+    try runtime.pushBorrowed(sequence);
+    try std.testing.expect((try runtime.runUnit("<test>", "[69998 69999] del pop")) == .ok);
+    try std.testing.expect(runtime.lastPolls() >= 1);
+
     const pairs = try allocator.alloc(dict.Pair, 70_000);
     defer allocator.free(pairs);
     for (pairs, 0..) |*pair, index| pair.* = .{
@@ -230,6 +258,10 @@ test "dict-text: large updates yield through the public runtime" {
 
     try runtime.pushBorrowed(dictionary);
     try std.testing.expect((try runtime.runUnit("<test>", "69999 del pop")) == .ok);
+    try std.testing.expect(runtime.lastPolls() >= 1);
+
+    try runtime.pushBorrowed(dictionary);
+    try std.testing.expect((try runtime.runUnit("<test>", "[69999] dict.del pop")) == .ok);
     try std.testing.expect(runtime.lastPolls() >= 1);
 
     try runtime.pushBorrowed(dictionary);

@@ -2266,7 +2266,7 @@ test "e2e: every stdlib module resolves with no ECL_PATH and no filesystem" {
     // The network word reaches the network, and a refused connection is a
     // value-level error rather than a crash (DoD-31's non-network half).
     var refused = try cli.runOptions(.{
-        .argv = &.{ "./ecl", "\"http://127.0.0.1:1/nope\" {} http.get" },
+        .argv = &.{ "./ecl", "{'target \"http://127.0.0.1:1/nope\"} http.get" },
         .cwd = .{ .dir = temporary.dir },
         .environ_map = &environment,
     });

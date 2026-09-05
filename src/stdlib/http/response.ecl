@@ -1,7 +1,8 @@
 ### module http.response
-# A response is the dict {'status 'headers 'body}: what http.get and http.post
-# return and what an http.server handler leaves. These words build one, read
-# its headers by name regardless of letter case, and return updated copies.
+# A response is the dict {'status 'headers 'body}: what http.get, http.post,
+# and http.send return and what an http.server handler leaves. These words
+# build one, read its headers by name regardless of letter case, and return
+# updated copies.
 # Wire rules (no 1xx, reserved names, no CR or LF) belong to
 # http.server.render-response; this module accepts every well-shaped value.
 []

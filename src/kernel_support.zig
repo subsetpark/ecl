@@ -2,7 +2,10 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const value = @import("value.zig");
+const heap = @import("heap.zig");
+const list = @import("list.zig");
 const machine = @import("machine.zig");
+const poll = @import("poll.zig");
 
 pub const Value = value.Value;
 pub const HeapKind = value.HeapKind;
@@ -10,6 +13,73 @@ pub const Machine = machine.Machine;
 pub const MachineError = machine.MachineError;
 
 pub const max_depth: usize = 256;
+
+pub const PervasiveSelectorProgress = union(enum) {
+    pending,
+    leaf: Value,
+    depth_exceeded,
+    complete,
+};
+
+/// Walk a nested list selector in left-to-right leaf order without assigning
+/// meaning to its leaves. Collection kernels own leaf validation because an
+/// index selector requires integers while a dictionary selector admits every
+/// whole-value atom.
+pub const PervasiveSelectorCursor = struct {
+    pub const owned_disposal: heap.OwnedDisposal = .retire;
+
+    const Frame = union(enum) {
+        node: struct { selector: Value, depth: usize },
+        children: struct { selectors: Value, depth: usize, index: usize },
+    };
+
+    frames: poll.ChunkStack(Frame),
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        selector: Value,
+    ) error{OutOfMemory}!PervasiveSelectorCursor {
+        var frames = poll.ChunkStack(Frame).init(allocator);
+        errdefer frames.deinit();
+        try frames.push(.{ .node = .{ .selector = selector, .depth = 0 } });
+        return .{ .frames = frames };
+    }
+
+    pub fn retire(self: *PervasiveSelectorCursor, releases: *heap.ReleaseDomain) void {
+        self.frames.retire(releases);
+    }
+
+    pub fn advanceOne(self: *PervasiveSelectorCursor) error{OutOfMemory}!PervasiveSelectorProgress {
+        const frame = self.frames.pop() orelse return .complete;
+        return switch (frame) {
+            .node => |node| node_result: {
+                if (node.selector != .list) break :node_result .{ .leaf = node.selector };
+                if (node.depth >= max_depth) break :node_result .depth_exceeded;
+                try self.frames.push(.{ .children = .{
+                    .selectors = node.selector,
+                    .depth = node.depth + 1,
+                    .index = 0,
+                } });
+                break :node_result .pending;
+            },
+            .children => |children| children_result: {
+                if (children.index == children.selectors.list.length())
+                    break :children_result .pending;
+                try self.frames.reserve(2);
+                self.frames.pushReserved(.{ .children = .{
+                    .selectors = children.selectors,
+                    .depth = children.depth,
+                    .index = children.index + 1,
+                } });
+                self.frames.pushReserved(.{ .node = .{
+                    .selector = list.atUnchecked(children.selectors, children.index),
+                    .depth = children.depth,
+                } });
+                break :children_result .pending;
+            },
+        };
+    }
+};
 
 /// The scheduler's kernel interval, re-exported so typed loops can bound a
 /// range without importing the machine. `Context` remains the only door to the

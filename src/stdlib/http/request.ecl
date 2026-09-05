@@ -1,7 +1,10 @@
 ### module http.request
-# A request is the dict {'method 'target 'path 'query 'headers 'body 'peer}
-# that http.server hands a handler. These words build one, read headers and
-# query parameters by name, decode the body, and return updated copies.
+# A request is a dict whose recognized fields are 'method, 'target, 'path,
+# 'query, 'headers, 'body, 'peer, and 'params. Every field is optional, so the
+# same value can describe overrides for an outbound http.get or http.post, a
+# complete request consumed by http.send, or the complete request http.server
+# hands a handler. These words build one, read its fields using empty defaults,
+# and return updated copies.
 []
 (
  ### defp type-error
@@ -46,30 +49,33 @@
   if)
  'params? defp
 
+ ### defp string-field?
+ (name request -- bool : "Return 1 when an optional request field is absent or a string.")
+ (swap over over dict.has? (at str.str?) (pop pop 1) if)
+ 'string-field? defp
+
  ### def valid?
  (value -- bool :
-  "Return 1 when a value is a request dict: 'method, 'target, 'path, 'query, 'headers, 'body, and
-   'peer, with string method, target, path, query, and peer, a headers dict from ASCII-lowercased
-   string names to lists of strings, and a byte-list body, plus an optional 'params dict of string
-   names to string values as http.server.route binds it. Never raises.")
+  "Return 1 when a value is a partial or complete request dict. Recognized optional fields are
+   'method, 'target, 'path, 'query, and 'peer strings; 'headers from ASCII-lowercased string names
+   to lists of strings; a byte-list 'body; and 'params from string names to string values. Never
+   raises.")
  (dup type 'dict match?
-  (dup 'params {} at-or params?
-   swap ['params] dict.drop
-   dup ['method 'target 'path 'query 'headers 'body 'peer] dict.keys-exactly?
-   (dup ['method 'target 'path 'query 'peer] dict.at (str.str?) all?
-    over 'headers at headers? and
-    over 'body at bytes? and
+  (dup dict.keys ['method 'target 'path 'query 'headers 'body 'peer 'params] in? (1 match?) all?
+   (dup ['method 'target 'path 'query 'peer] swap (string-field?) partial all?
+    over 'headers {} at-or headers? and
+    over 'body [] at-or bytes? and
+    over 'params {} at-or params? and
     nip)
    (pop 0)
-   if
-   and)
+   if)
   (pop 0)
   if)
  'valid? def
 
  ### defp checked
- (request -- request : "Return a request dict or raise 'type.")
- (dup valid? "expected a request dict {'method 'target 'path 'query 'headers 'body 'peer}"
+ (request -- request : "Return a partial or complete request dict or raise 'type.")
+ (dup valid? "expected a request dict with recognized, well-typed fields"
   type-error assert)
  'checked defp
 
@@ -105,7 +111,7 @@
   "Return the list of values of a header, matching the name regardless of letter case, or () when it
    is absent. A non-request or non-string name is 'type.")
  ("http.request.header expects a string header name" checked-string str.lower
-  swap checked 'headers at swap () at-or)
+  swap checked 'headers {} at-or swap () at-or)
  'header def
 
  ### def header?
@@ -148,7 +154,7 @@
    the result must be UTF-8, + is left as is, and a later duplicate key replaces an earlier one. An
    empty query is {}. A % not followed by two hex digits, or an escape sequence that is not UTF-8,
    is 'domain; a non-request is 'type.")
- (checked 'query at "&" split ("" match? not) filter {} (query-pair) fold)
+ (checked 'query "" at-or "&" split ("" match? not) filter {} (query-pair) fold)
  'query def
 
  ### def param
@@ -166,7 +172,7 @@
  ### def text
  (request -- string :
   "Return the body decoded as UTF-8 text. A body that is not valid UTF-8 is 'domain, as for chars.")
- (checked 'body at chars)
+ (checked 'body [] at-or chars)
  'text def
 
  ### def json
@@ -185,8 +191,8 @@
   assert
   swap "http.request.with-header expects a string header name" checked-string str.lower
   (|request value name|
-   request checked 'headers at name () at-or value cat
-   request 'headers at name rolldown put
+   request checked 'headers {} at-or name () at-or value cat
+   request 'headers {} at-or name rolldown put
    request 'headers rolldown put)
   call)
  'with-header def

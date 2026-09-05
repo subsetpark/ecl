@@ -722,7 +722,10 @@ fn packageSource(
 ) ![]u8 {
     var source = std.Io.Writer.Allocating.init(allocator);
     defer source.deinit();
-    try source.writer.print("\"https://127.0.0.1:{d}{s}\" {{}} http.get-bytes 'body at ", .{ port, endpoint });
+    try source.writer.print(
+        "{{'target \"https://127.0.0.1:{d}{s}\"}} http.get-bytes 'body at ",
+        .{ port, endpoint },
+    );
     try appendString(&source.writer, package);
     switch (operation) {
         .inspect => try source.writer.writeAll(" pkg.store.inspect"),
@@ -816,7 +819,7 @@ fn requestCountSource(port: u16) ![]u8 {
     var source = std.Io.Writer.Allocating.init(allocator);
     defer source.deinit();
     try source.writer.print(
-        "\"https://127.0.0.1:{d}/__counts\" {{}} http.get 'body at json.parse ",
+        "{{'target \"https://127.0.0.1:{d}/__counts\"}} http.get 'body at json.parse ",
         .{port},
     );
     for ([_][]const u8{

@@ -141,7 +141,7 @@ const cases = [_]Case{
     .{ .name = "table invalid", .source = "{\"a\" [1 2] \"b\" [3]} table.rows" },
     .{ .name = "getenv unset", .source = "\"ECL_SNAPSHOT_ABSENT\" getenv" },
     .{ .name = "read-text missing", .source = "'cwd \"no-such-file.ecl\" fs.read-text" },
-    .{ .name = "http dead port", .source = "\"http://127.0.0.1:1/x\" {} http.get" },
+    .{ .name = "http dead port", .source = "{'target \"http://127.0.0.1:1/x\"} http.get" },
     // Bit patterns and counter-based randomness. Every draw here is seeded, so
     // the transcript is as reproducible as the arithmetic above it.
     .{ .name = "band", .source = "[12 10] 6 band" },
@@ -1068,12 +1068,12 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stderr:
         \\{'kind 'io 'msg "entry does not exist" 'word 'fs.read-text 'trace ['fs.read-text] 'data {'operation 'read-text 'root 'cwd 'path "no-such-file.ecl" 'reason 'not-found 'source "<command>" 'line 1 'col 25}}
         \\=== http dead port ===
-        \\source: "http://127.0.0.1:1/x" {} http.get
+        \\source: {'target "http://127.0.0.1:1/x"} http.get
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'io 'msg "cannot reach `http://127.0.0.1:1/x`: ConnectionRefused" 'word 'http.get 'trace ['http.get] 'data {'path "http://127.0.0.1:1/x" 'source "<command>" 'line 1 'col 27}}
+        \\{'kind 'io 'msg "cannot reach `http://127.0.0.1:1/x`: ConnectionRefused" 'word 'http.get 'trace ['http.get] 'data {'path "http://127.0.0.1:1/x" 'source "<command>" 'line 1 'col 34}}
         \\=== band ===
         \\source: [12 10] 6 band
         \\exit: 0
