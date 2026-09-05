@@ -731,8 +731,9 @@ The canonical layout follows these rules:
 - Space-separated forms pack into local groups up to 100 columns. Continuation
   lines begin immediately inside their opening delimiter. A standalone
   closing delimiter aligns with its opener.
-- Existing newlines remain hard boundaries. Comments and multiline children
-  break their local groups. An indivisible token or preserved comment may
+- Existing newlines remain hard boundaries. Comments break their local groups;
+  multiline children retain their internal breaks without forcing a following
+  sibling onto a separate line. An indivisible token or preserved comment may
   exceed 100 columns.
 - Comments remain attached to neighboring forms and preserve physical line
   boundaries.
