@@ -861,7 +861,7 @@ fn stdlibSessionAllocationProbe(
             "oom-dict.ecl",
             "[1 2] [0 1] del pop " ++
                 "[['a 1] ['b 2]] dict.from-pairs dup dict.keys pop dup dict.vals pop " ++
-                "dup 'a dict.has? pop dup ['b 'a] dict.at pop dup {} dict.merge dup dict.pairs dict.from-pairs pop " ++
+                "dup 'a dict.has? pop dup [['b] 'a] dict.at pop dup {} dict.merge dup dict.pairs dict.from-pairs pop " ++
                 "dup ['a 'b] dict.keys-exactly? pop dup ['a] (1 +) dict.update " ++
                 "dup 'c 0 (1 +) dict.update-or dup (nip) dict.map dup (1 +) each " ++
                 "dup (pop pop 1) dict.filter dup (pop pop 0) dict.reject dup ['a] dict.take " ++

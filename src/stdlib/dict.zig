@@ -288,7 +288,8 @@ const DictAtCursor = struct {
                             @intCast(node.selector.list.length()),
                         );
                         errdefer values.deinit();
-                        try self.frames.push(.{ .build = .{
+                        try self.frames.reserve(1);
+                        self.frames.pushReserved(.{ .build = .{
                             .selector = node.selector,
                             .depth = node.depth + 1,
                             .values = values.take(),

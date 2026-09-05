@@ -33,7 +33,7 @@ pub const words = [_]env.BuiltinWord{
     .{
         .name = "get",
         .doc = "( request -- response ) Fetch a partial or complete http.request with GET defaults, following " ++
-            "redirects, and return " ++
+            "redirects for bodyless requests, and return " ++
             "{'status int 'headers dict 'body string}.\n\n" ++
             "request is a dictionary under the http.request contract and must carry a string 'target URL. Its " ++
             "optional 'method overrides GET; optional 'headers maps lowercased string names to lists of string " ++
@@ -738,7 +738,7 @@ const RequestDriver = struct {
                 return evaluator.fail(.domain, "HTTP request method does not admit a body");
         };
         var request = client.request(self.method, uri, .{
-            .redirect_behavior = if (self.follow_redirects) @enumFromInt(3) else .unhandled,
+            .redirect_behavior = if (self.follow_redirects and !sends_body) @enumFromInt(3) else .unhandled,
             .extra_headers = extra,
         }) catch |err| return self.failIo(evaluator, exchange_data.request.url, @errorName(err));
         defer request.deinit();

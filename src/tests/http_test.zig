@@ -262,7 +262,7 @@ test "http: post sends headers and body" {
         "{{'target \"http://127.0.0.1:{d}/echo\" 'headers {{\"x-probe\" (\"probed\")}} " ++
             "'body [112 97 121 108 111 97 100]}} http.post " ++
             "dup 'status at swap dup 'body at swap 'headers at \"x-fixture\" at",
-        "200 \"POST|probed|payload\" \"echo\"",
+        "200 \"POST|1|probed|payload\" \"echo\"",
     );
 }
 
@@ -277,7 +277,19 @@ test "http: request fields override get defaults and preserve repeated headers a
         "{{'target \"http://127.0.0.1:{d}/echo\" 'method \"PATCH\" " ++
             "'headers {{\"x-probe\" (\"one\" \"two\")}} 'body [112 97 121 108 111 97 100]}} " ++
             "http.get 'body at",
-        "\"PATCH|one,two|payload\"",
+        "\"PATCH|2|one,two|payload\"",
+    );
+    try expectStack(
+        fixture.port,
+        "{{'target \"http://127.0.0.1:{d}/redirect-echo\" 'method \"PATCH\" 'body [112]}} " ++
+            "http.get 'status at",
+        "307",
+    );
+    try expectStack(
+        fixture.port,
+        "{{'target \"http://127.0.0.1:{d}/redirect-echo\" 'method \"PATCH\" 'body [112]}} " ++
+            "http.get-bytes 'status at",
+        "307",
     );
     try expectStack(
         fixture.port,
@@ -290,7 +302,7 @@ test "http: request fields override get defaults and preserve repeated headers a
         "\"PATCH\" \"http://127.0.0.1:{d}/echo\" http.request.new " ++
             "\"x-probe\" \"sent\" http.request.with-header " ++
             "[115 101 110 100] http.request.with-body http.send 'body at",
-        "\"PATCH|sent|send\"",
+        "\"PATCH|1|sent|send\"",
     );
 }
 
