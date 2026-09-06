@@ -215,6 +215,20 @@ test "native: streaming crosses the default ring capacity" {
     try std.testing.expectEqual(@as(i64, 131073), runtime.stackItems()[0].int);
 }
 
+test "native: bounded controller errors preserve UTF-8 and the backend error kind" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer diagnostics.deinit();
+    var runtime = try initRuntime(&output.writer, &diagnostics.writer, native_fixture.directory);
+    defer runtime.deinit();
+    try expectOk(&runtime, "portprobe.new 'p set");
+    try expectErrorContains(&runtime, "p 4 0 portprobe.exchange", &.{"'kind 'io"});
+    try expectErrorContains(&runtime, "portprobe.fail-long", &.{"'kind 'io"});
+    try expectOk(&runtime, "p 1 2 portprobe.exchange p portprobe.close");
+    try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[0].int);
+}
+
 const PortSpec = struct {
     pub const name = "counter";
     pub const State = struct { value: u64 = 0 };
@@ -276,8 +290,12 @@ fn expectErrorContains(
     defer runtime.release(failure);
     var rendered = try runtime.renderValue(failure);
     defer rendered.deinit();
-    for (needles) |needle|
-        try std.testing.expect(std.mem.indexOf(u8, rendered.bytes(), needle) != null);
+    for (needles) |needle| {
+        if (std.mem.indexOf(u8, rendered.bytes(), needle) == null) {
+            std.debug.print("expected native error to contain {s}; received {s}\n", .{ needle, rendered.bytes() });
+            return error.MissingErrorDetail;
+        }
+    }
 }
 
 fn initRuntime(
@@ -713,6 +731,8 @@ test "native: reflection exposes native origin effects documentation and capabil
         "<native:sample.increment> requires call build-values\nreschedule",
     ) != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "requires call, build-values, reschedule") != null);
+    try expectOk(&runtime, "'portprobe.new which 'portprobe.new see");
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "requires call, reschedule, ports") != null);
     var display = try runtime.stackDisplay();
     defer display.deinit();
     try std.testing.expectEqualStrings("\"Increment an integer.\"", display.bytes());

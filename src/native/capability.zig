@@ -12,6 +12,16 @@ pub const Outcome = enum(u32) {
 pub const Kind = abi.ValueKindWire;
 pub const ErrorKind = abi.ErrorKindWire;
 
+/// Bound valid UTF-8 without splitting its last code point. Both callback
+/// surfaces use this prefix before handing the host a borrowed message.
+pub fn boundedErrorMessage(message: []const u8) []const u8 {
+    var end = @min(message.len, abi.max_error_message_bytes);
+    if (end < message.len) {
+        while (end != 0 and message[end] & 0xc0 == 0x80) end -= 1;
+    }
+    return message[0..end];
+}
+
 pub const Candidate = enum(u64) {
     invalid = 0,
     _,

@@ -33,6 +33,10 @@ fn Spec(comptime label: []const u8) type {
             if (fail_open.swap(false, .acq_rel)) controller.fail(.domain, "deliberate initialization failure");
         }
         pub fn run(state: *State, code: u32, controller: *ecl.Controller) void {
+            if (code == 4) {
+                controller.fail(.io, ("x" ** 4095) ++ "€");
+                return;
+            }
             if (code == 2) {
                 controller.fail(.domain, "deliberate operation failure");
                 return;
@@ -134,6 +138,9 @@ fn checkOther(call: *ecl.Call("port --"), _: *Schedule, port: *Other) ecl.Callba
 fn cleanupCount(call: *ecl.Call("-- n")) ecl.CallbackResult {
     return call.complete(.{ecl.Scalar.int(cleaned.load(.acquire))});
 }
+fn failLong(call: *ecl.Call("--")) ecl.CallbackResult {
+    return call.fail(.io, ("x" ** 4095) ++ "€");
+}
 fn unblock(call: *ecl.Call("--")) ecl.CallbackResult {
     std.Io.Threaded.mutexLock(&gate_mutex);
     permits += 1;
@@ -204,7 +211,7 @@ fn exchangeReadyWait(call: *ecl.Call("port code count -- checksum"), schedule: *
 fn exchangeBody(call: *ecl.Call("port code count -- checksum"), schedule: *Schedule, port: *Counter, comptime park_pending: bool) ecl.CallbackResult {
     const code = call.input(1).int() orelse return call.fail(.type, "expected opcode");
     const count = call.input(2).int() orelse return call.fail(.type, "expected count");
-    if (code < 0 or code > 3 or count < 0) return call.fail(.domain, "invalid operation");
+    if (code < 0 or code > 4 or count < 0) return call.fail(.domain, "invalid operation");
     const state = schedule.state();
     if (!state.admitted) switch (try port.begin(0, try call.forward(0), @intCast(code))) {
         .ready => {
@@ -298,6 +305,7 @@ pub const Extension = ecl.module(.{
         ecl.word("close", "Join port cleanup.", close),
         ecl.word("other-check", "Require the other kind.", checkOther),
         ecl.word("cleaned", "Observe completed cleanup.", cleanupCount),
+        ecl.word("fail-long", "Report a bounded UTF-8 word error.", failLong),
         ecl.word("exchange", "Stream repeated bytes and return a checksum.", exchange),
         ecl.word("exchange-ready-wait", "Observe operation completion before wait registration.", exchangeReadyWait),
     },
