@@ -1360,6 +1360,14 @@ Nested reads and forwarding share one metered path resolver. Candidates remain
 invocation-local, while aggregate builders own values retained across yields.
 Tasks and modules remain unavailable as native value views.
 
+Native port definitions are copied and validated with the module descriptor.
+Their identity is the pinned module instance and validated definition index;
+names are descriptive metadata. Typed SDK adapters expose backend state only
+to controller callbacks. Ordinary native words receive invocation-local port
+capabilities and address suspended work through runtime-owned operation slots.
+Cancellation notification is a bounded concurrent callback; initialization,
+execution, and cleanup belong to the controller thread.
+
 The machine presents the callback a transactional input window. A successful
 return validates and commits the declared outputs. Failure restores the ecl
 operand stack, while external effects performed by the callback remain
