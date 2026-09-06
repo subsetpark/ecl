@@ -12,6 +12,56 @@ const native_sample = @import("native-sample");
 const native_fixture = @import("native_fixture_options");
 const ecl = @import("ecl-native");
 
+test "native: package ports stream beyond capacity and retain ordered state" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer diagnostics.deinit();
+    var runtime = try session.Session.initWithHostConfig(std.testing.allocator, &.{}, .{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .ecl_path = native_fixture.directory,
+        .native_port_limits = .{ .ring_capacity = 8 },
+    }, .{ .worker_pool = 1 });
+    defer runtime.deinit();
+    try expectOk(&runtime, "portprobe.new 'p set p 0 10000 portprobe.exchange p 1 2 portprobe.exchange p 1 3 portprobe.exchange p portprobe.close p portprobe.close");
+    try std.testing.expectEqual(@as(i64, 10000), runtime.stackItems()[0].int);
+    try std.testing.expectEqual(@as(i64, 18), runtime.stackItems()[1].int);
+    try std.testing.expectEqual(@as(i64, 21), runtime.stackItems()[2].int);
+}
+
+test "native: package port kinds, operation failure, forwarding and terminal identity" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer diagnostics.deinit();
+    var runtime = try initRuntime(&output.writer, &diagnostics.writer, native_fixture.directory);
+    defer runtime.deinit();
+    try expectOk(&runtime, "portprobe.new 'p set");
+    try expectErrorContains(&runtime, "p portprobe.other-check", &.{"'kind 'type"});
+    try expectErrorContains(&runtime, "p foreignport.close", &.{"'kind 'type"});
+    try expectErrorContains(&runtime, "p 2 0 portprobe.exchange", &.{ "'kind 'domain", "deliberate operation failure" });
+    try expectOk(&runtime, "p 1 3 portprobe.exchange p wrap sample.nested-port p match? p portprobe.close p portprobe.close");
+    try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[0].int);
+    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[1].int);
+    try expectErrorContains(&runtime, "p 1 0 portprobe.exchange", &.{"'kind 'io"});
+}
+
+test "native: package port scope transfer and rollback" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer diagnostics.deinit();
+    var runtime = try initRuntime(&output.writer, &diagnostics.writer, native_fixture.directory);
+    defer runtime.deinit();
+    try expectOk(&runtime, "portprobe.new 'p set p wrap dup cat [] (pop pop) 3 pack (@give) @attempt pop p 1 2 portprobe.exchange");
+    try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[0].int);
+    try expectOk(&runtime, "p wrap [] (1 3 portprobe.exchange) @give await 'ok at first");
+    try std.testing.expectEqual(@as(i64, 5), runtime.stackItems()[1].int);
+    try expectErrorContains(&runtime, "p 1 0 portprobe.exchange", &.{"'kind 'io"});
+}
+
 const PortSpec = struct {
     pub const name = "counter";
     pub const State = struct { value: u64 = 0 };

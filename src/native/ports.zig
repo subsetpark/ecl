@@ -80,6 +80,7 @@ pub fn Port(comptime Spec: type) type {
             var reply: abi.PortReply = .{};
             const adapter_value = self.adapter();
             const status = (adapter_value.invocation.host.port orelse return .failed)(adapter_value.invocation.context, &request_value, &reply);
+            if (status == .yield_required) return .pending;
             if (status == .out_of_memory) return error.OutOfMemory;
             if (status != .ok) return .failed;
             return switch (reply.status) {

@@ -149,12 +149,13 @@ const source_groups = [_]SourceGroup{
     // and transactional-call boundary form one separately rooted component.
     .{ .production = true, .files = &.{
         "native/ports.zig",        "native/abi.zig",        "native/capability.zig", "native/sdk.zig",
-        "native/build_helper.zig", "native_descriptor.zig", "native_module.zig",     "native_call.zig",
-        "stdlib/io.zig",
+        "native/build_helper.zig", "native_descriptor.zig", "native_module.zig",     "native_port.zig",
+        "native_call.zig",         "stdlib/io.zig",
     }, .sources = &.{
         @embedFile("../native/ports.zig"),  @embedFile("../native/abi.zig"),          @embedFile("../native/capability.zig"),
         @embedFile("../native/sdk.zig"),    @embedFile("../native/build_helper.zig"), @embedFile("../native_descriptor.zig"),
-        @embedFile("../native_module.zig"), @embedFile("../native_call.zig"),         @embedFile("../stdlib/io.zig"),
+        @embedFile("../native_module.zig"), @embedFile("../native_port.zig"),         @embedFile("../native_call.zig"),
+        @embedFile("../stdlib/io.zig"),
     } },
 };
 
@@ -210,6 +211,7 @@ const repository_verification_files = [_][]const u8{
     "test/reference_snapshots.zig",
     "test/scheduler_shell_property.zig",
     "test/native/sample.zig",
+    "test/native/ports.zig",
     "test/native/malformed.zig",
     "test/native/negative/no_call_parameter.zig",
     "test/native/negative/wrong_return_type.zig",
