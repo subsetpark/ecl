@@ -86,6 +86,8 @@ pub const ClockPolicy = struct {
 /// mode — from turning `init` into a positional checklist whose arguments
 /// only differ by type.
 pub const Host = struct {
+    /// Capacity for trusted package-defined resources; validated at creation
+    /// of the Session, independently of filesystem, process, and net policies.
     native_port_limits: native_port.Limits = .{},
     io: std.Io,
     output: *std.Io.Writer,

@@ -44,6 +44,7 @@ pub const NetPolicy = internal.net_port.NetPolicy;
 pub const NetBind = internal.net_port.Bind;
 pub const NetBindPolicy = internal.net_port.BindPolicy;
 pub const NetLimits = internal.net_port.Limits;
+pub const NativePortLimits = @FieldType(Host, "native_port_limits");
 
 const public_declarations = [_][]const u8{
     "version",
@@ -79,6 +80,7 @@ const public_declarations = [_][]const u8{
     "NetBind",
     "NetBindPolicy",
     "NetLimits",
+    "NativePortLimits",
 };
 
 comptime {
