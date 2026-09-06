@@ -208,7 +208,7 @@ pub fn Call(comptime effect_source: []const u8) type {
             kind: ErrorKind,
             message: []const u8,
         ) error{ OutOfMemory, InvalidValue }!Outcome {
-            const bounded = message[0..@min(message.len, abi.max_error_message_bytes)];
+            const bounded = capability.boundedErrorMessage(message);
             try capability.requireOk(self.state().invocation.host.fail(
                 self.state().invocation.context,
                 kind,

@@ -25,7 +25,8 @@ pub const Controller = opaque {
         return self.state().table.cancelled(self.state().context);
     }
     pub fn fail(self: *Controller, kind: capability.ErrorKind, message: []const u8) void {
-        self.state().table.fail(self.state().context, kind, message.ptr, @intCast(@min(message.len, abi.max_error_message_bytes)));
+        const bounded = capability.boundedErrorMessage(message);
+        self.state().table.fail(self.state().context, kind, bounded.ptr, @intCast(bounded.len));
     }
 };
 
