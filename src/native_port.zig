@@ -185,10 +185,6 @@ pub const Access = opaque {
 };
 
 const Operations = transfers.ControllerLane(Operation);
-const Lane = struct {
-    queue: Operations = .{},
-    active: ?*Operation = null,
-};
 
 pub const Cell = struct {
     allocator: std.mem.Allocator,
@@ -207,7 +203,7 @@ pub const Cell = struct {
     phase: enum { reserved, initializing, open, closing, cleaned, joined } = .reserved,
     controller: union(enum) { unstarted, running: std.Thread, joined } = .unstarted,
     initialization_failure: ?Failure = null,
-    lanes: [abi.max_port_lanes]Lane = .{Lane{}} ** abi.max_port_lanes,
+    lanes: [abi.max_port_lanes]Operations = .{Operations{}} ** abi.max_port_lanes,
     retired_next: ?*Cell = null,
 
     fn allocate(reservation: *LiveReservation, instance: *native.ModuleInstance, kind: u32) error{OutOfMemory}!*Cell {
@@ -252,7 +248,7 @@ pub const Cell = struct {
             0 => self.phase != .reserved and self.phase != .initializing,
             1 => self.phase == .joined,
             else => self.closed.load(.acquire) or key - 2 >= self.definition.lane_count or
-                self.lanes[key - 2].queue.count < self.laneCapacity(@intCast(key - 2)),
+                self.lanes[key - 2].count < self.laneCapacity(@intCast(key - 2)),
         };
     }
     pub fn wakeReasonLocked(_: *Cell, _: u64) external.Wake {
@@ -294,7 +290,7 @@ pub const Cell = struct {
         self.phase = .closing;
         // Total admission, across every lane, is capped at 256.
         for (self.lanes[0..self.definition.lane_count]) |*lane| {
-            var ticket = lane.queue.front();
+            var ticket = lane.front();
             while (ticket) |current| : (ticket = current.successor()) current.owner().markCancelled();
         }
         if (notify_backend) self.definition.cancel.?(self.backend.ptr);
@@ -341,13 +337,12 @@ pub const Cell = struct {
         var controller_context: ControllerContext = .{ .cell = self, .operation = null };
         while (true) {
             lock(&self.mutex);
-            while (lane.queue.empty() and !self.closed.load(.acquire)) self.changed.waitUncancelable(io(), &self.mutex);
-            const ticket = lane.queue.front() orelse {
+            while (lane.empty() and !self.closed.load(.acquire)) self.changed.waitUncancelable(io(), &self.mutex);
+            const ticket = lane.front() orelse {
                 unlock(&self.mutex);
                 return;
             };
             const op = ticket.owner();
-            lane.active = op;
             lock(&op.mutex);
             const execute = !self.closed.load(.acquire) and op.phase == .queued;
             if (execute) op.phase = .active;
@@ -360,8 +355,7 @@ pub const Cell = struct {
             const unacknowledged = op.phase == .cancelling;
             unlock(&op.mutex);
             if (execute and unacknowledged) self.closeLocked();
-            lane.active = null;
-            _ = lane.queue.remove(ticket);
+            _ = lane.remove(ticket);
             op.finish();
             self.waits.notifyLocked(self);
             unlock(&self.mutex);
@@ -370,23 +364,24 @@ pub const Cell = struct {
     }
     pub fn admit(self: *Cell, code: u32) error{OutOfMemory}!union(enum) { pending, closed, invalid_operation, operation: *Operation } {
         const lane = self.definition.select_lane.?(code);
-        if (lane >= self.definition.lane_count) return .invalid_operation;
         lock(&self.mutex);
         const closed = self.closed.load(.acquire);
-        const full = self.lanes[lane].queue.count == self.laneCapacity(lane);
+        const invalid = lane >= self.definition.lane_count;
+        const full = !invalid and self.lanes[lane].count == self.laneCapacity(lane);
         unlock(&self.mutex);
         if (closed) return .closed;
+        if (invalid) return .invalid_operation;
         if (full) return .pending;
         const op = try Operation.create(self, code, lane);
         lock(&self.mutex);
-        if (self.closed.load(.acquire) or self.lanes[lane].queue.count == self.laneCapacity(lane)) {
+        if (self.closed.load(.acquire) or self.lanes[lane].count == self.laneCapacity(lane)) {
             const now_closed = self.closed.load(.acquire);
             unlock(&self.mutex);
             op.releaseReadiness();
             return if (now_closed) .closed else .pending;
         }
         op.retainReadiness();
-        self.lanes[lane].queue.append(op.ticket);
+        self.lanes[lane].append(op.ticket);
         self.changed.broadcast(io());
         unlock(&self.mutex);
         return .{ .operation = op };
@@ -502,26 +497,24 @@ pub const Operation = struct {
         const cell = self.cell;
         lock(&cell.mutex);
         const lane = &cell.lanes[self.lane];
-        if (lane.active == self) {
-            lock(&self.mutex);
-            const already_cancelled = self.phase.isCancelled();
-            unlock(&self.mutex);
-            if (!already_cancelled) switch (cell.definition.cancellation) {
+        lock(&self.mutex);
+        const phase = self.phase;
+        unlock(&self.mutex);
+        if (phase == .active) {
+            switch (cell.definition.cancellation) {
                 .close_resource => cell.closeLocked(),
                 .acknowledge => {
                     self.markCancelled();
                     cell.definition.cancel_operation.?(cell.backend.ptr, self.lane);
                 },
                 _ => unreachable,
-            };
+            }
             unlock(&cell.mutex);
             return;
         }
-        lock(&self.mutex);
-        const queued = self.phase == .queued;
-        unlock(&self.mutex);
+        const queued = phase == .queued;
         if (queued) {
-            _ = lane.queue.remove(self.ticket);
+            _ = lane.remove(self.ticket);
             self.markCancelled();
             self.finish();
             cell.waits.notifyLocked(cell);

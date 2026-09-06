@@ -79,7 +79,7 @@ fn DuplexSpec(comptime acknowledge: bool) type {
     return struct {
         const Base = Spec("lane");
         pub const name = if (acknowledge) "duplex" else "unacknowledged";
-        pub const Lane = enum { receive, send };
+        pub const Lane = enum(u64) { receive, send };
         pub const cancellation: ecl.PortCancellation = .acknowledge;
         pub const State = struct { lanes: [2]Base.State = .{Base.State{}} ** 2 };
         pub fn init() State {

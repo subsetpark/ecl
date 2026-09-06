@@ -1374,7 +1374,9 @@ cell to its scope. Initialization cannot run before the heap identity, membershi
 and controller lifetime are owned. Successful call commit publishes provisional
 ports; rollback closes them. Ordered lanes use the same FIFO ticket boundary
 as network and process writers. A ticket holds its lane through cancellation
-until execution acknowledges reuse and returns, or the resource closes. Native
+until execution acknowledges reuse and returns, or the resource closes. The
+operation phase is the authority for dispatch and cancellation; no independent
+active-operation pointer can disagree with it. Native
 kinds select lanes by a bounded, state-independent operation classifier. The
 host partitions the total admission budget across lanes so a saturated lane
 cannot consume another lane's progress capacity. Request and response rings
@@ -1412,8 +1414,7 @@ remain independent of this completion protocol.
 
 An ordered controller lane owns FIFO tickets independently of the executor
 that advances them. Network and process streams use it for writer ordering.
-Only the active ticket
-may write; retiring it promotes the next surviving ticket, while retiring a
+Only the active ticket may write; retiring it promotes the next surviving ticket, while retiring a
 queued ticket preserves the active writer. Ticket creation, admission, and
 retirement are explicit states behind opaque handles. Backend readiness and
 stream terminal facts remain independent of lane ownership. Native operation
@@ -1422,7 +1423,11 @@ cancellation policy. Network receive/send and process stdin/stdout/stderr
 progress remain independent; their poll and process-supervisor executors retain
 resource-specific terminal facts. A stream write accepts bytes into bounded
 host buffering. Flush, process reaping, stream EOF, and resource cleanup are
-separate observations, not interchangeable completion states.
+separate observations, not interchangeable completion states. Retiring a
+built-in writer ticket acknowledges that enqueueing has stopped; accepted bytes
+remain owned by the resource, whose I/O continues independently. Native runs
+may still mutate private backend state after task cancellation, so their lane
+requires controller acknowledgement and return before reuse.
 
 Port capacity is owned by a shared consuming reservation bound to its issuing
 owner and release policy. A provisional creator transfers that token into the
