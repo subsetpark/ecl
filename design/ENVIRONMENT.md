@@ -46,8 +46,8 @@ module. Its descriptor declares the same canonical name requested by the
 loader. The complete word table validates before publication, and publication
 is atomic.
 
-The current pre-release native ABI is version 2, with entry symbol
-`ecl_module_abi_v2`. Native modules built for earlier versions must be rebuilt;
+The current pre-release native ABI is version 3, with entry symbol
+`ecl_module_abi_v3`. Native modules built for earlier versions must be rebuilt;
 the loader provides no legacy adapter.
 
 Each native word has a declared effect and nonempty documentation. Native
@@ -61,10 +61,13 @@ uses its existing registration.
 
 Native modules may declare typed port kinds with persistent private state.
 Their words can forward opaque ports through aggregates, stream operations,
-and explicitly close them. Operations on each port execute in admission order;
-different ports can progress independently. An ordinary operation error leaves
-the port usable. Cancelling an active operation closes it and cancels queued
-work; cancelling queued work removes only that operation. Explicit close is
+and explicitly close them. Operations execute in FIFO order within a declared
+lane. A port defaults to one lane; multiple lanes and different ports can
+progress independently. An ordinary operation error leaves the port usable.
+Cancelling queued work removes only that operation. Active cancellation closes
+the resource by default. A kind may instead support recovery: its interrupted
+controller must acknowledge reusable state and finish before the lane executes
+more work. Missing acknowledgement closes the resource and cancels all lanes. Explicit close is
 idempotent and waits for cleanup. Scope closure also waits for cleanup, and
 `@give` transfers ownership atomically without interrupting active work.
 
@@ -78,7 +81,13 @@ The embedding host may configure `NativePortLimits` through
 `Host.native_port_limits`: live capacity is 1–4096, operation capacity is 1–256,
 and ring capacity is 1 byte–16 MiB. Invalid limits reject Session initialization.
 Creation beyond live capacity raises `'domain`; operations wait for admission
-when their queue is full. These resource limits do not sandbox native code.
+when their lane is full. The operation budget is partitioned across lanes,
+reserving at least one slot for each; creation fails with `'domain` when the
+budget cannot cover the declared lanes. Idle capacity is not borrowed across
+lanes. Forced close interrupts all lanes and waits for terminal cleanup.
+Graceful shutdown is a separate, resource-specific operation. Cancellation
+never promises to reverse external effects or accepted stream bytes.
+These resource limits do not sandbox native code.
 
 Opening a shared library executes machine code before ECL validates its
 descriptor. Every directory used for native loading is a trusted-code

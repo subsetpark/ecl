@@ -2,6 +2,8 @@
 const abi = @import("ecl-native-abi");
 const capability = @import("capability.zig");
 
+pub const Cancellation = enum { close_resource, acknowledge };
+
 pub const Progress = union(enum) { ready, pending, failed, candidate: capability.Candidate, bytes: u32 };
 pub const Interests = packed struct(u32) { readable: bool = true, writable: bool = true, reserved: u30 = 0 };
 
@@ -24,6 +26,13 @@ pub const Controller = opaque {
     pub fn cancelled(self: *Controller) bool {
         return self.state().table.cancelled(self.state().context);
     }
+    /// Acknowledge that an interrupted operation has restored reusable backend
+    /// state. The lane remains occupied until run returns. False means the
+    /// resource is closing, or this invocation has no recoverable cancellation.
+    pub fn acknowledgeCancellation(self: *Controller) bool {
+        const value = self.state();
+        return value.table.acknowledge_cancellation(value.context);
+    }
     pub fn fail(self: *Controller, kind: capability.ErrorKind, message: []const u8) void {
         const bounded = capability.boundedErrorMessage(message);
         self.state().table.fail(self.state().context, kind, bounded.ptr, @intCast(bounded.len));
@@ -32,12 +41,25 @@ pub const Controller = opaque {
 
 pub const Adapter = struct { invocation: *capability.Invocation, definition: u32 };
 
-/// `init` constructs bounded initial state before publication. `open`, `run`,
-/// and `deinit` execute on the private controller. `cancel` may run concurrently
+/// `init` constructs bounded initial state before publication. `open` precedes
+/// all lane runs, and `deinit` follows their completion. Runs in distinct lanes
+/// may overlap; same-lane runs are FIFO. `cancel` may run concurrently
 /// with `open` or `run`: it must be bounded, thread-safe, and interrupt backend
 /// waits. It never races `deinit`. Cleanup runs even when `open` fails.
 pub fn Port(comptime Spec: type) type {
+    const Lane = if (@hasDecl(Spec, "Lane")) Spec.Lane else enum { operation };
+    const cancellation: Cancellation = if (@hasDecl(Spec, "cancellation")) Spec.cancellation else .close_resource;
     comptime {
+        if (@typeInfo(Lane) != .@"enum") @compileError("ecl-native: Port Lane must be an enum");
+        const info = @typeInfo(Lane).@"enum";
+        if (!info.is_exhaustive or info.fields.len == 0 or info.fields.len > abi.max_port_lanes)
+            @compileError("ecl-native: Port Lane must declare 1 to 16 exhaustive lanes");
+        for (info.fields, 0..) |field, index| if (field.value != index)
+            @compileError("ecl-native: Port Lane values must be contiguous from zero");
+        if (@hasDecl(Spec, "Lane") and (!@hasDecl(Spec, "lane") or @TypeOf(Spec.lane) != fn (u32) Lane))
+            @compileError("ecl-native: Port lanes require fn lane(u32) Lane");
+        if (cancellation == .acknowledge and (!@hasDecl(Spec, "cancelOperation") or @TypeOf(Spec.cancelOperation) != fn (*Spec.State, Lane) void))
+            @compileError("ecl-native: recoverable cancellation requires fn cancelOperation(*State, Lane) void");
         for (.{ "State", "name", "init", "open", "run", "cancel", "deinit" }) |name|
             if (!@hasDecl(Spec, name)) @compileError("ecl-native: Port spec requires State, name, init, open, run, cancel, and deinit");
         if (@sizeOf(Spec.State) == 0 or @sizeOf(Spec.State) > abi.max_port_state_bytes or @alignOf(Spec.State) > 64)
@@ -57,7 +79,16 @@ pub fn Port(comptime Spec: type) type {
             return @ptrCast(@alignCast(self));
         }
         pub fn definition() abi.PortDefinition {
-            return .{ .state_size = @sizeOf(Spec.State), .state_alignment = @alignOf(Spec.State), .name_ptr = name.ptr, .name_len = name.len, .init_state = initState, .initialize = initialize, .execute = execute, .cancel = cancelState, .cleanup = cleanup };
+            return .{ .state_size = @sizeOf(Spec.State), .state_alignment = @alignOf(Spec.State), .name_ptr = name.ptr, .name_len = name.len, .init_state = initState, .initialize = initialize, .execute = execute, .cancel = cancelState, .cleanup = cleanup, .lane_count = @typeInfo(Lane).@"enum".fields.len, .cancellation = switch (cancellation) {
+                .close_resource => .close_resource,
+                .acknowledge => .acknowledge,
+            }, .select_lane = selectLane, .cancel_operation = if (cancellation == .acknowledge) cancelOperation else null };
+        }
+        fn selectLane(operation: u32) callconv(.c) u32 {
+            return if (@hasDecl(Spec, "Lane")) @intFromEnum(Spec.lane(operation)) else 0;
+        }
+        fn cancelOperation(raw: *anyopaque, lane: u32) callconv(.c) void {
+            Spec.cancelOperation(@ptrCast(@alignCast(raw)), @enumFromInt(lane));
         }
         fn initState(raw: *anyopaque) callconv(.c) void {
             const state: *Spec.State = @ptrCast(@alignCast(raw));

@@ -32,6 +32,38 @@ fn expectPortProgram(workers: u32, max_operations: u32, source: []const u8, expe
     try std.testing.expectEqualStrings(expected, display.bytes());
 }
 
+test "native: independent lanes retain admission capacity under blocked stream pressure" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.duplex-new 'p set p wrap (3 0 portprobe.duplex-exchange) @spawn 't set " ++
+        "1 portprobe.await-blocked p wrap (0 9 portprobe.duplex-exchange) @spawn 'q set " ++
+        "1 portprobe.await-waiting p 1 65 portprobe.duplex-exchange " ++
+        "q cancel q await pop portprobe.unblock t await 'ok at first p portprobe.duplex-close", "65 1");
+}
+
+test "native: acknowledged active cancellation preserves subsequent lane operations" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.duplex-new 'p set p wrap (3 0 portprobe.duplex-exchange) @spawn 't set " ++
+        "1 portprobe.await-blocked p wrap (0 17 portprobe.duplex-exchange) @spawn 'q set " ++
+        "2 portprobe.await-admitted t cancel t await 'err at 'kind at " ++
+        "q await 'ok at first p 1 65 portprobe.duplex-exchange p portprobe.duplex-close portprobe.cleaned", "'cancelled 17 65 1");
+}
+
+test "native: unacknowledged cancellation closes every lane and joins cleanup" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.unacknowledged-new 'p set p wrap (3 0 portprobe.unacknowledged-exchange) @spawn 'a set " ++
+        "p wrap (5 0 portprobe.unacknowledged-exchange) @spawn 'b set " ++
+        "2 portprobe.await-blocked a cancel a await 'err at 'kind at b await 'err at 'kind at " ++
+        "p portprobe.unacknowledged-close portprobe.cleaned", "'cancelled 'io 1");
+}
+
+test "native: closing and transferring independent lanes preserves resource ownership" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.duplex-new 'p set p wrap (3 0 portprobe.duplex-exchange) @spawn 'a set " ++
+        "p wrap (5 0 portprobe.duplex-exchange) @spawn 'b set 2 portprobe.await-blocked " ++
+        "p wrap [] (portprobe.duplex-close) @give await 'ok at pop " ++
+        "a await 'err at 'kind at b await 'err at 'kind at portprobe.cleaned", "'io 'io 1");
+}
+
+test "native: creation refuses an operation budget smaller than its lane count" {
+    try expectPortProgram(1, 1, "[] (portprobe.duplex-new) @attempt 'err at 'kind at portprobe.cleaned", "'domain 0");
+}
+
 test "native: blocked controllers leave another port and task runnable" {
     for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.new 'p set p wrap (3 0 portprobe.exchange) @spawn 't set " ++
         "1 portprobe.await-blocked [] (7) @spawn await 'ok at first " ++
@@ -260,6 +292,20 @@ test "native: SDK port declarations validate state layouts and controller adapte
     try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &invalid);
     definition = P.definition();
     definition.state_alignment = 3;
+    try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &invalid);
+    definition = P.definition();
+    definition.lane_count = 0;
+    try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &invalid);
+    definition.lane_count = abi.max_port_lanes + 1;
+    try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &invalid);
+    definition = P.definition();
+    definition.cancellation = .acknowledge;
+    try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &invalid);
+    definition = P.definition();
+    definition.cancellation = @enumFromInt(999);
+    try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &invalid);
+    definition = P.definition();
+    definition.select_lane = null;
     try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &invalid);
 }
 

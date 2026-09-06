@@ -153,6 +153,9 @@ pub fn build(b: *std.Build) void {
     }
 
     const negative_cases = [_]struct { file: []const u8, message: []const u8 }{
+        .{ .file = "missing_port_recovery", .message = "ecl-native: recoverable cancellation requires fn cancelOperation(*State, Lane) void" },
+        .{ .file = "invalid_lane_selector", .message = "ecl-native: Port lanes require fn lane(u32) Lane" },
+        .{ .file = "invalid_port_lanes", .message = "ecl-native: Port Lane values must be contiguous from zero" },
         .{ .file = "invalid_port_callbacks", .message = "ecl-native: Port callbacks have invalid signatures" },
         .{ .file = "port_without_schedule", .message = "ecl-native: Port operations require Reschedule" },
         .{ .file = "undeclared_port", .message = "ecl-native: callback port capability is not declared by the module" },

@@ -163,11 +163,14 @@ pub fn ControllerLane(comptime Cell: type) type {
                 if (self.linked()) @panic("destroying a queued writer");
                 allocator.destroy(self.node());
             }
+            pub fn successor(self: *const Ticket) ?*Ticket {
+                return if (self.node().next) |next| @ptrCast(next) else null;
+            }
             pub fn owner(self: *const Ticket) *Cell {
                 return self.node().cell;
             }
             pub fn checkCell(self: *const Ticket, cell: *Cell) void {
-                if (self.node().cell != cell or !self.linked()) @panic("invalid writer ticket");
+                if (self.owner() != cell or !self.linked()) @panic("invalid writer ticket");
             }
             pub fn active(self: *const Ticket) bool {
                 return self.node().phase == .active;
@@ -179,6 +182,7 @@ pub fn ControllerLane(comptime Cell: type) type {
                 };
             }
         };
+        count: usize = 0,
         first: ?*Node = null,
         last: ?*Node = null,
 
@@ -186,7 +190,7 @@ pub fn ControllerLane(comptime Cell: type) type {
             return if (self.first) |entry| @ptrCast(entry) else null;
         }
         pub fn empty(self: *const Self) bool {
-            return self.first == null;
+            return self.front() == null;
         }
         /// Consumes the ticket's created state into FIFO ownership.
         pub fn append(self: *Self, ticket: *Ticket) void {
@@ -201,6 +205,7 @@ pub fn ControllerLane(comptime Cell: type) type {
                 node.phase = .active;
             }
             self.last = node;
+            self.count += 1;
         }
         /// Retires a ticket and promotes its successor if it owned the turn.
         /// The caller notifies backend readiness, then destroys it outside the lock.
@@ -213,6 +218,7 @@ pub fn ControllerLane(comptime Cell: type) type {
                 next.previous = node.previous;
                 if (was_active) next.phase = .active;
             } else self.last = node.previous;
+            self.count -= 1;
             node.phase = .retired;
             node.previous = null;
             node.next = null;

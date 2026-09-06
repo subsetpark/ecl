@@ -1366,19 +1366,29 @@ names are descriptive metadata. Typed SDK adapters expose backend state only
 to controller callbacks. Ordinary native words receive invocation-local port
 capabilities and address suspended work through runtime-owned operation slots.
 Cancellation notification is a bounded concurrent callback; initialization,
-execution, and cleanup belong to the controller thread.
+execution, and cleanup belong to host-owned controllers. Initialization precedes
+all lane execution, and cleanup follows every lane executor’s completion.
 
 The native resource owner reserves Session capacity before attaching a provisional
 cell to its scope. Initialization cannot run before the heap identity, membership,
 and controller lifetime are owned. Successful call commit publishes provisional
-ports; rollback closes them. Each cell serializes admitted operations, with bounded
-request and response rings separating worker execution from controller blocking.
+ports; rollback closes them. Ordered lanes use the same FIFO ticket boundary
+as network and process writers. A ticket holds its lane through cancellation
+until execution acknowledges reuse and returns, or the resource closes. Native
+kinds select lanes by a bounded, state-independent operation classifier. The
+host partitions the total admission budget across lanes so a saturated lane
+cannot consume another lane's progress capacity. Request and response rings
+separate scheduler execution from controller blocking.
 Operation slots own queues and streams across callback suspension; readiness
 registration observes terminal state under the same mutex as notification.
 
 Closing cancels active and queued work and prevents further admission. Cancelling
-only a queued operation removes that operation; cancelling active work closes its
-cell. Controller cleanup precedes joining, and joining precedes scope detachment.
+only a queued operation removes that operation. Active cancellation either
+closes the cell or invokes its declared recovery protocol. Recovery requires
+explicit acknowledgement of reusable state; returning without it closes every
+lane. Close overrides recovery and interrupts all active streams. Lane executors
+are joined before controller cleanup, and the root controller is joined before
+scope detachment.
 The resource owner joins completed controllers outside ECL workers, so scope
 teardown can await cleanup without blocking a worker. Closed heap identities retain
 their module pin independently of backend cleanup. Session shutdown closes creation,
@@ -1406,8 +1416,13 @@ Only the active ticket
 may write; retiring it promotes the next surviving ticket, while retiring a
 queued ticket preserves the active writer. Ticket creation, admission, and
 retirement are explicit states behind opaque handles. Backend readiness and
-stream terminal facts remain independent of queue ownership; native operation
-admission retains its separate streaming and cancellation contract.
+stream terminal facts remain independent of lane ownership. Native operation
+admission uses these same lanes with bounded capacity and an explicit active
+cancellation policy. Network receive/send and process stdin/stdout/stderr
+progress remain independent; their poll and process-supervisor executors retain
+resource-specific terminal facts. A stream write accepts bytes into bounded
+host buffering. Flush, process reaping, stream EOF, and resource cleanup are
+separate observations, not interchangeable completion states.
 
 Port capacity is owned by a shared consuming reservation bound to its issuing
 owner and release policy. A provisional creator transfers that token into the
