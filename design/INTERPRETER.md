@@ -1400,6 +1400,13 @@ before detaching scope memberships, so observing scope completion also proves
 that execution no longer retains the issuing domain. Retained value references
 remain independent of this completion protocol.
 
+Network and process streams share FIFO writer tickets. Only the active ticket
+may write; retiring it promotes the next surviving ticket, while retiring a
+queued ticket preserves the active writer. Ticket creation, admission, and
+retirement are explicit states behind opaque handles. Backend readiness and
+stream terminal facts remain independent of queue ownership; native operation
+admission retains its separate streaming and cancellation contract.
+
 Network, process, and native ports share the same scope-transfer boundary.
 Backends supply their locked lifetime predicate and ownership location; the
 shared protocol authorizes the origin, attaches the destination outside the
