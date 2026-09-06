@@ -10,6 +10,41 @@ const native_module = @import("../native_module.zig");
 const session = @import("../session.zig");
 const native_sample = @import("native-sample");
 const native_fixture = @import("native_fixture_options");
+const ecl = @import("ecl-native");
+
+const PortSpec = struct {
+    pub const name = "counter";
+    pub const State = struct { value: u64 = 0 };
+    pub fn init() State {
+        return .{};
+    }
+    pub fn open(_: *State, _: *ecl.Controller) void {}
+    pub fn run(_: *State, _: u32, _: *ecl.Controller) void {}
+    pub fn cancel(_: *State) void {}
+    pub fn deinit(_: *State) void {}
+};
+
+test "native: SDK port declarations validate state layouts and controller adapters" {
+    const P = ecl.Port(PortSpec);
+    const Extension = ecl.module(.{ .name = "sample", .doc = "Port definition probe.", .linkage = .static, .words = .{}, .ports = .{P} });
+    var host = heap.HostOwner.init(std.testing.allocator);
+    defer host.cleanup().drain();
+    const requested = try intern.internModuleName("sample");
+    const validated = try validate(host.cleanup(), requested, Extension.descriptor());
+    defer validated.deinit();
+    const port = validated.port(0).?;
+    try std.testing.expectEqualStrings("counter", port.name_ptr[0..port.name_len]);
+    try std.testing.expectEqual(@as(u32, @sizeOf(PortSpec.State)), port.state_size);
+    try std.testing.expect(validated.port(1) == null);
+    var invalid = Extension.descriptor().*;
+    var definition = P.definition();
+    invalid.ports_ptr = @ptrCast(&definition);
+    definition.cancel = null;
+    try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &invalid);
+    definition = P.definition();
+    definition.state_alignment = 3;
+    try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &invalid);
+}
 
 fn expectOk(runtime: *session.Session, source: []const u8) !void {
     switch (try runtime.runUnit("native-test.ecl", source)) {

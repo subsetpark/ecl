@@ -148,14 +148,13 @@ const source_groups = [_]SourceGroup{
     // The installed author SDK, its sized ABI records, validation, loader,
     // and transactional-call boundary form one separately rooted component.
     .{ .production = true, .files = &.{
-        "native/abi.zig",          "native/capability.zig", "native/sdk.zig",
-        "native/build_helper.zig", "native_descriptor.zig", "native_module.zig",
-        "native_call.zig",         "stdlib/io.zig",
+        "native/ports.zig",        "native/abi.zig",        "native/capability.zig", "native/sdk.zig",
+        "native/build_helper.zig", "native_descriptor.zig", "native_module.zig",     "native_call.zig",
+        "stdlib/io.zig",
     }, .sources = &.{
-        @embedFile("../native/abi.zig"),        @embedFile("../native/capability.zig"),
-        @embedFile("../native/sdk.zig"),        @embedFile("../native/build_helper.zig"),
-        @embedFile("../native_descriptor.zig"), @embedFile("../native_module.zig"),
-        @embedFile("../native_call.zig"),       @embedFile("../stdlib/io.zig"),
+        @embedFile("../native/ports.zig"),  @embedFile("../native/abi.zig"),          @embedFile("../native/capability.zig"),
+        @embedFile("../native/sdk.zig"),    @embedFile("../native/build_helper.zig"), @embedFile("../native_descriptor.zig"),
+        @embedFile("../native_module.zig"), @embedFile("../native_call.zig"),         @embedFile("../stdlib/io.zig"),
     } },
 };
 
@@ -221,6 +220,8 @@ const repository_verification_files = [_][]const u8{
     "test/native/negative/unknown_capability.zig",
     "test/native/negative/duplicate_word.zig",
     "test/native/negative/empty_doc.zig",
+    "test/native/negative/invalid_port_callbacks.zig",
+    "test/native/negative/port_without_schedule.zig",
     "test/http_fixture_server.zig",
     "test/pkg_lock_fixture.zig",
     "test/process_fixture.zig",

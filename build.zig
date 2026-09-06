@@ -138,6 +138,8 @@ pub fn build(b: *std.Build) void {
     }
 
     const negative_cases = [_]struct { file: []const u8, message: []const u8 }{
+        .{ .file = "invalid_port_callbacks", .message = "ecl-native: Port callbacks have invalid signatures" },
+        .{ .file = "port_without_schedule", .message = "ecl-native: Port operations require Reschedule" },
         .{ .file = "no_call_parameter", .message = "ecl-native: callback first parameter must be *ecl.Call(\"inputs -- outputs\")" },
         .{ .file = "wrong_return_type", .message = "ecl-native: callback return type must be ecl.CallbackResult" },
         .{ .file = "generic_callback", .message = "ecl-native: callback must be non-generic and non-variadic" },

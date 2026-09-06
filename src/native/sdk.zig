@@ -3,6 +3,11 @@
 const std = @import("std");
 pub const abi = @import("ecl-native-abi");
 const capability = @import("capability.zig");
+const ports = @import("ports.zig");
+pub const Port = ports.Port;
+pub const Controller = ports.Controller;
+pub const PortProgress = ports.Progress;
+pub const PortInterests = ports.Interests;
 
 pub const Outcome = capability.Outcome;
 pub const ErrorKind = capability.ErrorKind;
@@ -243,6 +248,7 @@ pub fn word(
     var build_values = false;
     var reschedule = false;
     var RescheduleType: type = void;
+    var uses_ports = false;
     for (function.params[1..], 1..) |parameter, parameter_index| {
         if (parameter.type == null) @compileError("ecl-native: callback capabilities must have concrete types");
         if (parameter.type.? == *BuildValues) {
@@ -252,14 +258,18 @@ pub fn word(
             build_values = true;
         } else if (isReschedulePointer(parameter.type.?)) {
             if (reschedule) @compileError("ecl-native: callback names a capability more than once");
-            if (build_values and parameter_index != 2)
-                @compileError("ecl-native: BuildValues must precede Reschedule");
+
             reschedule = true;
             RescheduleType = @typeInfo(parameter.type.?).pointer.child;
+        } else if (isPortPointer(parameter.type.?)) {
+            for (function.params[1..parameter_index]) |prior| if (prior.type.? == parameter.type.?)
+                @compileError("ecl-native: callback names a capability more than once");
+            uses_ports = true;
         } else {
             @compileError("ecl-native: callback parameter is not a supported capability");
         }
     }
+    if (uses_ports and !reschedule) @compileError("ecl-native: Port operations require Reschedule");
     const CallbackValue = callback_fn;
     const WordName = word_name;
     const WordDocumentation = word_documentation;
@@ -309,6 +319,7 @@ pub fn word(
         }
 
         pub fn invoke(
+            comptime Ports: anytype,
             host: *const abi.HostTable,
             context: *anyopaque,
             output: *abi.InvokeResult,
@@ -319,27 +330,25 @@ pub fn word(
                 return;
             };
             const call = NativeCall.adapterPointer(&call_state);
-            const result: CallbackResult = if (uses_build_values and uses_reschedule) result: {
-                var build_state: capability.BuildState = .{ .invocation = &call_state.invocation };
-                const build: *BuildValues = @ptrCast(&build_state);
-                var reschedule_state = NativeRescheduleType.initAdapter(&call_state.invocation) catch {
+            var build_state: capability.BuildState = .{ .invocation = &call_state.invocation };
+            var reschedule_state: if (uses_reschedule) NativeRescheduleType.AdapterState else void = if (uses_reschedule)
+                NativeRescheduleType.initAdapter(&call_state.invocation) catch {
                     output.* = .{ .tag = .fail, .adapter_status = 1 };
                     return;
-                };
-                const schedule = NativeRescheduleType.adapterPointer(&reschedule_state);
-                break :result callback(call, build, schedule);
-            } else if (uses_build_values) result: {
-                var build_state: capability.BuildState = .{ .invocation = &call_state.invocation };
-                const build: *BuildValues = @ptrCast(&build_state);
-                break :result callback(call, build);
-            } else if (uses_reschedule) result: {
-                var reschedule_state = NativeRescheduleType.initAdapter(&call_state.invocation) catch {
-                    output.* = .{ .tag = .fail, .adapter_status = 1 };
-                    return;
-                };
-                const schedule = NativeRescheduleType.adapterPointer(&reschedule_state);
-                break :result callback(call, schedule);
-            } else callback(call);
+                }
+            else {};
+            var port_states: [function.params.len]ports.Adapter = .{ports.Adapter{ .invocation = &call_state.invocation, .definition = 0 }} ** function.params.len;
+            // SAFETY: every callback parameter is initialized by the exhaustive capability dispatch below.
+            var arguments: std.meta.ArgsTuple(Callback) = undefined;
+            arguments[0] = call;
+            inline for (function.params[1..], 1..) |parameter, index| {
+                const T = parameter.type.?;
+                if (comptime T == *BuildValues) arguments[index] = @ptrCast(&build_state) else if (comptime isReschedulePointer(T)) arguments[index] = NativeRescheduleType.adapterPointer(&reschedule_state) else {
+                    port_states[index].definition = comptime portIndex(Ports, @typeInfo(T).pointer.child);
+                    arguments[index] = @ptrCast(&port_states[index]);
+                }
+            }
+            const result = @call(.auto, callback, arguments);
             const outcome = result catch |err| switch (err) {
                 error.OutOfMemory => {
                     output.* = .{ .tag = .fail, .adapter_status = 1 };
@@ -394,6 +403,16 @@ pub fn module(comptime spec: anytype) type {
     const ModuleName = spec.name;
     const ModuleDocumentation = spec.doc;
     const Words = words;
+    const Ports = if (@hasField(@TypeOf(spec), "ports")) spec.ports else .{};
+    if (Ports.len > abi.max_port_definitions) @compileError("ecl-native: too many port definitions");
+    inline for (Ports, 0..) |P, index| {
+        if (!identifier(P.name)) @compileError("ecl-native: port name must be an identifier");
+        inline for (0..index) |prior_index| {
+            const prior = Ports[prior_index];
+            if (std.mem.eql(u8, P.name, prior.name))
+                @compileError("ecl-native: module contains a duplicate port name");
+        }
+    }
     const uses_build_values = uses: {
         var result = false;
         for (words) |Word| result = result or Word.uses_build_values;
@@ -406,12 +425,18 @@ pub fn module(comptime spec: anytype) type {
     };
     const requirement_count: usize = 1 +
         @as(usize, @intFromBool(uses_build_values)) +
-        @as(usize, @intFromBool(uses_reschedule));
+        @as(usize, @intFromBool(uses_reschedule)) + @as(usize, @intFromBool(Ports.len != 0));
     return struct {
         const Self = @This();
         var definitions_storage = definitions: {
             var result: [word_count]abi.Definition = undefined;
             for (Words, 0..) |Word, index| result[index] = Word.definition(index);
+            break :definitions result;
+        };
+        var ports_storage = definitions: {
+            // SAFETY: every declared port contributes exactly one initialized record.
+            var result: [Ports.len]abi.PortDefinition = undefined;
+            for (Ports, 0..) |P, index| result[index] = P.definition();
             break :definitions result;
         };
         var requirements_storage = requirements: {
@@ -423,6 +448,7 @@ pub fn module(comptime spec: anytype) type {
                 result[1 + @as(usize, @intFromBool(uses_build_values))] = .{
                     .id = @intFromEnum(abi.CapabilityId.reschedule),
                 };
+            if (Ports.len != 0) result[requirement_count - 1] = .{ .id = @intFromEnum(abi.CapabilityId.ports) };
             break :requirements result;
         };
         // The entry point returns this graph after its stack frame is gone;
@@ -438,6 +464,8 @@ pub fn module(comptime spec: anytype) type {
             .capabilities_ptr = &requirements_storage,
             .callback_count = definitions_storage.len,
             .invoke = invoke,
+            .port_count = Ports.len,
+            .ports_ptr = &ports_storage,
         };
 
         pub fn descriptor() *const abi.Descriptor {
@@ -451,7 +479,7 @@ pub fn module(comptime spec: anytype) type {
             output: *abi.InvokeResult,
         ) callconv(.c) void {
             inline for (Words, 0..) |Word, index| if (callback_index == index) {
-                Word.invoke(host, context, output);
+                Word.invoke(Ports, host, context, output);
                 return;
             };
             output.* = .{ .tag = .fail, .adapter_status = 2 };
@@ -566,4 +594,18 @@ fn identifier(bytes: []const u8) bool {
 
 fn asciiAlpha(byte: u8) bool {
     return std.ascii.isAlphabetic(byte);
+}
+
+fn isPortPointer(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .pointer => |p| p.size == .one and switch (@typeInfo(p.child)) {
+            .@"opaque" => @hasDecl(p.child, "ecl_port_marker"),
+            else => false,
+        },
+        else => false,
+    };
+}
+fn portIndex(comptime Ports: anytype, comptime P: type) u32 {
+    inline for (Ports, 0..) |Declared, index| if (Declared == P) return index;
+    @compileError("ecl-native: callback port capability is not declared by the module");
 }
