@@ -6,6 +6,7 @@ const capability = @import("capability.zig");
 const ports = @import("ports.zig");
 pub const Port = ports.Port;
 pub const Controller = ports.Controller;
+pub const PortCancellation = ports.Cancellation;
 pub const PortProgress = ports.Progress;
 pub const PortInterests = ports.Interests;
 
@@ -225,6 +226,9 @@ pub fn word(
     comptime word_documentation: []const u8,
     comptime callback_fn: anytype,
 ) type {
+    // A module's word declarations share one comptime evaluation budget.
+    // Set it at the factory, before the enclosing module can be evaluated.
+    @setEvalBranchQuota(100_000);
     if (word_documentation.len == 0) @compileError("ecl-native: word documentation must not be empty");
     if (!identifier(word_name)) @compileError("ecl-native: word name must be a nonempty identifier");
     const Callback = @TypeOf(callback_fn);
@@ -387,12 +391,12 @@ fn writeAdapterFailure(
 pub const Linkage = enum { dynamic, static };
 
 pub fn module(comptime spec: anytype) type {
+    @setEvalBranchQuota(1000 + spec.words.len * spec.words.len * 16);
     if (!identifier(spec.name)) @compileError("ecl-native: module name must be a nonempty identifier");
     if (spec.doc.len == 0) @compileError("ecl-native: module documentation must not be empty");
     const module_linkage: Linkage = if (@hasField(@TypeOf(spec), "linkage")) spec.linkage else .dynamic;
     const words = spec.words;
     const word_count = words.len;
-    @setEvalBranchQuota(1000 + word_count * word_count * 16);
     inline for (words, 0..) |Word, index| {
         inline for (0..index) |prior_index| {
             const Prior = words[prior_index];

@@ -5,8 +5,8 @@
 
 const builtin = @import("builtin");
 
-pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v2";
-pub const abi_version: u32 = 2;
+pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v3";
+pub const abi_version: u32 = 3;
 
 pub const max_error_message_bytes: u32 = 4096;
 pub const max_guest_scalar_bytes: u32 = 4096;
@@ -76,6 +76,8 @@ pub const Candidate = u64;
 pub const max_port_definitions = 64;
 pub const max_port_state_bytes = 1 << 20;
 pub const max_operation_slots = 16;
+pub const max_port_lanes = 16;
+pub const PortCancellation = enum(u32) { close_resource, acknowledge, _ };
 
 pub const PortAction = enum(u32) { create, check, begin, write, finish_request, read, result, wait, close, release, _ };
 pub const PortStatus = enum(u32) { ready, pending, failed, _ };
@@ -103,6 +105,7 @@ pub const ControllerTable = extern struct {
     read: *const fn (*anyopaque, [*]u8, u32) callconv(.c) u32,
     write: *const fn (*anyopaque, [*]const u8, u32) callconv(.c) u32,
     cancelled: *const fn (*anyopaque) callconv(.c) bool,
+    acknowledge_cancellation: *const fn (*anyopaque) callconv(.c) bool,
     fail: *const fn (*anyopaque, ErrorKindWire, [*]const u8, u32) callconv(.c) void,
 };
 pub const PortControllerFn = *const fn (*anyopaque, *const ControllerTable, *anyopaque) callconv(.c) void;
@@ -118,6 +121,10 @@ pub const PortDefinition = extern struct {
     execute: ?PortOperationFn,
     cancel: ?StateDeinitFn,
     cleanup: ?StateDeinitFn,
+    lane_count: u32 = 1,
+    cancellation: PortCancellation = .close_resource,
+    select_lane: ?*const fn (u32) callconv(.c) u32 = null,
+    cancel_operation: ?*const fn (*anyopaque, u32) callconv(.c) void = null,
 };
 
 pub const CapabilityRequirement = extern struct {
@@ -377,7 +384,7 @@ fn assertRecord(comptime T: type, comptime expected_size: usize, comptime expect
 
 comptime {
     @setEvalBranchQuota(8000);
-    if (@sizeOf(usize) != 8) @compileError("native ABI v2 supports 64-bit targets only");
+    if (@sizeOf(usize) != 8) @compileError("native ABI v3 supports 64-bit targets only");
 
     assertRecord(CapabilityRequirement, 8, 4);
     assertRecord(EffectSlot, 24, 8);
@@ -387,10 +394,10 @@ comptime {
     assertRecord(InvokeResult, 16, 8);
     assertRecord(HostTable, 144, 8);
     assertRecord(Descriptor, 104, 8);
-    assertRecord(PortDefinition, 64, 8);
+    assertRecord(PortDefinition, 88, 8);
     assertRecord(PortRequest, 48, 8);
     assertRecord(PortReply, 24, 8);
-    assertRecord(ControllerTable, 32, 8);
+    assertRecord(ControllerTable, 40, 8);
     assertRecord(EntryResult, 32, 8);
 
     if (@offsetOf(Definition, "callback_index") != 4 or

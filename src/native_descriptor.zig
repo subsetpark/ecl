@@ -528,7 +528,13 @@ pub const ValidateCursor = struct {
                     port.state_alignment == 0 or port.state_alignment > 64 or
                     !std.math.isPowerOfTwo(port.state_alignment) or
                     port.init_state == null or port.initialize == null or port.execute == null or
-                    port.cancel == null or port.cleanup == null) return error.InvalidPortDefinition;
+                    port.cancel == null or port.cleanup == null or port.select_lane == null or
+                    port.lane_count == 0 or port.lane_count > abi.max_port_lanes) return error.InvalidPortDefinition;
+                switch (port.cancellation) {
+                    .close_resource => if (port.cancel_operation != null) return error.InvalidPortDefinition,
+                    .acknowledge => if (port.cancel_operation == null) return error.InvalidPortDefinition,
+                    _ => return error.InvalidPortDefinition,
+                }
                 const name = try guestUtf8(port.name_ptr, port.name_len, max_word_name_bytes);
                 const symbol = intern.internNamespace(name) catch |err| return switch (err) {
                     error.OutOfMemory => error.OutOfMemory,

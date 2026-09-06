@@ -1026,6 +1026,7 @@ fn hostPort(context_value: *anyopaque, request: *const abi.PortRequest, reply: *
             if (slot.* == .empty) {
                 const value_created = call.activeEvaluator().createNativePort(call.instance, request.definition) catch |err| return switch (err) {
                     error.OutOfMemory => .out_of_memory,
+                    error.InsufficientLanes => portError(call, reply, .domain, "native port operation limit cannot cover its lanes"),
                     error.Limit => portError(call, reply, .domain, "native port live limit exceeded"),
                     error.Closed, error.Io, error.ScopeClosing => portError(call, reply, .io, "native port creation is unavailable"),
                 };
@@ -1071,6 +1072,7 @@ fn hostPort(context_value: *anyopaque, request: *const abi.PortRequest, reply: *
                     return portError(call, reply, .domain, "native operation admission slot is occupied");
                 switch (cell.admit(request.operation) catch return .out_of_memory) {
                     .pending => reply.status = .pending,
+                    .invalid_operation => return portError(call, reply, .domain, "native operation selected an invalid lane"),
                     .closed => return portError(call, reply, .io, "native port is closed"),
                     .operation => |operation| {
                         cell.releasePort();
@@ -1110,7 +1112,7 @@ fn hostPort(context_value: *anyopaque, request: *const abi.PortRequest, reply: *
             if (call.port_wait != null) return portError(call, reply, .domain, "native call already requested a wait");
             call.port_wait = switch (slot.*) {
                 .creating => slot.cell().?.source(0),
-                .admission => |pending| pending.cell.source(2),
+                .admission => |pending| pending.cell.admissionSource(pending.code),
                 .operation => |operation| operation.source(request.interests),
                 .closing => |cell| cell.source(1),
                 .empty, .published => return portError(call, reply, .domain, "native wait slot is empty"),

@@ -359,7 +359,7 @@ words use the public `ecl-native` SDK, declare exact effects, and request only
 the narrow host capabilities they need. Their tables validate and publish
 atomically through the same module registry used by source modules.
 
-The pre-release ABI is version 2 (`ecl_module_abi_v2`); rebuild existing native
+The pre-release ABI is version 3 (`ecl_module_abi_v3`); rebuild existing native
 modules against this SDK. Port inputs expose `.port` through `ValueView.kind()`
 and can be returned with `Call.forward`. With `Reschedule`, `Call.forwardNested`
 returns an invocation-local candidate for a bounded `Path` into a list or
@@ -371,9 +371,9 @@ Declare package resources with `const P = ecl.Port(Spec)` and include `P` in
 the module's `.ports` tuple. `Spec` supplies `name`, `State`, `init`, `open`,
 `run`, `cancel`, and `deinit`; the SDK checks their signatures. Word callbacks
 request `*P` and a `Reschedule` capability. The host owns each port's state,
-controller thread, scope membership, operation queues, and library lifetime.
+controller execution, scope membership, operation queues, and library lifetime.
 See [`test/native/ports.zig`](test/native/ports.zig) for a complete streaming
-example with two distinct kinds.
+example with serialized and independently progressing kinds.
 
 `create(slot)` publishes a candidate once initialization succeeds. `begin`
 admits an operation; `write`, `finishRequest`, `read`, and `result` advance its
@@ -387,8 +387,13 @@ unfinished work; `close` is idempotent and completes after controller cleanup.
 
 Controller callbacks receive private state and a `Controller` with bounded
 byte-stream access, cancellation observation, and error reporting. Stream waits
-block only the private controller. `init` must be bounded. `open`, `run`, and
-`deinit` execute serially on that controller; `cancel` can run concurrently with
+block only the private controller. `init` must be bounded. `open` and
+`deinit` surround operation execution: initialization finishes before any `run`,
+and cleanup starts after all runs finish. By default runs are serialized.
+Declare an exhaustive, zero-based `Lane` enum and `fn lane(u32) Lane` to select
+independent FIFO lanes. The selector must be bounded and depend only on its
+operation code. Runs on different lanes may execute concurrently; shared State
+must synchronize cross-lane access. `cancel` can run concurrently with
 `open` or `run`, must be bounded and thread-safe, and must interrupt any backend
 waits. Cancellation can already be set when a callback starts; check it before
 starting external work and preserve that observation across backend waits.
@@ -399,7 +404,23 @@ Sessions default to 64 live native ports, 16 admitted operations per port, and
 64 KiB per request and response ring. Hosts can set validated limits through
 `Host.native_port_limits`. Full operation queues wait for capacity;
 exceeding the live-port limit raises `'domain`. Cancelling queued work removes
-that operation. Cancelling active work closes the port and cancels its queue.
+that operation. By default cancelling active work closes the port and cancels
+its queues. To permit recovery, declare `cancellation = ecl.PortCancellation.acknowledge`
+and `fn cancelOperation(*State, Lane) void`, declaring `Lane` even for a single
+recoverable lane. This bounded, thread-safe callback
+must interrupt the selected lane's backend wait. The interrupted `run` must
+restore reusable state and call `controller.acknowledgeCancellation()` before
+returning; otherwise the host closes the resource. The lane stays occupied
+until that run returns. Resource close always overrides recovery.
+
+The operation budget is partitioned across lanes, with remainder slots assigned
+in declaration order. This reserves progress capacity for every lane; creation
+fails with `'domain` if the budget cannot cover all lanes. Idle lanes do not lend
+their slots. Admission waits are lane-specific. Sending bytes to a host ring
+means acceptance, not peer acknowledgement. Cancellation and errors do not undo
+external effects or bytes already accepted. Graceful shutdown, half-close, and
+protocol acknowledgement are author-defined operations; host close is forced
+cleanup, bounded by the controller's obligation to interrupt its backend waits.
 Ordinary backend errors preserve the port. Kind mismatches raise `'type`, and
 operations on closed ports raise `'io`. Scope cleanup and `@give` follow the
 same ownership protocol as network and process ports.
