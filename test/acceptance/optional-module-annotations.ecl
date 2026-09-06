@@ -54,7 +54,7 @@
 
 ### `set` is exactly literal capture plus `def`, including optional metadata.
 
-### def answer
+### set answer
 (: "The answer.")
 42 'answer set
 42 literal 'spelled def

@@ -1,12 +1,12 @@
 pop
 
-### def persist
+### set persist
 7 'persist set
 
 ### module loaded
 []
 (
- ### def answer
+ ### set answer
  8 'answer set) 'loaded @defm
 "side"
 io.prin

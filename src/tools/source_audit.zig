@@ -1180,20 +1180,16 @@ fn auditHttpServerWriteSink() bool {
         const line_text = std.mem.trimStart(u8, source[line_start..found], " ");
         if (line_text.len > 0 and line_text[0] == '#') continue;
         count += 1;
-        // The immediately enclosing definition, public or private: whichever
+        // The immediately enclosing declaration is whichever exact-word
         // navigation header is nearest above the occurrence.
-        const public_header = std.mem.lastIndexOf(u8, source[0..found], "### def ");
-        const private_header = std.mem.lastIndexOf(u8, source[0..found], "### defp ");
-        const private_wins = if (private_header) |private| (public_header == null or private > public_header.?) else false;
-        if (!private_wins) {
+        const header = lastDeclarationHeader(source[0..found]) orelse {
             std.log.err("http server write sink: `net.write` appears outside `write-response`", .{});
             failed = true;
             continue;
-        }
-        const name_start = private_header.? + "### defp ".len;
-        const name_end = preludeTokenEnd(source, name_start);
-        if (!std.mem.eql(u8, source[name_start..name_end], "write-response")) {
-            std.log.err("http server write sink: `net.write` appears in `{s}`; only `write-response` may write", .{source[name_start..name_end]});
+        };
+        const name_end = preludeTokenEnd(source, header.name_start);
+        if (!std.mem.eql(u8, source[header.name_start..name_end], "write-response")) {
+            std.log.err("http server write sink: `net.write` appears in `{s}`; only `write-response` may write", .{source[header.name_start..name_end]});
             failed = true;
         }
     }
@@ -1202,6 +1198,20 @@ fn auditHttpServerWriteSink() bool {
         failed = true;
     }
     return failed;
+}
+
+const DeclarationHeader = struct { position: usize, name_start: usize };
+
+fn lastDeclarationHeader(source: []const u8) ?DeclarationHeader {
+    const prefixes = [_][]const u8{ "### def ", "### defp ", "### set ", "### setp " };
+    var latest: ?DeclarationHeader = null;
+    for (prefixes) |prefix| {
+        const position = std.mem.lastIndexOf(u8, source, prefix) orelse continue;
+        if (latest == null or position > latest.?.position) {
+            latest = .{ .position = position, .name_start = position + prefix.len };
+        }
+    }
+    return latest;
 }
 
 fn auditDynamicContextSpelling() bool {

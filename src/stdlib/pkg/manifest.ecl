@@ -2,12 +2,12 @@
 # Validate and read package manifests.
 []
 (
- ### defp manifest-keys
+ ### setp manifest-keys
  # Required manifest keys.
  ['format 'name 'version 'exports 'requires]
  'manifest-keys setp
 
- ### defp requirement-keys
+ ### setp requirement-keys
  # Required package-requirement keys.
  ['package 'version 'url 'hash]
  'requirement-keys setp

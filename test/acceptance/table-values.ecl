@@ -6,7 +6,7 @@
  'with-column)
 import
 
-### def sales
+### set sales
 {"id" [1 2 3] "city" ["Oslo" "Lima" "Oslo"]} 'sales set
 
 # Core reflection is honest: a table is a dict and behaves as one.

@@ -524,7 +524,7 @@ test "module sources: formatter and standard modules use @defm" {
     const registration = try formatter.format(std.testing.allocator, "[] ((1) 'x def) 'stats @defm\n");
     defer std.testing.allocator.free(registration);
     try std.testing.expectEqualStrings(
-        "### module stats\n[]\n(\n ### def x\n (1) 'x def) 'stats @defm\n",
+        "### module stats\n[] (\n    ### def x\n    (1) 'x def) 'stats @defm\n",
         registration,
     );
     const seeded = try formatter.format(
@@ -533,7 +533,7 @@ test "module sources: formatter and standard modules use @defm" {
     );
     defer std.testing.allocator.free(seeded);
     try std.testing.expectEqualStrings(
-        "### module counter\n[[0]]\n(\n ### def tick\n (1 +) 'tick def) 'counter @defm\n",
+        "### module counter\n[[0]] (\n       ### def tick\n       (1 +) 'tick def) 'counter @defm\n",
         seeded,
     );
     const anonymous = try formatter.format(std.testing.allocator, "[] ((1) 'x def) @module\n");
