@@ -24,6 +24,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const external = @import("external.zig");
+const transfers = @import("port_transfer.zig");
 const heap = @import("heap.zig");
 const scheduler_api = @import("scheduler.zig");
 const value = @import("value.zig");
@@ -579,73 +580,21 @@ pub const ListenerCell = struct {
     /// Attach this listener to `to_erased` while leaving its current
     /// membership in place, so a caller moving several ports can still back
     /// out. `from_erased` must be the scope that owns the listener now.
-    pub fn prepareScopeTransfer(
-        self: *ListenerCell,
-        from_erased: *anyopaque,
-        to_erased: *anyopaque,
-    ) heap.PortTransferError!void {
-        const destination: *scheduler_api.TaskScope = @ptrCast(@alignCast(to_erased));
-        std.Io.Threaded.mutexLock(&self.mutex);
-        switch (self.ownership) {
-            .none => {
-                std.Io.Threaded.mutexUnlock(&self.mutex);
-                return error.Closed;
-            },
-            .transferring => {
-                std.Io.Threaded.mutexUnlock(&self.mutex);
-                return error.Busy;
-            },
-            .owned => |current| if (current.owningScope() != from_erased) {
-                std.Io.Threaded.mutexUnlock(&self.mutex);
-                return error.NotOwner;
-            },
-        }
-        std.Io.Threaded.mutexUnlock(&self.mutex);
-
-        // `attachExternal` allocates and takes the destination scope's lock,
-        // so it runs outside this cell's lock: the cancellation walk takes a
-        // scope lock before a member's, and the reverse order would close a
-        // cycle between them.
-        const member = external.scopeMember(ListenerCell, self);
-        var token = destination.scheduler.attachExternal(destination, member) catch |err| return switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            error.ScopeClosing => error.ScopeClosing,
-        };
-
-        std.Io.Threaded.mutexLock(&self.mutex);
-        // Re-check the owner, not just that there is one: the origin observed
-        // before the attach is the one this move was authorized against, so a
-        // listener that closed or changed hands in the meantime hands the new
-        // membership straight back rather than leaving the destination scope
-        // holding a member nothing will ever detach.
-        const still_owned = switch (self.ownership) {
-            .owned => |current| current.owningScope() == from_erased,
-            .none, .transferring => false,
-        };
-        if (!still_owned) {
-            std.Io.Threaded.mutexUnlock(&self.mutex);
-            token.detach();
-            return error.Closed;
-        }
-        self.ownership.beginTransfer(token);
-        std.Io.Threaded.mutexUnlock(&self.mutex);
+    const Transfer = transfers.ScopeTransfer(ListenerCell, transferOwnership, transferLive);
+    fn transferOwnership(self: *ListenerCell) *external.Ownership {
+        return &self.ownership;
     }
-
-    /// Make a prepared transfer permanent: the destination scope owns the
-    /// listener and the origin scope no longer does.
+    fn transferLive(self: *ListenerCell) bool {
+        return self.ownership.live();
+    }
+    pub fn prepareScopeTransfer(self: *ListenerCell, from: *anyopaque, to: *anyopaque) heap.PortTransferError!void {
+        return Transfer.prepare(self, from, to);
+    }
     pub fn commitScopeTransfer(self: *ListenerCell) void {
-        std.Io.Threaded.mutexLock(&self.mutex);
-        var detached = self.ownership.commitTransfer();
-        std.Io.Threaded.mutexUnlock(&self.mutex);
-        detached.detachAll();
+        Transfer.commit(self);
     }
-
-    /// Undo a prepared transfer, leaving the origin scope as the owner.
     pub fn abortScopeTransfer(self: *ListenerCell) void {
-        std.Io.Threaded.mutexLock(&self.mutex);
-        var detached = self.ownership.abortTransfer();
-        std.Io.Threaded.mutexUnlock(&self.mutex);
-        detached.detachAll();
+        Transfer.abort(self);
     }
 
     fn attach(self: *ListenerCell, membership: external.ScopeMembership) void {
@@ -1418,79 +1367,24 @@ pub const ConnectionCell = struct {
 
     /// Attach this connection to `to_erased` while leaving its current
     /// membership in place. `from_erased` must be the scope that owns it now.
-    pub fn prepareScopeTransfer(
-        self: *ConnectionCell,
-        from_erased: *anyopaque,
-        to_erased: *anyopaque,
-    ) heap.PortTransferError!void {
-        const destination: *scheduler_api.TaskScope = @ptrCast(@alignCast(to_erased));
-        std.Io.Threaded.mutexLock(&self.mutex);
-        const live = switch (self.lifecycle) {
+    const Transfer = transfers.ScopeTransfer(ConnectionCell, transferOwnership, transferLive);
+    fn transferOwnership(self: *ConnectionCell) *external.Ownership {
+        return &self.ownership;
+    }
+    fn transferLive(self: *ConnectionCell) bool {
+        return switch (self.lifecycle) {
             .prepared, .running => true,
             .stopping, .terminal => false,
         };
-        if (!live) {
-            std.Io.Threaded.mutexUnlock(&self.mutex);
-            return error.Closed;
-        }
-        switch (self.ownership) {
-            .none => {
-                std.Io.Threaded.mutexUnlock(&self.mutex);
-                return error.Closed;
-            },
-            .transferring => {
-                std.Io.Threaded.mutexUnlock(&self.mutex);
-                return error.Busy;
-            },
-            .owned => |current| if (current.owningScope() != from_erased) {
-                std.Io.Threaded.mutexUnlock(&self.mutex);
-                return error.NotOwner;
-            },
-        }
-        std.Io.Threaded.mutexUnlock(&self.mutex);
-
-        // Outside this cell's lock: the cancellation walk takes a scope lock
-        // before a member's, so attaching under the cell lock would close a
-        // cycle between the two.
-        const member = external.scopeMember(ConnectionCell, self);
-        var token = destination.scheduler.attachExternal(destination, member) catch |err| return switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            error.ScopeClosing => error.ScopeClosing,
-        };
-
-        std.Io.Threaded.mutexLock(&self.mutex);
-        // The owner is re-checked, not just its presence: the origin observed
-        // before the attach is the one this move was authorized against.
-        const still_live = switch (self.lifecycle) {
-            .prepared, .running => switch (self.ownership) {
-                .owned => |current| current.owningScope() == from_erased,
-                .none, .transferring => false,
-            },
-            .stopping, .terminal => false,
-        };
-        if (!still_live) {
-            std.Io.Threaded.mutexUnlock(&self.mutex);
-            token.detach();
-            return error.Closed;
-        }
-        self.ownership.beginTransfer(token);
-        std.Io.Threaded.mutexUnlock(&self.mutex);
     }
-
-    /// Make a prepared transfer permanent.
+    pub fn prepareScopeTransfer(self: *ConnectionCell, from: *anyopaque, to: *anyopaque) heap.PortTransferError!void {
+        return Transfer.prepare(self, from, to);
+    }
     pub fn commitScopeTransfer(self: *ConnectionCell) void {
-        std.Io.Threaded.mutexLock(&self.mutex);
-        var detached = self.ownership.commitTransfer();
-        std.Io.Threaded.mutexUnlock(&self.mutex);
-        detached.detachAll();
+        Transfer.commit(self);
     }
-
-    /// Undo a prepared transfer, leaving the origin scope as the owner.
     pub fn abortScopeTransfer(self: *ConnectionCell) void {
-        std.Io.Threaded.mutexLock(&self.mutex);
-        var detached = self.ownership.abortTransfer();
-        std.Io.Threaded.mutexUnlock(&self.mutex);
-        detached.detachAll();
+        Transfer.abort(self);
     }
 
     fn abort(self: *ConnectionCell) void {

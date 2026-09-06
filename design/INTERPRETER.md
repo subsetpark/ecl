@@ -1368,6 +1368,13 @@ capabilities and address suspended work through runtime-owned operation slots.
 Cancellation notification is a bounded concurrent callback; initialization,
 execution, and cleanup belong to the controller thread.
 
+Network, process, and native ports share the same scope-transfer boundary.
+Backends supply their locked lifetime predicate and ownership location; the
+shared protocol authorizes the origin, attaches the destination outside the
+cell lock, revalidates ownership, and consumes commit or rollback. Backend
+shutdown retains its own execution model while using the common ownership,
+readiness, and byte-ring representations.
+
 The machine presents the callback a transactional input window. A successful
 return validates and commits the declared outputs. Failure restores the ecl
 operand stack, while external effects performed by the callback remain
