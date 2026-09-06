@@ -1462,13 +1462,24 @@ quoting is `'parse`.
 ## dict
 
 These operations preserve the language's immutable, insertion-ordered
-dictionary semantics. The constructor family accepts flat adjacent entries,
-parallel key/value lists, association lists, or one shared value for a key
-list. All constructors reject duplicate keys instead of silently choosing a
-winner. Core `at`, `put`, `update`, and `del` treat a dictionary selector as
-one whole-value key. Their `dict.at`, `dict.update`, and `dict.del` counterparts
-instead pervade through nested list selectors; use the core forms to address a
-dictionary key that is itself a list.
+dictionary semantics. The constructor family accepts one key/value association,
+flat adjacent entries, parallel key/value lists, association lists, or one
+shared value for a key list. All constructors reject duplicate keys instead of
+silently choosing a winner. Core `at`, `put`, `update`, and `del` treat a
+dictionary selector as one whole-value key. Their `dict.at`, `dict.update`, and
+`dict.del` counterparts instead pervade through nested list selectors; use the
+core forms to address a dictionary key that is itself a list.
+
+### associate
+`( value key -- dict )` — Build a one-entry dictionary associating `key` with
+`value`.
+
+#### Examples
+
+```ecl
+["inspect" "alpha"] 'args dict.associate
+# => {'args ["inspect" "alpha"]}
+```
 
 ### at
 `( dict selector -- values )` — Look up every leaf of a nested list selector

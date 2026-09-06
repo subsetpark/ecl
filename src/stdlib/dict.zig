@@ -60,6 +60,11 @@ pub const words = [_]env.BuiltinWord{
         .primitive = dict_kernels.mergeForModule,
     },
     .{
+        .name = "associate",
+        .doc = "( value key -- dict ) Build a one-entry dictionary associating the key with the value.",
+        .primitive = associate,
+    },
+    .{
         .name = "from-flat",
         .doc = "( entries -- dict ) Build a dictionary from one flat adjacent key/value list.",
         .primitive = fromFlat,
@@ -371,6 +376,41 @@ const DictAtDriver = struct {
         return switch (try self.cursor.borrowMut().advance(evaluator, machine.kernel_poll_quantum)) {
             .pending => .yielded,
             .complete => |result| .{ .output = result },
+        };
+    }
+};
+
+fn associate(evaluator: *Machine) MachineError!void {
+    try evaluator.require(2);
+    var key = try evaluator.popValue();
+    defer key.deinit();
+    var associated_value = try evaluator.popValue();
+    defer associated_value.deinit();
+    const pair = [1]dict_storage.Pair{.{ key.borrow(), associated_value.borrow() }};
+    const materializer = try dict_storage.Materializer.init(
+        evaluator.allocator(),
+        &pair,
+        false,
+    );
+    try evaluator.startDriver(AssociateDriver{
+        .key = .init(key.take()),
+        .associated_value = .init(associated_value.take()),
+        .materializer = .init(materializer),
+    });
+}
+
+const AssociateDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+    key: heap.Owned(Value),
+    associated_value: heap.Owned(Value),
+    materializer: heap.Owned(dict_storage.Materializer),
+
+    pub fn advance(evaluator: *Machine, self: *AssociateDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        return switch (try self.materializer.borrowMut().advance(machine.kernel_poll_quantum)) {
+            .pending => .yielded,
+            .duplicate_key => unreachable,
+            .complete => |dictionary| .{ .output = dictionary },
         };
     }
 };

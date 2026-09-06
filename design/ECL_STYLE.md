@@ -209,11 +209,12 @@ it. Use `pair` for two values and `pack` when a literal count is itself the
 clearest description; do not retain a distant count solely to delimit a long
 computed region.
 
-Use `dict.from-lists` when keys and values already exist as parallel lists. Use
-`dict.from-flat` when the natural intermediate form is alternating key and value
-entries. Use `dict.from-pairs` when the natural form is a list of `[key value]`
-associations. Use literal dictionaries for inert fixed data. Construct
-dictionaries containing expressions with words that execute those expressions.
+Use `dict.associate` for one computed value and key. Use `dict.from-lists` when
+keys and values already exist as parallel lists. Use `dict.from-flat` when the
+natural intermediate form is alternating key and value entries. Use
+`dict.from-pairs` when the natural form is a list of `[key value]` associations.
+Use literal dictionaries for inert fixed data. Construct dictionaries containing
+expressions with words that execute those expressions.
 Dictionary observation and transformation words
 such as `dict.keys`, `dict.has?`, and `dict.merge` stay qualified; `put` and
 `del` remain bare because both are polymorphic over lists and dictionaries.
