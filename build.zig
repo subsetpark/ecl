@@ -61,6 +61,21 @@ pub fn build(b: *std.Build) void {
     native_fixture_step.dependOn(fixture_install);
     const fixture_files = b.addWriteFiles();
     _ = fixture_files.addCopyFile(fixture.getEmittedBin(), "sample.eclmod");
+    for ([_][]const u8{ "portprobe", "foreignport" }) |name| {
+        const options = b.addOptions();
+        options.addOption([]const u8, "module_name", name);
+        const port_fixture = native_build.addExtension(b, .{
+            .name = name,
+            .root_source_file = b.path("test/native/ports.zig"),
+            .target = target,
+            .optimize = optimize,
+            .ecl_native = native_sdk,
+        });
+        port_fixture.root_module.addOptions("port_fixture_options", options);
+        port_fixture.root_module.link_libc = true;
+        native_fixture_step.dependOn(native_build.installExtension(b, port_fixture, "native-fixture"));
+        _ = fixture_files.addCopyFile(port_fixture.getEmittedBin(), b.fmt("{s}.eclmod", .{name}));
+    }
     const native_fixture_options = b.addOptions();
     native_fixture_options.addOptionPath(
         "directory",

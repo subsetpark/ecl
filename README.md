@@ -367,6 +367,41 @@ dictionary. Handle `.yield_required` by yielding and reopening the path on the
 next invocation. These views and candidates expose no backend state or scope
 ownership authority.
 
+Declare package resources with `const P = ecl.Port(Spec)` and include `P` in
+the module's `.ports` tuple. `Spec` supplies `name`, `State`, `init`, `open`,
+`run`, `cancel`, and `deinit`; the SDK checks their signatures. Word callbacks
+request `*P` and a `Reschedule` capability. The host owns each port's state,
+controller thread, scope membership, operation queues, and library lifetime.
+See [`test/native/ports.zig`](test/native/ports.zig) for a complete streaming
+example with two distinct kinds.
+
+`create(slot)` publishes a candidate once initialization succeeds. `begin`
+admits an operation; `write`, `finishRequest`, `read`, and `result` advance its
+byte protocol. Both streams can return partial progress. Advance writing and
+reading together: filling the request before draining the response can deadlock
+a bidirectional protocol. On pending progress, call `wait` with the needed stream
+directions and return `.yield`. Resume through the same operation slot, keeping
+only encoding offsets and owned data in continuation state. Views and candidates
+must be obtained again in each invocation. `release` retires a slot and cancels
+unfinished work; `close` is idempotent and completes after controller cleanup.
+
+Controller callbacks receive private state and a `Controller` with bounded
+byte-stream access, cancellation observation, and error reporting. Stream waits
+block only the private controller. `init` must be bounded. `open`, `run`, and
+`deinit` execute serially on that controller; `cancel` can run concurrently with
+`open` or `run`, must be bounded and thread-safe, and must interrupt any backend
+waits. Integrations with uninterruptible blocking calls do not meet this contract.
+Controllers cannot use ECL values, builders, scopes, or scheduler internals.
+
+Sessions default to 64 live native ports, 16 admitted operations per port, and
+64 KiB per request and response ring. Hosts can set validated limits through
+`Host.native_port_limits`. Full operation queues wait for capacity;
+exceeding the live-port limit raises `'domain`. Cancelling queued work removes
+that operation. Cancelling active work closes the port and cancels its queue.
+Ordinary backend errors preserve the port. Kind mismatches raise `'type`, and
+operations on closed ports raise `'io`. Scope cleanup and `@give` follow the
+same ownership protocol as network and process ports.
+
 [`test/native/sample.zig`](test/native/sample.zig) is the reference extension
 used by the acceptance suite. Native loading is a trusted-code boundary:
 opening a shared library executes machine code before ecl can validate its

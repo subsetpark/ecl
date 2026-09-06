@@ -1368,6 +1368,22 @@ capabilities and address suspended work through runtime-owned operation slots.
 Cancellation notification is a bounded concurrent callback; initialization,
 execution, and cleanup belong to the controller thread.
 
+The native resource owner reserves Session capacity before attaching a provisional
+cell to its scope. Initialization cannot run before the heap identity, membership,
+and controller lifetime are owned. Successful call commit publishes provisional
+ports; rollback closes them. Each cell serializes admitted operations, with bounded
+request and response rings separating worker execution from controller blocking.
+Operation slots own queues and streams across callback suspension; readiness
+registration observes terminal state under the same mutex as notification.
+
+Closing cancels active and queued work and prevents further admission. Cancelling
+only a queued operation removes that operation; cancelling active work closes its
+cell. Controller cleanup precedes joining, and joining precedes scope detachment.
+The resource owner joins completed controllers outside ECL workers, so scope
+teardown can await cleanup without blocking a worker. Closed heap identities retain
+their module pin independently of backend cleanup. Session shutdown closes creation,
+settles resources and calls, and releases native images only after those lifetimes.
+
 Network, process, and native ports share the same scope-transfer boundary.
 Backends supply their locked lifetime predicate and ownership location; the
 shared protocol authorizes the origin, attaches the destination outside the
