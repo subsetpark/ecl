@@ -95,6 +95,10 @@ test "formatter applies uniform aligned structural layout" {
     try expectFormat("(| x y | x y)", "(|x y| x y)\n");
 }
 
+test "multiline child does not force the following sibling to break" {
+    try expectFormat("(alpha\n beta) gamma", "(alpha\n beta) gamma\n");
+}
+
 test "multiline modules break only their local top-level run" {
     const source = "((1) 'x def) @module dup 'stats register wrap";
     try expectFormat(
@@ -148,8 +152,7 @@ test "comments break only their local structural run" {
         source,
         "(dup type 'list match?\n" ++
             " (# nested comment\n" ++
-            "  dup len dup 0 > swap 2 mod 1 = and)\n" ++
-            " if)\n",
+            "  dup len dup 0 > swap 2 mod 1 = and) if)\n",
     );
     try expectParseEquivalent(source);
 }
@@ -164,8 +167,7 @@ test "formatter preserves comments and atomic literal contents" {
         "# heading with  two spaces\n" ++
             "(foo # trailing exactly\n" ++
             " bar\n" ++
-            " \"raw\n  string\"\n" ++
-            " \\space)\n",
+            " \"raw\n  string\" \\space)\n",
     );
     try expectParseEquivalent(source);
 }

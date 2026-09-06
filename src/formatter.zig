@@ -21,7 +21,6 @@ const FormKind = union(enum) { atom: []const u8, string: []const u8, delimited: 
 const Form = struct {
     kind: FormKind,
     layout: ?*const Doc = null,
-    force_break: bool = false,
 };
 const Syntax = struct { root: Sequence, containers: []*Form };
 const ParseContext = struct {
@@ -103,14 +102,10 @@ const SyntaxParser = struct {
                 atomEnd(self.source, start);
             if (self.index == start) return error.InvalidSource;
             const syntax_form = try self.allocator.create(Form);
-            syntax_form.* = .{
-                .kind = if (byte == '"')
-                    .{ .string = self.source[start..self.index] }
-                else
-                    .{ .atom = self.source[start..self.index] },
-                .force_break = byte == '"' and
-                    std.mem.indexOfScalar(u8, self.source[start..self.index], '\n') != null,
-            };
+            syntax_form.* = .{ .kind = if (byte == '"')
+                .{ .string = self.source[start..self.index] }
+            else
+                .{ .atom = self.source[start..self.index] } };
             try contexts.items[contexts.items.len - 1].parts.append(
                 self.allocator,
                 .{ .form = syntax_form },
@@ -397,7 +392,6 @@ const NestedDoc = struct {
     doc: *const Doc,
     has_content: bool,
     trailing_hardlines: usize,
-    force_break: bool,
 };
 const Formatter = struct {
     host: *const heap.HostCleanup,
@@ -598,7 +592,6 @@ const Formatter = struct {
         for (syntax.containers) |form_item| {
             const formatted = try self.formatDelimited(form_item.kind.delimited);
             form_item.layout = formatted.doc;
-            form_item.force_break = formatted.force_break;
         }
     }
     fn formatDelimited(self: *Formatter, delimited: Delimited) Error!NestedDoc {
@@ -608,7 +601,6 @@ const Formatter = struct {
                 .doc = try self.docs.concat(&.{ try self.docs.text(delimited.open), try self.docs.text(delimited.close) }),
                 .has_content = true,
                 .trailing_hardlines = 0,
-                .force_break = false,
             };
         }
         var pieces: std.ArrayList(*const Doc) = .empty;
@@ -622,7 +614,6 @@ const Formatter = struct {
             .doc = try self.docs.group(try self.docs.aligned(try self.docs.concat(pieces.items))),
             .has_content = true,
             .trailing_hardlines = 0,
-            .force_break = nested_doc.force_break,
         };
     }
     fn formatModuleRegistration(
@@ -674,7 +665,6 @@ const Formatter = struct {
         var previous_form: ?usize = null;
         var pending_definition: ?usize = null;
         var newlines: usize = 0;
-        var force_break = false;
         for (sequence.parts, 0..) |part, part_index| switch (part) {
             .trivia => |trivia| switch (trivia.kind) {
                 .space => newlines += lineBreakCount(trivia.bytes),
@@ -684,7 +674,6 @@ const Formatter = struct {
                             newlines = 0;
                             continue;
                         }
-                        force_break = true;
                         try self.appendHardlines(&output, if (have_content) 2 else 1);
                         try output.append(self.allocator(), try self.definitionHeader(
                             header.name,
@@ -698,7 +687,6 @@ const Formatter = struct {
                         continue;
                     }
                     if (attachedDefinitionAfterComment(sequence, part_index)) |header| {
-                        force_break = true;
                         if (pending_definition != header.part) {
                             try self.appendHardlines(&output, if (have_content) 2 else 1);
                             try output.append(self.allocator(), try self.definitionHeader(
@@ -718,7 +706,6 @@ const Formatter = struct {
                         } else try output.append(self.allocator(), try self.docs.text(" "));
                     }
                     try output.append(self.allocator(), try self.docs.text(trivia.bytes));
-                    force_break = true;
                     have_content = true;
                     previous_comment = true;
                     newlines = 0;
@@ -744,12 +731,6 @@ const Formatter = struct {
                     } else if (!tightBinderGap(binder, previous_form, part_index)) {
                         if (newlines > 0) {
                             try self.appendHardlines(&output, @min(newlines, 2));
-                            force_break = true;
-                        } else if (previous_form != null and
-                            sequence.parts[previous_form.?].form.force_break)
-                        {
-                            try self.appendHardlines(&output, 1);
-                            force_break = true;
                         } else {
                             try output.append(self.allocator(), try self.docs.softline());
                             fill_pair = true;
@@ -765,7 +746,6 @@ const Formatter = struct {
                         try output.append(self.allocator(), try self.form(sequence, part_index));
                     }
                 } else try output.append(self.allocator(), try self.form(sequence, part_index));
-                force_break = force_break or sequence.parts[part_index].form.force_break;
                 if (fill_pair) {
                     const start = output.items.len - 2;
                     const pair = try self.docs.localGroup(try self.docs.concat(output.items[start..]));
@@ -792,7 +772,6 @@ const Formatter = struct {
             .doc = try self.docs.concat(output.items),
             .has_content = have_content or output.items.len > 0 or trailing_hardlines > 0,
             .trailing_hardlines = trailing_hardlines,
-            .force_break = force_break,
         };
     }
     fn appendHardlines(self: *Formatter, output: *std.ArrayList(*const Doc), count: usize) Error!void {

@@ -41,7 +41,7 @@ execute 'syntax match eclSymbol /' . s:atom_start . "'"
       \ . s:atom_end . '/'
 
 execute 'syntax match eclDefinition /' . s:atom_start
-      \ . '\%(defp\?\|setp\?\|@defm\)' . s:atom_end . '/'
+      \ . '\%(defp\?\|setp\?\|test\|@defm\)' . s:atom_end . '/'
 
 syntax match eclComment /#.*/ contains=@Spell
 
