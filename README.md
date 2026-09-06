@@ -359,6 +359,14 @@ words use the public `ecl-native` SDK, declare exact effects, and request only
 the narrow host capabilities they need. Their tables validate and publish
 atomically through the same module registry used by source modules.
 
+The pre-release ABI is version 2 (`ecl_module_abi_v2`); rebuild existing native
+modules against this SDK. Port inputs expose `.port` through `ValueView.kind()`
+and can be returned with `Call.forward`. With `Reschedule`, `Call.forwardNested`
+returns an invocation-local candidate for a bounded `Path` into a list or
+dictionary. Handle `.yield_required` by yielding and reopening the path on the
+next invocation. These views and candidates expose no backend state or scope
+ownership authority.
+
 [`test/native/sample.zig`](test/native/sample.zig) is the reference extension
 used by the acceptance suite. Native loading is a trusted-code boundary:
 opening a shared library executes machine code before ecl can validate its

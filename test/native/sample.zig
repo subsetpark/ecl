@@ -59,6 +59,41 @@ const OneBuild = struct {
 };
 const OneBuildSchedule = ecl.Reschedule(OneBuild);
 
+fn forwardNestedPort(
+    call: *ecl.Call("value -- result"),
+    schedule: *OneBuildSchedule,
+) ecl.CallbackResult {
+    const path: []const u64 = switch (call.input(0).kind()) {
+        .list => &.{ecl.Path.item(0)},
+        .dict => &.{ecl.Path.value(0)},
+        else => return call.fail(.type, "expected a list or dictionary containing a port"),
+    };
+    if (!schedule.state().appended) {
+        schedule.state().appended = true;
+        if (!schedule.consume(65_536)) unreachable;
+        return switch (try call.forwardNested(0, path)) {
+            .yield_required => schedule.yield(),
+            .candidate => call.fail(.user, "nested forwarding ignored the exhausted turn"),
+            .invalid => call.fail(.domain, "nested forwarding rejected a valid path"),
+        };
+    }
+    switch (call.nested(0, path)) {
+        .item => |item| {
+            if (item.kind() != .port) return call.fail(.type, "expected a nested port");
+            if (item.int() != null or item.float() != null or item.char() != null or
+                item.bytes() != null or item.aggregateLength() != null)
+                return call.fail(.user, "port view exposed a scalar or aggregate representation");
+        },
+        .yield_required => return schedule.yield(),
+        .invalid => return call.fail(.domain, "invalid nested port path"),
+    }
+    return switch (try call.forwardNested(0, path)) {
+        .candidate => |candidate| call.complete(.{candidate}),
+        .yield_required => schedule.yield(),
+        .invalid => call.fail(.domain, "nested port forwarding rejected"),
+    };
+}
+
 fn singleton(
     call: *ecl.Call("value -- result"),
     build: *ecl.BuildValues,
@@ -337,6 +372,7 @@ pub const Extension = ecl.module(.{
         ecl.word("discard", "Discard one value.", discard),
         ecl.word("split", "Return one input twice.", split),
         ecl.word("forward", "Forward an input unchanged.", forward),
+        ecl.word("nested-port", "Observe and forward the first port in a list or dictionary.", forwardNestedPort),
         ecl.word("fail-user", "Raise the user error kind.", failUser),
         ecl.word("fail-kind", "Raise one of the eight author-owned error kinds.", failKind),
         ecl.word("make-char", "Construct a character through the SDK scalar boundary.", makeChar),

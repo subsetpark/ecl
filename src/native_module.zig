@@ -283,6 +283,7 @@ pub const ModuleInstance = opaque {
             result.list_at = null;
             result.dict_at = null;
             result.read_path = null;
+            result.forward_path = null;
         }
         return result;
     }

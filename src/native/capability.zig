@@ -217,7 +217,7 @@ pub const ValueView = opaque {
     pub fn bytes(self: *const ValueView) ?[]const u8 {
         return switch (self.kind()) {
             .symbol, .word => self.state().wire.bytes_ptr.?[0..self.state().wire.bytes_len],
-            .int, .float, .char, .list, .dict => null,
+            .int, .float, .char, .list, .dict, .port => null,
             _ => null,
         };
     }
@@ -225,7 +225,7 @@ pub const ValueView = opaque {
     pub fn aggregateLength(self: *const ValueView) ?u64 {
         return switch (self.kind()) {
             .list, .dict => self.state().wire.aggregate_len,
-            .int, .float, .char, .symbol, .word => null,
+            .int, .float, .char, .symbol, .word, .port => null,
             _ => null,
         };
     }

@@ -107,6 +107,42 @@ fn dummyInvoke(_: *const abi.HostTable, _: *anyopaque, _: u32, output: *abi.Invo
     output.* = .{ .tag = .fail };
 }
 
+test "native: opaque ports survive forwarding and nested aggregate builders" {
+    const Port = struct {
+        releases: usize = 0,
+
+        pub fn releasePort(self: *@This()) void {
+            self.releases += 1;
+        }
+        pub fn prepareScopeTransfer(_: *@This(), _: *anyopaque, _: *anyopaque) heap.PortTransferError!void {
+            return error.Closed;
+        }
+        pub fn commitScopeTransfer(_: *@This()) void {}
+        pub fn abortScopeTransfer(_: *@This()) void {}
+    };
+    var port: Port = .{};
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer diagnostics.deinit();
+    {
+        var runtime = try initRuntime(&output.writer, &diagnostics.writer, native_fixture.directory);
+        defer runtime.deinit();
+        try runtime.pushOwned(try heap.createPort(Port, std.testing.allocator, 917, &port));
+        try expectErrorContains(&runtime, "sample.draft-fail", &.{ "'kind 'user", "draft candidates retired" });
+        try std.testing.expectEqual(@as(usize, 0), port.releases);
+        try expectOk(
+            &runtime,
+            "sample.forward sample.split " ++
+                "sample.singleton sample.nested-port " ++
+                "'key swap sample.pair-dict sample.nested-port match?",
+        );
+        try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
+        try std.testing.expectEqual(@as(usize, 1), port.releases);
+    }
+    try std.testing.expectEqual(@as(usize, 1), port.releases);
+}
+
 fn validate(
     host: *const heap.HostCleanup,
     requested: intern.ModuleName,
@@ -252,12 +288,11 @@ test "native: the SDK generates a descriptor the production validator accepts" {
     defer validated.deinit();
 
     try std.testing.expectEqualStrings("sample", intern.get(intern.moduleId(validated.name())));
-    try std.testing.expectEqual(@as(usize, 19), validated.definitions().len);
+    try std.testing.expectEqual(@as(usize, 20), validated.definitions().len);
     const expected_names = [_][]const u8{
-        "increment",      "discard",       "split",          "forward",    "fail-user",  "fail-kind",
-        "make-char",      "singleton",     "pair-dict",      "sum-list",   "sum-dict",   "cooperative",
-        "draft-fail",     "yield-forever", "builder-budget", "large-list", "large-dict", "duplicate-dict",
-        "noncooperative",
+        "increment",     "discard",        "split",      "forward",    "nested-port",    "fail-user",      "fail-kind",
+        "make-char",     "singleton",      "pair-dict",  "sum-list",   "sum-dict",       "cooperative",    "draft-fail",
+        "yield-forever", "builder-budget", "large-list", "large-dict", "duplicate-dict", "noncooperative",
     };
     for (validated.definitions(), expected_names) |definition, expected| {
         try std.testing.expectEqualStrings(expected, intern.get(intern.namespaceId(definition.name)));

@@ -147,6 +147,34 @@ pub fn Call(comptime effect_source: []const u8) type {
             return @enumFromInt(output);
         }
 
+        /// Forward a nested input without decoding or rebuilding it. The
+        /// candidate is invocation-local, including when it denotes a port.
+        /// A port view grants no access to its private backend state.
+        pub fn forwardNested(
+            self: *Self,
+            comptime index: usize,
+            path: []const u64,
+        ) error{OutOfMemory}!BuildResult {
+            if (index >= EffectSpec.inputs.len)
+                @compileError("ecl-native: forwarded input exceeds the declared effect");
+            if (path.len > Path.max_depth) return .invalid;
+            var output: abi.Candidate = 0;
+            const invocation = &self.state().invocation;
+            return switch ((invocation.host.forward_path orelse return .invalid)(
+                invocation.context,
+                @intCast(index),
+                path.ptr,
+                @intCast(path.len),
+                &output,
+            )) {
+                .ok => .{ .candidate = @enumFromInt(output) },
+                .yield_required => .yield_required,
+                .out_of_memory => error.OutOfMemory,
+                .invalid => .invalid,
+                _ => .invalid,
+            };
+        }
+
         pub fn complete(self: *Self, outputs: anytype) error{ OutOfMemory, InvalidValue }!Outcome {
             const OutputTuple = @TypeOf(outputs);
             const tuple = switch (@typeInfo(OutputTuple)) {

@@ -46,6 +46,10 @@ module. Its descriptor declares the same canonical name requested by the
 loader. The complete word table validates before publication, and publication
 is atomic.
 
+The current pre-release native ABI is version 2, with entry symbol
+`ecl_module_abi_v2`. Native modules built for earlier versions must be rebuilt;
+the loader provides no legacy adapter.
+
 Each native word has a declared effect and nonempty documentation. Native
 words support qualified calls, imports, `doc`, `which`, and `see`. A failing
 native call restores its operand stack. Native code may raise `'type`,

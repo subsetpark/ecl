@@ -525,7 +525,6 @@ pub fn begin(
     )) {
         .task => return evaluator.fail(.type, "native words cannot observe task capabilities"),
         .module => return evaluator.fail(.type, "native words cannot observe module capabilities"),
-        .port => return evaluator.fail(.type, "native words cannot observe port capabilities"),
         else => {},
     };
     const transferred = owned_check;
@@ -556,6 +555,7 @@ const full_host_table = abi.HostTable{
     .build_list_finish = hostBuildListFinish,
     .build_dict_append = hostBuildDictAppend,
     .build_dict_finish = hostBuildDictFinish,
+    .forward_path = hostForwardPath,
 };
 
 fn transactionFrom(context: *anyopaque) *Transaction {
@@ -581,7 +581,7 @@ fn writeView(call: *Transaction, item: Value, output: *abi.ValueView) abi.HostSt
         .dict => |header| .{ .kind = .dict, .aggregate_len = header.length() },
         .task => return call.rejectCapability("native words cannot observe task capabilities"),
         .module => return call.rejectCapability("native words cannot observe module capabilities"),
-        .port => return call.rejectCapability("native words cannot observe port capabilities"),
+        .port => .{ .kind = .port },
     };
     return .ok;
 }
@@ -642,31 +642,66 @@ fn hostReadPath(
     output: *abi.ValueView,
 ) callconv(.c) abi.HostStatus {
     const call = transactionFrom(context);
+    return switch (readPath(call, input_index, path_ptr, path_len)) {
+        .value => |item| writeView(call, item, output),
+        .status => |status| status,
+    };
+}
+
+fn hostForwardPath(
+    context: *anyopaque,
+    input_index: u32,
+    path_ptr: [*]const u64,
+    path_len: u32,
+    output: *abi.Candidate,
+) callconv(.c) abi.HostStatus {
+    const call = transactionFrom(context);
+    const item = switch (readPath(call, input_index, path_ptr, path_len)) {
+        .value => |item| item,
+        .status => |status| return status,
+    };
+    var view: abi.ValueView = .{ .kind = .int };
+    const observed = writeView(call, item, &view);
+    if (observed != .ok) return observed;
+    heap.retainValue(item);
+    const status = call.appendCandidate(item, null);
+    if (status == .ok) output.* = call.candidateWire();
+    return status;
+}
+
+const PathRead = union(enum) { value: Value, status: abi.HostStatus };
+
+fn readPath(
+    call: *Transaction,
+    input_index: u32,
+    path_ptr: [*]const u64,
+    path_len: u32,
+) PathRead {
     if (call.terminal != .idle or call.continuation == null or
         input_index >= call.definition.effect.inputs)
-        return .invalid;
-    if (path_len > abi.max_read_path_depth) return .invalid;
-    if (charge(call, @max(path_len, 1)) != .ok) return .yield_required;
+        return .{ .status = .invalid };
+    if (path_len > abi.max_read_path_depth) return .{ .status = .invalid };
+    if (charge(call, @max(path_len, 1)) != .ok) return .{ .status = .yield_required };
     var current = call.activeEvaluator().nativeInputBorrowed(
         call.definition.effect.inputs,
         input_index,
     );
     for (path_ptr[0..path_len]) |step| switch (current) {
         .list => |header| {
-            if (step >= header.length()) return .invalid;
+            if (step >= header.length()) return .{ .status = .invalid };
             current = list.atUnchecked(current, @intCast(step));
         },
         .dict => |header| {
             const entry = step / 2;
-            if (entry >= dict.keysOf(header).list.length()) return .invalid;
+            if (entry >= dict.keysOf(header).list.length()) return .{ .status = .invalid };
             current = if (step % 2 == 0)
                 dict.keyAt(header, @intCast(entry))
             else
                 dict.valueAt(header, @intCast(entry));
         },
-        .int, .float, .char, .symbol, .word, .task, .module, .port => return .invalid,
+        .int, .float, .char, .symbol, .word, .task, .module, .port => return .{ .status = .invalid },
     };
-    return writeView(call, current, output);
+    return .{ .value = current };
 }
 
 fn hostDictAt(
@@ -718,7 +753,7 @@ fn hostScalar(
     const units: u32 = switch (scalar.kind) {
         .symbol, .word => @max(1, std.math.cast(u32, scalar.bytes_len) orelse return .invalid),
         .int, .float, .char => 0,
-        .list, .dict => return .invalid,
+        .list, .dict, .port => return .invalid,
         _ => return .invalid,
     };
     if (units > abi.max_guest_scalar_bytes) return .invalid;
@@ -739,7 +774,7 @@ fn hostScalar(
             const id = intern.intern(bytes) catch return .out_of_memory;
             break :item if (scalar.kind == .symbol) .{ .symbol = id } else .{ .word = .{ .name = id } };
         },
-        .list, .dict => return .invalid,
+        .list, .dict, .port => return .invalid,
         _ => return .invalid,
     };
     const status = call.appendCandidate(item, null);
