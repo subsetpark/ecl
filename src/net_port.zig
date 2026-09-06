@@ -300,7 +300,7 @@ pub const NetOwner = struct {
     /// `address` is the caller's parsed literal; it is normalized here.
     pub fn listen(
         self: *NetOwner,
-        scheduler: *const scheduler_api.WorkerScheduler,
+        _: *const scheduler_api.WorkerScheduler,
         scope: *scheduler_api.TaskScope,
         address: IpAddress,
     ) ListenError!Value {
@@ -330,12 +330,7 @@ pub const NetOwner = struct {
             cell.releaseRef();
         }
 
-        const member = external.scopeMember(ListenerCell, cell);
-        const membership = scheduler.attachExternal(scope, member) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.ScopeClosing => return error.ScopeClosing,
-        };
-        cell.attach(membership);
+        try transfers.publishScope(ListenerCell, cell, scope, ListenerCell.transferOwnership);
 
         return heap.createPort(ListenerCell, self.allocator, cell.identity, cell) catch
             return error.OutOfMemory;
@@ -492,10 +487,7 @@ pub const ListenerCell = struct {
     mutex: std.Io.Mutex = .init,
     changed: std.Io.Condition = .init,
     state: State,
-    ownership: external.Ownership = .none,
-    /// Set when `close` ran before `attach` stored the membership token, so
-    /// `attach` detaches at once instead of leaving the scope waiting.
-    detach_on_attach: bool = false,
+    ownership: external.Ownership = .provisional,
     waits: WaitList(ListenerCell) = .{},
     slots_first: ?*AcceptSlot = null,
     slots_last: ?*AcceptSlot = null,
@@ -597,20 +589,6 @@ pub const ListenerCell = struct {
         Transfer.abort(self);
     }
 
-    fn attach(self: *ListenerCell, membership: external.ScopeMembership) void {
-        std.Io.Threaded.mutexLock(&self.mutex);
-        if (self.detach_on_attach) {
-            self.detach_on_attach = false;
-            std.Io.Threaded.mutexUnlock(&self.mutex);
-            var owned = membership;
-            owned.detach();
-            return;
-        }
-        std.debug.assert(self.ownership == .none);
-        self.ownership = .{ .owned = membership };
-        std.Io.Threaded.mutexUnlock(&self.mutex);
-    }
-
     /// Close the socket, release the quota slot, and detach from the scope.
     /// Idempotent: a closed cell stays closed and nothing runs twice. When an
     /// acceptor thread is running, wake it and wait for it to leave `poll`
@@ -643,11 +621,7 @@ pub const ListenerCell = struct {
                     if (current.state == .waiting) current.state = .closed;
                 }
                 self.waits.notifyLocked(self);
-                if (self.ownership.live()) {
-                    detached = self.ownership.release();
-                } else {
-                    self.detach_on_attach = true;
-                }
+                detached = self.ownership.release();
             },
             .closed => {},
         }
@@ -1056,7 +1030,7 @@ pub const ConnectionCell = struct {
     write_first: ?*WriteNode = null,
     write_last: ?*WriteNode = null,
     waits: WaitList(ConnectionCell) = .{},
-    ownership: external.Ownership = .none,
+    ownership: external.Ownership = .provisional,
 
     const Lifecycle = union(enum) {
         /// Allocated; no thread exists. The scope may already hold the member
@@ -1088,15 +1062,14 @@ pub const ConnectionCell = struct {
     fn publish(
         owner: *NetOwner,
         accepted: AcceptedSocket,
-        scheduler: *const scheduler_api.WorkerScheduler,
+        _: *const scheduler_api.WorkerScheduler,
         scope: *scheduler_api.TaskScope,
     ) error{OutOfMemory}!AcceptProgress {
         const cell = prepare(owner, accepted) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Resources => return .resources,
         };
-        const member = external.scopeMember(ConnectionCell, cell);
-        const membership = scheduler.attachExternal(scope, member) catch |err| {
+        transfers.publishScope(ConnectionCell, cell, scope, ConnectionCell.transferOwnership) catch |err| {
             cell.retireUnstarted(.abort);
             return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
@@ -1104,7 +1077,6 @@ pub const ConnectionCell = struct {
             };
         };
         std.Io.Threaded.mutexLock(&cell.mutex);
-        cell.ownership = .{ .owned = membership };
         // The scope may have started cancelling between the attach and this
         // lock; then no thread starts and the cell retires here, so the scope
         // never waits on a controller that does not exist.

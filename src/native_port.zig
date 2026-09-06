@@ -165,12 +165,8 @@ pub const Access = opaque {
         return self.publish(cell, item, scope);
     }
     fn publish(_: *Access, cell: *Cell, item: Value, scope: *scheduler.TaskScope) CreateError!Value {
-        const membership = scope.scheduler.attachExternal(scope, external.scopeMember(Cell, cell)) catch |err| return switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            error.ScopeClosing => error.ScopeClosing,
-        };
+        try transfers.publishScope(Cell, cell, scope, Cell.transferOwnership);
         lock(&cell.mutex);
-        cell.ownership = .{ .owned = membership };
         cell.retainReadiness();
         const thread = std.Thread.spawn(.{}, Cell.run, .{cell}) catch {
             var detached = cell.ownership.release();
@@ -199,7 +195,7 @@ pub const Cell = struct {
     mutex: std.Io.Mutex = .init,
     changed: std.Io.Condition = .init,
     waits: external.WaitList(Cell) = .{},
-    ownership: external.Ownership = .none,
+    ownership: external.Ownership = .provisional,
     phase: enum { reserved, initializing, open, closing, cleaned, joined } = .reserved,
     controller: union(enum) { unstarted, running: std.Thread, joined } = .unstarted,
     initialization_failure: ?Failure = null,

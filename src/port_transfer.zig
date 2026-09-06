@@ -8,6 +8,22 @@ const Value = @import("value.zig").Value;
 const external = @import("external.zig");
 const scheduler = @import("scheduler.zig");
 
+/// Attach outside the resource lock, then consume the membership under it.
+/// The caller retains the cell throughout and owns backend rollback on failure.
+/// Startup must revalidate backend cancellation under the same resource lock.
+pub fn publishScope(
+    comptime Cell: type,
+    cell: *Cell,
+    scope: *scheduler.TaskScope,
+    comptime ownership: fn (*Cell) *external.Ownership,
+) error{ OutOfMemory, ScopeClosing }!void {
+    const membership = try scope.scheduler.attachExternal(scope, external.scopeMember(Cell, cell));
+    std.Io.Threaded.mutexLock(&cell.mutex);
+    var detached = ownership(cell).publish(membership);
+    std.Io.Threaded.mutexUnlock(&cell.mutex);
+    detached.detachAll();
+}
+
 /// The backend supplies only its locked lifetime predicate and ownership
 /// location. This boundary owns lock ordering, origin authorization, destination
 /// attachment, revalidation, and consuming rollback for every port kind.
@@ -21,7 +37,7 @@ pub fn ScopeTransfer(
             const destination: *scheduler.TaskScope = @ptrCast(@alignCast(to));
             std.Io.Threaded.mutexLock(&cell.mutex);
             const rejected: ?heap.PortTransferError = if (!live(cell)) error.Closed else switch (ownership(cell).*) {
-                .none => error.Closed,
+                .none, .provisional => error.Closed,
                 .transferring => error.Busy,
                 .owned => |current| if (current.owningScope() == from) null else error.NotOwner,
             };
@@ -35,7 +51,7 @@ pub fn ScopeTransfer(
             const owner = ownership(cell);
             const valid = live(cell) and switch (owner.*) {
                 .owned => |current| current.owningScope() == from,
-                .none, .transferring => false,
+                .none, .provisional, .transferring => false,
             };
             if (valid) owner.beginTransfer(token);
             std.Io.Threaded.mutexUnlock(&cell.mutex);

@@ -1384,6 +1384,14 @@ teardown can await cleanup without blocking a worker. Closed heap identities ret
 their module pin independently of backend cleanup. Session shutdown closes creation,
 settles resources and calls, and releases native images only after those lifetimes.
 
+External resource publication uses the shared scope-attachment boundary. Its
+ownership state distinguishes provisional attachment from released ownership;
+a release racing initial attachment consumes the eventual membership instead of
+resurrecting a closed resource. Attachment and detachment occur outside the
+resource lock, while membership publication and backend startup revalidation
+use that lock. The creator retains the provisional cell until publication or
+backend rollback completes.
+
 Network, process, and native ports share the same scope-transfer boundary.
 Backends supply their locked lifetime predicate and ownership location; the
 shared protocol authorizes the origin, attaches the destination outside the

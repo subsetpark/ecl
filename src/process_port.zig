@@ -291,7 +291,7 @@ pub const ProcessOwner = struct {
 
     pub fn spawn(
         self: *ProcessOwner,
-        scheduler: *const scheduler_api.WorkerScheduler,
+        _: *const scheduler_api.WorkerScheduler,
         scope: *scheduler_api.TaskScope,
         spec: ProcessSpec,
     ) SpawnError!Value {
@@ -338,17 +338,7 @@ pub const ProcessOwner = struct {
             supervisor_lease.release();
         };
 
-        const member = external.scopeMember(ProcessCell, cell);
-        const membership = scheduler.attachExternal(scope, member) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.ScopeClosing => return error.ScopeClosing,
-        };
-        // `attachExternal` has already linked the cell into the scope, so a
-        // cancellation walk can reach it from another thread: publish the
-        // ownership under the lock, as ConnectionCell.publish does.
-        std.Io.Threaded.mutexLock(&cell.mutex);
-        cell.controllers.ownership = .{ .owned = membership };
-        std.Io.Threaded.mutexUnlock(&cell.mutex);
+        try transfers.publishScope(ProcessCell, cell, scope, processOwnership);
 
         cell.start(supervisor_lease) catch return error.Io;
         supervisor_lease_owned = false;
@@ -575,7 +565,7 @@ const ControllerGroup = struct {
     /// Protected by `cell.mutex` after the initial lease is issued. A count
     /// decrement is published only after that lease has dropped its cell pin.
     leases: usize = 0,
-    ownership: external.Ownership = .none,
+    ownership: external.Ownership = .provisional,
     cell: *ProcessCell,
 
     fn initialLease(self: *ControllerGroup) ControllerLease {
