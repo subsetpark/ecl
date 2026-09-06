@@ -529,13 +529,7 @@ const GroupState = union(enum) {
     retired: Termination,
 };
 
-const WriteNode = struct {
-    cell: *ProcessCell,
-    previous: ?*WriteNode = null,
-    next: ?*WriteNode = null,
-    linked: bool = true,
-    active: bool = false,
-};
+const Writers = transfers.WriterQueue(ProcessCell);
 
 const InputState = enum {
     open,
@@ -625,7 +619,7 @@ fn processLive(cell: *ProcessCell) bool {
     return cell.group_state != .retired;
 }
 
-pub const WritePermit = opaque {};
+pub const WritePermit = Writers.Ticket;
 
 pub const RunEdge = enum {
     stdout_terminal,
@@ -648,14 +642,6 @@ pub const RunPoll = struct {
     input: InputTerminal,
     termination: ?Termination,
 };
-
-fn writeNode(permit: *WritePermit) *WriteNode {
-    return @ptrCast(@alignCast(permit));
-}
-
-fn writePermit(node: *WriteNode) *WritePermit {
-    return @ptrCast(@alignCast(node));
-}
 
 const readiness_stdout: u64 = 1;
 const readiness_stderr: u64 = 2;
@@ -686,8 +672,7 @@ pub const ProcessCell = struct {
     discard_outputs: bool = false,
     stdout_reader_active: bool = false,
     stderr_reader_active: bool = false,
-    write_first: ?*WriteNode = null,
-    write_last: ?*WriteNode = null,
+    writers: Writers = .{},
     waits: external.WaitList(ProcessCell) = .{},
     timeout_done: std.Io.Event = .unset,
     timed_out: bool = false,
@@ -767,7 +752,7 @@ pub const ProcessCell = struct {
         if (old != 1) return;
         _ = self.refs.load(.acquire);
         std.debug.assert(self.phase == .reaped);
-        std.debug.assert(self.waits.first == null and self.write_first == null);
+        std.debug.assert(self.waits.first == null and self.writers.empty());
         self.allocator.free(self.stdin.bytes);
         self.allocator.free(self.stdout.bytes);
         self.allocator.free(self.stderr.bytes);
@@ -848,19 +833,11 @@ pub const ProcessCell = struct {
     }
 
     pub fn beginWrite(self: *ProcessCell) error{OutOfMemory}!*WritePermit {
-        const node = try self.allocator.create(WriteNode);
-        node.* = .{ .cell = self };
+        const ticket = try WritePermit.create(self.allocator, self);
         std.Io.Threaded.mutexLock(&self.mutex);
-        if (self.write_last) |last| {
-            last.next = node;
-            node.previous = last;
-        } else {
-            self.write_first = node;
-            node.active = true;
-        }
-        self.write_last = node;
+        self.writers.append(ticket);
         std.Io.Threaded.mutexUnlock(&self.mutex);
-        return writePermit(node);
+        return ticket;
     }
 
     pub fn write(
@@ -868,12 +845,12 @@ pub const ProcessCell = struct {
         permit: *WritePermit,
         bytes: []const u8,
     ) WriteProgress {
-        const node = writeNode(permit);
-        std.debug.assert(node.cell == self and node.linked);
+        const node = permit;
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        node.checkCell(self);
         if (self.input != .open or self.io_failed) return .io;
-        if (!node.active or self.stdin.free() == 0) return .pending;
+        if (!node.active() or self.stdin.free() == 0) return .pending;
         const count = @min(bytes.len, self.stdin.free());
         self.stdin.push(bytes[0..count]);
         self.changed.broadcast(blockingIo());
@@ -881,7 +858,7 @@ pub const ProcessCell = struct {
     }
 
     pub fn writeSource(self: *ProcessCell, permit: *WritePermit) external.ReadinessSource {
-        return external.readinessSource(ProcessCell, self, @intFromPtr(writeNode(permit)));
+        return external.readinessSource(ProcessCell, self, @intFromPtr(permit));
     }
 
     pub fn beginRun(self: *ProcessCell) *RunCursor {
@@ -946,29 +923,19 @@ pub const ProcessCell = struct {
     }
 
     pub fn finishWrite(self: *ProcessCell, permit: *WritePermit) void {
-        self.retireWrite(writeNode(permit));
+        self.retireWrite(permit);
     }
 
     pub fn abandonWrite(self: *ProcessCell, permit: *WritePermit) void {
-        self.retireWrite(writeNode(permit));
+        self.retireWrite(permit);
     }
 
-    fn retireWrite(self: *ProcessCell, node: *WriteNode) void {
+    fn retireWrite(self: *ProcessCell, ticket: *WritePermit) void {
         std.Io.Threaded.mutexLock(&self.mutex);
-        if (node.linked) {
-            const was_active = node.active;
-            if (node.previous) |previous| previous.next = node.next else self.write_first = node.next;
-            if (node.next) |next| {
-                next.previous = node.previous;
-                if (was_active) next.active = true;
-            } else self.write_last = node.previous;
-            node.linked = false;
-            node.previous = null;
-            node.next = null;
-            self.notifyReadyLocked();
-        }
+        ticket.checkCell(self);
+        if (self.writers.remove(ticket)) self.notifyReadyLocked();
         std.Io.Threaded.mutexUnlock(&self.mutex);
-        self.allocator.destroy(node);
+        ticket.destroy(self.allocator);
     }
 
     pub fn beginRead(self: *ProcessCell, stream: Stream) error{ReaderActive}!void {
@@ -1218,7 +1185,7 @@ pub const ProcessCell = struct {
             const pointer = key & readiness_pointer_mask;
             const observation: *const RunObservation = @ptrFromInt(pointer);
             const write_ready = if (observation.permit) |permit| ready: {
-                const node = writeNode(permit);
+                const node = permit;
                 break :ready self.writeReadyLocked(node);
             } else false;
             return self.stdout.len != 0 or self.stderr.len != 0 or write_ready or
@@ -1229,14 +1196,14 @@ pub const ProcessCell = struct {
             readiness_stderr => self.stderr.len != 0 or self.stderr_done,
             readiness_terminal => self.phase == .reaped,
             else => {
-                const node: *WriteNode = @ptrFromInt(key);
+                const node: *WritePermit = @ptrFromInt(key);
                 return self.writeReadyLocked(node);
             },
         };
     }
 
-    fn writeReadyLocked(self: *ProcessCell, node: *const WriteNode) bool {
-        return !node.linked or (node.active and self.stdin.free() != 0) or
+    fn writeReadyLocked(self: *ProcessCell, node: *const WritePermit) bool {
+        return !node.linked() or (node.active() and self.stdin.free() != 0) or
             self.input != .open or self.io_failed;
     }
 

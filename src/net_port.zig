@@ -971,23 +971,9 @@ fn drainPipe(read_end: posix.fd_t) void {
     }
 }
 
-const WriteNode = struct {
-    cell: *ConnectionCell,
-    previous: ?*WriteNode = null,
-    next: ?*WriteNode = null,
-    linked: bool = true,
-    active: bool = false,
-};
+const Writers = transfers.WriterQueue(ConnectionCell);
 
-pub const WritePermit = opaque {};
-
-fn writeNode(permit: *WritePermit) *WriteNode {
-    return @ptrCast(@alignCast(permit));
-}
-
-fn writePermit(node: *WriteNode) *WritePermit {
-    return @ptrCast(@alignCast(node));
-}
+pub const WritePermit = Writers.Ticket;
 
 const readiness_read: u64 = 1;
 /// Waits for the send ring to empty, so `close` can promise that the bytes it
@@ -1027,8 +1013,7 @@ pub const ConnectionCell = struct {
     peer_eof: bool = false,
     /// The socket failed; set once, never cleared.
     failure: ?Failure = null,
-    write_first: ?*WriteNode = null,
-    write_last: ?*WriteNode = null,
+    writers: Writers = .{},
     waits: WaitList(ConnectionCell) = .{},
     ownership: external.Ownership = .provisional,
 
@@ -1166,7 +1151,7 @@ pub const ConnectionCell = struct {
         _ = self.refs.load(.acquire);
         std.debug.assert(self.lifecycle == .terminal);
         std.debug.assert(self.ownership == .none);
-        std.debug.assert(self.waits.first == null and self.write_first == null);
+        std.debug.assert(self.waits.first == null and self.writers.empty());
         self.allocator.free(self.receive.bytes);
         self.allocator.free(self.send.bytes);
         self.allocator.destroy(self);
@@ -1264,28 +1249,20 @@ pub const ConnectionCell = struct {
     }
 
     pub fn beginWrite(self: *ConnectionCell) error{OutOfMemory}!*WritePermit {
-        const node = try self.allocator.create(WriteNode);
-        node.* = .{ .cell = self };
+        const ticket = try WritePermit.create(self.allocator, self);
         std.Io.Threaded.mutexLock(&self.mutex);
-        if (self.write_last) |last| {
-            last.next = node;
-            node.previous = last;
-        } else {
-            self.write_first = node;
-            node.active = true;
-        }
-        self.write_last = node;
+        self.writers.append(ticket);
         std.Io.Threaded.mutexUnlock(&self.mutex);
-        return writePermit(node);
+        return ticket;
     }
 
     pub fn write(self: *ConnectionCell, permit: *WritePermit, bytes: []const u8) WriteProgress {
-        const node = writeNode(permit);
-        std.debug.assert(node.cell == self and node.linked);
+        const node = permit;
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        node.checkCell(self);
         if (self.failureLocked()) |failure| return .{ .failed = failure };
-        if (!node.active or self.send.free() == 0) return .pending;
+        if (!node.active() or self.send.free() == 0) return .pending;
         const count = @min(bytes.len, self.send.free());
         self.send.push(bytes[0..count]);
         self.signalLocked();
@@ -1293,33 +1270,23 @@ pub const ConnectionCell = struct {
     }
 
     pub fn writeSource(self: *ConnectionCell, permit: *WritePermit) external.ReadinessSource {
-        return external.readinessSource(ConnectionCell, self, @intFromPtr(writeNode(permit)));
+        return external.readinessSource(ConnectionCell, self, @intFromPtr(permit));
     }
 
     pub fn finishWrite(self: *ConnectionCell, permit: *WritePermit) void {
-        self.retireWrite(writeNode(permit));
+        self.retireWrite(permit);
     }
 
     pub fn abandonWrite(self: *ConnectionCell, permit: *WritePermit) void {
-        self.retireWrite(writeNode(permit));
+        self.retireWrite(permit);
     }
 
-    fn retireWrite(self: *ConnectionCell, node: *WriteNode) void {
+    fn retireWrite(self: *ConnectionCell, ticket: *WritePermit) void {
         std.Io.Threaded.mutexLock(&self.mutex);
-        if (node.linked) {
-            const was_active = node.active;
-            if (node.previous) |previous| previous.next = node.next else self.write_first = node.next;
-            if (node.next) |next| {
-                next.previous = node.previous;
-                if (was_active) next.active = true;
-            } else self.write_last = node.previous;
-            node.linked = false;
-            node.previous = null;
-            node.next = null;
-            self.waits.notifyLocked(self);
-        }
+        ticket.checkCell(self);
+        if (self.writers.remove(ticket)) self.waits.notifyLocked(self);
         std.Io.Threaded.mutexUnlock(&self.mutex);
-        self.allocator.destroy(node);
+        ticket.destroy(self.allocator);
     }
 
     /// Graceful close: refuse new writes, let the controller deliver queued
@@ -1413,8 +1380,8 @@ pub const ConnectionCell = struct {
         if (key == readiness_read)
             return self.receive.len != 0 or self.peer_eof or self.failureLocked() != null;
         if (key == readiness_drain) return self.drainedLocked();
-        const node: *const WriteNode = @ptrFromInt(key);
-        return !node.linked or (node.active and self.send.free() != 0) or self.failureLocked() != null;
+        const node: *const WritePermit = @ptrFromInt(key);
+        return !node.linked() or (node.active() and self.send.free() != 0) or self.failureLocked() != null;
     }
 
     fn noteFailureLocked(self: *ConnectionCell, code: posix.E) void {
@@ -2006,4 +1973,48 @@ fn connectionLifecycle(allocator: std.mem.Allocator) !void {
 
 test "connection lifecycle propagates every allocation failure without leaking a socket or slot" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, connectionLifecycle, .{});
+}
+
+test "net: writer tickets cancel queued and active writers without closing the connection" {
+    var harness: LoopbackHarness = undefined;
+    try harness.init(std.testing.allocator, .{ .send_capacity = 8 });
+    defer harness.deinit();
+    const listener_port = try harness.listen(.{ .ip4 = .loopback(0) });
+    defer harness.host.domain().releaseValue(listener_port);
+    const listener = fromValue(listener_port).?;
+    const peer = try connectLoopback(listener.localAddress().?.getPort());
+    defer peer.close(std.testing.io);
+    var target: TestTarget = .{};
+    const port = try harness.acceptOne(listener, &target);
+    defer harness.host.domain().releaseValue(port);
+    const cell = connectionFromValue(port).?;
+    const first = try cell.beginWrite();
+    const middle = try cell.beginWrite();
+    const last = try cell.beginWrite();
+    try std.testing.expect(cell.write(middle, "b") == .pending);
+    try std.testing.expect(cell.write(last, "c") == .pending);
+    cell.abandonWrite(middle);
+    try std.testing.expectEqual(WriteProgress{ .written = 1 }, cell.write(first, "a"));
+    // Register before promotion, proving that retiring the active writer wakes
+    // its surviving successor without relying on controller scheduling.
+    var source = cell.writeSource(last);
+    defer source.deinit();
+    var registration = switch (try source.register(external.wakeTarget(TestTarget, &target))) {
+        .registered => |registered| registered,
+        .ready => return error.UnexpectedReadiness,
+    };
+    cell.abandonWrite(first);
+    target.event.waitUncancelable(std.testing.io);
+    registration.cancel();
+    try std.testing.expectEqual(WriteProgress{ .written = 1 }, cell.write(last, "c"));
+    cell.finishWrite(last);
+    const next = try cell.beginWrite();
+    try std.testing.expectEqual(WriteProgress{ .written = 1 }, cell.write(next, "d"));
+    cell.finishWrite(next);
+    cell.close();
+    var buffer: [8]u8 = undefined;
+    var reader = peer.reader(std.testing.io, &buffer);
+    var actual: [3]u8 = undefined;
+    try reader.interface.readSliceAll(&actual);
+    try std.testing.expectEqualStrings("acd", &actual);
 }

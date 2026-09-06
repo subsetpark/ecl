@@ -94,6 +94,83 @@ pub fn ScopeTransfer(
     };
 }
 
+/// FIFO writer ownership, independent of stream state and wake policy. All
+/// queue and ticket observations are protected by the backend's cell mutex.
+pub fn WriterQueue(comptime Cell: type) type {
+    return struct {
+        const Self = @This();
+        const Node = struct {
+            cell: *Cell,
+            previous: ?*Node = null,
+            next: ?*Node = null,
+            phase: enum { created, queued, active, retired } = .created,
+        };
+        pub const Ticket = opaque {
+            fn node(self: *const Ticket) *Node {
+                return @ptrCast(@alignCast(@constCast(self)));
+            }
+            pub fn create(allocator: std.mem.Allocator, cell: *Cell) error{OutOfMemory}!*Ticket {
+                const entry = try allocator.create(Node);
+                entry.* = .{ .cell = cell };
+                return @ptrCast(entry);
+            }
+            /// Consumes an unqueued or retired ticket. Cancel readiness first.
+            pub fn destroy(self: *Ticket, allocator: std.mem.Allocator) void {
+                if (self.linked()) @panic("destroying a queued writer");
+                allocator.destroy(self.node());
+            }
+            pub fn checkCell(self: *const Ticket, cell: *Cell) void {
+                if (self.node().cell != cell or !self.linked()) @panic("invalid writer ticket");
+            }
+            pub fn active(self: *const Ticket) bool {
+                return self.node().phase == .active;
+            }
+            pub fn linked(self: *const Ticket) bool {
+                return switch (self.node().phase) {
+                    .queued, .active => true,
+                    .created, .retired => false,
+                };
+            }
+        };
+        first: ?*Node = null,
+        last: ?*Node = null,
+
+        pub fn empty(self: *const Self) bool {
+            return self.first == null;
+        }
+        /// Consumes the ticket's created state into FIFO ownership.
+        pub fn append(self: *Self, ticket: *Ticket) void {
+            const node = ticket.node();
+            if (node.phase != .created) @panic("writer ticket already admitted");
+            if (self.last) |last| {
+                last.next = node;
+                node.previous = last;
+                node.phase = .queued;
+            } else {
+                self.first = node;
+                node.phase = .active;
+            }
+            self.last = node;
+        }
+        /// Retires a ticket and promotes its successor if it owned the turn.
+        /// The caller notifies backend readiness, then destroys it outside the lock.
+        pub fn remove(self: *Self, ticket: *Ticket) bool {
+            const node = ticket.node();
+            if (!ticket.linked()) return false;
+            const was_active = ticket.active();
+            if (node.previous) |previous| previous.next = node.next else self.first = node.next;
+            if (node.next) |next| {
+                next.previous = node.previous;
+                if (was_active) next.phase = .active;
+            } else self.last = node.previous;
+            node.phase = .retired;
+            node.previous = null;
+            node.next = null;
+            return true;
+        }
+    };
+}
+
 pub const ReadProgress = union(enum) { pending, eof, data: usize };
 pub const WriteProgress = union(enum) { pending, written: usize };
 
