@@ -1353,6 +1353,13 @@ The exact wire ABI is the callback's sole interpreter surface. It contains:
 - a host table containing only requested capabilities; and
 - a typed rescheduling result for work that continues beyond one leaf call.
 
+Port views carry only their value kind. Forwarding retains the opaque heap
+identity in the invocation's candidate table, including for a bounded path
+inside an aggregate; it grants no backend access or scope ownership authority.
+Nested reads and forwarding share one metered path resolver. Candidates remain
+invocation-local, while aggregate builders own values retained across yields.
+Tasks and modules remain unavailable as native value views.
+
 The machine presents the callback a transactional input window. A successful
 return validates and commits the declared outputs. Failure restores the ecl
 operand stack, while external effects performed by the callback remain

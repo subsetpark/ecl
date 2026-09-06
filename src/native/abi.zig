@@ -5,8 +5,8 @@
 
 const builtin = @import("builtin");
 
-pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v1";
-pub const abi_version: u32 = 1;
+pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v2";
+pub const abi_version: u32 = 2;
 
 pub const max_error_message_bytes: u32 = 4096;
 pub const max_guest_scalar_bytes: u32 = 4096;
@@ -66,6 +66,7 @@ pub const ValueKindWire = enum(u32) {
     word = 4,
     list = 5,
     dict = 6,
+    port = 7,
     _,
 };
 
@@ -189,6 +190,15 @@ pub const ReadPathFn = *const fn (
     path_len: u32,
     output: *ValueView,
 ) callconv(.c) HostStatus;
+/// Retains the value addressed by the same bounded path as `read_path` in
+/// the current invocation's candidate table. No backend authority is granted.
+pub const ForwardPathFn = *const fn (
+    call_context: *anyopaque,
+    input_index: u32,
+    path_ptr: [*]const u64,
+    path_len: u32,
+    output: *Candidate,
+) callconv(.c) HostStatus;
 pub const CompleteFn = *const fn (
     call_context: *anyopaque,
     outputs: [*]const Candidate,
@@ -229,6 +239,7 @@ pub const HostTable = extern struct {
     build_list_finish: ?BuildListFinishFn,
     build_dict_append: ?BuildDictAppendFn,
     build_dict_finish: ?BuildDictFinishFn,
+    forward_path: ?ForwardPathFn = null,
 };
 
 pub const Invoke = *const fn (
@@ -314,7 +325,7 @@ fn assertRecord(comptime T: type, comptime expected_size: usize, comptime expect
 
 comptime {
     @setEvalBranchQuota(4000);
-    if (@sizeOf(usize) != 8) @compileError("native ABI v1 supports 64-bit targets only");
+    if (@sizeOf(usize) != 8) @compileError("native ABI v2 supports 64-bit targets only");
 
     assertRecord(CapabilityRequirement, 8, 4);
     assertRecord(EffectSlot, 24, 8);
@@ -322,7 +333,7 @@ comptime {
     assertRecord(ValueView, 40, 8);
     assertRecord(Scalar, 32, 8);
     assertRecord(InvokeResult, 16, 8);
-    assertRecord(HostTable, 128, 8);
+    assertRecord(HostTable, 136, 8);
     assertRecord(Descriptor, 88, 8);
     assertRecord(EntryResult, 32, 8);
 
