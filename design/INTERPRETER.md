@@ -1400,7 +1400,9 @@ before detaching scope memberships, so observing scope completion also proves
 that execution no longer retains the issuing domain. Retained value references
 remain independent of this completion protocol.
 
-Network and process streams share FIFO writer tickets. Only the active ticket
+An ordered controller lane owns FIFO tickets independently of the executor
+that advances them. Network and process streams use it for writer ordering.
+Only the active ticket
 may write; retiring it promotes the next surviving ticket, while retiring a
 queued ticket preserves the active writer. Ticket creation, admission, and
 retirement are explicit states behind opaque handles. Backend readiness and

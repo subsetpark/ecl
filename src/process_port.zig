@@ -499,7 +499,7 @@ const GroupState = union(enum) {
     retired: Termination,
 };
 
-const Writers = transfers.WriterQueue(ProcessCell);
+const Writers = transfers.ControllerLane(ProcessCell);
 
 const InputState = enum {
     open,

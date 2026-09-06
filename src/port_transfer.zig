@@ -137,9 +137,10 @@ pub fn Reservation(comptime Owner: type, comptime releaseSlot: fn (*Owner) void)
     };
 }
 
-/// FIFO writer ownership, independent of stream state and wake policy. All
-/// queue and ticket observations are protected by the backend's cell mutex.
-pub fn WriterQueue(comptime Cell: type) type {
+/// Ordered controller-lane ownership, independent of execution, stream state,
+/// and wake policy. Queue observations require the owning resource mutex.
+/// A ticket owns its turn until retirement, even when execution is cancelled.
+pub fn ControllerLane(comptime Cell: type) type {
     return struct {
         const Self = @This();
         const Node = struct {
@@ -162,6 +163,9 @@ pub fn WriterQueue(comptime Cell: type) type {
                 if (self.linked()) @panic("destroying a queued writer");
                 allocator.destroy(self.node());
             }
+            pub fn owner(self: *const Ticket) *Cell {
+                return self.node().cell;
+            }
             pub fn checkCell(self: *const Ticket, cell: *Cell) void {
                 if (self.node().cell != cell or !self.linked()) @panic("invalid writer ticket");
             }
@@ -178,6 +182,9 @@ pub fn WriterQueue(comptime Cell: type) type {
         first: ?*Node = null,
         last: ?*Node = null,
 
+        pub fn front(self: *const Self) ?*Ticket {
+            return if (self.first) |entry| @ptrCast(entry) else null;
+        }
         pub fn empty(self: *const Self) bool {
             return self.first == null;
         }

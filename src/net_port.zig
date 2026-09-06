@@ -953,7 +953,7 @@ fn drainPipe(read_end: posix.fd_t) void {
     }
 }
 
-const Writers = transfers.WriterQueue(ConnectionCell);
+const Writers = transfers.ControllerLane(ConnectionCell);
 
 pub const WritePermit = Writers.Ticket;
 
