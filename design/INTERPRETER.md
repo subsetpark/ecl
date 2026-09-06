@@ -1407,6 +1407,14 @@ retirement are explicit states behind opaque handles. Backend readiness and
 stream terminal facts remain independent of queue ownership; native operation
 admission retains its separate streaming and cancellation contract.
 
+Port capacity is owned by a shared consuming reservation bound to its issuing
+owner and release policy. A provisional creator transfers that token into the
+resource, so rollback and terminal cleanup cannot both return the same slot.
+Limits and release milestones remain backend-specific: connection capacity
+wakes blocked acceptors, process capacity follows reaping, listener capacity
+follows socket closure, and native capacity follows controller joining.
+Retaining a closed value does not retain a live-capacity reservation.
+
 Network, process, and native ports share the same scope-transfer boundary.
 Backends supply their locked lifetime predicate and ownership location; the
 shared protocol authorizes the origin, attaches the destination outside the

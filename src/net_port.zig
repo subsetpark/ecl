@@ -306,25 +306,24 @@ pub const NetOwner = struct {
     ) ListenError!Value {
         const normalized = normalize(address);
         if (!self.policy.allows(normalized)) return error.Denied;
-        if (!self.reserveLive()) return error.LiveLimit;
-        var reservation_owned = true;
-        errdefer if (reservation_owned) self.releaseLive();
+        var reservation = ListenerReservation.acquire(self, NetOwner.reserveLive) orelse return error.LiveLimit;
+        errdefer reservation.release();
 
         var server = try bindListening(normalized, self.policy.limits.kernel_backlog);
-        errdefer if (reservation_owned) server.deinit(self.io);
+        errdefer if (reservation.isHeld()) server.deinit(self.io);
 
         const cell = try self.allocator.create(ListenerCell);
         cell.* = .{
             .allocator = self.allocator,
             .io = self.io,
             .owner = self,
+            .reservation = reservation.take(),
             .identity = self.next_identity.fetchAdd(1, .monotonic),
             .state = .{ .bound = .{ .server = server, .address = server.socket.address } },
         };
         // From here the cell owns the socket and the reservation; every
         // failure path closes through the one transition and drops the
         // initial reference.
-        reservation_owned = false;
         errdefer {
             cell.close();
             cell.releaseRef();
@@ -409,26 +408,8 @@ const OwnedSocket = struct {
 
 /// One live-connection quota slot, released exactly once. Nothing else in
 /// this file decrements the connection counter.
-const ConnectionReservation = struct {
-    owner: ?*NetOwner,
-
-    fn acquire(owner: *NetOwner) ?ConnectionReservation {
-        if (!owner.reserveConnection()) return null;
-        return .{ .owner = owner };
-    }
-
-    fn release(self: *ConnectionReservation) void {
-        const owner = self.owner orelse return;
-        self.owner = null;
-        owner.releaseConnection();
-    }
-
-    fn take(self: *ConnectionReservation) ConnectionReservation {
-        const moved = self.*;
-        self.owner = null;
-        return moved;
-    }
-};
+const ConnectionReservation = transfers.Reservation(NetOwner, NetOwner.releaseConnection);
+const ListenerReservation = transfers.Reservation(NetOwner, NetOwner.releaseLive);
 
 /// Both ends of a connection, captured at acceptance: the peer from `accept`
 /// and the local end from `getsockname`, so a wildcard listener's connection
@@ -482,6 +463,7 @@ pub const ListenerCell = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     owner: *NetOwner,
+    reservation: ListenerReservation,
     identity: u64,
     refs: std.atomic.Value(usize) = .init(1),
     mutex: std.Io.Mutex = .init,
@@ -615,7 +597,7 @@ pub const ListenerCell = struct {
                 var server = bound.server;
                 server.deinit(self.io);
                 self.state = .{ .closed = bound.address };
-                self.owner.releaseLive();
+                self.reservation.release();
                 var slot = self.slots_first;
                 while (slot) |current| : (slot = current.next) {
                     if (current.state == .waiting) current.state = .closed;
@@ -858,7 +840,7 @@ pub const ListenerCell = struct {
             .bound => |bound| bound.server.socket.handle,
             .closed => return,
         };
-        var reservation = ConnectionReservation.acquire(self.owner) orelse {
+        var reservation = ConnectionReservation.acquire(self.owner, NetOwner.reserveConnection) orelse {
             self.acceptor.quota_blocked = true;
             return;
         };

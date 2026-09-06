@@ -94,6 +94,49 @@ pub fn ScopeTransfer(
     };
 }
 
+/// One already-accounted capacity slot, with its issuing owner and release
+/// policy inseparable. Moving empties the source; releasing an empty token is
+/// harmless. Backend code decides when to reserve and when capacity returns.
+pub fn Reservation(comptime Owner: type, comptime releaseSlot: fn (*Owner) void) type {
+    return union(enum) {
+        const Self = @This();
+        held: *Owner,
+        consumed,
+
+        pub fn acquire(owner_value: *Owner, comptime reserveSlot: fn (*Owner) bool) ?Self {
+            if (!reserveSlot(owner_value)) return null;
+            return adoptReserved(owner_value);
+        }
+        /// Consumes one slot already reserved under the owner's own protocol.
+        /// This supports reservation coupled to native reaper startup and IDs.
+        pub fn adoptReserved(owner_value: *Owner) Self {
+            return .{ .held = owner_value };
+        }
+        pub fn owner(self: *const Self) *Owner {
+            return switch (self.*) {
+                .held => |issuer| issuer,
+                .consumed => @panic("capacity reservation already consumed"),
+            };
+        }
+        pub fn isHeld(self: Self) bool {
+            return self == .held;
+        }
+        /// Consumes either state, returning the reservation or an empty token.
+        pub fn take(self: *Self) Self {
+            const moved = self.*;
+            self.* = .consumed;
+            return moved;
+        }
+        pub fn release(self: *Self) void {
+            const moved = self.take();
+            switch (moved) {
+                .held => |issuer| releaseSlot(issuer),
+                .consumed => {},
+            }
+        }
+    };
+}
+
 /// FIFO writer ownership, independent of stream state and wake policy. All
 /// queue and ticket observations are protected by the backend's cell mutex.
 pub fn WriterQueue(comptime Cell: type) type {
