@@ -56,8 +56,10 @@
  'updates test
 
  ### test construction
- (-- : "Construct dictionaries from pairs and repeated values.")
- ([['a 1] ['b 2]] dict.from-pairs dup dict.pairs dict.from-pairs match? 1 equal
+ (-- : "Construct dictionaries from one association, pairs, and repeated values.")
+ (42 'answer dict.associate {'answer 42} equal
+  [1 2] 'args dict.associate {'args [1 2]} equal
+  [['a 1] ['b 2]] dict.from-pairs dup dict.pairs dict.from-pairs match? 1 equal
   ['a 'b 'c] 0 dict.from-keys {'a 0 'b 0 'c 0} equal
   [] dict.from-pairs {} equal
   [] 0 dict.from-keys {} equal
@@ -106,7 +108,7 @@
  ### test documentation
  (-- : "Expose documentation for every dict module export.")
  (['dict.size 'dict.keys 'dict.vals 'dict.pairs 'dict.has? 'dict.at
-   'dict.merge 'dict.from-flat 'dict.from-lists 'dict.from-pairs
+   'dict.merge 'dict.associate 'dict.from-flat 'dict.from-lists 'dict.from-pairs
    'dict.from-keys 'dict.keys-exactly? 'dict.update 'dict.update-or
    'dict.map 'dict.filter 'dict.reject 'dict.take
    'dict.del 'dict.split 'dict.merge-with]

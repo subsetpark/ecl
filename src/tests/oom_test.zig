@@ -867,7 +867,7 @@ fn stdlibSessionAllocationProbe(
                 "dup (pop pop 1) dict.filter dup (pop pop 0) dict.reject dup ['a] dict.take " ++
                 "dup ['a] dict.del dup ['a] dict.split pop pop " ++
                 "{'a 2} (|key left right| key pop left right +) dict.merge-with pop " ++
-                "['a 'b] 0 dict.from-keys pop",
+                "['a 'b] 0 dict.from-keys pop 1 'one dict.associate pop",
         ),
         .error_value => try runOk(
             &runtime,
