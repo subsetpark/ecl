@@ -306,6 +306,11 @@ pub fn build(b: *std.Build) void {
         "Run native loader and transactional-call tests",
     );
     native_runtime_step.dependOn(&run_native_runtime_tests.step);
+    const port_tests = b.addTest(.{ .root_module = test_mod, .filters = &.{ "process:", "net:", "native:" } });
+    port_tests.linkage = runtime_linkage;
+    const run_port_tests = b.addRunArtifact(port_tests);
+    run_port_tests.step.dependOn(&fixture_files.step);
+    b.step("test-ports", "Run shared process, network, and native port behavior").dependOn(&run_port_tests.step);
     const native_acceptance_mod = b.createModule(.{
         .root_source_file = b.path("test/native_runtime.zig"),
         .target = target,

@@ -1,10 +1,65 @@
-//! Shared bounded byte transfers; backend adapters own readiness and error policy.
+//! Shared scope transfers and bounded byte transfers for every port backend.
 const std = @import("std");
 const heap = @import("heap.zig");
 const list = @import("list.zig");
 const machine = @import("machine.zig");
 const storage = @import("kernel_storage.zig");
 const Value = @import("value.zig").Value;
+const external = @import("external.zig");
+const scheduler = @import("scheduler.zig");
+
+/// The backend supplies only its locked lifetime predicate and ownership
+/// location. This boundary owns lock ordering, origin authorization, destination
+/// attachment, revalidation, and consuming rollback for every port kind.
+pub fn ScopeTransfer(
+    comptime Cell: type,
+    comptime ownership: fn (*Cell) *external.Ownership,
+    comptime live: fn (*Cell) bool,
+) type {
+    return struct {
+        pub fn prepare(cell: *Cell, from: *anyopaque, to: *anyopaque) heap.PortTransferError!void {
+            const destination: *scheduler.TaskScope = @ptrCast(@alignCast(to));
+            std.Io.Threaded.mutexLock(&cell.mutex);
+            const rejected: ?heap.PortTransferError = if (!live(cell)) error.Closed else switch (ownership(cell).*) {
+                .none => error.Closed,
+                .transferring => error.Busy,
+                .owned => |current| if (current.owningScope() == from) null else error.NotOwner,
+            };
+            std.Io.Threaded.mutexUnlock(&cell.mutex);
+            if (rejected) |err| return err;
+
+            // Scope cancellation takes the scope lock before the cell lock.
+            // Allocating and attaching under the cell lock would reverse it.
+            var token = try destination.scheduler.attachExternal(destination, external.scopeMember(Cell, cell));
+            std.Io.Threaded.mutexLock(&cell.mutex);
+            const owner = ownership(cell);
+            const valid = live(cell) and switch (owner.*) {
+                .owned => |current| current.owningScope() == from,
+                .none, .transferring => false,
+            };
+            if (valid) owner.beginTransfer(token);
+            std.Io.Threaded.mutexUnlock(&cell.mutex);
+            if (!valid) {
+                token.detach();
+                return error.Closed;
+            }
+        }
+
+        pub fn commit(cell: *Cell) void {
+            std.Io.Threaded.mutexLock(&cell.mutex);
+            var detached = ownership(cell).commitTransfer();
+            std.Io.Threaded.mutexUnlock(&cell.mutex);
+            detached.detachAll();
+        }
+
+        pub fn abort(cell: *Cell) void {
+            std.Io.Threaded.mutexLock(&cell.mutex);
+            var detached = ownership(cell).abortTransfer();
+            std.Io.Threaded.mutexUnlock(&cell.mutex);
+            detached.detachAll();
+        }
+    };
+}
 
 pub const ReadProgress = union(enum) { pending, eof, data: usize };
 pub const WriteProgress = union(enum) { pending, written: usize };
