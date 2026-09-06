@@ -44,6 +44,8 @@ pub const Failure = struct {
     }
 };
 
+const LiveReservation = transfers.Reservation(OwnerState, OwnerState.releaseLive);
+
 const OwnerState = struct {
     host: *const heap.HostCleanup,
     limits: Limits,
@@ -84,7 +86,7 @@ const OwnerState = struct {
             // The enqueued controller still owns this reference. Joining it
             // precedes every scope release and every native-image release.
             cell.controller.running.join();
-            self.releaseLive();
+            cell.reservation.release();
             lock(&cell.mutex);
             cell.controller = .joined;
             cell.phase = .joined;
@@ -152,8 +154,9 @@ pub const Access = opaque {
         const identity = owner.identity;
         owner.identity +%= 1;
         unlock(&owner.mutex);
-        errdefer owner.releaseLive();
-        const cell = try Cell.allocate(owner, instance, kind);
+        var reservation = LiveReservation.adoptReserved(owner);
+        errdefer reservation.release();
+        const cell = try Cell.allocate(&reservation, instance, kind);
         const item = heap.createPort(Cell, cell.allocator, identity, cell) catch |err| {
             cell.releasePort();
             return err;
@@ -183,6 +186,7 @@ pub const Access = opaque {
 pub const Cell = struct {
     allocator: std.mem.Allocator,
     owner: *OwnerState,
+    reservation: LiveReservation,
     instance: *native.ModuleInstance,
     kind: u32,
     definition: abi.PortDefinition,
@@ -202,13 +206,14 @@ pub const Cell = struct {
     admitted: u32 = 0,
     retired_next: ?*Cell = null,
 
-    fn allocate(owner: *OwnerState, instance: *native.ModuleInstance, kind: u32) error{OutOfMemory}!*Cell {
+    fn allocate(reservation: *LiveReservation, instance: *native.ModuleInstance, kind: u32) error{OutOfMemory}!*Cell {
+        const owner = reservation.owner();
         const allocator = owner.host.allocator();
         const definition = instance.validated().port(kind).?;
         const state = try allocator.alignedAlloc(u8, .@"64", definition.state_size);
         errdefer allocator.free(state);
         const cell = try allocator.create(Cell);
-        cell.* = .{ .allocator = allocator, .owner = owner, .instance = instance, .kind = kind, .definition = definition, .backend = state };
+        cell.* = .{ .allocator = allocator, .owner = owner, .reservation = reservation.take(), .instance = instance, .kind = kind, .definition = definition, .backend = state };
         instance.retain();
         return cell;
     }
@@ -229,9 +234,11 @@ pub const Cell = struct {
     }
     pub fn releasePort(self: *Cell) void {
         if (self.refs.fetchSub(1, .acq_rel) != 1) return;
+        var reservation = self.reservation.take();
         self.instance.releasePin();
         self.allocator.free(self.backend);
         self.allocator.destroy(self);
+        reservation.release();
     }
     pub fn registerReadiness(self: *Cell, key: u64, target: external.WakeTarget) external.RegisterError!external.RegisterResult {
         return external.WaitList(Cell).register(self, key, target);

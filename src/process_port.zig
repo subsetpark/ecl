@@ -297,7 +297,7 @@ pub const ProcessOwner = struct {
     ) SpawnError!Value {
         if (comptime !backendSupported()) return error.Unsupported;
         try self.validateSpec(spec);
-        var live_reservation = LiveReservation.acquire(self) orelse return error.LiveLimit;
+        var live_reservation = LiveReservation.acquire(self, ProcessOwner.reserveLive) orelse return error.LiveLimit;
         errdefer live_reservation.release();
 
         var environment = std.process.Environ.Map.init(self.allocator);
@@ -373,37 +373,7 @@ pub const ProcessOwner = struct {
 
 /// A live-process slot is a consuming capability. Before publication the
 /// spawning call owns it; after `take`, the process cell is its sole owner.
-const LiveReservation = union(enum) {
-    held: *ProcessOwner,
-    consumed,
-
-    fn acquire(process_owner: *ProcessOwner) ?LiveReservation {
-        if (!process_owner.reserveLive()) return null;
-        return .{ .held = process_owner };
-    }
-
-    fn processOwner(self: *const LiveReservation) *ProcessOwner {
-        return switch (self.*) {
-            .held => |process_owner| process_owner,
-            .consumed => @panic("live-process reservation already consumed"),
-        };
-    }
-
-    fn take(self: *LiveReservation) LiveReservation {
-        const held_owner = self.processOwner();
-        self.* = .consumed;
-        return .{ .held = held_owner };
-    }
-
-    fn release(self: *LiveReservation) void {
-        const held_owner = switch (self.*) {
-            .held => |process_owner| process_owner,
-            .consumed => return,
-        };
-        self.* = .consumed;
-        held_owner.releaseLive();
-    }
-};
+const LiveReservation = transfers.Reservation(ProcessOwner, ProcessOwner.releaseLive);
 
 fn ownerFromAccess(access_value: *external.ProcessAccess) *ProcessOwner {
     return @ptrCast(@alignCast(access_value));
@@ -683,7 +653,7 @@ pub const ProcessCell = struct {
         child: std.process.Child,
         identity: u64,
     ) error{OutOfMemory}!*ProcessCell {
-        const owner = live_reservation.processOwner();
+        const owner = live_reservation.owner();
         const group = try owner.allocator.create(OwnedGroup);
         errdefer owner.allocator.destroy(group);
         group.* = .{ .child = child, .pgid = child.id.? };
