@@ -1138,18 +1138,12 @@ pub const ConnectionCell = struct {
     fn retireUnstarted(self: *ConnectionCell, reason: StopReason) void {
         std.Io.Threaded.mutexLock(&self.mutex);
         std.debug.assert(self.lifecycle != .running);
-        var detached = self.finalizeLocked(reason);
-        std.Io.Threaded.mutexUnlock(&self.mutex);
-        // Same order as the controller: the publisher's reference goes first
-        // while the member (if any) still pins the cell.
-        self.releaseRef();
-        detached.detachAll();
+        self.finalizeLocked(reason);
     }
 
-    /// Close the descriptor and the wake pipe, release the reservation,
-    /// publish `terminal`, wake every waiter, and hand back the membership
-    /// token for the caller to detach outside the lock. Runs exactly once.
-    fn finalizeLocked(self: *ConnectionCell, reason: StopReason) external.Ownership.Detached {
+    /// Consumes the lock and the final controller/publisher reference after
+    /// closing descriptors, releasing capacity, and publishing terminal state.
+    fn finalizeLocked(self: *ConnectionCell, reason: StopReason) void {
         std.debug.assert(self.lifecycle != .terminal);
         self.socket.close();
         self.reservation.release();
@@ -1157,9 +1151,7 @@ pub const ConnectionCell = struct {
         std.Io.Threaded.closeFd(self.wake[1]);
         self.lifecycle = .{ .terminal = reason };
         self.waits.notifyLocked(self);
-        // A connection that dies mid-transfer detaches the destination too:
-        // that membership never became authoritative.
-        return self.ownership.release();
+        transfers.completeControllerLocked(ConnectionCell, self, &self.ownership, releaseRef);
     }
 
     fn retainRef(self: *ConnectionCell) void {
@@ -1522,14 +1514,7 @@ pub const ConnectionCell = struct {
         // RST for an abort with unread data) rather than a silent vanish.
         _ = posix.system.shutdown(self.socket.fd.?, posix.SHUT.RDWR);
         std.Io.Threaded.mutexLock(&self.mutex);
-        var detached = self.finalizeLocked(finalize_reason);
-        std.Io.Threaded.mutexUnlock(&self.mutex);
-        // Drop the thread's reference while the scope member still pins the
-        // cell, then detach: the member's release is the last one and it
-        // happens before the scope publishes quiescence, so teardown and the
-        // allocation sweep never observe a cell the thread has yet to drop.
-        self.releaseRef();
-        detached.detachAll();
+        self.finalizeLocked(finalize_reason);
     }
 };
 

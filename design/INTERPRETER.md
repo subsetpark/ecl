@@ -1392,6 +1392,14 @@ resource lock, while membership publication and backend startup revalidation
 use that lock. The creator retains the provisional cell until publication or
 backend rollback completes.
 
+Controller completion consumes the final execution reference and resource lock
+at one shared boundary. Backend-specific quiescence must already hold: process
+controller leases have drained, a connection controller has closed its handles,
+or a native controller has been joined. The boundary drops the execution pin
+before detaching scope memberships, so observing scope completion also proves
+that execution no longer retains the issuing domain. Retained value references
+remain independent of this completion protocol.
+
 Network, process, and native ports share the same scope-transfer boundary.
 Backends supply their locked lifetime predicate and ownership location; the
 shared protocol authorizes the origin, attaches the destination outside the

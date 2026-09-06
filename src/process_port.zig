@@ -573,7 +573,7 @@ const ControllerGroup = struct {
         cell.retainRef();
         if (self.leases != 0) @panic("initial controller lease already issued");
         self.leases = 1;
-        return .{ .group = self, .cell = cell };
+        return .{ .group = self };
     }
 
     fn tryLease(self: *ControllerGroup) ?ControllerLease {
@@ -585,13 +585,12 @@ const ControllerGroup = struct {
         if (self.leases == 0 or self.leases == std.math.maxInt(usize))
             @panic("invalid controller lease count");
         self.leases += 1;
-        return .{ .group = self, .cell = cell };
+        return .{ .group = self };
     }
 
     /// Consumes `cell`'s reference owned by one lease. Nonfinal releases drop
     /// that pin before making the smaller count observable to the supervisor.
     fn releasePinned(self: *ControllerGroup, cell: *ProcessCell) void {
-        var detached: external.Ownership.Detached = .{};
         std.Io.Threaded.mutexLock(&cell.mutex);
         std.debug.assert(self.cell == cell);
         std.debug.assert(self.leases != 0);
@@ -604,26 +603,17 @@ const ControllerGroup = struct {
         }
         if (cell.group_state != .retired) @panic("process scope detached before group retirement");
         self.leases = 0;
-        // A process that retires mid-transfer detaches the destination too:
-        // that membership never became authoritative.
-        detached = self.ownership.release();
-        std.Io.Threaded.mutexUnlock(&cell.mutex);
-
-        cell.releaseRef();
-        detached.detachAll();
+        transfers.completeControllerLocked(ProcessCell, cell, &self.ownership, ProcessCell.releaseRef);
     }
 };
 
 const ControllerLease = struct {
     group: ?*ControllerGroup,
-    cell: ?*ProcessCell,
 
     fn release(self: *ControllerLease) void {
         const group = self.group orelse return;
-        const cell = self.cell orelse @panic("controller lease lost its cell reference");
         self.group = null;
-        self.cell = null;
-        group.releasePinned(cell);
+        group.releasePinned(group.cell);
     }
 };
 
