@@ -85,7 +85,7 @@ pub fn Port(comptime Spec: type) type {
             }, .select_lane = selectLane, .cancel_operation = if (cancellation == .acknowledge) cancelOperation else null };
         }
         fn selectLane(operation: u32) callconv(.c) u32 {
-            return if (@hasDecl(Spec, "Lane")) @intFromEnum(Spec.lane(operation)) else 0;
+            return if (@hasDecl(Spec, "Lane")) @intCast(@intFromEnum(Spec.lane(operation))) else 0;
         }
         fn cancelOperation(raw: *anyopaque, lane: u32) callconv(.c) void {
             Spec.cancelOperation(@ptrCast(@alignCast(raw)), @enumFromInt(lane));
