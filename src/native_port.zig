@@ -88,11 +88,8 @@ const OwnerState = struct {
             lock(&cell.mutex);
             cell.controller = .joined;
             cell.phase = .joined;
-            var detached = cell.ownership.release();
             cell.waits.notifyLocked(cell);
-            unlock(&cell.mutex);
-            detached.detachAll();
-            cell.releasePort();
+            transfers.completeControllerLocked(Cell, cell, &cell.ownership, Cell.releasePort);
         }
     }
 };

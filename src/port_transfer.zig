@@ -24,6 +24,23 @@ pub fn publishScope(
     detached.detachAll();
 }
 
+/// Consumes the held cell mutex and the caller's final execution/publisher
+/// reference. The backend must first establish quiescence (including a join
+/// when code-image lifetime requires it) and publish its terminal facts.
+/// No caller may access the cell after this returns. Drop the execution pin
+/// before detachment lets the scope observe completion and destroy its domain.
+pub fn completeControllerLocked(
+    comptime Cell: type,
+    cell: *Cell,
+    ownership: *external.Ownership,
+    comptime release: fn (*Cell) void,
+) void {
+    var detached = ownership.release();
+    std.Io.Threaded.mutexUnlock(&cell.mutex);
+    release(cell);
+    detached.detachAll();
+}
+
 /// The backend supplies only its locked lifetime predicate and ownership
 /// location. This boundary owns lock ordering, origin authorization, destination
 /// attachment, revalidation, and consuming rollback for every port kind.
