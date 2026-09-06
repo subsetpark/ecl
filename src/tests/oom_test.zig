@@ -1314,6 +1314,47 @@ test "oom: standard-library and host: native port forwarding" {
     try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, nativePortForwardingProbe);
 }
 
+fn NativePortLifecycleProbe(comptime source: []const u8) type {
+    return struct {
+        fn run(failing: *std.testing.FailingAllocator, failure_offset: ?usize) !usize {
+            var locked_allocator = LockedAllocator{ .child = failing.allocator() };
+            const allocator = locked_allocator.allocator();
+            var output_buffer: [256]u8 = undefined;
+            var output = std.Io.Writer.fixed(&output_buffer);
+            var diagnostics_buffer: [256]u8 = undefined;
+            var diagnostics = std.Io.Writer.fixed(&diagnostics_buffer);
+            var runtime = try session.Session.initWithHostConfig(allocator, &.{}, .{
+                .io = std.testing.io,
+                .output = &output,
+                .diagnostics = &diagnostics,
+                .ecl_path = native_fixture.directory,
+                .native_port_limits = .{ .ring_capacity = 8 },
+            }, .cooperative);
+            defer runtime.deinit();
+            try runOk(&runtime, "oom-port-setup.ecl", "portprobe.cleaned pop");
+            const first_failure_index = failing.alloc_index;
+            if (failure_offset) |offset| failing.fail_index = first_failure_index + offset;
+            try runOk(&runtime, "oom-port-lifecycle.ecl", source);
+            return first_failure_index;
+        }
+    };
+}
+
+test "oom: standard-library and host: native port lifecycle creation and admission" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.new-ready-wait 1 2 portprobe.exchange-ready-wait pop",
+    ).run);
+}
+
+test "oom: standard-library and host: native port lifecycle transfer and rollback" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.new-ready-wait dup wrap dup cat [] (pop pop) 3 pack (@give) @attempt pop " ++
+            "wrap [] (1 2 portprobe.exchange-ready-wait) @give await pop",
+    ).run);
+}
+
 fn checkStdlibSurfaceOrdinalShard(
     comptime surface: StdlibSurface,
     comptime ordinal_shard_index: usize,

@@ -224,6 +224,8 @@ const repository_verification_files = [_][]const u8{
     "test/native/negative/empty_doc.zig",
     "test/native/negative/invalid_port_callbacks.zig",
     "test/native/negative/port_without_schedule.zig",
+    "test/native/negative/undeclared_port.zig",
+    "test/native/negative/retained_port_candidate.zig",
     "test/http_fixture_server.zig",
     "test/pkg_lock_fixture.zig",
     "test/process_fixture.zig",

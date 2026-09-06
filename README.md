@@ -390,7 +390,9 @@ byte-stream access, cancellation observation, and error reporting. Stream waits
 block only the private controller. `init` must be bounded. `open`, `run`, and
 `deinit` execute serially on that controller; `cancel` can run concurrently with
 `open` or `run`, must be bounded and thread-safe, and must interrupt any backend
-waits. Integrations with uninterruptible blocking calls do not meet this contract.
+waits. Cancellation can already be set when a callback starts; check it before
+starting external work and preserve that observation across backend waits.
+Integrations with uninterruptible blocking calls do not meet this contract.
 Controllers cannot use ECL values, builders, scopes, or scheduler internals.
 
 Sessions default to 64 live native ports, 16 admitted operations per port, and

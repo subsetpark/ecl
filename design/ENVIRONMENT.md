@@ -59,6 +59,27 @@ other error kinds remain reserved to the runtime.
 A loaded native module remains loaded for the session. Repeated resolution
 uses its existing registration.
 
+Native modules may declare typed port kinds with persistent private state.
+Their words can forward opaque ports through aggregates, stream operations,
+and explicitly close them. Operations on each port execute in admission order;
+different ports can progress independently. An ordinary operation error leaves
+the port usable. Cancelling an active operation closes it and cancels queued
+work; cancelling queued work removes only that operation. Explicit close is
+idempotent and waits for cleanup. Scope closure also waits for cleanup, and
+`@give` transfers ownership atomically without interrupting active work.
+
+Kinds belong to a loaded module instance, not to a textual name. A mismatched
+kind raises `'type`; operations on closed ports raise `'io`. Retained closed
+ports remain opaque identities. Tasks and modules are unsupported native inputs.
+
+The default Session limits are 64 live native ports, 16 admitted operations per
+port (including the active one), and 64 KiB for each request and response ring.
+The embedding host may configure `NativePortLimits` through
+`Host.native_port_limits`: live capacity is 1–4096, operation capacity is 1–256,
+and ring capacity is 1 byte–16 MiB. Invalid limits reject Session initialization.
+Creation beyond live capacity raises `'domain`; operations wait for admission
+when their queue is full. These resource limits do not sandbox native code.
+
 Opening a shared library executes machine code before ECL validates its
 descriptor. Every directory used for native loading is a trusted-code
 boundary.
