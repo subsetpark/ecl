@@ -2,12 +2,12 @@
 # Validate and compare package versions using the supported SemVer subset.
 []
 (
- ### defp digit-chars
+ ### setp digit-chars
  # Decimal digits.
  "0123456789"
  'digit-chars setp
 
- ### defp identifier-chars
+ ### setp identifier-chars
  # Characters allowed in prerelease identifiers.
  "-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
  'identifier-chars setp

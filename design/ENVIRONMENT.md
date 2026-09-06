@@ -740,6 +740,9 @@ The canonical layout follows these rules:
 - Space-separated forms pack into local groups up to 100 columns. Continuation
   lines begin immediately inside their opening delimiter. A standalone
   closing delimiter aligns with its opener.
+- An inline literal module registration's seed and body share the body's
+  opening line when that physical line fits. Later body lines do not force
+  their separator to break; an authored newline remains a hard boundary.
 - Existing newlines remain hard boundaries. Comments break their local groups;
   multiline children retain their internal breaks without forcing a following
   sibling onto a separate line. An indivisible token or preserved comment may
@@ -750,9 +753,9 @@ The canonical layout follows these rules:
   may refill its docstring paragraph.
 - Literal module registrations receive `### module <name>` navigation
   headers.
-- Literal public definitions and constants receive `### def <name>` headers;
-  private definitions and constants receive `### defp <name>` headers; test
-  declarations receive `### test <name>` headers.
+- Literal declarations receive a header containing their exact defining word:
+  `### def <name>`, `### defp <name>`, `### set <name>`, or
+  `### setp <name>`. Test declarations receive `### test <name>` headers.
 - Navigation headers are derived from structural terminators. Existing header
   text is normalized. Dictionary-contained forms are excluded from header
   recognition.

@@ -119,6 +119,7 @@ const SyntaxParser = struct {
     }
 };
 const Mode = enum { flat, broken };
+const FitScope = enum { group, local, first_line };
 const Fill = struct { words: []const []const u8, final_reserve: usize };
 const Doc = union(enum) {
     empty,
@@ -130,6 +131,9 @@ const Doc = union(enum) {
     /// A fill decision scoped to one separator and the term after it. Unlike
     /// a structural group, this does not reserve width for later siblings.
     local_group: *const Doc,
+    /// A separator whose choice depends only on the following physical line.
+    /// The child retains its own grouping decisions after the separator.
+    line_pair: *const Doc,
     aligned: *const Doc,
     fill_sep: Fill,
     docline: usize,
@@ -173,6 +177,9 @@ const DocBuilder = struct {
     }
     fn localGroup(self: *DocBuilder, item: *const Doc) Error!*const Doc {
         return self.node(.{ .local_group = item });
+    }
+    fn linePair(self: *DocBuilder, item: *const Doc) Error!*const Doc {
+        return self.node(.{ .line_pair = item });
     }
     fn aligned(self: *DocBuilder, item: *const Doc) Error!*const Doc {
         return self.node(.{ .aligned = item });
@@ -238,7 +245,7 @@ const Renderer = struct {
             }),
             .group => |item| {
                 const mode: Mode = if (frame.mode == .flat or
-                    self.fits(max_width -| self.column, item, true)) .flat else .broken;
+                    self.fits(max_width -| self.column, item, .group)) .flat else .broken;
                 try self.stack.append(self.allocator, .{
                     .doc = item,
                     .indent = frame.indent,
@@ -247,11 +254,25 @@ const Renderer = struct {
             },
             .local_group => |item| {
                 const mode: Mode = if (frame.mode == .flat or
-                    self.fits(max_width -| self.column, item, false)) .flat else .broken;
+                    self.fits(max_width -| self.column, item, .local)) .flat else .broken;
                 try self.stack.append(self.allocator, .{
                     .doc = item,
                     .indent = frame.indent,
                     .mode = mode,
+                });
+            },
+            .line_pair => |item| {
+                if (self.column < max_width and
+                    self.fits(max_width - self.column - 1, item, .first_line))
+                {
+                    try self.writeSpace();
+                } else {
+                    try self.lineBreak(frame.indent);
+                }
+                try self.stack.append(self.allocator, .{
+                    .doc = item,
+                    .indent = frame.indent,
+                    .mode = frame.mode,
                 });
             },
             .fill_sep => |fill| try self.renderFill(fill, frame),
@@ -267,12 +288,12 @@ const Renderer = struct {
         self: *Renderer,
         available: usize,
         candidate: *const Doc,
-        include_pending: bool,
+        scope: FitScope,
     ) bool {
         // SAFETY: ProbeStack reads only initialized slots below `len`.
         var commands: ProbeStack = .{ .items = undefined };
         _ = commands.push(.{ .frame = .{ .doc = candidate, .indent = 0, .mode = .flat } });
-        var pending = if (include_pending) self.stack.items.len else 0;
+        var pending = if (scope == .group) self.stack.items.len else 0;
         var remaining = available;
         var steps: usize = 0;
         while (true) {
@@ -301,7 +322,7 @@ const Renderer = struct {
                     if (cursor.index == cursor.words.len) continue;
                     const separator: usize = @intFromBool(cursor.index > 0);
                     const width = flatWidthLimited(cursor.words[cursor.index], remaining -| separator) orelse
-                        return false;
+                        return scope == .first_line;
                     if (separator + width > remaining) return false;
                     remaining -= separator + width;
                     if (!commands.push(.{ .fill = .{
@@ -313,7 +334,8 @@ const Renderer = struct {
                 .frame => |frame| switch (frame.doc.*) {
                     .empty => {},
                     .text => |bytes| {
-                        const width = flatWidthLimited(bytes, remaining) orelse return frame.mode == .broken;
+                        const width = flatWidthLimited(bytes, remaining) orelse
+                            return scope == .first_line or frame.mode == .broken;
                         if (width > remaining) return false;
                         remaining -= width;
                     },
@@ -324,12 +346,21 @@ const Renderer = struct {
                         if (remaining == 0) return false;
                         remaining -= 1;
                     } else return true,
-                    .hardline => return frame.mode == .broken,
+                    .hardline => return scope == .first_line or frame.mode == .broken,
                     .group, .local_group, .aligned => |item| if (!commands.push(.{ .frame = .{
                         .doc = item,
                         .indent = 0,
                         .mode = if (frame.mode == .flat) .flat else .broken,
                     } })) return false,
+                    .line_pair => |item| {
+                        if (remaining == 0) return false;
+                        remaining -= 1;
+                        if (!commands.push(.{ .frame = .{
+                            .doc = item,
+                            .indent = 0,
+                            .mode = if (frame.mode == .flat) .flat else .broken,
+                        } })) return false;
+                    },
                     .fill_sep => |fill| {
                         if (frame.mode == .broken) return true;
                         if (!commands.push(.{ .fill = .{ .words = fill.words, .index = 0 } })) return false;
@@ -428,8 +459,7 @@ const Formatter = struct {
                             if (have_content) try self.rootBreak(&output, &line, 2);
                             try line.append(self.allocator(), try self.definitionHeader(
                                 header.name,
-                                header.private,
-                                header.test_declaration,
+                                header.declaration.?,
                             ));
                             have_content = true;
                             previous_comment = true;
@@ -454,8 +484,7 @@ const Formatter = struct {
                                 else
                                     try self.definitionHeader(
                                         header.name,
-                                        header.private,
-                                        header.test_declaration,
+                                        header.declaration.?,
                                     ));
                                 have_content = true;
                                 previous_comment = true;
@@ -493,8 +522,7 @@ const Formatter = struct {
                         try line.append(self.allocator(), if (name != null)
                             try self.definitionHeader(
                                 header_name,
-                                definitionPrivate(sequence, part_index),
-                                definitionTest(sequence, part_index),
+                                definitionDeclaration(sequence, part_index).?,
                             )
                         else
                             try self.moduleHeader(header_name));
@@ -508,7 +536,7 @@ const Formatter = struct {
                         }
                     }
                     const packed_registration: ?*const Doc = if (registration) |info|
-                        if (moduleRegistrationTailIsPackable(sequence, info))
+                        if (moduleRegistrationIsPackable(sequence, part_index, info))
                             try self.formatModuleRegistration(sequence, part_index, info)
                         else
                             null
@@ -572,16 +600,10 @@ const Formatter = struct {
     fn definitionHeader(
         self: *Formatter,
         name: []const u8,
-        private: bool,
-        test_declaration: bool,
+        declaration: Declaration,
     ) Error!*const Doc {
         return self.docs.concat(&.{
-            try self.docs.text(if (test_declaration)
-                "### test "
-            else if (private)
-                "### defp "
-            else
-                "### def "),
+            try self.docs.text(declaration.header()),
             try self.docs.text(name),
         });
     }
@@ -629,16 +651,24 @@ const Formatter = struct {
         var closing: std.ArrayList(*const Doc) = .empty;
         defer closing.deinit(self.allocator());
         try closing.append(self.allocator(), try self.docs.text(delimited.close));
+        var previous_form = registration.body;
         for (sequence.parts[registration.body + 1 .. registration.terminator + 1], registration.body + 1..) |part, index| {
             switch (part) {
                 .trivia => continue,
                 .form => {},
             }
-            const suffix = try self.docs.localGroup(try self.docs.concat(&.{
-                try self.docs.softline(),
-                try self.form(sequence, index),
-            }));
-            try closing.append(self.allocator(), suffix);
+            const breaks = formBreakCount(sequence, previous_form, index);
+            if (breaks == 0) {
+                const suffix = try self.docs.localGroup(try self.docs.concat(&.{
+                    try self.docs.softline(),
+                    try self.form(sequence, index),
+                }));
+                try closing.append(self.allocator(), suffix);
+            } else {
+                for (0..breaks) |_| try closing.append(self.allocator(), try self.docs.hardline());
+                try closing.append(self.allocator(), try self.form(sequence, index));
+            }
+            previous_form = index;
         }
 
         var body: std.ArrayList(*const Doc) = .empty;
@@ -650,11 +680,15 @@ const Formatter = struct {
         try body.append(self.allocator(), try self.docs.concat(closing.items));
         const registered_body = try self.docs.group(try self.docs.aligned(try self.docs.concat(body.items)));
         if (start == registration.body) return registered_body;
-        return self.docs.group(try self.docs.concat(&.{
-            try self.form(sequence, start),
-            try self.docs.softline(),
-            registered_body,
-        }));
+        const seed = try self.form(sequence, start);
+        const breaks = formBreakCount(sequence, start, registration.body);
+        if (breaks == 0) return self.docs.concat(&.{ seed, try self.docs.linePair(registered_body) });
+        var seeded: std.ArrayList(*const Doc) = .empty;
+        defer seeded.deinit(self.allocator());
+        try seeded.append(self.allocator(), seed);
+        for (0..breaks) |_| try seeded.append(self.allocator(), try self.docs.hardline());
+        try seeded.append(self.allocator(), registered_body);
+        return self.docs.concat(seeded.items);
     }
     fn nested(self: *Formatter, sequence: Sequence) Error!NestedDoc {
         var output: std.ArrayList(*const Doc) = .empty;
@@ -677,8 +711,7 @@ const Formatter = struct {
                         try self.appendHardlines(&output, if (have_content) 2 else 1);
                         try output.append(self.allocator(), try self.definitionHeader(
                             header.name,
-                            header.private,
-                            header.test_declaration,
+                            header.declaration.?,
                         ));
                         have_content = true;
                         previous_comment = true;
@@ -691,8 +724,7 @@ const Formatter = struct {
                             try self.appendHardlines(&output, if (have_content) 2 else 1);
                             try output.append(self.allocator(), try self.definitionHeader(
                                 header.name,
-                                header.private,
-                                header.test_declaration,
+                                header.declaration.?,
                             ));
                             have_content = true;
                             previous_comment = true;
@@ -720,8 +752,7 @@ const Formatter = struct {
                         self.allocator(),
                         try self.definitionHeader(
                             definition_name,
-                            definitionPrivate(sequence, part_index),
-                            definitionTest(sequence, part_index),
+                            definitionDeclaration(sequence, part_index).?,
                         ),
                     );
                     try output.append(self.allocator(), try self.docs.hardline());
@@ -985,19 +1016,40 @@ fn definitionFollows(sequence: Sequence, current: usize) bool {
             if (stage == 0) {
                 if (bytes.len < 2 or bytes[0] != '\'' or !lexer.validSymbol(bytes[1..])) return false;
                 stage = 1;
-            } else return std.mem.eql(u8, bytes, "def") or
-                std.mem.eql(u8, bytes, "defp") or
-                std.mem.eql(u8, bytes, "test") or
-                std.mem.eql(u8, bytes, "set") or
-                std.mem.eql(u8, bytes, "setp");
+            } else return Declaration.fromWord(bytes) != null;
         },
     };
     return false;
 }
+const Declaration = enum {
+    def,
+    defp,
+    set,
+    setp,
+    test_decl,
+
+    fn fromWord(word: []const u8) ?Declaration {
+        if (std.mem.eql(u8, word, "def")) return .def;
+        if (std.mem.eql(u8, word, "defp")) return .defp;
+        if (std.mem.eql(u8, word, "set")) return .set;
+        if (std.mem.eql(u8, word, "setp")) return .setp;
+        if (std.mem.eql(u8, word, "test")) return .test_decl;
+        return null;
+    }
+
+    fn header(self: Declaration) []const u8 {
+        return switch (self) {
+            .def => "### def ",
+            .defp => "### defp ",
+            .set => "### set ",
+            .setp => "### setp ",
+            .test_decl => "### test ",
+        };
+    }
+};
 const DefinitionInfo = struct {
     name: []const u8,
-    private: bool,
-    test_declaration: bool,
+    declaration: Declaration,
 };
 fn definitionInfo(sequence: Sequence, start: usize) ?DefinitionInfo {
     const first = sequence.parts[start].form;
@@ -1015,25 +1067,22 @@ fn definitionInfo(sequence: Sequence, start: usize) ?DefinitionInfo {
     const quoted_index = nextFormPart(sequence, body_index).?;
     const terminator_index = nextFormPart(sequence, quoted_index).?;
     const terminator = sequence.parts[terminator_index].form.kind.atom;
-    const set_binding = std.mem.eql(u8, terminator, "set") or std.mem.eql(u8, terminator, "setp");
+    const declaration = Declaration.fromWord(terminator) orelse return null;
+    const set_binding = declaration == .set or declaration == .setp;
     if (set_binding) {
         if (!isLiteralValueForm(body)) return null;
     } else if (!isListForm(body)) return null;
     const quoted = sequence.parts[quoted_index].form.kind.atom;
     return .{
         .name = quoted[1..],
-        .private = std.mem.eql(u8, terminator, "defp") or std.mem.eql(u8, terminator, "setp"),
-        .test_declaration = std.mem.eql(u8, terminator, "test"),
+        .declaration = declaration,
     };
 }
 fn definitionName(sequence: Sequence, start: usize) ?[]const u8 {
     return (definitionInfo(sequence, start) orelse return null).name;
 }
-fn definitionPrivate(sequence: Sequence, start: usize) bool {
-    return (definitionInfo(sequence, start) orelse return false).private;
-}
-fn definitionTest(sequence: Sequence, start: usize) bool {
-    return (definitionInfo(sequence, start) orelse return false).test_declaration;
+fn definitionDeclaration(sequence: Sequence, start: usize) ?Declaration {
+    return (definitionInfo(sequence, start) orelse return null).declaration;
 }
 fn isLiteralValueForm(form_item: *const Form) bool {
     return switch (form_item.kind) {
@@ -1094,13 +1143,28 @@ fn moduleRegistrationInfo(sequence: Sequence, start: usize) ?ModuleRegistration 
     };
     return null;
 }
-fn moduleRegistrationTailIsPackable(sequence: Sequence, registration: ModuleRegistration) bool {
+fn moduleRegistrationIsPackable(
+    sequence: Sequence,
+    start: usize,
+    registration: ModuleRegistration,
+) bool {
     if (sequence.parts[registration.body].form.kind != .delimited) return false;
-    for (sequence.parts[registration.body + 1 .. registration.terminator + 1]) |part| switch (part) {
+    for (sequence.parts[start + 1 .. registration.terminator + 1]) |part| switch (part) {
         .trivia => |trivia| if (trivia.kind == .comment) return false,
         .form => {},
     };
     return true;
+}
+fn formBreakCount(sequence: Sequence, before: usize, after: usize) usize {
+    var count: usize = 0;
+    for (sequence.parts[before + 1 .. after]) |part| switch (part) {
+        .trivia => |trivia| {
+            if (trivia.kind == .space)
+                count = @min(count + lineBreakCount(trivia.bytes), 2);
+        },
+        .form => unreachable,
+    };
+    return count;
 }
 fn nextFormPart(sequence: Sequence, after: usize) ?usize {
     for (sequence.parts[after + 1 ..], after + 1..) |part, index| switch (part) {
@@ -1142,14 +1206,17 @@ const HeaderTarget = struct {
     part: usize,
     name: []const u8,
     module: bool = false,
-    private: bool = false,
-    test_declaration: bool = false,
+    declaration: ?Declaration = null,
 };
 fn existingDefinitionHeader(sequence: Sequence, index: usize, bytes: []const u8) ?HeaderTarget {
     const definition_prefix = std.mem.startsWith(u8, bytes, "# def ") or
         std.mem.startsWith(u8, bytes, "### def ") or
         std.mem.startsWith(u8, bytes, "# defp ") or
-        std.mem.startsWith(u8, bytes, "### defp ");
+        std.mem.startsWith(u8, bytes, "### defp ") or
+        std.mem.startsWith(u8, bytes, "# set ") or
+        std.mem.startsWith(u8, bytes, "### set ") or
+        std.mem.startsWith(u8, bytes, "# setp ") or
+        std.mem.startsWith(u8, bytes, "### setp ");
     const test_prefix = std.mem.startsWith(u8, bytes, "# test ") or
         std.mem.startsWith(u8, bytes, "### test ");
     if (!definition_prefix and !test_prefix) return null;
@@ -1163,13 +1230,12 @@ fn existingDefinitionHeader(sequence: Sequence, index: usize, bytes: []const u8)
             return null
     else
         return null;
-    const test_declaration = definitionTest(sequence, part);
-    if (test_prefix and !test_declaration) return null;
+    const declaration = definitionDeclaration(sequence, part) orelse return null;
+    if (test_prefix and declaration != .test_decl) return null;
     return .{
         .part = part,
         .name = definitionName(sequence, part) orelse return null,
-        .private = definitionPrivate(sequence, part),
-        .test_declaration = test_declaration,
+        .declaration = declaration,
     };
 }
 fn existingModuleHeader(sequence: Sequence, index: usize, bytes: []const u8) ?HeaderTarget {
@@ -1205,8 +1271,7 @@ fn attachedDefinitionAfterComment(sequence: Sequence, index: usize) ?HeaderTarge
                 return .{
                     .part = part_index,
                     .name = name,
-                    .private = definitionPrivate(sequence, part_index),
-                    .test_declaration = definitionTest(sequence, part_index),
+                    .declaration = definitionDeclaration(sequence, part_index).?,
                 };
             }
             const name = moduleRegistrationName(sequence, part_index) orelse return null;

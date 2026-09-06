@@ -69,9 +69,10 @@ The following rules are enforced for checked-in first-party source:
 
 - A standard module's terminal form is `@defm`.
 - Every prelude definition begins with the exact `### def <name>` navigation
-  header, and the name matches its terminal quoted definition name. Standard
-  modules use `### def <name>` for `def`/`set` and `### defp <name>` for
-  `defp`/`setp`. A first-class test uses `### test <name>` and the name
+  header, and the name matches its terminal quoted definition name. A standard
+  module's navigation header uses the exact declaration word. The four forms
+  are `### def <name>`, `### defp <name>`, `### set <name>`, and
+  `### setp <name>`. A first-class test uses `### test <name>` and the name
   matches its terminal quoted `test` declaration.
 - Every `def`/`defp` definition has a meaningful nonempty annotation
   docstring. State a fixed successful stack effect when one can be expressed.
@@ -244,8 +245,8 @@ implementation or advertise the abstraction.
 Use comments for decisions that are not evident from the stack program:
 format compatibility, a deliberate validation boundary, or why a stricter
 contract exists. Do not translate each line of code into prose. Put a
-definition's explanatory comments immediately after its `### def` or
-`### defp` header and before its annotation.
+definition's explanatory comments immediately after its navigation header and
+before its annotation.
 
 ## Verification
 

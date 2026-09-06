@@ -12,17 +12,17 @@
   and)
  'chars-in? defp
 
- ### defp lead-chars
+ ### setp lead-chars
  # Valid first characters for a package-name segment.
  "abcdefghijklmnopqrstuvwxyz"
  'lead-chars setp
 
- ### defp segment-chars
+ ### setp segment-chars
  # Valid later characters for a package-name segment.
  "-0123456789abcdefghijklmnopqrstuvwxyz"
  'segment-chars setp
 
- ### defp hex-chars
+ ### setp hex-chars
  # Lowercase hexadecimal digits.
  "0123456789abcdef"
  'hex-chars setp

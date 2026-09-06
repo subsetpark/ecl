@@ -1,5 +1,5 @@
 ### module stats
 []
 (
- ### def answer
+ ### set answer
  1 'answer set) 'stats @defm

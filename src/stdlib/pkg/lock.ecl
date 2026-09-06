@@ -2,22 +2,22 @@
 # Validate, read, and canonically render package locks.
 []
 (
- ### defp lock-keys
+ ### setp lock-keys
  # Required cache-lock keys.
  ['format 'root 'packages 'requires]
  'lock-keys setp
 
- ### defp vendor-lock-keys
+ ### setp vendor-lock-keys
  # Required project-vendor lock keys.
  ['format 'root 'store 'packages 'requires]
  'vendor-lock-keys setp
 
- ### defp selection-keys
+ ### setp selection-keys
  # Exact fields retained for one globally selected package.
  ['version 'url 'hash]
  'selection-keys setp
 
- ### defp edge-keys
+ ### setp edge-keys
  # Exact fields retained for one consumer-local dependency alias.
  ['package 'version]
  'edge-keys setp

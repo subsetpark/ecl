@@ -3,15 +3,15 @@
 (
  'stdlib.test.support ('equal 'raises-containing 'documented) import
 
- ### defp canonical-lock
+ ### setp canonical-lock
  "{'format 1\n 'root \"my.proj\"\n 'packages\n {\"bar\" {'version \"0.3.0\" 'url \"https://e.com/b.tgz\" 'hash \"sha256-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\"}\n  \"foo\" {'version \"1.2.0\" 'url \"https://e.com/f.tgz\" 'hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}}\n 'requires\n {\"foo\" {\"bar\" {'package \"bar\" 'version \"0.3.0\"}}\n  \"my.proj\" {\"foo\" {'package \"foo\" 'version \"1.2.0\"}}}}\n"
  'canonical-lock setp
 
- ### defp vendor-lock
+ ### setp vendor-lock
  "{'format 1\n 'root \"my.proj\"\n 'store 'vendor\n 'packages\n {\"bar\" {'version \"0.3.0\" 'url \"https://e.com/b.tgz\" 'hash \"sha256-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\"}\n  \"foo\" {'version \"1.2.0\" 'url \"https://e.com/f.tgz\" 'hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}}\n 'requires\n {\"foo\" {\"bar\" {'package \"bar\" 'version \"0.3.0\"}}\n  \"my.proj\" {\"foo\" {'package \"foo\" 'version \"1.2.0\"}}}}\n"
  'vendor-lock setp
 
- ### defp unsorted-lock
+ ### setp unsorted-lock
  {'format 1 'root "my.proj"
   'packages
   {"foo"

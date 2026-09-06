@@ -1,7 +1,7 @@
 ### module register-style
 []
 (
- ### def answer
+ ### set answer
  7 'answer set)
 @module
 'register-style
