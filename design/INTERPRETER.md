@@ -909,8 +909,7 @@ before publishing the smaller count, so the supervisor can observe the final
 count only after every other release completes. The final lease takes the
 membership token, drops its cell reference while the external-member reference
 still pins the cell, and only then detaches membership, so scope quiescence
-cannot race any controller release. Each cell owns a nominal live-process
-reservation; after every nonfinal controller has drained, the supervisor
+cannot race any controller release. Each process allocation owns its live capacity; after every nonfinal controller has drained, the supervisor
 consumes that reservation under the cell lock before publishing the public
 reaped state. Observing termination therefore also closes the process owner's
 lifetime use. Reaping the group leader therefore
@@ -1452,9 +1451,11 @@ remain owned by the resource, whose I/O continues independently. Native runs
 may still mutate private backend state after task cancellation, so their lane
 requires controller acknowledgement and return before reuse.
 
-Port capacity is owned by a shared consuming reservation bound to its issuing
-owner and release policy. A provisional creator transfers that token into the
-resource, so rollback and terminal cleanup cannot both return the same slot.
+Port capacity lives in factory-owned resource storage, bound to its issuing
+owner and release policy. Initialization borrows the cell being constructed;
+the factory returns capacity and storage on failure. No separately copyable
+quota token exists. Terminal retirement returns the allocation’s capacity once;
+retained metadata keeps the allocation and its allocator without retaining quota.
 Limits and release milestones remain backend-specific: connection capacity
 wakes blocked acceptors, process capacity follows reaping, listener capacity
 follows socket closure, and native capacity follows controller joining.
