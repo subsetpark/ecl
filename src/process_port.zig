@@ -281,6 +281,12 @@ pub const ProcessOwner = struct {
         return self.policy.max_stderr_capture;
     }
 
+    fn resourceAllocator(self: *ProcessOwner) std.mem.Allocator {
+        return self.allocator;
+    }
+    fn reserveResource(self: *ProcessOwner) error{LiveLimit}!void {
+        if (!self.reserveLive()) return error.LiveLimit;
+    }
     fn reserveLive(self: *ProcessOwner) bool {
         var observed = self.live.load(.acquire);
         while (observed < self.policy.max_live_ports) {
@@ -309,38 +315,7 @@ pub const ProcessOwner = struct {
             error.OutOfMemory => error.OutOfMemory,
             error.Closed => error.Io,
         };
-        var live_reservation = LiveReservation.acquire(self, ProcessOwner.reserveLive) orelse return error.LiveLimit;
-        errdefer live_reservation.release();
-
-        var environment = std.process.Environ.Map.init(self.allocator);
-        defer environment.deinit();
-        for (self.environment.entries) |entry| environment.put(entry.name, entry.value) catch
-            return error.OutOfMemory;
-        for (spec.environment) |entry| environment.put(entry.name, entry.value) catch
-            return error.OutOfMemory;
-
-        const argv = try self.allocator.alloc([]const u8, spec.args.len + 1);
-        defer self.allocator.free(argv);
-        argv[0] = spec.executable;
-        @memcpy(argv[1..], spec.args);
-
-        var child: ?std.process.Child = std.process.spawn(self.io, .{
-            .argv = argv,
-            .cwd = if (spec.cwd orelse self.policy.initial_cwd) |cwd| .{ .path = cwd } else .inherit,
-            .environ_map = &environment,
-            .stdin = .pipe,
-            .stdout = .pipe,
-            .stderr = .pipe,
-            .pgid = 0,
-        }) catch return error.Io;
-        errdefer if (child) |*owned_child| killChildGroup(owned_child, self.io);
-
-        const cell = ProcessCell.create(
-            &live_reservation,
-            child.?,
-            self.next_identity.fetchAdd(1, .monotonic),
-        ) catch return error.OutOfMemory;
-        child = null;
+        const cell = try Resource.create(self, .{spec}, ProcessCell.initializeAllocation);
         var initial_owned = true;
         errdefer if (initial_owned) cell.releasePort();
         var supervisor_lease = cell.controllers.initialLease();
@@ -383,9 +358,9 @@ pub const ProcessOwner = struct {
     }
 };
 
-/// A live-process slot is a consuming capability. Before publication the
-/// spawning call owns it; after `take`, the process cell is its sole owner.
-const LiveReservation = transfers.Reservation(ProcessOwner, ProcessOwner.releaseLive);
+/// The factory owns live capacity with the cell allocation through rollback
+/// or terminal retirement. Backend code never receives a quota token.
+const Resource = transfers.Resource(ProcessCell, ProcessOwner, ProcessOwner.resourceAllocator, ProcessOwner.reserveResource, ProcessOwner.releaseLive);
 
 fn ownerFromAccess(access_value: *external.ProcessAccess) *ProcessOwner {
     return @ptrCast(@alignCast(access_value));
@@ -579,7 +554,7 @@ const ControllerGroup = struct {
         }
         if (cell.group_state != .retired) @panic("process scope detached before group retirement");
         self.leases = 0;
-        cell.live_reservation.release();
+        Resource.retire(cell);
         cell.phase = .{ .reaped = cell.group_state.retired };
         cell.notifyReadyLocked();
         transfers.completeControllerLocked(ProcessCell, cell, &self.ownership, ProcessCell.releaseRef);
@@ -637,7 +612,6 @@ const readiness_pointer_mask: u64 = ~@as(u64, 7);
 pub const ProcessCell = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    live_reservation: LiveReservation,
     identity: u64,
     refs: std.atomic.Value(usize) = .init(1),
     mutex: std.Io.Mutex = .init,
@@ -664,17 +638,30 @@ pub const ProcessCell = struct {
     timed_out: bool = false,
     run_observation: RunObservation = .{},
 
-    fn create(
-        live_reservation: *LiveReservation,
-        child: std.process.Child,
-        identity: u64,
-    ) error{OutOfMemory}!*ProcessCell {
-        const owner = live_reservation.owner();
+    fn initializeAllocation(cell: *ProcessCell, owner: *ProcessOwner, spec: ProcessSpec) SpawnError!void {
+        var environment = std.process.Environ.Map.init(owner.allocator);
+        defer environment.deinit();
+        for (owner.environment.entries) |entry| environment.put(entry.name, entry.value) catch
+            return error.OutOfMemory;
+        for (spec.environment) |entry| environment.put(entry.name, entry.value) catch
+            return error.OutOfMemory;
+        const argv = try owner.allocator.alloc([]const u8, spec.args.len + 1);
+        defer owner.allocator.free(argv);
+        argv[0] = spec.executable;
+        @memcpy(argv[1..], spec.args);
+        var child = std.process.spawn(owner.io, .{
+            .argv = argv,
+            .cwd = if (spec.cwd orelse owner.policy.initial_cwd) |cwd| .{ .path = cwd } else .inherit,
+            .environ_map = &environment,
+            .stdin = .pipe,
+            .stdout = .pipe,
+            .stderr = .pipe,
+            .pgid = 0,
+        }) catch return error.Io;
+        errdefer killChildGroup(&child, owner.io);
         const group = try owner.allocator.create(OwnedGroup);
         errdefer owner.allocator.destroy(group);
         group.* = .{ .child = child, .pgid = child.id.? };
-        const cell = try owner.allocator.create(ProcessCell);
-        errdefer owner.allocator.destroy(cell);
         const stdin = try owner.allocator.alloc(u8, owner.policy.stdin_capacity);
         errdefer owner.allocator.free(stdin);
         const stdout = try owner.allocator.alloc(u8, owner.policy.stdout_capacity);
@@ -683,8 +670,7 @@ pub const ProcessCell = struct {
         cell.* = .{
             .allocator = owner.allocator,
             .io = owner.io,
-            .live_reservation = live_reservation.take(),
-            .identity = identity,
+            .identity = owner.next_identity.fetchAdd(1, .monotonic),
             .group_state = .{ .running = group },
             .controllers = .{ .cell = cell },
             .executor = owner.executor.access(),
@@ -692,7 +678,6 @@ pub const ProcessCell = struct {
             .stdout = .{ .bytes = stdout },
             .stderr = .{ .bytes = stderr },
         };
-        return cell;
     }
 
     fn start(self: *ProcessCell, lease: ControllerLease) error{Io}!void {
@@ -744,7 +729,7 @@ pub const ProcessCell = struct {
         self.allocator.free(self.stdin.bytes);
         self.allocator.free(self.stdout.bytes);
         self.allocator.free(self.stderr.bytes);
-        self.allocator.destroy(self);
+        Resource.destroy(self);
     }
 
     fn waitForOtherControllers(self: *ProcessCell) void {
@@ -1514,18 +1499,7 @@ test "process: provisional rollback retains capacity until cancellation setup re
     defer runtime_scheduler.deinit(&scope);
 
     // Exercise the production provisional factory before starting its root job.
-    var reservation = LiveReservation.acquire(&owner, ProcessOwner.reserveLive).?;
-    defer reservation.release();
-    var child: ?std.process.Child = try std.process.spawn(std.testing.io, .{
-        .argv = &.{ fixture_path, "exit", "7" },
-        .stdin = .pipe,
-        .stdout = .pipe,
-        .stderr = .pipe,
-        .pgid = 0,
-    });
-    defer if (child) |*owned| killChildGroup(owned, std.testing.io);
-    const cell = try ProcessCell.create(&reservation, child.?, 41);
-    child = null;
+    const cell = try Resource.create(&owner, .{ProcessSpec{ .executable = fixture_path, .args = &.{ "exit", "7" } }}, ProcessCell.initializeAllocation);
     defer cell.releasePort();
     var initial = cell.controllers.initialLease();
     var provisional = true;

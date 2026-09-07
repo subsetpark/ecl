@@ -45,7 +45,7 @@ pub const Failure = struct {
     }
 };
 
-const LiveReservation = transfers.Reservation(OwnerState, OwnerState.releaseLive);
+const Resource = transfers.Resource(Cell, OwnerState, OwnerState.allocator, OwnerState.reserveLive, OwnerState.releaseLive);
 
 const OwnerState = struct {
     host: *const heap.HostCleanup,
@@ -56,6 +56,16 @@ const OwnerState = struct {
     identity: u64 = 1,
     executor: *controllers.Owner,
 
+    fn allocator(self: *OwnerState) std.mem.Allocator {
+        return self.host.allocator();
+    }
+    fn reserveLive(self: *OwnerState) error{ Closed, Limit }!void {
+        lock(&self.mutex);
+        defer unlock(&self.mutex);
+        if (self.closing) return error.Closed;
+        if (self.live == self.limits.max_live_ports) return error.Limit;
+        self.live += 1;
+    }
     fn releaseLive(self: *OwnerState) void {
         lock(&self.mutex);
         self.live -= 1;
@@ -105,22 +115,11 @@ pub const Access = opaque {
     pub fn create(self: *Access, instance: *native.ModuleInstance, kind: u32, scope: *scheduler.TaskScope) CreateError!Value {
         const owner = self.state();
         if (instance.validated().port(kind).?.lane_count > owner.limits.max_operations) return error.InsufficientLanes;
+        const cell = try Resource.create(owner, .{ instance, kind }, Cell.initializeAllocation);
         lock(&owner.mutex);
-        if (owner.closing) {
-            unlock(&owner.mutex);
-            return error.Closed;
-        }
-        if (owner.live == owner.limits.max_live_ports) {
-            unlock(&owner.mutex);
-            return error.Limit;
-        }
-        owner.live += 1;
         const identity = owner.identity;
         owner.identity +%= 1;
         unlock(&owner.mutex);
-        var reservation = LiveReservation.adoptReserved(owner);
-        errdefer reservation.release();
-        const cell = try Cell.allocate(&reservation, instance, kind);
         const item = heap.createPort(Cell, cell.allocator, identity, cell) catch |err| {
             cell.releasePort();
             return err;
@@ -154,7 +153,6 @@ const Operations = controllers.Lane(Operation);
 pub const Cell = struct {
     allocator: std.mem.Allocator,
     owner: *OwnerState,
-    reservation: LiveReservation,
     instance: *native.ModuleInstance,
     kind: u32,
     definition: abi.PortDefinition,
@@ -169,16 +167,12 @@ pub const Cell = struct {
     initialization_failure: ?Failure = null,
     lanes: [abi.max_port_lanes]Operations = .{Operations{}} ** abi.max_port_lanes,
 
-    fn allocate(reservation: *LiveReservation, instance: *native.ModuleInstance, kind: u32) error{OutOfMemory}!*Cell {
-        const owner = reservation.owner();
+    fn initializeAllocation(cell: *Cell, owner: *OwnerState, instance: *native.ModuleInstance, kind: u32) error{OutOfMemory}!void {
         const allocator = owner.host.allocator();
         const definition = instance.validated().port(kind).?;
         const state = try allocator.alignedAlloc(u8, .@"64", definition.state_size);
-        errdefer allocator.free(state);
-        const cell = try allocator.create(Cell);
-        cell.* = .{ .allocator = allocator, .owner = owner, .reservation = reservation.take(), .instance = instance, .kind = kind, .definition = definition, .backend = state };
+        cell.* = .{ .allocator = allocator, .owner = owner, .instance = instance, .kind = kind, .definition = definition, .backend = state };
         instance.retain();
-        return cell;
     }
     pub fn retainReadiness(self: *Cell) void {
         _ = self.refs.fetchAdd(1, .monotonic);
@@ -197,11 +191,9 @@ pub const Cell = struct {
     }
     pub fn releasePort(self: *Cell) void {
         if (self.refs.fetchSub(1, .acq_rel) != 1) return;
-        var reservation = self.reservation.take();
         self.instance.releasePin();
         self.allocator.free(self.backend);
-        self.allocator.destroy(self);
-        reservation.release();
+        Resource.destroy(self);
     }
     pub fn registerReadiness(self: *Cell, key: u64, target: external.WakeTarget) external.RegisterError!external.RegisterResult {
         return external.WaitList(Cell).register(self, key, target);
@@ -296,7 +288,7 @@ pub const Cell = struct {
     }
     fn retireController(args: struct { *Cell }, _: void) void {
         const cell = args[0];
-        cell.reservation.release();
+        Resource.retire(cell);
         lock(&cell.mutex);
         cell.phase = .joined;
         cell.waits.notifyLocked(cell);

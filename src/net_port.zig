@@ -249,6 +249,15 @@ pub const NetOwner = struct {
         std.debug.assert(old != 0);
     }
 
+    fn resourceAllocator(self: *NetOwner) std.mem.Allocator {
+        return self.allocator;
+    }
+    fn reserveListener(self: *NetOwner) error{LiveLimit}!void {
+        if (!self.reserveLive()) return error.LiveLimit;
+    }
+    fn reserveAccepted(self: *NetOwner) error{LiveLimit}!void {
+        if (!self.reserveConnection()) return error.LiveLimit;
+    }
     fn reserveLive(self: *NetOwner) bool {
         return reserveCounter(&self.live, self.policy.limits.max_live_listeners);
     }
@@ -313,21 +322,7 @@ pub const NetOwner = struct {
     ) ListenError!Value {
         const normalized = normalize(address);
         if (!self.policy.allows(normalized)) return error.Denied;
-        var reservation = ListenerReservation.acquire(self, NetOwner.reserveLive) orelse return error.LiveLimit;
-        errdefer reservation.release();
-
-        var server = try bindListening(normalized, self.policy.limits.kernel_backlog);
-        errdefer if (reservation.isHeld()) server.deinit(self.io);
-
-        const cell = try self.allocator.create(ListenerCell);
-        cell.* = .{
-            .allocator = self.allocator,
-            .io = self.io,
-            .owner = self,
-            .reservation = reservation.take(),
-            .identity = self.next_identity.fetchAdd(1, .monotonic),
-            .state = .{ .bound = .{ .server = server, .address = server.socket.address } },
-        };
+        const cell = try ListenerResource.create(self, .{normalized}, ListenerCell.initializeAllocation);
         // From here the cell owns the socket and the reservation; every
         // failure path closes through the one transition and drops the
         // initial reference.
@@ -415,8 +410,8 @@ const OwnedSocket = struct {
 
 /// One live-connection quota slot, released exactly once. Nothing else in
 /// this file decrements the connection counter.
-const ConnectionReservation = transfers.Reservation(NetOwner, NetOwner.releaseConnection);
-const ListenerReservation = transfers.Reservation(NetOwner, NetOwner.releaseLive);
+const AcceptedResource = transfers.Resource(AcceptedSocket, NetOwner, NetOwner.resourceAllocator, NetOwner.reserveAccepted, NetOwner.releaseConnection);
+const ListenerResource = transfers.Resource(ListenerCell, NetOwner, NetOwner.resourceAllocator, NetOwner.reserveListener, NetOwner.releaseLive);
 
 /// Both ends of a connection, captured at acceptance: the peer from `accept`
 /// and the local end from `getsockname`, so a wildcard listener's connection
@@ -430,12 +425,37 @@ const Endpoints = struct {
 /// a connection transfers both; dropping it releases both.
 const AcceptedSocket = struct {
     socket: OwnedSocket,
-    reservation: ConnectionReservation,
     endpoints: Endpoints,
 
-    fn deinit(self: *AcceptedSocket) void {
+    fn initializeAllocation(self: *AcceptedSocket, _: *NetOwner, listen_fd: posix.fd_t) error{ Pending, Resources, Io }!void {
+        // SAFETY: accept initializes the address before it is read on success.
+        var storage: std.Io.Threaded.PosixAddress = undefined;
+        var length: posix.socklen_t = @sizeOf(std.Io.Threaded.PosixAddress);
+        const rc = if (builtin.os.tag == .linux)
+            posix.system.accept4(listen_fd, &storage.any, &length, posix.SOCK.CLOEXEC)
+        else
+            posix.system.accept(listen_fd, &storage.any, &length);
+        switch (posix.errno(rc)) {
+            .SUCCESS => {},
+            .AGAIN, .INTR, .CONNABORTED => return error.Pending,
+            .MFILE, .NFILE, .NOBUFS, .NOMEM => return error.Resources,
+            else => return error.Io,
+        }
+        var socket: OwnedSocket = .{ .fd = @intCast(rc) };
+        errdefer socket.close();
+        const local = prepareAccepted(socket.fd.?) catch return error.Io;
+        self.* = .{ .socket = socket, .endpoints = .{
+            .local = local,
+            .peer = std.Io.Threaded.addressFromPosix(&storage),
+        } };
+    }
+    fn close(self: *AcceptedSocket) void {
         self.socket.close();
-        self.reservation.release();
+        AcceptedResource.retire(self);
+    }
+    fn deinit(self: *AcceptedSocket) void {
+        self.close();
+        AcceptedResource.destroy(self);
     }
 };
 
@@ -452,11 +472,11 @@ pub const AcceptSlot = struct {
     previous: ?*AcceptSlot = null,
     next: ?*AcceptSlot = null,
     linked: bool = true,
-    state: State = .waiting,
+    state: State,
 
     const State = union(enum) {
-        waiting,
-        ready: AcceptedSocket,
+        waiting: *AcceptedResource.Candidate,
+        ready: *AcceptedSocket,
         failed: AcceptFailure,
         taken,
         closed,
@@ -470,7 +490,6 @@ pub const ListenerCell = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     owner: *NetOwner,
-    reservation: ListenerReservation,
     identity: u64,
     refs: std.atomic.Value(usize) = .init(1),
     mutex: std.Io.Mutex = .init,
@@ -509,6 +528,17 @@ pub const ListenerCell = struct {
 
     const Waits = WaitList(ListenerCell);
 
+    fn initializeAllocation(cell: *ListenerCell, owner: *NetOwner, address: IpAddress) ListenError!void {
+        const server = try bindListening(address, owner.policy.limits.kernel_backlog);
+        cell.* = .{
+            .allocator = owner.allocator,
+            .io = owner.io,
+            .owner = owner,
+            .identity = owner.next_identity.fetchAdd(1, .monotonic),
+            .state = .{ .bound = .{ .server = server, .address = server.socket.address } },
+        };
+    }
+
     fn retainRef(self: *ListenerCell) void {
         const old = self.refs.fetchAdd(1, .monotonic);
         std.debug.assert(old != 0 and old != std.math.maxInt(usize));
@@ -522,7 +552,7 @@ pub const ListenerCell = struct {
         std.debug.assert(self.state == .closed);
         std.debug.assert(self.ownership == .none);
         std.debug.assert(self.slots_first == null and self.waits.first == null);
-        self.allocator.destroy(self);
+        ListenerResource.destroy(self);
     }
 
     pub fn releasePort(self: *ListenerCell) void {
@@ -612,10 +642,13 @@ pub const ListenerCell = struct {
         var server = bound.server;
         server.deinit(self.io);
         self.state = .{ .closed = bound.address };
-        self.reservation.release();
+        ListenerResource.retire(self);
         var slot = self.slots_first;
         while (slot) |current| : (slot = current.next) {
-            if (current.state == .waiting) current.state = .closed;
+            if (current.state == .waiting) {
+                current.state.waiting.deinit();
+                current.state = .closed;
+            }
         }
         self.waits.notifyLocked(self);
         transfers.completeControllerLocked(ListenerCell, self, &self.ownership, ListenerCell.releaseRef);
@@ -671,6 +704,8 @@ pub const ListenerCell = struct {
         };
         const slot = try self.allocator.create(AcceptSlot);
         errdefer self.allocator.destroy(slot);
+        const candidate = try AcceptedResource.prepare(self.owner);
+        errdefer candidate.deinit();
         if (!self.acceptor.running) {
             if (self.acceptor.wake == null) {
                 self.acceptor.wake = std.Io.Threaded.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true }) catch return error.Io;
@@ -692,7 +727,7 @@ pub const ListenerCell = struct {
             // act is to take the mutex this call still holds.
             self.owner.registerAcceptor(self);
         }
-        slot.* = .{};
+        slot.* = .{ .state = .{ .waiting = candidate } };
         if (self.slots_last) |last| {
             last.next = slot;
             slot.previous = last;
@@ -760,13 +795,14 @@ pub const ListenerCell = struct {
         slot.linked = false;
         std.debug.assert(self.demand != 0);
         self.demand -= 1;
-        var orphan: ?AcceptedSocket = null;
+        var orphan: ?*AcceptedSocket = null;
         switch (slot.state) {
             .ready => |ready| orphan = ready,
-            .waiting, .failed, .closed, .taken => {},
+            .waiting => |candidate| candidate.deinit(),
+            .failed, .closed, .taken => {},
         }
         std.Io.Threaded.mutexUnlock(&self.mutex);
-        if (orphan) |*accepted| accepted.deinit();
+        if (orphan) |accepted| accepted.deinit();
         self.allocator.destroy(slot);
     }
 
@@ -832,7 +868,7 @@ pub const ListenerCell = struct {
         if (failure) |reason| {
             var slot = self.slots_first;
             while (slot) |current| : (slot = current.next) {
-                if (current.state == .waiting) current.state = .{ .failed = reason };
+                if (current.state == .waiting) self.failSlotLocked(current, reason);
             }
             self.waits.notifyLocked(self);
         }
@@ -861,42 +897,21 @@ pub const ListenerCell = struct {
             .bound => |bound| bound.server.socket.handle,
             .closing, .closed => return,
         };
-        var reservation = ConnectionReservation.acquire(self.owner, NetOwner.reserveConnection) orelse {
-            self.acceptor.quota_blocked = true;
-            return;
+        const accepted = slot.state.waiting.activate(.{listen_fd}, AcceptedSocket.initializeAllocation) catch |err| switch (err) {
+            error.LiveLimit => {
+                self.acceptor.quota_blocked = true;
+                return;
+            },
+            error.Pending => return,
+            error.Resources => return self.failSlotLocked(slot, .resources),
+            error.Io => return self.failSlotLocked(slot, .io),
         };
-        // Released on every path that does not move it into the slot; the
-        // move empties it, so the release is then a no-op.
-        defer reservation.release();
-        // SAFETY: accept writes the peer address into `storage` before it is
-        // read, and nothing reads it on any failure path.
-        var storage: std.Io.Threaded.PosixAddress = undefined;
-        var length: posix.socklen_t = @sizeOf(std.Io.Threaded.PosixAddress);
-        const rc = if (builtin.os.tag == .linux)
-            posix.system.accept4(listen_fd, &storage.any, &length, posix.SOCK.CLOEXEC)
-        else
-            posix.system.accept(listen_fd, &storage.any, &length);
-        switch (posix.errno(rc)) {
-            .SUCCESS => {},
-            .AGAIN, .INTR, .CONNABORTED => return,
-            .MFILE, .NFILE, .NOBUFS, .NOMEM => return self.failSlotLocked(slot, .resources),
-            else => return self.failSlotLocked(slot, .io),
-        }
-        var socket: OwnedSocket = .{ .fd = @intCast(rc) };
-        const peer = std.Io.Threaded.addressFromPosix(&storage);
-        const local = prepareAccepted(socket.fd.?) catch {
-            socket.close();
-            return self.failSlotLocked(slot, .io);
-        };
-        slot.state = .{ .ready = .{
-            .socket = socket,
-            .reservation = reservation.take(),
-            .endpoints = .{ .local = local, .peer = peer },
-        } };
+        slot.state = .{ .ready = accepted };
         self.waits.notifyLocked(self);
     }
 
     fn failSlotLocked(self: *ListenerCell, slot: *AcceptSlot, failure: AcceptFailure) void {
+        slot.state.waiting.deinit();
         slot.state = .{ .failed = failure };
         self.waits.notifyLocked(self);
     }
@@ -1005,8 +1020,7 @@ pub const ConnectionCell = struct {
     refs: std.atomic.Value(usize) = .init(1),
     mutex: std.Io.Mutex = .init,
     lifecycle: Lifecycle = .prepared,
-    socket: OwnedSocket,
-    reservation: ConnectionReservation,
+    accepted: *AcceptedSocket,
     endpoints: Endpoints,
     wake: [2]posix.fd_t,
     receive: Ring,
@@ -1049,7 +1063,7 @@ pub const ConnectionCell = struct {
     /// scope can wait for it. Owns `accepted` on every path.
     fn publish(
         owner: *NetOwner,
-        accepted: AcceptedSocket,
+        accepted: *AcceptedSocket,
         _: *const scheduler_api.WorkerScheduler,
         scope: *scheduler_api.TaskScope,
     ) error{OutOfMemory}!AcceptProgress {
@@ -1097,8 +1111,7 @@ pub const ConnectionCell = struct {
         return .{ .accepted = port };
     }
 
-    fn prepare(owner: *NetOwner, accepted_value: AcceptedSocket) error{ OutOfMemory, Resources }!*ConnectionCell {
-        var accepted = accepted_value;
+    fn prepare(owner: *NetOwner, accepted: *AcceptedSocket) error{ OutOfMemory, Resources }!*ConnectionCell {
         errdefer accepted.deinit();
         const cell = try owner.allocator.create(ConnectionCell);
         errdefer owner.allocator.destroy(cell);
@@ -1110,8 +1123,7 @@ pub const ConnectionCell = struct {
         cell.* = .{
             .allocator = owner.allocator,
             .identity = owner.next_identity.fetchAdd(1, .monotonic),
-            .socket = accepted.socket,
-            .reservation = accepted.reservation,
+            .accepted = accepted,
             .endpoints = accepted.endpoints,
             .wake = wake,
             .receive = .{ .bytes = receive },
@@ -1133,8 +1145,7 @@ pub const ConnectionCell = struct {
     /// closing descriptors, releasing capacity, and publishing terminal state.
     fn finalizeLocked(self: *ConnectionCell, reason: StopReason) void {
         std.debug.assert(self.lifecycle != .terminal);
-        self.socket.close();
-        self.reservation.release();
+        self.accepted.close();
         std.Io.Threaded.closeFd(self.wake[0]);
         std.Io.Threaded.closeFd(self.wake[1]);
         self.lifecycle = .{ .terminal = reason };
@@ -1157,6 +1168,7 @@ pub const ConnectionCell = struct {
         std.debug.assert(self.waits.first == null and self.writers.empty());
         self.allocator.free(self.receive.bytes);
         self.allocator.free(self.send.bytes);
+        self.accepted.deinit();
         self.allocator.destroy(self);
     }
 
@@ -1426,7 +1438,7 @@ pub const ConnectionCell = struct {
         const finalize_reason: StopReason = loop: while (true) {
             std.Io.Threaded.mutexLock(&self.mutex);
             const interest = self.interestLocked();
-            const socket_fd = self.socket.fd.?;
+            const socket_fd = self.accepted.socket.fd.?;
             const wake_fd = self.wake[0];
             const read_capacity = @min(block.len, self.receive.free());
             std.Io.Threaded.mutexUnlock(&self.mutex);
@@ -1487,7 +1499,7 @@ pub const ConnectionCell = struct {
         };
         // Shut down before closing so the peer observes an orderly FIN (or
         // RST for an abort with unread data) rather than a silent vanish.
-        _ = posix.system.shutdown(self.socket.fd.?, posix.SHUT.RDWR);
+        _ = posix.system.shutdown(self.accepted.socket.fd.?, posix.SHUT.RDWR);
         return finalize_reason;
     }
 };

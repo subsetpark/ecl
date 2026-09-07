@@ -94,45 +94,91 @@ pub fn ScopeTransfer(
     };
 }
 
-/// One already-accounted capacity slot, with its issuing owner and release
-/// policy inseparable. Moving empties the source; releasing an empty token is
-/// harmless. Backend code decides when to reserve and when capacity returns.
-pub fn Reservation(comptime Owner: type, comptime releaseSlot: fn (*Owner) void) type {
-    return union(enum) {
-        const Self = @This();
-        held: *Owner,
-        consumed,
-
-        pub fn acquire(owner_value: *Owner, comptime reserveSlot: fn (*Owner) bool) ?Self {
-            if (!reserveSlot(owner_value)) return null;
-            return adoptReserved(owner_value);
+/// Factory-owned storage and capacity. Backend initialization cannot extract
+/// or duplicate quota authority; rollback returns it with the allocation.
+pub fn Resource(
+    comptime Cell: type,
+    comptime Issuer: type,
+    comptime allocatorOf: fn (*Issuer) std.mem.Allocator,
+    comptime reserve: anytype,
+    comptime release: fn (*Issuer) void,
+) type {
+    return struct {
+        // Capacity lives in the allocation, never in a transferable value.
+        // Copies of a cell pointer cannot duplicate its capacity obligation.
+        const Allocation = struct {
+            issuer: *Issuer,
+            allocator: std.mem.Allocator,
+            capacity: enum { vacant, held, returned } = .held,
+            cell: Cell,
+        };
+        fn allocation(cell: *Cell) *Allocation {
+            return @alignCast(@fieldParentPtr("cell", cell));
         }
-        /// Consumes one slot already reserved under the owner's own protocol.
-        /// This supports reservation coupled to native reaper startup and IDs.
-        pub fn adoptReserved(owner_value: *Owner) Self {
-            return .{ .held = owner_value };
-        }
-        pub fn owner(self: *const Self) *Owner {
-            return switch (self.*) {
-                .held => |issuer| issuer,
-                .consumed => @panic("capacity reservation already consumed"),
-            };
-        }
-        pub fn isHeld(self: Self) bool {
-            return self == .held;
-        }
-        /// Consumes either state, returning the reservation or an empty token.
-        pub fn take(self: *Self) Self {
-            const moved = self.*;
-            self.* = .consumed;
-            return moved;
-        }
-        pub fn release(self: *Self) void {
-            const moved = self.take();
-            switch (moved) {
-                .held => |issuer| releaseSlot(issuer),
-                .consumed => {},
+        /// Storage can precede capacity when a pending request waits for a
+        /// resource. Its owner keeps this candidate until activation succeeds.
+        pub const Candidate = opaque {
+            fn state(self: *@This()) *Allocation {
+                return @ptrCast(@alignCast(self));
             }
+            pub fn deinit(self: *@This()) void {
+                const owned = self.state();
+                owned.allocator.destroy(owned);
+            }
+            /// Failure retains the candidate. Success transfers its allocation
+            /// into the initialized cell; the request replaces its state.
+            pub fn activate(self: *@This(), args: anytype, comptime initialize: anytype) (@typeInfo(@typeInfo(@TypeOf(reserve)).@"fn".return_type.?).error_union.error_set ||
+                @typeInfo(@typeInfo(@TypeOf(initialize)).@"fn".return_type.?).error_union.error_set)!*Cell {
+                const owned = self.state();
+                try reserve(owned.issuer);
+                errdefer release(owned.issuer);
+                try @call(.auto, initialize, .{ &owned.cell, owned.issuer } ++ args);
+                owned.capacity = .held;
+                return &owned.cell;
+            }
+        };
+        pub fn prepare(issuer: *Issuer) error{OutOfMemory}!*Candidate {
+            const allocator = allocatorOf(issuer);
+            const owned = try allocator.create(Allocation);
+            owned.issuer = issuer;
+            owned.allocator = allocator;
+            owned.capacity = .vacant;
+            return @ptrCast(owned);
+        }
+        pub fn create(issuer: *Issuer, args: anytype, comptime initialize: anytype) (error{OutOfMemory} ||
+            @typeInfo(@typeInfo(@TypeOf(reserve)).@"fn".return_type.?).error_union.error_set ||
+            @typeInfo(@typeInfo(@TypeOf(initialize)).@"fn".return_type.?).error_union.error_set)!*Cell {
+            try reserve(issuer);
+            errdefer release(issuer);
+            const allocator = allocatorOf(issuer);
+            const owned = try allocator.create(Allocation);
+            errdefer allocator.destroy(owned);
+            owned.issuer = issuer;
+            owned.allocator = allocator;
+            owned.capacity = .held;
+            // Initialization owns its partial backend resources on failure;
+            // this factory owns storage and capacity on every exit path.
+            try @call(.auto, initialize, .{ &owned.cell, issuer } ++ args);
+            return &owned.cell;
+        }
+        /// Called by terminal retirement under the resource's lifetime lock.
+        /// Retained metadata keeps its allocation, but no longer holds quota.
+        pub fn retire(cell: *Cell) void {
+            const owned = allocation(cell);
+            switch (owned.capacity) {
+                .held => {
+                    owned.capacity = .returned;
+                    release(owned.issuer);
+                },
+                .vacant, .returned => {},
+            }
+        }
+        /// Consumes final allocation ownership after backend destruction.
+        pub fn destroy(cell: *Cell) void {
+            const owned = allocation(cell);
+            const allocator = owned.allocator;
+            retire(cell);
+            allocator.destroy(owned);
         }
     };
 }
