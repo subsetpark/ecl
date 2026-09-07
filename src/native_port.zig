@@ -5,6 +5,7 @@ const external = @import("external.zig");
 const heap = @import("heap.zig");
 const native = @import("native_module.zig");
 const scheduler = @import("scheduler.zig");
+const ExecutorOwner = @import("port_controller.zig").Owner;
 const transfers = @import("port_transfer.zig");
 const Ring = @import("byte_ring.zig").Ring;
 const Value = @import("value.zig").Value;
@@ -54,45 +55,13 @@ const OwnerState = struct {
     closing: bool = false,
     live: u32 = 0,
     identity: u64 = 1,
-    reaper: ?std.Thread = null,
-    first: ?*Cell = null,
-    last: ?*Cell = null,
+    executor: *ExecutorOwner,
 
     fn releaseLive(self: *OwnerState) void {
         lock(&self.mutex);
         self.live -= 1;
         self.changed.broadcast(io());
         unlock(&self.mutex);
-    }
-    fn enqueue(self: *OwnerState, cell: *Cell) void {
-        lock(&self.mutex);
-        if (self.last) |last| last.retired_next = cell else self.first = cell;
-        self.last = cell;
-        self.changed.broadcast(io());
-        unlock(&self.mutex);
-    }
-    fn reap(self: *OwnerState) void {
-        while (true) {
-            lock(&self.mutex);
-            while (self.first == null and !(self.closing and self.live == 0))
-                self.changed.waitUncancelable(io(), &self.mutex);
-            const cell = self.first orelse {
-                unlock(&self.mutex);
-                return;
-            };
-            self.first = cell.retired_next;
-            if (self.first == null) self.last = null;
-            unlock(&self.mutex);
-            // The enqueued controller still owns this reference. Joining it
-            // precedes every scope release and every native-image release.
-            cell.controller.running.join();
-            cell.reservation.release();
-            lock(&cell.mutex);
-            cell.controller = .joined;
-            cell.phase = .joined;
-            cell.waits.notifyLocked(cell);
-            transfers.completeControllerLocked(Cell, cell, &cell.ownership, Cell.releasePort);
-        }
     }
 };
 
@@ -103,7 +72,8 @@ pub const Owner = opaque {
     pub fn init(host: *const heap.HostCleanup, limits: Limits) error{ OutOfMemory, InvalidLimits }!*Owner {
         try limits.validate();
         const state_value = try host.allocator().create(OwnerState);
-        state_value.* = .{ .host = host, .limits = limits };
+        errdefer host.allocator().destroy(state_value);
+        state_value.* = .{ .host = host, .limits = limits, .executor = try ExecutorOwner.init(host.allocator()) };
         return ownerFromState(state_value);
     }
     pub fn access(self: *Owner) *Access {
@@ -119,7 +89,7 @@ pub const Owner = opaque {
     pub fn deinit(self: *Owner) void {
         const state_value = self.state();
         self.closeCreation();
-        if (state_value.reaper) |thread| thread.join();
+        state_value.executor.deinit();
         state_value.host.allocator().destroy(state_value);
     }
 };
@@ -147,10 +117,6 @@ pub const Access = opaque {
             unlock(&owner.mutex);
             return error.Limit;
         }
-        if (owner.reaper == null) owner.reaper = std.Thread.spawn(.{}, OwnerState.reap, .{owner}) catch {
-            unlock(&owner.mutex);
-            return error.Io;
-        };
         owner.live += 1;
         const identity = owner.identity;
         owner.identity +%= 1;
@@ -169,16 +135,17 @@ pub const Access = opaque {
         try transfers.publishScope(Cell, cell, scope, Cell.transferOwnership);
         lock(&cell.mutex);
         cell.retainReadiness();
-        const thread = std.Thread.spawn(.{}, Cell.run, .{cell}) catch {
+        cell.owner.executor.access().spawn(Cell.run, .{cell}, Cell.retireController) catch |err| {
             var detached = cell.ownership.release();
             cell.phase = .joined;
-            cell.controller = .joined;
             unlock(&cell.mutex);
             detached.detachAll();
             cell.releasePort();
-            return error.Io;
+            return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                error.Io, error.Closed => error.Io,
+            };
         };
-        cell.controller = .{ .running = thread };
         unlock(&cell.mutex);
         return item;
     }
@@ -201,10 +168,8 @@ pub const Cell = struct {
     waits: external.WaitList(Cell) = .{},
     ownership: external.Ownership = .provisional,
     phase: enum { reserved, initializing, open, closing, cleaned, joined } = .reserved,
-    controller: union(enum) { unstarted, running: std.Thread, joined } = .unstarted,
     initialization_failure: ?Failure = null,
     lanes: [abi.max_port_lanes]Operations = .{Operations{}} ** abi.max_port_lanes,
-    retired_next: ?*Cell = null,
 
     fn allocate(reservation: *LiveReservation, instance: *native.ModuleInstance, kind: u32) error{OutOfMemory}!*Cell {
         const owner = reservation.owner();
@@ -330,7 +295,14 @@ pub const Cell = struct {
         lock(&self.mutex);
         self.phase = .cleaned;
         unlock(&self.mutex);
-        self.owner.enqueue(self);
+    }
+    fn retireController(args: struct { *Cell }, _: void) void {
+        const cell = args[0];
+        cell.reservation.release();
+        lock(&cell.mutex);
+        cell.phase = .joined;
+        cell.waits.notifyLocked(cell);
+        transfers.completeControllerLocked(Cell, cell, &cell.ownership, Cell.releasePort);
     }
     fn runLane(self: *Cell, index: usize) void {
         const lane = &self.lanes[index];
