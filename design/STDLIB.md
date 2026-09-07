@@ -2285,8 +2285,8 @@ listeners already equals the host maximum. A host failure to bind or listen is
 `'unsupported`, or `'io`.
 
 A listener is an opaque identity capability that prints `<port:N>` and has
-type `'port`; it exposes no descriptor and cannot be passed through JSON or the
-native value ABI. `proc` words reject a listener with `'type`, and `net` words
+type `'port`; it exposes no descriptor and cannot be passed through JSON.
+Native words can view and forward its opaque identity. `proc` words reject a listener with `'type`, and `net` words
 reject a process port with `'type`. The socket is bound and listening before
 the value is returned, so a returned listener is ready, and `local-address`,
 which returns the bound endpoint without parking, is the whole readiness
@@ -2425,7 +2425,7 @@ checked before the operating system is reached.
 Bytes are ordinary integer lists whose elements are all in `0...255`. Process
 streams do not decode Unicode. A port is an opaque identity capability that
 prints `<port:N>` and has type `'port`; it exposes no PID and cannot be passed
-through JSON or the native value ABI.
+through JSON. Native words can view and forward its opaque identity.
 
 ### close-input
 `( port -- )` — Close the process's stdin after queued bytes have been written.

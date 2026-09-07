@@ -10,6 +10,304 @@ const native_module = @import("../native_module.zig");
 const session = @import("../session.zig");
 const native_sample = @import("native-sample");
 const native_fixture = @import("native_fixture_options");
+const ecl = @import("ecl-native");
+
+fn expectPortProgram(workers: u32, max_operations: u32, source: []const u8, expected: []const u8) !void {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer diagnostics.deinit();
+    var runtime = try session.Session.initWithHostConfig(std.testing.allocator, &.{}, .{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .ecl_path = native_fixture.directory,
+        .native_port_limits = .{ .ring_capacity = 8, .max_operations = max_operations },
+    }, .{ .worker_pool = workers });
+    defer runtime.deinit();
+    try expectOk(&runtime, "portprobe.reset");
+    try expectOk(&runtime, source);
+    var display = try runtime.stackDisplay();
+    defer display.deinit();
+    try std.testing.expectEqualStrings(expected, display.bytes());
+}
+
+test "native: independent lanes retain admission capacity under blocked stream pressure" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.duplex-new 'p set p wrap (3 0 portprobe.duplex-exchange) @spawn 't set " ++
+        "1 portprobe.await-blocked p wrap (0 9 portprobe.duplex-exchange) @spawn 'q set " ++
+        "1 portprobe.await-waiting p 1 65 portprobe.duplex-exchange " ++
+        "q cancel q await pop portprobe.unblock t await 'ok at first p portprobe.duplex-close", "65 1");
+}
+
+test "native: acknowledged active cancellation preserves subsequent lane operations" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.duplex-new 'p set p wrap (3 0 portprobe.duplex-exchange) @spawn 't set " ++
+        "1 portprobe.await-blocked p wrap (0 17 portprobe.duplex-exchange) @spawn 'q set " ++
+        "2 portprobe.await-admitted t cancel t await 'err at 'kind at " ++
+        "q await 'ok at first p 1 65 portprobe.duplex-exchange p portprobe.duplex-close portprobe.cleaned", "'cancelled 17 65 1");
+}
+
+test "native: unacknowledged cancellation closes every lane and joins cleanup" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.unacknowledged-new 'p set p wrap (3 0 portprobe.unacknowledged-exchange) @spawn 'a set " ++
+        "p wrap (5 0 portprobe.unacknowledged-exchange) @spawn 'b set " ++
+        "2 portprobe.await-blocked a cancel a await 'err at 'kind at b await 'err at 'kind at " ++
+        "p portprobe.unacknowledged-close portprobe.cleaned", "'cancelled 'io 1");
+}
+
+test "native: closing and transferring independent lanes preserves resource ownership" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.duplex-new 'p set p wrap (3 0 portprobe.duplex-exchange) @spawn 'a set " ++
+        "p wrap (5 0 portprobe.duplex-exchange) @spawn 'b set 2 portprobe.await-blocked " ++
+        "p wrap [] (portprobe.duplex-close) @give await 'ok at pop " ++
+        "a await 'err at 'kind at b await 'err at 'kind at portprobe.cleaned", "'io 'io 1");
+}
+
+test "native: creation refuses an operation budget smaller than its lane count" {
+    try expectPortProgram(1, 1, "[] (portprobe.duplex-new) @attempt 'err at 'kind at portprobe.cleaned", "'domain 0");
+}
+
+test "native: blocked controllers leave another port and task runnable" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.new 'p set p wrap (3 0 portprobe.exchange) @spawn 't set " ++
+        "1 portprobe.await-blocked [] (7) @spawn await 'ok at first " ++
+        "portprobe.new 1 4 portprobe.exchange portprobe.unblock t await 'ok at first p portprobe.close", "7 4 1");
+}
+
+test "native: cancellation before admission and while queued preserves the port" {
+    for ([_]u32{ 1, 8 }) |workers| {
+        try expectPortProgram(workers, 1, "portprobe.new 'p set p wrap (3 0 portprobe.exchange) @spawn 't set " ++
+            "1 portprobe.await-blocked p wrap (1 2 portprobe.exchange) @spawn 'q set " ++
+            "1 portprobe.await-waiting q cancel q await pop portprobe.unblock t await 'ok at first " ++
+            "p 1 2 portprobe.exchange p portprobe.close", "1 3");
+        try expectPortProgram(workers, 2, "portprobe.new 'p set p wrap (3 0 portprobe.exchange) @spawn 't set " ++
+            "1 portprobe.await-blocked p wrap (1 2 portprobe.exchange) @spawn 'q set " ++
+            "2 portprobe.await-admitted q cancel q await pop portprobe.unblock t await 'ok at first " ++
+            "p 1 2 portprobe.exchange p portprobe.close", "1 3");
+    }
+}
+
+test "native: active cancellation interrupts backend waits and cancels its queue" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.new 'p set p wrap (3 0 portprobe.exchange) @spawn 't set " ++
+        "1 portprobe.await-blocked p wrap (1 2 portprobe.exchange) @spawn 'q set " ++
+        "2 portprobe.await-admitted t cancel t await 'err at 'kind at q await 'err at 'kind at " ++
+        "p portprobe.close p portprobe.close portprobe.cleaned", "'cancelled 'io 1");
+}
+
+test "native: admitted operations execute in order under queue pressure" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.new 'p set p wrap (3 0 portprobe.exchange) @spawn 't set " ++
+        "1 portprobe.await-blocked p wrap (1 2 portprobe.exchange) @spawn 'q set " ++
+        "2 portprobe.await-admitted p wrap (1 4 portprobe.exchange) @spawn 'r set " ++
+        "1 portprobe.await-waiting portprobe.unblock t await 'ok at first q await 'ok at first " ++
+        "r await 'ok at first p portprobe.close", "1 3 7");
+}
+
+test "native: initialization cancellation and concurrent close join cleanup" {
+    for ([_]u32{ 1, 8 }) |workers| {
+        try expectPortProgram(workers, 2, "portprobe.block-next [] (portprobe.new) @spawn 't set " ++
+            "1 portprobe.await-blocked t cancel t await pop 1 portprobe.await-cleaned portprobe.cleaned", "1");
+        try expectPortProgram(workers, 2, "portprobe.new 'p set p wrap (3 0 portprobe.exchange) @spawn 't set " ++
+            "1 portprobe.await-blocked p wrap (portprobe.close) @spawn 'a set " ++
+            "p wrap (portprobe.close) @spawn 'b set a await pop b await pop t await 'err at 'kind at " ++
+            "portprobe.cleaned", "'io 1");
+    }
+}
+
+test "native: transfer preserves active operations and rolls back multiple ports" {
+    for ([_]u32{ 1, 8 }) |workers| {
+        try expectPortProgram(workers, 2, "portprobe.new 'p set p wrap (3 0 portprobe.exchange) @spawn 't set " ++
+            "1 portprobe.await-blocked p wrap [] (portprobe.unblock 1 2 portprobe.exchange) @give await 'ok at first " ++
+            "t await 'ok at first p portprobe.close portprobe.cleaned", "3 1 1");
+        try expectPortProgram(workers, 2, "portprobe.pair 'q set 'p set q portprobe.close " ++
+            "p q pair [] (pop pop) 3 pack (@give) @attempt 'err at 'kind at " ++
+            "p 1 2 portprobe.exchange p portprobe.close portprobe.cleaned", "'domain 2 2");
+    }
+}
+
+test "native: close races transfer and controller completion without duplicate cleanup" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.new 'p set p wrap (3 0 portprobe.exchange) @spawn 't set " ++
+        "1 portprobe.await-blocked p wrap (portprobe.close) @spawn 'c set " ++
+        "p wrap [] (pop) 3 pack (@give) @attempt pop portprobe.unblock " ++
+        "c await 'ok at pop t await pop p portprobe.close portprobe.cleaned", "1");
+}
+
+test "native: initialization and publication failures clean provisional resources" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.fail-next [] (portprobe.new) @attempt 'err at 'kind at " ++
+        "1 portprobe.await-cleaned [] (portprobe.new-fail) @attempt 'err at 'kind at " ++
+        "2 portprobe.await-cleaned portprobe.cleaned", "'domain 'user 2");
+}
+
+test "native: live capacity is reserved before initialization and released by close" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer diagnostics.deinit();
+    var runtime = try session.Session.initWithHostConfig(std.testing.allocator, &.{}, .{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .ecl_path = native_fixture.directory,
+        .native_port_limits = .{ .max_live_ports = 1 },
+    }, .{ .worker_pool = 1 });
+    defer runtime.deinit();
+    try expectOk(&runtime, "portprobe.reset portprobe.new 'p set");
+    try expectErrorContains(&runtime, "portprobe.new", &.{ "'kind 'domain", "live limit" });
+    try expectOk(&runtime, "p portprobe.close portprobe.new portprobe.close");
+    try expectErrorContains(&runtime, "portprobe.pair", &.{ "'kind 'domain", "live limit" });
+    try expectOk(&runtime, "3 portprobe.await-cleaned portprobe.cleaned");
+    try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[0].int);
+}
+
+test "native: completion preceding wait registration remains observable" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.new-ready-wait dup 1 2 portprobe.exchange-ready-wait swap portprobe.close", "2");
+}
+
+test "native: Session shutdown joins active controllers before releasing images" {
+    for ([_]u32{ 1, 8 }) |workers| {
+        var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer output.deinit();
+        var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer diagnostics.deinit();
+        var observer = try initRuntime(&output.writer, &diagnostics.writer, native_fixture.directory);
+        defer observer.deinit();
+        try expectOk(&observer, "portprobe.reset");
+        {
+            var runtime = try session.Session.initWithHostConfig(std.testing.allocator, &.{}, .{
+                .io = std.testing.io,
+                .output = &output.writer,
+                .diagnostics = &diagnostics.writer,
+                .ecl_path = native_fixture.directory,
+            }, .{ .worker_pool = workers });
+            defer runtime.deinit();
+            try expectOk(&runtime, "portprobe.new wrap (3 0 portprobe.exchange) @spawn pop 1 portprobe.await-blocked");
+        }
+        // A second Session pins the same fixture image solely to observe the
+        // first Session's completed cleanup through an ordinary native word.
+        try expectOk(&observer, "portprobe.cleaned");
+        try std.testing.expectEqual(@as(i64, 1), observer.stackItems()[0].int);
+    }
+}
+
+test "native: package ports stream beyond capacity and retain ordered state" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer diagnostics.deinit();
+    var runtime = try session.Session.initWithHostConfig(std.testing.allocator, &.{}, .{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .ecl_path = native_fixture.directory,
+        .native_port_limits = .{ .ring_capacity = 8 },
+    }, .{ .worker_pool = 1 });
+    defer runtime.deinit();
+    try expectOk(&runtime, "portprobe.new 'p set p 0 10000 portprobe.exchange p 1 2 portprobe.exchange p 1 3 portprobe.exchange p portprobe.close p portprobe.close");
+    try std.testing.expectEqual(@as(i64, 10000), runtime.stackItems()[0].int);
+    try std.testing.expectEqual(@as(i64, 18), runtime.stackItems()[1].int);
+    try std.testing.expectEqual(@as(i64, 21), runtime.stackItems()[2].int);
+}
+
+test "native: package port kinds, operation failure, forwarding and terminal identity" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer diagnostics.deinit();
+    var runtime = try initRuntime(&output.writer, &diagnostics.writer, native_fixture.directory);
+    defer runtime.deinit();
+    try expectOk(&runtime, "portprobe.new 'p set");
+    try expectOk(&runtime, "portprobe.other-new 'q set q portprobe.other-check");
+    try expectErrorContains(&runtime, "q portprobe.close", &.{"'kind 'type"});
+    try expectErrorContains(&runtime, "p portprobe.other-check", &.{"'kind 'type"});
+    try expectErrorContains(&runtime, "p foreignport.close", &.{"'kind 'type"});
+    try expectErrorContains(&runtime, "p 2 0 portprobe.exchange", &.{ "'kind 'domain", "deliberate operation failure" });
+    try expectOk(&runtime, "p 1 3 portprobe.exchange p wrap sample.nested-port p match? p portprobe.close p portprobe.close");
+    try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[0].int);
+    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[1].int);
+    try expectErrorContains(&runtime, "p 1 0 portprobe.exchange", &.{"'kind 'io"});
+}
+
+test "native: package port scope transfer and rollback" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer diagnostics.deinit();
+    var runtime = try initRuntime(&output.writer, &diagnostics.writer, native_fixture.directory);
+    defer runtime.deinit();
+    try expectOk(&runtime, "portprobe.new 'p set p wrap dup cat [] (pop pop) 3 pack (@give) @attempt pop p 1 2 portprobe.exchange");
+    try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[0].int);
+    try expectOk(&runtime, "p wrap [] (1 3 portprobe.exchange) @give await 'ok at first");
+    try std.testing.expectEqual(@as(i64, 5), runtime.stackItems()[1].int);
+    try expectErrorContains(&runtime, "p 1 0 portprobe.exchange", &.{"'kind 'io"});
+}
+
+test "native: streaming crosses the default ring capacity" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer diagnostics.deinit();
+    var runtime = try initRuntime(&output.writer, &diagnostics.writer, native_fixture.directory);
+    defer runtime.deinit();
+    try expectOk(&runtime, "portprobe.new dup 0 131073 portprobe.exchange swap portprobe.close");
+    try std.testing.expectEqual(@as(i64, 131073), runtime.stackItems()[0].int);
+}
+
+test "native: bounded controller errors preserve UTF-8 and the backend error kind" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer diagnostics.deinit();
+    var runtime = try initRuntime(&output.writer, &diagnostics.writer, native_fixture.directory);
+    defer runtime.deinit();
+    try expectOk(&runtime, "portprobe.new 'p set");
+    try expectErrorContains(&runtime, "p 4 0 portprobe.exchange", &.{"'kind 'io"});
+    try expectErrorContains(&runtime, "portprobe.fail-long", &.{"'kind 'io"});
+    try expectOk(&runtime, "p 1 2 portprobe.exchange p portprobe.close");
+    try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[0].int);
+}
+
+const PortSpec = struct {
+    pub const name = "counter";
+    pub const State = struct { value: u64 = 0 };
+    pub fn init() State {
+        return .{};
+    }
+    pub fn open(_: *State, _: *ecl.Controller) void {}
+    pub fn run(_: *State, _: u32, _: *ecl.Controller) void {}
+    pub fn cancel(_: *State) void {}
+    pub fn deinit(_: *State) void {}
+};
+
+test "native: SDK port declarations validate state layouts and controller adapters" {
+    const P = ecl.Port(PortSpec);
+    const Extension = ecl.module(.{ .name = "sample", .doc = "Port definition probe.", .linkage = .static, .words = .{}, .ports = .{P} });
+    var host = heap.HostOwner.init(std.testing.allocator);
+    defer host.cleanup().drain();
+    const requested = try intern.internModuleName("sample");
+    const validated = try validate(host.cleanup(), requested, Extension.descriptor());
+    defer validated.deinit();
+    const port = validated.port(0).?;
+    try std.testing.expectEqualStrings("counter", port.name_ptr[0..port.name_len]);
+    try std.testing.expectEqual(@as(u32, @sizeOf(PortSpec.State)), port.state_size);
+    try std.testing.expect(validated.port(1) == null);
+    var invalid = Extension.descriptor().*;
+    var definition = P.definition();
+    invalid.ports_ptr = @ptrCast(&definition);
+    definition.cancel = null;
+    try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &invalid);
+    definition = P.definition();
+    definition.state_alignment = 3;
+    try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &invalid);
+    definition = P.definition();
+    definition.lane_count = 0;
+    try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &invalid);
+    definition.lane_count = abi.max_port_lanes + 1;
+    try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &invalid);
+    definition = P.definition();
+    definition.cancellation = .acknowledge;
+    try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &invalid);
+    definition = P.definition();
+    definition.cancellation = @enumFromInt(999);
+    try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &invalid);
+    definition = P.definition();
+    definition.select_lane = null;
+    try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &invalid);
+}
 
 fn expectOk(runtime: *session.Session, source: []const u8) !void {
     switch (try runtime.runUnit("native-test.ecl", source)) {
@@ -38,8 +336,12 @@ fn expectErrorContains(
     defer runtime.release(failure);
     var rendered = try runtime.renderValue(failure);
     defer rendered.deinit();
-    for (needles) |needle|
-        try std.testing.expect(std.mem.indexOf(u8, rendered.bytes(), needle) != null);
+    for (needles) |needle| {
+        if (std.mem.indexOf(u8, rendered.bytes(), needle) == null) {
+            std.debug.print("expected native error to contain {s}; received {s}\n", .{ needle, rendered.bytes() });
+            return error.MissingErrorDetail;
+        }
+    }
 }
 
 fn initRuntime(
@@ -105,6 +407,42 @@ const Fixture = struct {
 
 fn dummyInvoke(_: *const abi.HostTable, _: *anyopaque, _: u32, output: *abi.InvokeResult) callconv(.c) void {
     output.* = .{ .tag = .fail };
+}
+
+test "native: opaque ports survive forwarding and nested aggregate builders" {
+    const Port = struct {
+        releases: usize = 0,
+
+        pub fn releasePort(self: *@This()) void {
+            self.releases += 1;
+        }
+        pub fn prepareScopeTransfer(_: *@This(), _: *anyopaque, _: *anyopaque) heap.PortTransferError!void {
+            return error.Closed;
+        }
+        pub fn commitScopeTransfer(_: *@This()) void {}
+        pub fn abortScopeTransfer(_: *@This()) void {}
+    };
+    var port: Port = .{};
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer diagnostics.deinit();
+    {
+        var runtime = try initRuntime(&output.writer, &diagnostics.writer, native_fixture.directory);
+        defer runtime.deinit();
+        try runtime.pushOwned(try heap.createPort(Port, std.testing.allocator, 917, &port));
+        try expectErrorContains(&runtime, "sample.draft-fail", &.{ "'kind 'user", "draft candidates retired" });
+        try std.testing.expectEqual(@as(usize, 0), port.releases);
+        try expectOk(
+            &runtime,
+            "sample.forward sample.split " ++
+                "sample.singleton sample.nested-port " ++
+                "'key swap sample.pair-dict sample.nested-port match?",
+        );
+        try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
+        try std.testing.expectEqual(@as(usize, 1), port.releases);
+    }
+    try std.testing.expectEqual(@as(usize, 1), port.releases);
 }
 
 fn validate(
@@ -252,12 +590,11 @@ test "native: the SDK generates a descriptor the production validator accepts" {
     defer validated.deinit();
 
     try std.testing.expectEqualStrings("sample", intern.get(intern.moduleId(validated.name())));
-    try std.testing.expectEqual(@as(usize, 19), validated.definitions().len);
+    try std.testing.expectEqual(@as(usize, 20), validated.definitions().len);
     const expected_names = [_][]const u8{
-        "increment",      "discard",       "split",          "forward",    "fail-user",  "fail-kind",
-        "make-char",      "singleton",     "pair-dict",      "sum-list",   "sum-dict",   "cooperative",
-        "draft-fail",     "yield-forever", "builder-budget", "large-list", "large-dict", "duplicate-dict",
-        "noncooperative",
+        "increment",     "discard",        "split",      "forward",    "nested-port",    "fail-user",      "fail-kind",
+        "make-char",     "singleton",      "pair-dict",  "sum-list",   "sum-dict",       "cooperative",    "draft-fail",
+        "yield-forever", "builder-budget", "large-list", "large-dict", "duplicate-dict", "noncooperative",
     };
     for (validated.definitions(), expected_names) |definition, expected| {
         try std.testing.expectEqualStrings(expected, intern.get(intern.namespaceId(definition.name)));
@@ -440,6 +777,8 @@ test "native: reflection exposes native origin effects documentation and capabil
         "<native:sample.increment> requires call build-values\nreschedule",
     ) != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "requires call, build-values, reschedule") != null);
+    try expectOk(&runtime, "'portprobe.new which 'portprobe.new see");
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "requires call, reschedule, ports") != null);
     var display = try runtime.stackDisplay();
     defer display.deinit();
     try std.testing.expectEqualStrings("\"Increment an integer.\"", display.bytes());

@@ -9,6 +9,7 @@ const intern = @import("intern.zig");
 const spans = @import("spans.zig");
 const env = @import("env.zig");
 const modules = @import("modules.zig");
+const native_port = @import("native_port.zig");
 const native_call = @import("native_call.zig");
 const native_module = @import("native_module.zig");
 const native_abi = @import("native-abi");
@@ -3096,6 +3097,11 @@ pub const Machine = struct {
             diagnostic,
         );
     }
+    pub fn createNativePort(self: *Machine, instance: *native_module.ModuleInstance, kind: u32) native_port.CreateError!Value {
+        const scope: *@import("scheduler.zig").TaskScope = @ptrCast(@alignCast(self.unit.task_scope orelse return error.ScopeClosing));
+        return instance.portAccess().create(instance, kind, scope);
+    }
+
     pub fn beginNativeTiming(self: *const Machine) ?i128 {
         if (!self.unit.inherited.native_diagnostics) return null;
         const io = self.unit.inherited.host_io orelse return null;

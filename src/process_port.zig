@@ -1,6 +1,6 @@
 //! Scope-owned POSIX subprocess controller behind opaque ECL port values.
 //!
-//! Blocking kernel pipe and wait operations run only on detached controller
+//! Blocking kernel pipe and wait operations run only on host-owned controller
 //! threads. Scheduler workers interact through bounded queues and the generic
 //! readiness capabilities in `external.zig`; live-process ownership belongs to
 //! a TaskScope membership, never to the language value reference count.
@@ -8,6 +8,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const external = @import("external.zig");
+const controllers = @import("port_controller.zig");
+const transfers = @import("port_transfer.zig");
 const heap = @import("heap.zig");
 const scheduler_api = @import("scheduler.zig");
 const value = @import("value.zig");
@@ -219,6 +221,7 @@ pub const ProcessOwner = struct {
     io: std.Io,
     policy: OwnedPolicy,
     environment: OwnedEnvironment,
+    executor: *controllers.Owner,
     live: std.atomic.Value(usize) = .init(0),
     next_identity: std.atomic.Value(u64) = .init(1),
 
@@ -228,6 +231,9 @@ pub const ProcessOwner = struct {
         policy: ProcessPolicy,
         environment: []const EnvironmentEntry,
     ) PolicyError!ProcessOwner {
+        // A supervisor, three pipes, and optional timeout and escalation jobs.
+        const jobs = std.math.mul(usize, policy.max_live_ports, 6) catch return error.InvalidPolicy;
+        const capacity = std.math.add(usize, jobs, 1) catch return error.InvalidPolicy;
         var effective_policy = policy;
         const captured_cwd = if (policy.initial_cwd == null)
             std.process.currentPathAlloc(io, allocator) catch |err| switch (err) {
@@ -240,20 +246,23 @@ pub const ProcessOwner = struct {
         if (captured_cwd) |cwd| effective_policy.initial_cwd = cwd;
         var owned_policy = try OwnedPolicy.init(allocator, effective_policy);
         errdefer owned_policy.deinit(allocator);
-        const owned_environment = try OwnedEnvironment.init(
+        var owned_environment = try OwnedEnvironment.init(
             allocator,
             policy.inherit_environment,
             environment,
         );
+        errdefer owned_environment.deinit(allocator);
         return .{
             .allocator = allocator,
             .io = io,
+            .executor = try controllers.Owner.init(allocator, capacity),
             .policy = owned_policy,
             .environment = owned_environment,
         };
     }
 
     pub fn deinit(self: *ProcessOwner) void {
+        self.executor.deinit();
         std.debug.assert(self.live.load(.acquire) == 0);
         self.environment.deinit(self.allocator);
         self.policy.deinit(self.allocator);
@@ -290,13 +299,17 @@ pub const ProcessOwner = struct {
 
     pub fn spawn(
         self: *ProcessOwner,
-        scheduler: *const scheduler_api.WorkerScheduler,
+        _: *const scheduler_api.WorkerScheduler,
         scope: *scheduler_api.TaskScope,
         spec: ProcessSpec,
     ) SpawnError!Value {
         if (comptime !backendSupported()) return error.Unsupported;
         try self.validateSpec(spec);
-        var live_reservation = LiveReservation.acquire(self) orelse return error.LiveLimit;
+        self.executor.access().prepare() catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.Closed => error.Io,
+        };
+        var live_reservation = LiveReservation.acquire(self, ProcessOwner.reserveLive) orelse return error.LiveLimit;
         errdefer live_reservation.release();
 
         var environment = std.process.Environ.Map.init(self.allocator);
@@ -337,17 +350,7 @@ pub const ProcessOwner = struct {
             supervisor_lease.release();
         };
 
-        const member = external.scopeMember(ProcessCell, cell);
-        const membership = scheduler.attachExternal(scope, member) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.ScopeClosing => return error.ScopeClosing,
-        };
-        // `attachExternal` has already linked the cell into the scope, so a
-        // cancellation walk can reach it from another thread: publish the
-        // ownership under the lock, as ConnectionCell.publish does.
-        std.Io.Threaded.mutexLock(&cell.mutex);
-        cell.controllers.ownership = .{ .owned = membership };
-        std.Io.Threaded.mutexUnlock(&cell.mutex);
+        try transfers.publishScope(ProcessCell, cell, scope, processOwnership);
 
         cell.start(supervisor_lease) catch return error.Io;
         supervisor_lease_owned = false;
@@ -382,37 +385,7 @@ pub const ProcessOwner = struct {
 
 /// A live-process slot is a consuming capability. Before publication the
 /// spawning call owns it; after `take`, the process cell is its sole owner.
-const LiveReservation = union(enum) {
-    held: *ProcessOwner,
-    consumed,
-
-    fn acquire(process_owner: *ProcessOwner) ?LiveReservation {
-        if (!process_owner.reserveLive()) return null;
-        return .{ .held = process_owner };
-    }
-
-    fn processOwner(self: *const LiveReservation) *ProcessOwner {
-        return switch (self.*) {
-            .held => |process_owner| process_owner,
-            .consumed => @panic("live-process reservation already consumed"),
-        };
-    }
-
-    fn take(self: *LiveReservation) LiveReservation {
-        const held_owner = self.processOwner();
-        self.* = .consumed;
-        return .{ .held = held_owner };
-    }
-
-    fn release(self: *LiveReservation) void {
-        const held_owner = switch (self.*) {
-            .held => |process_owner| process_owner,
-            .consumed => return,
-        };
-        self.* = .consumed;
-        held_owner.releaseLive();
-    }
-};
+const LiveReservation = transfers.Reservation(ProcessOwner, ProcessOwner.releaseLive);
 
 fn ownerFromAccess(access_value: *external.ProcessAccess) *ProcessOwner {
     return @ptrCast(@alignCast(access_value));
@@ -538,13 +511,7 @@ const GroupState = union(enum) {
     retired: Termination,
 };
 
-const WriteNode = struct {
-    cell: *ProcessCell,
-    previous: ?*WriteNode = null,
-    next: ?*WriteNode = null,
-    linked: bool = true,
-    active: bool = false,
-};
+const Writers = controllers.Lane(ProcessCell);
 
 const InputState = enum {
     open,
@@ -566,15 +533,15 @@ pub const InputTerminal = enum {
     broken,
 };
 
-/// Controller leases cover detached threads only. Retirement closes lease
-/// creation; the supervisor waits for every other controller before its final
+/// Controller leases pin backend execution and cancellation setup. Retirement
+/// closes lease creation; the supervisor waits for every other controller before its final
 /// lease detaches membership. Port/readiness refs use the independent cell
 /// refcount.
 const ControllerGroup = struct {
     /// Protected by `cell.mutex` after the initial lease is issued. A count
     /// decrement is published only after that lease has dropped its cell pin.
     leases: usize = 0,
-    ownership: external.Ownership = .none,
+    ownership: external.Ownership = .provisional,
     cell: *ProcessCell,
 
     fn initialLease(self: *ControllerGroup) ControllerLease {
@@ -582,7 +549,7 @@ const ControllerGroup = struct {
         cell.retainRef();
         if (self.leases != 0) @panic("initial controller lease already issued");
         self.leases = 1;
-        return .{ .group = self, .cell = cell };
+        return .{ .group = self };
     }
 
     fn tryLease(self: *ControllerGroup) ?ControllerLease {
@@ -594,13 +561,12 @@ const ControllerGroup = struct {
         if (self.leases == 0 or self.leases == std.math.maxInt(usize))
             @panic("invalid controller lease count");
         self.leases += 1;
-        return .{ .group = self, .cell = cell };
+        return .{ .group = self };
     }
 
     /// Consumes `cell`'s reference owned by one lease. Nonfinal releases drop
     /// that pin before making the smaller count observable to the supervisor.
     fn releasePinned(self: *ControllerGroup, cell: *ProcessCell) void {
-        var detached: external.Ownership.Detached = .{};
         std.Io.Threaded.mutexLock(&cell.mutex);
         std.debug.assert(self.cell == cell);
         std.debug.assert(self.leases != 0);
@@ -613,103 +579,32 @@ const ControllerGroup = struct {
         }
         if (cell.group_state != .retired) @panic("process scope detached before group retirement");
         self.leases = 0;
-        // A process that retires mid-transfer detaches the destination too:
-        // that membership never became authoritative.
-        detached = self.ownership.release();
-        std.Io.Threaded.mutexUnlock(&cell.mutex);
-
-        cell.releaseRef();
-        detached.detachAll();
+        cell.live_reservation.release();
+        cell.phase = .{ .reaped = cell.group_state.retired };
+        cell.notifyReadyLocked();
+        transfers.completeControllerLocked(ProcessCell, cell, &self.ownership, ProcessCell.releaseRef);
     }
 };
 
 const ControllerLease = struct {
     group: ?*ControllerGroup,
-    cell: ?*ProcessCell,
 
     fn release(self: *ControllerLease) void {
         const group = self.group orelse return;
-        const cell = self.cell orelse @panic("controller lease lost its cell reference");
         self.group = null;
-        self.cell = null;
-        group.releasePinned(cell);
+        group.releasePinned(group.cell);
     }
 };
 
-/// Attach this process port to `to_erased` while leaving its current
-/// membership in place. `from_erased` must be the scope that owns it now.
-/// The process group, its controller threads, and its pipes are internal to
-/// the cell rather than separate scope members, so this one membership is the
-/// whole of what the owning scope holds.
-fn prepareProcessTransfer(
-    cell: *ProcessCell,
-    from_erased: *anyopaque,
-    to_erased: *anyopaque,
-) heap.PortTransferError!void {
-    const destination: *scheduler_api.TaskScope = @ptrCast(@alignCast(to_erased));
-    std.Io.Threaded.mutexLock(&cell.mutex);
-    if (cell.group_state == .retired) {
-        std.Io.Threaded.mutexUnlock(&cell.mutex);
-        return error.Closed;
-    }
-    switch (cell.controllers.ownership) {
-        .none => {
-            std.Io.Threaded.mutexUnlock(&cell.mutex);
-            return error.Closed;
-        },
-        .transferring => {
-            std.Io.Threaded.mutexUnlock(&cell.mutex);
-            return error.Busy;
-        },
-        .owned => |current| if (current.owningScope() != from_erased) {
-            std.Io.Threaded.mutexUnlock(&cell.mutex);
-            return error.NotOwner;
-        },
-    }
-    std.Io.Threaded.mutexUnlock(&cell.mutex);
-
-    // Outside the cell lock: the cancellation walk takes a scope lock before a
-    // member's, so attaching under the cell lock would close a cycle.
-    const member = external.scopeMember(ProcessCell, cell);
-    var token = destination.scheduler.attachExternal(destination, member) catch |err| return switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        error.ScopeClosing => error.ScopeClosing,
-    };
-
-    std.Io.Threaded.mutexLock(&cell.mutex);
-    // Re-check the owner, not just that there is one: the origin observed
-    // before the attach is the one this move was authorized against. A process
-    // that retired in the meantime has had its token taken by the final lease,
-    // so hand the new one straight back rather than leaving the destination
-    // scope holding a member nothing detaches.
-    const still_owned = cell.group_state != .retired and switch (cell.controllers.ownership) {
-        .owned => |current| current.owningScope() == from_erased,
-        .none, .transferring => false,
-    };
-    if (!still_owned) {
-        std.Io.Threaded.mutexUnlock(&cell.mutex);
-        token.detach();
-        return error.Closed;
-    }
-    cell.controllers.ownership.beginTransfer(token);
-    std.Io.Threaded.mutexUnlock(&cell.mutex);
+const ProcessTransfer = transfers.ScopeTransfer(ProcessCell, processOwnership, processLive);
+fn processOwnership(cell: *ProcessCell) *external.Ownership {
+    return &cell.controllers.ownership;
+}
+fn processLive(cell: *ProcessCell) bool {
+    return cell.group_state != .retired;
 }
 
-fn commitProcessTransfer(cell: *ProcessCell) void {
-    std.Io.Threaded.mutexLock(&cell.mutex);
-    var detached = cell.controllers.ownership.commitTransfer();
-    std.Io.Threaded.mutexUnlock(&cell.mutex);
-    detached.detachAll();
-}
-
-fn abortProcessTransfer(cell: *ProcessCell) void {
-    std.Io.Threaded.mutexLock(&cell.mutex);
-    var detached = cell.controllers.ownership.abortTransfer();
-    std.Io.Threaded.mutexUnlock(&cell.mutex);
-    detached.detachAll();
-}
-
-pub const WritePermit = opaque {};
+pub const WritePermit = Writers.Ticket;
 
 pub const RunEdge = enum {
     stdout_terminal,
@@ -733,14 +628,6 @@ pub const RunPoll = struct {
     termination: ?Termination,
 };
 
-fn writeNode(permit: *WritePermit) *WriteNode {
-    return @ptrCast(@alignCast(permit));
-}
-
-fn writePermit(node: *WriteNode) *WritePermit {
-    return @ptrCast(@alignCast(node));
-}
-
 const readiness_stdout: u64 = 1;
 const readiness_stderr: u64 = 2;
 const readiness_terminal: u64 = 3;
@@ -759,6 +646,7 @@ pub const ProcessCell = struct {
     group_state: GroupState,
     next_escalation: u64 = 1,
     controllers: ControllerGroup,
+    executor: *controllers.Executor,
     stdin: Ring,
     stdout: Ring,
     stderr: Ring,
@@ -770,8 +658,7 @@ pub const ProcessCell = struct {
     discard_outputs: bool = false,
     stdout_reader_active: bool = false,
     stderr_reader_active: bool = false,
-    write_first: ?*WriteNode = null,
-    write_last: ?*WriteNode = null,
+    writers: Writers = .{},
     waits: external.WaitList(ProcessCell) = .{},
     timeout_done: std.Io.Event = .unset,
     timed_out: bool = false,
@@ -782,7 +669,7 @@ pub const ProcessCell = struct {
         child: std.process.Child,
         identity: u64,
     ) error{OutOfMemory}!*ProcessCell {
-        const owner = live_reservation.processOwner();
+        const owner = live_reservation.owner();
         const group = try owner.allocator.create(OwnedGroup);
         errdefer owner.allocator.destroy(group);
         group.* = .{ .child = child, .pgid = child.id.? };
@@ -800,6 +687,7 @@ pub const ProcessCell = struct {
             .identity = identity,
             .group_state = .{ .running = group },
             .controllers = .{ .cell = cell },
+            .executor = owner.executor.access(),
             .stdin = .{ .bytes = stdin },
             .stdout = .{ .bytes = stdout },
             .stderr = .{ .bytes = stderr },
@@ -821,23 +709,24 @@ pub const ProcessCell = struct {
             .running, .closing, .terminal, .reaped => {},
         }
         std.Io.Threaded.mutexUnlock(&self.mutex);
-        const thread = std.Thread.spawn(.{}, supervisorThreadMain, .{ self, lease }) catch return error.Io;
-        thread.detach();
+        self.executor.spawn(supervisorThreadMain, .{ self, lease }, retireController) catch return error.Io;
     }
 
     fn failBeforeStart(self: *ProcessCell) void {
         self.kill();
+        std.Io.Threaded.mutexLock(&self.mutex);
         const group = switch (self.group_state) {
             .running => |group| group,
             .grace => |grace| grace.group,
             .kill_issued => |group| group,
             .retired => unreachable,
         };
+        std.Io.Threaded.mutexUnlock(&self.mutex);
         group.child.kill(self.io);
+        std.Io.Threaded.mutexLock(&self.mutex);
         self.group_state = .{ .retired = .{ .unknown = 0 } };
+        std.Io.Threaded.mutexUnlock(&self.mutex);
         self.allocator.destroy(group);
-        self.live_reservation.release();
-        self.phase = .{ .reaped = .{ .unknown = 0 } };
     }
 
     fn retainRef(self: *ProcessCell) void {
@@ -851,7 +740,7 @@ pub const ProcessCell = struct {
         if (old != 1) return;
         _ = self.refs.load(.acquire);
         std.debug.assert(self.phase == .reaped);
-        std.debug.assert(self.waits.first == null and self.write_first == null);
+        std.debug.assert(self.waits.first == null and self.writers.empty());
         self.allocator.free(self.stdin.bytes);
         self.allocator.free(self.stdout.bytes);
         self.allocator.free(self.stderr.bytes);
@@ -874,15 +763,15 @@ pub const ProcessCell = struct {
         from_erased: *anyopaque,
         to_erased: *anyopaque,
     ) heap.PortTransferError!void {
-        return prepareProcessTransfer(self, from_erased, to_erased);
+        return ProcessTransfer.prepare(self, from_erased, to_erased);
     }
 
     pub fn commitScopeTransfer(self: *ProcessCell) void {
-        commitProcessTransfer(self);
+        ProcessTransfer.commit(self);
     }
 
     pub fn abortScopeTransfer(self: *ProcessCell) void {
-        abortProcessTransfer(self);
+        ProcessTransfer.abort(self);
     }
 
     pub fn retainReadiness(self: *ProcessCell) void {
@@ -915,12 +804,11 @@ pub const ProcessCell = struct {
         lease_value: ControllerLease,
     ) void {
         var lease = lease_value;
-        const thread = std.Thread.spawn(.{}, escalationMain, .{ self, escalation, lease }) catch {
+        self.executor.spawn(escalationMain, .{ self, escalation, lease }, retireController) catch {
             self.escalateKill(escalation);
             lease.release();
             return;
         };
-        thread.detach();
     }
 
     pub fn registerReadiness(
@@ -932,19 +820,11 @@ pub const ProcessCell = struct {
     }
 
     pub fn beginWrite(self: *ProcessCell) error{OutOfMemory}!*WritePermit {
-        const node = try self.allocator.create(WriteNode);
-        node.* = .{ .cell = self };
+        const ticket = try WritePermit.create(self.allocator, self);
         std.Io.Threaded.mutexLock(&self.mutex);
-        if (self.write_last) |last| {
-            last.next = node;
-            node.previous = last;
-        } else {
-            self.write_first = node;
-            node.active = true;
-        }
-        self.write_last = node;
+        self.writers.append(ticket);
         std.Io.Threaded.mutexUnlock(&self.mutex);
-        return writePermit(node);
+        return ticket;
     }
 
     pub fn write(
@@ -952,12 +832,12 @@ pub const ProcessCell = struct {
         permit: *WritePermit,
         bytes: []const u8,
     ) WriteProgress {
-        const node = writeNode(permit);
-        std.debug.assert(node.cell == self and node.linked);
+        const node = permit;
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        node.checkCell(self);
         if (self.input != .open or self.io_failed) return .io;
-        if (!node.active or self.stdin.free() == 0) return .pending;
+        if (!node.begin() or self.stdin.free() == 0) return .pending;
         const count = @min(bytes.len, self.stdin.free());
         self.stdin.push(bytes[0..count]);
         self.changed.broadcast(blockingIo());
@@ -965,7 +845,7 @@ pub const ProcessCell = struct {
     }
 
     pub fn writeSource(self: *ProcessCell, permit: *WritePermit) external.ReadinessSource {
-        return external.readinessSource(ProcessCell, self, @intFromPtr(writeNode(permit)));
+        return external.readinessSource(ProcessCell, self, @intFromPtr(permit));
     }
 
     pub fn beginRun(self: *ProcessCell) *RunCursor {
@@ -1030,29 +910,24 @@ pub const ProcessCell = struct {
     }
 
     pub fn finishWrite(self: *ProcessCell, permit: *WritePermit) void {
-        self.retireWrite(writeNode(permit));
+        self.retireWrite(permit, false);
     }
 
     pub fn abandonWrite(self: *ProcessCell, permit: *WritePermit) void {
-        self.retireWrite(writeNode(permit));
+        self.retireWrite(permit, true);
     }
 
-    fn retireWrite(self: *ProcessCell, node: *WriteNode) void {
+    fn retireWrite(self: *ProcessCell, ticket: *WritePermit, cancelled: bool) void {
         std.Io.Threaded.mutexLock(&self.mutex);
-        if (node.linked) {
-            const was_active = node.active;
-            if (node.previous) |previous| previous.next = node.next else self.write_first = node.next;
-            if (node.next) |next| {
-                next.previous = node.previous;
-                if (was_active) next.active = true;
-            } else self.write_last = node.previous;
-            node.linked = false;
-            node.previous = null;
-            node.next = null;
-            self.notifyReadyLocked();
+        ticket.checkCell(self);
+        if (cancelled) {
+            _ = self.writers.cancel(ticket, .release);
+        } else {
+            _ = self.writers.complete(ticket);
         }
+        self.notifyReadyLocked();
         std.Io.Threaded.mutexUnlock(&self.mutex);
-        self.allocator.destroy(node);
+        ticket.destroy();
     }
 
     pub fn beginRead(self: *ProcessCell, stream: Stream) error{ReaderActive}!void {
@@ -1161,11 +1036,10 @@ pub const ProcessCell = struct {
             return;
         }
         var lease = self.controllers.tryLease() orelse return;
-        const thread = std.Thread.spawn(.{}, timeoutThreadMain, .{ self, milliseconds, lease }) catch {
+        self.executor.spawn(timeoutThreadMain, .{ self, milliseconds, lease }, retireController) catch {
             lease.release();
             return error.Io;
         };
-        thread.detach();
     }
 
     pub fn timedOut(self: *ProcessCell) bool {
@@ -1302,7 +1176,7 @@ pub const ProcessCell = struct {
             const pointer = key & readiness_pointer_mask;
             const observation: *const RunObservation = @ptrFromInt(pointer);
             const write_ready = if (observation.permit) |permit| ready: {
-                const node = writeNode(permit);
+                const node = permit;
                 break :ready self.writeReadyLocked(node);
             } else false;
             return self.stdout.len != 0 or self.stderr.len != 0 or write_ready or
@@ -1313,14 +1187,14 @@ pub const ProcessCell = struct {
             readiness_stderr => self.stderr.len != 0 or self.stderr_done,
             readiness_terminal => self.phase == .reaped,
             else => {
-                const node: *WriteNode = @ptrFromInt(key);
+                const node: *WritePermit = @ptrFromInt(key);
                 return self.writeReadyLocked(node);
             },
         };
     }
 
-    fn writeReadyLocked(self: *ProcessCell, node: *const WriteNode) bool {
-        return !node.linked or (node.active and self.stdin.free() != 0) or
+    fn writeReadyLocked(self: *ProcessCell, node: *const WritePermit) bool {
+        return !node.linked() or (node.active() and self.stdin.free() != 0) or
             self.input != .open or self.io_failed;
     }
 
@@ -1406,12 +1280,6 @@ pub const ProcessCell = struct {
 
         self.allocator.destroy(group);
         self.waitForOtherControllers();
-
-        std.Io.Threaded.mutexLock(&self.mutex);
-        self.live_reservation.release();
-        self.phase = .{ .reaped = translated };
-        self.notifyReadyLocked();
-        std.Io.Threaded.mutexUnlock(&self.mutex);
     }
 
     const IoThread = enum { stdin, stdout, stderr };
@@ -1424,11 +1292,10 @@ pub const ProcessCell = struct {
     ) error{Io}!void {
         _ = kind;
         var lease = self.controllers.tryLease().?;
-        const thread = std.Thread.spawn(.{}, function, .{ self, file, lease }) catch {
+        self.executor.spawn(function, .{ self, file, lease }, retireController) catch {
             lease.release();
             return error.Io;
         };
-        thread.detach();
     }
 
     fn failIoThread(self: *ProcessCell, file: std.Io.File, kind: IoThread) void {
@@ -1525,9 +1392,15 @@ pub const ProcessCell = struct {
     }
 };
 
-fn timeoutThreadMain(cell: *ProcessCell, milliseconds: u64, lease_value: ControllerLease) void {
-    var lease = lease_value;
-    defer lease.release();
+// The shared executor owns the lease after spawn succeeds and releases it
+// only after joining the backend function, including all error returns.
+fn retireController(args: anytype, _: void) void {
+    var lease = args[args.len - 1];
+    lease.release();
+}
+
+fn timeoutThreadMain(_: *controllers.Execution, cell: *ProcessCell, milliseconds: u64, lease_value: ControllerLease) void {
+    _ = lease_value;
     const duration: std.Io.Clock.Duration = .{
         .raw = .fromMilliseconds(@intCast(milliseconds)),
         .clock = .awake,
@@ -1548,12 +1421,12 @@ fn timeoutThreadMain(cell: *ProcessCell, milliseconds: u64, lease_value: Control
 }
 
 fn escalationMain(
+    _: *controllers.Execution,
     cell: *ProcessCell,
     escalation: EscalationId,
     lease_value: ControllerLease,
 ) void {
-    var lease = lease_value;
-    defer lease.release();
+    _ = lease_value;
     const duration: std.Io.Clock.Duration = .{
         .raw = .fromMilliseconds(250),
         .clock = .awake,
@@ -1564,27 +1437,23 @@ fn escalationMain(
     cell.escalateKill(escalation);
 }
 
-fn supervisorThreadMain(cell: *ProcessCell, lease_value: ControllerLease) void {
-    var lease = lease_value;
-    defer lease.release();
+fn supervisorThreadMain(_: *controllers.Execution, cell: *ProcessCell, lease_value: ControllerLease) void {
+    _ = lease_value;
     cell.supervisorMain();
 }
 
-fn stdinThreadMain(cell: *ProcessCell, file: std.Io.File, lease_value: ControllerLease) void {
-    var lease = lease_value;
-    defer lease.release();
+fn stdinThreadMain(_: *controllers.Execution, cell: *ProcessCell, file: std.Io.File, lease_value: ControllerLease) void {
+    _ = lease_value;
     cell.stdinMain(file);
 }
 
-fn stdoutThreadMain(cell: *ProcessCell, file: std.Io.File, lease_value: ControllerLease) void {
-    var lease = lease_value;
-    defer lease.release();
+fn stdoutThreadMain(_: *controllers.Execution, cell: *ProcessCell, file: std.Io.File, lease_value: ControllerLease) void {
+    _ = lease_value;
     cell.stdoutMain(file);
 }
 
-fn stderrThreadMain(cell: *ProcessCell, file: std.Io.File, lease_value: ControllerLease) void {
-    var lease = lease_value;
-    defer lease.release();
+fn stderrThreadMain(_: *controllers.Execution, cell: *ProcessCell, file: std.Io.File, lease_value: ControllerLease) void {
+    _ = lease_value;
     cell.stderrMain(file);
 }
 
@@ -1623,6 +1492,61 @@ test "process policy rejects ambient and relative executable selection before sp
     try std.testing.expectError(error.InvalidSpec, owner.validateSpec(.{ .executable = "program" }));
     try std.testing.expectError(error.Denied, owner.validateSpec(.{ .executable = "/other/program" }));
     try owner.validateSpec(.{ .executable = "/allowed/program" });
+}
+
+test "process: provisional rollback retains capacity until cancellation setup retires" {
+    const fixture_path = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        @import("process_fixture_options").process_exe,
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(fixture_path);
+    var host = heap.HostOwner.init(std.testing.allocator);
+    defer host.cleanup().drain();
+    var owner = try ProcessOwner.init(std.testing.allocator, std.testing.io, .{
+        .executables = .unrestricted,
+        .max_live_ports = 1,
+    }, &.{});
+    defer owner.deinit();
+    var runtime_scheduler = try scheduler_api.Scheduler.init(host.cleanup(), .cooperative, .host);
+    runtime_scheduler.attachRetirement();
+    var scope = scheduler_api.TaskScope.init(runtime_scheduler.worker());
+    defer runtime_scheduler.deinit(&scope);
+
+    // Exercise the production provisional factory before starting its root job.
+    var reservation = LiveReservation.acquire(&owner, ProcessOwner.reserveLive).?;
+    defer reservation.release();
+    var child: ?std.process.Child = try std.process.spawn(std.testing.io, .{
+        .argv = &.{ fixture_path, "exit", "7" },
+        .stdin = .pipe,
+        .stdout = .pipe,
+        .stderr = .pipe,
+        .pgid = 0,
+    });
+    defer if (child) |*owned| killChildGroup(owned, std.testing.io);
+    const cell = try ProcessCell.create(&reservation, child.?, 41);
+    child = null;
+    defer cell.releasePort();
+    var initial = cell.controllers.initialLease();
+    var provisional = true;
+    defer if (provisional) {
+        cell.failBeforeStart();
+        initial.release();
+    };
+    try transfers.publishScope(ProcessCell, cell, &scope, processOwnership);
+    // Scope cancellation can acquire this lease between attachment and spawn.
+    var cancellation = cell.controllers.tryLease().?;
+    defer cancellation.release();
+    cell.failBeforeStart();
+    initial.release();
+    provisional = false;
+    try std.testing.expect(cell.termination() == null);
+    const spec: ProcessSpec = .{ .executable = fixture_path, .args = &.{ "exit", "7" } };
+    try std.testing.expectError(error.LiveLimit, owner.spawn(runtime_scheduler.worker(), &scope, spec));
+    cancellation.release();
+    try std.testing.expect(cell.termination() != null);
+    const next = try owner.spawn(runtime_scheduler.worker(), &scope, spec);
+    host.domain().releaseValue(next);
 }
 
 test "dormant controller reaps a direct child before scope detachment" {

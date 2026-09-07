@@ -30,6 +30,7 @@
 //! runner while preserving exhaustive failure injection.
 const std = @import("std");
 const session = @import("../session.zig");
+const heap = @import("../heap.zig");
 const native_fixture = @import("native_fixture_options");
 const archive_fixtures = @import("archive_fixture_options");
 const process_fixture = @import("process_fixture_options");
@@ -1258,6 +1259,108 @@ fn checkStdlibSurface(comptime surface: StdlibSurface) !void {
         std.heap.smp_allocator,
         SurfaceProbe(surface).run,
     );
+}
+
+fn nativePortForwardingProbe(
+    failing: *std.testing.FailingAllocator,
+    failure_offset: ?usize,
+) !usize {
+    const Port = struct {
+        releases: usize = 0,
+
+        pub fn releasePort(self: *@This()) void {
+            self.releases += 1;
+        }
+        pub fn prepareScopeTransfer(_: *@This(), _: *anyopaque, _: *anyopaque) heap.PortTransferError!void {
+            return error.Closed;
+        }
+        pub fn commitScopeTransfer(_: *@This()) void {}
+        pub fn abortScopeTransfer(_: *@This()) void {}
+    };
+    var port: Port = .{};
+    var locked_allocator = LockedAllocator{ .child = failing.allocator() };
+    const allocator = locked_allocator.allocator();
+    var first_failure_index: usize = 0;
+    const result = operation: {
+        var output_buffer: [1024]u8 = undefined;
+        var output = std.Io.Writer.fixed(&output_buffer);
+        var diagnostics_buffer: [1024]u8 = undefined;
+        var diagnostics = std.Io.Writer.fixed(&diagnostics_buffer);
+        var runtime = try session.Session.initWithHostConfig(allocator, &.{}, .{
+            .io = std.testing.io,
+            .output = &output,
+            .diagnostics = &diagnostics,
+            .ecl_path = native_fixture.directory,
+            .standard_input = .program_source,
+        }, .cooperative);
+        defer runtime.deinit();
+        try runOk(&runtime, "oom-native-setup.ecl", "0 sample.forward pop");
+        try runtime.pushOwned(try heap.createPort(Port, allocator, 31, &port));
+        first_failure_index = failing.alloc_index;
+        if (failure_offset) |offset| failing.fail_index = first_failure_index + offset;
+        break :operation runOk(
+            &runtime,
+            "oom-native-port.ecl",
+            "sample.singleton sample.nested-port 'key swap sample.pair-dict sample.nested-port pop",
+        );
+    };
+    try std.testing.expectEqual(@as(usize, 1), port.releases);
+    try result;
+    return first_failure_index;
+}
+
+test "oom: standard-library and host: native port forwarding" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, nativePortForwardingProbe);
+}
+
+fn NativePortLifecycleProbe(comptime source: []const u8) type {
+    return struct {
+        fn run(failing: *std.testing.FailingAllocator, failure_offset: ?usize) !usize {
+            var locked_allocator = LockedAllocator{ .child = failing.allocator() };
+            const allocator = locked_allocator.allocator();
+            var output_buffer: [256]u8 = undefined;
+            var output = std.Io.Writer.fixed(&output_buffer);
+            var diagnostics_buffer: [256]u8 = undefined;
+            var diagnostics = std.Io.Writer.fixed(&diagnostics_buffer);
+            var runtime = try session.Session.initWithHostConfig(allocator, &.{}, .{
+                .io = std.testing.io,
+                .output = &output,
+                .diagnostics = &diagnostics,
+                .ecl_path = native_fixture.directory,
+                .native_port_limits = .{ .ring_capacity = 8 },
+            }, .cooperative);
+            defer runtime.deinit();
+            try runOk(&runtime, "oom-port-setup.ecl", "portprobe.cleaned pop");
+            const first_failure_index = failing.alloc_index;
+            if (failure_offset) |offset| failing.fail_index = first_failure_index + offset;
+            try runOk(&runtime, "oom-port-lifecycle.ecl", source);
+            return first_failure_index;
+        }
+    };
+}
+
+test "oom: standard-library and host: native port lifecycle creation and admission" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.new-ready-wait 1 2 portprobe.exchange-ready-wait pop",
+    ).run);
+}
+
+test "oom: standard-library and host: native port lifecycle independent lanes" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.duplex-new-ready-wait dup 0 2 portprobe.duplex-exchange-ready-wait pop " ++
+            "wrap [] (1 2 portprobe.duplex-exchange-ready-wait) @give await pop",
+    ).run);
+}
+
+test "oom: standard-library and host: native port lifecycle transfer and rollback" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.new-ready-wait dup wrap dup cat [] (pop pop) 3 pack (@give) @attempt pop " ++
+            "wrap [] (1 2 portprobe.exchange-ready-wait) @give await pop",
+    ).run);
 }
 
 fn checkStdlibSurfaceOrdinalShard(

@@ -32,6 +32,7 @@ pub const ValidateError = error{
     InvalidEffect,
     DuplicateDefinition,
     InvalidContinuation,
+    InvalidPortDefinition,
     ModuleNameMismatch,
     MissingInvoke,
 };
@@ -47,6 +48,8 @@ pub const ValidatedDefinition = struct {
     deinit_continuation: ?abi.StateDeinitFn,
 };
 
+const PortDefinitions = [abi.max_port_definitions]?abi.PortDefinition;
+
 const DescriptorState = struct {
     host: *const heap.HostCleanup,
     name: intern.ModuleName,
@@ -55,6 +58,7 @@ const DescriptorState = struct {
     requirements: []abi.CapabilityRequirement,
     invoke: abi.Invoke,
     callback_count: u32,
+    ports: PortDefinitions,
 
     fn deinit(self: *DescriptorState) void {
         const allocator = self.host.allocator();
@@ -100,6 +104,11 @@ pub const ValidatedDescriptor = opaque {
 
     pub fn invoke(self: *const ValidatedDescriptor) abi.Invoke {
         return self.state().invoke;
+    }
+
+    pub fn port(self: *const ValidatedDescriptor, index: u32) ?abi.PortDefinition {
+        if (index >= self.state().ports.len) return null;
+        return self.state().ports[index];
     }
 
     pub fn callbackCount(self: *const ValidatedDescriptor) u32 {
@@ -340,11 +349,13 @@ pub const ValidateCursor = struct {
 
     const Allocated = struct {
         descriptor: abi.Descriptor,
+        ports: PortDefinitions,
         requirements: []abi.CapabilityRequirement,
         definitions: []ValidatedDefinition,
     };
     const ModuleArtifacts = struct {
         descriptor: abi.Descriptor,
+        ports: PortDefinitions,
         name: intern.ModuleName,
         doc: *env.DocumentationString,
         requirements: []abi.CapabilityRequirement,
@@ -419,6 +430,7 @@ pub const ValidateCursor = struct {
                 module_doc.builder.deinit();
                 self.state = .{ .capabilities = .{
                     .descriptor = allocated.descriptor,
+                    .ports = allocated.ports,
                     .name = name,
                     .doc = document,
                     .requirements = allocated.requirements,
@@ -501,6 +513,40 @@ pub const ValidateCursor = struct {
         );
         if (descriptor.callback_count != 0 and descriptor.invoke == null)
             return error.MissingInvoke;
+        if (descriptor.port_count > abi.max_port_definitions) return error.CountOverflow;
+        try validateRecordSize(descriptor.port_record_size, @sizeOf(abi.PortDefinition));
+        var ports: PortDefinitions = .{null} ** abi.max_port_definitions;
+        if (descriptor.port_count != 0) {
+            const records = try RecordArray(abi.PortDefinition).init(
+                descriptor.ports_ptr orelse return error.InvalidPortDefinition,
+                descriptor.port_count,
+                descriptor.port_record_size,
+            );
+            for (0..descriptor.port_count) |index| {
+                var port = try records.read(index);
+                if (port.state_size == 0 or port.state_size > abi.max_port_state_bytes or
+                    port.state_alignment == 0 or port.state_alignment > 64 or
+                    !std.math.isPowerOfTwo(port.state_alignment) or
+                    port.init_state == null or port.initialize == null or port.execute == null or
+                    port.cancel == null or port.cleanup == null or port.select_lane == null or
+                    port.lane_count == 0 or port.lane_count > abi.max_port_lanes) return error.InvalidPortDefinition;
+                switch (port.cancellation) {
+                    .close_resource => if (port.cancel_operation != null) return error.InvalidPortDefinition,
+                    .acknowledge => if (port.cancel_operation == null) return error.InvalidPortDefinition,
+                    _ => return error.InvalidPortDefinition,
+                }
+                const name = try guestUtf8(port.name_ptr, port.name_len, max_word_name_bytes);
+                const symbol = intern.internNamespace(name) catch |err| return switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    error.InvalidName => error.InvalidName,
+                };
+                const owned_name = intern.get(intern.namespaceId(symbol));
+                for (ports[0..index]) |prior| if (std.mem.eql(u8, prior.?.name_ptr[0..prior.?.name_len], owned_name))
+                    return error.DuplicateDefinition;
+                port.name_ptr = owned_name.ptr;
+                ports[index] = port;
+            }
+        }
         const requirements = try self.host.allocator().alloc(
             abi.CapabilityRequirement,
             descriptor.capability_count,
@@ -512,6 +558,7 @@ pub const ValidateCursor = struct {
         );
         self.state = .{ .module_name = .{
             .descriptor = descriptor,
+            .ports = ports,
             .requirements = requirements,
             .definitions = definitions,
         } };
@@ -542,6 +589,7 @@ pub const ValidateCursor = struct {
 
     fn validateCapability(self: *ValidateCursor, module: *ModuleArtifacts) ValidateError!void {
         if (module.capability_index == module.descriptor.capability_count) {
+            if (module.descriptor.port_count != 0 and !hasCapability(module, .ports)) return error.InvalidPortDefinition;
             const moved = module.*;
             self.state = .{ .definition = moved };
             return;
@@ -554,7 +602,7 @@ pub const ValidateCursor = struct {
         const requirement = try records.read(module.capability_index);
         try validateRecordSize(requirement.size, @sizeOf(abi.CapabilityRequirement));
         switch (@as(abi.CapabilityId, @enumFromInt(requirement.id))) {
-            .call, .build_values, .reschedule => {},
+            .call, .build_values, .reschedule, .ports => {},
             _ => return error.UnsupportedCapabilityId,
         }
         module.requirements[module.capability_index] = requirement;
@@ -632,6 +680,7 @@ pub const ValidateCursor = struct {
             .requirements = module.requirements,
             .invoke = invoke,
             .callback_count = module.descriptor.callback_count,
+            .ports = module.ports,
         };
         self.state = .complete;
         return .{ .complete = @ptrCast(state) };

@@ -135,8 +135,8 @@ const source_groups = [_]SourceGroup{
     // vocabulary in external.zig and are opened only by their Session-owned
     // owner.
     .{ .production = true, .files = &.{
-        "scheduler.zig", "scheduler_core.zig", "external.zig",      "process_port.zig", "console.zig", "task_prims.zig", "filesystem_port.zig", "package_authority.zig", "directory_order.zig",
-        "net_port.zig",  "byte_ring.zig",      "port_transfer.zig",
+        "scheduler.zig", "scheduler_core.zig", "external.zig",      "process_port.zig",    "console.zig", "task_prims.zig", "filesystem_port.zig", "package_authority.zig", "directory_order.zig",
+        "net_port.zig",  "byte_ring.zig",      "port_transfer.zig", "port_controller.zig",
     }, .sources = &.{
         @embedFile("../scheduler.zig"),       @embedFile("../scheduler_core.zig"),
         @embedFile("../external.zig"),        @embedFile("../process_port.zig"),
@@ -144,18 +144,19 @@ const source_groups = [_]SourceGroup{
         @embedFile("../filesystem_port.zig"), @embedFile("../package_authority.zig"),
         @embedFile("../directory_order.zig"), @embedFile("../net_port.zig"),
         @embedFile("../byte_ring.zig"),       @embedFile("../port_transfer.zig"),
+        @embedFile("../port_controller.zig"),
     } },
     // The installed author SDK, its sized ABI records, validation, loader,
     // and transactional-call boundary form one separately rooted component.
     .{ .production = true, .files = &.{
-        "native/abi.zig",          "native/capability.zig", "native/sdk.zig",
-        "native/build_helper.zig", "native_descriptor.zig", "native_module.zig",
+        "native/ports.zig",        "native/abi.zig",        "native/capability.zig", "native/sdk.zig",
+        "native/build_helper.zig", "native_descriptor.zig", "native_module.zig",     "native_port.zig",
         "native_call.zig",         "stdlib/io.zig",
     }, .sources = &.{
-        @embedFile("../native/abi.zig"),        @embedFile("../native/capability.zig"),
-        @embedFile("../native/sdk.zig"),        @embedFile("../native/build_helper.zig"),
-        @embedFile("../native_descriptor.zig"), @embedFile("../native_module.zig"),
-        @embedFile("../native_call.zig"),       @embedFile("../stdlib/io.zig"),
+        @embedFile("../native/ports.zig"),  @embedFile("../native/abi.zig"),          @embedFile("../native/capability.zig"),
+        @embedFile("../native/sdk.zig"),    @embedFile("../native/build_helper.zig"), @embedFile("../native_descriptor.zig"),
+        @embedFile("../native_module.zig"), @embedFile("../native_port.zig"),         @embedFile("../native_call.zig"),
+        @embedFile("../stdlib/io.zig"),
     } },
 };
 
@@ -211,6 +212,7 @@ const repository_verification_files = [_][]const u8{
     "test/reference_snapshots.zig",
     "test/scheduler_shell_property.zig",
     "test/native/sample.zig",
+    "test/native/ports.zig",
     "test/native/malformed.zig",
     "test/native/negative/no_call_parameter.zig",
     "test/native/negative/wrong_return_type.zig",
@@ -221,6 +223,13 @@ const repository_verification_files = [_][]const u8{
     "test/native/negative/unknown_capability.zig",
     "test/native/negative/duplicate_word.zig",
     "test/native/negative/empty_doc.zig",
+    "test/native/negative/invalid_port_callbacks.zig",
+    "test/native/negative/missing_port_recovery.zig",
+    "test/native/negative/invalid_lane_selector.zig",
+    "test/native/negative/invalid_port_lanes.zig",
+    "test/native/negative/port_without_schedule.zig",
+    "test/native/negative/undeclared_port.zig",
+    "test/native/negative/retained_port_candidate.zig",
     "test/http_fixture_server.zig",
     "test/pkg_lock_fixture.zig",
     "test/process_fixture.zig",

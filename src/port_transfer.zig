@@ -1,10 +1,141 @@
-//! Shared bounded byte transfers; backend adapters own readiness and error policy.
+//! Shared scope transfers and bounded byte transfers for every port backend.
 const std = @import("std");
 const heap = @import("heap.zig");
 const list = @import("list.zig");
 const machine = @import("machine.zig");
 const storage = @import("kernel_storage.zig");
 const Value = @import("value.zig").Value;
+const external = @import("external.zig");
+const scheduler = @import("scheduler.zig");
+
+/// Attach outside the resource lock, then consume the membership under it.
+/// The caller retains the cell throughout and owns backend rollback on failure.
+/// Startup must revalidate backend cancellation under the same resource lock.
+pub fn publishScope(
+    comptime Cell: type,
+    cell: *Cell,
+    scope: *scheduler.TaskScope,
+    comptime ownership: fn (*Cell) *external.Ownership,
+) error{ OutOfMemory, ScopeClosing }!void {
+    const membership = try scope.scheduler.attachExternal(scope, external.scopeMember(Cell, cell));
+    std.Io.Threaded.mutexLock(&cell.mutex);
+    var detached = ownership(cell).publish(membership);
+    std.Io.Threaded.mutexUnlock(&cell.mutex);
+    detached.detachAll();
+}
+
+/// Consumes the held cell mutex and the caller's final execution/publisher
+/// reference. The backend must first establish quiescence (including a join
+/// when code-image lifetime requires it) and publish its terminal facts.
+/// No caller may access the cell after this returns. Drop the execution pin
+/// before detachment lets the scope observe completion and destroy its domain.
+pub fn completeControllerLocked(
+    comptime Cell: type,
+    cell: *Cell,
+    ownership: *external.Ownership,
+    comptime release: fn (*Cell) void,
+) void {
+    var detached = ownership.release();
+    std.Io.Threaded.mutexUnlock(&cell.mutex);
+    release(cell);
+    detached.detachAll();
+}
+
+/// The backend supplies only its locked lifetime predicate and ownership
+/// location. This boundary owns lock ordering, origin authorization, destination
+/// attachment, revalidation, and consuming rollback for every port kind.
+pub fn ScopeTransfer(
+    comptime Cell: type,
+    comptime ownership: fn (*Cell) *external.Ownership,
+    comptime live: fn (*Cell) bool,
+) type {
+    return struct {
+        pub fn prepare(cell: *Cell, from: *anyopaque, to: *anyopaque) heap.PortTransferError!void {
+            const destination: *scheduler.TaskScope = @ptrCast(@alignCast(to));
+            std.Io.Threaded.mutexLock(&cell.mutex);
+            const rejected: ?heap.PortTransferError = if (!live(cell)) error.Closed else switch (ownership(cell).*) {
+                .none, .provisional => error.Closed,
+                .transferring => error.Busy,
+                .owned => |current| if (current.owningScope() == from) null else error.NotOwner,
+            };
+            std.Io.Threaded.mutexUnlock(&cell.mutex);
+            if (rejected) |err| return err;
+
+            // Scope cancellation takes the scope lock before the cell lock.
+            // Allocating and attaching under the cell lock would reverse it.
+            var token = try destination.scheduler.attachExternal(destination, external.scopeMember(Cell, cell));
+            std.Io.Threaded.mutexLock(&cell.mutex);
+            const owner = ownership(cell);
+            const valid = live(cell) and switch (owner.*) {
+                .owned => |current| current.owningScope() == from,
+                .none, .provisional, .transferring => false,
+            };
+            if (valid) owner.beginTransfer(token);
+            std.Io.Threaded.mutexUnlock(&cell.mutex);
+            if (!valid) {
+                token.detach();
+                return error.Closed;
+            }
+        }
+
+        pub fn commit(cell: *Cell) void {
+            std.Io.Threaded.mutexLock(&cell.mutex);
+            var detached = ownership(cell).commitTransfer();
+            std.Io.Threaded.mutexUnlock(&cell.mutex);
+            detached.detachAll();
+        }
+
+        pub fn abort(cell: *Cell) void {
+            std.Io.Threaded.mutexLock(&cell.mutex);
+            var detached = ownership(cell).abortTransfer();
+            std.Io.Threaded.mutexUnlock(&cell.mutex);
+            detached.detachAll();
+        }
+    };
+}
+
+/// One already-accounted capacity slot, with its issuing owner and release
+/// policy inseparable. Moving empties the source; releasing an empty token is
+/// harmless. Backend code decides when to reserve and when capacity returns.
+pub fn Reservation(comptime Owner: type, comptime releaseSlot: fn (*Owner) void) type {
+    return union(enum) {
+        const Self = @This();
+        held: *Owner,
+        consumed,
+
+        pub fn acquire(owner_value: *Owner, comptime reserveSlot: fn (*Owner) bool) ?Self {
+            if (!reserveSlot(owner_value)) return null;
+            return adoptReserved(owner_value);
+        }
+        /// Consumes one slot already reserved under the owner's own protocol.
+        /// This supports reservation coupled to native reaper startup and IDs.
+        pub fn adoptReserved(owner_value: *Owner) Self {
+            return .{ .held = owner_value };
+        }
+        pub fn owner(self: *const Self) *Owner {
+            return switch (self.*) {
+                .held => |issuer| issuer,
+                .consumed => @panic("capacity reservation already consumed"),
+            };
+        }
+        pub fn isHeld(self: Self) bool {
+            return self == .held;
+        }
+        /// Consumes either state, returning the reservation or an empty token.
+        pub fn take(self: *Self) Self {
+            const moved = self.*;
+            self.* = .consumed;
+            return moved;
+        }
+        pub fn release(self: *Self) void {
+            const moved = self.take();
+            switch (moved) {
+                .held => |issuer| releaseSlot(issuer),
+                .consumed => {},
+            }
+        }
+    };
+}
 
 pub const ReadProgress = union(enum) { pending, eof, data: usize };
 pub const WriteProgress = union(enum) { pending, written: usize };

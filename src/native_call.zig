@@ -9,6 +9,8 @@ const heap = @import("heap.zig");
 const intern = @import("intern.zig");
 const list = @import("list.zig");
 const machine = @import("machine.zig");
+const native_port = @import("native_port.zig");
+const external = @import("external.zig");
 const native_module = @import("native_module.zig");
 const value = @import("value.zig");
 
@@ -287,6 +289,8 @@ const Transaction = struct {
     continuation: ?[]align(64) u8 = null,
     budget: u32 = 0,
     yield_requested: bool = false,
+    port_slots: [abi.max_operation_slots]PortSlot = .{.empty} ** abi.max_operation_slots,
+    port_wait: ?external.ReadinessSource = null,
 
     fn create(
         evaluator: *machine.Machine,
@@ -331,6 +335,8 @@ const Transaction = struct {
         _: *heap.ReleaseDomain,
         _: std.mem.Allocator,
     ) void {
+        for (&self.port_slots) |*slot| slot.retire(self.releases);
+        if (self.port_wait) |*wait| wait.deinit();
         for (self.outputs.items) |item| self.releases.releaseValue(item);
         self.clearCandidates();
         for (&self.builders) |*builder_entry| if (builder_entry.*) |owned| {
@@ -448,6 +454,10 @@ const Transaction = struct {
         self: *Transaction,
     ) machine.MachineError!machine.WorkProgress {
         self.active_evaluator = evaluator;
+        defer if (self.port_wait) |*wait| {
+            wait.deinit();
+            self.port_wait = null;
+        };
         defer self.active_evaluator = null;
         try evaluator.pollKernel();
         self.budget = machine.kernel_poll_quantum;
@@ -485,6 +495,10 @@ const Transaction = struct {
                     }
                     try machine.finishEffectCheck(evaluator, check);
                 }
+                for (&self.port_slots) |*slot| if (slot.* == .creating) {
+                    const item = slot.creating;
+                    slot.* = .{ .published = item };
+                };
                 break :complete .completed;
             },
             .fail => switch (self.terminal) {
@@ -503,8 +517,13 @@ const Transaction = struct {
                     .contract,
                     "native callback yielded without Reschedule authority",
                 )
-            else
-                .yielded,
+            else yielded: {
+                if (self.port_wait) |source| {
+                    self.port_wait = null;
+                    try evaluator.park(.{ .external = source });
+                }
+                break :yielded .yielded;
+            },
             _ => return evaluator.fail(.contract, "native callback returned an unknown result tag"),
         };
     }
@@ -525,7 +544,6 @@ pub fn begin(
     )) {
         .task => return evaluator.fail(.type, "native words cannot observe task capabilities"),
         .module => return evaluator.fail(.type, "native words cannot observe module capabilities"),
-        .port => return evaluator.fail(.type, "native words cannot observe port capabilities"),
         else => {},
     };
     const transferred = owned_check;
@@ -556,6 +574,8 @@ const full_host_table = abi.HostTable{
     .build_list_finish = hostBuildListFinish,
     .build_dict_append = hostBuildDictAppend,
     .build_dict_finish = hostBuildDictFinish,
+    .forward_path = hostForwardPath,
+    .port = hostPort,
 };
 
 fn transactionFrom(context: *anyopaque) *Transaction {
@@ -581,7 +601,7 @@ fn writeView(call: *Transaction, item: Value, output: *abi.ValueView) abi.HostSt
         .dict => |header| .{ .kind = .dict, .aggregate_len = header.length() },
         .task => return call.rejectCapability("native words cannot observe task capabilities"),
         .module => return call.rejectCapability("native words cannot observe module capabilities"),
-        .port => return call.rejectCapability("native words cannot observe port capabilities"),
+        .port => .{ .kind = .port },
     };
     return .ok;
 }
@@ -642,31 +662,66 @@ fn hostReadPath(
     output: *abi.ValueView,
 ) callconv(.c) abi.HostStatus {
     const call = transactionFrom(context);
+    return switch (readPath(call, input_index, path_ptr, path_len)) {
+        .value => |item| writeView(call, item, output),
+        .status => |status| status,
+    };
+}
+
+fn hostForwardPath(
+    context: *anyopaque,
+    input_index: u32,
+    path_ptr: [*]const u64,
+    path_len: u32,
+    output: *abi.Candidate,
+) callconv(.c) abi.HostStatus {
+    const call = transactionFrom(context);
+    const item = switch (readPath(call, input_index, path_ptr, path_len)) {
+        .value => |item| item,
+        .status => |status| return status,
+    };
+    var view: abi.ValueView = .{ .kind = .int };
+    const observed = writeView(call, item, &view);
+    if (observed != .ok) return observed;
+    heap.retainValue(item);
+    const status = call.appendCandidate(item, null);
+    if (status == .ok) output.* = call.candidateWire();
+    return status;
+}
+
+const PathRead = union(enum) { value: Value, status: abi.HostStatus };
+
+fn readPath(
+    call: *Transaction,
+    input_index: u32,
+    path_ptr: [*]const u64,
+    path_len: u32,
+) PathRead {
     if (call.terminal != .idle or call.continuation == null or
         input_index >= call.definition.effect.inputs)
-        return .invalid;
-    if (path_len > abi.max_read_path_depth) return .invalid;
-    if (charge(call, @max(path_len, 1)) != .ok) return .yield_required;
+        return .{ .status = .invalid };
+    if (path_len > abi.max_read_path_depth) return .{ .status = .invalid };
+    if (charge(call, @max(path_len, 1)) != .ok) return .{ .status = .yield_required };
     var current = call.activeEvaluator().nativeInputBorrowed(
         call.definition.effect.inputs,
         input_index,
     );
     for (path_ptr[0..path_len]) |step| switch (current) {
         .list => |header| {
-            if (step >= header.length()) return .invalid;
+            if (step >= header.length()) return .{ .status = .invalid };
             current = list.atUnchecked(current, @intCast(step));
         },
         .dict => |header| {
             const entry = step / 2;
-            if (entry >= dict.keysOf(header).list.length()) return .invalid;
+            if (entry >= dict.keysOf(header).list.length()) return .{ .status = .invalid };
             current = if (step % 2 == 0)
                 dict.keyAt(header, @intCast(entry))
             else
                 dict.valueAt(header, @intCast(entry));
         },
-        .int, .float, .char, .symbol, .word, .task, .module, .port => return .invalid,
+        .int, .float, .char, .symbol, .word, .task, .module, .port => return .{ .status = .invalid },
     };
-    return writeView(call, current, output);
+    return .{ .value = current };
 }
 
 fn hostDictAt(
@@ -718,7 +773,7 @@ fn hostScalar(
     const units: u32 = switch (scalar.kind) {
         .symbol, .word => @max(1, std.math.cast(u32, scalar.bytes_len) orelse return .invalid),
         .int, .float, .char => 0,
-        .list, .dict => return .invalid,
+        .list, .dict, .port => return .invalid,
         _ => return .invalid,
     };
     if (units > abi.max_guest_scalar_bytes) return .invalid;
@@ -739,7 +794,7 @@ fn hostScalar(
             const id = intern.intern(bytes) catch return .out_of_memory;
             break :item if (scalar.kind == .symbol) .{ .symbol = id } else .{ .word = .{ .name = id } };
         },
-        .list, .dict => return .invalid,
+        .list, .dict, .port => return .invalid,
         _ => return .invalid,
     };
     const status = call.appendCandidate(item, null);
@@ -907,5 +962,166 @@ fn hostRequestYield(context: *anyopaque) callconv(.c) abi.HostStatus {
     const call = transactionFrom(context);
     if (call.terminal != .idle or call.continuation == null) return .invalid;
     call.yield_requested = true;
+    return .ok;
+}
+
+const PortSlot = union(enum) {
+    empty,
+    creating: Value,
+    published: Value,
+    admission: struct { cell: *native_port.Cell, code: u32 },
+    operation: *native_port.Operation,
+    closing: *native_port.Cell,
+
+    fn cell(self: PortSlot) ?*native_port.Cell {
+        return switch (self) {
+            .empty => null,
+            .creating, .published => |item| heap.portPayload(native_port.Cell, item.port).?,
+            .admission => |pending| pending.cell,
+            .operation => |operation| operation.cell,
+            .closing => |closing| closing,
+        };
+    }
+    fn retire(self: *PortSlot, releases: *heap.ReleaseDomain) void {
+        switch (self.*) {
+            .empty => {},
+            .creating => |item| {
+                heap.portPayload(native_port.Cell, item.port).?.close();
+                releases.releaseValue(item);
+            },
+            .published => |item| releases.releaseValue(item),
+            .admission => |pending| pending.cell.releasePort(),
+            .closing => |cell_value| cell_value.releasePort(),
+            .operation => |operation| {
+                operation.cancel();
+                operation.releaseReadiness();
+            },
+        }
+        self.* = .empty;
+    }
+};
+
+fn portFailure(call: *Transaction, reply: *abi.PortReply, failure: native_port.Failure) abi.HostStatus {
+    reply.status = .failed;
+    return hostFail(call, failure.kind, &failure.message, failure.len);
+}
+fn portError(call: *Transaction, reply: *abi.PortReply, kind: abi.ErrorKindWire, message: []const u8) abi.HostStatus {
+    return portFailure(call, reply, .init(kind, message));
+}
+
+fn hostPort(context_value: *anyopaque, request: *const abi.PortRequest, reply: *abi.PortReply) callconv(.c) abi.HostStatus {
+    const call = transactionFrom(context_value);
+    if (request.size != @sizeOf(abi.PortRequest) or reply.size != @sizeOf(abi.PortReply) or call.terminal != .idle) return .invalid;
+    reply.* = .{};
+    if (call.instance.validated().port(request.definition) == null)
+        return portError(call, reply, .type, "native port kind is not declared by this module");
+    if (request.slot >= call.port_slots.len or request.length > 64 * 1024 or request.interests > 3)
+        return portError(call, reply, .domain, "invalid native port operation slot or stream request");
+    if (charge(call, 1 + @min(request.length, 4096)) != .ok) return .yield_required;
+    const slot = &call.port_slots[request.slot];
+    if (request.action != .check) if (slot.cell()) |cell| if (cell.instance != call.instance or cell.kind != request.definition)
+        return portError(call, reply, .type, "native operation slot belongs to another port kind");
+    switch (request.action) {
+        .create => {
+            if (slot.* == .empty) {
+                const value_created = call.activeEvaluator().createNativePort(call.instance, request.definition) catch |err| return switch (err) {
+                    error.OutOfMemory => .out_of_memory,
+                    error.InsufficientLanes => portError(call, reply, .domain, "native port operation limit cannot cover its lanes"),
+                    error.Limit => portError(call, reply, .domain, "native port live limit exceeded"),
+                    error.Closed, error.Io, error.ScopeClosing => portError(call, reply, .io, "native port creation is unavailable"),
+                };
+                slot.* = .{ .creating = value_created };
+            }
+            if (slot.* != .creating) return portError(call, reply, .domain, "native port creation slot is occupied");
+            switch (slot.cell().?.initialized()) {
+                .pending => reply.status = .pending,
+                .failed => |failure| return portFailure(call, reply, failure),
+                .ready => {
+                    heap.retainValue(slot.creating);
+                    const status = call.appendCandidate(slot.creating, null);
+                    if (status != .ok) return status;
+                    reply.candidate = call.candidateWire();
+                },
+            }
+        },
+        .check, .begin, .close => {
+            const candidate = call.candidate(request.port) orelse return portError(call, reply, .type, "invalid native port candidate");
+            const cell = native_port.fromValue(candidate.value, call.instance, request.definition) orelse
+                return portError(call, reply, .type, "native port kind mismatch");
+            if (request.action == .check) return .ok;
+            if (slot.cell()) |existing| if (existing != cell)
+                return portError(call, reply, .type, "native operation slot belongs to another port");
+            if (request.action == .close) {
+                if (slot.* == .empty) {
+                    cell.retainReadiness();
+                    slot.* = .{ .closing = cell };
+                }
+                if (slot.* != .closing) return portError(call, reply, .domain, "native close slot is occupied");
+                cell.close();
+                if (!cell.joined()) reply.status = .pending;
+            } else {
+                if (slot.* == .operation) {
+                    if (slot.operation.code != request.operation) return portError(call, reply, .domain, "native operation slot has another operation");
+                    return .ok;
+                }
+                if (slot.* == .empty) {
+                    cell.retainReadiness();
+                    slot.* = .{ .admission = .{ .cell = cell, .code = request.operation } };
+                }
+                if (slot.* != .admission or slot.admission.code != request.operation)
+                    return portError(call, reply, .domain, "native operation admission slot is occupied");
+                switch (cell.admit(request.operation) catch return .out_of_memory) {
+                    .pending => reply.status = .pending,
+                    .invalid_operation => return portError(call, reply, .domain, "native operation selected an invalid lane"),
+                    .closed => return portError(call, reply, .io, "native port is closed"),
+                    .operation => |operation| {
+                        cell.releasePort();
+                        slot.* = .{ .operation = operation };
+                    },
+                }
+            }
+        },
+        .write, .read, .finish_request, .result => {
+            if (slot.* != .operation) return portError(call, reply, .domain, "native operation slot is not admitted");
+            const operation = slot.operation;
+            switch (request.action) {
+                .write, .read => {
+                    const bytes = if (request.bytes) |pointer| pointer[0..@min(request.length, 4096)] else return portError(call, reply, .domain, "native stream buffer is missing");
+                    const count = (if (request.action == .write) operation.write(bytes) else operation.read(bytes)) orelse {
+                        return switch (operation.result()) {
+                            .failed => |failure| portFailure(call, reply, failure),
+                            .pending, .ready => portError(call, reply, .io, "native operation stream is closed"),
+                        };
+                    };
+                    reply.transferred = @intCast(count);
+                    if (count == 0 and request.length != 0) switch (operation.result()) {
+                        .pending => reply.status = .pending,
+                        .failed, .ready => {},
+                    };
+                },
+                .finish_request => operation.finishRequest(),
+                .result => switch (operation.result()) {
+                    .pending => reply.status = .pending,
+                    .ready => {},
+                    .failed => |failure| return portFailure(call, reply, failure),
+                },
+                else => unreachable,
+            }
+        },
+        .wait => {
+            if (call.port_wait != null) return portError(call, reply, .domain, "native call already requested a wait");
+            call.port_wait = switch (slot.*) {
+                .creating => slot.cell().?.source(0),
+                .admission => |pending| pending.cell.admissionSource(pending.code),
+                .operation => |operation| operation.source(request.interests),
+                .closing => |cell| cell.source(1),
+                .empty, .published => return portError(call, reply, .domain, "native wait slot is empty"),
+            };
+            call.yield_requested = true;
+            reply.status = .pending;
+        },
+        .release => slot.retire(call.releases),
+        _ => return .invalid,
+    }
     return .ok;
 }

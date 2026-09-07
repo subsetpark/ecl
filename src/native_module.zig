@@ -3,6 +3,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const abi = @import("native-abi");
+const native_port = @import("native_port.zig");
 const descriptor_api = @import("native_descriptor.zig");
 const heap = @import("heap.zig");
 const intern = @import("intern.zig");
@@ -270,6 +271,7 @@ pub const ModuleInstance = opaque {
     /// capability.
     pub fn mintHostTable(self: *const ModuleInstance, full: abi.HostTable) abi.HostTable {
         var result = full;
+        if (!self.hasCapability(.ports)) result.port = null;
         if (!self.hasCapability(.build_values)) {
             result.build_list_append = null;
             result.build_list_finish = null;
@@ -283,12 +285,17 @@ pub const ModuleInstance = opaque {
             result.list_at = null;
             result.dict_at = null;
             result.read_path = null;
+            result.forward_path = null;
         }
         return result;
     }
 
     pub fn name(self: *const ModuleInstance) intern.ModuleName {
         return self.state().descriptor.name();
+    }
+
+    pub fn portAccess(self: *const ModuleInstance) *native_port.Access {
+        return self.state().owner.state().ports.access();
     }
 
     pub fn validated(self: *const ModuleInstance) *const descriptor_api.ValidatedDescriptor {
@@ -310,6 +317,7 @@ pub const ModuleInstance = opaque {
 };
 
 const OwnerState = struct {
+    ports: *native_port.Owner,
     host: *const heap.HostCleanup,
     phase: std.atomic.Value(OwnerPhase) = .init(.open),
     live_instances: std.atomic.Value(u32) = .init(0),
@@ -328,8 +336,16 @@ pub const Owner = opaque {
     }
 
     pub fn init(host: *const heap.HostCleanup) error{OutOfMemory}!*Owner {
+        return initWithPortLimits(host, .{}) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.InvalidLimits => unreachable,
+        };
+    }
+
+    pub fn initWithPortLimits(host: *const heap.HostCleanup, limits: native_port.Limits) error{ OutOfMemory, InvalidLimits }!*Owner {
         const state_value = try host.allocator().create(OwnerState);
-        state_value.* = .{ .host = host };
+        errdefer host.allocator().destroy(state_value);
+        state_value.* = .{ .host = host, .ports = try native_port.Owner.init(host, limits) };
         return ownerFromState(state_value);
     }
 
@@ -350,6 +366,7 @@ pub const Owner = opaque {
             .acquire,
         );
         std.debug.assert(prior == null);
+        self.state().ports.closeCreation();
         return @ptrCast(self);
     }
 
@@ -504,6 +521,7 @@ pub const ClosingOwner = opaque {
     pub fn settle(self: *ClosingOwner) *SettledOwner {
         const owner_value = self.owner();
         std.debug.assert(owner_value.state().phase.load(.acquire) == .closing);
+        owner_value.state().ports.deinit();
         while (owner_value.popRetired()) |instance| {
             const allocator = instance.host.allocator();
             instance.descriptor.deinit();
@@ -538,6 +556,7 @@ pub fn capabilityName(id: u32) []const u8 {
         .call => "call",
         .build_values => "build-values",
         .reschedule => "reschedule",
+        .ports => "ports",
         _ => "unknown",
     };
 }

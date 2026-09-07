@@ -7,6 +7,7 @@ const reader = @import("reader.zig");
 const spans = @import("spans.zig");
 const env = @import("env.zig");
 const modules = @import("modules.zig");
+const native_port = @import("native_port.zig");
 const native_module = @import("native_module.zig");
 const machine = @import("machine.zig");
 const prims = @import("prims.zig");
@@ -85,6 +86,9 @@ pub const ClockPolicy = struct {
 /// mode — from turning `init` into a positional checklist whose arguments
 /// only differ by type.
 pub const Host = struct {
+    /// Capacity for trusted package-defined resources; validated at creation
+    /// of the Session, independently of filesystem, process, and net policies.
+    native_port_limits: native_port.Limits = .{},
     io: std.Io,
     output: *std.Io.Writer,
     diagnostics: *std.Io.Writer,
@@ -454,7 +458,10 @@ pub const Session = enum(usize) {
         else
             null;
         errdefer if (test_authority) |*authority| authority.deinit();
-        const native_owner = try native_module.Owner.init(host_owner.cleanup());
+        const native_owner = native_module.Owner.initWithPortLimits(host_owner.cleanup(), if (host) |services| services.native_port_limits else .{}) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.InvalidLimits => error.InvalidHostPolicy,
+        };
         errdefer native_owner.closeCalls().settle().deinit();
         // A Session builds exactly one archive on its own reclamation root, so
         // the provenance owner is always free here; treating the refusal as an

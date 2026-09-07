@@ -61,6 +61,21 @@ pub fn build(b: *std.Build) void {
     native_fixture_step.dependOn(fixture_install);
     const fixture_files = b.addWriteFiles();
     _ = fixture_files.addCopyFile(fixture.getEmittedBin(), "sample.eclmod");
+    for ([_][]const u8{ "portprobe", "foreignport" }) |name| {
+        const options = b.addOptions();
+        options.addOption([]const u8, "module_name", name);
+        const port_fixture = native_build.addExtension(b, .{
+            .name = name,
+            .root_source_file = b.path("test/native/ports.zig"),
+            .target = target,
+            .optimize = optimize,
+            .ecl_native = native_sdk,
+        });
+        port_fixture.root_module.addOptions("port_fixture_options", options);
+        port_fixture.root_module.link_libc = true;
+        native_fixture_step.dependOn(native_build.installExtension(b, port_fixture, "native-fixture"));
+        _ = fixture_files.addCopyFile(port_fixture.getEmittedBin(), b.fmt("{s}.eclmod", .{name}));
+    }
     const native_fixture_options = b.addOptions();
     native_fixture_options.addOptionPath(
         "directory",
@@ -138,6 +153,13 @@ pub fn build(b: *std.Build) void {
     }
 
     const negative_cases = [_]struct { file: []const u8, message: []const u8 }{
+        .{ .file = "missing_port_recovery", .message = "ecl-native: recoverable cancellation requires fn cancelOperation(*State, Lane) void" },
+        .{ .file = "invalid_lane_selector", .message = "ecl-native: Port lanes require fn lane(u32) Lane" },
+        .{ .file = "invalid_port_lanes", .message = "ecl-native: Port Lane values must be contiguous from zero" },
+        .{ .file = "invalid_port_callbacks", .message = "ecl-native: Port callbacks have invalid signatures" },
+        .{ .file = "port_without_schedule", .message = "ecl-native: Port operations require Reschedule" },
+        .{ .file = "undeclared_port", .message = "ecl-native: callback port capability is not declared by the module" },
+        .{ .file = "retained_port_candidate", .message = "ecl-native: Reschedule State cannot embed an ephemeral capability" },
         .{ .file = "no_call_parameter", .message = "ecl-native: callback first parameter must be *ecl.Call(\"inputs -- outputs\")" },
         .{ .file = "wrong_return_type", .message = "ecl-native: callback return type must be ecl.CallbackResult" },
         .{ .file = "generic_callback", .message = "ecl-native: callback must be non-generic and non-variadic" },
@@ -304,6 +326,11 @@ pub fn build(b: *std.Build) void {
         "Run native loader and transactional-call tests",
     );
     native_runtime_step.dependOn(&run_native_runtime_tests.step);
+    const port_tests = b.addTest(.{ .root_module = test_mod, .filters = &.{ "process:", "net:", "native:" } });
+    port_tests.linkage = runtime_linkage;
+    const run_port_tests = b.addRunArtifact(port_tests);
+    run_port_tests.step.dependOn(&fixture_files.step);
+    b.step("test-ports", "Run shared process, network, and native port behavior").dependOn(&run_port_tests.step);
     const native_acceptance_mod = b.createModule(.{
         .root_source_file = b.path("test/native_runtime.zig"),
         .target = target,

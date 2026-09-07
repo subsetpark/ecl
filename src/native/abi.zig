@@ -5,8 +5,8 @@
 
 const builtin = @import("builtin");
 
-pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v1";
-pub const abi_version: u32 = 1;
+pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v3";
+pub const abi_version: u32 = 3;
 
 pub const max_error_message_bytes: u32 = 4096;
 pub const max_guest_scalar_bytes: u32 = 4096;
@@ -22,6 +22,7 @@ pub const CapabilityId = enum(u32) {
     call = 1,
     build_values = 2,
     reschedule = 3,
+    ports = 4,
     _,
 };
 
@@ -66,10 +67,65 @@ pub const ValueKindWire = enum(u32) {
     word = 4,
     list = 5,
     dict = 6,
+    port = 7,
     _,
 };
 
 pub const Candidate = u64;
+
+pub const max_port_definitions = 64;
+pub const max_port_state_bytes = 1 << 20;
+pub const max_operation_slots = 16;
+pub const max_port_lanes = 16;
+pub const PortCancellation = enum(u32) { close_resource, acknowledge, _ };
+
+pub const PortAction = enum(u32) { create, check, begin, write, finish_request, read, result, wait, close, release, _ };
+pub const PortStatus = enum(u32) { ready, pending, failed, _ };
+pub const PortRequest = extern struct {
+    size: u32 = @sizeOf(PortRequest),
+    action: PortAction,
+    definition: u32,
+    slot: u32 = 0,
+    port: Candidate = 0,
+    operation: u32 = 0,
+    interests: u32 = 3,
+    bytes: ?[*]u8 = null,
+    length: u32 = 0,
+};
+pub const PortReply = extern struct {
+    size: u32 = @sizeOf(PortReply),
+    status: PortStatus = .ready,
+    candidate: Candidate = 0,
+    transferred: u32 = 0,
+};
+pub const PortFn = *const fn (*anyopaque, *const PortRequest, *PortReply) callconv(.c) HostStatus;
+/// Controller streams block only their private host controller. Zero bytes
+/// denotes request EOF or cancellation; failure is reported separately.
+pub const ControllerTable = extern struct {
+    read: *const fn (*anyopaque, [*]u8, u32) callconv(.c) u32,
+    write: *const fn (*anyopaque, [*]const u8, u32) callconv(.c) u32,
+    cancelled: *const fn (*anyopaque) callconv(.c) bool,
+    acknowledge_cancellation: *const fn (*anyopaque) callconv(.c) bool,
+    fail: *const fn (*anyopaque, ErrorKindWire, [*]const u8, u32) callconv(.c) void,
+};
+pub const PortControllerFn = *const fn (*anyopaque, *const ControllerTable, *anyopaque) callconv(.c) void;
+pub const PortOperationFn = *const fn (*anyopaque, u32, *const ControllerTable, *anyopaque) callconv(.c) void;
+pub const PortDefinition = extern struct {
+    size: u32 = @sizeOf(PortDefinition),
+    state_size: u32,
+    state_alignment: u32,
+    name_len: u32,
+    name_ptr: [*]const u8,
+    init_state: ?StateInitFn,
+    initialize: ?PortControllerFn,
+    execute: ?PortOperationFn,
+    cancel: ?StateDeinitFn,
+    cleanup: ?StateDeinitFn,
+    lane_count: u32 = 1,
+    cancellation: PortCancellation = .close_resource,
+    select_lane: ?*const fn (u32) callconv(.c) u32 = null,
+    cancel_operation: ?*const fn (*anyopaque, u32) callconv(.c) void = null,
+};
 
 pub const CapabilityRequirement = extern struct {
     size: u32 = @sizeOf(CapabilityRequirement),
@@ -189,6 +245,15 @@ pub const ReadPathFn = *const fn (
     path_len: u32,
     output: *ValueView,
 ) callconv(.c) HostStatus;
+/// Retains the value addressed by the same bounded path as `read_path` in
+/// the current invocation's candidate table. No backend authority is granted.
+pub const ForwardPathFn = *const fn (
+    call_context: *anyopaque,
+    input_index: u32,
+    path_ptr: [*]const u64,
+    path_len: u32,
+    output: *Candidate,
+) callconv(.c) HostStatus;
 pub const CompleteFn = *const fn (
     call_context: *anyopaque,
     outputs: [*]const Candidate,
@@ -229,6 +294,8 @@ pub const HostTable = extern struct {
     build_list_finish: ?BuildListFinishFn,
     build_dict_append: ?BuildDictAppendFn,
     build_dict_finish: ?BuildDictFinishFn,
+    forward_path: ?ForwardPathFn = null,
+    port: ?PortFn = null,
 };
 
 pub const Invoke = *const fn (
@@ -253,6 +320,9 @@ pub const Descriptor = extern struct {
     capabilities_ptr: [*]const CapabilityRequirement,
     callback_count: u32,
     invoke: ?Invoke,
+    port_count: u32 = 0,
+    port_record_size: u32 = @sizeOf(PortDefinition),
+    ports_ptr: ?[*]const PortDefinition = null,
 };
 
 pub const EntryResult = extern struct {
@@ -313,8 +383,8 @@ fn assertRecord(comptime T: type, comptime expected_size: usize, comptime expect
 }
 
 comptime {
-    @setEvalBranchQuota(4000);
-    if (@sizeOf(usize) != 8) @compileError("native ABI v1 supports 64-bit targets only");
+    @setEvalBranchQuota(8000);
+    if (@sizeOf(usize) != 8) @compileError("native ABI v3 supports 64-bit targets only");
 
     assertRecord(CapabilityRequirement, 8, 4);
     assertRecord(EffectSlot, 24, 8);
@@ -322,8 +392,12 @@ comptime {
     assertRecord(ValueView, 40, 8);
     assertRecord(Scalar, 32, 8);
     assertRecord(InvokeResult, 16, 8);
-    assertRecord(HostTable, 128, 8);
-    assertRecord(Descriptor, 88, 8);
+    assertRecord(HostTable, 144, 8);
+    assertRecord(Descriptor, 104, 8);
+    assertRecord(PortDefinition, 88, 8);
+    assertRecord(PortRequest, 48, 8);
+    assertRecord(PortReply, 24, 8);
+    assertRecord(ControllerTable, 40, 8);
     assertRecord(EntryResult, 32, 8);
 
     if (@offsetOf(Definition, "callback_index") != 4 or

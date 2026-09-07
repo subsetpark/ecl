@@ -12,6 +12,16 @@ pub const Outcome = enum(u32) {
 pub const Kind = abi.ValueKindWire;
 pub const ErrorKind = abi.ErrorKindWire;
 
+/// Bound valid UTF-8 without splitting its last code point. Both callback
+/// surfaces use this prefix before handing the host a borrowed message.
+pub fn boundedErrorMessage(message: []const u8) []const u8 {
+    var end = @min(message.len, abi.max_error_message_bytes);
+    if (end < message.len) {
+        while (end != 0 and message[end] & 0xc0 == 0x80) end -= 1;
+    }
+    return message[0..end];
+}
+
 pub const Candidate = enum(u64) {
     invalid = 0,
     _,
@@ -217,7 +227,7 @@ pub const ValueView = opaque {
     pub fn bytes(self: *const ValueView) ?[]const u8 {
         return switch (self.kind()) {
             .symbol, .word => self.state().wire.bytes_ptr.?[0..self.state().wire.bytes_len],
-            .int, .float, .char, .list, .dict => null,
+            .int, .float, .char, .list, .dict, .port => null,
             _ => null,
         };
     }
@@ -225,7 +235,7 @@ pub const ValueView = opaque {
     pub fn aggregateLength(self: *const ValueView) ?u64 {
         return switch (self.kind()) {
             .list, .dict => self.state().wire.aggregate_len,
-            .int, .float, .char, .symbol, .word => null,
+            .int, .float, .char, .symbol, .word, .port => null,
             _ => null,
         };
     }

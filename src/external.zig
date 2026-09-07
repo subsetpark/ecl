@@ -357,6 +357,9 @@ pub const ScopeMembership = struct {
 /// origin has not yet let go. States such as closed-with-a-pending-move or
 /// live-with-no-owner are not representable.
 pub const Ownership = union(enum) {
+    /// Initial attachment is still outstanding. Release remembers cancellation
+    /// by transitioning to none, so a late membership cannot resurrect ownership.
+    provisional,
     none,
     owned: ScopeMembership,
     transferring: struct { origin: ScopeMembership, destination: ScopeMembership },
@@ -380,18 +383,34 @@ pub const Ownership = union(enum) {
         }
     };
 
+    /// Consumes the initial membership under the resource lock. A release that
+    /// won the attachment race returns it for detachment outside that lock.
+    pub fn publish(self: *Ownership, membership: ScopeMembership) Detached {
+        switch (self.*) {
+            .provisional => {
+                self.* = .{ .owned = membership };
+                return .{};
+            },
+            .none => return .{ .first = membership },
+            .owned, .transferring => @panic("external resource already published"),
+        }
+    }
+
     /// The scope that owns the resource now, or null when none does. During a
     /// transfer this is still the origin: the move is not yet authoritative.
     pub fn owningScope(self: Ownership) ?*anyopaque {
         return switch (self) {
-            .none => null,
+            .none, .provisional => null,
             .owned => |current| current.owningScope(),
             .transferring => |both| both.origin.owningScope(),
         };
     }
 
     pub fn live(self: Ownership) bool {
-        return self != .none;
+        return switch (self) {
+            .owned, .transferring => true,
+            .none, .provisional => false,
+        };
     }
 
     /// Give up every membership. A resource closing mid-transfer detaches the
@@ -399,7 +418,7 @@ pub const Ownership = union(enum) {
     pub fn release(self: *Ownership) Detached {
         defer self.* = .none;
         return switch (self.*) {
-            .none => .{},
+            .none, .provisional => .{},
             .owned => |current| .{ .first = current },
             .transferring => |both| .{ .first = both.origin, .second = both.destination },
         };
