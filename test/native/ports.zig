@@ -98,6 +98,37 @@ fn DuplexSpec(comptime acknowledge: bool) type {
         pub fn run(state: *State, code: u32, controller: *ecl.Controller) void {
             const current = &state.lanes[@intFromEnum(lane(code))];
             if (code == 8) return;
+            if (code == 10 or code == 11) {
+                _ = controller.writeTo(1, &.{ 4, 5, 6 });
+                if (code == 11) _ = controller.finishOutput(1);
+                controller.fail(.domain, "failure after buffered output");
+                return;
+            }
+            if (code == 12) {
+                var buffer: [64]u8 = undefined;
+                while (true) {
+                    const count = controller.readFrom(0, &buffer);
+                    if (count == 0) return;
+                    var sent: usize = 0;
+                    while (sent < count) {
+                        const n = controller.writeTo(1, buffer[sent..count]);
+                        if (n == 0) return;
+                        sent += n;
+                    }
+                    for (buffer[0..count]) |*byte| byte.* ^= 255;
+                    sent = 0;
+                    while (sent < count) {
+                        const n = controller.writeTo(2, buffer[sent..count]);
+                        if (n == 0) return;
+                        sent += n;
+                    }
+                }
+            }
+            if (code == 13) {
+                var byte: [1]u8 = undefined;
+                if (controller.readFrom(0, &byte) != 0) _ = controller.writeTo(1, &byte);
+                return;
+            }
             if (code == 6) {
                 if (current.total != 7 or !checkParameters(controller)) controller.fail(.domain, "structured parameters were not preserved");
                 return;
@@ -420,9 +451,14 @@ pub const Extension = ecl.module(.{
         ecl.operation("failure", "Fail with a deterministic terminal error.", Duplex, 2, .receive, 0),
         ecl.operation("inspect", "Validate structured parameters without additional streaming.", Duplex, 6, .receive, 0),
         ecl.operation("noop", "Complete without additional streaming.", Duplex, 8, .receive, 0),
+        ecl.operation("buffered-failure", "Fail after accepting output bytes.", Duplex, 10, .receive, 2),
+        ecl.operation("finished-failure", "Fail after finishing the output endpoint.", Duplex, 11, .receive, 2),
+        ecl.operation("pipeline", "Stream input, output, and independent diagnostics.", Duplex, 12, .receive, 7),
+        ecl.operation("early-exit", "Stop consuming input after one byte.", Duplex, 13, .receive, 3),
         ecl.operation("blocked", "Wait for an explicit controller gate.", Duplex, 3, .receive, 3),
         ecl.endpoint("input", "Exchange byte input.", Duplex, .{ .id = 0, .transport = .bytes, .direction = .input }),
         ecl.endpoint("output", "Exchange byte output.", Duplex, .{ .id = 1, .transport = .bytes, .direction = .output }),
+        ecl.endpoint("diagnostics", "Independent pipeline diagnostic bytes.", Duplex, .{ .id = 2, .transport = .bytes, .direction = .output }),
         ecl.word("duplex-new-ready-wait", "Create lanes with deterministic wait allocation.", createDuplexReadyWait),
         ecl.word("duplex-exchange-ready-wait", "Exercise deterministic lane admission and wait allocation.", exchangeDuplexReadyWait),
         ecl.word("duplex-new", "Create a port with independently progressing lanes.", createDuplex),

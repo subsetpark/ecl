@@ -68,6 +68,12 @@ identity. Their complete registration validates before the module is visible.
 controllers read them through bounded `Controller.input` paths. Each request
 allows at most 64 KiB of scalar/text data, 4,096 aggregate nodes, and 16 port
 attachments. Executable words, tasks, and modules are rejected recursively.
+Registered byte endpoints are selected by opaque ECL capabilities; controllers
+use `readFrom`, `writeTo`, and `finishOutput` with their declared endpoint IDs.
+Each enabled byte endpoint has a bounded ring using the host's configured byte
+capacity. Output and diagnostics require concurrent consumption when both may
+fill. Controller reads and writes may return partial chunks; cancellation and
+resource closure interrupt blocked transport.
 Their words can forward opaque ports through aggregates, stream operations,
 and explicitly close them. Operations execute in FIFO order within a declared
 lane. A port defaults to one lane; multiple lanes and different ports can

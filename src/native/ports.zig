@@ -57,6 +57,18 @@ pub const Controller = opaque {
         const state_value = self.state();
         return state_value.table.read(state_value.context, bytes.ptr, @intCast(@min(bytes.len, 64 * 1024)));
     }
+    pub fn readFrom(self: *Controller, endpoint: u6, bytes: []u8) usize {
+        const owned = self.state();
+        return owned.table.read_endpoint(owned.context, endpoint, bytes.ptr, @intCast(@min(bytes.len, 64 * 1024)));
+    }
+    pub fn writeTo(self: *Controller, endpoint: u6, bytes: []const u8) usize {
+        const owned = self.state();
+        return owned.table.write_endpoint(owned.context, endpoint, bytes.ptr, @intCast(@min(bytes.len, 64 * 1024)));
+    }
+    pub fn finishOutput(self: *Controller, endpoint: u6) bool {
+        const owned = self.state();
+        return owned.table.finish_endpoint(owned.context, endpoint);
+    }
     pub fn write(self: *Controller, bytes: []const u8) usize {
         const state_value = self.state();
         return state_value.table.write(state_value.context, bytes.ptr, @intCast(@min(bytes.len, 64 * 1024)));

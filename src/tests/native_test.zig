@@ -13,6 +13,10 @@ const native_fixture = @import("native_fixture_options");
 const ecl = @import("ecl-native");
 
 fn expectPortProgram(workers: u32, max_operations: u32, source: []const u8, expected: []const u8) !void {
+    try expectPortProgramAtCapacity(workers, max_operations, 8, source, expected);
+}
+
+fn expectPortProgramAtCapacity(workers: u32, max_operations: u32, capacity: u32, source: []const u8, expected: []const u8) !void {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
@@ -22,7 +26,7 @@ fn expectPortProgram(workers: u32, max_operations: u32, source: []const u8, expe
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
         .ecl_path = native_fixture.directory,
-        .native_port_limits = .{ .ring_capacity = 8, .max_operations = max_operations },
+        .native_port_limits = .{ .ring_capacity = capacity, .max_operations = max_operations },
     }, .{ .worker_pool = workers });
     defer runtime.deinit();
     try expectOk(&runtime, "'task ('await 'cancel) import portprobe.reset");
@@ -56,6 +60,79 @@ test "native: common requests reject executable values oversize data and foreign
         "[] (portprobe.factory [0] 4096 take port.open) @attempt 'err at 'kind at " ++
         "portprobe.other-new 'p set [] (p portprobe.failure [] port.begin) @attempt 'err at 'kind at " ++
         "p port.close portprobe.cleaned", "'type 'overflow 'type 1");
+}
+
+test "native: byte endpoints preserve exact bytes finish and stable eof" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.factory [] port.open 'p set p portprobe.echo [] port.begin 'x set " ++
+        "x portprobe.input port.endpoint 'w set x portprobe.output port.endpoint 'r set " ++
+        "w [0 10 255 1] port.write w port.finish w port.finish x port.await " ++
+        "r 8 port.read r 8 port.read r 8 port.read " ++
+        "x port.result x port.close p port.close r type portprobe.cleaned", "[0 10 255 1] [] [] () 'port 1");
+}
+
+test "native: endpoint attenuation rejects other directions and ownership transfer" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.factory [] port.open 'p set p portprobe.echo [] port.begin 'x set " ++
+        "x portprobe.input port.endpoint 'w set x portprobe.output port.endpoint 'r set " ++
+        "w wrap (8 port.read) @attempt 'err at 'kind at " ++
+        "r wrap ([1] port.write) @attempt 'err at 'kind at " ++
+        "r wrap (port.finish) @attempt 'err at 'kind at " ++
+        "w wrap [] (pop) 3 pack (@give) @attempt 'err at 'kind at " ++
+        "w port.finish x port.await x port.close p port.close portprobe.cleaned", "'type 'type 'type 'domain 1");
+}
+
+test "native: media pipeline drains output and diagnostics concurrently under pressure" {
+    for ([_]u32{ 1, 8 }) |workers| for ([_]u32{ 1, 8 }) |capacity| try expectPortProgramAtCapacity(workers, 4, capacity, "portprobe.factory [] port.open 'p set p portprobe.pipeline [] port.begin 'x set " ++
+        "x portprobe.input port.endpoint 'w set " ++
+        "x portprobe.output port.endpoint wrap ('r set [] (dup len 32 <) (r 8 port.read cat) while r 8 port.read) @spawn 'a set " ++
+        "x portprobe.diagnostics port.endpoint wrap ('r set [] (dup len 32 <) (r 8 port.read cat) while r 8 port.read) @spawn 'b set " ++
+        "w [3] 32 take port.write w port.finish " ++
+        "a task.await 'ok at dup first [3] 32 take match? swap 1 at len " ++
+        "b task.await 'ok at dup first [252] 32 take match? swap 1 at len " ++
+        "x port.await x port.close p port.close portprobe.cleaned", "1 0 1 0 1");
+}
+
+test "native: input finish preserves an accepted writer through its final byte" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.factory [] port.open 'p set p portprobe.echo [] port.begin 'x set " ++
+        "x portprobe.input port.endpoint 'w set x portprobe.output port.endpoint 'r set " ++
+        "w wrap ([1] 32 take port.write) @spawn 'a set r 8 port.read 'prefix set w port.finish " ++
+        "prefix (dup len 32 <) (r 8 port.read cat) while [1] 32 take match? " ++
+        "r 8 port.read len a task.await 'ok at pop " ++
+        "w wrap ([] port.write) @attempt 'err at 'kind at " ++
+        "x port.await x port.close p port.close portprobe.cleaned", "1 0 'io 1");
+}
+
+test "native: concurrent writes remain contiguous through repeated byte pressure" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.factory [] port.open 'p set p portprobe.echo [] port.begin 'x set " ++
+        "x portprobe.input port.endpoint 'w set " ++
+        "x portprobe.output port.endpoint wrap ('r set [] (dup len 32 <) (r 8 port.read cat) while) @spawn 'reader set " ++
+        "w wrap ([1] 16 take port.write) @spawn 'a set w wrap ([2] 16 take port.write) @spawn 'b set " ++
+        "a task.await 'ok at pop b task.await 'ok at pop w port.finish " ++
+        "reader task.await 'ok at first dup [1] 16 take [2] 16 take cat match? " ++
+        "swap [2] 16 take [1] 16 take cat match? or " ++
+        "x port.await x port.close p port.close portprobe.cleaned", "1 1");
+}
+
+test "native: overlapping endpoint reads fail without consuming the pending read" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.factory [] port.open 'p set p portprobe.blocked [] port.begin 'x set 1 portprobe.await-blocked " ++
+        "x portprobe.output port.endpoint 'r set r wrap (8 port.read) @spawn 'a set r wrap (8 port.read) @spawn 'b set " ++
+        "a b 2 pack task.await-any 'err at 'kind at swap pop " ++
+        "x port.cancel a task.await pop b task.await pop x port.close p port.close portprobe.cleaned", "'contract 1");
+}
+
+test "native: accepted output precedes failure and explicit eof remains stable" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.factory [] port.open 'p set p portprobe.buffered-failure [] port.begin 'x set " ++
+        "x wrap (port.await) @attempt 'err at 'kind at x portprobe.output port.endpoint 'r set " ++
+        "r 8 port.read r wrap (8 port.read) @attempt 'err at 'kind at x port.close " ++
+        "p portprobe.finished-failure [] port.begin 'y set y wrap (port.await) @attempt pop " ++
+        "y portprobe.output port.endpoint 's set s 8 port.read s 8 port.read s 8 port.read " ++
+        "y port.close p port.close portprobe.cleaned", "'domain [4 5 6] 'domain [4 5 6] [] [] 1");
+}
+
+test "native: early consumer completion interrupts a blocked byte producer" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.factory [] port.open 'p set p portprobe.early-exit [] port.begin 'x set " ++
+        "x portprobe.input port.endpoint 'w set w wrap ([7] 32 take port.write) @attempt 'err at 'kind at " ++
+        "w port.finish x port.await x portprobe.output port.endpoint 8 port.read " ++
+        "x port.close p port.close portprobe.cleaned", "'io [7] 1");
 }
 
 test "native: an exported exchange remains owned when only a borrowed use is sent" {
@@ -1036,6 +1113,9 @@ test "native: cooperative slices let another unit progress at one worker" {
         .{ .worker_pool = 1 },
     );
     defer runtime.deinit();
+    // Measure interleaved execution after module loading; a cold await-any
+    // lookup can otherwise let the native task finish before observing it.
+    try expectOk(&runtime, "'task ('await 'await-any) import 0 sample.increment pop");
     try expectOk(
         &runtime,
         "[] ([] (sample.cooperative) @spawn 'native-task set " ++

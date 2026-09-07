@@ -12,6 +12,7 @@ const Value = @import("value.zig").Value;
 const list = @import("list.zig");
 const descriptor = @import("native_descriptor.zig");
 const port_message = @import("port_message.zig");
+const byte_transport = @import("port_bytes.zig");
 
 const RegisteredState = struct {
     instance: *native.ModuleInstance,
@@ -436,6 +437,45 @@ pub const Cell = struct {
     }
 };
 
+const Protocol = union(enum) {
+    legacy: struct { request: Ring, response: Ring, finished: bool = false },
+    registered: struct { parameters: Value, pipes: [64]?byte_transport.Pair = .{null} ** 64 },
+
+    fn init(cell: *Cell, endpoints: u64, parameters: ?*const port_message.Validated) error{OutOfMemory}!Protocol {
+        const input = parameters orelse {
+            const request = try cell.allocator.alloc(u8, cell.owner.limits.ring_capacity);
+            errdefer cell.allocator.free(request);
+            const response = try cell.allocator.alloc(u8, cell.owner.limits.ring_capacity);
+            return .{ .legacy = .{ .request = .{ .bytes = request }, .response = .{ .bytes = response } } };
+        };
+        heap.retainValue(input.value());
+        var result: Protocol = .{ .registered = .{ .parameters = input.value() } };
+        errdefer result.deinit(cell);
+        for (&result.registered.pipes, 0..) |*pipe, index| {
+            const id: u6 = @intCast(index);
+            if (endpoints & (@as(u64, 1) << id) == 0) continue;
+            const definition = cell.instance.validated().endpoint(cell.kind, id, .exchange).?;
+            if (definition.transport == .bytes) pipe.* = byte_transport.create(cell.owner.host, cell.owner.limits.ring_capacity) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidCapacity => unreachable,
+            };
+        }
+        return result;
+    }
+    fn deinit(self: *Protocol, cell: *Cell) void {
+        switch (self.*) {
+            .legacy => |legacy| {
+                cell.allocator.free(legacy.request.bytes);
+                cell.allocator.free(legacy.response.bytes);
+            },
+            .registered => |registered| {
+                for (registered.pipes) |pipe| if (pipe) |pair| pair.pipe.release();
+                heap.hostDomain(cell.owner.host).releaseValue(registered.parameters);
+            },
+        }
+    }
+};
+
 pub const Operation = struct {
     allocator: std.mem.Allocator,
     cell: *Cell,
@@ -445,37 +485,28 @@ pub const Operation = struct {
     mutex: std.Io.Mutex = .init,
     changed: std.Io.Condition = .init,
     waits: external.WaitList(Operation) = .{},
-    request: Ring,
-    response: Ring,
-    request_finished: bool = false,
+    protocol: Protocol,
     failure: ?Failure = null,
     ownership: external.Ownership = .provisional,
     lifetime: enum { open, closing, closed } = .open,
     terminal_result: union(enum) { available: Value, claimed },
-    parameters: ?Value = null,
     endpoints: u64,
 
     fn create(cell: *Cell, code: u32, lane: u32, endpoints: u64, parameters: ?*const port_message.Validated) error{ OutOfMemory, Closed, Full }!*Operation {
         const allocator = cell.allocator;
-        const request = try allocator.alloc(u8, cell.owner.limits.ring_capacity);
-        errdefer allocator.free(request);
-        const response = try allocator.alloc(u8, cell.owner.limits.ring_capacity);
-        errdefer allocator.free(response);
+        var protocol = try Protocol.init(cell, endpoints, parameters);
+        errdefer protocol.deinit(cell);
         const terminal_value = try list.fromValues(allocator, &.{});
         errdefer heap.hostDomain(cell.owner.host).releaseValue(terminal_value);
         lock(&cell.mutex);
         defer unlock(&cell.mutex);
         if (cell.closed.load(.acquire)) return error.Closed;
-        const ticket = try cell.lanes[lane].admit(allocator, cell.laneCapacity(lane), .{ cell, code, lane, request, response, terminal_value, endpoints, parameters }, initialize) orelse return error.Full;
+        const ticket = try cell.lanes[lane].admit(allocator, cell.laneCapacity(lane), .{ cell, code, lane, protocol, terminal_value, endpoints }, initialize) orelse return error.Full;
         cell.changed.broadcast(io());
         return ticket.owner();
     }
-    fn initialize(op: *Operation, ticket: *Operations.Ticket, cell: *Cell, code: u32, lane: u32, request: []u8, response: []u8, terminal_value: Value, endpoints: u64, parameters: ?*const port_message.Validated) void {
-        op.* = .{ .allocator = cell.allocator, .cell = cell, .code = code, .lane = lane, .ticket = ticket, .request = .{ .bytes = request }, .response = .{ .bytes = response }, .terminal_result = .{ .available = terminal_value }, .endpoints = endpoints };
-        if (parameters) |validated| {
-            op.parameters = validated.value();
-            heap.retainValue(validated.value());
-        }
+    fn initialize(op: *Operation, ticket: *Operations.Ticket, cell: *Cell, code: u32, lane: u32, protocol: Protocol, terminal_value: Value, endpoints: u64) void {
+        op.* = .{ .allocator = cell.allocator, .cell = cell, .code = code, .lane = lane, .ticket = ticket, .protocol = protocol, .terminal_result = .{ .available = terminal_value }, .endpoints = endpoints };
         cell.retainReadiness();
     }
     fn runnable(self: *Operation) bool {
@@ -569,13 +600,11 @@ pub const Operation = struct {
         return self.lifetime == .closed;
     }
     fn deinit(self: *Operation) void {
-        if (self.parameters) |parameters| heap.hostDomain(self.cell.owner.host).releaseValue(parameters);
+        self.protocol.deinit(self.cell);
         switch (self.terminal_result) {
             .available => |item| heap.hostDomain(self.cell.owner.host).releaseValue(item),
             .claimed => {},
         }
-        self.allocator.free(self.request.bytes);
-        self.allocator.free(self.response.bytes);
         self.cell.releasePort();
     }
     pub fn registerReadiness(self: *Operation, key: u64, target: external.WakeTarget) external.RegisterError!external.RegisterResult {
@@ -584,9 +613,10 @@ pub const Operation = struct {
     pub fn readyLocked(self: *Operation, key: u64) bool {
         if (key == 4) return self.lifetime == .closed;
         if (key == 8) return self.ticket.status() == .done or self.ticket.status() == .cancelled;
+        if (self.protocol != .legacy) return self.ticket.status() == .done or self.ticket.isCancelled();
         return self.ticket.status() == .done or self.ticket.isCancelled() or
-            (key & 1 != 0 and self.response.len != 0) or
-            (key & 2 != 0 and !self.request_finished and self.request.free() != 0);
+            (key & 1 != 0 and self.protocol.legacy.response.len != 0) or
+            (key & 2 != 0 and !self.protocol.legacy.finished and self.protocol.legacy.request.free() != 0);
     }
     pub fn wakeReasonLocked(_: *Operation, _: u64) external.Wake {
         return .ready;
@@ -595,6 +625,18 @@ pub const Operation = struct {
         return external.readinessSource(Operation, self, interests);
     }
     fn notifyLocked(self: *Operation) void {
+        if (self.protocol == .registered and (self.ticket.isCancelled() or self.ticket.status() == .done)) {
+            for (self.protocol.registered.pipes, 0..) |pipe, index| if (pipe) |pair| {
+                const endpoint = self.cell.instance.validated().endpoint(self.cell.kind, @intCast(index), .exchange).?;
+                if (self.ticket.isCancelled()) {
+                    pair.pipe.fail(byte_transport.Failure.init(.cancelled, "exchange was cancelled"), false);
+                } else if (endpoint.direction == .input) {
+                    pair.pipe.fail(byte_transport.Failure.init(.io, "exchange input consumer completed"), true);
+                } else if (self.failure) |failure| {
+                    pair.pipe.fail(byte_transport.Failure.init(descriptor.mapErrorKind(failure.kind) orelse .io, failure.message[0..failure.len]), false);
+                } else pair.pipe.finish();
+            };
+        }
         self.changed.broadcast(io());
         self.waits.notifyLocked(self);
     }
@@ -646,9 +688,9 @@ pub const Operation = struct {
     pub fn write(self: *Operation, bytes: []const u8) ?usize {
         lock(&self.mutex);
         defer unlock(&self.mutex);
-        if (self.ticket.isCancelled() or self.ticket.status() == .done or self.request_finished) return null;
-        const count = @min(bytes.len, self.request.free());
-        self.request.push(bytes[0..count]);
+        if (self.ticket.isCancelled() or self.ticket.status() == .done or self.protocol.legacy.finished) return null;
+        const count = @min(bytes.len, self.protocol.legacy.request.free());
+        self.protocol.legacy.request.push(bytes[0..count]);
         self.notifyLocked();
         return count;
     }
@@ -656,13 +698,13 @@ pub const Operation = struct {
         lock(&self.mutex);
         defer unlock(&self.mutex);
         if (self.ticket.isCancelled()) return null;
-        const count = self.response.pop(bytes);
+        const count = self.protocol.legacy.response.pop(bytes);
         self.notifyLocked();
         return count;
     }
     pub fn finishRequest(self: *Operation) void {
         lock(&self.mutex);
-        self.request_finished = true;
+        self.protocol.legacy.finished = true;
         self.notifyLocked();
         unlock(&self.mutex);
     }
@@ -673,6 +715,70 @@ pub fn exchangeFromValue(item: Value) ?*Operation {
     return heap.portPayload(Operation, .exchange, item.port);
 }
 
+const EndpointState = struct {
+    parent: Value,
+    loan: union(enum) { reader: *byte_transport.Pipe, writer: *byte_transport.Pipe },
+};
+
+/// The endpoint's variant is its complete transport authority. Its retained
+/// parent identity keeps the transport alive without transferring scope.
+pub const Endpoint = opaque {
+    fn state(self: *Endpoint) *EndpointState {
+        return @ptrCast(@alignCast(self));
+    }
+    pub fn reader(self: *Endpoint) ?*byte_transport.Pipe {
+        return switch (self.state().loan) {
+            .reader => |pipe| pipe,
+            .writer => null,
+        };
+    }
+    pub fn writer(self: *Endpoint) ?*byte_transport.Pipe {
+        return switch (self.state().loan) {
+            .writer => |pipe| pipe,
+            .reader => null,
+        };
+    }
+    pub fn releasePort(self: *Endpoint) void {
+        const owned = self.state();
+        const parent = owned.parent;
+        const owner = exchangeFromValue(parent).?.cell.owner;
+        owner.allocator().destroy(owned);
+        heap.hostDomain(owner.host).releaseValue(parent);
+    }
+};
+
+pub fn endpointFromValue(item: Value) ?*Endpoint {
+    if (item != .port) return null;
+    return heap.portPayload(Endpoint, .endpoint, item.port);
+}
+
+/// Failure leaves both inputs owned by their caller. Success retains the
+/// source identity and publishes an attenuated borrow, never another owner.
+pub fn borrowEndpoint(parent: Value, selector: *RegisteredCapability) error{ OutOfMemory, WrongKind, Unsupported }!Value {
+    const spec = switch (selector.definition()) {
+        .endpoint => |endpoint| endpoint,
+        else => return error.WrongKind,
+    };
+    const operation = exchangeFromValue(parent) orelse return error.WrongKind;
+    if (operation.cell.instance != selector.instance() or operation.cell.kind != spec.resource) return error.WrongKind;
+    if (spec.owner != .exchange or operation.protocol != .registered or operation.endpoints & (@as(u64, 1) << spec.id) == 0) return error.Unsupported;
+    const pair = operation.protocol.registered.pipes[spec.id] orelse return error.Unsupported;
+    const owner = operation.cell.owner;
+    const owned = try owner.allocator().create(EndpointState);
+    errdefer owner.allocator().destroy(owned);
+    owned.* = .{ .parent = parent, .loan = switch (spec.direction) {
+        .input => .{ .writer = pair.pipe },
+        .output => .{ .reader = pair.pipe },
+    } };
+    lock(&owner.mutex);
+    const identity = owner.identity;
+    owner.identity +%= 1;
+    unlock(&owner.mutex);
+    const result = try heap.createBorrowedPort(Endpoint, .endpoint, owner.allocator(), identity, @ptrCast(owned));
+    heap.retainValue(parent);
+    return result;
+}
+
 const ControllerContext = struct { cell: *Cell, operation: ?*Operation, running: ?*controllers.Running = null };
 fn context(raw: *anyopaque) *ControllerContext {
     return @ptrCast(@alignCast(raw));
@@ -680,7 +786,10 @@ fn context(raw: *anyopaque) *ControllerContext {
 fn controllerInput(raw: *anyopaque, path: [*]const u64, depth: u32, output: *abi.ValueView) callconv(.c) bool {
     if (depth > abi.max_read_path_depth or output.size != @sizeOf(abi.ValueView)) return false;
     const ctx = context(raw);
-    const root = if (ctx.operation) |operation| operation.parameters else ctx.cell.configuration;
+    const root: ?Value = if (ctx.operation) |operation| switch (operation.protocol) {
+        .legacy => null,
+        .registered => |registered| registered.parameters,
+    } else ctx.cell.configuration;
     var item = root orelse {
         if (depth != 0) return false;
         output.* = .{ .kind = .list };
@@ -711,23 +820,25 @@ fn controllerInput(raw: *anyopaque, path: [*]const u64, depth: u32, output: *abi
 fn controllerRead(raw: *anyopaque, bytes: [*]u8, length: u32) callconv(.c) u32 {
     if (length == 0) return 0;
     const op = context(raw).operation orelse return 0;
+    if (op.protocol == .registered) return controllerReadEndpoint(raw, 0, bytes, length);
     lock(&op.mutex);
     defer unlock(&op.mutex);
-    while (!op.ticket.isCancelled() and op.request.len == 0 and !op.request_finished) op.changed.waitUncancelable(io(), &op.mutex);
+    while (!op.ticket.isCancelled() and op.protocol.legacy.request.len == 0 and !op.protocol.legacy.finished) op.changed.waitUncancelable(io(), &op.mutex);
     if (op.ticket.isCancelled()) return 0;
-    const count = op.request.pop(bytes[0..@min(length, 64 * 1024)]);
+    const count = op.protocol.legacy.request.pop(bytes[0..@min(length, 64 * 1024)]);
     op.notifyLocked();
     return @intCast(count);
 }
 fn controllerWrite(raw: *anyopaque, bytes: [*]const u8, length: u32) callconv(.c) u32 {
     if (length == 0) return 0;
     const op = context(raw).operation orelse return 0;
+    if (op.protocol == .registered) return controllerWriteEndpoint(raw, 1, bytes, length);
     lock(&op.mutex);
     defer unlock(&op.mutex);
-    while (!op.ticket.isCancelled() and op.response.free() == 0) op.changed.waitUncancelable(io(), &op.mutex);
+    while (!op.ticket.isCancelled() and op.protocol.legacy.response.free() == 0) op.changed.waitUncancelable(io(), &op.mutex);
     if (op.ticket.isCancelled()) return 0;
-    const count = @min(@min(length, 64 * 1024), op.response.free());
-    op.response.push(bytes[0..count]);
+    const count = @min(@min(length, 64 * 1024), op.protocol.legacy.response.free());
+    op.protocol.legacy.response.push(bytes[0..count]);
     op.notifyLocked();
     return @intCast(count);
 }
@@ -738,6 +849,40 @@ fn controllerCancelled(raw: *anyopaque) callconv(.c) bool {
     lock(&op.mutex);
     defer unlock(&op.mutex);
     return op.ticket.isCancelled();
+}
+
+fn controllerPipe(raw: *anyopaque, index: u32, direction: enum { input, output }) ?byte_transport.Pair {
+    const op = context(raw).operation orelse return null;
+    if (op.protocol != .registered or index >= 64) return null;
+    const endpoint = op.cell.instance.validated().endpoint(op.cell.kind, @intCast(index), .exchange) orelse return null;
+    if (endpoint.transport != .bytes or switch (direction) {
+        .input => endpoint.direction != .input,
+        .output => endpoint.direction != .output,
+    }) return null;
+    return op.protocol.registered.pipes[index];
+}
+fn controllerReadEndpoint(raw: *anyopaque, index: u32, bytes: [*]u8, length: u32) callconv(.c) u32 {
+    if (length == 0) return 0;
+    const pair = controllerPipe(raw, index, .input) orelse {
+        const text = "controller selected an unsupported byte input";
+        controllerFail(raw, .domain, text.ptr, text.len);
+        return 0;
+    };
+    return @intCast(pair.controller.read(bytes[0..@min(length, 64 * 1024)]));
+}
+fn controllerWriteEndpoint(raw: *anyopaque, index: u32, bytes: [*]const u8, length: u32) callconv(.c) u32 {
+    if (length == 0) return 0;
+    const pair = controllerPipe(raw, index, .output) orelse {
+        const text = "controller selected an unsupported byte output";
+        controllerFail(raw, .domain, text.ptr, text.len);
+        return 0;
+    };
+    return @intCast(pair.controller.write(bytes[0..@min(length, 64 * 1024)]));
+}
+fn controllerFinishEndpoint(raw: *anyopaque, index: u32) callconv(.c) bool {
+    const pair = controllerPipe(raw, index, .output) orelse return false;
+    pair.pipe.finish();
+    return true;
 }
 fn controllerAcknowledge(raw: *anyopaque) callconv(.c) bool {
     const ctx = context(raw);
@@ -772,7 +917,7 @@ fn controllerFail(raw: *anyopaque, kind: abi.ErrorKindWire, bytes: [*]const u8, 
         unlock(&ctx.cell.mutex);
     }
 }
-const controller_table: abi.ControllerTable = .{ .input = controllerInput, .read = controllerRead, .write = controllerWrite, .cancelled = controllerCancelled, .acknowledge_cancellation = controllerAcknowledge, .fail = controllerFail };
+const controller_table: abi.ControllerTable = .{ .input = controllerInput, .read_endpoint = controllerReadEndpoint, .write_endpoint = controllerWriteEndpoint, .finish_endpoint = controllerFinishEndpoint, .read = controllerRead, .write = controllerWrite, .cancelled = controllerCancelled, .acknowledge_cancellation = controllerAcknowledge, .fail = controllerFail };
 
 pub fn fromValue(value: Value, instance: *native.ModuleInstance, kind: u32) ?*Cell {
     const handle = switch (value) {

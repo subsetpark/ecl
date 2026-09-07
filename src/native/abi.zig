@@ -103,6 +103,9 @@ pub const PortFn = *const fn (*anyopaque, *const PortRequest, *PortReply) callco
 /// denotes request EOF or cancellation; failure is reported separately.
 pub const ControllerTable = extern struct {
     input: *const fn (*anyopaque, [*]const u64, u32, *ValueView) callconv(.c) bool,
+    read_endpoint: *const fn (*anyopaque, u32, [*]u8, u32) callconv(.c) u32,
+    write_endpoint: *const fn (*anyopaque, u32, [*]const u8, u32) callconv(.c) u32,
+    finish_endpoint: *const fn (*anyopaque, u32) callconv(.c) bool,
     read: *const fn (*anyopaque, [*]u8, u32) callconv(.c) u32,
     write: *const fn (*anyopaque, [*]const u8, u32) callconv(.c) u32,
     cancelled: *const fn (*anyopaque) callconv(.c) bool,
@@ -418,7 +421,7 @@ comptime {
     assertRecord(PortDefinition, 88, 8);
     assertRecord(PortRequest, 48, 8);
     assertRecord(PortReply, 24, 8);
-    assertRecord(ControllerTable, 48, 8);
+    assertRecord(ControllerTable, 72, 8);
     assertRecord(EntryResult, 32, 8);
 
     if (@offsetOf(Definition, "callback_index") != 4 or

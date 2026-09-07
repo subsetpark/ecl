@@ -55,13 +55,7 @@ pub const CallDefinition = struct {
 pub const PortCapability = union(enum) {
     factory: u32,
     operation: struct { resource: u32, code: u32, lane: u32, endpoints: u64 },
-    endpoint: struct {
-        resource: u32,
-        id: u6,
-        transport: enum { bytes, messages },
-        direction: enum { input, output },
-        owner: enum { resource, exchange },
-    },
+    endpoint: EndpointDefinition,
 
     pub fn resource(self: PortCapability) u32 {
         return switch (self) {
@@ -71,6 +65,15 @@ pub const PortCapability = union(enum) {
         };
     }
 };
+
+pub const EndpointDefinition = struct {
+    resource: u32,
+    id: u6,
+    transport: enum { bytes, messages },
+    direction: enum { input, output },
+    owner: enum { resource, exchange },
+};
+const EndpointSlot = struct { resource: ?EndpointDefinition = null, exchange: ?EndpointDefinition = null };
 
 const PortDefinitions = [abi.max_port_definitions]?abi.PortDefinition;
 
@@ -111,6 +114,7 @@ const DescriptorState = struct {
     invoke: abi.Invoke,
     callback_count: u32,
     ports: PortDefinitions,
+    endpoints: []EndpointSlot,
 
     fn deinit(self: *DescriptorState) void {
         const allocator = self.host.allocator();
@@ -122,6 +126,7 @@ const DescriptorState = struct {
         }
         allocator.free(self.definitions);
         allocator.free(self.requirements);
+        allocator.free(self.endpoints);
         allocator.destroy(self);
     }
 };
@@ -161,6 +166,16 @@ pub const ValidatedDescriptor = opaque {
     pub fn port(self: *const ValidatedDescriptor, index: u32) ?abi.PortDefinition {
         if (index >= self.state().ports.len) return null;
         return self.state().ports[index];
+    }
+
+    pub fn endpoint(self: *const ValidatedDescriptor, kind: u32, id: u6, owner: enum { resource, exchange }) ?EndpointDefinition {
+        const index = @as(usize, kind) * 64 + id;
+        if (index >= self.state().endpoints.len) return null;
+        const slot = self.state().endpoints[index];
+        return switch (owner) {
+            .resource => slot.resource,
+            .exchange => slot.exchange,
+        };
     }
 
     pub fn callbackCount(self: *const ValidatedDescriptor) u32 {
@@ -404,6 +419,7 @@ pub const ValidateCursor = struct {
         ports: PortDefinitions,
         requirements: []abi.CapabilityRequirement,
         definitions: []ValidatedDefinition,
+        endpoints: []EndpointSlot,
     };
     const ModuleArtifacts = struct {
         descriptor: abi.Descriptor,
@@ -413,6 +429,7 @@ pub const ValidateCursor = struct {
         requirements: []abi.CapabilityRequirement,
         capability_index: usize = 0,
         definitions: []ValidatedDefinition,
+        endpoints: []EndpointSlot,
         definition_index: usize = 0,
         endpoint_masks: [abi.max_port_definitions]u64 = .{0} ** abi.max_port_definitions,
         resource_endpoint_masks: [abi.max_port_definitions]u64 = .{0} ** abi.max_port_definitions,
@@ -425,6 +442,7 @@ pub const ValidateCursor = struct {
     };
     const State = union(enum) {
         header,
+        endpoint_storage: struct { allocated: Allocated, next: usize = 0 },
         module_name: Allocated,
         module_doc: struct {
             allocated: Allocated,
@@ -473,6 +491,15 @@ pub const ValidateCursor = struct {
         var remaining = budget;
         while (remaining != 0) : (remaining -= 1) switch (self.state) {
             .header => self.validateHeader() catch |err| return self.reject(err, null),
+            .endpoint_storage => |*storage_state| {
+                if (storage_state.next == storage_state.allocated.endpoints.len) {
+                    const allocated = storage_state.allocated;
+                    self.state = .{ .module_name = allocated };
+                } else {
+                    storage_state.allocated.endpoints[storage_state.next] = .{};
+                    storage_state.next += 1;
+                }
+            },
             .module_name => |allocated| self.validateModuleName(allocated) catch |err|
                 return self.reject(err, null),
             .module_doc => |*module_doc| {
@@ -490,6 +517,7 @@ pub const ValidateCursor = struct {
                     .doc = document,
                     .requirements = allocated.requirements,
                     .definitions = allocated.definitions,
+                    .endpoints = allocated.endpoints,
                 } };
             },
             .capabilities => |*module| self.validateCapability(module) catch |err|
@@ -613,12 +641,15 @@ pub const ValidateCursor = struct {
             ValidatedDefinition,
             descriptor.definition_count,
         );
-        self.state = .{ .module_name = .{
+        errdefer self.host.allocator().free(definitions);
+        const endpoints = try self.host.allocator().alloc(EndpointSlot, @as(usize, descriptor.port_count) * 64);
+        self.state = .{ .endpoint_storage = .{ .allocated = .{
             .descriptor = descriptor,
             .ports = ports,
             .requirements = requirements,
             .definitions = definitions,
-        } };
+            .endpoints = endpoints,
+        } } };
     }
 
     fn validateModuleName(self: *ValidateCursor, allocated: Allocated) ValidateError!void {
@@ -772,6 +803,12 @@ pub const ValidateCursor = struct {
                 const bit = @as(u64, 1) << @as(u6, @intCast(binding.endpoint));
                 if (mask.* & bit != 0) return error.DuplicateDefinition;
                 mask.* |= bit;
+                const endpoint_value = portCapability(binding).endpoint;
+                const slot = &module.endpoints[@as(usize, binding.resource) * 64 + binding.endpoint];
+                switch (endpoint_value.owner) {
+                    .resource => slot.resource = endpoint_value,
+                    .exchange => slot.exchange = endpoint_value,
+                }
             },
             .call => unreachable,
             _ => unreachable,
@@ -791,6 +828,7 @@ pub const ValidateCursor = struct {
             .invoke = invoke,
             .callback_count = module.descriptor.callback_count,
             .ports = module.ports,
+            .endpoints = module.endpoints,
         };
         self.state = .complete;
         return .{ .complete = @ptrCast(state) };
@@ -807,6 +845,7 @@ pub const ValidateCursor = struct {
         const releases = heap.hostDomain(self.host);
         switch (self.state) {
             .header, .complete, .failed => {},
+            .endpoint_storage => |*initializing| self.cleanupAllocated(&initializing.allocated),
             .module_name => |*allocated| self.cleanupAllocated(allocated),
             .module_doc => |*module_doc| {
                 module_doc.builder.deinit();
@@ -832,6 +871,7 @@ pub const ValidateCursor = struct {
     }
 
     fn cleanupAllocated(self: *ValidateCursor, allocated: *Allocated) void {
+        self.host.allocator().free(allocated.endpoints);
         self.host.allocator().free(allocated.definitions);
         self.host.allocator().free(allocated.requirements);
     }
@@ -842,6 +882,7 @@ pub const ValidateCursor = struct {
         releases: *heap.ReleaseDomain,
     ) void {
         releases.releaseHeader(env.documentationHeader(module.doc));
+        self.host.allocator().free(module.endpoints);
         for (module.definitions[0..module.definition_index]) |definition| {
             releases.releaseHeader(env.documentationHeader(definition.doc));
             definition.effect.retire(releases);

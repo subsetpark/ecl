@@ -2389,6 +2389,10 @@ the owning scope aborts outstanding work and joins cancellation cleanup.
 |---|---|---|
 | `port.open` | `( factory config -- resource )` | Initialize a resource and publish it into the calling scope. Failure joins cleanup through that scope. |
 | `port.begin` | `( resource operation request -- exchange )` | Admit a registered operation on its declared FIFO lane, parking while admission capacity is full. |
+| `port.endpoint` | `( source selector -- endpoint )` | Borrow a direction-specific endpoint permitted by the exchange's operation. Currently supports native exchange byte endpoints. |
+| `port.read` | `( readable max -- bytes )` | Read up to a positive maximum; `[]` denotes stable EOF. Overlapping readers raise `'contract`. |
+| `port.write` | `( writable bytes -- )` | Accept a complete byte list under bounded pressure. Concurrent calls execute FIFO and remain contiguous. |
+| `port.finish` | `( writable -- )` | Finish input after admitted writes. Idempotent; later writes raise `'io`. |
 | `port.await` | `( exchange -- )` | Wait for successful completion or raise the terminal error. Repeatable; does not drain output. |
 | `port.result` | `( exchange -- value )` | Wait and claim the terminal result once. A later successful-result claim raises `'contract`. |
 | `port.cancel` | `( exchange -- )` | Request cancellation idempotently. Completion remains observable and waits for controller return. |
@@ -2400,6 +2404,15 @@ stream output have `[]` as their result. Input finish, output EOF, completion,
 and cleanup are distinct events. An active cancellation releases its controller
 lane only after acknowledgement and return; a controller that cannot restore
 reusable state closes its resource.
+
+Endpoint capabilities preserve the source identity and cannot be transferred
+independently with `@give`. A selector from another issuing kind, or a read or
+write through the wrong direction, raises `'type`; an endpoint not permitted
+by the operation raises `'domain`. Buffered output remains readable before a
+terminal failure is raised. Once observed, EOF remains stable even if the
+exchange subsequently fails. An early input consumer exit wakes blocked writers
+with `'io`. Streaming callers must drain independent outputs concurrently when
+necessary for progress; waiting for completion does not drain them.
 
 Configuration and initial requests may contain integers, floats, characters,
 symbols, lists, dictionaries, and port capabilities. Executable words, tasks,

@@ -8,15 +8,111 @@ const std = @import("std");
 const message = @import("../port_message.zig");
 const poll = @import("../poll.zig");
 const scheduler = @import("../scheduler.zig");
+const bytes = @import("../port_bytes.zig");
+const transfer = @import("../port_transfer.zig");
 
 pub const words = [_]env.BuiltinWord{
     .{ .name = "open", .doc = "( factory config -- resource ) Initialize a registered resource in the calling scope.", .primitive = open },
     .{ .name = "begin", .doc = "( resource operation request -- exchange ) Admit a registered operation with bounded structured parameters.", .primitive = begin },
+    .{ .name = "endpoint", .effect = "source selector -- endpoint", .doc = "Obtain an attenuated endpoint capability supported by its source.", .primitive = endpoint },
+    .{ .name = "read", .doc = "( readable max -- bytes ) Read a positive byte chunk, or [] at stable EOF.", .primitive = read },
+    .{ .name = "write", .doc = "( writable bytes -- ) Accept a complete byte list in FIFO order under bounded pressure.", .primitive = write },
+    .{ .name = "finish", .effect = "writable --", .doc = "Finish input after previously accepted data. Idempotent.", .primitive = finish },
     .{ .name = "cancel", .effect = "exchange --", .doc = "Request exchange cancellation. Completion remains observable.", .primitive = cancel },
     .{ .name = "close", .doc = "( port -- ) Abort a resource or exchange and join its cleanup. Idempotent.", .primitive = close },
     .{ .name = "await", .doc = "( exchange -- ) Observe successful exchange completion or its terminal failure without draining output.", .primitive = awaitExchange },
     .{ .name = "result", .doc = "( exchange -- value ) Wait and claim an exchange result exactly once. Later claims raise 'contract.", .primitive = result },
 };
+
+fn endpoint(evaluator: *machine.Machine) machine.MachineError!void {
+    var selector = try evaluator.popValue();
+    defer selector.deinit();
+    var source = try evaluator.popValue();
+    defer source.deinit();
+    const capability = native.registeredCapability(selector.borrow(), .endpoint_selector) orelse return evaluator.typeError("an endpoint selector");
+    const item = native.borrowEndpoint(source.borrow(), capability) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.WrongKind => evaluator.typeError("a source of the endpoint selector's issuing kind"),
+        error.Unsupported => evaluator.fail(.domain, "source does not support this endpoint"),
+    };
+    try evaluator.pushOwned(item);
+}
+
+fn read(evaluator: *machine.Machine) machine.MachineError!void {
+    var maximum = try evaluator.popValue();
+    defer maximum.deinit();
+    if (maximum.borrow() != .int) return evaluator.typeError("a positive byte count");
+    if (maximum.borrow().int <= 0) return evaluator.fail(.domain, "port.read count must be positive");
+    var item = try evaluator.popValue();
+    errdefer item.deinit();
+    const capability = native.endpointFromValue(item.borrow()) orelse return evaluator.typeError("a readable byte endpoint");
+    const pipe = capability.reader() orelse return evaluator.typeError("a readable byte endpoint");
+    pipe.beginRead() catch return evaluator.fail(.contract, "endpoint already has a pending reader");
+    errdefer pipe.endRead();
+    const buffer = try evaluator.allocator().alloc(u8, @min(@as(usize, @intCast(maximum.borrow().int)), pipe.readCapacity()));
+    errdefer evaluator.allocator().free(buffer);
+    const driver = try evaluator.allocator().create(ReadDriver);
+    driver.* = .{ .allocator = evaluator.allocator(), .port = item.take(), .backend = .{ .pipe = pipe }, .buffer = buffer };
+    evaluator.adoptDriver(driver);
+}
+
+const ReadDriver = transfer.ReadDriver(ReadBackend);
+const ReadBackend = struct {
+    pipe: *bytes.Pipe,
+    pub fn endRead(self: ReadBackend) void {
+        self.pipe.endRead();
+    }
+    pub fn readSource(self: ReadBackend) @import("../external.zig").ReadinessSource {
+        return self.pipe.readSource();
+    }
+    pub fn read(self: ReadBackend, evaluator: *machine.Machine, buffer: []u8) machine.MachineError!transfer.ReadProgress {
+        return switch (self.pipe.read(buffer)) {
+            .pending => .pending,
+            .eof => .eof,
+            .data => |count| .{ .data = count },
+            .failed => |failure| evaluator.fail(failure.kind, failure.text[0..failure.len]),
+        };
+    }
+};
+
+fn write(evaluator: *machine.Machine) machine.MachineError!void {
+    var input = try evaluator.popValue();
+    errdefer input.deinit();
+    if (input.borrow() != .list) return evaluator.typeError("a byte list");
+    var item = try evaluator.popValue();
+    errdefer item.deinit();
+    const capability = native.endpointFromValue(item.borrow()) orelse return evaluator.typeError("a writable byte endpoint");
+    const pipe = capability.writer() orelse return evaluator.typeError("a writable byte endpoint");
+    const permit = pipe.beginWrite() catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.Finished => evaluator.fail(.io, "endpoint input is finished"),
+    };
+    errdefer permit.cancel();
+    const driver = try evaluator.allocator().create(WriteDriver);
+    driver.* = .init(evaluator.allocator(), item.take(), input.take(), .{}, permit);
+    evaluator.adoptDriver(driver);
+}
+
+const WriteDriver = transfer.WriteDriver(WriteBackend);
+const WriteBackend = struct {
+    pub const WritePermit = bytes.WritePermit;
+    pub const invalid_byte_message = "port.write contains a value outside 0...255";
+    pub fn write(_: WriteBackend, evaluator: *machine.Machine, permit: *WritePermit, buffer: []const u8) machine.MachineError!transfer.WriteProgress {
+        return switch (permit.write(buffer)) {
+            .pending => .pending,
+            .written => |count| .{ .written = count },
+            .failed => |failure| evaluator.fail(failure.kind, failure.text[0..failure.len]),
+        };
+    }
+};
+
+fn finish(evaluator: *machine.Machine) machine.MachineError!void {
+    var item = try evaluator.popValue();
+    defer item.deinit();
+    const capability = native.endpointFromValue(item.borrow()) orelse return evaluator.typeError("a writable endpoint");
+    const pipe = capability.writer() orelse return evaluator.typeError("a writable endpoint");
+    pipe.finish();
+}
 
 fn open(evaluator: *machine.Machine) machine.MachineError!void {
     try startRequest(evaluator, .factory);

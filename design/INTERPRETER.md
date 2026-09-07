@@ -1388,6 +1388,19 @@ validated resource kinds, fixed operation lanes, and endpoint permissions;
 registration rejects duplicate endpoint identities and undeclared permissions
 before publishing any binding.
 
+Registered byte endpoints use a shared bounded transport (`port_bytes.zig`).
+An exchange owns its pipes; each attenuated endpoint retains the exchange and
+exposes only its declared direction. A sealed descriptor index resolves endpoint
+permissions without scanning a module during admission. Pipe construction
+precedes admission, so allocation failure cannot publish a partial transport.
+Scheduler-facing pipes and blocking controller authority are distinct opaque
+capabilities. The shared writer lane orders complete calls, a reader claim
+excludes overlapping reads, and explicit transport phases distinguish pending
+finish, stable EOF, and failure. Finish preserves admitted writer turns; failure
+preserves accepted output unless cleanup is abortive. Cancellation wakes blocked
+transport independently of the operation lane. Copies are bounded per turn,
+and endpoint drivers use the shared resumable byte-transfer machinery.
+
 Configuration and initial requests cross a bounded validation boundary before
 resource creation or operation admission. A nominal validated view grants
 retention of their immutable roots. Controllers receive only read-only wire
