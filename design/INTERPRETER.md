@@ -999,32 +999,30 @@ getsockname, all through `std.Io.net.IpAddress.listen`, which stores the
 resolved local address on the returned socket — and never parks; a listener
 that is never asked to accept has no controller thread, readiness source, or
 wait registration. The order is the process port's: validate the configuration, check
-the grant, acquire a live-listener reservation (a consuming capability like
-the process live slot), open the socket, create the `ListenerCell`, attach it
-to the calling unit's `TaskScope` through `attachExternal` and store the
-returned membership token, and only then wrap it in a port value with
-`heap.createPort`. Every failure on that path releases the reservation and
-closes the socket exactly once. The socket is opened before the scope is asked,
-because a scope may begin closing between any earlier check and the attach;
-when `attachExternal` refuses a closing scope, the just-opened socket is closed
-through the same `close` transition and the caller sees `'cancelled`.
+the grant, reserve live capacity with resource storage, open the socket,
+attach the initialized cell to the calling unit's scope, and then publish its
+heap identity. Factory rollback returns storage and capacity; once the cell
+owns the socket, scope-attachment and publication failures close through the
+same terminal transition.
 
-A `ListenerCell` has one mutex-protected exhaustive state, `bound` (owning the
-server socket and its resolved address) or `closed`, and one reference count
-shared by the port value and the scope member; the heap projects a port to a
-cell only when the release adapter matches, so a process port and a listener
-cannot be confused. `ListenerCell.close` is the single close transition: under
-the mutex it moves `bound` to `closed`, stops the acceptor if one is running
-(see the next section), closes the socket, and releases the reservation; after
-unlocking it detaches the scope membership token once. It is idempotent, and
-both the `net.close` word and `cancelExternalMember` call it, so a listener
-closed explicitly and later swept by its scope, or the reverse, closes exactly
-once and detaches exactly once. When `close` returns the socket is closed, so
-the same address and port may be bound again immediately. `local-address` reads
-the state under the mutex and copies the address out; a `closed` cell has no
-address to report. The cell is destroyed when the last reference drops and is
-asserted `closed` at that point. `NetOwner.deinit` asserts a zero live count,
-which holds because Session teardown closes the root scope first.
+A listener's exhaustive state owns either a dormant bound socket, an accepting
+job, a closing job, or terminal address metadata. An accepting job owns the
+bound socket, its wake descriptors, and its registry entry together. The
+registry exposes only live wake pipes and removes an entry before its
+owner closes those descriptors. Failed submission returns the socket to
+its dormant owner and destroys all provisional job resources. Joined retirement
+returns the socket to dormancy on an acceptor failure, or closes it if shutdown
+was requested. No independent running flag or optional wake pipe carries
+lifetime authority.
+
+Explicit close and scope cancellation take the same transition under the
+listener mutex. A dormant socket closes immediately; an accepting job receives
+a wake and retains its resources until joined retirement. Terminal readiness
+follows socket closure and capacity return, so completed `net.close` permits
+immediate rebinding. The terminal state retains the recorded address for
+identity and failure metadata, but `local-address` reports only an open bound
+endpoint. Value, scope, readiness, and execution references keep the cell
+alive independently; only final reference release destroys terminal metadata.
 
 Every failure maps a `std.Io.net.IpAddress.ListenError` to one closed reason
 vocabulary at the `net_port` boundary — `'in-use`, `'unavailable`,
@@ -1051,7 +1049,7 @@ the connection's `Endpoints` (the peer from `accept`, the local end from
 actually reached on). No other production code in `net_port.zig` calls
 `closeFd` on a connection socket or decrements the connection counter. Each
 outstanding `accept` owns an `AcceptSlot` whose state is exhaustive:
-`waiting` (holding nothing: neither a socket nor a reservation), `ready`
+`waiting` (owning candidate storage, but neither a socket nor capacity), `ready`
 (holding an `AcceptedSocket`), `failed`, `taken`, or `closed`. `endAccept`
 releases whatever the slot still holds, so a cancelled accept can neither
 leak a socket nor release a slot twice, and a waiting accept costs the
@@ -1065,11 +1063,11 @@ wake a blocked `accept` on macOS, closing a descriptor another thread is
 blocked on is a reuse hazard everywhere, and `netAcceptPosix` treats `EAGAIN`
 as a bug, so the non-blocking socket that `poll` requires would trip it. When
 `poll` reports the socket readable, the acceptor takes the listener mutex,
-rechecks that a `waiting` slot exists, acquires a `ConnectionReservation`
-from `NetOwner` under that mutex, and only then calls `accept4`, still
-holding the mutex, and moves the returned socket and its reservation into
-that slot as one `AcceptedSocket` before unlocking (`acceptOneLocked`). When
-no reservation is available the acceptor makes no syscall: the connection
+rechecks that a waiting slot exists, and activates its candidate storage.
+The resource factory reserves connection capacity before the non-blocking
+accept call and returns capacity if initialization cannot complete. Successful
+activation gives the slot one accepted socket allocation carrying capacity. When
+no capacity is available the acceptor makes no syscall: the connection
 stays in the kernel backlog, the acceptor marks itself quota-blocked, and it
 polls only its wake pipe, not the listening socket, until a release wake
 arrives, so a full quota spins no thread and takes no socket it cannot own.
