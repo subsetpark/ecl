@@ -37,16 +37,37 @@ test "stdlib: embedded module resolves via import with no ECL_PATH" {
     // A bare Session has no host IO and no search path at all, so nothing
     // here could reach a file even if one existed.
     const exports = [_][]const u8{
-        "dict.from-pairs",   "error.new",         "result.ok",
-        "str.upper",         "io.print",          "csv.parse",
-        "json.parse",        "table.valid?",      "http.get-bytes",
-        "http.server.route", "http.request.new",  "http.response.new",
-        "proc.wait",         "fs.read-text",      "net.listen",
-        "path.normalize",    "archive.sha256",    "clock.now",
-        "time.parse",        "pkg.store.inspect", "rng.float",
-        "rand.float",        "pkg.version.less?", "pkg.name.valid?",
-        "pkg.data.read-one", "pkg.manifest.read", "pkg.lock.read",
-        "pkg.mvs.resolve",   "pkg.sync.run",      "pkg.cli.init",
+        "task.pending",
+        "dict.from-pairs",
+        "error.new",
+        "result.ok",
+        "str.upper",
+        "io.print",
+        "csv.parse",
+        "json.parse",
+        "table.valid?",
+        "http.get-bytes",
+        "http.server.route",
+        "http.request.new",
+        "http.response.new",
+        "proc.wait",
+        "fs.read-text",
+        "net.listen",
+        "path.normalize",
+        "archive.sha256",
+        "clock.now",
+        "time.parse",
+        "pkg.store.inspect",
+        "rng.float",
+        "rand.float",
+        "pkg.version.less?",
+        "pkg.name.valid?",
+        "pkg.data.read-one",
+        "pkg.manifest.read",
+        "pkg.lock.read",
+        "pkg.mvs.resolve",
+        "pkg.sync.run",
+        "pkg.cli.init",
         "test.default.run",
     };
     for (stdlib.names(), exports) |name, qualified| {
@@ -210,7 +231,7 @@ test "stdlib: concurrent first references converge on one published module" {
         try expectDisplay(
             &runtime,
             "[[1] [2] [3] [4] [5] [6] [7] [8]] [] (result.ok) @each " ++
-                "([1] result.ok) ('result ('ok) import [2] ok) 2 pack ([] swap @spawn) each await-all",
+                "([1] result.ok) ('result ('ok) import [2] ok) 2 pack ([] swap @spawn) each (task.await) each",
             "({'ok [1]} {'ok [2]} {'ok [3]} {'ok [4]} " ++
                 "{'ok [5]} {'ok [6]} {'ok [7]} {'ok [8]}) " ++
                 "({'ok ({'ok [1]})} {'ok ({'ok [2]})})",

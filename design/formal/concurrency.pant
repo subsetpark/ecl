@@ -5,13 +5,13 @@ import ECL_UNITS.
 context Concurrency.
 
 > This model is normative for structured task identity, attachment to the
-> general unit lifecycle, cached terminal results, observation by `await`,
+> general unit lifecycle, cached terminal results, observation by `task.await`,
 > deadline expiry, cancellation, and the requirement that a unit quiesce its
 > task scope before becoming terminal.
 >
 > It abstracts over evaluator steps, scheduling policy, elapsed time, I/O
 > interleaving, handle storage and lexical scope, and the selection algorithms
-> used by `await-any`, `await-all`, and `@each`. The surrounding language
+> used by `task.await-any`, sequential awaits, and `@each`. The surrounding language
 > specification governs those operations. A conforming scheduler may run
 > runnable tasks serially; the model promises lifetime and result semantics,
 > without promising simultaneous progress or fairness.
@@ -227,7 +227,7 @@ all candidate: Task |
 
 where
 
-> `Await task until deadline expires` is the timeout branch of `await-for`.
+> `Await task until deadline expires` is the timeout branch of `task.await-for`.
 > It is available only while the attached unit is active, yields a value
 > satisfying `timeout-result?`, and leaves the task and attached unit unchanged. A
 > terminal task therefore wins over deadline expiry, including at a zero

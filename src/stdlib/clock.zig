@@ -1,7 +1,7 @@
 //! Scheduler-backed clock words.
 //!
 //! `now`, `elapsed`, and `sleep` read the one monotonic clock the scheduler
-//! owns, so a program's instants, its sleeps, and every `await-for` deadline
+//! owns, so a program's instants, its sleeps, and every `task.await-for` deadline
 //! agree on what time it is — including under a host-driven manual clock.
 //! `unix` is the separate wall-clock grant: absent unless the Session host
 //! supplied one, and never implied by host I/O or TLS verification time.

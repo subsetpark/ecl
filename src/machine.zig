@@ -6897,7 +6897,7 @@ fn resumeTaskWait(self: *Machine, wait: TaskWaitResume, task_join: bool) Machine
         .overflow => {
             abandonTaskJoin(self);
             clearWorkDriver(self.unit);
-            return self.fail(.overflow, "await-for deadline lies beyond the clock's range");
+            return self.fail(.overflow, "task.await-for deadline lies beyond the clock's range");
         },
         .out_of_memory => if (task_join)
             try resumeTaskJoinOutOfMemory(self)

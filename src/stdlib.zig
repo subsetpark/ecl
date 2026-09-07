@@ -54,6 +54,7 @@ const Module = struct {
 };
 
 const modules = [_]Module{
+    .{ .name = "task", .entry = .{ .builtin = &@import("task_prims.zig").words } },
     .{ .name = "dict", .entry = .{ .builtin = &dict_module.words } },
     .{ .name = "error", .entry = .{ .source = .{
         .name = "<stdlib:error>",

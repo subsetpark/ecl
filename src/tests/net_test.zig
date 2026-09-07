@@ -351,7 +351,7 @@ test "net: scope closure releases the socket even while a listener value is reta
     var runtime: Runtime = .{};
     try runtime.open(.{ .net = unrestricted }, .cooperative);
     defer runtime.close();
-    try runtime.run("[] (" ++ listen_ephemeral ++ " dup net.local-address) @spawn await 'ok at");
+    try runtime.run("[] (" ++ listen_ephemeral ++ " dup net.local-address) @spawn task.await 'ok at");
     var storage: [1]u16 = undefined;
     const ports = try runtime.ports(&storage);
     try std.testing.expectEqual(@as(usize, 1), ports.len);
@@ -393,7 +393,7 @@ test "net: the live-listener quota is released when a scope closes" {
     var runtime: Runtime = .{};
     try runtime.open(.{ .net = one }, .cooperative);
     defer runtime.close();
-    try runtime.run("[] (" ++ listen_ephemeral ++ ") @spawn await pop " ++ listen_ephemeral ++ " net.local-address 'address at");
+    try runtime.run("[] (" ++ listen_ephemeral ++ ") @spawn task.await pop " ++ listen_ephemeral ++ " net.local-address 'address at");
     try runtime.expectDisplay("\"127.0.0.1\"");
 }
 
@@ -430,7 +430,7 @@ test "net: concurrent listens under the worker pool close with their scopes" {
     try runtime.open(.{ .net = loopback_ephemeral }, .{ .worker_pool = 4 });
     defer runtime.close();
     const child = "[] (" ++ listen_ephemeral ++ " net.local-address) @spawn";
-    try runtime.run("[] (" ++ child ++ " " ++ child ++ " await swap await) @spawn " ++ child ++ " await swap await");
+    try runtime.run("[] (" ++ child ++ " " ++ child ++ " task.await swap task.await) @spawn " ++ child ++ " task.await swap task.await");
     var storage: [3]u16 = undefined;
     const ports = try runtime.ports(&storage);
     try std.testing.expectEqual(@as(usize, 3), ports.len);
@@ -721,7 +721,7 @@ test "net: a connection belongs to the accepting unit's scope and closes with it
     defer runtime.close();
     const port = try listenerPort(&runtime);
     const peer = try Peer.start(port, .read_until_eof);
-    try runtime.run("[] (l net.accept) @spawn await 'ok at first 'c set c type");
+    try runtime.run("[] (l net.accept) @spawn task.await 'ok at first 'c set c type");
     try runtime.expectDisplay("'port");
     try expectPeerBytes(peer.join(), "");
     try runtime.runError("c 4 net.read", .{
@@ -757,7 +757,7 @@ test "net: closing a listener wakes parked acceptors with io closed and leaves a
     defer runtime.close();
     const port = try listenerPort(&runtime);
     const peer = try Peer.start(port, .{ .write_then_read_until_eof = "in" });
-    try runtime.run("l net.accept 'c set [] (l net.accept) @spawn 'waiting set 0 clock.sleep l net.close waiting await 'err at 'kind at");
+    try runtime.run("l net.accept 'c set [] (l net.accept) @spawn 'waiting set 0 clock.sleep l net.close waiting task.await 'err at 'kind at");
     try runtime.expectDisplay("'io");
     try runtime.run("pop c 2 net.read c [111 117 116] net.write c net.close");
     try runtime.expectDisplay("[105 110]");
@@ -782,7 +782,7 @@ test "net: overlapping reads on one connection are a contract failure" {
     // certain, then its own read finds the reader slot taken.
     try runtime.run("l net.accept 'c set [] (c 2 net.read) @spawn 'reader set 0 clock.sleep " ++
         "[] (c 2 net.read) @attempt 'err at 'kind at " ++
-        "c [1] net.write reader await 'ok at first c net.close");
+        "c [1] net.write reader task.await 'ok at first c net.close");
     try runtime.expectDisplay("'contract [97 98]");
     // The peer consumed the sync byte before writing; nothing else reached it.
     try expectPeerBytes(peer.join(), "");
@@ -835,11 +835,11 @@ test "net: accept parks at the live-connection quota and proceeds when a connect
     // A second peer completes its handshake into the kernel backlog. The
     // parked accept neither fails with the limit nor proceeds.
     const second = try Peer.start(port, .{ .write_then_read_until_eof = "x" });
-    try runtime.run("waiting 0 await-for 'err at 'kind at");
+    try runtime.run("waiting 0 task.await-for 'err at 'kind at");
     try runtime.expectDisplay("'timeout");
     // Closing the first connection frees the slot; the child's accept yields
     // the queued peer and reads what it wrote.
-    try runtime.run("pop c net.close waiting await 'ok at first");
+    try runtime.run("pop c net.close waiting task.await 'ok at first");
     try runtime.expectDisplay("[120]");
     try expectPeerBytes(first.join(), "");
     try expectPeerBytes(second.join(), "");
@@ -853,14 +853,14 @@ test "net: cancelling a parked accept or read leaves the listener and connection
     // The cancelled accept had the acceptor waiting in poll; the connection
     // that arrives afterwards must stay in the kernel backlog, unreset, until
     // the next accept takes it.
-    try runtime.run("[] (l net.accept) @spawn 'waiting set 0 clock.sleep waiting dup cancel await 'err at 'kind at");
+    try runtime.run("[] (l net.accept) @spawn 'waiting set 0 clock.sleep waiting dup task.cancel task.await 'err at 'kind at");
     try runtime.expectDisplay("'cancelled");
     const early = try Peer.start(port, .{ .write_then_read_until_eof = "q" });
     try runtime.run("pop l net.accept 'e set e 1 net.read e net.close");
     try runtime.expectDisplay("[113]");
     try expectPeerBytes(early.join(), "");
     const peer = try Peer.start(port, .{ .sync_then_write = "abcd" });
-    try runtime.run("pop l net.accept 'c set [] (c 4 net.read) @spawn 0 clock.sleep dup cancel await 'err at 'kind at");
+    try runtime.run("pop l net.accept 'c set [] (c 4 net.read) @spawn 0 clock.sleep dup task.cancel task.await 'err at 'kind at");
     try runtime.expectDisplay("'cancelled");
     try runtime.run("pop c [1] net.write c 4 net.read c net.close");
     try runtime.expectDisplay("[97 98 99 100]");
@@ -920,7 +920,7 @@ test "net: concurrent connections under the worker pool close with their scopes"
     // would race across workers and hand one child another's connection.
     const child = "[] (l net.accept 1 net.read) @spawn";
     try runtime.run(child ++ " " ++ child ++ " " ++ child ++ " 't3 set 't2 set 't1 set " ++
-        "t1 await 'ok at first t2 await 'ok at first t3 await 'ok at first cat cat");
+        "t1 task.await 'ok at first t2 task.await 'ok at first t3 task.await 'ok at first cat cat");
     var display = try runtime.session.stackDisplay();
     defer display.deinit();
     var total: usize = 0;
@@ -954,7 +954,7 @@ test "net: @give moves listener ownership, so the child's end closes the socket"
         var runtime: Runtime = .{};
         try runtime.open(.{ .net = loopback_ephemeral }, .cooperative);
         defer runtime.close();
-        const port = try runForPort(&runtime, capture ++ "wrap [] (pop) @give await pop");
+        const port = try runForPort(&runtime, capture ++ "wrap [] (pop) @give task.await pop");
         try std.testing.expect(port != 0);
         try std.testing.expectEqual(Probe.refused, try probe(port));
     }
@@ -963,7 +963,7 @@ test "net: @give moves listener ownership, so the child's end closes the socket"
         var runtime: Runtime = .{};
         try runtime.open(.{ .net = loopback_ephemeral }, .cooperative);
         defer runtime.close();
-        const port = try runForPort(&runtime, capture ++ "wrap (pop) @spawn await pop");
+        const port = try runForPort(&runtime, capture ++ "wrap (pop) @spawn task.await pop");
         try std.testing.expect(port != 0);
         try std.testing.expectEqual(Probe.accepted, try probe(port));
     }
@@ -974,7 +974,7 @@ test "net: a given listener is usable by the child and can be given onward" {
     try runtime.open(.{ .net = loopback_ephemeral }, .cooperative);
     defer runtime.close();
     try runtime.run(listen_ephemeral ++
-        " wrap [] (wrap [] (net.local-address 'port at 0 >) @give await) @give await" ++
+        " wrap [] (wrap [] (net.local-address 'port at 0 >) @give task.await) @give task.await" ++
         " 'ok at first 'ok at first");
     var display = try runtime.session.stackDisplay();
     defer display.deinit();
@@ -982,7 +982,7 @@ test "net: a given listener is usable by the child and can be given onward" {
 }
 
 test "net: @give refuses a port the calling unit does not own" {
-    const program = listen_ephemeral ++ " dup wrap (wrap [] (pop) @give await) @spawn await nip";
+    const program = listen_ephemeral ++ " dup wrap (wrap [] (pop) @give task.await) @spawn task.await nip";
     var runtime: Runtime = .{};
     try runtime.open(.{ .net = loopback_ephemeral }, .cooperative);
     defer runtime.close();
@@ -1034,7 +1034,7 @@ test "net: a process port is givable too, and dies with the unit it was given to
     const program = try std.fmt.allocPrint(
         allocator,
         "'proc ('spawn 'wait) import {{'executable \"{s}\" 'args (\"block\")}} spawn" ++
-            " dup wrap [] (pop) @give await pop wait 'kind at",
+            " dup wrap [] (pop) @give task.await pop wait 'kind at",
         .{fixture_path},
     );
     defer allocator.free(program);
@@ -1047,7 +1047,7 @@ test "net: a process port is givable too, and dies with the unit it was given to
 }
 
 test "net: @give with no ports is @spawn, and the given ports are the deepest stack values" {
-    try support.expectStack("[] [40 2] (+) @give await 'ok at first", "42");
+    try support.expectStack("[] [40 2] (+) @give task.await 'ok at first", "42");
 }
 
 test "net: @give bounds its port list before doing any per-port work" {

@@ -593,7 +593,7 @@
   "Continue from the reader child's result or its failure.")
  (dup 'ok dict.has?
   (nip 'ok at first run-handler)
-  ('err at swap dup cancel await pop nip read-failure)
+  ('err at swap dup task.cancel task.await pop nip read-failure)
   if)
  'dispatch-read defp
 
@@ -604,7 +604,7 @@
  (|connection config handler|
   connection config handler
   connection config 2 pack (read-request) @spawn
-  dup config 'read-timeout-ms at await-for
+  dup config 'read-timeout-ms at task.await-for
   dispatch-read)
  'handle-connection defp
 
@@ -636,7 +636,7 @@
  (tasks -- tasks :
   "Park until some child unit finishes, then drop it from the live set. Its result is discarded:
    serve-connection reports its own failures.")
- (dup await-any pop del)
+ (dup task.await-any pop del)
  'reap-one defp
 
  ### defp serve-step

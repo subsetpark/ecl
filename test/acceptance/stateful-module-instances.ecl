@@ -63,7 +63,7 @@ pool.size io.pp
 pool.size io.pp
 
 ### Serialization: contending updates publish exactly the successful ones.
-[1] 50 take (pop [] (left.tick) @spawn) each await-all pop
+[1] 50 take (pop [] (left.tick) @spawn) each (task.await) each pop
 left.peek io.pp
 
 ### The prohibited shapes are 'domain, and they publish nothing.

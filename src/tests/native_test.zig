@@ -570,7 +570,7 @@ test "native: cooperative slices let another unit progress at one worker" {
     try expectOk(
         &runtime,
         "[] ([] (sample.cooperative) @spawn 'native-task set " ++
-            "[] (7) @spawn 'observer set native-task observer pair await-any) @spawn await",
+            "[] (7) @spawn 'observer set native-task observer pair task.await-any) @spawn task.await",
     );
     var display = try runtime.stackDisplay();
     defer display.deinit();
@@ -620,7 +620,7 @@ test "native: cancellation after a yield preserves the pre-call operand stack" {
     try expectOk(&runtime, "5");
     try expectOk(
         &runtime,
-        "[] (9 sample.yield-forever) @spawn dup 1 await-for pop dup cancel await pop",
+        "[] (9 sample.yield-forever) @spawn dup 1 task.await-for pop dup task.cancel task.await pop",
     );
     try std.testing.expectEqual(@as(usize, 1), runtime.stackItems().len);
     try std.testing.expectEqual(@as(i64, 5), runtime.stackItems()[0].int);

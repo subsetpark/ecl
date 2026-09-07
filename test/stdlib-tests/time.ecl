@@ -187,8 +187,8 @@
  ### test sleeping
  (-- : "Sleep for zero and small durations and reject malformed durations.")
  (0 clock.sleep
-  [] (0 clock.sleep 7) @spawn await {'ok [7]} equal
-  [] (1 clock.sleep 8) @spawn await {'ok [8]} equal
+  [] (0 clock.sleep 7) @spawn task.await {'ok [7]} equal
+  [] (1 clock.sleep 8) @spawn task.await {'ok [8]} equal
   (-1 clock.sleep) 'domain 'clock.sleep raises-word
   (1.5 clock.sleep) 'type 'clock.sleep raises-word
   ("soon" clock.sleep) 'type 'clock.sleep raises-word)

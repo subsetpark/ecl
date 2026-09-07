@@ -386,7 +386,7 @@ from an error value, and `fail` is sugar for raising an error whose kind is
 `'user` and whose message is the supplied string.
 
 Failure is observed as data only outside an explicit boundary: `@attempt`, or
-the concurrent `@spawn`/`await` path, returns `{'ok (values)}` after success or
+the concurrent `@spawn`/`task.await` path, returns `{'ok (values)}` after success or
 `{'err error}` after failure. Each envelope is an ordinary dictionary and is
 the boundary's only result value. The REPL is the implicit top-level boundary;
 a script's boundary is the process.
@@ -520,7 +520,7 @@ Words that are isolated but *not* marked, with their reasons:
 - `infra` and `within` — they apply on an explicitly named *other* stack.
 - `import`, `load`, `unmodule`, `register` — they construct, publish, or retire
   without taking a quotation.
-- `await`, `await-all`, `await-any`, `await-for`, `cancel`, `tasks` —
+- `task.await`, `task.await-any`, `task.await-for`, `task.cancel`, `task.pending` —
   they consume tasks rather than making them.
 
 `@` is an ordinary word character that the reader does not reserve: a user's
@@ -1090,8 +1090,8 @@ anonymously, be passed as data, and be registered more than once.
 - Concurrent `within` attempts have no specified FIFO order or fairness
   policy. Transactions on distinct slots and activity unrelated to a
   registration's durable stack may proceed concurrently.
-- **A `within` transaction cannot wait on another ECL task.** `await`,
-  `await-all`, `await-any`, `await-for`, and any other task-waiting operation
+- **A `within` transaction cannot wait on another ECL task.** `task.await`,
+  `task.await-any`, `task.await-for`, and any other task-waiting operation
   raise `'domain` while a `within` transaction is active, even if the requested
   result is already available. The error occurs before consuming a task or
   registering a wait. An implementation may preempt or internally suspend the
@@ -1178,14 +1178,14 @@ anonymously, be passed as data, and be registered more than once.
 The unit that spawns a task owns its structured lifetime. A unit cannot finish
 while an owned task remains active. Leaving a scope with an active unawaited
 task requests cancellation and waits for that task's complete descendant scope
-to quiesce. The session is the root task scope. `tasks` reports pending
+to quiesce. The session is the root task scope. `task.pending` reports pending
 descendants in deterministic spawn preorder.
 
-`await-any` accepts a nonempty task list and returns the selected index and
+`task.await-any` accepts a nonempty task list and returns the selected index and
 cached task result. Among tasks terminal when the operation begins, the lowest
 input index wins; otherwise the first subsequent completion wins.
 
-`await-all` is the derived composition `(await) each`. It awaits every input,
+The composition `(task.await) each` awaits every input,
 returns cached results in input order, preserves failures as data, and does not
 cancel siblings.
 
@@ -1196,7 +1196,7 @@ re-raises that failure. Selection of the leftmost failure is independent of
 schedule order. Element tasks have no simultaneous-progress guarantee; a
 program that requires cross-element rendezvous to make progress is invalid.
 
-Await order is program order. Nondeterminism enters through `await-any` and
+Await order is program order. Nondeterminism enters through `task.await-any` and
 through I/O interleaving among concurrent tasks. I/O remains ordered within
 one task. Sequential combinators including `each`, `for`, and `fold` execute
 left to right.

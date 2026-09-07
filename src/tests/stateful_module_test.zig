@@ -395,9 +395,9 @@ test "concurrency: within applications serialize and publish exactly the success
         try expectStack(&runtime, counter_module, "");
         // Every application observes its predecessor's published state, so
         // the final value is exactly the successful increment count.
-        try expectStack(&runtime, "[1] 60 take (pop [] (c.tick) @spawn) each await-all pop c.peek", "60");
+        try expectStack(&runtime, "[1] 60 take (pop [] (c.tick) @spawn) each (task.await) each pop c.peek", "60");
         // A multi-input update composed with `partial` is one transaction.
-        try expectStack(&runtime, "[1] 20 take (pop [] (5 c.add) @spawn) each await-all pop c.peek", "160");
+        try expectStack(&runtime, "[1] 20 take (pop [] (5 c.add) @spawn) each (task.await) each pop c.peek", "160");
         // A pool checkout moves a value outward; checkin returns one. Both
         // are ordinary transactional updates on the same slot.
         try expectStack(
@@ -453,7 +453,7 @@ test "concurrency: one image registered twice arbitrates two independent slots" 
         try expectStack(
             &runtime,
             "[1] 40 take (pop [] (shared-left.tick) @spawn [] (shared-right.tick) @spawn pair) " ++
-                "each raze await-all pop shared-left.peek shared-right.peek",
+                "each raze (task.await) each pop shared-left.peek shared-right.peek",
             "40 40",
         );
         // Reloading one registration keeps the other's state and code
@@ -496,7 +496,7 @@ test "concurrency: failed within applications publish neither draft nor pending 
     // usable and the next application advances it by exactly one.
     try expectStack(
         &runtime,
-        "[] (c.tick) @spawn dup cancel await pop c.peek dup 1 = swap 2 = or",
+        "[] (c.tick) @spawn dup task.cancel task.await pop c.peek dup 1 = swap 2 = or",
         "1",
     );
     try expectStack(&runtime, "c.peek c.tick c.peek swap -", "1");
@@ -511,10 +511,10 @@ test "concurrency: within rejects parking nesting and cross-module drafts as dom
     try expectOk(&runtime, "[0] (" ++
         "(((1 +) within) within) 'nested def " ++
         "((c.tick) within) 'cross def " ++
-        "(([] (1) @spawn await pop) within) 'parked def " ++
-        "(([] (1) @spawn 5 await-for pop) within) 'deadlined def " ++
-        "([(1) (2)] ([] swap @spawn) each await-all pop) 'joined def " ++
-        "(([(1)] ([] swap @spawn) each await-all pop) within) 'joined-within def " ++
+        "(([] (1) @spawn task.await pop) within) 'parked def " ++
+        "(([] (1) @spawn 5 task.await-for pop) within) 'deadlined def " ++
+        "([(1) (2)] ([] swap @spawn) each (task.await) each pop) 'joined def " ++
+        "(([(1)] ([] swap @spawn) each (task.await) each pop) within) 'joined-within def " ++
         "((dup without) within) 'peek def) 'p @defm");
     // Reloading or removing *any* module from inside a state application
     // acquires a second slot's turn, which is the same deadlock shape a
@@ -562,7 +562,7 @@ test "concurrency: hot reload retains the durable stack and quiesces old generat
         try expectStack(&runtime, reload_counter, "");
         // With no reload in flight every application publishes, so the
         // final value is exactly the increment count.
-        try expectStack(&runtime, "[1] 30 take (pop [] (c.tick) @spawn) each await-all pop c.peek", "30");
+        try expectStack(&runtime, "[1] 30 take (pop [] (c.tick) @spawn) each (task.await) each pop c.peek", "30");
         // Reload racing concurrent callers: each caller either takes its
         // turn before the barrier or finds its generation superseded and is
         // refused. Nothing in between: the final value is exactly the
@@ -572,7 +572,7 @@ test "concurrency: hot reload retains the durable stack and quiesces old generat
             "[1] 30 take (pop [] ([] (c.tick) @attempt result.ok?) @spawn) each " ++
                 "[0] (((1 +) within) 'tick def ((dup without) within) 'peek def " ++
                 "((dup 2 * without) within) 'doubled def) 'c @defm " ++
-                "await-all ('ok at first) each sum 30 + c.peek match?",
+                "(task.await) each ('ok at first) each sum 30 + c.peek match?",
             "1",
         );
         // The replacement initializer is discarded and the new code is live.
@@ -649,7 +649,7 @@ test "concurrency: delayed old code cannot reach a recycled replacement slot" {
                 "((1 +) within) 'tick def " ++
                 "((dup without) within) 'peek def " ++
                 "(99) 'marker def) 'replacement @defm) @spawn append " ++
-                "await-all pop replacement.marker replacement.tick replacement.peek",
+                "(task.await) each pop replacement.marker replacement.tick replacement.peek",
             "99 701",
         );
     }
@@ -674,7 +674,7 @@ test "concurrency: unmodule closes quiesces and retires slots names and aliases"
         try expectStack(
             &runtime,
             "[1] 20 take (pop [] ([] (c.tick) @attempt pop) @spawn) each " ++
-                "'c unmodule await-all pop",
+                "'c unmodule (task.await) each pop",
             "",
         );
         try expectErrorContains(&runtime, "c.peek", &.{"'kind 'undefined-word"});
@@ -697,7 +697,7 @@ test "concurrency: unmodule closes quiesces and retires slots names and aliases"
             try expectStack(
                 &runtime,
                 "[(" ++ removable_module ++ ") ('c unmodule)] ([] swap @spawn) each " ++
-                    "await-all pop [] ('c unmodule) @attempt pop " ++
+                    "(task.await) each pop [] ('c unmodule) @attempt pop " ++
                     removable_module ++ " c.tick c.peek",
                 "1",
             );
@@ -734,8 +734,8 @@ test "concurrency: a cancelled unmodule leaves nothing stranded" {
             "((dup without) within) 'peek def (1) 'alive def) 'doomed @defm" ++
             " [] (([] ('doomed.alive execute) @attempt result.ok?) () while) @spawn 'close-watcher set" ++
             " [] ('doomed unmodule (1) () while) @spawn 'removal-task set" ++
-            " close-watcher await pop removal-task cancel" ++
-            " removal-task await 'err at 'kind at 'cancelled match? pop" ++
+            " close-watcher task.await pop removal-task task.cancel" ++
+            " removal-task task.await 'err at 'kind at 'cancelled match? pop" ++
             // A successful public mutation drives reuse settlement while the
             // Session remains live; shutdown is not the cleanup mechanism.
             " [1] (((dup without) within) 'peek def) 'settler @defm" ++
@@ -835,11 +835,11 @@ test "concurrency: applying an escaped quotation races reload and removal" {
     try expectOk(&runtime, "[] ((1) 'k def ((k)) 'q def) 'racer @defm racer.q 'held set");
     try expectOk(&runtime, "[1] 24 take (pop [] ([] (held call) @attempt) @spawn) each " ++
         "[] ((2) 'k def ((k)) 'q def) 'racer @defm " ++
-        "await-all pop");
+        "(task.await) each pop");
     // And against removal, where acquisition must fail rather than race.
     try expectOk(&runtime, "[] ((1) 'k def ((k)) 'q def) 'goner @defm goner.q 'gone set");
     try expectOk(&runtime, "[1] 24 take (pop [] ([] (gone call) @attempt) @spawn) each " ++
-        "'goner unmodule await-all pop");
+        "'goner unmodule (task.await) each pop");
 }
 
 // Stubs. Implemented by the patch each one names; see
@@ -873,7 +873,7 @@ test "concurrency: a resolver racing an image's last release never dereferences 
         try expectStack(
             &runtime,
             "[1] 64 take (pop [] ([] (gone call) @attempt) @spawn) each " ++
-                "'goner unmodule await-all pop",
+                "'goner unmodule (task.await) each pop",
             "",
         );
     }
@@ -901,7 +901,7 @@ test "concurrency: a resolver racing environment teardown resolves without a der
         try expectStack(
             &runtime,
             "[1] 64 take (pop [] ([] (held call) @attempt) @spawn) each " ++
-                "[] ((2) 'k def) 'reloaded @defm await-all pop",
+                "[] ((2) 'k def) 'reloaded @defm (task.await) each pop",
             "",
         );
         // The replacement is what callers now reach; the escaped quotation went

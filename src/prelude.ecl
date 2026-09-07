@@ -340,11 +340,6 @@
 ((match?) partial each first-where)
 'find def
 
-### def await-all
-(tasks -- results : "Wait for every task and return its result in input order.")
-((await) each)
-'await-all def
-
 ### def set
 (: "Bind a value as a constant word in the current scope; an optional annotation may precede the
     value.")

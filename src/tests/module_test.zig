@@ -227,7 +227,8 @@ test "module: an unknown long module prefix remains cancellable while it is inte
     @memcpy(qualified_bytes[prefix.len..], ".missing");
     const qualified = try intern.intern(qualified_bytes);
 
-    // Cooperative FIFO scheduling gives each seeded task one bounded opening
+    // Load task operations before the timed scenario. Cooperative FIFO
+    // scheduling gives each seeded task one bounded opening
     // turn before its body runs. The target spends its first evaluation turn
     // resolving the long qualified word. Its second turn advances one prefix-
     // interning slice and yields part-way through name validation; the seeded
@@ -235,10 +236,11 @@ test "module: an unknown long module prefix remains cancellable while it is inte
     // turn.
     const source =
         "1 pack (execute) @spawn dup 'target set " ++
-        "1 pack (cancel) @spawn await pop target await";
+        "1 pack (task.cancel) @spawn task.await pop target task.await";
 
     var runtime = try session.Session.initWithConfig(allocator, &.{}, .cooperative);
     defer runtime.deinit();
+    try expectOk(&runtime, "task.pending pop");
     try runtime.pushOwned(.{ .word = .{ .name = qualified } });
     try expectOk(&runtime, source);
 
@@ -877,7 +879,7 @@ test "session: mutation settlement is independent of a busy sole worker" {
         for (0..4096) |_| try runtime.define(name, binding.top());
         try std.testing.expect(counting.total_requested_bytes <= warmed_live_bytes + 4096);
         try std.testing.expectEqual(@as(usize, 1), runtime.schedulerWorkerThreadCount());
-        try expectOk(&runtime, "dup cancel await pop");
+        try expectOk(&runtime, "dup task.cancel task.await pop");
     }
     try std.testing.expectEqual(.ok, counting.deinit());
 }

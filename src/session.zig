@@ -1077,7 +1077,7 @@ pub const Session = enum(usize) {
     /// Advance a `manual` monotonic clock by whole milliseconds. Pending
     /// sleeps and deadlines whose instant is reached become ready through the
     /// ordinary timer path. The call returns once the clock has moved, not
-    /// once those wakes deliver; observe delivery through `await`. Refused for
+    /// once those wakes deliver; observe delivery through `task.await`. Refused for
     /// a host clock, and with `Overflow` — the clock unchanged — when the sum
     /// would leave the clock's range.
     pub fn advanceManualClock(

@@ -48,7 +48,7 @@ test "native runtime: loaded artifacts behave identically at one and eight worke
 }
 
 test "native runtime: spawned units inherit native loading context" {
-    const source = "[] (41 sample.increment) @spawn await";
+    const source = "[] (41 sample.increment) @spawn task.await";
     var one = try run(source, "1", false);
     defer one.deinit();
     var eight = try run(source, "8", false);

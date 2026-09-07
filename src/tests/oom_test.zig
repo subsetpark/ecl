@@ -557,7 +557,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "[] ({'kind 'custom 'data {'detail 7}} raise) @attempt pop " ++
             "[3 4] (+) with call pop 2 3 (+) (*) (-) tri2 pop pop pop " ++
             "[5 6] (+) @attempt pop " ++
-            "[7 8] (+) @spawn await pop " ++
+            "[7 8] (+) @spawn task.await pop " ++
             "[1] (2) @attempt pop " ++
             // This admitted reader body reaches ConstructionDriver allocation
             // after the re-scope cursor owns its source. Exhausting that exact
@@ -599,12 +599,12 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     try runOk(
         &runtime,
         "oom-concurrency.ecl",
-        "[] ([1 2 3] str) @spawn await pop " ++
-            "[] (1) @spawn dup pair await-any pop pop " ++
-            "[] (1) @spawn dup await pop 0 await-for pop " ++
-            "[] (1) @spawn 1000000 await-for pop " ++
-            "[] ((1) () while) @spawn dup cancel await pop " ++
-            "[(1) (missing) (2 3)] ([] swap @spawn) each await-all pop " ++
+        "[] ([1 2 3] str) @spawn task.await pop " ++
+            "[] (1) @spawn dup pair task.await-any pop pop " ++
+            "[] (1) @spawn dup task.await pop 0 task.await-for pop " ++
+            "[] (1) @spawn 1000000 task.await-for pop " ++
+            "[] ((1) () while) @spawn dup task.cancel task.await pop " ++
+            "[(1) (missing) (2 3)] ([] swap @spawn) each (task.await) each pop " ++
             "[1 2 3] [] (dup *) @each pop",
     );
     try runOk(
@@ -623,7 +623,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "[1 2] sample.sum-list pop {'a 1 'b 2} sample.sum-dict pop " ++
             "'answer 42 sample.pair-dict pop sample.builder-budget pop " ++
             "sample.cooperative pop [] (9 sample.draft-fail) @attempt pop " ++
-            "[] (9 sample.yield-forever) @spawn dup cancel await pop",
+            "[] (9 sample.yield-forever) @spawn dup task.cancel task.await pop",
     );
     try runOk(
         &runtime,
@@ -955,7 +955,7 @@ fn stdlibSessionAllocationProbe(
             "oom-clock.ecl",
             // The probe Session grants no wall clock, so `unix` exercises the
             // refusal path; a zero sleep parks and resumes without a timer.
-            "clock.now clock.elapsed pop [] (0 clock.sleep 1) @spawn await pop " ++
+            "clock.now clock.elapsed pop [] (0 clock.sleep 1) @spawn task.await pop " ++
                 "[] (clock.unix) @attempt pop",
         ),
         .net => try runOk(
@@ -966,7 +966,7 @@ fn stdlibSessionAllocationProbe(
             "{'address \"127.0.0.1\" 'port 0} net.listen dup net.local-address pop " ++
                 "dup net.close net.close " ++
                 "[] ({'address \"127.0.0.1\" 'port 1} net.listen) @attempt pop " ++
-                "[] ({'address \"127.0.0.1\" 'port 0} net.listen net.local-address) @spawn await pop",
+                "[] ({'address \"127.0.0.1\" 'port 0} net.listen net.local-address) @spawn task.await pop",
         ),
         // A live exchange has scheduling-dependent readiness cardinality (the
         // acceptor thread may fill the slot before or after the driver's first
@@ -989,7 +989,7 @@ fn stdlibSessionAllocationProbe(
             "oom-net-connection.ecl",
             "{'address \"127.0.0.1\" 'port 0} net.listen 'l set " ++
                 "[] (l net.accept) @spawn 'waiting set 0 clock.sleep l net.close " ++
-                "waiting await pop [] (l net.accept) @attempt pop",
+                "waiting task.await pop [] (l net.accept) @attempt pop",
         ),
         // Every ordinal is deterministic: two binds, one closed, then a give
         // whose second port refuses after the first is already prepared, so
@@ -1002,7 +1002,7 @@ fn stdlibSessionAllocationProbe(
                 "{'address \"127.0.0.1\" 'port 0} net.listen 'b set b net.close " ++
                 "[] (a b 2 pack [] (pop pop) @give) @attempt pop " ++
                 "[] (a a 2 pack [] (pop pop) @give) @attempt pop " ++
-                "a wrap [] (pop) @give await pop",
+                "a wrap [] (pop) @give task.await pop",
         ),
         .time => try runOk(
             &runtime,
@@ -1025,7 +1025,7 @@ fn stdlibSessionAllocationProbe(
                 "http.server.render-response pop " ++
                 "\"GET\" \"/a?b=1\" http.request.new dup http.request.query pop \"x\" \"y\" http.request.with-header pop " ++
                 "[] (l {'max-in-flight 1} (pop http.response.not-found) http.server.@serve) @spawn " ++
-                "0 clock.sleep dup cancel await pop l net.close",
+                "0 clock.sleep dup task.cancel task.await pop l net.close",
         ),
         .http => try runOk(
             &runtime,

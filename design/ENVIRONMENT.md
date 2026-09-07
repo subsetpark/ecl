@@ -155,7 +155,7 @@ manual clock that starts at zero and moves only when the embedder advances it
 through the Session by whole milliseconds. An advance that would carry the
 reading past the int range is refused and leaves the reading unchanged, so
 the manual clock never wraps or runs backwards. Every deadline —
-`clock.sleep`, `await-for`, and any future timed wait — captures its absolute
+`clock.sleep`, `task.await-for`, and any future timed wait — captures its absolute
 instant on that one clock before registering any timer state; an instant the
 clock could never report is refused with `'overflow` instead of being
 registered, and the timer thread reconsiders its heap on every advance. Under a manual clock no wait, wake, or `clock.now` sample

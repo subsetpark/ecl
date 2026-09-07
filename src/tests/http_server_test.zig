@@ -315,9 +315,9 @@ const Server = struct {
             allocator,
             "{s} [] (l {s} (dup 'path at [{s}" ++
                 "\"/close-listener\" (pop l net.close 204 http.response.new) " ++
-                "\"/stop\" (pop srv cancel 204 http.response.new) " ++
+                "\"/stop\" (pop srv task.cancel 204 http.response.new) " ++
                 "{s}] case) http.server.@serve) @spawn 'srv set " ++
-                "srv await 'err at dup 'kind at swap 'data {{}} at-or 'reason 'none at-or",
+                "srv task.await 'err at dup 'kind at swap 'data {{}} at-or 'reason 'none at-or",
             .{ prelude, config, rows, default_row },
         );
         errdefer allocator.free(program);
@@ -509,8 +509,8 @@ test "http server: the read deadline answers 408 and closes" {
 
 const gate_prelude = "[] (l2 net.accept) @spawn 'gate set";
 const gate_rows =
-    "\"/slow\" (pop gate await pop {'status 200 'headers {} 'body \"slow\"}) " ++
-    "\"/probe\" (pop gate 0 await-for 'ok dict.has? (\"terminal\") (\"active\") if {'status 200 'headers {} 'body \"\"} 'body rolldown put) ";
+    "\"/slow\" (pop gate task.await pop {'status 200 'headers {} 'body \"slow\"}) " ++
+    "\"/probe\" (pop gate 0 task.await-for 'ok dict.has? (\"terminal\") (\"active\") if {'status 200 'headers {} 'body \"\"} 'body rolldown put) ";
 
 test "http server: max-in-flight stops accepting until a request completes" {
     // One acceptor: the probe waits in the backlog behind the slow request and
