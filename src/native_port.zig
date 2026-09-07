@@ -5,7 +5,7 @@ const external = @import("external.zig");
 const heap = @import("heap.zig");
 const native = @import("native_module.zig");
 const scheduler = @import("scheduler.zig");
-const ExecutorOwner = @import("port_controller.zig").Owner;
+const controllers = @import("port_controller.zig");
 const transfers = @import("port_transfer.zig");
 const Ring = @import("byte_ring.zig").Ring;
 const Value = @import("value.zig").Value;
@@ -55,7 +55,7 @@ const OwnerState = struct {
     closing: bool = false,
     live: u32 = 0,
     identity: u64 = 1,
-    executor: *ExecutorOwner,
+    executor: *controllers.Owner,
 
     fn releaseLive(self: *OwnerState) void {
         lock(&self.mutex);
@@ -73,7 +73,7 @@ pub const Owner = opaque {
         try limits.validate();
         const state_value = try host.allocator().create(OwnerState);
         errdefer host.allocator().destroy(state_value);
-        state_value.* = .{ .host = host, .limits = limits, .executor = try ExecutorOwner.init(host.allocator()) };
+        state_value.* = .{ .host = host, .limits = limits, .executor = try controllers.Owner.init(host.allocator(), @as(usize, limits.max_live_ports) * @min(limits.max_operations, abi.max_port_lanes) + 1) };
         return ownerFromState(state_value);
     }
     pub fn access(self: *Owner) *Access {
@@ -262,7 +262,7 @@ pub const Cell = struct {
         self.changed.broadcast(io());
         self.waits.notifyLocked(self);
     }
-    fn run(self: *Cell) void {
+    fn run(execution: *controllers.Execution, self: *Cell) void {
         lock(&self.mutex);
         self.definition.init_state.?(self.backend.ptr);
         const initialize = !self.closed.load(.acquire);
@@ -270,23 +270,11 @@ pub const Cell = struct {
         unlock(&self.mutex);
         var controller_context: ControllerContext = .{ .cell = self, .operation = null };
         if (initialize) self.definition.initialize.?(self.backend.ptr, &controller_table, &controller_context);
-        var threads: [abi.max_port_lanes - 1]?std.Thread = .{null} ** (abi.max_port_lanes - 1);
         lock(&self.mutex);
         if (self.initialization_failure != null) self.closed.store(true, .release);
-        if (!self.closed.load(.acquire)) {
-            for (1..self.definition.lane_count) |lane| {
-                threads[lane - 1] = std.Thread.spawn(.{}, Cell.runLane, .{ self, lane }) catch {
-                    self.initialization_failure = Failure.init(.io, "cannot start native controller lane");
-                    self.closeLocked();
-                    break;
-                };
-            }
-        }
-        self.phase = if (self.closed.load(.acquire)) .closing else .open;
-        self.waits.notifyLocked(self);
+        const lane_count = if (self.closed.load(.acquire)) 1 else self.definition.lane_count;
         unlock(&self.mutex);
-        self.runLane(0);
-        for (threads) |thread| if (thread) |running| running.join();
+        execution.runLanes(lane_count, self, Cell.runLane, Cell.failLaneStartup, Cell.publishInitialization);
         // Every operation executor and cancellation notification has finished.
         // The root controller owns cleanup; its reaper joins it before detach.
         lock(&self.mutex);
@@ -294,6 +282,18 @@ pub const Cell = struct {
         self.definition.cleanup.?(self.backend.ptr);
         lock(&self.mutex);
         self.phase = .cleaned;
+        unlock(&self.mutex);
+    }
+    fn failLaneStartup(self: *Cell) void {
+        lock(&self.mutex);
+        self.initialization_failure = Failure.init(.io, "cannot start native controller lane");
+        self.closeLocked();
+        unlock(&self.mutex);
+    }
+    fn publishInitialization(self: *Cell) void {
+        lock(&self.mutex);
+        self.phase = if (self.closed.load(.acquire)) .closing else .open;
+        self.waits.notifyLocked(self);
         unlock(&self.mutex);
     }
     fn retireController(args: struct { *Cell }, _: void) void {

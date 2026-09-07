@@ -60,6 +60,7 @@ The main components are these:
 | Frame machine | Dispatch quotations, represent continuations, enforce application boundaries, and construct errors | `machine.zig` |
 | Bulk execution | Pervasive scalar semantics, typed flat loops, and guarded source-phrase recognition | `kernel_*.zig`, `kernels.zig`, `idioms.zig` |
 | Scheduler | Green units, structured task scopes, task and external waits, cancellation, timers, external membership, and retirement service | `scheduler_core.zig`, `scheduler.zig`, `external.zig`, `task_prims.zig` |
+| Port controllers | Typed job submission, independent execution, joined retirement, and shared scope lifetime | `port_controller.zig`, `port_transfer.zig` |
 | Process ports | Process policy, POSIX process-group ownership, bounded pipe queues, and terminal publication | `process_port.zig`, `stdlib/proc.zig` |
 | Network listeners and connections | Listen policy, exact grant matching over normalized IP literals, scope-owned listening sockets, demand-gated accept, bounded connection queues serviced by controller threads, and idempotent close | `net_port.zig`, `stdlib/net.zig` |
 | Boundary layers | Embedded modules, native extensions, rendering, terminal safety, the REPL, and the CLI | `prelude.zig`, `stdlib.zig`, `native_*.zig`, `print.zig`, `console.zig`, `line_editor.zig`, `main.zig` |
@@ -426,15 +427,15 @@ nominally constant scheduler turn from hiding an unbounded recursive free.
 
 Port reference lifetime is intentionally distinct from external-resource
 lifetime. A port heap object retains a process cell so terminal observations
-remain safe. A separate `ControllerGroup` issues one lease to every detached
+remain safe. A separate `ControllerGroup` issues one lease to every host-owned
 supervisor, pipe, timeout, and escalation thread and owns the spawning
 `TaskScope` membership. The final controller lease is released only after its
 thread's process-cell reference, and only that final release detaches whatever
 membership the port holds by then. The process-cell reference count therefore
 describes value and readiness observation, never controller quiescence.
 Dropping the last port value cannot orphan a live child, retaining a port
-cannot detach it from scope closure, and Session teardown cannot overtake a
-detached controller thread.
+cannot detach it from scope closure, and Session teardown joins controller
+jobs before releasing their owners.
 
 Which scope holds that membership can change. A live external resource is a
 member of exactly one task scope at a time, and a closed one is a member of
@@ -967,8 +968,8 @@ one entry per step, and releases the quota slot last, so a task scope or
 Session cannot publish quiescence while an operation still owns any of them.
 The filesystem read, write, and publication primitives run on the worker in
 these bounded quanta, the same convention the archive and package-store
-drivers already use; only process pipes and network ports (listeners and
-connections) use detached controller threads, and a network listener owns a
+drivers already use. Process pipes, native callbacks, and network ports use
+host-owned controller jobs. A network listener owns a
 socket and starts its one acceptor thread only when a unit first parks in
 `accept`.
 
@@ -1035,12 +1036,11 @@ Refusals before the host is reached are `'domain` with reasons `'unavailable`,
 
 Accepting, reading, and writing block indefinitely at the kernel and have no
 worker-side readiness source, so they follow the process-pipe model rather
-than the filesystem model: detached controller threads perform the blocking
+than the filesystem model: host-owned controller jobs perform the blocking
 calls and hand results to the scheduler through bounded queues and the
 readiness capabilities in `external.zig`. A parked unit holds no worker. The
-thread that owns a socket is the only place that closes its descriptor,
-releases its live reservation, and detaches its scope membership, exactly as
-the process supervisor is for a child.
+shared executor joins the socket job before its retirement callback
+closes descriptors, releases the live reservation, and detaches scope membership.
 
 Ownership is carried by consuming types rather than by convention. An
 `OwnedSocket` closes its descriptor at most once; a `ConnectionReservation`
@@ -1085,13 +1085,11 @@ backpressure in the kernel backlog. A connection aborted between `poll` and
 with a `resources` reason rather than failing the thread. Readiness keys are
 slot pointers, so a wake reaches the slot's owner and the owning driver takes
 exactly its own socket. `ListenerCell.close` writes one byte to the wake pipe
-and waits under the cell condition until the acceptor reports it has left
-`poll` and will not touch the descriptor again; only then does it close the
-socket, mark every waiting slot `closed`, and wake their owners. That wait is
-bounded by one thread returning from a `poll` the wake byte has already
-satisfied, which is not the unbounded worker wait this document forbids; the
-process controller's cancellation does not wait because a child may take
-hundreds of milliseconds to die, and no such delay exists here.
+and lets it return from `poll`. The shared executor joins the acceptor before
+closing the socket and publishing close readiness. A closing unit parks on
+that readiness; scope cancellation requests the same transition without
+waiting. Completion proves the address can be rebound, and neither worker
+progress nor cancellation depends on servicing the retirement queue inline.
 
 A `ConnectionCell` has exactly one controller thread. The socket is
 non-blocking, and the controller waits in one `poll` over the socket and the
@@ -1396,7 +1394,15 @@ retirement queue accepts only completed jobs and joins each before invoking its
 retirement callback; a blocked backend cannot hold up another job's retirement.
 Retirement callbacks perform bounded release and never wait for other jobs.
 Executor shutdown closes admission and joins the reaper after all callbacks
-have returned. The native byte ABI adapts onto this internal execution boundary.
+have returned. Reusable job records are reserved against the owner's resource
+limits before cancellation can require them; submission and retirement do not
+allocate after preparation. Unused records need no initialization walk. One
+additional record covers the retirement callback returning live capacity.
+Network polling, process supervision, stream I/O, timers, and native callbacks
+all submit typed jobs to this boundary. The native byte ABI is an adapter,
+not the representation of built-in operations. Only running jobs receive the
+capability to run and await child lanes; worker submission authority cannot
+join or destroy executors.
 The resource owner joins completed controllers outside ECL workers, so scope
 teardown can await cleanup without blocking a worker. Closed heap identities retain
 their module pin independently of backend cleanup. Session shutdown closes creation,
@@ -1411,9 +1417,9 @@ use that lock. The creator retains the provisional cell until publication or
 backend rollback completes.
 
 Controller completion consumes the final execution reference and resource lock
-at one shared boundary. Backend-specific quiescence must already hold: process
+at one shared boundary. Backend-specific quiescence and the executor join must already hold: process
 controller leases have drained, a connection controller has closed its handles,
-or a native controller has been joined. The boundary drops the execution pin
+and native cleanup has returned. The boundary drops the execution pin
 before detaching scope memberships, so observing scope completion also proves
 that execution no longer retains the issuing domain. Retained value references
 remain independent of this completion protocol.
