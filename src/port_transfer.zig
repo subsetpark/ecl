@@ -250,11 +250,11 @@ pub fn WriteDriver(comptime Backend: type) type {
         pub fn deinit(self: *Self, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
             switch (self.state) {
                 .encoding => |*state| {
-                    self.backend.cell.abandonWrite(state.permit);
+                    state.permit.cancel();
                     state.encoder.deinit();
                 },
                 .writing => |*state| {
-                    self.backend.cell.abandonWrite(state.permit);
+                    state.permit.cancel();
                     state.bytes.retire(releases, allocator);
                 },
                 .complete => |*bytes| bytes.retire(releases, allocator),
@@ -282,7 +282,7 @@ pub fn WriteDriver(comptime Backend: type) type {
             const state = &self.state.writing;
             const source = state.bytes.bytes();
             if (state.offset == source.len) {
-                self.backend.cell.finishWrite(state.permit);
+                state.permit.finish();
                 const bytes = state.bytes;
                 self.state = .{ .complete = bytes };
                 return .completed;
@@ -293,7 +293,7 @@ pub fn WriteDriver(comptime Backend: type) type {
                     break :progressed .yielded;
                 },
                 .pending => parked: {
-                    try evaluator.park(.{ .external = self.backend.cell.writeSource(state.permit) });
+                    try evaluator.park(.{ .external = state.permit.source() });
                     break :parked .yielded;
                 },
             };

@@ -144,7 +144,15 @@ const ControllerGroup = controllers.Group(Cell, void, .{
     .release = Cell.releasePort,
 });
 
-const Operations = controllers.Lane(Operation);
+const Operations = controllers.Lane(Operation, .operation, .{
+    .deinit = Operation.deinit,
+    .runnable = Operation.runnable,
+    .execute = Operation.execute,
+    .notifyOperation = Operation.notifyLocked,
+    .completeResource = Operation.completeResourceLocked,
+    .cancelPolicy = Operation.cancelPolicy,
+    .cancelResource = Operation.cancelResourceLocked,
+});
 
 pub const Cell = struct {
     allocator: std.mem.Allocator,
@@ -162,7 +170,7 @@ pub const Cell = struct {
     ownership: external.Ownership = .provisional,
     phase: enum { reserved, initializing, open, closing, cleaned, joined } = .reserved,
     initialization_failure: ?Failure = null,
-    lanes: [abi.max_port_lanes]Operations = .{Operations{}} ** abi.max_port_lanes,
+    lanes: [abi.max_port_lanes]Operations,
 
     fn initializeAllocation(cell: *Cell, owner: *OwnerState, instance: *native.ModuleInstance, kind: u32) error{OutOfMemory}!void {
         const allocator = owner.host.allocator();
@@ -170,7 +178,7 @@ pub const Cell = struct {
         const state = try allocator.alignedAlloc(u8, .@"64", definition.state_size);
         errdefer allocator.free(state);
         const group = try ControllerGroup.init(allocator, owner.executor.access(), cell);
-        cell.* = .{ .allocator = allocator, .owner = owner, .instance = instance, .kind = kind, .definition = definition, .backend = state, .controllers = group };
+        cell.* = .{ .allocator = allocator, .owner = owner, .instance = instance, .kind = kind, .definition = definition, .backend = state, .controllers = group, .lanes = .{Operations.init(&cell.mutex)} ** abi.max_port_lanes };
         instance.retain();
     }
     pub fn retainReadiness(self: *Cell) void {
@@ -299,30 +307,13 @@ pub const Cell = struct {
     }
     fn runLane(self: *Cell, index: usize) void {
         const lane = &self.lanes[index];
-        var controller_context: ControllerContext = .{ .cell = self, .operation = null };
         while (true) {
             lock(&self.mutex);
             while (lane.empty() and !self.closed.load(.acquire)) self.changed.waitUncancelable(io(), &self.mutex);
-            const ticket = lane.front() orelse {
-                unlock(&self.mutex);
-                return;
-            };
-            const op = ticket.owner();
-            lock(&op.mutex);
-            const execute = !self.closed.load(.acquire) and op.ticket.begin();
-            unlock(&op.mutex);
+            const finished = lane.empty();
             unlock(&self.mutex);
-            controller_context.operation = op;
-            if (execute) self.definition.execute.?(self.backend.ptr, op.code, &controller_table, &controller_context);
-            lock(&self.mutex);
-            lock(&op.mutex);
-            const completion = lane.complete(ticket);
-            op.notifyLocked();
-            unlock(&op.mutex);
-            if (completion == .close_resource) self.closeLocked();
-            self.waits.notifyLocked(self);
-            unlock(&self.mutex);
-            op.releaseReadiness();
+            if (finished) return;
+            _ = lane.runNext();
         }
     }
     pub fn admit(self: *Cell, code: u32) error{OutOfMemory}!union(enum) { pending, closed, invalid_operation, operation: *Operation } {
@@ -335,17 +326,11 @@ pub const Cell = struct {
         if (closed) return .closed;
         if (invalid) return .invalid_operation;
         if (full) return .pending;
-        const op = try Operation.create(self, code, lane);
-        lock(&self.mutex);
-        if (self.closed.load(.acquire) or !self.lanes[lane].tryAppend(op.ticket, self.laneCapacity(lane))) {
-            const now_closed = self.closed.load(.acquire);
-            unlock(&self.mutex);
-            op.releaseReadiness();
-            return if (now_closed) .closed else .pending;
-        }
-        op.retainReadiness();
-        self.changed.broadcast(io());
-        unlock(&self.mutex);
+        const op = Operation.create(self, code, lane) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.Closed => .closed,
+            error.Full => .pending,
+        };
         return .{ .operation = op };
     }
     const Transfer = transfers.ScopeTransfer(Cell, transferOwnership, transferLive);
@@ -372,7 +357,6 @@ pub const Operation = struct {
     code: u32,
     lane: u32,
     ticket: *Operations.Ticket,
-    refs: std.atomic.Value(u32) = .init(1),
     mutex: std.Io.Mutex = .init,
     changed: std.Io.Condition = .init,
     waits: external.WaitList(Operation) = .{},
@@ -381,29 +365,60 @@ pub const Operation = struct {
     request_finished: bool = false,
     failure: ?Failure = null,
 
-    fn create(cell: *Cell, code: u32, lane: u32) error{OutOfMemory}!*Operation {
+    fn create(cell: *Cell, code: u32, lane: u32) error{ OutOfMemory, Closed, Full }!*Operation {
         const allocator = cell.allocator;
         const request = try allocator.alloc(u8, cell.owner.limits.ring_capacity);
         errdefer allocator.free(request);
         const response = try allocator.alloc(u8, cell.owner.limits.ring_capacity);
         errdefer allocator.free(response);
-        const op = try allocator.create(Operation);
-        errdefer allocator.destroy(op);
-        const ticket = try Operations.Ticket.create(allocator, op);
-        op.* = .{ .allocator = allocator, .cell = cell, .code = code, .lane = lane, .ticket = ticket, .request = .{ .bytes = request }, .response = .{ .bytes = response } };
+        lock(&cell.mutex);
+        defer unlock(&cell.mutex);
+        if (cell.closed.load(.acquire)) return error.Closed;
+        const ticket = try cell.lanes[lane].admit(allocator, cell.laneCapacity(lane), .{ cell, code, lane, request, response }, initialize) orelse return error.Full;
+        cell.changed.broadcast(io());
+        return ticket.owner();
+    }
+    fn initialize(op: *Operation, ticket: *Operations.Ticket, cell: *Cell, code: u32, lane: u32, request: []u8, response: []u8) void {
+        op.* = .{ .allocator = cell.allocator, .cell = cell, .code = code, .lane = lane, .ticket = ticket, .request = .{ .bytes = request }, .response = .{ .bytes = response } };
         cell.retainReadiness();
-        return op;
+    }
+    fn runnable(self: *Operation) bool {
+        return !self.cell.closed.load(.acquire);
+    }
+    fn execute(self: *Operation, running: *controllers.Running) void {
+        var ctx: ControllerContext = .{ .cell = self.cell, .operation = self, .running = running };
+        self.cell.definition.execute.?(self.cell.backend.ptr, self.code, &controller_table, &ctx);
+    }
+    fn completeResourceLocked(self: *Operation, completion: controllers.Completion) void {
+        if (completion == .close_resource) self.cell.closeLocked();
+        self.cell.waits.notifyLocked(self.cell);
+    }
+    fn cancelPolicy(self: *Operation) controllers.CallbackCancellation {
+        return switch (self.cell.definition.cancellation) {
+            .close_resource => .close_resource,
+            .acknowledge => .acknowledge,
+            _ => unreachable,
+        };
+    }
+    fn cancelResourceLocked(self: *Operation, action: controllers.CancelAction) void {
+        const cell = self.cell;
+        switch (action) {
+            .close_resource => cell.closeLocked(),
+            .interrupt => cell.definition.cancel_operation.?(cell.backend.ptr, self.lane),
+            .retired => cell.waits.notifyLocked(cell),
+            .settled => {},
+        }
     }
     pub fn retainReadiness(self: *Operation) void {
-        _ = self.refs.fetchAdd(1, .monotonic);
+        self.ticket.retain();
     }
     pub fn releaseReadiness(self: *Operation) void {
-        if (self.refs.fetchSub(1, .acq_rel) != 1) return;
-        self.ticket.destroy();
+        self.ticket.release();
+    }
+    fn deinit(self: *Operation) void {
         self.allocator.free(self.request.bytes);
         self.allocator.free(self.response.bytes);
         self.cell.releasePort();
-        self.allocator.destroy(self);
     }
     pub fn registerReadiness(self: *Operation, key: u64, target: external.WakeTarget) external.RegisterError!external.RegisterResult {
         return external.WaitList(Operation).register(self, key, target);
@@ -430,25 +445,7 @@ pub const Operation = struct {
         unlock(&self.mutex);
     }
     pub fn cancel(self: *Operation) void {
-        const cell = self.cell;
-        lock(&cell.mutex);
-        lock(&self.mutex);
-        const policy: controllers.CancellationPolicy = switch (cell.definition.cancellation) {
-            .close_resource => .close_resource,
-            .acknowledge => .acknowledge,
-            _ => unreachable,
-        };
-        const action = cell.lanes[self.lane].cancel(self.ticket, policy);
-        self.notifyLocked();
-        unlock(&self.mutex);
-        switch (action) {
-            .close_resource => cell.closeLocked(),
-            .interrupt => cell.definition.cancel_operation.?(cell.backend.ptr, self.lane),
-            .retired => cell.waits.notifyLocked(cell),
-            .settled => {},
-        }
-        unlock(&cell.mutex);
-        if (action == .retired) self.releaseReadiness();
+        self.ticket.cancel();
     }
     pub fn result(self: *Operation) union(enum) { pending, ready, failed: Failure } {
         lock(&self.mutex);
@@ -484,7 +481,7 @@ pub const Operation = struct {
     }
 };
 
-const ControllerContext = struct { cell: *Cell, operation: ?*Operation };
+const ControllerContext = struct { cell: *Cell, operation: ?*Operation, running: ?*controllers.Running = null };
 fn context(raw: *anyopaque) *ControllerContext {
     return @ptrCast(@alignCast(raw));
 }
@@ -525,7 +522,8 @@ fn controllerAcknowledge(raw: *anyopaque) callconv(.c) bool {
     const op = ctx.operation orelse return false;
     lock(&op.mutex);
     defer unlock(&op.mutex);
-    return op.ticket.acknowledgeCancellation();
+    const running = ctx.running orelse return false;
+    return running.acknowledgeCancellation();
 }
 fn controllerFail(raw: *anyopaque, kind: abi.ErrorKindWire, bytes: [*]const u8, length: u32) callconv(.c) void {
     const ctx = context(raw);

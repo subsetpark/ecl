@@ -478,7 +478,7 @@ const GroupState = union(enum) {
     retired: Termination,
 };
 
-const Writers = controllers.Lane(ProcessCell);
+const Writers = controllers.Lane(ProcessCell, .writer, .{ .retain = ProcessCell.retainRef, .release = ProcessCell.releaseRef, .write = ProcessCell.writeTurnLocked, .notify = ProcessCell.notifyWritersLocked, .source = ProcessCell.writerSource });
 
 const InputState = enum {
     open,
@@ -510,7 +510,7 @@ fn processLive(cell: *ProcessCell) bool {
     return cell.group_state != .retired;
 }
 
-pub const WritePermit = Writers.Ticket;
+pub const WritePermit = Writers.Writer;
 
 pub const RunEdge = enum {
     stdout_terminal,
@@ -563,7 +563,7 @@ pub const ProcessCell = struct {
     discard_outputs: bool = false,
     stdout_reader_active: bool = false,
     stderr_reader_active: bool = false,
-    writers: Writers = .{},
+    writers: Writers,
     waits: external.WaitList(ProcessCell) = .{},
     timeout_done: std.Io.Event = .unset,
     timed_out: bool = false,
@@ -606,6 +606,7 @@ pub const ProcessCell = struct {
             .identity = owner.next_identity.fetchAdd(1, .monotonic),
             .group_state = .{ .running = group },
             .controllers = execution_group,
+            .writers = Writers.init(&cell.mutex),
             .stdin = .{ .bytes = stdin },
             .stdout = .{ .bytes = stdout },
             .stderr = .{ .bytes = stderr },
@@ -727,32 +728,23 @@ pub const ProcessCell = struct {
     }
 
     pub fn beginWrite(self: *ProcessCell) error{OutOfMemory}!*WritePermit {
-        const ticket = try WritePermit.create(self.allocator, self);
-        std.Io.Threaded.mutexLock(&self.mutex);
-        self.writers.append(ticket);
-        std.Io.Threaded.mutexUnlock(&self.mutex);
-        return ticket;
-    }
-
-    pub fn write(
-        self: *ProcessCell,
-        permit: *WritePermit,
-        bytes: []const u8,
-    ) WriteProgress {
-        const node = permit;
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        node.checkCell(self);
+        return (try self.writers.admitWriter(self.allocator, self, std.math.maxInt(usize))).?;
+    }
+    fn writeTurnLocked(self: *ProcessCell, turn: bool, bytes: []const u8) WriteProgress {
         if (self.input != .open or self.io_failed) return .io;
-        if (!node.begin() or self.stdin.free() == 0) return .pending;
+        if (!turn or self.stdin.free() == 0) return .pending;
         const count = @min(bytes.len, self.stdin.free());
         self.stdin.push(bytes[0..count]);
         self.changed.broadcast(blockingIo());
         return .{ .written = count };
     }
-
-    pub fn writeSource(self: *ProcessCell, permit: *WritePermit) external.ReadinessSource {
-        return external.readinessSource(ProcessCell, self, @intFromPtr(permit));
+    fn writerSource(self: *ProcessCell, key: u64) external.ReadinessSource {
+        return external.readinessSource(ProcessCell, self, key);
+    }
+    fn notifyWritersLocked(self: *ProcessCell) void {
+        self.waits.notifyLocked(self);
     }
 
     pub fn beginRun(self: *ProcessCell) *RunCursor {
@@ -814,27 +806,6 @@ pub const ProcessCell = struct {
         if (observation != &self.run_observation or !observation.active)
             @panic("run cursor belongs to another process");
         return observation;
-    }
-
-    pub fn finishWrite(self: *ProcessCell, permit: *WritePermit) void {
-        self.retireWrite(permit, false);
-    }
-
-    pub fn abandonWrite(self: *ProcessCell, permit: *WritePermit) void {
-        self.retireWrite(permit, true);
-    }
-
-    fn retireWrite(self: *ProcessCell, ticket: *WritePermit, cancelled: bool) void {
-        std.Io.Threaded.mutexLock(&self.mutex);
-        ticket.checkCell(self);
-        if (cancelled) {
-            _ = self.writers.cancel(ticket, .release);
-        } else {
-            _ = self.writers.complete(ticket);
-        }
-        self.notifyReadyLocked();
-        std.Io.Threaded.mutexUnlock(&self.mutex);
-        ticket.destroy();
     }
 
     pub fn beginRead(self: *ProcessCell, stream: Stream) error{ReaderActive}!void {

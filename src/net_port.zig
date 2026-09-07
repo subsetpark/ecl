@@ -955,9 +955,9 @@ fn drainPipe(read_end: posix.fd_t) void {
     }
 }
 
-const Writers = controllers.Lane(ConnectionCell);
+const Writers = controllers.Lane(ConnectionCell, .writer, .{ .retain = ConnectionCell.retainRef, .release = ConnectionCell.releaseRef, .write = ConnectionCell.writeTurnLocked, .notify = ConnectionCell.notifyWritersLocked, .source = ConnectionCell.writerSource });
 
-pub const WritePermit = Writers.Ticket;
+pub const WritePermit = Writers.Writer;
 
 const readiness_read: u64 = 1;
 /// Waits for the send ring to empty, so `close` can promise that the bytes it
@@ -1004,7 +1004,7 @@ pub const ConnectionCell = struct {
     peer_eof: bool = false,
     /// The socket failed; set once, never cleared.
     failure: ?Failure = null,
-    writers: Writers = .{},
+    writers: Writers,
     waits: WaitList(ConnectionCell) = .{},
     ownership: external.Ownership = .provisional,
 
@@ -1080,6 +1080,7 @@ pub const ConnectionCell = struct {
             .identity = owner.next_identity.fetchAdd(1, .monotonic),
             .accepted = accepted,
             .controllers = execution_group,
+            .writers = Writers.init(&cell.mutex),
             .endpoints = accepted.endpoints,
             .wake = wake,
             .receive = .{ .bytes = receive },
@@ -1224,49 +1225,23 @@ pub const ConnectionCell = struct {
     }
 
     pub fn beginWrite(self: *ConnectionCell) error{OutOfMemory}!*WritePermit {
-        const ticket = try WritePermit.create(self.allocator, self);
-        std.Io.Threaded.mutexLock(&self.mutex);
-        self.writers.append(ticket);
-        std.Io.Threaded.mutexUnlock(&self.mutex);
-        return ticket;
-    }
-
-    pub fn write(self: *ConnectionCell, permit: *WritePermit, bytes: []const u8) WriteProgress {
-        const node = permit;
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        node.checkCell(self);
+        return (try self.writers.admitWriter(self.allocator, self, std.math.maxInt(usize))).?;
+    }
+    fn writeTurnLocked(self: *ConnectionCell, turn: bool, bytes: []const u8) WriteProgress {
         if (self.failureLocked()) |failure| return .{ .failed = failure };
-        if (!node.begin() or self.send.free() == 0) return .pending;
+        if (!turn or self.send.free() == 0) return .pending;
         const count = @min(bytes.len, self.send.free());
         self.send.push(bytes[0..count]);
         self.signalLocked();
         return .{ .written = count };
     }
-
-    pub fn writeSource(self: *ConnectionCell, permit: *WritePermit) external.ReadinessSource {
-        return external.readinessSource(ConnectionCell, self, @intFromPtr(permit));
+    fn writerSource(self: *ConnectionCell, key: u64) external.ReadinessSource {
+        return external.readinessSource(ConnectionCell, self, key);
     }
-
-    pub fn finishWrite(self: *ConnectionCell, permit: *WritePermit) void {
-        self.retireWrite(permit, false);
-    }
-
-    pub fn abandonWrite(self: *ConnectionCell, permit: *WritePermit) void {
-        self.retireWrite(permit, true);
-    }
-
-    fn retireWrite(self: *ConnectionCell, ticket: *WritePermit, cancelled: bool) void {
-        std.Io.Threaded.mutexLock(&self.mutex);
-        ticket.checkCell(self);
-        if (cancelled) {
-            _ = self.writers.cancel(ticket, .release);
-        } else {
-            _ = self.writers.complete(ticket);
-        }
+    fn notifyWritersLocked(self: *ConnectionCell) void {
         self.waits.notifyLocked(self);
-        std.Io.Threaded.mutexUnlock(&self.mutex);
-        ticket.destroy();
     }
 
     /// Graceful close: refuse new writes, let the controller deliver queued
@@ -1637,16 +1612,16 @@ fn readExact(connection: *ConnectionCell, target: *TestTarget, destination: []u8
 fn writeAll(connection: *ConnectionCell, target: *TestTarget, bytes: []const u8) !void {
     const permit = try connection.beginWrite();
     var permit_owned = true;
-    defer if (permit_owned) connection.abandonWrite(permit);
+    defer if (permit_owned) permit.cancel();
     var offset: usize = 0;
     while (offset != bytes.len) {
-        switch (connection.write(permit, bytes[offset..])) {
+        switch (permit.write(bytes[offset..])) {
             .written => |count| offset += count,
-            .pending => try awaitSource(connection.writeSource(permit), target),
+            .pending => try awaitSource(permit.source(), target),
             .failed => return error.UnexpectedWriteOutcome,
         }
     }
-    connection.finishWrite(permit);
+    permit.finish();
     permit_owned = false;
 }
 
@@ -1970,26 +1945,26 @@ test "net: writer tickets cancel queued and active writers without closing the c
     const first = try cell.beginWrite();
     const middle = try cell.beginWrite();
     const last = try cell.beginWrite();
-    try std.testing.expect(cell.write(middle, "b") == .pending);
-    try std.testing.expect(cell.write(last, "c") == .pending);
-    cell.abandonWrite(middle);
-    try std.testing.expectEqual(WriteProgress{ .written = 1 }, cell.write(first, "a"));
+    try std.testing.expect(middle.write("b") == .pending);
+    try std.testing.expect(last.write("c") == .pending);
+    middle.cancel();
+    try std.testing.expectEqual(WriteProgress{ .written = 1 }, first.write("a"));
     // Register before promotion, proving that retiring the active writer wakes
     // its surviving successor without relying on controller scheduling.
-    var source = cell.writeSource(last);
+    var source = last.source();
     defer source.deinit();
     var registration = switch (try source.register(external.wakeTarget(TestTarget, &target))) {
         .registered => |registered| registered,
         .ready => return error.UnexpectedReadiness,
     };
-    cell.abandonWrite(first);
+    first.cancel();
     target.event.waitUncancelable(std.testing.io);
     registration.cancel();
-    try std.testing.expectEqual(WriteProgress{ .written = 1 }, cell.write(last, "c"));
-    cell.finishWrite(last);
+    try std.testing.expectEqual(WriteProgress{ .written = 1 }, last.write("c"));
+    last.finish();
     const next = try cell.beginWrite();
-    try std.testing.expectEqual(WriteProgress{ .written = 1 }, cell.write(next, "d"));
-    cell.finishWrite(next);
+    try std.testing.expectEqual(WriteProgress{ .written = 1 }, next.write("d"));
+    next.finish();
     cell.close();
     var buffer: [8]u8 = undefined;
     var reader = peer.reader(std.testing.io, &buffer);
