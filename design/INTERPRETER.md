@@ -1422,28 +1422,35 @@ or a claimed quiescence condition at completion. Retained value references
 remain independent of this execution lifetime. A listener's dormant socket
 needs no controller; its active acceptor joins before terminal detachment.
 
-An ordered controller lane owns FIFO tickets independently of the executor
-that advances them. Network and process streams use it for writer ordering.
-Only the active ticket may write; retiring it promotes the next surviving ticket, while retiring a
-queued ticket preserves the active writer. Ticket creation, admission, and
-retirement are explicit states behind opaque handles; ticket storage retains
-its issuing allocator through destruction. Linked tickets carry
-their lane identity; execution state independently records whether backend
-work has started, cancellation awaits acknowledgement, or execution has
-finished. One transition boundary decides whether cancellation releases the
-turn, interrupts a callback, or requires resource closure. Acknowledgement
-alone cannot promote the successor before the current executor returns. Backend readiness and
-stream terminal facts remain independent of lane ownership. Native operation
-admission uses these same lanes with bounded capacity and an explicit active
-cancellation policy. Network receive/send and process stdin/stdout/stderr
-progress remain independent; their poll and process-supervisor executors retain
-resource-specific terminal facts. A stream write accepts bytes into bounded
-host buffering. Flush, process reaping, stream EOF, and resource cleanup are
-separate observations, not interchangeable completion states. Retiring a
-built-in writer ticket acknowledges that enqueueing has stopped; accepted bytes
-remain owned by the resource, whose I/O continues independently. Native runs
-may still mutate private backend state after task cancellation, so their lane
-requires controller acknowledgement and return before reuse.
+An ordered controller lane binds its resource lock and owns admission,
+dispatch, and queue retirement. Admission allocates and initializes a node
+before publishing any capability and pins the operation or resource until
+retirement. There is no externally held unadmitted ticket and no independent
+lane argument on cancellation or completion. An operation payload and its ticket share one allocation and reference count.
+Queue and observer ownership independently keep that allocation alive; only
+their final release destroys the payload and ticket. A writer allocation pins
+its admitted resource until both its turn and permit ownership end.
+
+Callback operations expose observation and cancellation handles. The runtime
+claims the active turn under the resource and operation locks, lends an
+invocation-local running capability, and completes execution only when the
+callback returns. Only that borrowed capability can acknowledge active
+cancellation. Callback cancellation can request acknowledgement or resource
+closure; it cannot select the synchronous writer-release policy. Queue removal,
+successor promotion, notifications, and release of the queue pin follow one
+runtime-owned transition. Cancellation and completion still arbitrate under
+the locks; ownership prevents callers from completing through another lane
+or freeing an operation that its queue still owns.
+
+Network and process writers receive a distinct permit that derives writes,
+readiness, and retirement from its admitted resource. Incremental calls retain
+the turn until finish or cancellation; retiring a queued writer preserves the
+active writer. Retiring an active writer acknowledges that enqueueing has
+stopped. Accepted bytes remain resource-owned, and socket duplex progress and
+process stdin/stdout/stderr progress continue independently. Flush, process
+reaping, stream EOF, and resource cleanup are separate observations. Native
+callbacks may still mutate backend state after task cancellation, so their
+lane requires acknowledgement and callback return before reuse.
 
 Port capacity lives in factory-owned resource storage, bound to its issuing
 owner and release policy. Initialization borrows the cell being constructed;

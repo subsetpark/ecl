@@ -186,7 +186,7 @@ const SpecDriver = struct {
         if (self.byte_materializer) |*materializer| materializer.retire(releases);
         if (self.port_value) |port| {
             const cell = process.fromValue(port).?;
-            if (self.write_permit) |permit| cell.abandonWrite(permit);
+            if (self.write_permit) |permit| permit.cancel();
             if (self.run_cursor) |cursor| cell.endRun(cursor);
             if (self.stdout_reader) cell.endRead(.stdout);
             if (self.stderr_reader) cell.endRead(.stderr);
@@ -458,11 +458,11 @@ const SpecDriver = struct {
         if (self.write_permit) |permit| {
             const input = if (self.stdin_bytes) |*bytes| bytes.bytes() else &.{};
             if (self.stdin_offset == input.len) {
-                cell.finishWrite(permit);
+                permit.finish();
                 self.write_permit = null;
                 cell.closeInput();
                 progressed = true;
-            } else switch (cell.write(permit, input[self.stdin_offset..])) {
+            } else switch (permit.write(input[self.stdin_offset..])) {
                 .pending => {},
                 .written => |count| {
                     self.stdin_offset += count;
@@ -478,7 +478,7 @@ const SpecDriver = struct {
         if (cell.timedOut()) self.failed = .timeout;
         if (self.failed != null) {
             if (self.write_permit) |permit| {
-                cell.abandonWrite(permit);
+                permit.cancel();
                 self.write_permit = null;
             }
             cell.kill();
@@ -487,7 +487,7 @@ const SpecDriver = struct {
             poll.input != .pending)
         {
             if (self.write_permit) |permit| {
-                cell.abandonWrite(permit);
+                permit.cancel();
                 self.write_permit = null;
             }
             cell.endRead(.stdout);
@@ -673,9 +673,9 @@ fn write(evaluator: *Machine) MachineError!void {
     errdefer port.deinit();
     const cell = try portCell(evaluator, port.borrow());
     const permit = try cell.beginWrite();
-    errdefer cell.abandonWrite(permit);
+    errdefer permit.cancel();
     const driver = try evaluator.allocator().create(WriteDriver);
-    driver.* = .init(evaluator.allocator(), port.take(), bytes.take(), .{ .cell = cell }, permit);
+    driver.* = .init(evaluator.allocator(), port.take(), bytes.take(), .{}, permit);
     evaluator.adoptDriver(driver);
 }
 
@@ -684,10 +684,8 @@ const WriteDriver = transfer.WriteDriver(WriteBackend);
 const WriteBackend = struct {
     pub const WritePermit = process.WritePermit;
     pub const invalid_byte_message = "write contains a value outside 0...255";
-    cell: *process.ProcessCell,
-
-    pub fn write(self: WriteBackend, evaluator: *Machine, permit: *WritePermit, bytes: []const u8) MachineError!transfer.WriteProgress {
-        return switch (self.cell.write(permit, bytes)) {
+    pub fn write(_: WriteBackend, evaluator: *Machine, permit: *WritePermit, bytes: []const u8) MachineError!transfer.WriteProgress {
+        return switch (permit.write(bytes)) {
             .pending => .pending,
             .written => |count| .{ .written = count },
             .io => evaluator.fail(.io, "process stdin is closed"),

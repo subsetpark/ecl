@@ -511,7 +511,7 @@ fn write(evaluator: *Machine) MachineError!void {
     errdefer connection.deinit();
     const cell = try connectionCell(evaluator, connection.borrow());
     const permit = try cell.beginWrite();
-    errdefer cell.abandonWrite(permit);
+    errdefer permit.cancel();
     const driver = try evaluator.allocator().create(WriteDriver);
     driver.* = .init(evaluator.allocator(), connection.take(), bytes.take(), .{ .cell = cell }, permit);
     evaluator.adoptDriver(driver);
@@ -525,7 +525,7 @@ const WriteBackend = struct {
     cell: *net_port.ConnectionCell,
 
     pub fn write(self: WriteBackend, evaluator: *Machine, permit: *WritePermit, bytes: []const u8) MachineError!transfer.WriteProgress {
-        return switch (self.cell.write(permit, bytes)) {
+        return switch (permit.write(bytes)) {
             .pending => .pending,
             .written => |count| .{ .written = count },
             .failed => |failure| failConnection(evaluator, self.cell, failure),

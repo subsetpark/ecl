@@ -370,56 +370,105 @@ pub const Execution = opaque {
 
 /// Stream writers stop enqueueing synchronously; callback executors either
 /// establish reusable state explicitly or require whole-resource shutdown.
-pub const CancellationPolicy = enum { release, acknowledge, close_resource };
+const CancellationPolicy = enum { release, acknowledge, close_resource };
 pub const CancelAction = enum { retired, interrupt, close_resource, settled };
 pub const Completion = enum { retired, close_resource };
 pub const ExecutionState = enum { queued, active, cancelling, reusable, cancelled, done };
 
-/// Ordered controller-lane ownership, independent of execution, stream state,
-/// and wake policy. Queue observations require the owning resource mutex.
-/// A ticket owns its turn until retirement, even when execution is cancelled.
-/// The queue address remains stable while tickets are linked.
-pub fn Lane(comptime Cell: type) type {
+/// Invocation-local execution authority, minted only while lending a callback.
+pub const Running = opaque {
+    const Invocation = struct { context: *anyopaque, acknowledge: *const fn (*anyopaque) bool };
+    pub fn acknowledgeCancellation(self: *Running) bool {
+        const state: *Invocation = @ptrCast(@alignCast(self));
+        return state.acknowledge(state.context);
+    }
+};
+
+pub const CallbackCancellation = enum { acknowledge, close_resource };
+
+/// Admission binds a node to its owner and lane before publishing a handle.
+/// Callback payloads and tickets share one allocation; queue and observer
+/// references keep it alive. Writer allocations pin their resource until release.
+/// Only this boundary unlinks nodes or completes callback execution.
+pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comptime callbacks: anytype) type {
     return struct {
         const Self = @This();
+        const owns_cell = mode == .operation;
         const Node = struct {
             allocator: std.mem.Allocator,
-            cell: *Cell,
+            cell: if (owns_cell) Cell else *Cell,
+            lane: *Self,
+            refs: std.atomic.Value(usize) = .init(2),
             previous: ?*Node = null,
             next: ?*Node = null,
-            phase: union(enum) { created, queued: *Self, active: *Self, retired } = .created,
+            phase: enum { queued, active, retired },
             execution: ExecutionState = .queued,
+
+            fn owner(self: *Node) *Cell {
+                return if (owns_cell) &self.cell else self.cell;
+            }
+            fn retain(self: *Node) void {
+                _ = self.refs.fetchAdd(1, .monotonic);
+            }
+            fn release(self: *Node) void {
+                if (self.refs.fetchSub(1, .acq_rel) != 1) return;
+                const allocator = self.allocator;
+                if (owns_cell) {
+                    callbacks.deinit(&self.cell);
+                    allocator.destroy(self);
+                } else {
+                    const cell = self.cell;
+                    allocator.destroy(self);
+                    callbacks.release(cell);
+                }
+            }
+            fn begin(self: *Node) bool {
+                if (self.phase != .active) return false;
+                switch (self.execution) {
+                    .queued => self.execution = .active,
+                    .active => {},
+                    .cancelling, .reusable, .cancelled, .done => return false,
+                }
+                return true;
+            }
+            fn requestCancellation(self: *Node) void {
+                switch (self.execution) {
+                    .queued, .active => self.execution = .cancelling,
+                    .cancelling, .reusable, .cancelled, .done => {},
+                }
+            }
+            fn acknowledgeErased(raw: *anyopaque) bool {
+                const self: *Node = @ptrCast(@alignCast(raw));
+                return self.acknowledge();
+            }
+            fn acknowledge(self: *Node) bool {
+                if (self.execution != .cancelling) return false;
+                self.execution = .reusable;
+                return true;
+            }
         };
+        /// An operation observer owns storage, but cannot begin or complete
+        /// backend execution or remove queue entries. Releasing an observer
+        /// cannot destroy an operation still owned by its queue.
         pub const Ticket = opaque {
-            fn node(self: *const Ticket) *Node {
+            fn entry(self: *const Ticket) *Node {
                 return @ptrCast(@alignCast(@constCast(self)));
             }
-            pub fn create(allocator: std.mem.Allocator, cell: *Cell) error{OutOfMemory}!*Ticket {
-                const entry = try allocator.create(Node);
-                entry.* = .{ .allocator = allocator, .cell = cell };
-                return @ptrCast(entry);
+            pub fn retain(self: *Ticket) void {
+                self.entry().retain();
             }
-            /// Consumes an unqueued or retired ticket. Cancel readiness first.
-            pub fn destroy(self: *Ticket) void {
-                if (self.linked()) @panic("destroying a queued controller ticket");
-                const entry = self.node();
-                entry.allocator.destroy(entry);
-            }
-            pub fn successor(self: *const Ticket) ?*Ticket {
-                return if (self.node().next) |next| @ptrCast(next) else null;
+            /// Consumes one observer reference. Queue ownership is independent.
+            pub fn release(self: *Ticket) void {
+                self.entry().release();
             }
             pub fn owner(self: *const Ticket) *Cell {
-                return self.node().cell;
+                return self.entry().owner();
             }
-            pub fn checkCell(self: *const Ticket, cell: *Cell) void {
-                if (self.owner() != cell or !self.linked()) @panic("invalid controller ticket");
+            pub fn successor(self: *const Ticket) ?*Ticket {
+                return if (self.entry().next) |next| @ptrCast(next) else null;
             }
-            /// Execution observations and transitions require the operation's
-            /// state lock. Queue linkage additionally requires the resource
-            /// lock, acquired first. Stream writers use that lock for both;
-            /// byte ABI operations have a separate stream mutex.
             pub fn status(self: *const Ticket) ExecutionState {
-                return self.node().execution;
+                return self.entry().execution;
             }
             pub fn isCancelled(self: *const Ticket) bool {
                 return switch (self.status()) {
@@ -427,131 +476,188 @@ pub fn Lane(comptime Cell: type) type {
                     .queued, .active, .done => false,
                 };
             }
-            /// Only the turn owner may start work. Repeated stream advances
-            /// keep the same active execution until completion or cancellation.
-            pub fn begin(self: *Ticket) bool {
-                if (!self.active()) return false;
-                switch (self.status()) {
-                    .queued => self.node().execution = .active,
-                    .active => {},
-                    .cancelling, .reusable, .cancelled, .done => return false,
-                }
-                return true;
-            }
+            /// Resource shutdown marks operations under their state lock.
             pub fn requestCancellation(self: *Ticket) void {
-                switch (self.status()) {
-                    .queued, .active => self.node().execution = .cancelling,
-                    .cancelling, .reusable, .cancelled, .done => {},
-                }
+                self.entry().requestCancellation();
             }
-            /// Acknowledgement permits reuse only after the executor returns.
-            pub fn acknowledgeCancellation(self: *Ticket) bool {
-                if (self.status() != .cancelling) return false;
-                self.node().execution = .reusable;
-                return true;
-            }
-            fn finish(self: *Ticket) Completion {
-                const result: Completion = if (self.status() == .cancelling) .close_resource else .retired;
-                self.node().execution = switch (self.status()) {
-                    .queued, .active, .done => .done,
-                    .cancelling, .reusable, .cancelled => .cancelled,
-                };
-                return result;
-            }
-            pub fn active(self: *const Ticket) bool {
-                return self.node().phase == .active;
-            }
-            pub fn linked(self: *const Ticket) bool {
-                return switch (self.node().phase) {
-                    .queued, .active => true,
-                    .created, .retired => false,
-                };
+            pub fn cancel(self: *Ticket) void {
+                const node = self.entry();
+                const cell = node.owner();
+                const mutex = node.lane.mutex;
+                std.Io.Threaded.mutexLock(mutex);
+                std.Io.Threaded.mutexLock(&cell.mutex);
+                const policy: CallbackCancellation = callbacks.cancelPolicy(cell);
+                const action = node.lane.cancelNode(node, switch (policy) {
+                    .acknowledge => .acknowledge,
+                    .close_resource => .close_resource,
+                });
+                callbacks.notifyOperation(cell);
+                std.Io.Threaded.mutexUnlock(&cell.mutex);
+                callbacks.cancelResource(cell, action);
+                std.Io.Threaded.mutexUnlock(mutex);
+                if (action == .retired) node.release();
             }
         };
+        /// A writer owns a turn across incremental calls. All operations derive
+        /// the resource from its admission; there is no separate cell argument.
+        pub const Writer = opaque {
+            fn entry(self: *const Writer) *Node {
+                return @ptrCast(@alignCast(@constCast(self)));
+            }
+            pub fn linked(self: *const Writer) bool {
+                return self.entry().phase != .retired;
+            }
+            pub fn active(self: *const Writer) bool {
+                return self.entry().phase == .active;
+            }
+            pub fn write(self: *Writer, bytes: []const u8) @typeInfo(@TypeOf(callbacks.write)).@"fn".return_type.? {
+                const node = self.entry();
+                const cell = node.owner();
+                std.Io.Threaded.mutexLock(&cell.mutex);
+                defer std.Io.Threaded.mutexUnlock(&cell.mutex);
+                return callbacks.write(cell, node.begin(), bytes);
+            }
+            pub fn source(self: *Writer) @typeInfo(@TypeOf(callbacks.source)).@"fn".return_type.? {
+                return callbacks.source(self.entry().owner(), @intFromPtr(self));
+            }
+            pub fn finish(self: *Writer) void {
+                self.end(false);
+            }
+            pub fn cancel(self: *Writer) void {
+                self.end(true);
+            }
+            fn end(self: *Writer, cancelled: bool) void {
+                const node = self.entry();
+                const cell = node.owner();
+                std.Io.Threaded.mutexLock(&cell.mutex);
+                if (cancelled) {
+                    _ = node.lane.cancelNode(node, .release);
+                } else {
+                    _ = node.lane.finishAndRemove(node);
+                }
+                callbacks.notify(cell);
+                std.Io.Threaded.mutexUnlock(&cell.mutex);
+                node.release(); // queue ownership
+                node.release(); // writer ownership
+            }
+        };
+        mutex: *std.Io.Mutex,
         count: usize = 0,
         first: ?*Node = null,
         last: ?*Node = null,
 
+        pub fn init(mutex: *std.Io.Mutex) Self {
+            return .{ .mutex = mutex };
+        }
         pub fn front(self: *const Self) ?*Ticket {
-            return if (self.first) |entry| @ptrCast(entry) else null;
+            return if (self.first) |node| @ptrCast(node) else null;
         }
         pub fn empty(self: *const Self) bool {
-            return self.front() == null;
+            return self.first == null;
         }
         pub fn hasCapacity(self: *const Self, limit: usize) bool {
             return self.count < limit;
         }
-        /// Failure leaves a created ticket with the caller. Success consumes it.
-        pub fn tryAppend(self: *Self, ticket: *Ticket, limit: usize) bool {
-            if (!self.hasCapacity(limit)) return false;
-            self.append(ticket);
-            return true;
+        fn allocate(self: *Self, allocator: std.mem.Allocator, limit: usize) error{OutOfMemory}!?*Node {
+            if (!self.hasCapacity(limit)) return null;
+            const node = try allocator.create(Node);
+            node.allocator = allocator;
+            node.lane = self;
+            node.refs = .init(2);
+            node.previous = self.last;
+            node.next = null;
+            node.phase = if (self.first == null) .active else .queued;
+            node.execution = .queued;
+            // The owning payload is initialized by the factory before append.
+            return node;
         }
-        /// Consumes the ticket's created state into FIFO ownership.
-        pub fn append(self: *Self, ticket: *Ticket) void {
-            const node = ticket.node();
-            if (node.phase != .created) @panic("controller ticket already admitted");
-            if (self.last) |last| {
-                last.next = node;
-                node.previous = last;
-                node.phase = .{ .queued = self };
-            } else {
-                self.first = node;
-                node.phase = .{ .active = self };
-            }
+        fn append(self: *Self, node: *Node) void {
+            if (self.last) |last| last.next = node else self.first = node;
             self.last = node;
             self.count += 1;
         }
-        /// Both the resource lock and the operation state lock must be held.
-        /// The returned action is the only backend work cancellation requests.
-        pub fn cancel(self: *Self, ticket: *Ticket, policy: CancellationPolicy) CancelAction {
-            if (ticket.status() == .done or ticket.status() == .cancelled) return .settled;
-            self.requireMember(ticket);
-            switch (ticket.status()) {
+        /// The resource lock is held. The operation and ticket share one
+        /// allocation and refcount, owned by the queue and returned observer.
+        /// Initialization cannot fail; no partially initialized owner escapes.
+        pub fn admit(self: *Self, allocator: std.mem.Allocator, limit: usize, args: anytype, comptime initialize: anytype) error{OutOfMemory}!?*Ticket {
+            if (!owns_cell) @compileError("stream lanes admit writer permits");
+            const node = try self.allocate(allocator, limit) orelse return null;
+            const ticket: *Ticket = @ptrCast(node);
+            @call(.auto, initialize, .{ &node.cell, ticket } ++ args);
+            self.append(node);
+            return ticket;
+        }
+        pub fn admitWriter(self: *Self, allocator: std.mem.Allocator, cell: *Cell, limit: usize) error{OutOfMemory}!?*Writer {
+            if (owns_cell) @compileError("callback lanes admit operation observers");
+            const node = try self.allocate(allocator, limit) orelse return null;
+            node.cell = cell;
+            callbacks.retain(cell);
+            self.append(node);
+            return @ptrCast(node);
+        }
+        /// One lane executor owns dispatch. The runtime establishes both locks,
+        /// lends execution authority, and completes only after callback return.
+        pub fn runNext(self: *Self) bool {
+            const mutex = self.mutex;
+            std.Io.Threaded.mutexLock(mutex);
+            const node = self.first orelse {
+                std.Io.Threaded.mutexUnlock(mutex);
+                return false;
+            };
+            const cell = node.owner();
+            std.Io.Threaded.mutexLock(&cell.mutex);
+            const execute = node.begin() and callbacks.runnable(cell);
+            if (!execute) node.requestCancellation();
+            std.Io.Threaded.mutexUnlock(&cell.mutex);
+            std.Io.Threaded.mutexUnlock(mutex);
+            if (execute) {
+                var execution: Running.Invocation = .{ .context = node, .acknowledge = Node.acknowledgeErased };
+                callbacks.execute(cell, @as(*Running, @ptrCast(&execution)));
+            }
+            std.Io.Threaded.mutexLock(mutex);
+            std.Io.Threaded.mutexLock(&cell.mutex);
+            const completion = self.finishAndRemove(node);
+            callbacks.notifyOperation(cell);
+            std.Io.Threaded.mutexUnlock(&cell.mutex);
+            callbacks.completeResource(cell, completion);
+            std.Io.Threaded.mutexUnlock(mutex);
+            node.release();
+            return true;
+        }
+        fn cancelNode(self: *Self, node: *Node, policy: CancellationPolicy) CancelAction {
+            switch (node.execution) {
                 .queued => {
-                    ticket.requestCancellation();
-                    _ = ticket.acknowledgeCancellation();
-                    _ = self.finishAndRemove(ticket);
+                    node.requestCancellation();
+                    _ = node.acknowledge();
+                    _ = self.finishAndRemove(node);
                     return .retired;
                 },
                 .active => {
-                    ticket.requestCancellation();
+                    node.requestCancellation();
                     return switch (policy) {
                         .close_resource => .close_resource,
                         .acknowledge => .interrupt,
-                        .release => released: {
-                            _ = ticket.acknowledgeCancellation();
-                            _ = self.finishAndRemove(ticket);
-                            break :released .retired;
+                        .release => blk: {
+                            _ = node.acknowledge();
+                            _ = self.finishAndRemove(node);
+                            break :blk .retired;
                         },
                     };
                 },
                 .cancelling, .reusable, .cancelled, .done => return .settled,
             }
         }
-        /// Consumes execution and FIFO ownership. A returning executor that
-        /// has not acknowledged active cancellation requires resource shutdown.
-        pub fn complete(self: *Self, ticket: *Ticket) Completion {
-            self.requireMember(ticket);
-            return self.finishAndRemove(ticket);
-        }
-        fn requireMember(self: *const Self, ticket: *const Ticket) void {
-            const linked_lane = switch (ticket.node().phase) {
-                .queued, .active => |lane_owner| lane_owner,
-                .created, .retired => @panic("controller ticket is not admitted"),
+        fn finishAndRemove(self: *Self, node: *Node) Completion {
+            const result: Completion = if (node.execution == .cancelling) .close_resource else .retired;
+            node.execution = switch (node.execution) {
+                .queued, .active, .done => .done,
+                .cancelling, .reusable, .cancelled => .cancelled,
             };
-            if (linked_lane != self) @panic("ticket belongs to another controller lane");
-        }
-        /// Retires a ticket and promotes its successor if it owned the turn.
-        /// The caller notifies backend readiness, then destroys it outside the lock.
-        fn finishAndRemove(self: *Self, ticket: *Ticket) Completion {
-            const result = ticket.finish();
-            const node = ticket.node();
-            const was_active = ticket.active();
+            const was_active = node.phase == .active;
             if (node.previous) |previous| previous.next = node.next else self.first = node.next;
             if (node.next) |next| {
                 next.previous = node.previous;
-                if (was_active) next.phase = .{ .active = self };
+                if (was_active) next.phase = .active;
             } else self.last = node.previous;
             self.count -= 1;
             node.phase = .retired;
@@ -562,40 +668,109 @@ pub fn Lane(comptime Cell: type) type {
     };
 }
 
-test "native: shared lane admission and cancellation require acknowledged retirement" {
-    const Queue = Lane(u8);
-    var owner: u8 = 0;
-    var lane: Queue = .{};
-    // SAFETY: only the initialized prefix tracked by created is read.
-    var tickets: [3]*Queue.Ticket = undefined;
-    var created: usize = 0;
-    defer for (tickets[0..created]) |ticket| {
-        if (ticket.linked()) {
-            _ = ticket.acknowledgeCancellation();
-            _ = lane.complete(ticket);
+test "native: shared lane owns admission and writer retirement" {
+    const Probe = struct {
+        mutex: std.Io.Mutex = .init,
+        pins: usize = 0,
+        bytes: usize = 0,
+        fn retain(self: *@This()) void {
+            self.pins += 1;
         }
-        ticket.destroy();
+        fn release(self: *@This()) void {
+            self.pins -= 1;
+        }
+        fn write(self: *@This(), turn: bool, bytes: []const u8) ?usize {
+            if (!turn) return null;
+            self.bytes += bytes.len;
+            return bytes.len;
+        }
+        fn notify(_: *@This()) void {}
+        fn source(_: *@This(), _: u64) u64 {
+            return 7;
+        }
     };
-    for (&tickets) |*ticket| {
-        ticket.* = try Queue.Ticket.create(std.testing.allocator, &owner);
-        created += 1;
+    const Queue = Lane(Probe, .writer, .{ .retain = Probe.retain, .release = Probe.release, .write = Probe.write, .notify = Probe.notify, .source = Probe.source });
+    var probe: Probe = .{};
+    var lane = Queue.init(&probe.mutex);
+    var owned: [3]?*Queue.Writer = .{null} ** 3;
+    defer for (owned) |entry| {
+        if (entry) |writer| writer.cancel();
+    };
+    owned[0] = try lane.admitWriter(std.testing.allocator, &probe, 2);
+    owned[1] = try lane.admitWriter(std.testing.allocator, &probe, 2);
+    try std.testing.expect((try lane.admitWriter(std.testing.allocator, &probe, 2)) == null);
+    const first = owned[0].?;
+    const second = owned[1].?;
+    try std.testing.expectEqual(@as(?usize, 2), first.write("ab"));
+    try std.testing.expect(second.write("x") == null);
+    owned[1] = null;
+    second.cancel();
+    owned[2] = try lane.admitWriter(std.testing.allocator, &probe, 2);
+    const third = owned[2].?;
+    try std.testing.expect(!third.active());
+    owned[0] = null;
+    first.finish();
+    try std.testing.expect(third.active());
+    try std.testing.expectEqual(@as(u64, 7), third.source());
+    try std.testing.expectEqual(@as(?usize, 1), third.write("c"));
+    owned[2] = null;
+    third.finish();
+    try std.testing.expectEqual(@as(usize, 3), probe.bytes);
+    try std.testing.expectEqual(@as(usize, 0), probe.pins);
+}
+
+test "native: lane ownership outlives released operation observers" {
+    const Probe = struct {
+        mutex: std.Io.Mutex = .init,
+        executed: usize = 0,
+        destroyed: usize = 0,
+    };
+    const Operation = struct {
+        mutex: std.Io.Mutex = .init,
+        probe: *Probe,
+        value: usize,
+        fn initialize(self: *@This(), _: anytype, probe: *Probe, value: usize) void {
+            self.* = .{ .probe = probe, .value = value };
+        }
+        fn deinit(self: *@This()) void {
+            self.probe.destroyed += 1;
+        }
+        fn runnable(_: *@This()) bool {
+            return true;
+        }
+        fn execute(self: *@This(), _: *Running) void {
+            self.probe.executed += self.value;
+        }
+        fn notify(_: *@This()) void {}
+        fn complete(_: *@This(), _: Completion) void {}
+    };
+    const Queue = Lane(Operation, .operation, .{ .deinit = Operation.deinit, .runnable = Operation.runnable, .execute = Operation.execute, .notifyOperation = Operation.notify, .completeResource = Operation.complete });
+    var probe: Probe = .{};
+    var lane = Queue.init(&probe.mutex);
+    var observers: [2]?*Queue.Ticket = .{null} ** 2;
+    defer {
+        while (lane.runNext()) {}
+        for (observers) |observer| if (observer) |ticket| ticket.release();
     }
-    const first, const queued, const successor = tickets;
-    try std.testing.expect(lane.tryAppend(first, 2));
-    try std.testing.expect(lane.tryAppend(queued, 2));
-    try std.testing.expect(!lane.tryAppend(successor, 2));
-    try std.testing.expect(first.begin());
-    try std.testing.expect(!queued.begin());
-    try std.testing.expectEqual(CancelAction.retired, lane.cancel(queued, .acknowledge));
-    try std.testing.expect(lane.tryAppend(successor, 2));
-    try std.testing.expectEqual(CancelAction.interrupt, lane.cancel(first, .acknowledge));
-    try std.testing.expect(!successor.begin());
-    try std.testing.expect(first.acknowledgeCancellation());
-    try std.testing.expect(!successor.begin());
-    try std.testing.expectEqual(Completion.retired, lane.complete(first));
-    try std.testing.expect(successor.begin());
-    try std.testing.expectEqual(CancelAction.interrupt, lane.cancel(successor, .acknowledge));
-    try std.testing.expectEqual(Completion.close_resource, lane.complete(successor));
+    observers[0] = try lane.admit(std.testing.allocator, 2, .{ &probe, @as(usize, 17) }, Operation.initialize);
+    observers[1] = try lane.admit(std.testing.allocator, 2, .{ &probe, @as(usize, 23) }, Operation.initialize);
+    const first = observers[0].?;
+    observers[0] = null;
+    first.release();
+    try std.testing.expectEqual(@as(usize, 0), probe.destroyed);
+    try std.testing.expect(lane.runNext());
+    try std.testing.expectEqual(@as(usize, 17), probe.executed);
+    try std.testing.expectEqual(@as(usize, 1), probe.destroyed);
+    const retained = observers[1].?;
+    retained.retain();
+    retained.release();
+    try std.testing.expect(lane.runNext());
+    try std.testing.expectEqual(ExecutionState.done, retained.status());
+    try std.testing.expectEqual(@as(usize, 40), probe.executed);
+    try std.testing.expectEqual(@as(usize, 1), probe.destroyed);
+    observers[1] = null;
+    retained.release();
+    try std.testing.expectEqual(@as(usize, 2), probe.destroyed);
 }
 
 test "native: prepared controller jobs reuse storage without allocator access" {
