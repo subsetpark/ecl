@@ -120,7 +120,7 @@ pub const Access = opaque {
         const identity = owner.identity;
         owner.identity +%= 1;
         unlock(&owner.mutex);
-        const item = heap.createPort(Cell, cell.allocator, identity, cell) catch |err| {
+        const item = heap.createOwnedPort(Cell, .resource, cell.allocator, identity, cell) catch |err| {
             cell.releasePort();
             return err;
         };
@@ -556,6 +556,6 @@ pub fn fromValue(value: Value, instance: *native.ModuleInstance, kind: u32) ?*Ce
         .port => |port| port,
         else => return null,
     };
-    const cell = heap.portPayload(Cell, handle) orelse return null;
+    const cell = heap.portPayload(Cell, .resource, handle) orelse return null;
     return if (cell.instance == instance and cell.kind == kind) cell else null;
 }

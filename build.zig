@@ -327,7 +327,7 @@ pub fn build(b: *std.Build) void {
         "Run native loader and transactional-call tests",
     );
     native_runtime_step.dependOn(&run_native_runtime_tests.step);
-    const port_tests = b.addTest(.{ .root_module = test_mod, .filters = &.{ "process:", "net:", "native:" } });
+    const port_tests = b.addTest(.{ .root_module = test_mod, .filters = &.{ "process:", "net:", "native:", "port_message.test.", "heap.test.port" } });
     port_tests.linkage = runtime_linkage;
     const run_port_tests = b.addRunArtifact(port_tests);
     run_port_tests.step.dependOn(&fixture_files.step);
@@ -837,6 +837,9 @@ pub fn build(b: *std.Build) void {
             "session.test.",
             "poll.test.",
             "heap.test.",
+            // Bounded message validation and allocation rollback are small
+            // component checks and introduce no controller or Session startup.
+            "port_message.test.",
             "list.test.",
             "dict.test.",
             "equal.test.",

@@ -1265,6 +1265,21 @@ fn nativePortForwardingProbe(
     failing: *std.testing.FailingAllocator,
     failure_offset: ?usize,
 ) !usize {
+    return portForwardingProbe(failing, failure_offset, false);
+}
+
+fn borrowedPortForwardingProbe(
+    failing: *std.testing.FailingAllocator,
+    failure_offset: ?usize,
+) !usize {
+    return portForwardingProbe(failing, failure_offset, true);
+}
+
+fn portForwardingProbe(
+    failing: *std.testing.FailingAllocator,
+    failure_offset: ?usize,
+    comptime borrowed: bool,
+) !usize {
     const Port = struct {
         releases: usize = 0,
 
@@ -1295,7 +1310,11 @@ fn nativePortForwardingProbe(
         }, .cooperative);
         defer runtime.deinit();
         try runOk(&runtime, "oom-native-setup.ecl", "0 sample.forward pop");
-        try runtime.pushOwned(try heap.createPort(Port, allocator, 31, &port));
+        const input = if (borrowed)
+            try heap.createBorrowedPort(Port, .endpoint, allocator, 31, &port)
+        else
+            try heap.createOwnedPort(Port, .resource, allocator, 31, &port);
+        try runtime.pushOwned(input);
         first_failure_index = failing.alloc_index;
         if (failure_offset) |offset| failing.fail_index = first_failure_index + offset;
         break :operation runOk(
@@ -1312,6 +1331,11 @@ fn nativePortForwardingProbe(
 test "oom: standard-library and host: native port forwarding" {
     try requireSelectedOomTest(@src());
     try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, nativePortForwardingProbe);
+}
+
+test "oom: standard-library and host: native port forwarding borrowed endpoint" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, borrowedPortForwardingProbe);
 }
 
 fn NativePortLifecycleProbe(comptime source: []const u8) type {

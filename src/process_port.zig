@@ -323,7 +323,7 @@ pub const ProcessOwner = struct {
             error.Io, error.Closed => error.Io,
         };
 
-        const port = heap.createPort(ProcessCell, self.allocator, cell.identity, cell) catch {
+        const port = heap.createOwnedPort(ProcessCell, .resource, self.allocator, cell.identity, cell) catch {
             cell.kill();
             return error.OutOfMemory;
         };
@@ -1332,7 +1332,7 @@ fn translateTerm(term: std.process.Child.Term) Termination {
 
 pub fn fromValue(port: Value) ?*ProcessCell {
     if (port != .port) return null;
-    return heap.portPayload(ProcessCell, port.port);
+    return heap.portPayload(ProcessCell, .resource, port.port);
 }
 
 test "process policy rejects ambient and relative executable selection before spawn" {

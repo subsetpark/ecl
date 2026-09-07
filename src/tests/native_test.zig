@@ -430,7 +430,7 @@ test "native: opaque ports survive forwarding and nested aggregate builders" {
     {
         var runtime = try initRuntime(&output.writer, &diagnostics.writer, native_fixture.directory);
         defer runtime.deinit();
-        try runtime.pushOwned(try heap.createPort(Port, std.testing.allocator, 917, &port));
+        try runtime.pushOwned(try heap.createOwnedPort(Port, .resource, std.testing.allocator, 917, &port));
         try expectErrorContains(&runtime, "sample.draft-fail", &.{ "'kind 'user", "draft candidates retired" });
         try std.testing.expectEqual(@as(usize, 0), port.releases);
         try expectOk(
@@ -443,6 +443,34 @@ test "native: opaque ports survive forwarding and nested aggregate builders" {
         try std.testing.expectEqual(@as(usize, 1), port.releases);
     }
     try std.testing.expectEqual(@as(usize, 1), port.releases);
+}
+
+test "native: borrowed port roles forward identities but cannot be given" {
+    const Capability = struct {
+        releases: usize = 0,
+        pub fn releasePort(self: *@This()) void {
+            self.releases += 1;
+        }
+    };
+    inline for (comptime std.meta.tags(heap.BorrowedPortVariant)) |variant| {
+        var capability: Capability = .{};
+        var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer output.deinit();
+        var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer diagnostics.deinit();
+        {
+            var runtime = try initRuntime(&output.writer, &diagnostics.writer, native_fixture.directory);
+            defer runtime.deinit();
+            try runtime.pushOwned(try heap.createBorrowedPort(Capability, variant, std.testing.allocator, 918, &capability));
+            try expectOk(&runtime, "'cap set cap type 'port match? cap sample.forward cap match? " ++
+                "cap wrap [] (pop) 3 pack (@give) @attempt 'err at 'kind at");
+            var display = try runtime.stackDisplay();
+            defer display.deinit();
+            try std.testing.expectEqualStrings("1 1 'domain", display.bytes());
+            try std.testing.expectEqual(@as(usize, 0), capability.releases);
+        }
+        try std.testing.expectEqual(@as(usize, 1), capability.releases);
+    }
 }
 
 fn validate(

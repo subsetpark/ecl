@@ -1357,6 +1357,26 @@ Nested reads and forwarding share one metered path resolver. Candidates remain
 invocation-local, while aggregate builders own values retained across yields.
 Tasks and modules remain unavailable as native value views.
 
+Heap port capabilities distinguish factories, operation selectors, endpoint
+selectors, resources, exchanges, and endpoints. The role is part of the opaque
+heap representation and is checked together with backend identity before payload
+projection. Only resource and exchange roles carry scope-transfer authority;
+borrowed roles retain permitted use and issuer lifetime without acquiring an
+independent scope membership. Their constructors cannot supply transfer hooks.
+The existing network, process, and native resource producers use the owning
+resource constructor.
+
+The structured-message validation boundary retains an immutable root while a
+resumable traversal checks each occurrence. Its opaque handle exposes a value
+only after the complete traversal succeeds. Words, tasks, and modules are
+rejected recursively; nodes, portable scalar/text bytes, and capability
+attachments have independent budgets. Repeated references are charged at every
+occurrence, so shared aggregate storage cannot bypass transport limits. Failed
+validation is terminal, and retirement enqueues both the root and traversal
+storage without walking the input synchronously. Validation grants no scope
+publication or ownership-transfer authority. This boundary is preparatory;
+the current invocation-slot transport below still uses byte rings.
+
 Native port definitions are copied and validated with the module descriptor.
 Their identity is the pinned module instance and validated definition index;
 names are descriptive metadata. Typed SDK adapters expose backend state only

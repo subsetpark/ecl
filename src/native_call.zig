@@ -976,7 +976,7 @@ const PortSlot = union(enum) {
     fn cell(self: PortSlot) ?*native_port.Cell {
         return switch (self) {
             .empty => null,
-            .creating, .published => |item| heap.portPayload(native_port.Cell, item.port).?,
+            .creating, .published => |item| heap.portPayload(native_port.Cell, .resource, item.port).?,
             .admission => |pending| pending.cell,
             .operation => |operation| operation.cell,
             .closing => |closing| closing,
@@ -986,7 +986,7 @@ const PortSlot = union(enum) {
         switch (self.*) {
             .empty => {},
             .creating => |item| {
-                heap.portPayload(native_port.Cell, item.port).?.close();
+                heap.portPayload(native_port.Cell, .resource, item.port).?.close();
                 releases.releaseValue(item);
             },
             .published => |item| releases.releaseValue(item),

@@ -379,10 +379,11 @@ fn portCapabilityFailureProbe(allocator: std.mem.Allocator) !void {
     var cleanup = testing.Cleanup.init(allocator);
     defer cleanup.deinit();
     var external: ProbePort = .{};
-    const item = try createPort(ProbePort, allocator, 41, &external);
+    const item = try createOwnedPort(ProbePort, .resource, allocator, 41, &external);
     try std.testing.expectEqual(HeapKind.port, kind(item.heapHeader().?));
-    try std.testing.expectEqual(@as(u64, 41), portStorage(item.port).identity);
-    try std.testing.expectEqual(&external, portPayload(ProbePort, item.port).?);
+    try std.testing.expectEqual(@as(u64, 41), portIdentity(item.port));
+    try std.testing.expectEqual(value.PortVariant.resource, portVariant(item.port));
+    try std.testing.expectEqual(&external, portPayload(ProbePort, .resource, item.port).?);
     retainValue(item);
     cleanup.releaseValue(item);
     cleanup.capability().drain();
@@ -404,9 +405,9 @@ test "port payload projection rejects a foreign backend" {
     var cleanup = testing.Cleanup.init(std.testing.allocator);
     defer cleanup.deinit();
     var foreign: ForeignPort = .{};
-    const item = try createPort(ForeignPort, std.testing.allocator, 1, &foreign);
+    const item = try createOwnedPort(ForeignPort, .resource, std.testing.allocator, 1, &foreign);
     defer cleanup.releaseValue(item);
-    try std.testing.expect(portPayload(ProbePort, item.port) == null);
+    try std.testing.expect(portPayload(ProbePort, .resource, item.port) == null);
 }
 
 test "port capability exhausts allocation failures" {
@@ -415,6 +416,90 @@ test "port capability exhausts allocation failures" {
         portCapabilityFailureProbe,
         .{},
     );
+}
+
+const ProbeBorrowedPort = struct {
+    releases: usize = 0,
+
+    fn releasePort(self: *@This()) void {
+        self.releases += 1;
+    }
+};
+
+fn borrowedPortFailureProbe(allocator: std.mem.Allocator) !void {
+    var cleanup = testing.Cleanup.init(allocator);
+    defer cleanup.deinit();
+    inline for (comptime std.meta.tags(BorrowedPortVariant)) |variant| {
+        var payload: ProbeBorrowedPort = .{};
+        const item = try createBorrowedPort(ProbeBorrowedPort, variant, allocator, 42, &payload);
+        const expected: value.PortVariant = comptime switch (variant) {
+            .factory => .factory,
+            .operation_selector => .operation_selector,
+            .endpoint_selector => .endpoint_selector,
+            .endpoint => .endpoint,
+        };
+        try std.testing.expectEqual(expected, portVariant(item.port));
+        try std.testing.expectEqual(&payload, portPayload(ProbeBorrowedPort, expected, item.port).?);
+        try std.testing.expect(portPayload(ProbeBorrowedPort, .resource, item.port) == null);
+        try std.testing.expectError(error.NotOwner, preparePortTransfer(item.port, &payload, &payload));
+        retainValue(item);
+        cleanup.releaseValue(item);
+        cleanup.capability().drain();
+        try std.testing.expectEqual(@as(usize, 0), payload.releases);
+        cleanup.releaseValue(item);
+        cleanup.capability().drain();
+        try std.testing.expectEqual(@as(usize, 1), payload.releases);
+    }
+}
+
+test "port borrowed roles retain identity without scope transfer authority" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, borrowedPortFailureProbe, .{});
+}
+
+test "port exchange transfer consumes its prepared authority once" {
+    const Exchange = struct {
+        owner: *anyopaque,
+        prepared: ?*anyopaque = null,
+        commits: usize = 0,
+        aborts: usize = 0,
+
+        fn releasePort(_: *@This()) void {}
+        fn prepareScopeTransfer(self: *@This(), from: *anyopaque, to: *anyopaque) PortTransferError!void {
+            if (self.owner != from) return error.NotOwner;
+            if (self.prepared != null) return error.Busy;
+            self.prepared = to;
+        }
+        fn commitScopeTransfer(self: *@This()) void {
+            self.owner = self.prepared.?;
+            self.prepared = null;
+            self.commits += 1;
+        }
+        fn abortScopeTransfer(self: *@This()) void {
+            self.prepared = null;
+            self.aborts += 1;
+        }
+    };
+    var origin: u8 = 0;
+    var destination: u8 = 0;
+    var payload: Exchange = .{ .owner = &origin };
+    var cleanup = testing.Cleanup.init(std.testing.allocator);
+    defer cleanup.deinit();
+    const item = try createOwnedPort(Exchange, .exchange, std.testing.allocator, 43, &payload);
+    defer cleanup.releaseValue(item);
+    try std.testing.expectEqual(value.PortVariant.exchange, portVariant(item.port));
+    try std.testing.expect(portPayload(Exchange, .resource, item.port) == null);
+    var abandoned = try preparePortTransfer(item.port, &origin, &destination);
+    abandoned.abort();
+    abandoned.commit();
+    try std.testing.expectEqual(@as(usize, 1), payload.aborts);
+    var moved = try preparePortTransfer(item.port, &origin, &destination);
+    moved.commit();
+    moved.commit();
+    moved.abort();
+    try std.testing.expectEqual(@as(usize, 1), payload.commits);
+    try std.testing.expectError(error.NotOwner, preparePortTransfer(item.port, &origin, &destination));
+    var returned = try preparePortTransfer(item.port, &destination, &origin);
+    returned.commit();
 }
 
 pub const DictPayload = value.DictPayload;
@@ -560,8 +645,24 @@ const PortStorage = struct {
     identity: u64,
     payload: *anyopaque,
     release: *const fn (*anyopaque) void,
-    prepare_transfer: *const fn (*anyopaque, *anyopaque, *anyopaque) PortTransferError!PortTransfer,
+    role: PortRole,
 };
+
+const PreparePortTransfer = *const fn (*anyopaque, *anyopaque, *anyopaque) PortTransferError!PortTransfer;
+
+/// Transfer authority exists exactly for owning roles. A borrowed capability
+/// cannot accidentally acquire it by supplying a backend transfer callback.
+const PortRole = union(value.PortVariant) {
+    factory,
+    operation_selector,
+    endpoint_selector,
+    resource: PreparePortTransfer,
+    exchange: PreparePortTransfer,
+    endpoint,
+};
+
+pub const OwningPortVariant = enum { resource, exchange };
+pub const BorrowedPortVariant = enum { factory, operation_selector, endpoint_selector, endpoint };
 
 /// A module value owns exactly one release of an opaque semantic payload.
 /// The heap never learns what a module image is: it stores the payload and
@@ -1152,7 +1253,7 @@ fn allocPortHeader(
     identity: u64,
     payload: *anyopaque,
     release: *const fn (*anyopaque) void,
-    prepare_transfer: *const fn (*anyopaque, *anyopaque, *anyopaque) PortTransferError!PortTransfer,
+    role: PortRole,
 ) error{OutOfMemory}!*InitializingPort {
     const obj = try allocator.create(Object);
     errdefer allocator.destroy(obj);
@@ -1161,7 +1262,7 @@ fn allocPortHeader(
         .identity = identity,
         .payload = payload,
         .release = release,
-        .prepare_transfer = prepare_transfer,
+        .role = role,
     };
     obj.* = .{
         .header = HeaderImpl.init(.port, identity),
@@ -1201,9 +1302,7 @@ fn PortTransferAdapter(comptime Payload: type) type {
     };
 }
 
-/// Every port kind must be able to change owning scope. This is deliberately
-/// not optional: a payload that omits the transfer steps fails to compile
-/// here rather than becoming a second class of port that `@give` refuses.
+/// Every owning port kind must implement the complete transfer protocol.
 fn portPrepareTransfer(
     comptime Payload: type,
 ) *const fn (*anyopaque, *anyopaque, *anyopaque) PortTransferError!PortTransfer {
@@ -1220,8 +1319,9 @@ fn portPrepareTransfer(
 /// Wraps one already-owned external-cell reference in an opaque port value.
 /// On failure the caller retains the reference; on success final value release
 /// calls `releasePort` exactly once.
-pub fn createPort(
+pub fn createOwnedPort(
     comptime Payload: type,
+    comptime variant: OwningPortVariant,
     allocator: std.mem.Allocator,
     identity: u64,
     payload: *Payload,
@@ -1231,7 +1331,35 @@ pub fn createPort(
         identity,
         @ptrCast(payload),
         PortReleaseAdapter(Payload).release,
-        portPrepareTransfer(Payload),
+        switch (variant) {
+            .resource => .{ .resource = portPrepareTransfer(Payload) },
+            .exchange => .{ .exchange = portPrepareTransfer(Payload) },
+        },
+    );
+    return .{ .port = publishPort(initializing) };
+}
+
+/// Wraps one owned backend reference without granting scope ownership. Failure
+/// leaves the reference with the caller; final value release consumes it once.
+/// The backend retains its issuer or owner for the complete reference lifetime.
+pub fn createBorrowedPort(
+    comptime Payload: type,
+    comptime variant: BorrowedPortVariant,
+    allocator: std.mem.Allocator,
+    identity: u64,
+    payload: *Payload,
+) error{OutOfMemory}!Value {
+    const initializing = try allocPortHeader(
+        allocator,
+        identity,
+        @ptrCast(payload),
+        PortReleaseAdapter(Payload).release,
+        switch (variant) {
+            .factory => .factory,
+            .operation_selector => .operation_selector,
+            .endpoint_selector => .endpoint_selector,
+            .endpoint => .endpoint,
+        },
     );
     return .{ .port = publishPort(initializing) };
 }
@@ -1245,7 +1373,10 @@ pub fn preparePortTransfer(
     to: *anyopaque,
 ) PortTransferError!PortTransfer {
     const storage = portStorage(header);
-    return storage.prepare_transfer(storage.payload, from, to);
+    return switch (storage.role) {
+        .resource, .exchange => |prepare| prepare(storage.payload, from, to),
+        .factory, .operation_selector, .endpoint_selector, .endpoint => error.NotOwner,
+    };
 }
 
 fn portStorage(header: *const PortHandle) *const PortStorage {
@@ -1256,12 +1387,16 @@ pub fn portIdentity(header: *const PortHandle) u64 {
     return portStorage(header).identity;
 }
 
+pub fn portVariant(header: *const PortHandle) value.PortVariant {
+    return std.meta.activeTag(portStorage(header).role);
+}
+
 /// Validated typed projection for the backend that created a port. Matching
 /// the release adapter prevents an unrelated opaque port kind from being
 /// reinterpreted merely because both payloads erase to `anyopaque`.
-pub fn portPayload(comptime Payload: type, header: *const PortHandle) ?*Payload {
+pub fn portPayload(comptime Payload: type, comptime variant: value.PortVariant, header: *const PortHandle) ?*Payload {
     const storage = portStorage(header);
-    if (storage.release != PortReleaseAdapter(Payload).release) return null;
+    if (storage.role != variant or storage.release != PortReleaseAdapter(Payload).release) return null;
     return @ptrCast(@alignCast(storage.payload));
 }
 

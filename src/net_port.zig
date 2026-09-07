@@ -321,7 +321,7 @@ pub const NetOwner = struct {
 
         try transfers.publishScope(ListenerCell, cell, scope, ListenerCell.transferOwnership);
 
-        return heap.createPort(ListenerCell, self.allocator, cell.identity, cell) catch
+        return heap.createOwnedPort(ListenerCell, .resource, self.allocator, cell.identity, cell) catch
             return error.OutOfMemory;
     }
 };
@@ -1053,7 +1053,7 @@ pub const ConnectionCell = struct {
                 error.Io, error.Closed => .resources,
             };
         };
-        const port = heap.createPort(ConnectionCell, owner.allocator, cell.identity, cell) catch {
+        const port = heap.createOwnedPort(ConnectionCell, .resource, owner.allocator, cell.identity, cell) catch {
             cell.abort();
             cell.releaseRef();
             return error.OutOfMemory;
@@ -1466,14 +1466,14 @@ pub fn pollAcceptFromUnit(
 /// Typed projection of a port value; null for any other port kind or value.
 pub fn fromValue(port: Value) ?*ListenerCell {
     if (port != .port) return null;
-    return heap.portPayload(ListenerCell, port.port);
+    return heap.portPayload(ListenerCell, .resource, port.port);
 }
 
 /// Typed projection of a connection port; null for a listener, a process
 /// port, or any other value.
 pub fn connectionFromValue(port: Value) ?*ConnectionCell {
     if (port != .port) return null;
-    return heap.portPayload(ConnectionCell, port.port);
+    return heap.portPayload(ConnectionCell, .resource, port.port);
 }
 
 fn ownerFromAccess(access_value: *external.NetAccess) *NetOwner {
