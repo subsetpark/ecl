@@ -5,8 +5,8 @@
 
 const builtin = @import("builtin");
 
-pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v3";
-pub const abi_version: u32 = 3;
+pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v4";
+pub const abi_version: u32 = 4;
 
 pub const max_error_message_bytes: u32 = 4096;
 pub const max_guest_scalar_bytes: u32 = 4096;
@@ -102,6 +102,7 @@ pub const PortFn = *const fn (*anyopaque, *const PortRequest, *PortReply) callco
 /// Controller streams block only their private host controller. Zero bytes
 /// denotes request EOF or cancellation; failure is reported separately.
 pub const ControllerTable = extern struct {
+    input: *const fn (*anyopaque, [*]const u64, u32, *ValueView) callconv(.c) bool,
     read: *const fn (*anyopaque, [*]u8, u32) callconv(.c) u32,
     write: *const fn (*anyopaque, [*]const u8, u32) callconv(.c) u32,
     cancelled: *const fn (*anyopaque) callconv(.c) bool,
@@ -138,6 +139,24 @@ pub const EffectSlot = extern struct {
     name_len: u64,
 };
 
+pub const BindingKind = enum(u32) { call, factory, operation, endpoint, _ };
+pub const EndpointTransport = enum(u32) { bytes, messages, _ };
+pub const EndpointDirection = enum(u32) { input, output, _ };
+pub const EndpointOwner = enum(u32) { resource, exchange, _ };
+/// Registration metadata contains private controller selectors, never ECL
+/// values. The host validates and seals it into module-instance capabilities.
+pub const PortBinding = extern struct {
+    kind: BindingKind = .call,
+    resource: u32 = 0,
+    operation: u32 = 0,
+    lane: u32 = 0,
+    endpoints: u64 = 0,
+    endpoint: u32 = 0,
+    transport: EndpointTransport = .bytes,
+    direction: EndpointDirection = .input,
+    owner: EndpointOwner = .exchange,
+};
+
 pub const Definition = extern struct {
     size: u32 = @sizeOf(Definition),
     callback_index: u32,
@@ -155,6 +174,7 @@ pub const Definition = extern struct {
     continuation_alignment: u32 = 0,
     init_continuation: ?StateInitFn = null,
     deinit_continuation: ?StateDeinitFn = null,
+    binding: PortBinding = .{},
 };
 
 pub const ValueView = extern struct {
@@ -384,11 +404,12 @@ fn assertRecord(comptime T: type, comptime expected_size: usize, comptime expect
 
 comptime {
     @setEvalBranchQuota(8000);
-    if (@sizeOf(usize) != 8) @compileError("native ABI v3 supports 64-bit targets only");
+    if (@sizeOf(usize) != 8) @compileError("native ABI v4 supports 64-bit targets only");
 
     assertRecord(CapabilityRequirement, 8, 4);
     assertRecord(EffectSlot, 24, 8);
-    assertRecord(Definition, 96, 8);
+    assertRecord(Definition, 136, 8);
+    assertRecord(PortBinding, 40, 8);
     assertRecord(ValueView, 40, 8);
     assertRecord(Scalar, 32, 8);
     assertRecord(InvokeResult, 16, 8);
@@ -397,7 +418,7 @@ comptime {
     assertRecord(PortDefinition, 88, 8);
     assertRecord(PortRequest, 48, 8);
     assertRecord(PortReply, 24, 8);
-    assertRecord(ControllerTable, 40, 8);
+    assertRecord(ControllerTable, 48, 8);
     assertRecord(EntryResult, 32, 8);
 
     if (@offsetOf(Definition, "callback_index") != 4 or

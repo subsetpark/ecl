@@ -7,13 +7,51 @@ pub const Cancellation = enum { close_resource, acknowledge };
 pub const Progress = union(enum) { ready, pending, failed, candidate: capability.Candidate, bytes: u32 };
 pub const Interests = packed struct(u32) { readable: bool = true, writable: bool = true, reserved: u30 = 0 };
 
-pub const ControllerState = struct { table: *const abi.ControllerTable, context: *anyopaque };
+pub const ControllerState = struct { table: *const abi.ControllerTable, context: *anyopaque, input_view: abi.ValueView = .{ .kind = .list } };
+
+/// Controller-local read-only view. Borrowed text and this view last until the
+/// next input lookup or controller return. Port values expose only their kind.
+pub const MessageView = opaque {
+    fn wire(self: *const MessageView) *const abi.ValueView {
+        return @ptrCast(@alignCast(self));
+    }
+    pub fn kind(self: *const MessageView) abi.ValueKindWire {
+        return self.wire().kind;
+    }
+    pub fn int(self: *const MessageView) ?i64 {
+        return if (self.kind() == .int) @bitCast(self.wire().scalar_bits) else null;
+    }
+    pub fn float(self: *const MessageView) ?f64 {
+        return if (self.kind() == .float) @bitCast(self.wire().scalar_bits) else null;
+    }
+    pub fn char(self: *const MessageView) ?u21 {
+        return if (self.kind() == .char) @intCast(self.wire().scalar_bits) else null;
+    }
+    pub fn symbol(self: *const MessageView) ?[]const u8 {
+        if (self.kind() != .symbol) return null;
+        return self.wire().bytes_ptr.?[0..@intCast(self.wire().bytes_len)];
+    }
+    pub fn length(self: *const MessageView) ?u64 {
+        return switch (self.kind()) {
+            .list, .dict => self.wire().aggregate_len,
+            else => null,
+        };
+    }
+};
 
 /// Available only on the controller. Streams may block this private thread;
 /// cancellation interrupts host stream waits. No ECL values are accessible.
 pub const Controller = opaque {
     fn state(self: *Controller) *ControllerState {
         return @ptrCast(@alignCast(self));
+    }
+    /// Read configuration during open, or structured parameters during run.
+    /// Dictionary positions alternate key/value. Paths have at most 64 entries.
+    pub fn input(self: *Controller, path: []const u64) ?*const MessageView {
+        if (path.len > abi.max_read_path_depth) return null;
+        const owned = self.state();
+        if (!owned.table.input(owned.context, path.ptr, @intCast(path.len), &owned.input_view)) return null;
+        return @ptrCast(&owned.input_view);
     }
     pub fn read(self: *Controller, bytes: []u8) usize {
         const state_value = self.state();
@@ -74,6 +112,7 @@ pub fn Port(comptime Spec: type) type {
     return opaque {
         const Self = @This();
         pub const ecl_port_marker = void;
+        pub const LaneType = Lane;
         pub const name = Spec.name;
         fn adapter(self: *Self) *Adapter {
             return @ptrCast(@alignCast(self));

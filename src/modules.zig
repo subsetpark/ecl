@@ -2682,6 +2682,7 @@ pub const Registry = enum(usize) {
     /// loading and static transport verification. Each turn installs at most
     /// one validated definition into the unpublished generation.
     pub const NativeCandidateCursor = struct {
+        registry: *Registry,
         instance: *native_module.ModuleInstance,
         candidate: ?OwnedImage,
         definition_index: usize = 0,
@@ -2691,6 +2692,7 @@ pub const Registry = enum(usize) {
             instance: *native_module.ModuleInstance,
         ) error{OutOfMemory}!NativeCandidateCursor {
             return .{
+                .registry = registry,
                 .instance = instance,
                 .candidate = try registry.createImage(),
             };
@@ -2709,15 +2711,32 @@ pub const Registry = enum(usize) {
                 return .{ .complete = completed };
             }
             const definition = definitions[self.definition_index];
-            _ = self.candidate.?.publishDefinition(definition.name, .{ .native = .{
-                .callable = .{
-                    .instance = self.instance,
-                    .definition = @intCast(self.definition_index),
+            const releases = self.registry.releaseDomain();
+            var body: ?value.Value = null;
+            defer if (body) |owned| releases.releaseValue(owned);
+            const publication: env.ModulePublication = switch (definition.body) {
+                .call => .{ .native = .{
+                    .callable = .{
+                        .instance = self.instance,
+                        .definition = @intCast(self.definition_index),
+                    },
+                    .visibility = .public,
+                    .effect = definition.effect,
+                    .doc = definition.doc,
+                } },
+                .port => cap: {
+                    const capability = try @import("native_port.zig").sealCapability(self.instance, @intCast(self.definition_index));
+                    defer releases.releaseValue(capability);
+                    body = try list.fromValues(self.registry.allocator(), &.{capability});
+                    break :cap .{ .word = .{
+                        .body = env.quotation(body.?.list).?,
+                        .visibility = .public,
+                        .effect = definition.effect,
+                        .doc = definition.doc,
+                    } };
                 },
-                .visibility = .public,
-                .effect = definition.effect,
-                .doc = definition.doc,
-            } }) catch |err| switch (err) {
+            };
+            _ = self.candidate.?.publishDefinition(definition.name, publication) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.Frozen => unreachable,
             };

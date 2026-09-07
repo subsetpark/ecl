@@ -6,6 +6,7 @@ const capability = @import("capability.zig");
 const ports = @import("ports.zig");
 pub const Port = ports.Port;
 pub const Controller = ports.Controller;
+pub const MessageView = ports.MessageView;
 pub const PortCancellation = ports.Cancellation;
 pub const PortProgress = ports.Progress;
 pub const PortInterests = ports.Interests;
@@ -27,6 +28,64 @@ pub const BuildResult = capability.BuildResult;
 pub const BuildAppendResult = capability.BuildAppendResult;
 pub const Reschedule = capability.Reschedule;
 pub const CallbackResult = error{ OutOfMemory, InvalidValue }!Outcome;
+
+pub fn factory(comptime name: []const u8, comptime doc: []const u8, comptime P: type) type {
+    return portBinding(name, doc, P, .{ .kind = .factory });
+}
+
+pub fn operation(comptime name: []const u8, comptime doc: []const u8, comptime P: type, comptime code: u32, comptime lane: P.LaneType, comptime endpoints: u64) type {
+    return portBinding(name, doc, P, .{ .kind = .operation, .operation = code, .lane = @intFromEnum(lane), .endpoints = endpoints });
+}
+
+pub const Endpoint = struct {
+    id: u6,
+    transport: enum { bytes, messages },
+    direction: enum { input, output },
+    owner: enum { resource, exchange } = .exchange,
+};
+
+pub fn endpoint(comptime name: []const u8, comptime doc: []const u8, comptime P: type, comptime spec: Endpoint) type {
+    return portBinding(name, doc, P, .{
+        .kind = .endpoint,
+        .endpoint = spec.id,
+        .transport = switch (spec.transport) {
+            .bytes => .bytes,
+            .messages => .messages,
+        },
+        .direction = switch (spec.direction) {
+            .input => .input,
+            .output => .output,
+        },
+        .owner = switch (spec.owner) {
+            .resource => .resource,
+            .exchange => .exchange,
+        },
+    });
+}
+
+fn portBinding(comptime binding_name: []const u8, comptime document: []const u8, comptime P: type, comptime metadata: abi.PortBinding) type {
+    if (!identifier(binding_name)) @compileError("ecl-native: port binding name must be an identifier");
+    if (document.len == 0) @compileError("ecl-native: port binding documentation must not be empty");
+    return struct {
+        pub const registered_port_binding = void;
+        pub const name = binding_name;
+        pub const uses_build_values = false;
+        pub const uses_reschedule = false;
+        var outputs = makeSlots(.{"capability"});
+        var inputs: [0]abi.EffectSlot = .{};
+        pub fn definition(comptime Ports: anytype) abi.Definition {
+            var binding = metadata;
+            binding.resource = comptime index: {
+                for (Ports, 0..) |Declared, i| if (Declared == P) break :index @intCast(i);
+                @compileError("ecl-native: registered capability requires a declared port");
+            };
+            return .{ .callback_index = 0, .name_ptr = name.ptr, .name_len = name.len, .doc_ptr = document.ptr, .doc_len = document.len, .input_count = 0, .inputs_ptr = &inputs, .output_count = 1, .outputs_ptr = &outputs, .binding = binding };
+        }
+        pub fn invoke(comptime _: anytype, _: *const abi.HostTable, _: *anyopaque, output: *abi.InvokeResult) void {
+            output.* = .{ .tag = .fail, .adapter_status = 2 };
+        }
+    };
+}
 
 pub fn Call(comptime effect_source: []const u8) type {
     const EffectSpec = parseEffect(effect_source);
@@ -434,7 +493,7 @@ pub fn module(comptime spec: anytype) type {
         const Self = @This();
         var definitions_storage = definitions: {
             var result: [word_count]abi.Definition = undefined;
-            for (Words, 0..) |Word, index| result[index] = Word.definition(index);
+            for (Words, 0..) |Word, index| result[index] = if (@hasDecl(Word, "registered_port_binding")) Word.definition(Ports) else Word.definition(index);
             break :definitions result;
         };
         var ports_storage = definitions: {

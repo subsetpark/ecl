@@ -359,7 +359,7 @@ words use the public `ecl-native` SDK, declare exact effects, and request only
 the narrow host capabilities they need. Their tables validate and publish
 atomically through the same module registry used by source modules.
 
-The pre-release ABI is version 3 (`ecl_module_abi_v3`); rebuild existing native
+The pre-release ABI is version 4 (`ecl_module_abi_v4`); rebuild existing native
 modules against this SDK. Port inputs expose `.port` through `ValueView.kind()`
 and can be returned with `Call.forward`. With `Reschedule`, `Call.forwardNested`
 returns an invocation-local candidate for a bounded `Path` into a list or

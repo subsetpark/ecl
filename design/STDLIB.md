@@ -2374,6 +2374,12 @@ with the peer's address and port attached.
 
 ## port
 
+Factories, operation selectors, and endpoint selectors are opaque `'port`
+values exported through ordinary library bindings. Repeated lookup preserves
+identity. Selectors belong to their issuing module instance and resource kind;
+using another kind or the wrong capability variant raises `'type`. These
+borrowed capabilities are not transferable scope owners.
+
 Native exchanges are opaque `'port` values with their own task-scope ownership.
 An exchange returned by a native word survives that word's invocation. Retaining
 or sending its value shares use; `@give` transfers its scope ownership. Exiting
@@ -2381,6 +2387,8 @@ the owning scope aborts outstanding work and joins cancellation cleanup.
 
 | Word | Effect | Contract |
 |---|---|---|
+| `port.open` | `( factory config -- resource )` | Initialize a resource and publish it into the calling scope. Failure joins cleanup through that scope. |
+| `port.begin` | `( resource operation request -- exchange )` | Admit a registered operation on its declared FIFO lane, parking while admission capacity is full. |
 | `port.await` | `( exchange -- )` | Wait for successful completion or raise the terminal error. Repeatable; does not drain output. |
 | `port.result` | `( exchange -- value )` | Wait and claim the terminal result once. A later successful-result claim raises `'contract`. |
 | `port.cancel` | `( exchange -- )` | Request cancellation idempotently. Completion remains observable and waits for controller return. |
@@ -2392,6 +2400,13 @@ stream output have `[]` as their result. Input finish, output EOF, completion,
 and cleanup are distinct events. An active cancellation releases its controller
 lane only after acknowledgement and return; a controller that cannot restore
 reusable state closes its resource.
+
+Configuration and initial requests may contain integers, floats, characters,
+symbols, lists, dictionaries, and port capabilities. Executable words, tasks,
+and modules are rejected recursively with `'type`. Each value is bounded by
+64 KiB of scalar/text bytes, 4,096 nodes, and 16 capability occurrences; exceeding
+a bound raises `'overflow` before initialization or admission. Retaining an
+existing resource in a request shares use and does not transfer its scope.
 
 ## proc
 

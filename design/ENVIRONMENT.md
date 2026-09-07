@@ -46,8 +46,8 @@ module. Its descriptor declares the same canonical name requested by the
 loader. The complete word table validates before publication, and publication
 is atomic.
 
-The current pre-release native ABI is version 3, with entry symbol
-`ecl_module_abi_v3`. Native modules built for earlier versions must be rebuilt;
+The current pre-release native ABI is version 4, with entry symbol
+`ecl_module_abi_v4`. Native modules built for earlier versions must be rebuilt;
 the loader provides no legacy adapter.
 
 Each native word has a declared effect and nonempty documentation. Native
@@ -60,6 +60,14 @@ A loaded native module remains loaded for the session. Repeated resolution
 uses its existing registration.
 
 Native modules may declare typed port kinds with persistent private state.
+ABI v4 modules also export documented factory, operation-selector, and
+endpoint-selector bindings through `ecl.factory`, `ecl.operation`, and
+`ecl.endpoint`. Bindings are ordinary opaque ECL values with module-instance
+identity. Their complete registration validates before the module is visible.
+`port.open` and `port.begin` accept structured configuration and parameters;
+controllers read them through bounded `Controller.input` paths. Each request
+allows at most 64 KiB of scalar/text data, 4,096 aggregate nodes, and 16 port
+attachments. Executable words, tasks, and modules are rejected recursively.
 Their words can forward opaque ports through aggregates, stream operations,
 and explicitly close them. Operations execute in FIFO order within a declared
 lane. A port defaults to one lane; multiple lanes and different ports can

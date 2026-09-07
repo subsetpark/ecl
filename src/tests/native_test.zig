@@ -38,6 +38,26 @@ test "native: exported exchange transfers ownership and joins cancellation on sc
         "x type p 1 7 portprobe.duplex-exchange p portprobe.duplex-close portprobe.cleaned", "'port 7 1");
 }
 
+test "native: registered capabilities retain identity across ordinary module bindings" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.factory type portprobe.factory portprobe.factory match? " ++
+        "portprobe.echo portprobe.echo match? portprobe.input portprobe.output match? " ++
+        "portprobe.factory sample.forward portprobe.factory match? " ++
+        "portprobe.factory wrap [] (pop) 3 pack (@give) @attempt 'err at 'kind at", "'port 1 1 0 1 'domain");
+}
+
+test "native: common open and begin preserve structured configuration and parameters" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.factory 7 port.open 'p set p portprobe.inspect " ++
+        "42 0.5 \"a\" first 'tag [7] {'key 9} portprobe.factory 7 pack port.begin " ++
+        "dup port.result swap port.await p port.close portprobe.cleaned", "() 1");
+}
+
+test "native: common requests reject executable values oversize data and foreign selectors" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "[] (portprobe.factory (pop) port.open) @attempt 'err at 'kind at " ++
+        "[] (portprobe.factory [0] 4096 take port.open) @attempt 'err at 'kind at " ++
+        "portprobe.other-new 'p set [] (p portprobe.failure [] port.begin) @attempt 'err at 'kind at " ++
+        "p port.close portprobe.cleaned", "'type 'overflow 'type 1");
+}
+
 test "native: an exported exchange remains owned when only a borrowed use is sent" {
     for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.duplex-new 'p set p 3 portprobe.start 'x set 1 portprobe.await-blocked " ++
         "x wrap (pop) @spawn task.await 'ok at pop " ++
@@ -345,6 +365,45 @@ test "native: SDK port declarations validate state layouts and controller adapte
     definition = P.definition();
     definition.select_lane = null;
     try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &invalid);
+}
+
+test "native: registered descriptors reject undeclared kinds lanes and endpoints" {
+    const P = ecl.Port(PortSpec);
+    const Extension = ecl.module(.{ .name = "sample", .doc = "Registered port validation.", .linkage = .static, .ports = .{P}, .words = .{
+        ecl.factory("factory", "Create a counter.", P),
+        ecl.operation("operation", "Read counter bytes.", P, 0, .operation, 1),
+        ecl.endpoint("output", "Counter bytes.", P, .{ .id = 0, .transport = .bytes, .direction = .output }),
+    } });
+    var host = heap.HostOwner.init(std.testing.allocator);
+    defer host.cleanup().drain();
+    const requested = try intern.internModuleName("sample");
+    const validated = try validate(host.cleanup(), requested, Extension.descriptor());
+    defer validated.deinit();
+    try std.testing.expectEqual(@as(usize, 3), validated.definitions().len);
+    var raw = Extension.descriptor().*;
+    const original: [3]abi.Definition = raw.definitions_ptr[0..3].*;
+    var definitions = original;
+    raw.definitions_ptr = &definitions;
+    definitions[0].binding.resource = 1;
+    try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &raw);
+    definitions = original;
+    definitions[1].binding.lane = 1;
+    try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &raw);
+    definitions = original;
+    definitions[1].binding.endpoints = 2;
+    try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &raw);
+    definitions = original;
+    definitions[2].binding.endpoint = 64;
+    try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &raw);
+    definitions = original;
+    definitions[2].binding.transport = @enumFromInt(999);
+    try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &raw);
+    definitions = original;
+    definitions[2].binding.owner = .resource;
+    try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &raw);
+    definitions = original;
+    definitions[0].doc_len = 0;
+    try expectReject(error.EmptyDocumentation, host.cleanup(), requested, &raw);
 }
 
 fn expectOk(runtime: *session.Session, source: []const u8) !void {

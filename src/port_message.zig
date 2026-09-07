@@ -133,6 +133,10 @@ pub const Message = opaque {
         return if (self.state().phase == .ready) self.state().root else null;
     }
 
+    pub fn validated(self: *Message) ?*const Validated {
+        return if (self.state().phase == .ready) @ptrCast(self) else null;
+    }
+
     pub fn footprint(self: *Message) ?Footprint {
         return if (self.state().phase == .ready) self.state().footprint else null;
     }
@@ -144,6 +148,15 @@ pub const Message = opaque {
         state_value.frames.retire(releases);
         releases.releaseValue(state_value.root);
         state_value.allocator.destroy(state_value);
+    }
+};
+
+/// Borrowed proof of a complete bounded validation, valid while Message owns
+/// the immutable root. Consumers retain the root before that owner retires.
+pub const Validated = opaque {
+    pub fn value(self: *const Validated) Value {
+        const state: *const State = @ptrCast(@alignCast(self));
+        return state.root;
     }
 };
 

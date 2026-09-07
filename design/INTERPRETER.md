@@ -1380,7 +1380,21 @@ the current invocation-slot transport below still uses byte rings.
 Native port definitions are copied and validated with the module descriptor.
 Their identity is the pinned module instance and validated definition index;
 names are descriptive metadata. Typed SDK adapters expose backend state only
-to controller callbacks. Ordinary native words receive invocation-local port
+to controller callbacks. Validated definitions distinguish callable words from
+registered factories and selectors. Capability bindings are single-value
+quotations in the immutable module image; each capability independently pins
+its issuing instance. Repeated lookup shares that identity. Selectors carry
+validated resource kinds, fixed operation lanes, and endpoint permissions;
+registration rejects duplicate endpoint identities and undeclared permissions
+before publishing any binding.
+
+Configuration and initial requests cross a bounded validation boundary before
+resource creation or operation admission. A nominal validated view grants
+retention of their immutable roots. Controllers receive only read-only wire
+views with bounded paths, never heap handles or allocator authority. Root
+retirement follows the containing resource or exchange lifetime.
+
+Ordinary native words receive invocation-local port
 capabilities and address suspended work through runtime-owned operation slots.
 Cancellation notification is a bounded concurrent callback; initialization,
 execution, and cleanup belong to host-owned controllers. Initialization precedes
@@ -1394,7 +1408,8 @@ as network and process writers. A ticket holds its lane through cancellation
 until execution acknowledges reuse and returns, or the resource closes. The
 operation phase is the authority for dispatch and cancellation; no independent
 active-operation pointer can disagree with it. Native
-kinds select lanes by a bounded, state-independent operation classifier. The
+kinds' registered operation selectors declare lanes; legacy native word
+adapters select them with a bounded, state-independent classifier. The
 host partitions the total admission budget across lanes so a saturated lane
 cannot consume another lane's progress capacity. Request and response rings
 separate scheduler execution from controller blocking.

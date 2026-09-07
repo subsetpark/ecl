@@ -319,13 +319,13 @@ const Transaction = struct {
             call.instance.releasePin();
             evaluator.allocator().destroy(call);
         }
-        if (definition.continuation_size != 0) {
+        if (definition.body.call.continuation_size != 0) {
             call.continuation = try evaluator.allocator().alignedAlloc(
                 u8,
                 .@"64",
-                definition.continuation_size,
+                definition.body.call.continuation_size,
             );
-            definition.init_continuation.?(call.continuation.?.ptr);
+            definition.body.call.init_continuation.?(call.continuation.?.ptr);
         }
         return call;
     }
@@ -349,7 +349,7 @@ const Transaction = struct {
         if (self.effect_check) |*check| check.deinit(self.releases);
         self.effect_check = null;
         if (self.continuation) |state| {
-            self.definition.deinit_continuation.?(state.ptr);
+            self.definition.body.call.deinit_continuation.?(state.ptr);
             self.allocator.free(state);
         }
         self.instance.releasePin();
@@ -469,7 +469,7 @@ const Transaction = struct {
         const timing = evaluator.beginNativeTiming();
         defer evaluator.finishNativeTiming(self.instance, timing);
         var result = abi.InvokeResult{ .tag = .fail, .adapter_status = 2 };
-        self.instance.invoke()(&self.host_table, self, self.definition.callback_index, &result);
+        self.instance.invoke()(&self.host_table, self, self.definition.body.call.callback_index, &result);
         if (result.size != @sizeOf(abi.InvokeResult))
             return evaluator.fail(.contract, "native callback returned an invalid result record size");
         if (result.adapter_status == 1) return error.OutOfMemory;

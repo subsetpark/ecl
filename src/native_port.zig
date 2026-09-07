@@ -10,6 +10,60 @@ const transfers = @import("port_transfer.zig");
 const Ring = @import("byte_ring.zig").Ring;
 const Value = @import("value.zig").Value;
 const list = @import("list.zig");
+const descriptor = @import("native_descriptor.zig");
+const port_message = @import("port_message.zig");
+
+const RegisteredState = struct {
+    instance: *native.ModuleInstance,
+    definition: u32,
+};
+
+/// A registered capability pins its issuing module instance. Its descriptor
+/// index is sealed at module publication and cannot be supplied by ECL code.
+pub const RegisteredCapability = opaque {
+    fn state(self: *RegisteredCapability) *RegisteredState {
+        return @ptrCast(@alignCast(self));
+    }
+    pub fn instance(self: *RegisteredCapability) *native.ModuleInstance {
+        return self.state().instance;
+    }
+    pub fn definition(self: *RegisteredCapability) descriptor.PortCapability {
+        const owned = self.state();
+        return owned.instance.definition(owned.definition).body.port;
+    }
+    pub fn releasePort(self: *RegisteredCapability) void {
+        const owned = self.state();
+        const issuer = owned.instance;
+        issuer.portAccess().state().allocator().destroy(owned);
+        issuer.releasePin();
+    }
+};
+
+pub fn registeredCapability(item: Value, comptime role: @import("value.zig").PortVariant) ?*RegisteredCapability {
+    if (item != .port) return null;
+    return heap.portPayload(RegisteredCapability, role, item.port);
+}
+
+/// Module publication owns the returned reference on success. Failure retains
+/// the caller's module pin and publishes no partially initialized capability.
+pub fn sealCapability(instance: *native.ModuleInstance, index: u32) error{OutOfMemory}!Value {
+    const owner = instance.portAccess().state();
+    const owned = try owner.allocator().create(RegisteredState);
+    errdefer owner.allocator().destroy(owned);
+    owned.* = .{ .instance = instance, .definition = index };
+    lock(&owner.mutex);
+    const identity = owner.identity;
+    owner.identity +%= 1;
+    unlock(&owner.mutex);
+    const capability: *RegisteredCapability = @ptrCast(owned);
+    const result = switch (instance.definition(index).body.port) {
+        .factory => try heap.createBorrowedPort(RegisteredCapability, .factory, owner.allocator(), identity, capability),
+        .operation => try heap.createBorrowedPort(RegisteredCapability, .operation_selector, owner.allocator(), identity, capability),
+        .endpoint => try heap.createBorrowedPort(RegisteredCapability, .endpoint_selector, owner.allocator(), identity, capability),
+    };
+    instance.retain();
+    return result;
+}
 
 fn io() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
@@ -114,9 +168,14 @@ pub const Access = opaque {
     /// Failure cancels/detaches every provisional resource; no backend code
     /// runs until heap storage, scope membership, and controller ownership exist.
     pub fn create(self: *Access, instance: *native.ModuleInstance, kind: u32, scope: *scheduler.TaskScope) CreateError!Value {
+        return self.createConfigured(instance, kind, scope, null);
+    }
+    /// Borrows validated configuration on either outcome; a created cell owns
+    /// its independent retained reference before any controller starts.
+    pub fn createConfigured(self: *Access, instance: *native.ModuleInstance, kind: u32, scope: *scheduler.TaskScope, config: ?*const port_message.Validated) CreateError!Value {
         const owner = self.state();
         if (instance.validated().port(kind).?.lane_count > owner.limits.max_operations) return error.InsufficientLanes;
-        const cell = try Resource.create(owner, .{ instance, kind }, Cell.initializeAllocation);
+        const cell = try Resource.create(owner, .{ instance, kind, config }, Cell.initializeAllocation);
         lock(&owner.mutex);
         const identity = owner.identity;
         owner.identity +%= 1;
@@ -157,6 +216,7 @@ const Operations = controllers.Lane(Operation, .operation, .{
 });
 
 pub const Cell = struct {
+    pub const Admission = union(enum) { pending, closed, invalid_operation, operation: Value };
     allocator: std.mem.Allocator,
     owner: *OwnerState,
     instance: *native.ModuleInstance,
@@ -172,15 +232,20 @@ pub const Cell = struct {
     ownership: external.Ownership = .provisional,
     phase: enum { reserved, initializing, open, closing, cleaned, joined } = .reserved,
     initialization_failure: ?Failure = null,
+    configuration: ?Value = null,
     lanes: [abi.max_port_lanes]Operations,
 
-    fn initializeAllocation(cell: *Cell, owner: *OwnerState, instance: *native.ModuleInstance, kind: u32) error{OutOfMemory}!void {
+    fn initializeAllocation(cell: *Cell, owner: *OwnerState, instance: *native.ModuleInstance, kind: u32, config: ?*const port_message.Validated) error{OutOfMemory}!void {
         const allocator = owner.host.allocator();
         const definition = instance.validated().port(kind).?;
         const state = try allocator.alignedAlloc(u8, .@"64", definition.state_size);
         errdefer allocator.free(state);
         const group = try ControllerGroup.init(allocator, owner.executor.access(), cell);
         cell.* = .{ .allocator = allocator, .owner = owner, .instance = instance, .kind = kind, .definition = definition, .backend = state, .controllers = group, .lanes = .{Operations.init(&cell.mutex)} ** abi.max_port_lanes };
+        if (config) |validated| {
+            cell.configuration = validated.value();
+            heap.retainValue(validated.value());
+        }
         instance.retain();
     }
     pub fn retainReadiness(self: *Cell) void {
@@ -200,6 +265,7 @@ pub const Cell = struct {
     }
     pub fn releasePort(self: *Cell) void {
         if (self.refs.fetchSub(1, .acq_rel) != 1) return;
+        if (self.configuration) |config| heap.hostDomain(self.owner.host).releaseValue(config);
         self.instance.releasePin();
         self.allocator.free(self.backend);
         self.controllers.deinit();
@@ -318,8 +384,11 @@ pub const Cell = struct {
             _ = lane.runNext();
         }
     }
-    pub fn admit(self: *Cell, code: u32, scope: *scheduler.TaskScope) error{ OutOfMemory, ScopeClosing }!union(enum) { pending, closed, invalid_operation, operation: Value } {
+    pub fn admit(self: *Cell, code: u32, scope: *scheduler.TaskScope) error{ OutOfMemory, ScopeClosing }!Admission {
         const lane = self.definition.select_lane.?(code);
+        return self.admitOnLane(code, lane, 0, scope, null);
+    }
+    pub fn admitOnLane(self: *Cell, code: u32, lane: u32, endpoints: u64, scope: *scheduler.TaskScope, request: ?*const port_message.Validated) error{ OutOfMemory, ScopeClosing }!Admission {
         lock(&self.mutex);
         const closed = self.closed.load(.acquire);
         const invalid = lane >= self.definition.lane_count;
@@ -328,7 +397,7 @@ pub const Cell = struct {
         if (closed) return .closed;
         if (invalid) return .invalid_operation;
         if (full) return .pending;
-        const op = Operation.create(self, code, lane) catch |err| return switch (err) {
+        const op = Operation.create(self, code, lane, endpoints, request) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.Closed => .closed,
             error.Full => .pending,
@@ -383,8 +452,10 @@ pub const Operation = struct {
     ownership: external.Ownership = .provisional,
     lifetime: enum { open, closing, closed } = .open,
     terminal_result: union(enum) { available: Value, claimed },
+    parameters: ?Value = null,
+    endpoints: u64,
 
-    fn create(cell: *Cell, code: u32, lane: u32) error{ OutOfMemory, Closed, Full }!*Operation {
+    fn create(cell: *Cell, code: u32, lane: u32, endpoints: u64, parameters: ?*const port_message.Validated) error{ OutOfMemory, Closed, Full }!*Operation {
         const allocator = cell.allocator;
         const request = try allocator.alloc(u8, cell.owner.limits.ring_capacity);
         errdefer allocator.free(request);
@@ -395,12 +466,16 @@ pub const Operation = struct {
         lock(&cell.mutex);
         defer unlock(&cell.mutex);
         if (cell.closed.load(.acquire)) return error.Closed;
-        const ticket = try cell.lanes[lane].admit(allocator, cell.laneCapacity(lane), .{ cell, code, lane, request, response, terminal_value }, initialize) orelse return error.Full;
+        const ticket = try cell.lanes[lane].admit(allocator, cell.laneCapacity(lane), .{ cell, code, lane, request, response, terminal_value, endpoints, parameters }, initialize) orelse return error.Full;
         cell.changed.broadcast(io());
         return ticket.owner();
     }
-    fn initialize(op: *Operation, ticket: *Operations.Ticket, cell: *Cell, code: u32, lane: u32, request: []u8, response: []u8, terminal_value: Value) void {
-        op.* = .{ .allocator = cell.allocator, .cell = cell, .code = code, .lane = lane, .ticket = ticket, .request = .{ .bytes = request }, .response = .{ .bytes = response }, .terminal_result = .{ .available = terminal_value } };
+    fn initialize(op: *Operation, ticket: *Operations.Ticket, cell: *Cell, code: u32, lane: u32, request: []u8, response: []u8, terminal_value: Value, endpoints: u64, parameters: ?*const port_message.Validated) void {
+        op.* = .{ .allocator = cell.allocator, .cell = cell, .code = code, .lane = lane, .ticket = ticket, .request = .{ .bytes = request }, .response = .{ .bytes = response }, .terminal_result = .{ .available = terminal_value }, .endpoints = endpoints };
+        if (parameters) |validated| {
+            op.parameters = validated.value();
+            heap.retainValue(validated.value());
+        }
         cell.retainReadiness();
     }
     fn runnable(self: *Operation) bool {
@@ -494,6 +569,7 @@ pub const Operation = struct {
         return self.lifetime == .closed;
     }
     fn deinit(self: *Operation) void {
+        if (self.parameters) |parameters| heap.hostDomain(self.cell.owner.host).releaseValue(parameters);
         switch (self.terminal_result) {
             .available => |item| heap.hostDomain(self.cell.owner.host).releaseValue(item),
             .claimed => {},
@@ -601,6 +677,37 @@ const ControllerContext = struct { cell: *Cell, operation: ?*Operation, running:
 fn context(raw: *anyopaque) *ControllerContext {
     return @ptrCast(@alignCast(raw));
 }
+fn controllerInput(raw: *anyopaque, path: [*]const u64, depth: u32, output: *abi.ValueView) callconv(.c) bool {
+    if (depth > abi.max_read_path_depth or output.size != @sizeOf(abi.ValueView)) return false;
+    const ctx = context(raw);
+    const root = if (ctx.operation) |operation| operation.parameters else ctx.cell.configuration;
+    var item = root orelse {
+        if (depth != 0) return false;
+        output.* = .{ .kind = .list };
+        return true;
+    };
+    for (path[0..depth]) |index| {
+        item = switch (item) {
+            .list => |header| if (index < header.length()) list.atUnchecked(item, @intCast(index)) else return false,
+            .dict => |header| if (index / 2 < header.length()) (if (index % 2 == 0)
+                @import("dict.zig").keyAt(header, @intCast(index / 2))
+            else
+                @import("dict.zig").valueAt(header, @intCast(index / 2))) else return false,
+            else => return false,
+        };
+    }
+    output.* = switch (item) {
+        .int => |number| .{ .kind = .int, .scalar_bits = @bitCast(number) },
+        .float => |number| .{ .kind = .float, .scalar_bits = @bitCast(number) },
+        .char => |codepoint| .{ .kind = .char, .scalar_bits = codepoint },
+        .symbol => |id| .{ .kind = .symbol, .bytes_ptr = @import("intern.zig").get(id).ptr, .bytes_len = @import("intern.zig").get(id).len },
+        .list => |header| .{ .kind = .list, .aggregate_len = header.length() },
+        .dict => |header| .{ .kind = .dict, .aggregate_len = header.length() },
+        .port => .{ .kind = .port },
+        .word, .task, .module => return false,
+    };
+    return true;
+}
 fn controllerRead(raw: *anyopaque, bytes: [*]u8, length: u32) callconv(.c) u32 {
     if (length == 0) return 0;
     const op = context(raw).operation orelse return 0;
@@ -665,7 +772,7 @@ fn controllerFail(raw: *anyopaque, kind: abi.ErrorKindWire, bytes: [*]const u8, 
         unlock(&ctx.cell.mutex);
     }
 }
-const controller_table: abi.ControllerTable = .{ .read = controllerRead, .write = controllerWrite, .cancelled = controllerCancelled, .acknowledge_cancellation = controllerAcknowledge, .fail = controllerFail };
+const controller_table: abi.ControllerTable = .{ .input = controllerInput, .read = controllerRead, .write = controllerWrite, .cancelled = controllerCancelled, .acknowledge_cancellation = controllerAcknowledge, .fail = controllerFail };
 
 pub fn fromValue(value: Value, instance: *native.ModuleInstance, kind: u32) ?*Cell {
     const handle = switch (value) {

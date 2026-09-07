@@ -1339,6 +1339,10 @@ test "oom: standard-library and host: native port forwarding borrowed endpoint" 
 }
 
 fn NativePortLifecycleProbe(comptime source: []const u8) type {
+    return NativePortProbe(source, "portprobe.cleaned pop");
+}
+
+fn NativePortProbe(comptime source: []const u8, comptime setup: []const u8) type {
     return struct {
         fn run(failing: *std.testing.FailingAllocator, failure_offset: ?usize) !usize {
             var locked_allocator = LockedAllocator{ .child = failing.allocator() };
@@ -1355,13 +1359,29 @@ fn NativePortLifecycleProbe(comptime source: []const u8) type {
                 .native_port_limits = .{ .ring_capacity = 8 },
             }, .cooperative);
             defer runtime.deinit();
-            try runOk(&runtime, "oom-port-setup.ecl", "portprobe.cleaned pop");
+            try runOk(&runtime, "oom-port-setup.ecl", setup);
             const first_failure_index = failing.alloc_index;
             if (failure_offset) |offset| failing.fail_index = first_failure_index + offset;
             try runOk(&runtime, "oom-port-lifecycle.ecl", source);
             return first_failure_index;
         }
     };
+}
+
+test "oom: standard-library and host: native port registered capability publication" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortProbe(
+        "portprobe.factory type pop",
+        "",
+    ).run);
+}
+
+test "oom: standard-library and host: native port registered open and begin" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.factory [] port.open dup portprobe.noop [] port.begin " ++
+            "dup port.result pop port.close port.close",
+    ).run);
 }
 
 test "oom: standard-library and host: native port lifecycle creation and admission" {

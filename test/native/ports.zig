@@ -88,9 +88,20 @@ fn DuplexSpec(comptime acknowledge: bool) type {
         pub fn lane(code: u32) Lane {
             return if (code == 1 or code == 5) .send else .receive;
         }
-        pub fn open(_: *State, _: *ecl.Controller) void {}
+        pub fn open(state: *State, controller: *ecl.Controller) void {
+            const config = controller.input(&.{}) orelse return controller.fail(.domain, "missing configuration");
+            if (config.int()) |number| {
+                if (number < 0 or number > 255) return controller.fail(.domain, "invalid counter configuration");
+                for (&state.lanes) |*current| current.total = @intCast(number);
+            } else if (config.length() != 0) controller.fail(.domain, "expected an initial counter or empty configuration");
+        }
         pub fn run(state: *State, code: u32, controller: *ecl.Controller) void {
             const current = &state.lanes[@intFromEnum(lane(code))];
+            if (code == 8) return;
+            if (code == 6) {
+                if (current.total != 7 or !checkParameters(controller)) controller.fail(.domain, "structured parameters were not preserved");
+                return;
+            }
             Base.run(current, if (code == 5) 3 else code, controller);
             if (acknowledge and controller.cancelled()) {
                 current.cancelled.store(false, .release);
@@ -107,6 +118,18 @@ fn DuplexSpec(comptime acknowledge: bool) type {
             _ = cleaned.fetchAdd(1, .release);
         }
     };
+}
+fn checkParameters(controller: *ecl.Controller) bool {
+    if ((controller.input(&.{}) orelse return false).length() != 7) return false;
+    if ((controller.input(&.{0}) orelse return false).int() != 42) return false;
+    if ((controller.input(&.{1}) orelse return false).float() != 0.5) return false;
+    if ((controller.input(&.{2}) orelse return false).char() != 'a') return false;
+    if (!std.mem.eql(u8, (controller.input(&.{3}) orelse return false).symbol() orelse return false, "tag")) return false;
+    if ((controller.input(&.{ 4, 0 }) orelse return false).int() != 7) return false;
+    if (!std.mem.eql(u8, (controller.input(&.{ 5, 0 }) orelse return false).symbol() orelse return false, "key")) return false;
+    if ((controller.input(&.{ 5, 1 }) orelse return false).int() != 9) return false;
+    if ((controller.input(&.{6}) orelse return false).kind() != .port) return false;
+    return controller.input(&.{7}) == null;
 }
 const Duplex = ecl.Port(DuplexSpec(true));
 const Unacknowledged = ecl.Port(DuplexSpec(false));
@@ -391,6 +414,15 @@ pub const Extension = ecl.module(.{
     .doc = "Hermetic native port controller fixture.",
     .ports = .{ Counter, Other, Duplex, Unacknowledged },
     .words = .{
+        ecl.factory("factory", "Create an independently scheduled duplex resource.", Duplex),
+        ecl.operation("echo", "Echo accepted input bytes.", Duplex, 0, .receive, 3),
+        ecl.operation("checksum", "Sum accepted input bytes.", Duplex, 1, .send, 3),
+        ecl.operation("failure", "Fail with a deterministic terminal error.", Duplex, 2, .receive, 0),
+        ecl.operation("inspect", "Validate structured parameters without additional streaming.", Duplex, 6, .receive, 0),
+        ecl.operation("noop", "Complete without additional streaming.", Duplex, 8, .receive, 0),
+        ecl.operation("blocked", "Wait for an explicit controller gate.", Duplex, 3, .receive, 3),
+        ecl.endpoint("input", "Exchange byte input.", Duplex, .{ .id = 0, .transport = .bytes, .direction = .input }),
+        ecl.endpoint("output", "Exchange byte output.", Duplex, .{ .id = 1, .transport = .bytes, .direction = .output }),
         ecl.word("duplex-new-ready-wait", "Create lanes with deterministic wait allocation.", createDuplexReadyWait),
         ecl.word("duplex-exchange-ready-wait", "Exercise deterministic lane admission and wait allocation.", exchangeDuplexReadyWait),
         ecl.word("duplex-new", "Create a port with independently progressing lanes.", createDuplex),
