@@ -231,6 +231,7 @@ pub const ProcessOwner = struct {
         policy: ProcessPolicy,
         environment: []const EnvironmentEntry,
     ) PolicyError!ProcessOwner {
+        // A supervisor, three pipes, and optional timeout and escalation jobs.
         const jobs = std.math.mul(usize, policy.max_live_ports, 6) catch return error.InvalidPolicy;
         const capacity = std.math.add(usize, jobs, 1) catch return error.InvalidPolicy;
         var effective_policy = policy;
@@ -510,7 +511,7 @@ const GroupState = union(enum) {
     retired: Termination,
 };
 
-const Writers = transfers.ControllerLane(ProcessCell);
+const Writers = controllers.Lane(ProcessCell);
 
 const InputState = enum {
     open,
@@ -578,6 +579,9 @@ const ControllerGroup = struct {
         }
         if (cell.group_state != .retired) @panic("process scope detached before group retirement");
         self.leases = 0;
+        cell.live_reservation.release();
+        cell.phase = .{ .reaped = cell.group_state.retired };
+        cell.notifyReadyLocked();
         transfers.completeControllerLocked(ProcessCell, cell, &self.ownership, ProcessCell.releaseRef);
     }
 };
@@ -705,22 +709,24 @@ pub const ProcessCell = struct {
             .running, .closing, .terminal, .reaped => {},
         }
         std.Io.Threaded.mutexUnlock(&self.mutex);
-        self.executor.spawn(supervisorThreadMain, .{ self, lease }, retireSupervisor) catch return error.Io;
+        self.executor.spawn(supervisorThreadMain, .{ self, lease }, retireController) catch return error.Io;
     }
 
     fn failBeforeStart(self: *ProcessCell) void {
         self.kill();
+        std.Io.Threaded.mutexLock(&self.mutex);
         const group = switch (self.group_state) {
             .running => |group| group,
             .grace => |grace| grace.group,
             .kill_issued => |group| group,
             .retired => unreachable,
         };
+        std.Io.Threaded.mutexUnlock(&self.mutex);
         group.child.kill(self.io);
+        std.Io.Threaded.mutexLock(&self.mutex);
         self.group_state = .{ .retired = .{ .unknown = 0 } };
+        std.Io.Threaded.mutexUnlock(&self.mutex);
         self.allocator.destroy(group);
-        self.live_reservation.release();
-        self.phase = .{ .reaped = .{ .unknown = 0 } };
     }
 
     fn retainRef(self: *ProcessCell) void {
@@ -831,7 +837,7 @@ pub const ProcessCell = struct {
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
         node.checkCell(self);
         if (self.input != .open or self.io_failed) return .io;
-        if (!node.active() or self.stdin.free() == 0) return .pending;
+        if (!node.begin() or self.stdin.free() == 0) return .pending;
         const count = @min(bytes.len, self.stdin.free());
         self.stdin.push(bytes[0..count]);
         self.changed.broadcast(blockingIo());
@@ -904,19 +910,24 @@ pub const ProcessCell = struct {
     }
 
     pub fn finishWrite(self: *ProcessCell, permit: *WritePermit) void {
-        self.retireWrite(permit);
+        self.retireWrite(permit, false);
     }
 
     pub fn abandonWrite(self: *ProcessCell, permit: *WritePermit) void {
-        self.retireWrite(permit);
+        self.retireWrite(permit, true);
     }
 
-    fn retireWrite(self: *ProcessCell, ticket: *WritePermit) void {
+    fn retireWrite(self: *ProcessCell, ticket: *WritePermit, cancelled: bool) void {
         std.Io.Threaded.mutexLock(&self.mutex);
         ticket.checkCell(self);
-        if (self.writers.remove(ticket)) self.notifyReadyLocked();
+        if (cancelled) {
+            _ = self.writers.cancel(ticket, .release);
+        } else {
+            _ = self.writers.complete(ticket);
+        }
+        self.notifyReadyLocked();
         std.Io.Threaded.mutexUnlock(&self.mutex);
-        ticket.destroy(self.allocator);
+        ticket.destroy();
     }
 
     pub fn beginRead(self: *ProcessCell, stream: Stream) error{ReaderActive}!void {
@@ -1271,14 +1282,6 @@ pub const ProcessCell = struct {
         self.waitForOtherControllers();
     }
 
-    fn publishReaped(self: *ProcessCell) void {
-        std.Io.Threaded.mutexLock(&self.mutex);
-        self.live_reservation.release();
-        self.phase = .{ .reaped = self.group_state.retired };
-        self.notifyReadyLocked();
-        std.Io.Threaded.mutexUnlock(&self.mutex);
-    }
-
     const IoThread = enum { stdin, stdout, stderr };
 
     fn startIoThread(
@@ -1391,11 +1394,6 @@ pub const ProcessCell = struct {
 
 // The shared executor owns the lease after spawn succeeds and releases it
 // only after joining the backend function, including all error returns.
-fn retireSupervisor(args: struct { *ProcessCell, ControllerLease }, _: void) void {
-    args[0].publishReaped();
-    retireController(args, {});
-}
-
 fn retireController(args: anytype, _: void) void {
     var lease = args[args.len - 1];
     lease.release();
@@ -1494,6 +1492,61 @@ test "process policy rejects ambient and relative executable selection before sp
     try std.testing.expectError(error.InvalidSpec, owner.validateSpec(.{ .executable = "program" }));
     try std.testing.expectError(error.Denied, owner.validateSpec(.{ .executable = "/other/program" }));
     try owner.validateSpec(.{ .executable = "/allowed/program" });
+}
+
+test "process: provisional rollback retains capacity until cancellation setup retires" {
+    const fixture_path = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        @import("process_fixture_options").process_exe,
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(fixture_path);
+    var host = heap.HostOwner.init(std.testing.allocator);
+    defer host.cleanup().drain();
+    var owner = try ProcessOwner.init(std.testing.allocator, std.testing.io, .{
+        .executables = .unrestricted,
+        .max_live_ports = 1,
+    }, &.{});
+    defer owner.deinit();
+    var runtime_scheduler = try scheduler_api.Scheduler.init(host.cleanup(), .cooperative, .host);
+    runtime_scheduler.attachRetirement();
+    var scope = scheduler_api.TaskScope.init(runtime_scheduler.worker());
+    defer runtime_scheduler.deinit(&scope);
+
+    // Exercise the production provisional factory before starting its root job.
+    var reservation = LiveReservation.acquire(&owner, ProcessOwner.reserveLive).?;
+    defer reservation.release();
+    var child: ?std.process.Child = try std.process.spawn(std.testing.io, .{
+        .argv = &.{ fixture_path, "exit", "7" },
+        .stdin = .pipe,
+        .stdout = .pipe,
+        .stderr = .pipe,
+        .pgid = 0,
+    });
+    defer if (child) |*owned| killChildGroup(owned, std.testing.io);
+    const cell = try ProcessCell.create(&reservation, child.?, 41);
+    child = null;
+    defer cell.releasePort();
+    var initial = cell.controllers.initialLease();
+    var provisional = true;
+    defer if (provisional) {
+        cell.failBeforeStart();
+        initial.release();
+    };
+    try transfers.publishScope(ProcessCell, cell, &scope, processOwnership);
+    // Scope cancellation can acquire this lease between attachment and spawn.
+    var cancellation = cell.controllers.tryLease().?;
+    defer cancellation.release();
+    cell.failBeforeStart();
+    initial.release();
+    provisional = false;
+    try std.testing.expect(cell.termination() == null);
+    const spec: ProcessSpec = .{ .executable = fixture_path, .args = &.{ "exit", "7" } };
+    try std.testing.expectError(error.LiveLimit, owner.spawn(runtime_scheduler.worker(), &scope, spec));
+    cancellation.release();
+    try std.testing.expect(cell.termination() != null);
+    const next = try owner.spawn(runtime_scheduler.worker(), &scope, spec);
+    host.domain().releaseValue(next);
 }
 
 test "dormant controller reaps a direct child before scope detachment" {
