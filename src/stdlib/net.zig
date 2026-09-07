@@ -356,38 +356,41 @@ fn failConnection(evaluator: *Machine, cell: *net_port.ConnectionCell, failure: 
 /// is what makes that promise true when the closing unit ends immediately
 /// afterwards, as a unit given a connection normally does: without the wait,
 /// the unit's scope closure would abort the socket and discard the queue.
-const CloseDriver = struct {
-    pub const address_stable_driver = {};
-    /// Field ownership rather than self-owned construction: `startDriver`
-    /// retires a still-uninstalled driver's fields when its allocation fails,
-    /// so closing a connection needs no bespoke cleanup path of its own.
-    pub const ownership: heap.DriverOwnership = .fields;
-    connection: heap.Owned(Value),
-    cell: *net_port.ConnectionCell,
-    requested: bool = false,
+fn CloseDriver(comptime Cell: type) type {
+    return struct {
+        pub const address_stable_driver = {};
+        /// Field ownership rather than self-owned construction: `startDriver`
+        /// retires a still-uninstalled driver's fields when its allocation fails,
+        /// so closing a connection needs no bespoke cleanup path of its own.
+        pub const ownership: heap.DriverOwnership = .fields;
+        connection: heap.Owned(Value),
+        cell: *Cell,
+        requested: bool = false,
 
-    pub fn advance(evaluator: *Machine, self: *CloseDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        if (!self.requested) {
-            self.requested = true;
-            self.cell.close();
+        pub fn advance(evaluator: *Machine, self: *@This()) MachineError!machine.WorkProgress {
+            try evaluator.pollKernel();
+            if (!self.requested) {
+                self.requested = true;
+                self.cell.close();
+            }
+            if (self.cell.drained()) return .completed;
+            try evaluator.park(.{ .external = self.cell.drainSource() });
+            return .yielded;
         }
-        if (self.cell.drained()) return .completed;
-        try evaluator.park(.{ .external = self.cell.drainSource() });
-        return .yielded;
-    }
-};
+    };
+}
 
 fn close(evaluator: *Machine) MachineError!void {
     var item = try evaluator.popValue();
     errdefer item.deinit();
     if (net_port.fromValue(item.borrow())) |cell| {
-        cell.close();
-        item.deinit();
-        return;
+        return evaluator.startDriver(CloseDriver(net_port.ListenerCell){
+            .connection = .init(item.take()),
+            .cell = cell,
+        });
     }
     if (net_port.connectionFromValue(item.borrow())) |cell| {
-        return evaluator.startDriver(CloseDriver{
+        return evaluator.startDriver(CloseDriver(net_port.ConnectionCell){
             .connection = .init(item.take()),
             .cell = cell,
         });

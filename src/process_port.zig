@@ -1,6 +1,6 @@
 //! Scope-owned POSIX subprocess controller behind opaque ECL port values.
 //!
-//! Blocking kernel pipe and wait operations run only on detached controller
+//! Blocking kernel pipe and wait operations run only on host-owned controller
 //! threads. Scheduler workers interact through bounded queues and the generic
 //! readiness capabilities in `external.zig`; live-process ownership belongs to
 //! a TaskScope membership, never to the language value reference count.
@@ -8,6 +8,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const external = @import("external.zig");
+const controllers = @import("port_controller.zig");
 const transfers = @import("port_transfer.zig");
 const heap = @import("heap.zig");
 const scheduler_api = @import("scheduler.zig");
@@ -220,6 +221,7 @@ pub const ProcessOwner = struct {
     io: std.Io,
     policy: OwnedPolicy,
     environment: OwnedEnvironment,
+    executor: *controllers.Owner,
     live: std.atomic.Value(usize) = .init(0),
     next_identity: std.atomic.Value(u64) = .init(1),
 
@@ -229,6 +231,8 @@ pub const ProcessOwner = struct {
         policy: ProcessPolicy,
         environment: []const EnvironmentEntry,
     ) PolicyError!ProcessOwner {
+        const jobs = std.math.mul(usize, policy.max_live_ports, 6) catch return error.InvalidPolicy;
+        const capacity = std.math.add(usize, jobs, 1) catch return error.InvalidPolicy;
         var effective_policy = policy;
         const captured_cwd = if (policy.initial_cwd == null)
             std.process.currentPathAlloc(io, allocator) catch |err| switch (err) {
@@ -241,20 +245,23 @@ pub const ProcessOwner = struct {
         if (captured_cwd) |cwd| effective_policy.initial_cwd = cwd;
         var owned_policy = try OwnedPolicy.init(allocator, effective_policy);
         errdefer owned_policy.deinit(allocator);
-        const owned_environment = try OwnedEnvironment.init(
+        var owned_environment = try OwnedEnvironment.init(
             allocator,
             policy.inherit_environment,
             environment,
         );
+        errdefer owned_environment.deinit(allocator);
         return .{
             .allocator = allocator,
             .io = io,
+            .executor = try controllers.Owner.init(allocator, capacity),
             .policy = owned_policy,
             .environment = owned_environment,
         };
     }
 
     pub fn deinit(self: *ProcessOwner) void {
+        self.executor.deinit();
         std.debug.assert(self.live.load(.acquire) == 0);
         self.environment.deinit(self.allocator);
         self.policy.deinit(self.allocator);
@@ -297,6 +304,10 @@ pub const ProcessOwner = struct {
     ) SpawnError!Value {
         if (comptime !backendSupported()) return error.Unsupported;
         try self.validateSpec(spec);
+        self.executor.access().prepare() catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.Closed => error.Io,
+        };
         var live_reservation = LiveReservation.acquire(self, ProcessOwner.reserveLive) orelse return error.LiveLimit;
         errdefer live_reservation.release();
 
@@ -521,8 +532,8 @@ pub const InputTerminal = enum {
     broken,
 };
 
-/// Controller leases cover detached threads only. Retirement closes lease
-/// creation; the supervisor waits for every other controller before its final
+/// Controller leases pin backend execution and cancellation setup. Retirement
+/// closes lease creation; the supervisor waits for every other controller before its final
 /// lease detaches membership. Port/readiness refs use the independent cell
 /// refcount.
 const ControllerGroup = struct {
@@ -631,6 +642,7 @@ pub const ProcessCell = struct {
     group_state: GroupState,
     next_escalation: u64 = 1,
     controllers: ControllerGroup,
+    executor: *controllers.Executor,
     stdin: Ring,
     stdout: Ring,
     stderr: Ring,
@@ -671,6 +683,7 @@ pub const ProcessCell = struct {
             .identity = identity,
             .group_state = .{ .running = group },
             .controllers = .{ .cell = cell },
+            .executor = owner.executor.access(),
             .stdin = .{ .bytes = stdin },
             .stdout = .{ .bytes = stdout },
             .stderr = .{ .bytes = stderr },
@@ -692,8 +705,7 @@ pub const ProcessCell = struct {
             .running, .closing, .terminal, .reaped => {},
         }
         std.Io.Threaded.mutexUnlock(&self.mutex);
-        const thread = std.Thread.spawn(.{}, supervisorThreadMain, .{ self, lease }) catch return error.Io;
-        thread.detach();
+        self.executor.spawn(supervisorThreadMain, .{ self, lease }, retireSupervisor) catch return error.Io;
     }
 
     fn failBeforeStart(self: *ProcessCell) void {
@@ -786,12 +798,11 @@ pub const ProcessCell = struct {
         lease_value: ControllerLease,
     ) void {
         var lease = lease_value;
-        const thread = std.Thread.spawn(.{}, escalationMain, .{ self, escalation, lease }) catch {
+        self.executor.spawn(escalationMain, .{ self, escalation, lease }, retireController) catch {
             self.escalateKill(escalation);
             lease.release();
             return;
         };
-        thread.detach();
     }
 
     pub fn registerReadiness(
@@ -1014,11 +1025,10 @@ pub const ProcessCell = struct {
             return;
         }
         var lease = self.controllers.tryLease() orelse return;
-        const thread = std.Thread.spawn(.{}, timeoutThreadMain, .{ self, milliseconds, lease }) catch {
+        self.executor.spawn(timeoutThreadMain, .{ self, milliseconds, lease }, retireController) catch {
             lease.release();
             return error.Io;
         };
-        thread.detach();
     }
 
     pub fn timedOut(self: *ProcessCell) bool {
@@ -1259,10 +1269,12 @@ pub const ProcessCell = struct {
 
         self.allocator.destroy(group);
         self.waitForOtherControllers();
+    }
 
+    fn publishReaped(self: *ProcessCell) void {
         std.Io.Threaded.mutexLock(&self.mutex);
         self.live_reservation.release();
-        self.phase = .{ .reaped = translated };
+        self.phase = .{ .reaped = self.group_state.retired };
         self.notifyReadyLocked();
         std.Io.Threaded.mutexUnlock(&self.mutex);
     }
@@ -1277,11 +1289,10 @@ pub const ProcessCell = struct {
     ) error{Io}!void {
         _ = kind;
         var lease = self.controllers.tryLease().?;
-        const thread = std.Thread.spawn(.{}, function, .{ self, file, lease }) catch {
+        self.executor.spawn(function, .{ self, file, lease }, retireController) catch {
             lease.release();
             return error.Io;
         };
-        thread.detach();
     }
 
     fn failIoThread(self: *ProcessCell, file: std.Io.File, kind: IoThread) void {
@@ -1378,9 +1389,20 @@ pub const ProcessCell = struct {
     }
 };
 
-fn timeoutThreadMain(cell: *ProcessCell, milliseconds: u64, lease_value: ControllerLease) void {
-    var lease = lease_value;
-    defer lease.release();
+// The shared executor owns the lease after spawn succeeds and releases it
+// only after joining the backend function, including all error returns.
+fn retireSupervisor(args: struct { *ProcessCell, ControllerLease }, _: void) void {
+    args[0].publishReaped();
+    retireController(args, {});
+}
+
+fn retireController(args: anytype, _: void) void {
+    var lease = args[args.len - 1];
+    lease.release();
+}
+
+fn timeoutThreadMain(_: *controllers.Execution, cell: *ProcessCell, milliseconds: u64, lease_value: ControllerLease) void {
+    _ = lease_value;
     const duration: std.Io.Clock.Duration = .{
         .raw = .fromMilliseconds(@intCast(milliseconds)),
         .clock = .awake,
@@ -1401,12 +1423,12 @@ fn timeoutThreadMain(cell: *ProcessCell, milliseconds: u64, lease_value: Control
 }
 
 fn escalationMain(
+    _: *controllers.Execution,
     cell: *ProcessCell,
     escalation: EscalationId,
     lease_value: ControllerLease,
 ) void {
-    var lease = lease_value;
-    defer lease.release();
+    _ = lease_value;
     const duration: std.Io.Clock.Duration = .{
         .raw = .fromMilliseconds(250),
         .clock = .awake,
@@ -1417,27 +1439,23 @@ fn escalationMain(
     cell.escalateKill(escalation);
 }
 
-fn supervisorThreadMain(cell: *ProcessCell, lease_value: ControllerLease) void {
-    var lease = lease_value;
-    defer lease.release();
+fn supervisorThreadMain(_: *controllers.Execution, cell: *ProcessCell, lease_value: ControllerLease) void {
+    _ = lease_value;
     cell.supervisorMain();
 }
 
-fn stdinThreadMain(cell: *ProcessCell, file: std.Io.File, lease_value: ControllerLease) void {
-    var lease = lease_value;
-    defer lease.release();
+fn stdinThreadMain(_: *controllers.Execution, cell: *ProcessCell, file: std.Io.File, lease_value: ControllerLease) void {
+    _ = lease_value;
     cell.stdinMain(file);
 }
 
-fn stdoutThreadMain(cell: *ProcessCell, file: std.Io.File, lease_value: ControllerLease) void {
-    var lease = lease_value;
-    defer lease.release();
+fn stdoutThreadMain(_: *controllers.Execution, cell: *ProcessCell, file: std.Io.File, lease_value: ControllerLease) void {
+    _ = lease_value;
     cell.stdoutMain(file);
 }
 
-fn stderrThreadMain(cell: *ProcessCell, file: std.Io.File, lease_value: ControllerLease) void {
-    var lease = lease_value;
-    defer lease.release();
+fn stderrThreadMain(_: *controllers.Execution, cell: *ProcessCell, file: std.Io.File, lease_value: ControllerLease) void {
+    _ = lease_value;
     cell.stderrMain(file);
 }
 
