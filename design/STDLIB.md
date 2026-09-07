@@ -107,7 +107,7 @@ Use `[]` for no initial values. Always pushes exactly one result:
 `{'ok (values)}` with the successful stack values as a list, or
 `{'err <error dict>}`.
 
-Observationally `@spawn await` — same result shape, same error protocol,
+Observationally `@spawn task.await` — same result shape, same error protocol,
 same self-contained-quotation contract — differing only in scheduling.
 That identity is what makes the isolation non-arbitrary rather than an
 implementation accident. The complete form is `values (q) @attempt`. See
@@ -155,7 +155,7 @@ no initial values; the ambient stack never crosses the boundary. See
 #### Examples
 
 ```ecl
-[] (40 2 +) @spawn await
+[] (40 2 +) @spawn task.await
 # => {'ok [42]}
 ```
 
@@ -187,7 +187,7 @@ is which unit's end closes it. See [Concurrency](SPEC.md#concurrency).
 
 ```ecl
 {'address "127.0.0.1" 'port 0} net.listen
-wrap [] (net.local-address 'port at 0 >) @give await
+wrap [] (net.local-address 'port at 0 >) @give task.await
 # => {'ok [1]}
 ```
 
@@ -269,27 +269,6 @@ Equivalent to `swap (at) fold`.
 ### atan2
 `( y x -- z )` — **Pervasive.** Two-argument arctangent; returns float.
 
-### await
-`( task -- result )` — Park until the task completes; return its cached
-`{'ok …}`/`{'err …}` result. Idempotent. See
-[Concurrency](SPEC.md#concurrency).
-
-### await-all
-`( tasks -- results )` — Result of every task, in input order; never
-re-raises and never cancels siblings. Equivalent to `(await) each`.
-
-### await-any
-`( tasks -- index result )` — Race a nonempty all-task list; among tasks
-already terminal at entry the lowest index wins, otherwise the first
-completion.
-
-### await-for
-`( task milliseconds -- result )` — `await` with a nonnegative int
-deadline; expiry returns `{'err {'kind 'timeout}}` without cancelling the
-task. A terminal task beats even a zero deadline. A deadline beyond any
-instant the scheduler clock can report is `'overflow` before the wait
-registers.
-
 ### band
 `( x y -- z )` — **Pervasive.** Bitwise and over the two's-complement bit
 patterns of ints. Non-int leaves are `'type`.
@@ -346,10 +325,6 @@ the word is idempotent. Any other value is `'type`. Inverse of `chars`; see
 ### call
 `( q -- ... )` — *Inline.* Run a quotation on the current stack. A data
 list pushes its elements.
-
-### cancel
-`( task -- )` — Request cancellation; the task's result becomes
-`{'err {'kind 'cancelled …}}`. No-op when already terminal.
 
 ### case
 `( x clauses -- ... )` — *Inline.* The clause list is flat, nonempty, and
@@ -1152,10 +1127,6 @@ cycles.
 # => [1 2 3 1 2]
 ```
 
-### tasks
-`( -- tasks )` — Pending descendant tasks in deterministic spawn
-preorder.
-
 ### times
 `( n q -- ... )` — *Inline.* Run the quotation `n` times; `n` must be a
 nonnegative int. Tail-call optimized.
@@ -1384,7 +1355,7 @@ for the complete format, limit, containment, and publication contract.
 
 Scheduler-backed time. `now`, `elapsed`, and `sleep` read the one monotonic
 clock the Session's scheduler owns, so a program's instants, its sleeps, and
-every `await-for` deadline agree on the current time. `unix` is a separate
+every `task.await-for` deadline agree on the current time. `unix` is a separate
 wall-clock grant: the Session host may withhold it, fix it, anchor it to the
 monotonic clock, or pass the process clock through. The command line grants
 the process clock; embedded Sessions grant none by default. Possession of host
@@ -1400,7 +1371,7 @@ carry no date; wall time may jump and is not suitable for scheduling.
 
 A Session may run under a manual monotonic clock that starts at zero and moves
 only when the host advances it. Under that clock `now` is exact, `sleep` and
-`await-for` complete on the advance that reaches their deadline, and no word
+`task.await-for` complete on the advance that reaches their deadline, and no word
 waits on host time. `ENVIRONMENT.md` describes the host policy.
 
 ### elapsed
@@ -2330,7 +2301,7 @@ every other host failure, including a transmission timeout. Cancelling a unit
 parked in `accept`, `read`, or `write` fails only that unit with `'cancelled`;
 bytes the peer had already sent remain available to the next `read`, and a
 connection accepted for a cancelled `accept` is closed. There is no deadline
-on any connection word; a deadline is `@spawn` with `await-for` and `cancel`.
+on any connection word; a deadline is `@spawn` with `task.await-for` and `task.cancel`.
 TLS, framing, and every protocol limit belong to the modules built over a
 connection, not to this module.
 
@@ -3186,6 +3157,36 @@ propagate.
 ### with-column
 `( table name column -- table )` — Replace an existing column or append a new
 one, keeping the row count exact.
+
+## task
+
+Task handles are created by the core unit constructors `@spawn` and `@give`.
+Use `(task.await) each` to collect results in input order without cancelling siblings or re-raising task errors.
+
+### await
+`( task -- result )` — Park until the task completes; return its cached
+`{'ok …}`/`{'err …}` result. Idempotent. See
+[Concurrency](SPEC.md#concurrency).
+
+### await-any
+`( tasks -- index result )` — Race a nonempty all-task list; among tasks
+already terminal at entry the lowest index wins, otherwise the first
+completion.
+
+### await-for
+`( task milliseconds -- result )` — `task.await` with a nonnegative int
+deadline; expiry returns `{'err {'kind 'timeout}}` without cancelling the
+task. A terminal task beats even a zero deadline. A deadline beyond any
+instant the scheduler clock can report is `'overflow` before the wait
+registers.
+
+### cancel
+`( task -- )` — Request cancellation; the task's result becomes
+`{'err {'kind 'cancelled …}}`. No-op when already terminal.
+
+### pending
+`( -- tasks )` — Pending descendant tasks in deterministic spawn
+preorder.
 
 ## test.default
 

@@ -75,7 +75,7 @@ test "unit inputs: seeds reach every unit constructor in list order" {
     defer runtime.deinit();
 
     try expectStack(&runtime, "[10 3] (-) @attempt", "{'ok [7]}");
-    try expectStack(&runtime, "[10 3] (-) @spawn await", "{'ok [7]}");
+    try expectStack(&runtime, "[10 3] (-) @spawn task.await", "{'ok [7]}");
     // The element stays deepest in each child stack, beneath the shared seeds.
     try expectStack(&runtime, "[1 2] [10] (-) @each", "[-9 -8]");
     try expectStack(&runtime, "[4 5] (+ 'sum set) @module 'summed register summed.sum", "9");
@@ -112,7 +112,7 @@ test "unit inputs: every constructor diagnoses its own values operand" {
         "constructor's values operand",
         "`values (body) 'name @defm`",
     });
-    try expectErrorContains(&runtime, "[] (1 +) @spawn await 'err at raise", &.{
+    try expectErrorContains(&runtime, "[] (1 +) @spawn task.await 'err at raise", &.{
         "'isolation @spawn",
         "constructor's values operand",
         "`values (q) @spawn`",

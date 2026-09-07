@@ -784,7 +784,7 @@ test "fs: the live-operation quota is released after each operation" {
     try scratch.write("big", big);
     try runCase(policy, .{ .worker_pool = 2 },
         \\[] ('root "big" fs.read-bytes len) @spawn [] ('root "big" fs.read-bytes len) @spawn
-        \\pair await-all (dup 'ok dict.has? (pop 'ok) ('err at 'data at 'reason at) if) each
+        \\pair (task.await) each (dup 'ok dict.has? (pop 'ok) ('err at 'data at 'reason at) if) each
         \\dup ('ok match?) filter len 1 >= swap (dup 'ok match? swap 'limit match? or) all? and
         \\'root "file" fs.read-text
     , .{ .stack = "1 \"x\"" });

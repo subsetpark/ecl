@@ -17,15 +17,18 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     const definitions = comptime [_]env.BuiltinWord{
         .{ .name = "@spawn", .primitive = spawn, .effect = "values quotation -- task", .doc = "Run a quotation with an explicit initial stack concurrently in a fresh child unit." },
         .{ .name = "@give", .primitive = give, .effect = "ports values quotation -- task", .doc = "Run a quotation concurrently in a fresh child unit that owns the given ports: the child unit closes them when it ends, and the calling unit no longer does." },
-        .{ .name = "await", .primitive = await, .effect = "task -- result", .doc = "Wait for a task and return its success or error result." },
-        .{ .name = "cancel", .primitive = cancel, .effect = "task --", .doc = "Request cancellation of a task, doing nothing if it is already complete." },
-        .{ .name = "tasks", .primitive = tasks, .effect = "-- tasks", .doc = "Return pending descendant tasks in deterministic spawn order." },
-        .{ .name = "await-any", .primitive = awaitAny, .effect = "tasks -- index result", .doc = "Wait for any task in a nonempty list and return its index and result." },
-        .{ .name = "await-for", .primitive = awaitFor, .effect = "task milliseconds -- result", .doc = "Wait up to a nonnegative number of milliseconds for a task result." },
         .{ .name = "@each", .primitive = parEach, .effect = "sequence values quotation -- results", .doc = "Apply a quotation with an explicit shared initial stack concurrently in one fresh unit per element and return one result per element in input order." },
     };
     try core.installBuiltins(&definitions);
 }
+
+pub const words = [_]env.BuiltinWord{
+    .{ .name = "await", .primitive = await, .doc = "( task -- result ) Wait for a task and return its success or error result." },
+    .{ .name = "cancel", .primitive = cancel, .doc = "( task -- ) Request cancellation of a task, doing nothing if it is already complete." },
+    .{ .name = "pending", .primitive = tasks, .doc = "( -- tasks ) Return pending descendant tasks in deterministic spawn order." },
+    .{ .name = "await-any", .primitive = awaitAny, .doc = "( tasks -- index result ) Wait for any task in a nonempty list and return its index and result." },
+    .{ .name = "await-for", .primitive = awaitFor, .doc = "( task milliseconds -- result ) Wait up to a nonnegative number of milliseconds for a task result." },
+};
 
 fn scheduler(evaluator: *Machine) *const scheduler_api.WorkerScheduler {
     return @ptrCast(@alignCast(evaluator.unit.scheduler.?));
@@ -337,7 +340,7 @@ fn awaitAny(evaluator: *Machine) MachineError!void {
     }
     const count: usize = @intCast(task_list.list.length());
     if (count == 0) {
-        return evaluator.fail(.domain, "await-any requires a nonempty list");
+        return evaluator.fail(.domain, "task.await-any requires a nonempty list");
     }
     try evaluator.startDriver(AwaitAnyDriver{ .tasks = .init(tasks_value.take()) });
 }
@@ -350,10 +353,10 @@ fn awaitFor(evaluator: *Machine) MachineError!void {
     defer task.deinit();
     if (task.borrow() != .task) return evaluator.typeError("a task followed by milliseconds");
     if (duration.borrow() != .int) return evaluator.typeError("an integer millisecond duration");
-    if (duration.borrow().int < 0) return evaluator.fail(.domain, "await-for duration must be nonnegative");
+    if (duration.borrow().int < 0) return evaluator.fail(.domain, "task.await-for duration must be nonnegative");
     const milliseconds: u63 = @intCast(duration.borrow().int);
     scheduler(evaluator).checkDeadline(milliseconds) catch
-        return evaluator.fail(.overflow, "await-for deadline lies beyond the clock's range");
+        return evaluator.fail(.overflow, "task.await-for deadline lies beyond the clock's range");
     try evaluator.park(.{ .deadline = .{
         .task = task.take(),
         .milliseconds = milliseconds,
@@ -430,7 +433,7 @@ const AwaitAnyDriver = struct {
             if (list.atUnchecked(task_values, self.index) != .task) {
                 return evaluator.failAtIndex(
                     .type,
-                    "await-any expected only tasks",
+                    "task.await-any expected only tasks",
                     self.index,
                 );
             }

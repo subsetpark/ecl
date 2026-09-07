@@ -854,13 +854,13 @@ test "fuzz: history parsing merging and corruption preservation" {
 
 fn fuzzSchedulerRuntime(_: void, smith: *std.testing.Smith) !void {
     const programs = [_][]const u8{
-        "[] (1) @spawn await pop",
-        "[] (1) @spawn dup cancel await pop",
-        "[] (1) @spawn dup await pop await pop",
+        "[] (1) @spawn task.await pop",
+        "[] (1) @spawn dup task.cancel task.await pop",
+        "[] (1) @spawn dup task.await pop task.await pop",
         "[] [] (missing) @each pop",
         "[1 2 3] [] (dup *) @each pop",
-        "[] ((1) () while) @spawn dup cancel await pop",
-        "[] (7) @spawn 'fuzz-task set fuzz-task await pop",
+        "[] ((1) () while) @spawn dup task.cancel task.await pop",
+        "[] (7) @spawn 'fuzz-task set fuzz-task task.await pop",
     };
     var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .cooperative);
     defer runtime.deinit();
@@ -890,7 +890,7 @@ fn fuzzNativeTransactions(_: void, smith: *std.testing.Smith) !void {
         "7 sample.singleton pop",
         "[] (7 sample.draft-fail) @attempt pop",
         "sample.cooperative pop",
-        "[] (9 sample.yield-forever) @spawn dup cancel await pop",
+        "[] (9 sample.yield-forever) @spawn dup task.cancel task.await pop",
     };
     var source = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer source.deinit();

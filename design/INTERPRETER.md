@@ -134,6 +134,10 @@ starting stack explicit: empty, one borrowed element, explicit seeds, or an
 element followed by seeds. User-sized seeding is itself bounded work rather
 than hidden inside construction.
 
+Task construction remains in the core vocabulary. The embedded `task` module
+exposes handle observation, waiting, and cancellation through the same scheduler
+capabilities as core constructors; loading the module grants no additional authority.
+
 ### Host state is captured or capability-gated
 
 A Session captures the host environment once, records whether standard input

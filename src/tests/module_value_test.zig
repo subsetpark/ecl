@@ -489,7 +489,7 @@ test "module registration: reuse reload removal and delayed calls reclaim bounde
             "dup 'reuse-right register " ++
             "[] (reuse-left.bump) @spawn " ++
             "swap 'reuse-left register " ++
-            "await pop reuse-right.bump pop " ++
+            "task.await pop reuse-right.bump pop " ++
             "'reuse-left unmodule 'reuse-right unmodule";
         // Both batches are one unit each and differ only in the cycle count,
         // so their fixed per-unit costs cancel and the only variable is how
@@ -548,16 +548,37 @@ test "module sources: formatter and standard modules use @defm" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
     const exports = [_][]const u8{
-        "dict.from-pairs",   "error.new",         "result.ok",
-        "str.upper",         "io.print",          "csv.parse",
-        "json.parse",        "table.valid?",      "http.get-bytes",
-        "http.server.route", "http.request.new",  "http.response.new",
-        "proc.wait",         "fs.read-text",      "net.listen",
-        "path.normalize",    "archive.sha256",    "clock.now",
-        "time.parse",        "pkg.store.inspect", "rng.float",
-        "rand.float",        "pkg.version.less?", "pkg.name.valid?",
-        "pkg.data.read-one", "pkg.manifest.read", "pkg.lock.read",
-        "pkg.mvs.resolve",   "pkg.sync.run",      "pkg.cli.init",
+        "task.pending",
+        "dict.from-pairs",
+        "error.new",
+        "result.ok",
+        "str.upper",
+        "io.print",
+        "csv.parse",
+        "json.parse",
+        "table.valid?",
+        "http.get-bytes",
+        "http.server.route",
+        "http.request.new",
+        "http.response.new",
+        "proc.wait",
+        "fs.read-text",
+        "net.listen",
+        "path.normalize",
+        "archive.sha256",
+        "clock.now",
+        "time.parse",
+        "pkg.store.inspect",
+        "rng.float",
+        "rand.float",
+        "pkg.version.less?",
+        "pkg.name.valid?",
+        "pkg.data.read-one",
+        "pkg.manifest.read",
+        "pkg.lock.read",
+        "pkg.mvs.resolve",
+        "pkg.sync.run",
+        "pkg.cli.init",
         "test.default.run",
     };
     for (stdlib.names(), exports) |name, qualified| {

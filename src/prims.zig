@@ -40,7 +40,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "int", .primitive = intWord, .effect = "value -- int", .doc = "Return an int unchanged, a char's codepoint, or the value of an integer-literal string." },
         .{ .name = "float", .primitive = floatWord, .effect = "value -- float", .doc = "Return a float unchanged, an int as a float, or the value of a numeric-literal string." },
         .{ .name = "char", .primitive = charWord, .effect = "value -- char", .doc = "Return a char unchanged, the char with an int's codepoint, or the single char of a one-char string." },
-        .{ .name = "@attempt", .primitive = attempt, .effect = "values quotation -- result", .doc = "Run a body with an explicit initial stack in a fresh unit and return an ok or error result dictionary; observationally `@spawn await`." },
+        .{ .name = "@attempt", .primitive = attempt, .effect = "values quotation -- result", .doc = "Run a body with an explicit initial stack in a fresh unit and return an ok or error result dictionary; observationally `@spawn task.await`." },
         .{ .name = "raise", .primitive = raise, .effect = "error --", .doc = "Raise a language error from an error dictionary." },
         .{ .name = "args", .primitive = args, .effect = "-- arguments", .doc = "Return the process arguments as a list of strings." },
         .{ .name = "exit", .primitive = exit, .effect = "status --", .doc = "Request root-session termination with the given exit status." },

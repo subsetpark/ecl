@@ -1,6 +1,6 @@
 ### module result
 # Results have the same {'ok values} or {'err error} form produced by `@attempt`
-# and `await`.
+# and `task.await`.
 #
 # The success payload is a list containing the values left on the successful
 # stack. Operations that accept results validate their inputs before invoking a

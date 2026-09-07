@@ -20,9 +20,9 @@ context Units.
 >
 > `@attempt` begins a unit, waits synchronously for one terminal transition,
 > and reifies that outcome. `@spawn` begins the same kind of unit and returns a
-> task capability immediately; `await` later reifies the attached unit's
+> task capability immediately; `task.await` later reifies the attached unit's
 > terminal outcome through the same mapping. Thus `@attempt` is observationally
-> equivalent to `@spawn await`, while task lifetime and waiting behavior remain
+> equivalent to `@spawn task.await`, while task lifetime and waiting behavior remain
 > outside this model.
 >
 > `Begin unit` receives the complete entry-stack list and exact quotation body

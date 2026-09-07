@@ -522,8 +522,8 @@ test "linrec: empty post retains explicit depth frames and cancellation reaches 
     try std.testing.expect(depth_runtime.lastMaxFrames() >= 10_000);
 
     try support.expectStack(
-        "[] (200 (dup 100 = dup (victim cancel) () if pop dup 0 =) " ++
-            "(pop) (1 -) () linrec) @spawn dup 'victim set await 'err at 'kind at",
+        "[] (200 (dup 100 = dup (victim task.cancel) () if pop dup 0 =) " ++
+            "(pop) (1 -) () linrec) @spawn dup 'victim set task.await 'err at 'kind at",
         "'cancelled",
     );
 }
