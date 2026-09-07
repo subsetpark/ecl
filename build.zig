@@ -295,6 +295,7 @@ pub fn build(b: *std.Build) void {
     run_tests.step.dependOn(&fixture_files.step);
     const test_step = b.step("test", "Run the ecl test suite");
     test_step.dependOn(&run_tests.step);
+    test_step.dependOn(native_negative_step);
     const public_api_mod = b.createModule(.{
         .root_source_file = b.path("test/public_api.zig"),
         .target = target,
@@ -1124,6 +1125,7 @@ pub fn build(b: *std.Build) void {
     precommit_step.dependOn(check_formal_step);
     precommit_step.dependOn(b.getInstallStep());
     precommit_step.dependOn(analysis_step);
+    precommit_step.dependOn(native_negative_step);
     precommit_step.dependOn(&run_precommit_tests.step);
     precommit_step.dependOn(&run_public_api_tests.step);
 }

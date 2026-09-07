@@ -525,13 +525,20 @@ fn controllerAcknowledge(raw: *anyopaque) callconv(.c) bool {
     const running = ctx.running orelse return false;
     return running.acknowledgeCancellation();
 }
+fn boundedErrorMessage(message: []const u8) []const u8 {
+    var end = @min(message.len, abi.max_error_message_bytes);
+    if (end < message.len) {
+        while (end != 0 and message[end] & 0xc0 == 0x80) end -= 1;
+    }
+    return message[0..end];
+}
 fn controllerFail(raw: *anyopaque, kind: abi.ErrorKindWire, bytes: [*]const u8, length: u32) callconv(.c) void {
     const ctx = context(raw);
     const valid_kind: abi.ErrorKindWire = switch (kind) {
         .type, .shape, .conform, .overflow, .domain, .parse, .io, .user => kind,
         _ => .io,
     };
-    const failure = Failure.init(valid_kind, bytes[0..@min(length, abi.max_error_message_bytes)]);
+    const failure = Failure.init(valid_kind, boundedErrorMessage(bytes[0..length]));
     if (ctx.operation) |op| {
         lock(&op.mutex);
         op.failure = failure;

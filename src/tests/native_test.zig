@@ -25,7 +25,7 @@ fn expectPortProgram(workers: u32, max_operations: u32, source: []const u8, expe
         .native_port_limits = .{ .ring_capacity = 8, .max_operations = max_operations },
     }, .{ .worker_pool = workers });
     defer runtime.deinit();
-    try expectOk(&runtime, "portprobe.reset");
+    try expectOk(&runtime, "'task ('await 'cancel) import portprobe.reset");
     try expectOk(&runtime, source);
     var display = try runtime.stackDisplay();
     defer display.deinit();
@@ -41,9 +41,9 @@ test "native: independent lanes retain admission capacity under blocked stream p
 
 test "native: acknowledged active cancellation preserves subsequent lane operations" {
     for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.duplex-new 'p set p wrap (3 0 portprobe.duplex-exchange) @spawn 't set " ++
-        "1 portprobe.await-blocked p wrap (0 17 portprobe.duplex-exchange) @spawn 'q set " ++
+        "1 portprobe.await-blocked p wrap (1 17 portprobe.duplex-exchange) @spawn 'q set " ++
         "2 portprobe.await-admitted t cancel t await 'err at 'kind at " ++
-        "q await 'ok at first p 1 65 portprobe.duplex-exchange p portprobe.duplex-close portprobe.cleaned", "'cancelled 17 65 1");
+        "q await 'ok at first p 1 65 portprobe.duplex-exchange p portprobe.duplex-close portprobe.cleaned", "'cancelled 17 82 1");
 }
 
 test "native: unacknowledged cancellation closes every lane and joins cleanup" {
@@ -231,7 +231,7 @@ test "native: package port scope transfer and rollback" {
     defer runtime.deinit();
     try expectOk(&runtime, "portprobe.new 'p set p wrap dup cat [] (pop pop) 3 pack (@give) @attempt pop p 1 2 portprobe.exchange");
     try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[0].int);
-    try expectOk(&runtime, "p wrap [] (1 3 portprobe.exchange) @give await 'ok at first");
+    try expectOk(&runtime, "p wrap [] (1 3 portprobe.exchange) @give task.await 'ok at first");
     try std.testing.expectEqual(@as(i64, 5), runtime.stackItems()[1].int);
     try expectErrorContains(&runtime, "p 1 0 portprobe.exchange", &.{"'kind 'io"});
 }
@@ -490,6 +490,11 @@ test "native: descriptor validation rejects malformed metadata before publicatio
     var raw = fixture.descriptor();
     raw.abi_version += 1;
     try expectReject(error.AbiVersionMismatch, host.cleanup(), requested, &raw);
+
+    raw = fixture.descriptor();
+    raw.invoke = null;
+    raw.callback_count = 0;
+    try expectReject(error.MissingInvoke, host.cleanup(), requested, &raw);
 
     raw = fixture.descriptor();
     fixture.capabilities.?[0].id = 99;

@@ -1438,7 +1438,11 @@ its admitted resource until both its turn and permit ownership end.
 Callback operations expose observation and cancellation handles. The runtime
 claims the active turn under the resource and operation locks, lends an
 invocation-local running capability, and completes execution only when the
-callback returns. Only that borrowed capability can acknowledge active
+callback returns. Executor ownership is recorded under the operation mutex and
+ends before acquiring the resource lock for queue retirement. Cancellation
+cannot interrupt a returned callback still awaiting retirement. All execution
+state observation, cancellation, and acknowledgement share the operation mutex.
+Only that borrowed capability can acknowledge active
 cancellation. Callback cancellation can request acknowledgement or resource
 closure; it cannot select the synchronous writer-release policy. Queue removal,
 successor promotion, notifications, and release of the queue pin follow one

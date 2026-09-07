@@ -511,7 +511,7 @@ pub const ValidateCursor = struct {
             descriptor.capability_count,
             descriptor.capability_record_size,
         );
-        if (descriptor.callback_count != 0 and descriptor.invoke == null)
+        if (descriptor.invoke == null)
             return error.MissingInvoke;
         if (descriptor.port_count > abi.max_port_definitions) return error.CountOverflow;
         try validateRecordSize(descriptor.port_record_size, @sizeOf(abi.PortDefinition));

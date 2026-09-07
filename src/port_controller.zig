@@ -403,6 +403,7 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
             next: ?*Node = null,
             phase: enum { queued, active, retired },
             execution: ExecutionState = .queued,
+            executing: bool = false,
 
             fn owner(self: *Node) *Cell {
                 return if (owns_cell) &self.cell else self.cell;
@@ -432,6 +433,7 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
                 return true;
             }
             fn requestCancellation(self: *Node) void {
+                if (owns_cell and self.execution == .active and !self.executing) return;
                 switch (self.execution) {
                     .queued, .active => self.execution = .cancelling,
                     .cancelling, .reusable, .cancelled, .done => {},
@@ -568,6 +570,7 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
             node.next = null;
             node.phase = if (self.first == null) .active else .queued;
             node.execution = .queued;
+            node.executing = false;
             // The owning payload is initialized by the factory before append.
             return node;
         }
@@ -606,13 +609,17 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
             };
             const cell = node.owner();
             std.Io.Threaded.mutexLock(&cell.mutex);
-            const execute = node.begin() and callbacks.runnable(cell);
+            const execute = callbacks.runnable(cell) and node.begin();
+            node.executing = execute;
             if (!execute) node.requestCancellation();
             std.Io.Threaded.mutexUnlock(&cell.mutex);
             std.Io.Threaded.mutexUnlock(mutex);
             if (execute) {
                 var execution: Running.Invocation = .{ .context = node, .acknowledge = Node.acknowledgeErased };
                 callbacks.execute(cell, @as(*Running, @ptrCast(&execution)));
+                std.Io.Threaded.mutexLock(&cell.mutex);
+                node.executing = false;
+                std.Io.Threaded.mutexUnlock(&cell.mutex);
             }
             std.Io.Threaded.mutexLock(mutex);
             std.Io.Threaded.mutexLock(&cell.mutex);
@@ -633,6 +640,7 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
                     return .retired;
                 },
                 .active => {
+                    if (owns_cell and !node.executing) return .settled;
                     node.requestCancellation();
                     return switch (policy) {
                         .close_resource => .close_resource,

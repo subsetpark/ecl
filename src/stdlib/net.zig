@@ -43,8 +43,8 @@ pub const words = [_]env.BuiltinWord{
     .{
         .name = "close",
         .doc = "( port -- ) Close a listener or a connection. Idempotent, and the same transition scope closure performs.\n\n" ++
-            "A listener closes at once: every accept parked on it fails 'io 'closed, connections it already accepted " ++
-            "stay open, and its address and port may be bound again immediately. A connection first delivers the " ++
+            "Closing a listener parks until listener-drain readiness: every accept parked on it fails 'io 'closed, connections it already accepted " ++
+            "stay open, and completed close guarantees its address and port can be bound again. A connection first delivers the " ++
             "bytes already queued by write, then shuts the socket down; later reads and writes on it fail 'io 'closed. " ++
             "Closing a connection parks until those bytes reach the kernel or the connection fails, so a unit may " ++
             "close and end at once without its own scope closure discarding them; cancelling the parked close " ++
@@ -351,8 +351,9 @@ fn failConnection(evaluator: *Machine, cell: *net_port.ConnectionCell, failure: 
     };
 }
 
-/// Closing a connection promises that the bytes already queued reach the peer,
-/// so the close is not finished until the send ring has drained. Parking here
+/// Listener close parks until listener-drain readiness permits rebinding.
+/// Connection close parks until queued bytes reach the kernel or sending fails,
+/// so successful close waits for the send ring to drain. Parking here
 /// is what makes that promise true when the closing unit ends immediately
 /// afterwards, as a unit given a connection normally does: without the wait,
 /// the unit's scope closure would abort the socket and discard the queue.

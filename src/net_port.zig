@@ -1930,6 +1930,8 @@ test "connection lifecycle propagates every allocation failure without leaking a
 }
 
 test "net: writer tickets cancel queued and active writers without closing the connection" {
+    // SAFETY: `init` assigns every field before any use, and `deinit` runs
+    // only after a successful `init`.
     var harness: LoopbackHarness = undefined;
     try harness.init(std.testing.allocator, .{ .send_capacity = 8 });
     defer harness.deinit();
