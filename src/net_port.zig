@@ -1014,6 +1014,13 @@ pub const EndpointObservation = union(enum) {
 /// scheduler workers touch only the rings, the flags, and the wait list. A
 /// non-blocking socket and a wake pipe let one `poll` serve both directions,
 /// so there is no second thread to race the first one's cleanup.
+const ConnectionGroup = controllers.Group(ConnectionCell, ConnectionCell.StopReason, .{
+    .retain = ConnectionCell.retainRef,
+    .retireLocked = ConnectionCell.retireExecutionLocked,
+    .ownership = ConnectionCell.transferOwnership,
+    .release = ConnectionCell.releaseRef,
+});
+
 pub const ConnectionCell = struct {
     allocator: std.mem.Allocator,
     identity: u64,
@@ -1021,6 +1028,7 @@ pub const ConnectionCell = struct {
     mutex: std.Io.Mutex = .init,
     lifecycle: Lifecycle = .prepared,
     accepted: *AcceptedSocket,
+    controllers: *ConnectionGroup,
     endpoints: Endpoints,
     wake: [2]posix.fd_t,
     receive: Ring,
@@ -1071,38 +1079,14 @@ pub const ConnectionCell = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.Resources => return .resources,
         };
-        transfers.publishScope(ConnectionCell, cell, scope, ConnectionCell.transferOwnership) catch |err| {
-            cell.retireUnstarted(.abort);
+        cell.controllers.start(.{scope}, ConnectionCell.prepareStartup, ConnectionCell.controllerMain, ConnectionCell.abortStartup) catch |err| {
+            cell.releaseRef();
             return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 error.ScopeClosing => .scope_closing,
-            };
-        };
-        std.Io.Threaded.mutexLock(&cell.mutex);
-        // The scope may have started cancelling between the attach and this
-        // lock; then no thread starts and the cell retires here, so the scope
-        // never waits on a controller that does not exist.
-        if (cell.lifecycle == .stopping) {
-            std.Io.Threaded.mutexUnlock(&cell.mutex);
-            cell.retireUnstarted(.abort);
-            return .scope_closing;
-        }
-        std.debug.assert(cell.lifecycle == .prepared);
-        // Start under the lock: a cancellation from here on sees `running`
-        // and signals the controller through the wake pipe.
-        cell.retainRef();
-        cell.lifecycle = .running;
-        owner.executor.access().spawn(ConnectionCell.controllerMain, .{cell}, retireConnection) catch |err| {
-            cell.lifecycle = .prepared;
-            std.Io.Threaded.mutexUnlock(&cell.mutex);
-            cell.releaseRef();
-            cell.retireUnstarted(.abort);
-            return switch (err) {
-                error.OutOfMemory => error.OutOfMemory,
                 error.Io, error.Closed => .resources,
             };
         };
-        std.Io.Threaded.mutexUnlock(&cell.mutex);
         const port = heap.createPort(ConnectionCell, owner.allocator, cell.identity, cell) catch {
             cell.abort();
             cell.releaseRef();
@@ -1120,10 +1104,16 @@ pub const ConnectionCell = struct {
         const send = try owner.allocator.alloc(u8, owner.policy.limits.send_capacity);
         errdefer owner.allocator.free(send);
         const wake = std.Io.Threaded.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true }) catch return error.Resources;
+        errdefer {
+            std.Io.Threaded.closeFd(wake[0]);
+            std.Io.Threaded.closeFd(wake[1]);
+        }
+        const execution_group = try ConnectionGroup.init(owner.allocator, owner.executor.access(), cell);
         cell.* = .{
             .allocator = owner.allocator,
             .identity = owner.next_identity.fetchAdd(1, .monotonic),
             .accepted = accepted,
+            .controllers = execution_group,
             .endpoints = accepted.endpoints,
             .wake = wake,
             .receive = .{ .bytes = receive },
@@ -1132,25 +1122,28 @@ pub const ConnectionCell = struct {
         return cell;
     }
 
-    /// Finish a cell whose controller never started: close everything,
-    /// publish `terminal`, detach any membership, and drop the initial
-    /// reference.
-    fn retireUnstarted(self: *ConnectionCell, reason: StopReason) void {
+    fn prepareStartup(self: *ConnectionCell, scope: *scheduler_api.TaskScope) error{ OutOfMemory, ScopeClosing }!void {
+        try transfers.publishScope(ConnectionCell, self, scope, ConnectionCell.transferOwnership);
         std.Io.Threaded.mutexLock(&self.mutex);
-        std.debug.assert(self.lifecycle != .running);
-        self.finalizeLocked(reason);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        switch (self.lifecycle) {
+            .prepared => self.lifecycle = .running,
+            .stopping, .terminal => return error.ScopeClosing,
+            .running => unreachable,
+        }
     }
+    fn abortStartup(_: *ConnectionCell) void {}
 
-    /// Consumes the lock and the final controller/publisher reference after
-    /// closing descriptors, releasing capacity, and publishing terminal state.
-    fn finalizeLocked(self: *ConnectionCell, reason: StopReason) void {
-        std.debug.assert(self.lifecycle != .terminal);
+    fn retireExecutionLocked(self: *ConnectionCell, outcome: controllers.Outcome(StopReason)) void {
+        const reason: StopReason = switch (outcome) {
+            .aborted => .abort,
+            .completed => |reason| reason,
+        };
         self.accepted.close();
         std.Io.Threaded.closeFd(self.wake[0]);
         std.Io.Threaded.closeFd(self.wake[1]);
         self.lifecycle = .{ .terminal = reason };
         self.waits.notifyLocked(self);
-        transfers.completeControllerLocked(ConnectionCell, self, &self.ownership, releaseRef);
     }
 
     fn retainRef(self: *ConnectionCell) void {
@@ -1169,6 +1162,7 @@ pub const ConnectionCell = struct {
         self.allocator.free(self.receive.bytes);
         self.allocator.free(self.send.bytes);
         self.accepted.deinit();
+        self.controllers.deinit();
         self.allocator.destroy(self);
     }
 
@@ -1503,12 +1497,6 @@ pub const ConnectionCell = struct {
         return finalize_reason;
     }
 };
-
-fn retireConnection(args: struct { *ConnectionCell }, reason: ConnectionCell.StopReason) void {
-    const cell = args[0];
-    std.Io.Threaded.mutexLock(&cell.mutex);
-    cell.finalizeLocked(reason);
-}
 
 pub fn listenFromUnit(
     access_value: *external.NetAccess,

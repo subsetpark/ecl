@@ -128,25 +128,21 @@ pub const Access = opaque {
         return self.publish(cell, item, scope);
     }
     fn publish(_: *Access, cell: *Cell, item: Value, scope: *scheduler.TaskScope) CreateError!Value {
-        try transfers.publishScope(Cell, cell, scope, Cell.transferOwnership);
-        lock(&cell.mutex);
-        cell.retainReadiness();
-        cell.owner.executor.access().spawn(Cell.run, .{cell}, Cell.retireController) catch |err| {
-            var detached = cell.ownership.release();
-            cell.closed.store(true, .release);
-            cell.phase = .joined;
-            unlock(&cell.mutex);
-            detached.detachAll();
-            cell.releasePort();
-            return switch (err) {
-                error.OutOfMemory => error.OutOfMemory,
-                error.Io, error.Closed => error.Io,
-            };
+        cell.controllers.start(.{scope}, Cell.prepareStartup, Cell.run, Cell.abortStartup) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.ScopeClosing => error.ScopeClosing,
+            error.Io, error.Closed => error.Io,
         };
-        unlock(&cell.mutex);
         return item;
     }
 };
+
+const ControllerGroup = controllers.Group(Cell, void, .{
+    .retain = Cell.retainReadiness,
+    .retireLocked = Cell.retireExecutionLocked,
+    .ownership = Cell.transferOwnership,
+    .release = Cell.releasePort,
+});
 
 const Operations = controllers.Lane(Operation);
 
@@ -157,6 +153,7 @@ pub const Cell = struct {
     kind: u32,
     definition: abi.PortDefinition,
     backend: []align(64) u8,
+    controllers: *ControllerGroup,
     refs: std.atomic.Value(u32) = .init(1),
     closed: std.atomic.Value(bool) = .init(false),
     mutex: std.Io.Mutex = .init,
@@ -171,7 +168,9 @@ pub const Cell = struct {
         const allocator = owner.host.allocator();
         const definition = instance.validated().port(kind).?;
         const state = try allocator.alignedAlloc(u8, .@"64", definition.state_size);
-        cell.* = .{ .allocator = allocator, .owner = owner, .instance = instance, .kind = kind, .definition = definition, .backend = state };
+        errdefer allocator.free(state);
+        const group = try ControllerGroup.init(allocator, owner.executor.access(), cell);
+        cell.* = .{ .allocator = allocator, .owner = owner, .instance = instance, .kind = kind, .definition = definition, .backend = state, .controllers = group };
         instance.retain();
     }
     pub fn retainReadiness(self: *Cell) void {
@@ -193,6 +192,7 @@ pub const Cell = struct {
         if (self.refs.fetchSub(1, .acq_rel) != 1) return;
         self.instance.releasePin();
         self.allocator.free(self.backend);
+        self.controllers.deinit();
         Resource.destroy(self);
     }
     pub fn registerReadiness(self: *Cell, key: u64, target: external.WakeTarget) external.RegisterError!external.RegisterResult {
@@ -286,13 +286,16 @@ pub const Cell = struct {
         self.waits.notifyLocked(self);
         unlock(&self.mutex);
     }
-    fn retireController(args: struct { *Cell }, _: void) void {
-        const cell = args[0];
+    fn prepareStartup(cell: *Cell, scope: *scheduler.TaskScope) error{ OutOfMemory, ScopeClosing }!void {
+        try transfers.publishScope(Cell, cell, scope, Cell.transferOwnership);
+    }
+    fn abortStartup(cell: *Cell) void {
+        cell.closed.store(true, .release);
+    }
+    fn retireExecutionLocked(cell: *Cell, _: controllers.Outcome(void)) void {
         Resource.retire(cell);
-        lock(&cell.mutex);
         cell.phase = .joined;
         cell.waits.notifyLocked(cell);
-        transfers.completeControllerLocked(Cell, cell, &cell.ownership, Cell.releasePort);
     }
     fn runLane(self: *Cell, index: usize) void {
         const lane = &self.lanes[index];

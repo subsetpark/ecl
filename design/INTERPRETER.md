@@ -896,19 +896,16 @@ publishes one immutable `Child.Term`. POSIX children are created as
 process-group leaders. The supervisor observes leader termination with
 `waitid(..., WNOWAIT)`, performs the consuming TERM-to-KILL cleanup, and reaps
 the leader only afterward. The waitable leader pins its PID slot, so the PGID
-cannot be reused while cleanup retains it. The controller group stops issuing
-leases at retirement and its final lease may detach scope membership only
-after the group state contains no process identity. Every controller lease
-owns a process-cell reference. Lease creation and release-count transitions
-are serialized by the process-cell mutex; a nonfinal lease drops its cell pin
-before publishing the smaller count, so the supervisor can observe the final
-count only after every other release completes. The final lease takes the
-membership token, drops its cell reference while the external-member reference
-still pins the cell, and only then detaches membership, so scope quiescence
-cannot race any controller release. Each process allocation owns its live capacity; after every nonfinal controller has drained, the supervisor
-consumes that reservation under the cell lock before publishing the public
-reaped state. Observing termination therefore also closes the process owner's
-lifetime use. Reaping the group leader therefore
+cannot be reused while cleanup retains it. The runtime activity group owns one process-cell pin across startup,
+all joined jobs, and synchronous cancellation setup. Callback return retires
+borrowed activity; backends never receive a separately releasable lease.
+Root retirement closes activity admission and carries the completed outcome
+until the last activity drains. The runtime then publishes reaped state and
+returns live capacity under the cell lock, releases its execution pin, and
+detaches scope membership. Startup rollback follows the same transition, so
+an outstanding cancellation callback delays capacity return even when no root
+thread started. Observing reaped state closes the process owner's lifetime use.
+Reaping the group leader therefore
 cannot suppress group cleanup or publish scope quiescence while cleanup still
 owns process-group authority. Stdin independently transitions
 through `open`, `closing`, `closed_cleanly`, or `broken`; `proc.run` cannot
@@ -1416,13 +1413,16 @@ resource lock, while membership publication and backend startup revalidation
 use that lock. The creator retains the provisional cell until publication or
 backend rollback completes.
 
-Controller completion consumes the final execution reference and resource lock
-at one shared boundary. Backend-specific quiescence and the executor join must already hold: process
-controller leases have drained, a connection controller has closed its handles,
-and native cleanup has returned. The boundary drops the execution pin
-before detaching scope memberships, so observing scope completion also proves
-that execution no longer retains the issuing domain. Retained value references
-remain independent of this completion protocol.
+Native ports, network connections, and processes bind scope ownership and
+terminal publication to a runtime-owned activity group. Its provisional state
+owns startup rollback; successful submission transfers the root into the
+executor. Draining owns the root outcome and every outstanding activity until
+all jobs have joined and all borrowed callbacks have returned. Only that
+transition can publish terminal facts, drop the group's execution pin, and
+detach scope memberships. The backend does not supply an independent reference
+or a claimed quiescence condition at completion. Retained value references
+remain independent of this execution lifetime. A listener's dormant socket
+needs no controller; its active acceptor joins before terminal detachment.
 
 An ordered controller lane owns FIFO tickets independently of the executor
 that advances them. Network and process streams use it for writer ordering.

@@ -191,6 +191,138 @@ pub const Executor = opaque {
     }
 };
 
+pub fn Outcome(comptime Result: type) type {
+    return union(enum) { aborted, completed: Result };
+}
+
+/// Owns one resource pin across startup, controller jobs, and synchronous
+/// cancellation setup. Callers borrow activities; only this boundary retires
+/// them. The final callback runs after root return, all joins, and all borrows.
+pub fn Group(comptime Cell: type, comptime Result: type, comptime lifetime: anytype) type {
+    return opaque {
+        const Self = @This();
+        const Terminal = Outcome(Result);
+        const Data = struct {
+            allocator: std.mem.Allocator,
+            executor: *Executor,
+            cell: *Cell,
+            mutex: std.Io.Mutex = .init,
+            phase: union(enum) { provisional, open: usize, draining: struct { count: usize, outcome: Terminal }, retired } = .provisional,
+        };
+        fn data(self: *Self) *Data {
+            return @ptrCast(@alignCast(self));
+        }
+        pub fn init(allocator: std.mem.Allocator, executor: *Executor, cell: *Cell) error{OutOfMemory}!*Self {
+            const state = try allocator.create(Data);
+            state.* = .{ .allocator = allocator, .executor = executor, .cell = cell };
+            return @ptrCast(state);
+        }
+        /// The resource's final destructor consumes the drained group storage.
+        pub fn deinit(self: *Self) void {
+            const state = self.data();
+            switch (state.phase) {
+                .provisional, .retired => state.allocator.destroy(state),
+                .open, .draining => @panic("destroying a live controller group"),
+            }
+        }
+        /// Preparation may publish cancellation access. Failure always runs
+        /// rollback before surrendering the root; success transfers the root
+        /// into the executor. No backend receives its release authority.
+        pub fn start(self: *Self, args: anytype, comptime prepare: anytype, comptime run: anytype, comptime rollback: fn (*Cell) void) (@typeInfo(@typeInfo(@TypeOf(prepare)).@"fn".return_type.?).error_union.error_set || error{ OutOfMemory, Io, Closed })!void {
+            const state = self.data();
+            lifetime.retain(state.cell);
+            std.Io.Threaded.mutexLock(&state.mutex);
+            switch (state.phase) {
+                .provisional => state.phase = .{ .open = 1 },
+                .open, .draining, .retired => @panic("controller group already started"),
+            }
+            std.Io.Threaded.mutexUnlock(&state.mutex);
+            errdefer {
+                rollback(state.cell);
+                self.dropRoot(.aborted);
+            }
+            try @call(.auto, prepare, .{state.cell} ++ args);
+            const Root = struct {
+                fn main(execution: *Execution, group: *Self) Result {
+                    return run(execution, group.data().cell);
+                }
+                fn retire(values: struct { *Self }, result: Result) void {
+                    values[0].dropRoot(.{ .completed = result });
+                }
+            };
+            try state.executor.spawn(Root.main, .{self}, Root.retire);
+        }
+        fn acquire(self: *Self) bool {
+            const state = self.data();
+            std.Io.Threaded.mutexLock(&state.mutex);
+            defer std.Io.Threaded.mutexUnlock(&state.mutex);
+            switch (state.phase) {
+                .open => |*count| count.* += 1,
+                .provisional, .draining, .retired => return false,
+            }
+            return true;
+        }
+        fn dropRoot(self: *Self, outcome: Terminal) void {
+            const state = self.data();
+            std.Io.Threaded.mutexLock(&state.mutex);
+            const outstanding = state.phase.open;
+            state.phase = .{ .draining = .{ .count = outstanding, .outcome = outcome } };
+            std.Io.Threaded.mutexUnlock(&state.mutex);
+            self.release();
+        }
+        fn release(self: *Self) void {
+            const state = self.data();
+            std.Io.Threaded.mutexLock(&state.mutex);
+            const outcome: ?Terminal = switch (state.phase) {
+                .open => |*count| blk: {
+                    count.* -= 1;
+                    break :blk null;
+                },
+                .draining => |*draining| blk: {
+                    draining.count -= 1;
+                    break :blk if (draining.count == 0) draining.outcome else null;
+                },
+                .provisional, .retired => unreachable,
+            };
+            if (outcome != null) state.phase = .retired;
+            std.Io.Threaded.mutexUnlock(&state.mutex);
+            if (outcome) |terminal| {
+                const cell = state.cell;
+                std.Io.Threaded.mutexLock(&cell.mutex);
+                lifetime.retireLocked(cell, terminal);
+                var detached = lifetime.ownership(cell).release();
+                std.Io.Threaded.mutexUnlock(&cell.mutex);
+                lifetime.release(cell);
+                detached.detachAll();
+            }
+            // Releasing the execution pin may destroy the cell and this group.
+        }
+        /// The callback borrows the resource for exactly its dynamic extent.
+        /// A declined activity runs no callback and owns no release obligation.
+        pub fn with(self: *Self, args: anytype, comptime function: anytype) void {
+            if (!self.acquire()) return;
+            defer self.release();
+            @call(.auto, function, .{self.data().cell} ++ args);
+        }
+        /// Failure returns all acquired lifetime to the group; arguments remain
+        /// caller-owned. Success owns them until the shared executor joins.
+        pub fn spawn(self: *Self, args: anytype, comptime run: anytype) error{ OutOfMemory, Io, Closed }!void {
+            if (!self.acquire()) return error.Closed;
+            errdefer self.release();
+            const Args = @TypeOf(args);
+            const JobWork = struct {
+                fn main(execution: *Execution, group: *Self, values: Args) void {
+                    @call(.auto, run, .{ execution, group.data().cell } ++ values);
+                }
+                fn retire(values: struct { *Self, Args }, _: void) void {
+                    values[0].release();
+                }
+            };
+            try self.data().executor.spawn(JobWork.main, .{ self, args }, JobWork.retire);
+        }
+    };
+}
+
 /// Minted only inside a controller job. The worker-facing executor cannot
 /// acquire this authority to wait for child execution.
 pub const Execution = opaque {

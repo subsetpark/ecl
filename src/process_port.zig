@@ -316,25 +316,17 @@ pub const ProcessOwner = struct {
             error.Closed => error.Io,
         };
         const cell = try Resource.create(self, .{spec}, ProcessCell.initializeAllocation);
-        var initial_owned = true;
-        errdefer if (initial_owned) cell.releasePort();
-        var supervisor_lease = cell.controllers.initialLease();
-        var supervisor_lease_owned = true;
-        errdefer if (supervisor_lease_owned) {
-            cell.failBeforeStart();
-            supervisor_lease.release();
+        errdefer cell.releasePort();
+        cell.controllers.start(.{scope}, ProcessCell.prepareStartup, supervisorThreadMain, ProcessCell.failBeforeStart) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.ScopeClosing => error.ScopeClosing,
+            error.Io, error.Closed => error.Io,
         };
-
-        try transfers.publishScope(ProcessCell, cell, scope, processOwnership);
-
-        cell.start(supervisor_lease) catch return error.Io;
-        supervisor_lease_owned = false;
 
         const port = heap.createPort(ProcessCell, self.allocator, cell.identity, cell) catch {
             cell.kill();
             return error.OutOfMemory;
         };
-        initial_owned = false;
         return port;
     }
 
@@ -508,72 +500,11 @@ pub const InputTerminal = enum {
     broken,
 };
 
-/// Controller leases pin backend execution and cancellation setup. Retirement
-/// closes lease creation; the supervisor waits for every other controller before its final
-/// lease detaches membership. Port/readiness refs use the independent cell
-/// refcount.
-const ControllerGroup = struct {
-    /// Protected by `cell.mutex` after the initial lease is issued. A count
-    /// decrement is published only after that lease has dropped its cell pin.
-    leases: usize = 0,
-    ownership: external.Ownership = .provisional,
-    cell: *ProcessCell,
-
-    fn initialLease(self: *ControllerGroup) ControllerLease {
-        const cell = self.cell;
-        cell.retainRef();
-        if (self.leases != 0) @panic("initial controller lease already issued");
-        self.leases = 1;
-        return .{ .group = self };
-    }
-
-    fn tryLease(self: *ControllerGroup) ?ControllerLease {
-        const cell = self.cell;
-        std.Io.Threaded.mutexLock(&cell.mutex);
-        defer std.Io.Threaded.mutexUnlock(&cell.mutex);
-        if (cell.group_state == .retired) return null;
-        cell.retainRef();
-        if (self.leases == 0 or self.leases == std.math.maxInt(usize))
-            @panic("invalid controller lease count");
-        self.leases += 1;
-        return .{ .group = self };
-    }
-
-    /// Consumes `cell`'s reference owned by one lease. Nonfinal releases drop
-    /// that pin before making the smaller count observable to the supervisor.
-    fn releasePinned(self: *ControllerGroup, cell: *ProcessCell) void {
-        std.Io.Threaded.mutexLock(&cell.mutex);
-        std.debug.assert(self.cell == cell);
-        std.debug.assert(self.leases != 0);
-        if (self.leases != 1) {
-            cell.releaseRef();
-            self.leases -= 1;
-            if (self.leases == 1) cell.changed.broadcast(blockingIo());
-            std.Io.Threaded.mutexUnlock(&cell.mutex);
-            return;
-        }
-        if (cell.group_state != .retired) @panic("process scope detached before group retirement");
-        self.leases = 0;
-        Resource.retire(cell);
-        cell.phase = .{ .reaped = cell.group_state.retired };
-        cell.notifyReadyLocked();
-        transfers.completeControllerLocked(ProcessCell, cell, &self.ownership, ProcessCell.releaseRef);
-    }
-};
-
-const ControllerLease = struct {
-    group: ?*ControllerGroup,
-
-    fn release(self: *ControllerLease) void {
-        const group = self.group orelse return;
-        self.group = null;
-        group.releasePinned(group.cell);
-    }
-};
+const ControllerGroup = controllers.Group(ProcessCell, void, .{ .retain = ProcessCell.retainRef, .retireLocked = ProcessCell.retireExecutionLocked, .ownership = processOwnership, .release = ProcessCell.releaseRef });
 
 const ProcessTransfer = transfers.ScopeTransfer(ProcessCell, processOwnership, processLive);
 fn processOwnership(cell: *ProcessCell) *external.Ownership {
-    return &cell.controllers.ownership;
+    return &cell.ownership;
 }
 fn processLive(cell: *ProcessCell) bool {
     return cell.group_state != .retired;
@@ -619,8 +550,8 @@ pub const ProcessCell = struct {
     phase: ProcessPhase = .constructing,
     group_state: GroupState,
     next_escalation: u64 = 1,
-    controllers: ControllerGroup,
-    executor: *controllers.Executor,
+    controllers: *ControllerGroup,
+    ownership: external.Ownership = .provisional,
     stdin: Ring,
     stdout: Ring,
     stderr: Ring,
@@ -667,20 +598,22 @@ pub const ProcessCell = struct {
         const stdout = try owner.allocator.alloc(u8, owner.policy.stdout_capacity);
         errdefer owner.allocator.free(stdout);
         const stderr = try owner.allocator.alloc(u8, owner.policy.stderr_capacity);
+        errdefer owner.allocator.free(stderr);
+        const execution_group = try ControllerGroup.init(owner.allocator, owner.executor.access(), cell);
         cell.* = .{
             .allocator = owner.allocator,
             .io = owner.io,
             .identity = owner.next_identity.fetchAdd(1, .monotonic),
             .group_state = .{ .running = group },
-            .controllers = .{ .cell = cell },
-            .executor = owner.executor.access(),
+            .controllers = execution_group,
             .stdin = .{ .bytes = stdin },
             .stdout = .{ .bytes = stdout },
             .stderr = .{ .bytes = stderr },
         };
     }
 
-    fn start(self: *ProcessCell, lease: ControllerLease) error{Io}!void {
+    fn prepareStartup(self: *ProcessCell, scope: *scheduler_api.TaskScope) error{ OutOfMemory, ScopeClosing }!void {
+        try transfers.publishScope(ProcessCell, self, scope, processOwnership);
         // The scope member is linked before the supervisor exists, so a
         // cancellation walk may already have moved the phase to `closing` and
         // signalled the group. Take the lock and leave that transition in
@@ -694,7 +627,6 @@ pub const ProcessCell = struct {
             .running, .closing, .terminal, .reaped => {},
         }
         std.Io.Threaded.mutexUnlock(&self.mutex);
-        self.executor.spawn(supervisorThreadMain, .{ self, lease }, retireController) catch return error.Io;
     }
 
     fn failBeforeStart(self: *ProcessCell) void {
@@ -729,14 +661,14 @@ pub const ProcessCell = struct {
         self.allocator.free(self.stdin.bytes);
         self.allocator.free(self.stdout.bytes);
         self.allocator.free(self.stderr.bytes);
+        self.controllers.deinit();
         Resource.destroy(self);
     }
 
-    fn waitForOtherControllers(self: *ProcessCell) void {
-        std.Io.Threaded.mutexLock(&self.mutex);
-        defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        while (self.controllers.leases != 1)
-            self.changed.waitUncancelable(blockingIo(), &self.mutex);
+    fn retireExecutionLocked(self: *ProcessCell, _: controllers.Outcome(void)) void {
+        Resource.retire(self);
+        self.phase = .{ .reaped = self.group_state.retired };
+        self.notifyReadyLocked();
     }
 
     pub fn releasePort(self: *ProcessCell) void {
@@ -776,23 +708,13 @@ pub const ProcessCell = struct {
     }
 
     pub fn cancelExternalMember(self: *ProcessCell) void {
-        var lease = self.controllers.tryLease() orelse return;
-        const escalation = self.beginGrace(true);
-        if (escalation) |id| {
-            self.startEscalation(id, lease);
-        } else lease.release();
+        self.controllers.with(.{true}, ProcessCell.startGrace);
     }
 
-    fn startEscalation(
-        self: *ProcessCell,
-        escalation: EscalationId,
-        lease_value: ControllerLease,
-    ) void {
-        var lease = lease_value;
-        self.executor.spawn(escalationMain, .{ self, escalation, lease }, retireController) catch {
+    fn startGrace(self: *ProcessCell, discard: bool) void {
+        const escalation = self.beginGrace(discard) orelse return;
+        self.controllers.spawn(.{escalation}, escalationMain) catch {
             self.escalateKill(escalation);
-            lease.release();
-            return;
         };
     }
 
@@ -997,11 +919,7 @@ pub const ProcessCell = struct {
     }
 
     pub fn terminate(self: *ProcessCell) void {
-        var lease = self.controllers.tryLease() orelse return;
-        const escalation = self.beginGrace(true);
-        if (escalation) |id| {
-            self.startEscalation(id, lease);
-        } else lease.release();
+        self.controllers.with(.{true}, ProcessCell.startGrace);
     }
 
     pub fn kill(self: *ProcessCell) void {
@@ -1020,10 +938,9 @@ pub const ProcessCell = struct {
             if (expired) self.kill();
             return;
         }
-        var lease = self.controllers.tryLease() orelse return;
-        self.executor.spawn(timeoutThreadMain, .{ self, milliseconds, lease }, retireController) catch {
-            lease.release();
-            return error.Io;
+        self.controllers.spawn(.{milliseconds}, timeoutThreadMain) catch |err| switch (err) {
+            error.Closed => return,
+            error.OutOfMemory, error.Io => return error.Io,
         };
     }
 
@@ -1117,11 +1034,7 @@ pub const ProcessCell = struct {
     }
 
     fn beginPostLeaderCleanup(self: *ProcessCell) void {
-        var lease = self.controllers.tryLease() orelse return;
-        const escalation = self.beginGrace(false);
-        if (escalation) |id| {
-            self.startEscalation(id, lease);
-        } else lease.release();
+        self.controllers.with(.{false}, ProcessCell.startGrace);
     }
 
     fn escalateKill(self: *ProcessCell, escalation: EscalationId) void {
@@ -1264,7 +1177,6 @@ pub const ProcessCell = struct {
         std.Io.Threaded.mutexUnlock(&self.mutex);
 
         self.allocator.destroy(group);
-        self.waitForOtherControllers();
     }
 
     const IoThread = enum { stdin, stdout, stderr };
@@ -1276,11 +1188,7 @@ pub const ProcessCell = struct {
         kind: IoThread,
     ) error{Io}!void {
         _ = kind;
-        var lease = self.controllers.tryLease().?;
-        self.executor.spawn(function, .{ self, file, lease }, retireController) catch {
-            lease.release();
-            return error.Io;
-        };
+        self.controllers.spawn(.{file}, function) catch return error.Io;
     }
 
     fn failIoThread(self: *ProcessCell, file: std.Io.File, kind: IoThread) void {
@@ -1377,15 +1285,7 @@ pub const ProcessCell = struct {
     }
 };
 
-// The shared executor owns the lease after spawn succeeds and releases it
-// only after joining the backend function, including all error returns.
-fn retireController(args: anytype, _: void) void {
-    var lease = args[args.len - 1];
-    lease.release();
-}
-
-fn timeoutThreadMain(_: *controllers.Execution, cell: *ProcessCell, milliseconds: u64, lease_value: ControllerLease) void {
-    _ = lease_value;
+fn timeoutThreadMain(_: *controllers.Execution, cell: *ProcessCell, milliseconds: u64) void {
     const duration: std.Io.Clock.Duration = .{
         .raw = .fromMilliseconds(@intCast(milliseconds)),
         .clock = .awake,
@@ -1409,9 +1309,7 @@ fn escalationMain(
     _: *controllers.Execution,
     cell: *ProcessCell,
     escalation: EscalationId,
-    lease_value: ControllerLease,
 ) void {
-    _ = lease_value;
     const duration: std.Io.Clock.Duration = .{
         .raw = .fromMilliseconds(250),
         .clock = .awake,
@@ -1422,23 +1320,19 @@ fn escalationMain(
     cell.escalateKill(escalation);
 }
 
-fn supervisorThreadMain(_: *controllers.Execution, cell: *ProcessCell, lease_value: ControllerLease) void {
-    _ = lease_value;
+fn supervisorThreadMain(_: *controllers.Execution, cell: *ProcessCell) void {
     cell.supervisorMain();
 }
 
-fn stdinThreadMain(_: *controllers.Execution, cell: *ProcessCell, file: std.Io.File, lease_value: ControllerLease) void {
-    _ = lease_value;
+fn stdinThreadMain(_: *controllers.Execution, cell: *ProcessCell, file: std.Io.File) void {
     cell.stdinMain(file);
 }
 
-fn stdoutThreadMain(_: *controllers.Execution, cell: *ProcessCell, file: std.Io.File, lease_value: ControllerLease) void {
-    _ = lease_value;
+fn stdoutThreadMain(_: *controllers.Execution, cell: *ProcessCell, file: std.Io.File) void {
     cell.stdoutMain(file);
 }
 
-fn stderrThreadMain(_: *controllers.Execution, cell: *ProcessCell, file: std.Io.File, lease_value: ControllerLease) void {
-    _ = lease_value;
+fn stderrThreadMain(_: *controllers.Execution, cell: *ProcessCell, file: std.Io.File) void {
     cell.stderrMain(file);
 }
 
@@ -1501,23 +1395,36 @@ test "process: provisional rollback retains capacity until cancellation setup re
     // Exercise the production provisional factory before starting its root job.
     const cell = try Resource.create(&owner, .{ProcessSpec{ .executable = fixture_path, .args = &.{ "exit", "7" } }}, ProcessCell.initializeAllocation);
     defer cell.releasePort();
-    var initial = cell.controllers.initialLease();
-    var provisional = true;
-    defer if (provisional) {
-        cell.failBeforeStart();
-        initial.release();
+    const Probe = struct {
+        entered: std.Io.Event = .unset,
+        release: std.Io.Event = .unset,
+        thread: ?std.Thread = null,
+        fn blocked(_: *ProcessCell, self: *@This()) void {
+            self.entered.set(blockingIo());
+            self.release.waitUncancelable(blockingIo());
+        }
+        fn activity(target: *ProcessCell, self: *@This()) void {
+            target.controllers.with(.{self}, blocked);
+        }
+        fn prepare(target: *ProcessCell, target_scope: *scheduler_api.TaskScope, self: *@This()) error{ OutOfMemory, ScopeClosing, Io }!void {
+            try transfers.publishScope(ProcessCell, target, target_scope, processOwnership);
+            self.thread = std.Thread.spawn(.{}, activity, .{ target, self }) catch return error.Io;
+            self.entered.waitUncancelable(blockingIo());
+            return error.Io;
+        }
     };
-    try transfers.publishScope(ProcessCell, cell, &scope, processOwnership);
-    // Scope cancellation can acquire this lease between attachment and spawn.
-    var cancellation = cell.controllers.tryLease().?;
-    defer cancellation.release();
-    cell.failBeforeStart();
-    initial.release();
-    provisional = false;
+    var probe: Probe = .{};
+    defer {
+        probe.release.set(blockingIo());
+        if (probe.thread) |thread| thread.join();
+    }
+    try std.testing.expectError(error.Io, cell.controllers.start(.{ &scope, &probe }, Probe.prepare, supervisorThreadMain, ProcessCell.failBeforeStart));
     try std.testing.expect(cell.termination() == null);
     const spec: ProcessSpec = .{ .executable = fixture_path, .args = &.{ "exit", "7" } };
     try std.testing.expectError(error.LiveLimit, owner.spawn(runtime_scheduler.worker(), &scope, spec));
-    cancellation.release();
+    probe.release.set(blockingIo());
+    probe.thread.?.join();
+    probe.thread = null;
     try std.testing.expect(cell.termination() != null);
     const next = try owner.spawn(runtime_scheduler.worker(), &scope, spec);
     host.domain().releaseValue(next);
