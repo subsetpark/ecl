@@ -60,7 +60,7 @@ The main components are these:
 | Frame machine | Dispatch quotations, represent continuations, enforce application boundaries, and construct errors | `machine.zig` |
 | Bulk execution | Pervasive scalar semantics, typed flat loops, and guarded source-phrase recognition | `kernel_*.zig`, `kernels.zig`, `idioms.zig` |
 | Scheduler | Green units, structured task scopes, task and external waits, cancellation, timers, external membership, and retirement service | `scheduler_core.zig`, `scheduler.zig`, `external.zig`, `task_prims.zig` |
-| Port controllers | Typed job submission, independent execution, joined retirement, and shared scope lifetime | `port_controller.zig`, `port_transfer.zig` |
+| Port controllers | Typed job submission, FIFO admission and cancellation, independent execution, joined retirement, and shared scope lifetime | `port_controller.zig`, `port_transfer.zig` |
 | Process ports | Process policy, POSIX process-group ownership, bounded pipe queues, and terminal publication | `process_port.zig`, `stdlib/proc.zig` |
 | Network listeners and connections | Listen policy, exact grant matching over normalized IP literals, scope-owned listening sockets, demand-gated accept, bounded connection queues serviced by controller threads, and idempotent close | `net_port.zig`, `stdlib/net.zig` |
 | Boundary layers | Embedded modules, native extensions, rendering, terminal safety, the REPL, and the CLI | `prelude.zig`, `stdlib.zig`, `native_*.zig`, `print.zig`, `console.zig`, `line_editor.zig`, `main.zig` |
@@ -427,12 +427,13 @@ nominally constant scheduler turn from hiding an unbounded recursive free.
 
 Port reference lifetime is intentionally distinct from external-resource
 lifetime. A port heap object retains a process cell so terminal observations
-remain safe. A separate `ControllerGroup` issues one lease to every host-owned
-supervisor, pipe, timeout, and escalation thread and owns the spawning
-`TaskScope` membership. The final controller lease is released only after its
-thread's process-cell reference, and only that final release detaches whatever
-membership the port holds by then. The process-cell reference count therefore
-describes value and readiness observation, never controller quiescence.
+remain safe. A separate `ControllerGroup` owns the spawning `TaskScope`
+membership and execution leases, including cancellation setup before a
+supervisor starts. Quiescence requires a retired process group and all leases
+to return. Final lease retirement publishes reaped readiness, returns capacity,
+and drops the execution reference before scope detachment. Startup rollback
+and joined controller jobs use that same boundary. Value and readiness
+references remain independent of controller quiescence.
 Dropping the last port value cannot orphan a live child, retaining a port
 cannot detach it from scope closure, and Session teardown joins controller
 jobs before releasing their owners.
@@ -1428,7 +1429,13 @@ An ordered controller lane owns FIFO tickets independently of the executor
 that advances them. Network and process streams use it for writer ordering.
 Only the active ticket may write; retiring it promotes the next surviving ticket, while retiring a
 queued ticket preserves the active writer. Ticket creation, admission, and
-retirement are explicit states behind opaque handles. Backend readiness and
+retirement are explicit states behind opaque handles; ticket storage retains
+its issuing allocator through destruction. Linked tickets carry
+their lane identity; execution state independently records whether backend
+work has started, cancellation awaits acknowledgement, or execution has
+finished. One transition boundary decides whether cancellation releases the
+turn, interrupts a callback, or requires resource closure. Acknowledgement
+alone cannot promote the successor before the current executor returns. Backend readiness and
 stream terminal facts remain independent of lane ownership. Native operation
 admission uses these same lanes with bounded capacity and an explicit active
 cancellation policy. Network receive/send and process stdin/stdout/stderr

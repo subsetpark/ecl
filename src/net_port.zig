@@ -974,7 +974,7 @@ fn drainPipe(read_end: posix.fd_t) void {
     }
 }
 
-const Writers = transfers.ControllerLane(ConnectionCell);
+const Writers = controllers.Lane(ConnectionCell);
 
 pub const WritePermit = Writers.Ticket;
 
@@ -1265,7 +1265,7 @@ pub const ConnectionCell = struct {
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
         node.checkCell(self);
         if (self.failureLocked()) |failure| return .{ .failed = failure };
-        if (!node.active() or self.send.free() == 0) return .pending;
+        if (!node.begin() or self.send.free() == 0) return .pending;
         const count = @min(bytes.len, self.send.free());
         self.send.push(bytes[0..count]);
         self.signalLocked();
@@ -1277,19 +1277,24 @@ pub const ConnectionCell = struct {
     }
 
     pub fn finishWrite(self: *ConnectionCell, permit: *WritePermit) void {
-        self.retireWrite(permit);
+        self.retireWrite(permit, false);
     }
 
     pub fn abandonWrite(self: *ConnectionCell, permit: *WritePermit) void {
-        self.retireWrite(permit);
+        self.retireWrite(permit, true);
     }
 
-    fn retireWrite(self: *ConnectionCell, ticket: *WritePermit) void {
+    fn retireWrite(self: *ConnectionCell, ticket: *WritePermit, cancelled: bool) void {
         std.Io.Threaded.mutexLock(&self.mutex);
         ticket.checkCell(self);
-        if (self.writers.remove(ticket)) self.waits.notifyLocked(self);
+        if (cancelled) {
+            _ = self.writers.cancel(ticket, .release);
+        } else {
+            _ = self.writers.complete(ticket);
+        }
+        self.waits.notifyLocked(self);
         std.Io.Threaded.mutexUnlock(&self.mutex);
-        ticket.destroy(self.allocator);
+        ticket.destroy();
     }
 
     /// Graceful close: refuse new writes, let the controller deliver queued

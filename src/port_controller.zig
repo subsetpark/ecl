@@ -235,3 +235,261 @@ pub const Execution = opaque {
         std.Io.Threaded.mutexUnlock(&children.mutex);
     }
 };
+
+/// Stream writers stop enqueueing synchronously; callback executors either
+/// establish reusable state explicitly or require whole-resource shutdown.
+pub const CancellationPolicy = enum { release, acknowledge, close_resource };
+pub const CancelAction = enum { retired, interrupt, close_resource, settled };
+pub const Completion = enum { retired, close_resource };
+pub const ExecutionState = enum { queued, active, cancelling, reusable, cancelled, done };
+
+/// Ordered controller-lane ownership, independent of execution, stream state,
+/// and wake policy. Queue observations require the owning resource mutex.
+/// A ticket owns its turn until retirement, even when execution is cancelled.
+/// The queue address remains stable while tickets are linked.
+pub fn Lane(comptime Cell: type) type {
+    return struct {
+        const Self = @This();
+        const Node = struct {
+            allocator: std.mem.Allocator,
+            cell: *Cell,
+            previous: ?*Node = null,
+            next: ?*Node = null,
+            phase: union(enum) { created, queued: *Self, active: *Self, retired } = .created,
+            execution: ExecutionState = .queued,
+        };
+        pub const Ticket = opaque {
+            fn node(self: *const Ticket) *Node {
+                return @ptrCast(@alignCast(@constCast(self)));
+            }
+            pub fn create(allocator: std.mem.Allocator, cell: *Cell) error{OutOfMemory}!*Ticket {
+                const entry = try allocator.create(Node);
+                entry.* = .{ .allocator = allocator, .cell = cell };
+                return @ptrCast(entry);
+            }
+            /// Consumes an unqueued or retired ticket. Cancel readiness first.
+            pub fn destroy(self: *Ticket) void {
+                if (self.linked()) @panic("destroying a queued controller ticket");
+                const entry = self.node();
+                entry.allocator.destroy(entry);
+            }
+            pub fn successor(self: *const Ticket) ?*Ticket {
+                return if (self.node().next) |next| @ptrCast(next) else null;
+            }
+            pub fn owner(self: *const Ticket) *Cell {
+                return self.node().cell;
+            }
+            pub fn checkCell(self: *const Ticket, cell: *Cell) void {
+                if (self.owner() != cell or !self.linked()) @panic("invalid controller ticket");
+            }
+            /// Execution observations and transitions require the operation's
+            /// state lock. Queue linkage additionally requires the resource
+            /// lock, acquired first. Stream writers use that lock for both;
+            /// byte ABI operations have a separate stream mutex.
+            pub fn status(self: *const Ticket) ExecutionState {
+                return self.node().execution;
+            }
+            pub fn isCancelled(self: *const Ticket) bool {
+                return switch (self.status()) {
+                    .cancelling, .reusable, .cancelled => true,
+                    .queued, .active, .done => false,
+                };
+            }
+            /// Only the turn owner may start work. Repeated stream advances
+            /// keep the same active execution until completion or cancellation.
+            pub fn begin(self: *Ticket) bool {
+                if (!self.active()) return false;
+                switch (self.status()) {
+                    .queued => self.node().execution = .active,
+                    .active => {},
+                    .cancelling, .reusable, .cancelled, .done => return false,
+                }
+                return true;
+            }
+            pub fn requestCancellation(self: *Ticket) void {
+                switch (self.status()) {
+                    .queued, .active => self.node().execution = .cancelling,
+                    .cancelling, .reusable, .cancelled, .done => {},
+                }
+            }
+            /// Acknowledgement permits reuse only after the executor returns.
+            pub fn acknowledgeCancellation(self: *Ticket) bool {
+                if (self.status() != .cancelling) return false;
+                self.node().execution = .reusable;
+                return true;
+            }
+            fn finish(self: *Ticket) Completion {
+                const result: Completion = if (self.status() == .cancelling) .close_resource else .retired;
+                self.node().execution = switch (self.status()) {
+                    .queued, .active, .done => .done,
+                    .cancelling, .reusable, .cancelled => .cancelled,
+                };
+                return result;
+            }
+            pub fn active(self: *const Ticket) bool {
+                return self.node().phase == .active;
+            }
+            pub fn linked(self: *const Ticket) bool {
+                return switch (self.node().phase) {
+                    .queued, .active => true,
+                    .created, .retired => false,
+                };
+            }
+        };
+        count: usize = 0,
+        first: ?*Node = null,
+        last: ?*Node = null,
+
+        pub fn front(self: *const Self) ?*Ticket {
+            return if (self.first) |entry| @ptrCast(entry) else null;
+        }
+        pub fn empty(self: *const Self) bool {
+            return self.front() == null;
+        }
+        pub fn hasCapacity(self: *const Self, limit: usize) bool {
+            return self.count < limit;
+        }
+        /// Failure leaves a created ticket with the caller. Success consumes it.
+        pub fn tryAppend(self: *Self, ticket: *Ticket, limit: usize) bool {
+            if (!self.hasCapacity(limit)) return false;
+            self.append(ticket);
+            return true;
+        }
+        /// Consumes the ticket's created state into FIFO ownership.
+        pub fn append(self: *Self, ticket: *Ticket) void {
+            const node = ticket.node();
+            if (node.phase != .created) @panic("controller ticket already admitted");
+            if (self.last) |last| {
+                last.next = node;
+                node.previous = last;
+                node.phase = .{ .queued = self };
+            } else {
+                self.first = node;
+                node.phase = .{ .active = self };
+            }
+            self.last = node;
+            self.count += 1;
+        }
+        /// Both the resource lock and the operation state lock must be held.
+        /// The returned action is the only backend work cancellation requests.
+        pub fn cancel(self: *Self, ticket: *Ticket, policy: CancellationPolicy) CancelAction {
+            if (ticket.status() == .done or ticket.status() == .cancelled) return .settled;
+            self.requireMember(ticket);
+            switch (ticket.status()) {
+                .queued => {
+                    ticket.requestCancellation();
+                    _ = ticket.acknowledgeCancellation();
+                    _ = self.finishAndRemove(ticket);
+                    return .retired;
+                },
+                .active => {
+                    ticket.requestCancellation();
+                    return switch (policy) {
+                        .close_resource => .close_resource,
+                        .acknowledge => .interrupt,
+                        .release => released: {
+                            _ = ticket.acknowledgeCancellation();
+                            _ = self.finishAndRemove(ticket);
+                            break :released .retired;
+                        },
+                    };
+                },
+                .cancelling, .reusable, .cancelled, .done => return .settled,
+            }
+        }
+        /// Consumes execution and FIFO ownership. A returning executor that
+        /// has not acknowledged active cancellation requires resource shutdown.
+        pub fn complete(self: *Self, ticket: *Ticket) Completion {
+            self.requireMember(ticket);
+            return self.finishAndRemove(ticket);
+        }
+        fn requireMember(self: *const Self, ticket: *const Ticket) void {
+            const linked_lane = switch (ticket.node().phase) {
+                .queued, .active => |lane_owner| lane_owner,
+                .created, .retired => @panic("controller ticket is not admitted"),
+            };
+            if (linked_lane != self) @panic("ticket belongs to another controller lane");
+        }
+        /// Retires a ticket and promotes its successor if it owned the turn.
+        /// The caller notifies backend readiness, then destroys it outside the lock.
+        fn finishAndRemove(self: *Self, ticket: *Ticket) Completion {
+            const result = ticket.finish();
+            const node = ticket.node();
+            const was_active = ticket.active();
+            if (node.previous) |previous| previous.next = node.next else self.first = node.next;
+            if (node.next) |next| {
+                next.previous = node.previous;
+                if (was_active) next.phase = .{ .active = self };
+            } else self.last = node.previous;
+            self.count -= 1;
+            node.phase = .retired;
+            node.previous = null;
+            node.next = null;
+            return result;
+        }
+    };
+}
+
+test "native: shared lane admission and cancellation require acknowledged retirement" {
+    const Queue = Lane(u8);
+    var owner: u8 = 0;
+    var lane: Queue = .{};
+    // SAFETY: only the initialized prefix tracked by created is read.
+    var tickets: [3]*Queue.Ticket = undefined;
+    var created: usize = 0;
+    defer for (tickets[0..created]) |ticket| {
+        if (ticket.linked()) {
+            _ = ticket.acknowledgeCancellation();
+            _ = lane.complete(ticket);
+        }
+        ticket.destroy();
+    };
+    for (&tickets) |*ticket| {
+        ticket.* = try Queue.Ticket.create(std.testing.allocator, &owner);
+        created += 1;
+    }
+    const first, const queued, const successor = tickets;
+    try std.testing.expect(lane.tryAppend(first, 2));
+    try std.testing.expect(lane.tryAppend(queued, 2));
+    try std.testing.expect(!lane.tryAppend(successor, 2));
+    try std.testing.expect(first.begin());
+    try std.testing.expect(!queued.begin());
+    try std.testing.expectEqual(CancelAction.retired, lane.cancel(queued, .acknowledge));
+    try std.testing.expect(lane.tryAppend(successor, 2));
+    try std.testing.expectEqual(CancelAction.interrupt, lane.cancel(first, .acknowledge));
+    try std.testing.expect(!successor.begin());
+    try std.testing.expect(first.acknowledgeCancellation());
+    try std.testing.expect(!successor.begin());
+    try std.testing.expectEqual(Completion.retired, lane.complete(first));
+    try std.testing.expect(successor.begin());
+    try std.testing.expectEqual(CancelAction.interrupt, lane.cancel(successor, .acknowledge));
+    try std.testing.expectEqual(Completion.close_resource, lane.complete(successor));
+}
+
+test "native: prepared controller jobs reuse storage without allocator access" {
+    const Probe = struct {
+        done: std.Io.Event = .unset,
+        value: usize = 0,
+        fn run(_: *Execution, _: *@This(), value: usize) usize {
+            return value;
+        }
+        fn finish(args: struct { *@This(), usize }, value: usize) void {
+            args[0].value = value;
+            args[0].done.set(io());
+        }
+    };
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const owner = try Owner.init(failing.allocator(), 2);
+    defer owner.deinit();
+    const executor = owner.access();
+    try executor.prepare();
+    failing.fail_index = failing.alloc_index;
+    var probe: Probe = .{};
+    for (0..3) |index| {
+        probe.done.reset();
+        try executor.spawn(Probe.run, .{ &probe, index }, Probe.finish);
+        probe.done.waitUncancelable(io());
+        try std.testing.expectEqual(index, probe.value);
+    }
+    try std.testing.expect(!failing.has_induced_failure);
+}
