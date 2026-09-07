@@ -188,7 +188,7 @@ const OwnedPolicy = struct {
 ///
 /// Lock order: the acceptor registry mutex is a leaf. It is taken while
 /// holding a listener mutex (`beginAccept` registers under it) and while
-/// holding a connection cell mutex (`finalizeLocked` releases the reservation
+/// holding a connection cell mutex (terminal retirement returns capacity
 /// under it), and nothing is taken while it is held: `releaseConnection` only
 /// writes wake bytes. No path takes a listener mutex while holding a
 /// connection cell mutex.
@@ -200,12 +200,11 @@ pub const NetOwner = struct {
     live: std.atomic.Value(usize) = .init(0),
     live_connections: std.atomic.Value(usize) = .init(0),
     next_identity: std.atomic.Value(u64) = .init(1),
-    /// Guards the intrusive list of listeners whose acceptor thread is
-    /// running. A cell joins when its job is spawned and leaves after it is
-    /// joined, before listener finalization closes the wake pipe. This never leaves a
-    /// registered cell whose pipe is gone.
+    /// Registry borrowers may signal only the pipes owned by these records.
+    /// Registration precedes spawn; rollback or joined retirement removes the
+    /// record before closing its descriptors.
     acceptors_mutex: std.Io.Mutex = .init,
-    acceptors_first: ?*ListenerCell = null,
+    acceptors_first: ?*ListenerCell.Acceptor = null,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, policy: NetPolicy) PolicyError!NetOwner {
         const jobs = std.math.add(usize, policy.limits.max_live_listeners, policy.limits.max_live_connections) catch return error.InvalidPolicy;
@@ -283,37 +282,26 @@ pub const NetOwner = struct {
         std.Io.Threaded.mutexLock(&self.acceptors_mutex);
         defer std.Io.Threaded.mutexUnlock(&self.acceptors_mutex);
         var cell = self.acceptors_first;
-        while (cell) |current| : (cell = current.acceptor_next) {
-            signalPipe(current.acceptor.wake.?[1]);
+        while (cell) |current| : (cell = current.next) {
+            signalPipe(current.wake[1]);
         }
     }
 
-    /// Called by `beginAccept` under the listener mutex once its acceptor
-    /// thread exists; the cell's wake pipe is set for as long as it is listed.
-    fn registerAcceptor(self: *NetOwner, cell: *ListenerCell) void {
+    fn registerAcceptor(self: *NetOwner, acceptor: *ListenerCell.Acceptor) void {
         std.Io.Threaded.mutexLock(&self.acceptors_mutex);
         defer std.Io.Threaded.mutexUnlock(&self.acceptors_mutex);
-        std.debug.assert(cell.acceptor_prev == null and cell.acceptor_next == null);
-        std.debug.assert(self.acceptors_first != cell);
-        cell.acceptor_next = self.acceptors_first;
-        if (self.acceptors_first) |first| first.acceptor_prev = cell;
-        self.acceptors_first = cell;
+        acceptor.next = self.acceptors_first;
+        if (self.acceptors_first) |first| first.previous = acceptor;
+        self.acceptors_first = acceptor;
     }
 
-    /// Called after joining the acceptor, as the first act of leaving its role,
-    /// before any lock the exit protocol takes.
-    fn unregisterAcceptor(self: *NetOwner, cell: *ListenerCell) void {
+    fn unregisterAcceptor(self: *NetOwner, acceptor: *ListenerCell.Acceptor) void {
         std.Io.Threaded.mutexLock(&self.acceptors_mutex);
         defer std.Io.Threaded.mutexUnlock(&self.acceptors_mutex);
-        std.debug.assert(self.acceptors_first == cell or cell.acceptor_prev != null);
-        if (cell.acceptor_prev) |previous| previous.acceptor_next = cell.acceptor_next else self.acceptors_first = cell.acceptor_next;
-        if (cell.acceptor_next) |next| next.acceptor_prev = cell.acceptor_prev;
-        cell.acceptor_prev = null;
-        cell.acceptor_next = null;
+        if (acceptor.previous) |previous| previous.next = acceptor.next else self.acceptors_first = acceptor.next;
+        if (acceptor.next) |next| next.previous = acceptor.previous;
     }
 
-    /// Bind and listen, attach the socket to `scope`, then publish the port.
-    /// `address` is the caller's parsed literal; it is normalized here.
     pub fn listen(
         self: *NetOwner,
         _: *const scheduler_api.WorkerScheduler,
@@ -485,7 +473,7 @@ pub const AcceptSlot = struct {
 
 /// One bound-or-closed socket. The reference count is shared by the port
 /// value, the scope member, registered waits, and the acceptor thread; the
-/// socket and quota slot are released by the first `close`, whoever calls it.
+/// terminal transition returns socket capacity after any acceptor joins.
 pub const ListenerCell = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -500,30 +488,51 @@ pub const ListenerCell = struct {
     slots_first: ?*AcceptSlot = null,
     slots_last: ?*AcceptSlot = null,
     demand: usize = 0,
-    acceptor: Acceptor = .{},
-    /// Membership in the owner's running-acceptor registry; guarded by
-    /// `NetOwner.acceptors_mutex`, never by this cell's mutex.
-    acceptor_prev: ?*ListenerCell = null,
-    acceptor_next: ?*ListenerCell = null,
-
     const Bound = struct { server: std.Io.net.Server, address: IpAddress };
     const State = union(enum) {
-        bound: Bound,
-        closing: Bound,
-        /// Retains the address that was bound so a failure after closure can
-        /// still name it.
+        dormant: Bound,
+        accepting: *Acceptor,
+        closing: *Acceptor,
         closed: IpAddress,
     };
 
+    // The job owns the bound socket, wake descriptors, and registry entry.
+    // Registry borrowers can only signal its live pipe. Only joined retirement
+    // removes the registration and destroys these resources.
     const Acceptor = struct {
-        running: bool = false,
-        /// Set by `close` so a running acceptor exits after its next wake.
-        stop: bool = false,
-        /// Set by the acceptor when a slot acquire failed at the quota: it
-        /// polls only the wake pipe until a connection release wakes it, and
-        /// the connection it saw stays in the kernel backlog.
+        cell: *ListenerCell,
+        bound: Bound,
+        wake: [2]posix.fd_t,
+        previous: ?*Acceptor = null,
+        next: ?*Acceptor = null,
         quota_blocked: bool = false,
-        wake: ?[2]posix.fd_t = null,
+
+        fn start(cell: *ListenerCell, bound: Bound) AcceptError!void {
+            const owned = try cell.allocator.create(Acceptor);
+            errdefer cell.allocator.destroy(owned);
+            const wake = std.Io.Threaded.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true }) catch return error.Io;
+            errdefer {
+                std.Io.Threaded.closeFd(wake[0]);
+                std.Io.Threaded.closeFd(wake[1]);
+            }
+            try setBlockingMode(bound.server.socket.handle, .non_blocking);
+            owned.* = .{ .cell = cell, .bound = bound, .wake = wake };
+            cell.owner.registerAcceptor(owned);
+            errdefer cell.owner.unregisterAcceptor(owned);
+            cell.retainRef();
+            errdefer cell.releaseRef();
+            cell.owner.executor.access().spawn(ListenerCell.acceptorMain, .{owned}, retireAcceptor) catch |err| return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                error.Io, error.Closed => error.Io,
+            };
+            cell.state = .{ .accepting = owned };
+        }
+
+        fn destroy(self: *Acceptor) void {
+            std.Io.Threaded.closeFd(self.wake[0]);
+            std.Io.Threaded.closeFd(self.wake[1]);
+            self.cell.allocator.destroy(self);
+        }
     };
 
     const Waits = WaitList(ListenerCell);
@@ -535,7 +544,7 @@ pub const ListenerCell = struct {
             .io = owner.io,
             .owner = owner,
             .identity = owner.next_identity.fetchAdd(1, .monotonic),
-            .state = .{ .bound = .{ .server = server, .address = server.socket.address } },
+            .state = .{ .dormant = .{ .server = server, .address = server.socket.address } },
         };
     }
 
@@ -595,7 +604,7 @@ pub const ListenerCell = struct {
         return &self.ownership;
     }
     fn transferLive(self: *ListenerCell) bool {
-        return self.state == .bound and self.ownership.live();
+        return (self.state == .dormant or self.state == .accepting) and self.ownership.live();
     }
     pub fn prepareScopeTransfer(self: *ListenerCell, from: *anyopaque, to: *anyopaque) heap.PortTransferError!void {
         return Transfer.prepare(self, from, to);
@@ -612,33 +621,21 @@ pub const ListenerCell = struct {
     pub fn close(self: *ListenerCell) void {
         std.Io.Threaded.mutexLock(&self.mutex);
         switch (self.state) {
-            .bound => |bound| self.state = .{ .closing = bound },
-            .closing, .closed => {
-                std.Io.Threaded.mutexUnlock(&self.mutex);
-                return;
+            .dormant => |bound| {
+                self.retainRef();
+                self.finalizeCloseLocked(bound);
             },
+            .accepting => |acceptor| {
+                self.state = .{ .closing = acceptor };
+                signalPipe(acceptor.wake[1]);
+                self.changed.broadcast(blockingIo());
+                std.Io.Threaded.mutexUnlock(&self.mutex);
+            },
+            .closing, .closed => std.Io.Threaded.mutexUnlock(&self.mutex),
         }
-        if (self.acceptor.running) {
-            self.acceptor.stop = true;
-            if (self.acceptor.wake) |wake| signalPipe(wake[1]);
-            self.changed.broadcast(blockingIo());
-            std.Io.Threaded.mutexUnlock(&self.mutex);
-            return;
-        }
-        // No job owns a reference: mint the guard consumed by finalization.
-        self.retainRef();
-        self.finalizeCloseLocked();
     }
 
-    /// Consumes the held mutex and execution/publisher guard. A started
-    /// acceptor has already been joined by the shared executor.
-    fn finalizeCloseLocked(self: *ListenerCell) void {
-        const bound = self.state.closing;
-        if (self.acceptor.wake) |wake| {
-            std.Io.Threaded.closeFd(wake[0]);
-            std.Io.Threaded.closeFd(wake[1]);
-            self.acceptor.wake = null;
-        }
+    fn finalizeCloseLocked(self: *ListenerCell, bound: Bound) void {
         var server = bound.server;
         server.deinit(self.io);
         self.state = .{ .closed = bound.address };
@@ -651,7 +648,10 @@ pub const ListenerCell = struct {
             }
         }
         self.waits.notifyLocked(self);
-        transfers.completeControllerLocked(ListenerCell, self, &self.ownership, ListenerCell.releaseRef);
+        var detached = self.ownership.release();
+        std.Io.Threaded.mutexUnlock(&self.mutex);
+        self.releaseRef();
+        detached.detachAll();
     }
     pub fn drained(self: *ListenerCell) bool {
         std.Io.Threaded.mutexLock(&self.mutex);
@@ -667,7 +667,8 @@ pub const ListenerCell = struct {
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
         return switch (self.state) {
-            .bound => |bound| bound.address,
+            .dormant => |bound| bound.address,
+            .accepting => |acceptor| acceptor.bound.address,
             .closing, .closed => null,
         };
     }
@@ -677,7 +678,8 @@ pub const ListenerCell = struct {
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
         return switch (self.state) {
-            .bound, .closing => |bound| bound.address,
+            .dormant => |bound| bound.address,
+            .accepting, .closing => |acceptor| acceptor.bound.address,
             .closed => |address| address,
         };
     }
@@ -698,35 +700,15 @@ pub const ListenerCell = struct {
     pub fn beginAccept(self: *ListenerCell) AcceptError!*AcceptSlot {
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        const bound = switch (self.state) {
-            .bound => |*bound| bound,
+        switch (self.state) {
+            .dormant, .accepting => {},
             .closing, .closed => return error.Closed,
-        };
+        }
         const slot = try self.allocator.create(AcceptSlot);
         errdefer self.allocator.destroy(slot);
         const candidate = try AcceptedResource.prepare(self.owner);
         errdefer candidate.deinit();
-        if (!self.acceptor.running) {
-            if (self.acceptor.wake == null) {
-                self.acceptor.wake = std.Io.Threaded.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true }) catch return error.Io;
-            }
-            setBlockingMode(bound.server.socket.handle, .non_blocking) catch return error.Io;
-            self.retainRef();
-            self.acceptor.running = true;
-            self.acceptor.stop = false;
-            self.acceptor.quota_blocked = false;
-            self.owner.executor.access().spawn(ListenerCell.acceptorMain, .{self}, retireAcceptor) catch |err| {
-                self.acceptor.running = false;
-                self.releaseRef();
-                return switch (err) {
-                    error.OutOfMemory => error.OutOfMemory,
-                    error.Io, error.Closed => error.Io,
-                };
-            };
-            // The thread cannot reach `exitAcceptor` before this: its first
-            // act is to take the mutex this call still holds.
-            self.owner.registerAcceptor(self);
-        }
+        if (self.state == .dormant) try Acceptor.start(self, self.state.dormant);
         slot.* = .{ .state = .{ .waiting = candidate } };
         if (self.slots_last) |last| {
             last.next = slot;
@@ -785,8 +767,8 @@ pub const ListenerCell = struct {
     }
 
     /// Release the slot and whatever it still holds: a ready slot closes its
-    /// socket and releases its reservation; a waiting, failed, closed, or
-    /// taken slot owns nothing.
+    /// socket and returns capacity. A waiting slot owns candidate storage;
+    /// failed, closed, and taken slots own nothing.
     pub fn endAccept(self: *ListenerCell, slot: *AcceptSlot) void {
         std.Io.Threaded.mutexLock(&self.mutex);
         std.debug.assert(slot.linked);
@@ -819,18 +801,19 @@ pub const ListenerCell = struct {
     /// wake pipe alone so a connection in the backlog does not spin the
     /// thread. A wake byte means drain and recheck: exit if `close` asked for
     /// a stop, otherwise clear the block and look at the socket again.
-    fn acceptorMain(_: *controllers.Execution, self: *ListenerCell) ?AcceptFailure {
+    fn acceptorMain(_: *controllers.Execution, acceptor: *Acceptor) ?AcceptFailure {
+        const self = acceptor.cell;
         while (true) {
             std.Io.Threaded.mutexLock(&self.mutex);
-            while (!self.acceptor.stop and self.state == .bound and self.firstWaitingLocked() == null)
+            while (self.state == .accepting and self.firstWaitingLocked() == null)
                 self.changed.waitUncancelable(blockingIo(), &self.mutex);
-            if (self.acceptor.stop or self.state != .bound) {
+            if (self.state != .accepting) {
                 std.Io.Threaded.mutexUnlock(&self.mutex);
                 break;
             }
-            const listen_fd = self.state.bound.server.socket.handle;
-            const wake_fd = self.acceptor.wake.?[0];
-            const listen_events: i16 = if (self.acceptor.quota_blocked) 0 else posix.POLL.IN;
+            const listen_fd = acceptor.bound.server.socket.handle;
+            const wake_fd = acceptor.wake[0];
+            const listen_events: i16 = if (acceptor.quota_blocked) 0 else posix.POLL.IN;
             std.Io.Threaded.mutexUnlock(&self.mutex);
 
             var fds = [_]posix.pollfd{
@@ -841,29 +824,22 @@ pub const ListenerCell = struct {
             if (fds[1].revents != 0) {
                 drainPipe(wake_fd);
                 std.Io.Threaded.mutexLock(&self.mutex);
-                const stop = self.acceptor.stop;
-                self.acceptor.quota_blocked = false;
+                const stop = self.state != .accepting;
+                acceptor.quota_blocked = false;
                 std.Io.Threaded.mutexUnlock(&self.mutex);
                 if (stop) break;
                 continue;
             }
             if (fds[0].revents == 0) continue;
-            self.acceptOneLocked();
+            self.acceptOneLocked(acceptor);
         }
         return null;
     }
 
-    /// Leave the acceptor role. The registry entry goes first, so no
-    /// connection release writes to a wake pipe `close` is about to close
-    /// once `running` clears. The shared executor has joined the thread before
-    /// this callback drops its reference. Closing consumes that reference and
-    /// scope membership together; otherwise the membership still pins the cell.
-    /// A host failure is published and
-    /// `running` cleared under one lock hold, so a `beginAccept` that arrives
-    /// next either sees the failure on its own slot or starts a fresh thread;
-    /// it can never append a slot no thread will ever serve.
-    fn exitAcceptor(self: *ListenerCell, failure: ?AcceptFailure) void {
-        self.owner.unregisterAcceptor(self);
+    /// Joined retirement consumes the registry entry and descriptor bundle.
+    fn exitAcceptor(acceptor: *Acceptor, failure: ?AcceptFailure) void {
+        const self = acceptor.cell;
+        self.owner.unregisterAcceptor(acceptor);
         std.Io.Threaded.mutexLock(&self.mutex);
         if (failure) |reason| {
             var slot = self.slots_first;
@@ -872,34 +848,24 @@ pub const ListenerCell = struct {
             }
             self.waits.notifyLocked(self);
         }
-        self.acceptor.running = false;
-        if (self.state == .closing) return self.finalizeCloseLocked();
+        const bound = acceptor.bound;
+        acceptor.destroy();
+        if (self.state == .closing) return self.finalizeCloseLocked(bound);
+        self.state = .{ .dormant = bound };
         self.releaseRef();
         self.changed.broadcast(blockingIo());
         std.Io.Threaded.mutexUnlock(&self.mutex);
     }
 
-    /// Accept one connection into the first waiting slot, or accept nothing.
-    /// The syscall runs under the listener mutex so `endAccept` cannot remove
-    /// the last slot between the readiness report and the accept: either the
-    /// cancellation wins and the connection stays in the kernel backlog for
-    /// the next accept, or the accept wins and the socket belongs to that
-    /// slot. The live-connection slot is acquired here, just before the
-    /// syscall: when none is free the acceptor marks itself quota-blocked and
-    /// takes nothing, so the connection stays in the backlog until a release
-    /// wakes it. The listening socket is non-blocking, so the locked syscall
-    /// is bounded.
-    fn acceptOneLocked(self: *ListenerCell) void {
+    fn acceptOneLocked(self: *ListenerCell, acceptor: *Acceptor) void {
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
         const slot = self.firstWaitingLocked() orelse return;
-        const listen_fd = switch (self.state) {
-            .bound => |bound| bound.server.socket.handle,
-            .closing, .closed => return,
-        };
+        if (self.state != .accepting) return;
+        const listen_fd = acceptor.bound.server.socket.handle;
         const accepted = slot.state.waiting.activate(.{listen_fd}, AcceptedSocket.initializeAllocation) catch |err| switch (err) {
             error.LiveLimit => {
-                self.acceptor.quota_blocked = true;
+                acceptor.quota_blocked = true;
                 return;
             },
             error.Pending => return,
@@ -917,8 +883,8 @@ pub const ListenerCell = struct {
     }
 };
 
-fn retireAcceptor(args: struct { *ListenerCell }, failure: ?AcceptFailure) void {
-    args[0].exitAcceptor(failure);
+fn retireAcceptor(args: struct { *ListenerCell.Acceptor }, failure: ?AcceptFailure) void {
+    ListenerCell.exitAcceptor(args[0], failure);
 }
 
 /// Make an accepted descriptor close-on-exec and non-blocking (BSD kernels
