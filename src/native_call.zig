@@ -498,6 +498,9 @@ const Transaction = struct {
                 for (&self.port_slots) |*slot| if (slot.* == .creating) {
                     const item = slot.creating;
                     slot.* = .{ .published = item };
+                } else if (slot.* == .exporting_exchange) {
+                    const item = slot.exporting_exchange;
+                    slot.* = .{ .published_exchange = item };
                 };
                 break :complete .completed;
             },
@@ -970,7 +973,9 @@ const PortSlot = union(enum) {
     creating: Value,
     published: Value,
     admission: struct { cell: *native_port.Cell, code: u32 },
-    operation: *native_port.Operation,
+    operation: Value,
+    exporting_exchange: Value,
+    published_exchange: Value,
     closing: *native_port.Cell,
 
     fn cell(self: PortSlot) ?*native_port.Cell {
@@ -978,7 +983,7 @@ const PortSlot = union(enum) {
             .empty => null,
             .creating, .published => |item| heap.portPayload(native_port.Cell, .resource, item.port).?,
             .admission => |pending| pending.cell,
-            .operation => |operation| operation.cell,
+            .operation, .exporting_exchange, .published_exchange => |item| native_port.exchangeFromValue(item).?.cell,
             .closing => |closing| closing,
         };
     }
@@ -989,12 +994,12 @@ const PortSlot = union(enum) {
                 heap.portPayload(native_port.Cell, .resource, item.port).?.close();
                 releases.releaseValue(item);
             },
-            .published => |item| releases.releaseValue(item),
+            .published, .published_exchange => |item| releases.releaseValue(item),
             .admission => |pending| pending.cell.releasePort(),
             .closing => |cell_value| cell_value.releasePort(),
-            .operation => |operation| {
-                operation.cancel();
-                operation.releaseReadiness();
+            .operation, .exporting_exchange => |item| {
+                native_port.exchangeFromValue(item).?.close();
+                releases.releaseValue(item);
             },
         }
         self.* = .empty;
@@ -1022,6 +1027,17 @@ fn hostPort(context_value: *anyopaque, request: *const abi.PortRequest, reply: *
     if (request.action != .check) if (slot.cell()) |cell| if (cell.instance != call.instance or cell.kind != request.definition)
         return portError(call, reply, .type, "native operation slot belongs to another port kind");
     switch (request.action) {
+        .export_exchange => {
+            const item = switch (slot.*) {
+                .operation, .exporting_exchange => |item| item,
+                else => return portError(call, reply, .domain, "native exchange is not admitted"),
+            };
+            heap.retainValue(item);
+            const status = call.appendCandidate(item, null);
+            if (status != .ok) return status;
+            slot.* = .{ .exporting_exchange = item };
+            reply.candidate = call.candidateWire();
+        },
         .create => {
             if (slot.* == .empty) {
                 const value_created = call.activeEvaluator().createNativePort(call.instance, request.definition) catch |err| return switch (err) {
@@ -1061,7 +1077,7 @@ fn hostPort(context_value: *anyopaque, request: *const abi.PortRequest, reply: *
                 if (!cell.joined()) reply.status = .pending;
             } else {
                 if (slot.* == .operation) {
-                    if (slot.operation.code != request.operation) return portError(call, reply, .domain, "native operation slot has another operation");
+                    if (native_port.exchangeFromValue(slot.operation).?.code != request.operation) return portError(call, reply, .domain, "native operation slot has another operation");
                     return .ok;
                 }
                 if (slot.* == .empty) {
@@ -1070,7 +1086,12 @@ fn hostPort(context_value: *anyopaque, request: *const abi.PortRequest, reply: *
                 }
                 if (slot.* != .admission or slot.admission.code != request.operation)
                     return portError(call, reply, .domain, "native operation admission slot is occupied");
-                switch (cell.admit(request.operation) catch return .out_of_memory) {
+                const scope: *@import("scheduler.zig").TaskScope = @ptrCast(@alignCast(call.activeEvaluator().unit.task_scope orelse
+                    return portError(call, reply, .io, "native operation scope is closing")));
+                switch (cell.admit(request.operation, scope) catch |err| return switch (err) {
+                    error.OutOfMemory => .out_of_memory,
+                    error.ScopeClosing => portError(call, reply, .io, "native operation scope is closing"),
+                }) {
                     .pending => reply.status = .pending,
                     .invalid_operation => return portError(call, reply, .domain, "native operation selected an invalid lane"),
                     .closed => return portError(call, reply, .io, "native port is closed"),
@@ -1083,7 +1104,7 @@ fn hostPort(context_value: *anyopaque, request: *const abi.PortRequest, reply: *
         },
         .write, .read, .finish_request, .result => {
             if (slot.* != .operation) return portError(call, reply, .domain, "native operation slot is not admitted");
-            const operation = slot.operation;
+            const operation = native_port.exchangeFromValue(slot.operation).?;
             switch (request.action) {
                 .write, .read => {
                     const bytes = if (request.bytes) |pointer| pointer[0..@min(request.length, 4096)] else return portError(call, reply, .domain, "native stream buffer is missing");
@@ -1113,9 +1134,9 @@ fn hostPort(context_value: *anyopaque, request: *const abi.PortRequest, reply: *
             call.port_wait = switch (slot.*) {
                 .creating => slot.cell().?.source(0),
                 .admission => |pending| pending.cell.admissionSource(pending.code),
-                .operation => |operation| operation.source(request.interests),
+                .operation => |item| native_port.exchangeFromValue(item).?.source(request.interests),
                 .closing => |cell| cell.source(1),
-                .empty, .published => return portError(call, reply, .domain, "native wait slot is empty"),
+                .empty, .published, .exporting_exchange, .published_exchange => return portError(call, reply, .domain, "native wait slot is empty"),
             };
             call.yield_requested = true;
             reply.status = .pending;

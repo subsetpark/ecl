@@ -1379,6 +1379,14 @@ test "oom: standard-library and host: native port lifecycle independent lanes" {
     ).run);
 }
 
+test "oom: standard-library and host: native port lifecycle exported exchange" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.duplex-new-ready-wait dup 1 portprobe.start dup port.await dup port.result pop " ++
+            "wrap [] (port.close) @give task.await pop port.close",
+    ).run);
+}
+
 test "oom: standard-library and host: native port lifecycle transfer and rollback" {
     try requireSelectedOomTest(@src());
     try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortLifecycleProbe(

@@ -2372,6 +2372,27 @@ After a local `close` the write is `'io` `'closed`; a peer that has reset or
 already closed is `'io` `'reset`; any other host failure is `'io` `'io`, each
 with the peer's address and port attached.
 
+## port
+
+Native exchanges are opaque `'port` values with their own task-scope ownership.
+An exchange returned by a native word survives that word's invocation. Retaining
+or sending its value shares use; `@give` transfers its scope ownership. Exiting
+the owning scope aborts outstanding work and joins cancellation cleanup.
+
+| Word | Effect | Contract |
+|---|---|---|
+| `port.await` | `( exchange -- )` | Wait for successful completion or raise the terminal error. Repeatable; does not drain output. |
+| `port.result` | `( exchange -- value )` | Wait and claim the terminal result once. A later successful-result claim raises `'contract`. |
+| `port.cancel` | `( exchange -- )` | Request cancellation idempotently. Completion remains observable and waits for controller return. |
+| `port.close` | `( resource-or-exchange -- )` | Abort and join cleanup. Idempotent. Currently accepts native resources and exchanges. |
+
+A cancelled exchange raises `'cancelled` from `port.await` and `port.result`.
+Observation does not consume the result. Native operations that produce only
+stream output have `[]` as their result. Input finish, output EOF, completion,
+and cleanup are distinct events. An active cancellation releases its controller
+lane only after acknowledgement and return; a controller that cannot restore
+reusable state closes its resource.
+
 ## proc
 
 Host-backed subprocess ports. The module is present in every standard image,

@@ -151,12 +151,12 @@ const source_groups = [_]SourceGroup{
     .{ .production = true, .files = &.{
         "native/ports.zig",        "native/abi.zig",        "native/capability.zig", "native/sdk.zig",
         "native/build_helper.zig", "native_descriptor.zig", "native_module.zig",     "native_port.zig",
-        "native_call.zig",         "stdlib/io.zig",
+        "native_call.zig",         "stdlib/io.zig",         "stdlib/port.zig",
     }, .sources = &.{
         @embedFile("../native/ports.zig"),  @embedFile("../native/abi.zig"),          @embedFile("../native/capability.zig"),
         @embedFile("../native/sdk.zig"),    @embedFile("../native/build_helper.zig"), @embedFile("../native_descriptor.zig"),
         @embedFile("../native_module.zig"), @embedFile("../native_port.zig"),         @embedFile("../native_call.zig"),
-        @embedFile("../stdlib/io.zig"),
+        @embedFile("../stdlib/io.zig"),     @embedFile("../stdlib/port.zig"),
     } },
 };
 

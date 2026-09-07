@@ -32,6 +32,44 @@ fn expectPortProgram(workers: u32, max_operations: u32, source: []const u8, expe
     try std.testing.expectEqualStrings(expected, display.bytes());
 }
 
+test "native: exported exchange transfers ownership and joins cancellation on scope exit" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.duplex-new 'p set p 3 portprobe.start 'x set 1 portprobe.await-blocked " ++
+        "x wrap [] (pop) @give task.await 'ok at pop " ++
+        "x type p 1 7 portprobe.duplex-exchange p portprobe.duplex-close portprobe.cleaned", "'port 7 1");
+}
+
+test "native: an exported exchange remains owned when only a borrowed use is sent" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.duplex-new 'p set p 3 portprobe.start 'x set 1 portprobe.await-blocked " ++
+        "x wrap (pop) @spawn task.await 'ok at pop " ++
+        "portprobe.cleaned x wrap [] (pop) @give task.await 'ok at pop " ++
+        "p 1 5 portprobe.duplex-exchange p portprobe.duplex-close portprobe.cleaned", "0 5 1");
+}
+
+test "native: common exchange await repeats and cancel waits for acknowledged return" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.duplex-new 'p set " ++
+        "p 1 portprobe.start 'done set done port.await done port.await done port.close done port.close " ++
+        "p 3 portprobe.start 'x set 1 portprobe.await-blocked x port.cancel x port.cancel " ++
+        "x wrap (port.await) @attempt 'err at 'kind at " ++
+        "x wrap (port.await) @attempt 'err at 'kind at " ++
+        "x port.close x port.close p 1 9 portprobe.duplex-exchange p port.close portprobe.cleaned", "'cancelled 'cancelled 9 1");
+}
+
+test "native: common exchange failure is repeatable and separate from cleanup" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.duplex-new 'p set p 2 portprobe.start 'x set " ++
+        "x wrap (port.await) @attempt 'err at 'kind at " ++
+        "x wrap (port.await) @attempt 'err at 'kind at " ++
+        "x port.close p port.close portprobe.cleaned", "'domain 'domain 1");
+}
+
+test "native: exactly one concurrent caller claims an exchange result" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.duplex-new 'p set p 1 portprobe.start 'x set " ++
+        "x wrap (port.result) @spawn 'a set x wrap (port.result) @spawn 'b set " ++
+        "a task.await 'ra set b task.await 'rb set " ++
+        "ra 'ok dict.has? rb 'ok dict.has? + " ++
+        "ra 'err dict.has? (ra 'err at 'kind at) (rb 'err at 'kind at) if " ++
+        "x port.await x port.close p port.close portprobe.cleaned", "1 'contract 1");
+}
+
 test "native: independent lanes retain admission capacity under blocked stream pressure" {
     for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.duplex-new 'p set p wrap (3 0 portprobe.duplex-exchange) @spawn 't set " ++
         "1 portprobe.await-blocked p wrap (0 9 portprobe.duplex-exchange) @spawn 'q set " ++

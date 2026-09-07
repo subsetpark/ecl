@@ -497,7 +497,10 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
                 std.Io.Threaded.mutexUnlock(&cell.mutex);
                 callbacks.cancelResource(cell, action);
                 std.Io.Threaded.mutexUnlock(mutex);
-                if (action == .retired) node.release();
+                if (action == .retired) {
+                    callbacks.retireOperation(cell);
+                    node.release();
+                }
             }
         };
         /// A writer owns a turn across incremental calls. All operations derive
@@ -628,6 +631,7 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
             std.Io.Threaded.mutexUnlock(&cell.mutex);
             callbacks.completeResource(cell, completion);
             std.Io.Threaded.mutexUnlock(mutex);
+            callbacks.retireOperation(cell);
             node.release();
             return true;
         }
@@ -752,7 +756,9 @@ test "native: lane ownership outlives released operation observers" {
         fn notify(_: *@This()) void {}
         fn complete(_: *@This(), _: Completion) void {}
     };
-    const Queue = Lane(Operation, .operation, .{ .deinit = Operation.deinit, .runnable = Operation.runnable, .execute = Operation.execute, .notifyOperation = Operation.notify, .completeResource = Operation.complete });
+    const Queue = Lane(Operation, .operation, .{ .deinit = Operation.deinit, .runnable = Operation.runnable, .execute = Operation.execute, .notifyOperation = Operation.notify, .completeResource = Operation.complete, .retireOperation = struct {
+        fn retire(_: *Operation) void {}
+    }.retire });
     var probe: Probe = .{};
     var lane = Queue.init(&probe.mutex);
     var observers: [2]?*Queue.Ticket = .{null} ** 2;

@@ -9,6 +9,7 @@ const controllers = @import("port_controller.zig");
 const transfers = @import("port_transfer.zig");
 const Ring = @import("byte_ring.zig").Ring;
 const Value = @import("value.zig").Value;
+const list = @import("list.zig");
 
 fn io() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
@@ -150,6 +151,7 @@ const Operations = controllers.Lane(Operation, .operation, .{
     .execute = Operation.execute,
     .notifyOperation = Operation.notifyLocked,
     .completeResource = Operation.completeResourceLocked,
+    .retireOperation = Operation.settleScope,
     .cancelPolicy = Operation.cancelPolicy,
     .cancelResource = Operation.cancelResourceLocked,
 });
@@ -316,7 +318,7 @@ pub const Cell = struct {
             _ = lane.runNext();
         }
     }
-    pub fn admit(self: *Cell, code: u32) error{OutOfMemory}!union(enum) { pending, closed, invalid_operation, operation: *Operation } {
+    pub fn admit(self: *Cell, code: u32, scope: *scheduler.TaskScope) error{ OutOfMemory, ScopeClosing }!union(enum) { pending, closed, invalid_operation, operation: Value } {
         const lane = self.definition.select_lane.?(code);
         lock(&self.mutex);
         const closed = self.closed.load(.acquire);
@@ -331,7 +333,21 @@ pub const Cell = struct {
             error.Closed => .closed,
             error.Full => .pending,
         };
-        return .{ .operation = op };
+        lock(&self.owner.mutex);
+        const identity = self.owner.identity;
+        self.owner.identity +%= 1;
+        unlock(&self.owner.mutex);
+        const item = heap.createOwnedPort(Operation, .exchange, self.allocator, identity, op) catch |err| {
+            op.close();
+            op.releaseReadiness();
+            return err;
+        };
+        errdefer {
+            op.close();
+            heap.hostDomain(self.owner.host).releaseValue(item);
+        }
+        try transfers.publishScope(Operation, op, scope, Operation.transferOwnership);
+        return .{ .operation = item };
     }
     const Transfer = transfers.ScopeTransfer(Cell, transferOwnership, transferLive);
     fn transferOwnership(self: *Cell) *external.Ownership {
@@ -364,6 +380,9 @@ pub const Operation = struct {
     response: Ring,
     request_finished: bool = false,
     failure: ?Failure = null,
+    ownership: external.Ownership = .provisional,
+    lifetime: enum { open, closing, closed } = .open,
+    terminal_result: union(enum) { available: Value, claimed },
 
     fn create(cell: *Cell, code: u32, lane: u32) error{ OutOfMemory, Closed, Full }!*Operation {
         const allocator = cell.allocator;
@@ -371,15 +390,17 @@ pub const Operation = struct {
         errdefer allocator.free(request);
         const response = try allocator.alloc(u8, cell.owner.limits.ring_capacity);
         errdefer allocator.free(response);
+        const terminal_value = try list.fromValues(allocator, &.{});
+        errdefer heap.hostDomain(cell.owner.host).releaseValue(terminal_value);
         lock(&cell.mutex);
         defer unlock(&cell.mutex);
         if (cell.closed.load(.acquire)) return error.Closed;
-        const ticket = try cell.lanes[lane].admit(allocator, cell.laneCapacity(lane), .{ cell, code, lane, request, response }, initialize) orelse return error.Full;
+        const ticket = try cell.lanes[lane].admit(allocator, cell.laneCapacity(lane), .{ cell, code, lane, request, response, terminal_value }, initialize) orelse return error.Full;
         cell.changed.broadcast(io());
         return ticket.owner();
     }
-    fn initialize(op: *Operation, ticket: *Operations.Ticket, cell: *Cell, code: u32, lane: u32, request: []u8, response: []u8) void {
-        op.* = .{ .allocator = cell.allocator, .cell = cell, .code = code, .lane = lane, .ticket = ticket, .request = .{ .bytes = request }, .response = .{ .bytes = response } };
+    fn initialize(op: *Operation, ticket: *Operations.Ticket, cell: *Cell, code: u32, lane: u32, request: []u8, response: []u8, terminal_value: Value) void {
+        op.* = .{ .allocator = cell.allocator, .cell = cell, .code = code, .lane = lane, .ticket = ticket, .request = .{ .bytes = request }, .response = .{ .bytes = response }, .terminal_result = .{ .available = terminal_value } };
         cell.retainReadiness();
     }
     fn runnable(self: *Operation) bool {
@@ -389,8 +410,8 @@ pub const Operation = struct {
         var ctx: ControllerContext = .{ .cell = self.cell, .operation = self, .running = running };
         self.cell.definition.execute.?(self.cell.backend.ptr, self.code, &controller_table, &ctx);
     }
-    fn completeResourceLocked(self: *Operation, completion: controllers.Completion) void {
-        if (completion == .close_resource) self.cell.closeLocked();
+    fn completeResourceLocked(self: *Operation, outcome: controllers.Completion) void {
+        if (outcome == .close_resource) self.cell.closeLocked();
         self.cell.waits.notifyLocked(self.cell);
     }
     fn cancelPolicy(self: *Operation) controllers.CallbackCancellation {
@@ -415,7 +436,68 @@ pub const Operation = struct {
     pub fn releaseReadiness(self: *Operation) void {
         self.ticket.release();
     }
+    pub fn releasePort(self: *Operation) void {
+        self.releaseReadiness();
+    }
+    pub fn retainExternalMember(self: *Operation) void {
+        self.retainReadiness();
+    }
+    pub fn releaseExternalMember(self: *Operation) void {
+        self.releaseReadiness();
+    }
+    pub fn cancelExternalMember(self: *Operation) void {
+        self.close();
+    }
+    /// Abort transport and retain scope membership until callback return. The
+    /// lane's post-return hook settles membership outside both lifetime locks.
+    pub fn close(self: *Operation) void {
+        lock(&self.mutex);
+        if (self.lifetime == .open) self.lifetime = .closing;
+        unlock(&self.mutex);
+        self.cancel();
+        self.settleScope();
+    }
+    fn settleScope(self: *Operation) void {
+        lock(&self.mutex);
+        var detached: external.Ownership.Detached = .{};
+        const terminal = switch (self.ticket.status()) {
+            .done, .cancelled => true,
+            .queued, .active, .cancelling, .reusable => false,
+        };
+        if (self.lifetime == .closing and terminal) {
+            self.lifetime = .closed;
+            detached = self.ownership.release();
+            self.notifyLocked();
+        }
+        unlock(&self.mutex);
+        detached.detachAll();
+    }
+    const Transfer = transfers.ScopeTransfer(Operation, transferOwnership, transferLive);
+    fn transferOwnership(self: *Operation) *external.Ownership {
+        return &self.ownership;
+    }
+    fn transferLive(self: *Operation) bool {
+        return self.lifetime == .open;
+    }
+    pub fn prepareScopeTransfer(self: *Operation, from: *anyopaque, to: *anyopaque) heap.PortTransferError!void {
+        return Transfer.prepare(self, from, to);
+    }
+    pub fn commitScopeTransfer(self: *Operation) void {
+        Transfer.commit(self);
+    }
+    pub fn abortScopeTransfer(self: *Operation) void {
+        Transfer.abort(self);
+    }
+    pub fn closed(self: *Operation) bool {
+        lock(&self.mutex);
+        defer unlock(&self.mutex);
+        return self.lifetime == .closed;
+    }
     fn deinit(self: *Operation) void {
+        switch (self.terminal_result) {
+            .available => |item| heap.hostDomain(self.cell.owner.host).releaseValue(item),
+            .claimed => {},
+        }
         self.allocator.free(self.request.bytes);
         self.allocator.free(self.response.bytes);
         self.cell.releasePort();
@@ -424,6 +506,8 @@ pub const Operation = struct {
         return external.WaitList(Operation).register(self, key, target);
     }
     pub fn readyLocked(self: *Operation, key: u64) bool {
+        if (key == 4) return self.lifetime == .closed;
+        if (key == 8) return self.ticket.status() == .done or self.ticket.status() == .cancelled;
         return self.ticket.status() == .done or self.ticket.isCancelled() or
             (key & 1 != 0 and self.response.len != 0) or
             (key & 2 != 0 and !self.request_finished and self.request.free() != 0);
@@ -456,6 +540,33 @@ pub const Operation = struct {
             .cancelling, .reusable, .cancelled => .{ .failed = Failure.init(.io, "native port operation was cancelled") },
         };
     }
+    pub fn completion(self: *Operation) union(enum) { pending, ready, cancelled, failed: Failure } {
+        lock(&self.mutex);
+        defer unlock(&self.mutex);
+        return switch (self.ticket.status()) {
+            .queued, .active, .cancelling, .reusable => .pending,
+            .done => if (self.failure) |failure| .{ .failed = failure } else .ready,
+            .cancelled => .cancelled,
+        };
+    }
+    /// The caller reserves its output capacity before entering this consuming
+    /// transition. Success moves the result; every other outcome retains it.
+    pub fn claimResult(self: *Operation) union(enum) { pending, claimed, value: Value, cancelled, failed: Failure } {
+        lock(&self.mutex);
+        defer unlock(&self.mutex);
+        switch (self.ticket.status()) {
+            .queued, .active, .cancelling, .reusable => return .pending,
+            .cancelled => return .cancelled,
+            .done => {},
+        }
+        if (self.failure) |failure| return .{ .failed = failure };
+        const item = switch (self.terminal_result) {
+            .claimed => return .claimed,
+            .available => |item| item,
+        };
+        self.terminal_result = .claimed;
+        return .{ .value = item };
+    }
     pub fn write(self: *Operation, bytes: []const u8) ?usize {
         lock(&self.mutex);
         defer unlock(&self.mutex);
@@ -480,6 +591,11 @@ pub const Operation = struct {
         unlock(&self.mutex);
     }
 };
+
+pub fn exchangeFromValue(item: Value) ?*Operation {
+    if (item != .port) return null;
+    return heap.portPayload(Operation, .exchange, item.port);
+}
 
 const ControllerContext = struct { cell: *Cell, operation: ?*Operation, running: ?*controllers.Running = null };
 fn context(raw: *anyopaque) *ControllerContext {

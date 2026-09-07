@@ -79,7 +79,7 @@ pub const max_operation_slots = 16;
 pub const max_port_lanes = 16;
 pub const PortCancellation = enum(u32) { close_resource, acknowledge, _ };
 
-pub const PortAction = enum(u32) { create, check, begin, write, finish_request, read, result, wait, close, release, _ };
+pub const PortAction = enum(u32) { create, check, begin, write, finish_request, read, result, wait, close, release, export_exchange, _ };
 pub const PortStatus = enum(u32) { ready, pending, failed, _ };
 pub const PortRequest = extern struct {
     size: u32 = @sizeOf(PortRequest),

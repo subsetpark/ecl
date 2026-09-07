@@ -158,6 +158,24 @@ const Continuation = struct {
     pub fn deinit(_: *State) void {}
 };
 const Schedule = ecl.Reschedule(Continuation);
+fn startExchange(call: *ecl.Call("port code -- exchange"), _: *Schedule, port: *Duplex) ecl.CallbackResult {
+    const code = call.input(1).int() orelse return call.fail(.type, "expected operation code");
+    if (code < 0 or code > 5) return call.fail(.domain, "unknown operation");
+    switch (try port.begin(0, try call.forward(0), @intCast(code))) {
+        .pending => {
+            _ = try port.wait(0, .{});
+            return .yield;
+        },
+        .ready => {},
+        else => return .fail,
+    }
+    _ = try port.finishRequest(0);
+    return switch (try port.exportExchange(0)) {
+        .candidate => |exchange_value| call.complete(.{exchange_value}),
+        .pending => .yield,
+        else => .fail,
+    };
+}
 fn create(call: *ecl.Call("-- port"), _: *Schedule, port: *Counter) ecl.CallbackResult {
     return switch (try port.create(0)) {
         .candidate => |candidate| call.complete(.{candidate}),
@@ -382,6 +400,7 @@ pub const Extension = ecl.module(.{
         ecl.word("unacknowledged-exchange", "Exchange without acknowledging cancellation.", exchangeUnacknowledged),
         ecl.word("unacknowledged-close", "Join unrecoverable cancellation cleanup.", closeUnacknowledged),
         ecl.word("new", "Create a counter port.", create),
+        ecl.word("start", "Return a scope-owned duplex exchange independently of its native call.", startExchange),
         ecl.word("other-new", "Create the other declared port kind.", createOther),
         ecl.word("new-ready-wait", "Observe initialization completed before wait registration.", createReadyWait),
         ecl.word("new-fail", "Fail before publication commits.", createFailure),

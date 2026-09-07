@@ -119,7 +119,7 @@ pub fn Port(comptime Spec: type) type {
                 .pending => .pending,
                 .failed => .failed,
                 .ready => switch (request_value.action) {
-                    .create => .{ .candidate = @enumFromInt(reply.candidate) },
+                    .create, .export_exchange => .{ .candidate = @enumFromInt(reply.candidate) },
                     .read, .write => .{ .bytes = reply.transferred },
                     else => .ready,
                 },
@@ -134,6 +134,12 @@ pub fn Port(comptime Spec: type) type {
         }
         pub fn begin(self: *Self, slot: u32, port: capability.Candidate, operation: u32) error{OutOfMemory}!Progress {
             return self.request(.{ .action = .begin, .definition = self.adapter().definition, .slot = slot, .port = @intFromEnum(port), .operation = operation });
+        }
+        /// Offers an admitted exchange as an ordinary opaque value. Successful
+        /// callback publication preserves scope ownership beyond this call;
+        /// callback failure closes it and joins cancellation through its scope.
+        pub fn exportExchange(self: *Self, slot: u32) error{OutOfMemory}!Progress {
+            return self.request(.{ .action = .export_exchange, .definition = self.adapter().definition, .slot = slot });
         }
         pub fn write(self: *Self, slot: u32, bytes: []const u8) error{OutOfMemory}!Progress {
             return self.request(.{ .action = .write, .definition = self.adapter().definition, .slot = slot, .bytes = @constCast(bytes.ptr), .length = @intCast(@min(bytes.len, 64 * 1024)) });

@@ -548,6 +548,7 @@ test "module sources: formatter and standard modules use @defm" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
     const exports = [_][]const u8{
+        "port.await",
         "task.pending",
         "dict.from-pairs",
         "error.new",

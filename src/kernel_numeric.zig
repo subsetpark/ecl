@@ -1720,7 +1720,7 @@ const NestedTyped = union(enum) {
         return switch (progress) {
             .yielded => null,
             .output => |result| result,
-            .completed, .detached, .failed => unreachable,
+            .completed, .reserved_output, .detached, .failed => unreachable,
         };
     }
 };

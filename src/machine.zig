@@ -2160,6 +2160,7 @@ const TaskJoinCleanup = union(enum) {
 pub const WorkProgress = union(enum) {
     completed,
     output: Value,
+    reserved_output: struct { reservation: StackReservation, value: Value },
     yielded,
     detached,
     failed,
@@ -2194,6 +2195,13 @@ pub const StackReservation = struct {
 
     pub fn complete(self: *const StackReservation) bool {
         return self.remaining == 0;
+    }
+
+    /// Moves one already-reserved output through the evaluator's driver
+    /// completion boundary. No allocation can follow a consuming result claim.
+    pub fn output(self: StackReservation, item: Value) WorkProgress {
+        std.debug.assert(self.remaining == 1);
+        return .{ .reserved_output = .{ .reservation = self, .value = item } };
     }
 };
 
@@ -6727,6 +6735,12 @@ fn loop(self: *Machine) MachineError!RunStatus {
                 .output => |item| {
                     clearWorkDriver(self.unit);
                     try self.pushOwned(item);
+                    continue;
+                },
+                .reserved_output => |reserved| {
+                    clearWorkDriver(self.unit);
+                    var destination = reserved.reservation;
+                    destination.pushOwned(reserved.value);
                     continue;
                 },
                 // The driver destroyed and detached itself before invoking a

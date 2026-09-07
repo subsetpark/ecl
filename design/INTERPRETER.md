@@ -1398,8 +1398,21 @@ kinds select lanes by a bounded, state-independent operation classifier. The
 host partitions the total admission budget across lanes so a saturated lane
 cannot consume another lane's progress capacity. Request and response rings
 separate scheduler execution from controller blocking.
-Operation slots own queues and streams across callback suspension; readiness
+Every admitted native operation has a heap exchange identity and independent
+scope membership. Invocation slots retain those identities across suspension;
+they no longer own raw operation storage. Publishing an exchange as a native
+result preserves its scope ownership beyond callback return. Forwarding shares
+use, while `@give` moves ownership through the same bounded batch protocol as
+resources. Abortive cleanup retains the scope membership until controller
+return, including recovery acknowledgement. The lane's post-return transition
+settles that membership outside both operation and resource locks. Readiness
 registration observes terminal state under the same mutex as notification.
+Completion observation and result ownership are separate: observation remains
+repeatable, while claiming consumes an available terminal value under the
+exchange lock. The receiving evaluator reserves stack capacity before that
+transition, so allocation failure cannot consume a result without publishing it.
+The driver's completion carries that reservation with its owned output; only
+the evaluator commits it after driver retirement, without further allocation.
 
 Closing cancels active and queued work and prevents further admission. Cancelling
 only a queued operation removes that operation. Active cancellation either
