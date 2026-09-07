@@ -1391,6 +1391,12 @@ explicit acknowledgement of reusable state; returning without it closes every
 lane. Close overrides recovery and interrupts all active streams. Lane executors
 are joined before controller cleanup, and the root controller is joined before
 scope detachment.
+The internal port executor owns typed jobs and their execution guards. Its
+retirement queue accepts only completed jobs and joins each before invoking its
+retirement callback; a blocked backend cannot hold up another job's retirement.
+Retirement callbacks perform bounded release and never wait for other jobs.
+Executor shutdown closes admission and joins the reaper after all callbacks
+have returned. The native byte ABI adapts onto this internal execution boundary.
 The resource owner joins completed controllers outside ECL workers, so scope
 teardown can await cleanup without blocking a worker. Closed heap identities retain
 their module pin independently of backend cleanup. Session shutdown closes creation,
