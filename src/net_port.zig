@@ -193,6 +193,7 @@ const OwnedPolicy = struct {
 /// writes wake bytes. No path takes a listener mutex while holding a
 /// connection cell mutex.
 pub const NetOwner = struct {
+    instance: *@import("builtin_port.zig").Instance,
     allocator: std.mem.Allocator,
     io: std.Io,
     policy: OwnedPolicy,
@@ -211,7 +212,10 @@ pub const NetOwner = struct {
         const capacity = std.math.add(usize, jobs, 1) catch return error.InvalidPolicy;
         var owned_policy = try OwnedPolicy.init(allocator, policy);
         errdefer owned_policy.deinit(allocator);
+        const instance = try @import("builtin_port.zig").Instance.create(allocator, .network);
+        errdefer instance.release();
         return .{
+            .instance = instance,
             .allocator = allocator,
             .io = io,
             .policy = owned_policy,
@@ -221,6 +225,7 @@ pub const NetOwner = struct {
 
     pub fn deinit(self: *NetOwner) void {
         self.executor.deinit();
+        self.instance.release();
         std.debug.assert(self.live.load(.acquire) == 0);
         std.debug.assert(self.live_connections.load(.acquire) == 0);
         std.debug.assert(self.acceptors_first == null);
@@ -1472,6 +1477,11 @@ pub fn listenFromUnit(
     const runtime_scheduler: *const scheduler_api.WorkerScheduler = @ptrCast(@alignCast(scheduler_erased));
     const scope: *scheduler_api.TaskScope = @ptrCast(@alignCast(scope_erased));
     return ownerFromAccess(access_value).listen(runtime_scheduler, scope, address);
+}
+
+/// Borrow the library identity already owned by the Session's network service.
+pub fn registeredInstance(access_value: *external.NetAccess) *@import("builtin_port.zig").Instance {
+    return ownerFromAccess(access_value).instance;
 }
 
 /// `ListenerCell.pollAccept` for callers holding the unit's type-erased

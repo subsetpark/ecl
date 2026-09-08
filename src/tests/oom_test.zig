@@ -982,7 +982,7 @@ fn stdlibSessionAllocationProbe(
             "oom-net.ecl",
             // One granted bind read back and closed twice, one denied port,
             // and one listener released by its child scope.
-            "{'address \"127.0.0.1\" 'port 0} net.listen dup net.local-address pop " ++
+            "net.core.listener {'address \"127.0.0.1\" 'port 0} port.open dup net.local-address pop " ++
                 "dup net.close net.close " ++
                 "[] ({'address \"127.0.0.1\" 'port 1} net.listen) @attempt pop " ++
                 "[] ({'address \"127.0.0.1\" 'port 0} net.listen net.local-address) @spawn task.await pop",
@@ -1062,7 +1062,7 @@ fn stdlibSessionAllocationProbe(
             const process_source = try std.fmt.allocPrint(
                 scaffold_allocator,
                 "'proc ('spawn 'run) import " ++
-                    "{{'executable \"{s}\" 'args (\"block\")}} spawn pop " ++
+                    "proc.core.process {{'executable \"{s}\" 'args (\"block\")}} port.open pop " ++
                     "{{'executable \"/definitely/not/allowed\" " ++
                     "'args (\"one\" \"two\") 'cwd \"/\" " ++
                     "'env {{\"ECL_OOM_PROCESS\" \"probe\"}} 'stdin [0 1 255 2] " ++

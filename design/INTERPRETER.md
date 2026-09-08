@@ -727,6 +727,12 @@ Consuming APIs state what happens on every exit. An owned input is moved into a
 driver, returned to the caller, or retired, making append and publication
 ownership exact under failure.
 
+A driver replacement prepares its successor with independent input ownership
+before retiring the installed continuation. Installation then cannot fail.
+The driver's declared storage policy selects retirement at compile time:
+only inline-capable field-owned drivers can release an inline slot, while
+address-stable self-owned drivers retire their complete allocated state.
+
 ### Boundedness includes retirement
 
 Reclamation competes for scheduler service like evaluation. Final references
@@ -1316,6 +1322,15 @@ metadata directly; primitive families own their declarations, and kernel
 spellings remain owned by their closed operation enums. The source audit
 checks semantic spelling conventions across all classified production sources;
 documentation completeness and effect syntax are compile-time requirements.
+
+Each granted Session service owns its registered library instance. A library
+loaded without a grant owns an inert instance with no host authority.
+A module candidate publishes sealed capabilities as literal word
+bodies and pins its instance until publication or abandonment. Capability
+values retain that identity independently of service cleanup. Factories check
+the issuing instance before entering their typed backend; configuration
+validation and output reservation precede resource publication. Built-in
+controllers do not pass through the extension ABI.
 
 Package discovery and synchronization are
 described in `ENVIRONMENT.md`; they enter the evaluator through the same module

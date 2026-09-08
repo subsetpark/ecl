@@ -14,6 +14,7 @@ const messages = @import("../port_messages.zig");
 const dict = @import("../dict.zig");
 const intern = @import("../intern.zig");
 const Resource = @import("../port_resource.zig").Resource;
+const builtin = @import("../builtin_port.zig");
 
 pub const words = [_]env.BuiltinWord{
     .{ .name = "open", .doc = "( factory config -- resource ) Initialize a registered resource in the calling scope.", .primitive = open },
@@ -243,11 +244,14 @@ fn startRequest(evaluator: *machine.Machine, comptime role: @import("../value.zi
     defer input.deinit();
     var capability = try evaluator.popValue();
     defer capability.deinit();
-    const registered = native.registeredCapability(capability.borrow(), role) orelse return evaluator.typeError(if (role == .factory) "a factory" else "an operation selector");
+    const registered = native.registeredCapability(capability.borrow(), role);
+    const builtin_factory = if (role == .factory) builtin.Factory.fromValue(capability.borrow()) else null;
+    if (registered == null and builtin_factory == null)
+        return evaluator.typeError(if (role == .factory) "a factory" else "an operation selector");
     var resource: ?heap.OwnedValue = if (role == .operation_selector) try evaluator.popValue() else null;
     defer if (resource) |*owned| owned.deinit();
     if (resource) |owned| {
-        _ = native.fromValue(owned.borrow(), registered.instance(), registered.definition().resource()) orelse
+        _ = native.fromValue(owned.borrow(), registered.?.instance(), registered.?.definition().resource()) orelse
             return evaluator.typeError("a resource of the selector's issuing kind");
     }
     const driver = try evaluator.allocator().create(Request);
@@ -255,7 +259,12 @@ fn startRequest(evaluator: *machine.Machine, comptime role: @import("../value.zi
     const validated = try message.Message.create(evaluator.allocator(), input.borrow(), .{});
     driver.* = .{
         .capability = capability.take(),
-        .resource = if (resource) |*owned| owned.take() else null,
+        .kind = if (resource) |*owned|
+            .{ .operation = .{ .resource = owned.take(), .selector = registered.? } }
+        else if (builtin_factory) |factory|
+            .{ .builtin_factory = factory }
+        else
+            .{ .native_factory = registered.? },
         .message = validated,
     };
     evaluator.adoptDriver(driver);
@@ -265,7 +274,11 @@ const Request = struct {
     pub const address_stable_driver = {};
     pub const ownership: heap.DriverOwnership = .self_owned;
     capability: Value,
-    resource: ?Value,
+    kind: union(enum) {
+        native_factory: *native.RegisteredCapability,
+        builtin_factory: *builtin.Factory,
+        operation: struct { resource: Value, selector: *native.RegisteredCapability },
+    },
     message: *message.Message,
     state: union(enum) { validating, ready, opening: Value, consumed } = .validating,
 
@@ -279,7 +292,10 @@ const Request = struct {
         }
         self.message.retire(releases);
         releases.releaseValue(self.capability);
-        if (self.resource) |item| releases.releaseValue(item);
+        switch (self.kind) {
+            .operation => |operation| releases.releaseValue(operation.resource),
+            .native_factory, .builtin_factory => {},
+        }
     }
 
     pub fn advance(evaluator: *machine.Machine, self: *Request) machine.MachineError!machine.WorkProgress {
@@ -311,33 +327,51 @@ const Request = struct {
             }
         }
         const scope = try callingScope(evaluator);
-        if (self.resource) |item| {
-            const capability = native.registeredCapability(self.capability, .operation_selector).?;
-            const operation = capability.definition().operation;
-            const cell = native.fromValue(item, capability.instance(), operation.resource).?;
-            const output = try evaluator.reserveStack(1);
-            switch (cell.admitOnLane(operation.code, operation.lane, operation.endpoints, scope, self.message.validated().?) catch |err| return switch (err) {
-                error.OutOfMemory => error.OutOfMemory,
-                error.ScopeClosing => evaluator.fail(.cancelled, "port scope is closing"),
-            }) {
-                .operation => |exchange| {
-                    self.state = .consumed;
-                    return output.output(exchange);
-                },
-                .pending => try evaluator.park(.{ .external = cell.source(2 + @as(u64, operation.lane)) }),
-                .closed => return evaluator.fail(.io, "resource is closed"),
-                .invalid_operation => return evaluator.fail(.domain, "operation lane is unavailable"),
-            }
-        } else {
-            const capability = native.registeredCapability(self.capability, .factory).?;
-            const instance = capability.instance();
-            const item = instance.portAccess().createConfigured(instance, capability.definition().factory, scope, self.message.validated().?) catch |err| return switch (err) {
-                error.OutOfMemory => error.OutOfMemory,
-                error.Limit, error.InsufficientLanes => evaluator.fail(.domain, "port resource capacity is exhausted"),
-                error.Closed, error.Io => evaluator.fail(.io, "port resource creation failed"),
-                error.ScopeClosing => evaluator.fail(.cancelled, "port scope is closing"),
-            };
-            self.state = .{ .opening = item };
+        switch (self.kind) {
+            .operation => |request| {
+                const capability = request.selector;
+                const operation = capability.definition().operation;
+                const cell = native.fromValue(request.resource, capability.instance(), operation.resource).?;
+                const output = try evaluator.reserveStack(1);
+                switch (cell.admitOnLane(operation.code, operation.lane, operation.endpoints, scope, self.message.validated().?) catch |err| return switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    error.ScopeClosing => evaluator.fail(.cancelled, "port scope is closing"),
+                }) {
+                    .operation => |exchange| {
+                        self.state = .consumed;
+                        return output.output(exchange);
+                    },
+                    .pending => try evaluator.park(.{ .external = cell.source(2 + @as(u64, operation.lane)) }),
+                    .closed => return evaluator.fail(.io, "resource is closed"),
+                    .invalid_operation => return evaluator.fail(.domain, "operation lane is unavailable"),
+                }
+            },
+            .native_factory => |capability| {
+                const instance = capability.instance();
+                const item = instance.portAccess().createConfigured(instance, capability.definition().factory, scope, self.message.validated().?) catch |err| return switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    error.Limit, error.InsufficientLanes => evaluator.fail(.domain, "port resource capacity is exhausted"),
+                    error.Closed, error.Io => evaluator.fail(.io, "port resource creation failed"),
+                    error.ScopeClosing => evaluator.fail(.cancelled, "port scope is closing"),
+                };
+                self.state = .{ .opening = item };
+            },
+            .builtin_factory => |factory| {
+                switch (factory.kind()) {
+                    .listener => {
+                        const output = try evaluator.reserveStack(1);
+                        const item = try @import("net.zig").openRegistered(evaluator, self.message.validated().?.value(), factory.instance());
+                        self.state = .consumed;
+                        return output.output(item);
+                    },
+                    .process => {
+                        const next = try @import("proc.zig").prepareRegistered(evaluator, self.message.validated().?.value(), factory.instance());
+                        evaluator.retireDriver(self);
+                        next.install(evaluator);
+                        return .detached;
+                    },
+                }
+            },
         }
         return .yielded;
     }

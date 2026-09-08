@@ -167,6 +167,36 @@ test "net: a Session without a listen policy denies listen before the host is re
     });
 }
 
+test "net: registered listener factories preserve identity and enforce host grants" {
+    try expectStack(.{}, "net.core.listener dup type swap net.core.listener match?", "'port 1");
+    try expectStack(.{}, "[] (net.core.listener {'address \"127.0.0.1\" 'port 0} port.open) @attempt 'err at " ++
+        "dup 'kind at swap 'data at 'reason at", "'domain 'unavailable");
+    try expectStack(.{ .net = loopback_ephemeral }, "[] (net.core.listener {'address \"127.0.0.1\" 'port 1} port.open) @attempt 'err at " ++
+        "dup 'kind at swap 'data at 'reason at", "'domain 'denied");
+}
+
+test "net: common factory resources retain scope ownership and joined cleanup" {
+    for ([_]u32{ 1, 8 }) |workers| {
+        var runtime: Runtime = .{};
+        try runtime.open(.{ .net = loopback_ephemeral }, .{ .worker_pool = workers });
+        defer runtime.close();
+        try runtime.run("net.core.listener {'address \"127.0.0.1\" 'port 0} port.open 'l set " ++
+            "l net.local-address 'port at 0 > " ++
+            "l wrap [] (port.shutdown) @give task.await 'ok at len " ++
+            "l wrap (net.local-address) @attempt 'err at 'kind at " ++
+            "l port.close l port.shutdown " ++
+            "[] (net.core.listener {'address \"127.0.0.1\" 'port 0} port.open) @spawn " ++
+            "task.await 'ok at first dup type swap wrap (net.local-address) @attempt 'err at 'kind at");
+        try runtime.expectDisplay("1 0 'io 'port 'io");
+    }
+}
+
+test "net: common factories validate structured bounds before opening a resource" {
+    try expectStack(.{ .net = loopback_ephemeral }, "[] (net.core.listener (dup) port.open) @attempt 'err at 'kind at " ++
+        "[] (net.core.listener [0] 4097 take port.open) @attempt 'err at 'kind at " ++
+        "[] (0 net.core.listener [] port.begin) @attempt 'err at 'kind at", "'type 'overflow 'type");
+}
+
 test "net: policy validation is a distinct Session construction failure" {
     const invalid = [_]Policy{
         .{ .binds = .{ .exact = &.{.{ .address = "localhost", .port = 0 }} } },

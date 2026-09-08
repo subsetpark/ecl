@@ -241,12 +241,27 @@ fn readConfig(evaluator: *Machine, item: Value) MachineError!Config {
 fn listen(evaluator: *Machine) MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
-    const config = try readConfig(evaluator, item.borrow());
+    var output = try evaluator.reserveStack(1);
+    output.pushOwned(try openListener(evaluator, item.borrow()));
+}
+
+/// The common factory retains its sealed issuer while this typed backend
+/// initializes. No native ABI encoding or interpreter callback is involved.
+pub fn openRegistered(evaluator: *Machine, input: Value, instance: *@import("../builtin_port.zig").Instance) MachineError!Value {
+    if (evaluator.unit.inherited.net_access) |access| {
+        if (net_port.registeredInstance(access) != instance)
+            return evaluator.typeError("a factory issued by this network library instance");
+    }
+    return openListener(evaluator, input);
+}
+
+fn openListener(evaluator: *Machine, input: Value) MachineError!Value {
+    const config = try readConfig(evaluator, input);
     const parsed = net_port.parseLiteral(config.address(), config.port) catch
         return failNet(evaluator, .domain, "net.listen 'address is not an IP literal", config.address_value, config.port_value, .invalid);
     const access = evaluator.unit.inherited.net_access orelse
         return failNet(evaluator, .domain, "listening is unavailable in this session", config.address_value, config.port_value, .unavailable);
-    const port = net_port.listenFromUnit(
+    return net_port.listenFromUnit(
         access,
         evaluator.unit.scheduler.?,
         evaluator.unit.task_scope.?,
@@ -262,10 +277,6 @@ fn listen(evaluator: *Machine) MachineError!void {
         error.AddressUnavailable => failNet(evaluator, .io, "address is not available on this host", config.address_value, config.port_value, .unavailable),
         error.Resources => failNet(evaluator, .io, "host lacks resources to listen", config.address_value, config.port_value, .resources),
         error.Io => failNet(evaluator, .io, "could not listen", config.address_value, config.port_value, .io),
-    };
-    evaluator.pushOwned(port) catch |err| {
-        evaluator.releaseDomain().releaseValue(port);
-        return err;
     };
 }
 

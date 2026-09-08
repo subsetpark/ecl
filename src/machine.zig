@@ -3275,10 +3275,13 @@ pub const Machine = struct {
     /// than `heap.destroyDriver`, which would hand slot memory to the
     /// allocator.
     pub fn finishDriver(self: *Machine, driver: anytype) void {
-        if (self.unit.ownsInlineDriver(driver)) {
-            heap.deinitDriverFields(self.unit.releases, self.unit.allocator, driver);
-            self.unit.releaseInlineDriver();
-            return;
+        const Driver = @typeInfo(@TypeOf(driver)).pointer.child;
+        if (comptime inlineDriverCapable(Driver)) {
+            if (self.unit.ownsInlineDriver(driver)) {
+                heap.deinitDriverFields(self.unit.releases, self.unit.allocator, driver);
+                self.unit.releaseInlineDriver();
+                return;
+            }
         }
         heap.destroyDriver(self.unit.releases, self.unit.allocator, driver);
     }
@@ -3666,7 +3669,7 @@ pub const Machine = struct {
         ) error{OutOfMemory}!void {
             const provenance = switch (entry) {
                 .source => |source| source.name,
-                .native, .builtin => intern.get(intern.moduleId(self.name)),
+                .native, .builtin, .registered_builtin => intern.get(intern.moduleId(self.name)),
             };
             var candidate = heap.Owned([]u8).init(try evaluator.unit.allocator.dupe(u8, provenance));
             const materializer = kernel_storage.Utf8Materializer.init(
@@ -4191,7 +4194,7 @@ pub const Machine = struct {
             const text = switch (entry) {
                 .source => |source| try evaluator.unit.allocator.dupe(u8, source.text),
                 .native => |descriptor| return self.transferStatic(evaluator, transfer, descriptor),
-                .builtin => |words| return self.transferBuiltin(evaluator, transfer, words),
+                .builtin, .registered_builtin => return self.transferBuiltin(evaluator, transfer, entry),
             };
             const source_name = transfer.candidate.take();
             const completion = self.sourceCompletion(transfer, .standard_library, null);
@@ -4203,15 +4206,32 @@ pub const Machine = struct {
             self: *AutoLoadDriver,
             evaluator: *Machine,
             transfer: *@FieldType(State, "transfer"),
-            words: []const env.BuiltinWord,
+            entry: stdlib.Entry,
         ) MachineError!WorkProgress {
             // The candidate is created before ownership moves: struct-literal
             // fields evaluate in order, so a failure here would otherwise
             // strand the lease and path this driver had already taken.
-            const publication = try modules.Registry.BuiltinCandidateCursor.init(
-                evaluator.unit.inherited.registry.?,
-                words,
-            );
+            const registry = evaluator.unit.inherited.registry.?;
+            const publication = switch (entry) {
+                .builtin => |words| try modules.Registry.BuiltinCandidateCursor.init(registry, words),
+                .registered_builtin => |library| registered: {
+                    const instance = switch (library) {
+                        .network => if (evaluator.unit.inherited.net_access) |access| retained: {
+                            const issuer = @import("net_port.zig").registeredInstance(access);
+                            issuer.retain();
+                            break :retained issuer;
+                        } else try @import("builtin_port.zig").Instance.create(evaluator.allocator(), library),
+                        .process => if (evaluator.unit.inherited.process_access) |access| retained: {
+                            const issuer = @import("process_port.zig").registeredInstance(access);
+                            issuer.retain();
+                            break :retained issuer;
+                        } else try @import("builtin_port.zig").Instance.create(evaluator.allocator(), library),
+                    };
+                    defer instance.release();
+                    break :registered try modules.Registry.BuiltinCandidateCursor.initRegistered(registry, instance);
+                },
+                .source, .native => unreachable,
+            };
             // No errdefer: from here nothing fails until `startDriver`, which
             // disposes the whole uninstalled driver's owned fields itself.
             const next = BuiltinLoadDriver{

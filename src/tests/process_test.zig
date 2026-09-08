@@ -118,6 +118,48 @@ test "process: port values are opaque identity capabilities" {
     );
 }
 
+test "process: registered factories preserve identity and reject unavailable authority" {
+    try expectStack("proc.core.process dup type swap proc.core.process match?", null, "'port 1");
+    try expectStack("[] (proc.core.process {} port.open) @attempt 'err at 'kind at " ++
+        "[] (proc.core.process (dup) port.open) @attempt 'err at 'kind at " ++
+        "[] (proc.core.process [0] 4097 take port.open) @attempt 'err at 'kind at", null, "'domain 'type 'overflow");
+}
+
+test "process: common factories preserve byte streams and repeatable termination" {
+    const fixture_path = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, fixture.process_exe, allocator);
+    defer allocator.free(fixture_path);
+    const program = try source(
+        "proc.core.process {{'executable \"{s}\" 'args (\"echo\")}} port.open 'p set " ++
+            "p [0 1 255] proc.write p proc.close-input " ++
+            "p 1 proc.read-stdout p 1 proc.read-stdout p 1 proc.read-stdout " ++
+            "p proc.wait 'code at p proc.wait 'code at p port.close p port.close p type",
+        .{fixture_path},
+    );
+    defer allocator.free(program);
+    for ([_]u32{ 1, 8 }) |workers| try expectStackWithWorkers(program, .{
+        .executables = .{ .exact = &.{fixture_path} },
+        .stdin_capacity = 1,
+        .stdout_capacity = 1,
+    }, "[0] [1] [255] 0 0 'port", workers);
+}
+
+test "process: common factories transfer owners and clean resources returned by closed scopes" {
+    const fixture_path = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, fixture.process_exe, allocator);
+    defer allocator.free(fixture_path);
+    const program = try source(
+        "proc.core.process {{'executable \"{s}\" 'args (\"block\")}} port.open 'p set " ++
+            "p wrap [] (port.close) @give task.await 'ok at len p proc.wait 'kind at " ++
+            "[] (proc.core.process {{'executable \"{s}\" 'args (\"block\")}} port.open) @spawn " ++
+            "task.await 'ok at first dup type swap proc.wait 'kind at",
+        .{ fixture_path, fixture_path },
+    );
+    defer allocator.free(program);
+    for ([_]u32{ 1, 8 }) |workers| try expectStackWithWorkers(program, .{
+        .executables = .{ .exact = &.{fixture_path} },
+        .max_live_ports = 1,
+    }, "0 'signaled 'port 'signaled", workers);
+}
+
 test "process: shared port operations linearize and converge" {
     const fixture_path = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, fixture.process_exe, allocator);
     defer allocator.free(fixture_path);

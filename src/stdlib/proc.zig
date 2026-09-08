@@ -88,8 +88,31 @@ fn run(evaluator: *Machine) MachineError!void {
 
 fn beginSpec(evaluator: *Machine, mode: SpecDriver.Mode) MachineError!void {
     var spec = try evaluator.popValue();
-    errdefer spec.deinit();
-    if (spec.borrow() != .dict) return evaluator.typeError("a process specification dict");
+    defer spec.deinit();
+    evaluator.adoptDriver(try prepareSpec(evaluator, mode, spec.borrow()));
+}
+
+/// A fully initialized successor owns its specification independently of the
+/// common request driver. Installation consumes it without another allocation.
+pub const PreparedSpawn = opaque {
+    pub fn install(self: *PreparedSpawn, evaluator: *Machine) void {
+        const driver: *SpecDriver = @ptrCast(@alignCast(self));
+        evaluator.adoptDriver(driver);
+    }
+};
+
+/// Borrows the specification and issuer on both outcomes. Success returns a
+/// successor that must be installed after retiring the caller's continuation.
+pub fn prepareRegistered(evaluator: *Machine, spec: Value, instance: *@import("../builtin_port.zig").Instance) MachineError!*PreparedSpawn {
+    if (evaluator.unit.inherited.process_access) |access| {
+        if (process.registeredInstance(access) != instance)
+            return evaluator.typeError("a factory issued by this process library instance");
+    }
+    return @ptrCast(try prepareSpec(evaluator, .spawn, spec));
+}
+
+fn prepareSpec(evaluator: *Machine, mode: SpecDriver.Mode, spec: Value) MachineError!*SpecDriver {
+    if (spec != .dict) return evaluator.typeError("a process specification dict");
     const access = evaluator.unit.inherited.process_access orelse
         return evaluator.fail(.domain, "process creation is unavailable");
     const driver = try evaluator.allocator().create(SpecDriver);
@@ -101,9 +124,10 @@ fn beginSpec(evaluator: *Machine, mode: SpecDriver.Mode) MachineError!void {
         .access = access,
         .mode = mode,
         .keys = keys,
-        .spec_value = spec.take(),
+        .spec_value = spec,
     };
-    evaluator.adoptDriver(driver);
+    heap.retainValue(spec);
+    return driver;
 }
 
 const Range = struct { start: usize, len: usize };
@@ -421,6 +445,7 @@ const SpecDriver = struct {
             .name = self.slice(entry.name),
             .value = self.slice(entry.value),
         };
+        const output = if (self.mode == .spawn) try evaluator.reserveStack(1) else null;
         const port = process.spawnFromUnit(
             self.access,
             evaluator.unit.scheduler.?,
@@ -435,7 +460,7 @@ const SpecDriver = struct {
         if (self.mode == .spawn) {
             self.releases.releaseValue(self.spec_value.?);
             self.spec_value = null;
-            return .{ .output = port };
+            return output.?.output(port);
         }
         self.port_value = port;
         const cell = process.fromValue(port).?;

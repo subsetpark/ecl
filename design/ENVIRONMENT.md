@@ -16,10 +16,15 @@ Every module listed in `STDLIB.md` ships inside the `ecl` binary. Embedded
 modules load lazily at the first qualified reference or import. Loading needs
 no filesystem access and works with no `ECL_PATH`.
 
-Embedded modules use ECL source, linked native descriptors, or builtin word
-tables. The transport is an implementation property. All three publish
-ordinary module images and participate in registration, aliases, imports,
+Embedded modules use ECL source, linked native descriptors, builtin word
+tables, or registered built-in capabilities. The transport is an implementation
+property. Each publishes
+ordinary module images and participates in registration, aliases, imports,
 reflection, and shadowing through the same language operations.
+
+`net.core.listener` and `proc.core.process` export the built-in factories used
+by `port.open`. Their modules load without host grants; opening a resource
+still requires the Session's corresponding network or process authority.
 
 Embedded names have precedence over filesystem modules. A file on `ECL_PATH`
 cannot replace an embedded module during automatic loading. A program may

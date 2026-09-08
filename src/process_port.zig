@@ -217,6 +217,7 @@ const OwnedEnvironment = struct {
 /// Session-owned authority and immutable ambient inputs. Units never receive
 /// this owner directly; Patch 4 installs a narrow opaque access facade.
 pub const ProcessOwner = struct {
+    instance: *@import("builtin_port.zig").Instance,
     allocator: std.mem.Allocator,
     io: std.Io,
     policy: OwnedPolicy,
@@ -252,7 +253,10 @@ pub const ProcessOwner = struct {
             environment,
         );
         errdefer owned_environment.deinit(allocator);
+        const instance = try @import("builtin_port.zig").Instance.create(allocator, .process);
+        errdefer instance.release();
         return .{
+            .instance = instance,
             .allocator = allocator,
             .io = io,
             .executor = try controllers.Owner.init(allocator, capacity),
@@ -263,6 +267,7 @@ pub const ProcessOwner = struct {
 
     pub fn deinit(self: *ProcessOwner) void {
         self.executor.deinit();
+        self.instance.release();
         std.debug.assert(self.live.load(.acquire) == 0);
         self.environment.deinit(self.allocator);
         self.policy.deinit(self.allocator);
@@ -371,6 +376,11 @@ pub fn spawnFromUnit(
 
 pub fn stdoutCaptureLimit(access_value: *external.ProcessAccess) usize {
     return ownerFromAccess(access_value).stdoutCaptureLimit();
+}
+
+/// Borrow the library identity already owned by the Session's process service.
+pub fn registeredInstance(access_value: *external.ProcessAccess) *@import("builtin_port.zig").Instance {
+    return ownerFromAccess(access_value).instance;
 }
 
 pub fn stderrCaptureLimit(access_value: *external.ProcessAccess) usize {

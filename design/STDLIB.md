@@ -2229,6 +2229,12 @@ of address and port pairs, a maximum number of live listeners, the kernel
 accept backlog, a maximum number of live connections (default 64), and the
 receive and send capacities of each connection (default 64 KiB each).
 
+`net.core.listener` is the registered listener factory. Applying `port.open`
+to it and a listen configuration creates the same scope-owned listener as
+`net.listen`, subject to the common structured-value limits. The returned
+resource supports `net.accept`, address inspection, `port.shutdown`, and
+`port.close`. Retaining the factory grants no additional host authority.
+
 A listen configuration is a dictionary with exactly these fields:
 
 - required `'address`: a string holding an IPv4 or IPv6 literal; and
@@ -2473,6 +2479,12 @@ but process creation is `'domain` unless the Session host supplied process
 authority. The CLI supplies an explicit unrestricted policy; embedding hosts
 default to none and may restrict exact executable paths, working directories,
 environment inheritance, live ports, queue sizes, and run-capture sizes.
+
+`proc.core.process` is the registered process factory. Applying `port.open`
+to it and a spawn specification creates a process resource subject to the
+common structured-value limits and the same host policy as `proc.spawn`.
+The returned resource supports the process words and common lifecycle words;
+retaining the factory grants no additional host authority.
 
 A spawn specification is a dictionary with exactly these fields:
 
