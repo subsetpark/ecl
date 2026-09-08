@@ -261,6 +261,7 @@ cannot be replaced accidentally by a file with the same name.
 | `csv`, `json` | External data formats |
 | `table` | Column-oriented tables represented as ordinary dictionaries |
 | `http` | HTTP GET and POST |
+| `port` | Common resource, exchange, byte-stream, and structured-message capabilities |
 | `proc` | Capability-gated subprocess ports and bounded process execution |
 | `net` | Capability-gated TCP listeners and connections with scope-owned sockets |
 | `http.server` | Bounded HTTP/1.1 serving over `net` listeners |
@@ -278,6 +279,11 @@ ecl "[['a 1] ['b 2]] dict.from-pairs"     # {'a 1 'b 2}
 ecl '"a,b\nc,d" csv.parse'                 # (("a" "b") ("c" "d"))
 ecl '"{\"a\":[1,null]}" json.parse'       # {"a" (1 'null)}
 ```
+
+The `net` and `proc` words are ECL compositions over registered capabilities
+and `port.*`. First-party resources and ABI v4 extensions share controller
+execution, ownership, cancellation, and cleanup. See the
+[common port examples and conformance guide](examples/PORTS.md).
 
 Subprocesses use BEAM-style opaque ports rather than PIDs. The CLI grants an
 explicit process capability; library Sessions deny it unless their Host opts

@@ -1268,11 +1268,12 @@ response before writing it, which the source audit holds to that one call
 site. Malformed response values stay ordinary data; malformed wire output is
 unreachable.
 
-`proc` is a builtin for the same reason as other host-backed modules: process
-creation and pipe readiness require authority and representation ECL source
-cannot possess. Its public values remain ordinary dictionaries, byte lists,
-and opaque ports. The convenience `run` word is a client of the same controller
-as streaming ports; it is not a blocking second implementation.
+`net` and `proc` are ECL modules over registered factory, operation, and endpoint
+capabilities. Their adapters own host authority and typed socket or process
+state. Public words create resources and exchanges through the common vocabulary.
+The process `run` composition owns a child scope, drains both outputs alongside
+input and completion tasks, applies bounded capture and an optional task deadline,
+and joins that scope before returning or raising an error.
 
 ### The native ABI is narrow and transactional
 
@@ -1302,8 +1303,7 @@ heap representation and is checked together with backend identity before payload
 projection. Only resource and exchange roles carry scope-transfer authority;
 borrowed roles retain permitted use and issuer lifetime without acquiring an
 independent scope membership. Their constructors cannot supply transfer hooks.
-The existing network, process, and native resource producers use the owning
-resource constructor.
+All resource producers use the owning resource constructor.
 
 The structured-message validation boundary retains an immutable root while a
 resumable traversal checks each occurrence. Its opaque handle exposes a value
@@ -1313,8 +1313,8 @@ attachments have independent budgets. Repeated references are charged at every
 occurrence, so shared aggregate storage cannot bypass transport limits. Failed
 validation is terminal, and retirement enqueues both the root and traversal
 storage without walking the input synchronously. Validation grants no scope
-publication or ownership-transfer authority. This boundary is preparatory;
-the current invocation-slot transport below still uses byte rings.
+publication or ownership-transfer authority. Initial requests, messages, and
+terminal results all cross this boundary before delivery.
 
 Native port definitions are copied and validated with the module descriptor.
 Their identity is the pinned module instance and validated definition index;
@@ -1327,10 +1327,10 @@ validated resource kinds, fixed operation lanes, and endpoint permissions;
 registration rejects duplicate endpoint identities and undeclared permissions
 before publishing any binding.
 
-Resource lifecycle dispatch uses a closed, typed backend union
+Resource lifecycle dispatch uses an opaque registered semantic interface
 (`port_resource.zig`). A borrowed lifecycle capability requires a retained port
-identity throughout its use. Native resources, TCP listeners and connections,
-and processes report joined cleanup through their owning controller state.
+identity throughout its use. Each adapter reports joined cleanup through the
+common controller service.
 Connection cleanup readiness is distinct from send-ring drainage: returning the
 last accepted byte to the kernel does not prove the socket controller has joined.
 Common close and shutdown drivers park on cleanup readiness for every backend.
@@ -1457,7 +1457,7 @@ transition, so allocation failure cannot consume a result without publishing it.
 The driver's completion carries that reservation with its owned output; only
 the evaluator commits it after driver retirement, without further allocation.
 
-An external-child scope owns provisional native resources and separately
+An external-child scope owns provisional resources and separately
 represents permanent parent dependencies. It admits only external members and
 queues the scheduler's bounded cancellation cursor; native controllers cannot
 use it to re-enter ECL. Closing pins its parent until every child's final
@@ -1490,9 +1490,9 @@ quiescence, but cannot require scheduler access for destruction.
 
 Validated roots carry a bounded attachment index. Results and queued messages
 retain that index with their immutable root. The common resource boundary owns
-their publication protocol; a closed backend union projects only resource kinds
-that can create provisional children. Already published built-in resources
-remain shared uses when carried by a native message or result.
+their publication protocol. Only a resource registered with provisional ownership
+support grants the ownership projection needed for atomic publication. Already published
+resources remain shared uses when carried by a message or result.
 Claims snapshot unpublished child
 identities, prepare destination memberships outside locks, and revalidate under
 the receiving scope, source, provisional scopes, and child locks. Scope and
@@ -1553,9 +1553,8 @@ resource lock, while membership publication and backend startup revalidation
 use that lock. The creator retains the provisional cell until publication or
 backend rollback completes.
 
-Native ports, network connections, and processes bind scope ownership and
-terminal publication to a runtime-owned activity group. Its provisional state
-owns startup rollback; successful submission transfers the root into the
+All registered resources bind scope ownership and terminal publication to a
+runtime-owned activity group. Its provisional state owns startup rollback; successful submission transfers the root into the
 executor. Draining owns the root outcome and every outstanding activity until
 all jobs have joined and all borrowed callbacks have returned. Only that
 transition can publish terminal facts, drop the group's execution pin, and

@@ -25,8 +25,11 @@ reflection, and shadowing through the same language operations.
 `net.core.listener` and `proc.core.process` export the built-in factories used
 by `port.open`. Their modules load without host grants; opening a resource
 still requires the Session's corresponding network or process authority.
-The `proc.core` endpoint selectors expose the granted process streams through
-the common port vocabulary and confer no additional host permissions.
+The public `net` and `proc` modules are ECL compositions over these registered
+capabilities and `port.*`. Their operation and endpoint selectors expose only
+the granted resources and streams. First-party adapters use typed backend calls;
+the extension adapter translates ABI v4 calls into the same runtime interfaces
+for controller execution, transport, cancellation, ownership, and cleanup.
 
 Embedded names have precedence over filesystem modules. A file on `ECL_PATH`
 cannot replace an embedded module during automatic loading. A program may
