@@ -2412,6 +2412,9 @@ reusable state closes its resource.
 Endpoints may belong to a resource or to one exchange. Resource endpoints
 retain their direction and buffered data across exchange completion; finishing
 a resource endpoint or closing its resource ends that direction.
+A message may carry a sender through which its recipient replies to a backend
+request. Such a sender retains only its permitted direction; request identifiers,
+notifications, and response ordering follow the issuing library's protocol.
 Endpoint capabilities preserve the source identity and cannot be transferred
 independently with `@give`. A selector from another issuing kind, or a read or
 write through the wrong direction, raises `'type`; an endpoint not permitted

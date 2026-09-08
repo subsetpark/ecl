@@ -99,7 +99,7 @@ fn DuplexSpec(comptime acknowledge: bool) type {
         }
         pub fn run(state: *State, code: u32, controller: *ecl.Controller) void {
             const current = &state.lanes[@intFromEnum(lane(code))];
-            if (code >= 18 and code <= 25) {
+            if (code >= 18 and code <= 28) {
                 defer if (acknowledge and controller.cancelled()) {
                     current.cancelled.store(false, .release);
                     _ = controller.acknowledgeCancellation();
@@ -127,6 +127,31 @@ fn DuplexSpec(comptime acknowledge: bool) type {
                     return;
                 }
                 const builder = controller.builder();
+                if (code == 26) {
+                    for (1..3) |id| {
+                        if (!builder.symbol("id") or !builder.int(@intCast(id)) or !builder.symbol("reply") or
+                            !builder.replyEndpoint(3) or !builder.dictionary(2) or !builder.send(4)) return;
+                        if (id == 1 and (!builder.symbol("notification") or !builder.int(7) or !builder.dictionary(1) or !builder.send(4))) return;
+                    }
+                    for (0..2) |index| {
+                        if (!controller.receiveMessage(3)) return;
+                        const id = (controller.received(&.{0}) orelse return).int() orelse return;
+                        const value = (controller.received(&.{1}) orelse return).int() orelse return;
+                        if (id != 2 - @as(i64, @intCast(index)) or value != id * 10)
+                            return controller.fail(.domain, "RPC reply correlation failed");
+                        if (!controller.forwardMessage(4)) return;
+                    }
+                    _ = builder.int(42) and builder.result();
+                    return;
+                }
+                if (code == 27) {
+                    _ = builder.replyEndpoint(4);
+                    return;
+                }
+                if (code == 28) {
+                    _ = builder.replyEndpoint(3) and builder.result();
+                    return;
+                }
                 if (code == 25) {
                     _ = builder.int(42) and builder.sendResource(4);
                     return;
@@ -556,6 +581,9 @@ pub const Extension = extension: {
             ecl.operation("resource-messages", "Forward through resource-owned message channels.", Duplex, 23, .receive, 0),
             ecl.operation("resource-bytes", "Forward through resource-owned byte streams.", Duplex, 24, .receive, 0),
             ecl.operation("resource-notify", "Produce a resource event independently of exchange output.", Duplex, 25, .receive, 0),
+            ecl.operation("rpc", "Request ECL replies through opaque sender endpoints.", Duplex, 26, .receive, 24),
+            ecl.operation("invalid-reply", "Reject reply authority for an output endpoint.", Duplex, 27, .receive, 16),
+            ecl.operation("reply-result", "Return a retained endpoint after completion.", Duplex, 28, .receive, 8),
             ecl.operation("events", "Produce unsolicited structured events under pressure.", Duplex, 18, .receive, 16),
             ecl.operation("build-result", "Construct a nested structured result with a capability.", Duplex, 19, .receive, 0),
             ecl.operation("duplicate-result", "Reject duplicate structured keys.", Duplex, 20, .receive, 0),

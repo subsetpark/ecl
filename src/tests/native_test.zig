@@ -1418,3 +1418,26 @@ test "native: cancellation interrupts resource byte readers and leaves the lane 
         "p portprobe.resource-output port.endpoint dup 1 port.read swap 1 port.read " ++
         "y port.await y port.close p port.close portprobe.cleaned", "'cancelled [42] [] 1");
 }
+
+test "native: bidirectional RPC interleaves notifications and correlates out of order replies" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .message_capacity = 1, .message_queue_bytes = 64 }, "portprobe.factory [] port.open 'p set p portprobe.rpc [] port.begin 'x set " ++
+        "x portprobe.receiver port.endpoint 'r set r port.receive 'value at 'reply at 'a set " ++
+        "r port.receive 'value at 'notification at r port.receive 'value at 'reply at 'b set " ++
+        "b [2 20] port.send r port.receive 'value at a [1 10] port.send r port.receive 'value at " ++
+        "r port.receive 'kind at x port.result x port.close " ++
+        "b wrap ([] port.send) @attempt 'err at 'kind at p port.close portprobe.cleaned", "7 [2 20] [1 10] 'eof 42 'io 1");
+}
+
+test "native: reply endpoint construction cannot widen direction or completion lifetime" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.factory [] port.open 'p set " ++
+        "p wrap (portprobe.invalid-reply [] port.call) @attempt 'err at 'kind at " ++
+        "p portprobe.reply-result [] port.call dup wrap (port.receive) @attempt 'err at 'kind at " ++
+        "swap wrap ([] port.send) @attempt 'err at 'kind at p port.close portprobe.cleaned", "'domain 'type 'io 1");
+}
+
+test "native: RPC cancellation discards queued reply capabilities and restores admission" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .message_capacity = 1, .message_queue_bytes = 64 }, "portprobe.factory [] port.open 'p set p portprobe.rpc [] port.begin 'x set " ++
+        "x portprobe.receiver port.endpoint port.receive pop x port.cancel " ++
+        "x wrap (port.await) @attempt 'err at 'kind at x port.close " ++
+        "p portprobe.noop [] port.call pop p port.close portprobe.cleaned", "'cancelled 1");
+}

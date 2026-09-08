@@ -77,6 +77,11 @@ pub const MessageBuilder = opaque {
         if (path.len > abi.max_read_path_depth) return false;
         return self.apply(.{ .action = .copy_received, .path = path.ptr, .depth = @intCast(path.len) });
     }
+    /// Append an attenuated sender for a declared message input. ECL may use
+    /// it to reply; retaining it does not extend the exchange's scope lifetime.
+    pub fn replyEndpoint(self: *MessageBuilder, endpoint: u6) bool {
+        return self.apply(.{ .action = .reply_endpoint, .endpoint = endpoint });
+    }
     pub fn list(self: *MessageBuilder, count: u32) bool {
         return self.apply(.{ .action = .list, .count = count });
     }

@@ -1479,6 +1479,11 @@ materialization, symbol insertion, validation, and removal of consumed inputs
 advance in bounded steps. A completed validator grants publication authority;
 partial construction has none. Native code receives neither heap storage nor
 allocator authority, and controller return retires its construction state.
+Reply endpoint construction projects only a declared, admitted message input
+of the current exchange. The resulting sender pins that exchange's identity
+without transferring its ownership or extending its operational lifetime.
+Native-to-ECL requests therefore use the same bounded message and cancellation
+paths as ordinary traffic, with no interpreter re-entry authority.
 
 Native terminal failures distinguish runtime allocation exhaustion from bounded
 domain error data. Endpoint transport preserves that distinction through

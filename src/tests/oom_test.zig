@@ -1695,3 +1695,10 @@ test "oom: standard-library and host: native port registered resource endpoint" 
             "dup portprobe.resource-receiver port.endpoint port.receive pop port.close",
     ).run);
 }
+
+test "oom: standard-library and host: native port registered reply endpoint" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.factory [] port.open dup portprobe.reply-result [] port.call pop port.close",
+    ).run);
+}

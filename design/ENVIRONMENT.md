@@ -90,6 +90,11 @@ storage. Construction and validation advance in bounded steps. Successful
 `send` and `result` consume the completed message; failed transport keeps it
 for cleanup or retry. Construction errors invalidate the partial message, and
 `clear` explicitly starts another. Controller return discards unfinished work.
+`replyEndpoint` appends an opaque sender for a declared message input of the
+current exchange. A controller can send it with a request and receive ECL's
+response through that input. Output endpoints and inputs excluded by the
+operation cannot grant reply authority. Native controllers never synchronously
+invoke ECL; notification, correlation, and reply ordering are library protocols.
 Controllers report allocation exhaustion with `failOutOfMemory`; observation
 through results, endpoints, opening, or shutdown preserves the runtime OOM
 outcome and still performs normal cleanup.

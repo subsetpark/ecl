@@ -975,8 +975,12 @@ pub fn borrowEndpoint(parent: Value, selector: *RegisteredCapability) error{ Out
     };
     const cell = source.cell();
     if (cell.instance != selector.instance() or cell.kind != spec.resource) return error.WrongKind;
+    return createEndpoint(source, spec);
+}
+
+fn createEndpoint(source: EndpointParent, spec: descriptor.EndpointDefinition) error{ OutOfMemory, Unsupported }!Value {
     const pair = source.transport(spec.id) orelse return error.Unsupported;
-    const owner = cell.owner;
+    const owner = source.cell().owner;
     const owned = try owner.allocator().create(EndpointState);
     errdefer owner.allocator().destroy(owned);
     owned.* = .{ .parent = source, .loan = switch (pair) {
@@ -1114,6 +1118,17 @@ fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest
                 .legacy => return error.InvalidState,
             };
             try builder.copy(valueAtPath(root, path) orelse return error.InvalidValue);
+        },
+        .reply_endpoint => {
+            if (request.endpoint >= 64) return error.InvalidState;
+            const spec = ctx.cell.instance.validated().endpoint(ctx.cell.kind, @intCast(request.endpoint), .exchange) orelse return error.InvalidState;
+            if (spec.transport != .messages or spec.direction != .input) return error.InvalidState;
+            const reply = createEndpoint(.{ .exchange = op }, spec) catch |err| return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                error.Unsupported => error.InvalidState,
+            };
+            defer heap.hostDomain(ctx.cell.owner.host).releaseValue(reply);
+            try builder.copy(reply);
         },
         .list => try builder.list(request.count),
         .dictionary => try builder.dictionary(request.count),
