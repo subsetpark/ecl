@@ -1669,3 +1669,21 @@ test "oom: standard-library and host: native port registered graceful shutdown" 
         "portprobe.factory [] port.open dup port.shutdown port.close",
     ).run);
 }
+
+test "oom: standard-library and host: native port registered builder result" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.factory [] port.open dup portprobe.build-result over wrap port.call pop port.close",
+    ).run);
+}
+
+test "oom: standard-library and host: native port registered builder messages" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.factory [] port.open dup portprobe.build-received [] port.begin " ++
+            "dup portprobe.sender port.endpoint [1] port.send " ++
+            "dup portprobe.receiver port.endpoint port.receive pop " ++
+            "dup portprobe.receiver port.endpoint port.receive pop " ++
+            "dup port.result pop port.close port.close",
+    ).run);
+}

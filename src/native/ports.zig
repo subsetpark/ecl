@@ -39,11 +39,69 @@ pub const MessageView = opaque {
     }
 };
 
+/// A controller-local construction stack. Scalars append values; list and
+/// dictionary replace the last values with one aggregate. Methods finish their
+/// bounded host steps without entering ECL. Borrowed input/text lasts through
+/// the method call. A failed send/result retains the finished message; success
+/// consumes it and leaves the builder empty. Controller return discards it.
+pub const MessageBuilder = opaque {
+    fn state(self: *MessageBuilder) *ControllerState {
+        return @ptrCast(@alignCast(self));
+    }
+    fn apply(self: *MessageBuilder, request: abi.MessageBuildRequest) bool {
+        const owned = self.state();
+        var status = owned.table.build_message(owned.context, &request);
+        while (status == .yield_required) {
+            if (owned.table.cancelled(owned.context)) return false;
+            status = owned.table.build_message(owned.context, &.{ .action = .advance });
+        }
+        return status == .ok;
+    }
+    pub fn int(self: *MessageBuilder, item: i64) bool {
+        return self.apply(.{ .action = .scalar, .scalar = capability.Scalar.int(item).wire });
+    }
+    pub fn float(self: *MessageBuilder, item: f64) bool {
+        return self.apply(.{ .action = .scalar, .scalar = capability.Scalar.float(item).wire });
+    }
+    pub fn char(self: *MessageBuilder, item: u32) bool {
+        return self.apply(.{ .action = .scalar, .scalar = capability.Scalar.char(item).wire });
+    }
+    pub fn symbol(self: *MessageBuilder, bytes: []const u8) bool {
+        return self.apply(.{ .action = .scalar, .scalar = capability.Scalar.symbol(bytes).wire });
+    }
+    pub fn input(self: *MessageBuilder, path: []const u64) bool {
+        if (path.len > abi.max_read_path_depth) return false;
+        return self.apply(.{ .action = .copy_input, .path = path.ptr, .depth = @intCast(path.len) });
+    }
+    pub fn received(self: *MessageBuilder, path: []const u64) bool {
+        if (path.len > abi.max_read_path_depth) return false;
+        return self.apply(.{ .action = .copy_received, .path = path.ptr, .depth = @intCast(path.len) });
+    }
+    pub fn list(self: *MessageBuilder, count: u32) bool {
+        return self.apply(.{ .action = .list, .count = count });
+    }
+    pub fn dictionary(self: *MessageBuilder, pairs: u32) bool {
+        return self.apply(.{ .action = .dictionary, .count = pairs });
+    }
+    pub fn send(self: *MessageBuilder, endpoint: u6) bool {
+        return self.apply(.{ .action = .finish }) and self.apply(.{ .action = .send, .endpoint = endpoint });
+    }
+    pub fn result(self: *MessageBuilder) bool {
+        return self.apply(.{ .action = .finish }) and self.apply(.{ .action = .result });
+    }
+    pub fn clear(self: *MessageBuilder) bool {
+        return self.apply(.{ .action = .clear });
+    }
+};
+
 /// Available only on the controller. Streams may block this private thread;
 /// cancellation interrupts host stream waits. No ECL values are accessible.
 pub const Controller = opaque {
     fn state(self: *Controller) *ControllerState {
         return @ptrCast(@alignCast(self));
+    }
+    pub fn builder(self: *Controller) *MessageBuilder {
+        return @ptrCast(self);
     }
     /// Own the next complete message until forwarding, returning it as the
     /// result, or controller return. Refuses to discard an unconsumed message.

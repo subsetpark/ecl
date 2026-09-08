@@ -99,6 +99,39 @@ fn DuplexSpec(comptime acknowledge: bool) type {
         }
         pub fn run(state: *State, code: u32, controller: *ecl.Controller) void {
             const current = &state.lanes[@intFromEnum(lane(code))];
+            if (code >= 18 and code <= 22) {
+                defer if (acknowledge and controller.cancelled()) {
+                    current.cancelled.store(false, .release);
+                    _ = controller.acknowledgeCancellation();
+                };
+                const builder = controller.builder();
+                if (code == 18) {
+                    for (0..8) |index| if (!builder.int(@intCast(index)) or !builder.send(4)) return;
+                    return;
+                }
+                if (code == 19) {
+                    if (!builder.symbol("payload") or !builder.float(0.5) or !builder.char(0x03bb) or
+                        !builder.int(42) or !builder.symbol("tag") or !builder.input(&.{0}) or
+                        !builder.list(5) or !builder.dictionary(1) or !builder.result()) return;
+                    return;
+                }
+                if (code == 20) {
+                    if (!builder.symbol("key") or !builder.int(1) or !builder.symbol("key") or !builder.int(2)) return;
+                    _ = builder.dictionary(2);
+                    return;
+                }
+                if (code == 21) {
+                    if (!builder.symbol("x" ** (64 * 1024))) return;
+                    _ = builder.int(1);
+                    _ = builder.send(4); // Failed construction cannot publish a partial root.
+                    return;
+                }
+                if (!controller.receiveMessage(3)) return;
+                if (!builder.symbol("discarded") or !builder.clear() or !builder.symbol("copy") or
+                    !builder.received(&.{0}) or !builder.dictionary(1) or !builder.send(4) or
+                    !builder.list(0) or !builder.send(4) or !builder.dictionary(0) or !builder.result()) return;
+                return;
+            }
             if (code >= 14 and code <= 16) {
                 defer if (acknowledge and controller.cancelled()) {
                     current.cancelled.store(false, .release);
@@ -492,6 +525,11 @@ pub const Extension = ecl.module(.{
         ecl.operation("finished-failure", "Fail after finishing the output endpoint.", Duplex, 11, .receive, 2),
         ecl.operation("pipeline", "Stream input, output, and independent diagnostics.", Duplex, 12, .receive, 7),
         ecl.operation("early-exit", "Stop consuming input after one byte.", Duplex, 13, .receive, 3),
+        ecl.operation("events", "Produce unsolicited structured events under pressure.", Duplex, 18, .receive, 16),
+        ecl.operation("build-result", "Construct a nested structured result with a capability.", Duplex, 19, .receive, 0),
+        ecl.operation("duplicate-result", "Reject duplicate structured keys.", Duplex, 20, .receive, 0),
+        ecl.operation("oversize-event", "Reject oversize construction before output.", Duplex, 21, .receive, 16),
+        ecl.operation("build-received", "Copy received values and construct empty aggregates.", Duplex, 22, .receive, 24),
         ecl.operation("messages", "Forward complete structured messages.", Duplex, 14, .receive, 24),
         ecl.operation("message-result", "Return one structured message as the terminal result.", Duplex, 15, .receive, 8),
         ecl.operation("message-failure", "Fail after accepting one output message.", Duplex, 16, .receive, 24),

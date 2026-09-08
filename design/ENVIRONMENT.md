@@ -80,6 +80,12 @@ by a controller retain their budget reservation until forwarding or release.
 Controllers can receive a message, inspect it through bounded `received` paths,
 and consume it with `forwardMessage` or `resultMessage`. Failed consuming calls
 retain ownership, and controller return cleans up an unconsumed message.
+The controller-local `MessageBuilder` constructs scalars, nested lists and
+dictionaries, and copies permitted input capabilities without exposing ECL
+storage. Construction and validation advance in bounded steps. Successful
+`send` and `result` consume the completed message; failed transport keeps it
+for cleanup or retry. Construction errors invalidate the partial message, and
+`clear` explicitly starts another. Controller return discards unfinished work.
 Controllers report allocation exhaustion with `failOutOfMemory`; observation
 through results, endpoints, opening, or shutdown preserves the runtime OOM
 outcome and still performs normal cleanup.

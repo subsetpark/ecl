@@ -7,6 +7,7 @@ const ports = @import("ports.zig");
 pub const Port = ports.Port;
 pub const Controller = ports.Controller;
 pub const MessageView = ports.MessageView;
+pub const MessageBuilder = ports.MessageBuilder;
 pub const PortCancellation = ports.Cancellation;
 pub const PortProgress = ports.Progress;
 pub const PortInterests = ports.Interests;

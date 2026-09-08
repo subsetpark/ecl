@@ -1455,6 +1455,14 @@ resources. Abortive cleanup retains the scope membership until controller
 return, including recovery acknowledgement. The lane's post-return transition
 settles that membership outside both operation and resource locks. Readiness
 registration observes terminal state under the same mutex as notification.
+Native controllers build messages through a host-owned construction stack.
+Its fixed capacity derives from the message node limit, and its owning heap
+buffer retires abandoned roots without a synchronous graph walk. Aggregate
+materialization, symbol insertion, validation, and removal of consumed inputs
+advance in bounded steps. A completed validator grants publication authority;
+partial construction has none. Native code receives neither heap storage nor
+allocator authority, and controller return retires its construction state.
+
 Native terminal failures distinguish runtime allocation exhaustion from bounded
 domain error data. Endpoint transport preserves that distinction through
 buffered output and completion; cleanup retains its normal join obligations.

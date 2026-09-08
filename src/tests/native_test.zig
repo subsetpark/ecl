@@ -1348,3 +1348,29 @@ test "native: allocation failure survives controller and endpoint boundaries" {
         try std.testing.expectEqualStrings("1", opened.bytes());
     }
 }
+
+test "native: message builders produce unsolicited events with bounded queue pressure" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .message_capacity = 1, .message_queue_bytes = 8 }, "portprobe.factory [] port.open 'p set p portprobe.events [] port.begin 'x set " ++
+        "x portprobe.receiver port.endpoint 'r set " ++
+        "8 range (r port.receive 'value at =) each sum " ++
+        "r port.receive 'kind at x port.await x port.close p port.close portprobe.cleaned", "8 'eof 1");
+}
+
+test "native: message builders preserve nested scalars and capability identity" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.factory [] port.open 'p set p portprobe.build-result p wrap port.call 'payload at " ++
+        "dup 0 at swap dup 1 at int swap dup 2 at swap dup 3 at swap 4 at p match? " ++
+        "p port.close portprobe.cleaned", "0.5 955 42 'tag 1 1");
+}
+
+test "native: message builder failures reject partial output and duplicate dictionaries" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.factory [] port.open 'p set p wrap (portprobe.duplicate-result [] port.call) @attempt 'err at 'kind at " ++
+        "p portprobe.oversize-event [] port.begin 'x set x portprobe.receiver port.endpoint wrap (port.receive) @attempt 'err at 'kind at " ++
+        "x wrap (port.await) @attempt 'err at 'kind at x port.close p port.close portprobe.cleaned", "'domain 'overflow 'overflow 1");
+}
+
+test "native: message builders copy received values and reset consumed messages" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .message_capacity = 1 }, "portprobe.factory [] port.open 'p set p portprobe.build-received [] port.begin 'x set " ++
+        "x portprobe.sender port.endpoint [42] port.send x portprobe.receiver port.endpoint 'r set " ++
+        "r port.receive 'value at 'copy at r port.receive 'value at len x port.result dict.keys len " ++
+        "r port.receive 'kind at x port.close p port.close portprobe.cleaned", "42 0 0 'eof 1");
+}

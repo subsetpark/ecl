@@ -197,7 +197,7 @@ const DictBuild = struct {
                 const appended = building.appended;
                 const keys = building.keys;
                 const values = building.values;
-                const materializer = try dict.Materializer.initSlices(
+                const materializer = try dict.Materializer.initBorrowedSlices(
                     call.allocator,
                     keys.items()[0..appended],
                     values.items()[0..appended],

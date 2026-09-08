@@ -101,7 +101,18 @@ pub const PortReply = extern struct {
 pub const PortFn = *const fn (*anyopaque, *const PortRequest, *PortReply) callconv(.c) HostStatus;
 /// Controller streams block only their private host controller. Zero bytes
 /// denotes request EOF or cancellation; failure is reported separately.
+pub const MessageBuildAction = enum(u32) { scalar, copy_input, copy_received, list, dictionary, finish, advance, send, result, clear, _ };
+pub const MessageBuildRequest = extern struct {
+    size: u32 = @sizeOf(MessageBuildRequest),
+    action: MessageBuildAction,
+    count: u32 = 0,
+    endpoint: u32 = 0,
+    scalar: Scalar = .{ .kind = .int },
+    path: ?[*]const u64 = null,
+    depth: u32 = 0,
+};
 pub const ControllerTable = extern struct {
+    build_message: *const fn (*anyopaque, *const MessageBuildRequest) callconv(.c) HostStatus,
     fail_allocation: *const fn (*anyopaque) callconv(.c) void,
     receive_message: *const fn (*anyopaque, u32) callconv(.c) bool,
     received_message: *const fn (*anyopaque, [*]const u64, u32, *ValueView) callconv(.c) bool,
@@ -427,7 +438,8 @@ comptime {
     assertRecord(PortDefinition, 96, 8);
     assertRecord(PortRequest, 48, 8);
     assertRecord(PortReply, 24, 8);
-    assertRecord(ControllerTable, 112, 8);
+    assertRecord(MessageBuildRequest, 64, 8);
+    assertRecord(ControllerTable, 120, 8);
     assertRecord(EntryResult, 32, 8);
 
     if (@offsetOf(Definition, "callback_index") != 4 or

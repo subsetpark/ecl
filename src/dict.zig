@@ -30,6 +30,7 @@ pub const Materializer = struct {
     pub const owned_disposal: heap.OwnedDisposal = .retire;
 
     const State = union(enum) {
+        copy: struct { keys: []const Value, vals: []const Value, index: usize = 0 },
         table_init: usize,
         hash: struct {
             index: usize = 0,
@@ -102,6 +103,27 @@ pub const Materializer = struct {
         return initOwned(allocator, keys, vals, hashes, table, check_duplicates);
     }
 
+    /// Borrow source slices until completion or retirement. Copying is part of
+    /// advance, so native and scheduler builders retain bounded work per turn.
+    pub fn initBorrowedSlices(
+        allocator: std.mem.Allocator,
+        source_keys: []const Value,
+        source_vals: []const Value,
+        check_duplicates: bool,
+    ) error{OutOfMemory}!Materializer {
+        if (source_keys.len != source_vals.len or source_keys.len >= std.math.maxInt(u32)) return error.OutOfMemory;
+        const keys = try allocator.alloc(Value, source_keys.len);
+        errdefer allocator.free(keys);
+        const vals = try allocator.alloc(Value, source_vals.len);
+        errdefer allocator.free(vals);
+        const hashes = try allocator.alloc(i64, source_keys.len);
+        errdefer allocator.free(hashes);
+        const table = try allocateIndex(allocator, source_keys.len);
+        var result = initOwned(allocator, keys, vals, hashes, table, check_duplicates);
+        result.state = .{ .copy = .{ .keys = source_keys, .vals = source_vals } };
+        return result;
+    }
+
     fn initOwned(
         allocator: std.mem.Allocator,
         keys: []Value,
@@ -129,7 +151,7 @@ pub const Materializer = struct {
     }
     pub fn retire(self: *Materializer, releases: *heap.ReleaseDomain) void {
         switch (self.state) {
-            .table_init => {},
+            .copy, .table_init => {},
             .hash => |*state| if (state.cursor) |*cursor| cursor.deinit(),
             .duplicate_linear => |*state| if (state.cursor) |*cursor| cursor.deinit(),
             .duplicate_index => |*state| if (state.cursor) |*cursor| cursor.deinit(),
@@ -162,6 +184,14 @@ pub const Materializer = struct {
     pub fn advance(self: *Materializer, budget: usize) error{OutOfMemory}!MaterializeProgress {
         std.debug.assert(budget != 0 and self.state != .complete);
         while (true) switch (self.state) {
+            .copy => |*source| {
+                const end = @min(source.index + budget, source.keys.len);
+                @memcpy(self.keys[source.index..end], source.keys[source.index..end]);
+                @memcpy(self.vals[source.index..end], source.vals[source.index..end]);
+                source.index = end;
+                if (end == source.keys.len) self.state = if (self.table != null) .{ .table_init = 0 } else .{ .hash = .{} };
+                return .pending;
+            },
             .table_init => |*index| {
                 const table = self.table.?;
                 const end = @min(index.* + budget, table.len);

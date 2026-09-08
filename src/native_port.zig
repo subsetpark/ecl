@@ -13,6 +13,7 @@ const list = @import("list.zig");
 const descriptor = @import("native_descriptor.zig");
 const port_message = @import("port_message.zig");
 const byte_transport = @import("port_bytes.zig");
+const message_builder = @import("port_builder.zig");
 const message_transport = @import("port_messages.zig");
 
 const RegisteredState = struct {
@@ -599,7 +600,10 @@ pub const Operation = struct {
     }
     fn execute(self: *Operation, running: *controllers.Running) void {
         var ctx: ControllerContext = .{ .cell = self.cell, .invocation = .{ .operation = .{ .value = self, .running = running } } };
-        defer if (ctx.received) |item| item.release();
+        defer {
+            if (ctx.received) |item| item.release();
+            if (ctx.builder) |builder| builder.retire();
+        }
         self.cell.definition.execute.?(self.cell.backend.ptr, self.code, &controller_table, &ctx);
     }
     fn completeResourceLocked(self: *Operation, outcome: controllers.Completion) void {
@@ -923,6 +927,7 @@ const ControllerContext = struct {
     cell: *Cell,
     invocation: union(enum) { initialize, operation: struct { value: *Operation, running: *controllers.Running }, shutdown: ?Failure },
     received: ?*message_transport.Envelope = null,
+    builder: ?*message_builder.Builder = null,
     fn operation(self: *ControllerContext) ?*Operation {
         return switch (self.invocation) {
             .operation => |active| active.value,
@@ -949,16 +954,7 @@ fn viewMessage(root: ?Value, path: [*]const u64, depth: u32, output: *abi.ValueV
         output.* = .{ .kind = .list };
         return true;
     };
-    for (path[0..depth]) |index| {
-        item = switch (item) {
-            .list => |header| if (index < header.length()) list.atUnchecked(item, @intCast(index)) else return false,
-            .dict => |header| if (index / 2 < header.length()) (if (index % 2 == 0)
-                @import("dict.zig").keyAt(header, @intCast(index / 2))
-            else
-                @import("dict.zig").valueAt(header, @intCast(index / 2))) else return false,
-            else => return false,
-        };
-    }
+    item = valueAtPath(item, path[0..depth]) orelse return false;
     output.* = switch (item) {
         .int => |number| .{ .kind = .int, .scalar_bits = @bitCast(number) },
         .float => |number| .{ .kind = .float, .scalar_bits = @bitCast(number) },
@@ -970,6 +966,108 @@ fn viewMessage(root: ?Value, path: [*]const u64, depth: u32, output: *abi.ValueV
         .word, .task, .module => return false,
     };
     return true;
+}
+fn valueAtPath(root: Value, path: []const u64) ?Value {
+    if (path.len > abi.max_read_path_depth) return null;
+    var item = root;
+    for (path) |index| {
+        item = switch (item) {
+            .list => |header| if (index < header.length()) list.atUnchecked(item, @intCast(index)) else return null,
+            .dict => |header| if (index / 2 < header.length()) (if (index % 2 == 0)
+                @import("dict.zig").keyAt(header, @intCast(index / 2))
+            else
+                @import("dict.zig").valueAt(header, @intCast(index / 2))) else return null,
+            else => return null,
+        };
+    }
+    return item;
+}
+fn controllerBuildMessage(raw: *anyopaque, request: *const abi.MessageBuildRequest) callconv(.c) abi.HostStatus {
+    const ctx = context(raw);
+    return buildMessage(ctx, request) catch |err| {
+        if (ctx.builder) |builder| builder.invalidate();
+        recordControllerFailure(ctx, switch (err) {
+            error.OutOfMemory => .out_of_memory,
+            error.Overflow => .init(.overflow, "native message exceeds its structured value or queue limits"),
+            error.InvalidValue => .init(.type, "native message contains an invalid structured value"),
+            error.DuplicateKey => .init(.domain, "native message dictionary contains duplicate keys"),
+            error.InvalidState => .init(.domain, "invalid native message construction or endpoint"),
+        });
+        return if (err == error.OutOfMemory) .out_of_memory else .invalid;
+    };
+}
+fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest) message_builder.Error!abi.HostStatus {
+    if (request.size != @sizeOf(abi.MessageBuildRequest)) return error.InvalidState;
+    const op = ctx.operation() orelse return error.InvalidState;
+    if (controllerCancelled(ctx)) return .invalid;
+    if (ctx.builder == null) {
+        const builder = try message_builder.Builder.create(ctx.cell.owner.host);
+        ctx.builder = builder;
+    }
+    const builder = ctx.builder.?;
+    switch (request.action) {
+        .scalar => {
+            if (request.scalar.size != @sizeOf(abi.Scalar)) return error.InvalidState;
+            const scalar = request.scalar;
+            switch (scalar.kind) {
+                .int => try builder.int(@bitCast(scalar.bits)),
+                .float => try builder.float(@bitCast(scalar.bits)),
+                .char => try builder.char(scalar.bits),
+                .symbol => {
+                    if (scalar.bytes_len > 64 * 1024) return error.Overflow;
+                    const bytes = if (scalar.bytes_len == 0) "" else (scalar.bytes_ptr orelse return error.InvalidValue)[0..@intCast(scalar.bytes_len)];
+                    try builder.symbol(bytes);
+                },
+                .word, .list, .dict, .port => return error.InvalidValue,
+                _ => return error.InvalidValue,
+            }
+        },
+        .copy_input, .copy_received => {
+            if (request.depth > abi.max_read_path_depth) return error.InvalidValue;
+            const path = if (request.depth == 0) &.{} else (request.path orelse return error.InvalidValue)[0..request.depth];
+            const root = if (request.action == .copy_received)
+                (ctx.received orelse return error.InvalidState).value()
+            else switch (op.protocol) {
+                .registered => |registered| registered.parameters,
+                .legacy => return error.InvalidState,
+            };
+            try builder.copy(valueAtPath(root, path) orelse return error.InvalidValue);
+        },
+        .list => try builder.list(request.count),
+        .dictionary => try builder.dictionary(request.count),
+        .finish => try builder.finish(),
+        .advance => {},
+        .clear => builder.clear(),
+        .send => {
+            const validated = builder.validated() orelse return error.InvalidState;
+            const pair = controllerQueue(ctx, request.endpoint, .output) orelse return error.InvalidState;
+            if (validated.footprint().bytes > ctx.cell.owner.limits.message_queue_bytes) return error.Overflow;
+            const item = try message_transport.Envelope.create(ctx.cell.owner.host, validated);
+            if (!pair.controller.send(item)) {
+                item.release();
+                return .invalid;
+            }
+            try builder.consume();
+            return .ok;
+        },
+        .result => {
+            const validated = builder.validated() orelse return error.InvalidState;
+            const item = validated.value();
+            heap.retainValue(item);
+            lock(&op.mutex);
+            const previous = op.terminal_result.available;
+            op.terminal_result = .{ .available = item };
+            unlock(&op.mutex);
+            heap.hostDomain(ctx.cell.owner.host).releaseValue(previous);
+            try builder.consume();
+            return .ok;
+        },
+        _ => return error.InvalidState,
+    }
+    return switch (try builder.advance()) {
+        .pending => .yield_required,
+        .complete => .ok,
+    };
 }
 fn controllerRead(raw: *anyopaque, bytes: [*]u8, length: u32) callconv(.c) u32 {
     if (length == 0) return 0;
@@ -1139,12 +1237,12 @@ fn recordControllerFailure(ctx: *ControllerContext, failure: Failure) void {
     }
 }
 fn storeControllerFailure(destination: *?Failure, failure: Failure) void {
-    // Allocation exhaustion cannot be masked by a later domain error from a
-    // controller unwinding a failed host builder or transport operation.
-    if (destination.*) |existing| if (existing == .out_of_memory) return;
+    // Preserve the originating failure during controller unwind. Allocation
+    // exhaustion takes precedence and cannot be masked by a later report.
+    if (destination.* != null and failure != .out_of_memory) return;
     destination.* = failure;
 }
-const controller_table: abi.ControllerTable = .{ .fail_allocation = controllerFailAllocation, .receive_message = controllerReceiveMessage, .received_message = controllerReceivedMessage, .forward_message = controllerForwardMessage, .result_message = controllerResultMessage, .input = controllerInput, .read_endpoint = controllerReadEndpoint, .write_endpoint = controllerWriteEndpoint, .finish_endpoint = controllerFinishEndpoint, .read = controllerRead, .write = controllerWrite, .cancelled = controllerCancelled, .acknowledge_cancellation = controllerAcknowledge, .fail = controllerFail };
+const controller_table: abi.ControllerTable = .{ .build_message = controllerBuildMessage, .fail_allocation = controllerFailAllocation, .receive_message = controllerReceiveMessage, .received_message = controllerReceivedMessage, .forward_message = controllerForwardMessage, .result_message = controllerResultMessage, .input = controllerInput, .read_endpoint = controllerReadEndpoint, .write_endpoint = controllerWriteEndpoint, .finish_endpoint = controllerFinishEndpoint, .read = controllerRead, .write = controllerWrite, .cancelled = controllerCancelled, .acknowledge_cancellation = controllerAcknowledge, .fail = controllerFail };
 
 pub fn fromValue(value: Value, instance: *native.ModuleInstance, kind: u32) ?*Cell {
     const handle = switch (value) {
