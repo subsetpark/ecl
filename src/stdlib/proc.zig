@@ -464,7 +464,14 @@ const SpecDriver = struct {
         }
         self.port_value = port;
         const cell = process.fromValue(port).?;
-        self.write_permit = try cell.beginWrite();
+        const write_permit: ?*process.WritePermit = cell.beginWrite() catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Closed => closed: {
+                if (self.stdin_bytes) |*input| if (input.bytes().len != 0) self.noteFailure(.io);
+                break :closed null;
+            },
+        };
+        self.write_permit = write_permit;
         self.run_cursor = cell.beginRun();
         cell.beginRead(.stdout) catch return evaluator.fail(.contract, "stdout already has a pending reader");
         self.stdout_reader = true;
@@ -697,7 +704,10 @@ fn write(evaluator: *Machine) MachineError!void {
     var port = try evaluator.popValue();
     errdefer port.deinit();
     const cell = try portCell(evaluator, port.borrow());
-    const permit = try cell.beginWrite();
+    const permit = cell.beginWrite() catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.Closed => evaluator.fail(.io, "process stdin is closed"),
+    };
     errdefer permit.cancel();
     const driver = try evaluator.allocator().create(WriteDriver);
     driver.* = .init(evaluator.allocator(), port.take(), bytes.take(), .{}, permit);
@@ -707,9 +717,9 @@ fn write(evaluator: *Machine) MachineError!void {
 const WriteDriver = transfer.WriteDriver(WriteBackend);
 
 const WriteBackend = struct {
-    pub const WritePermit = process.WritePermit;
+    pub const WritePermit = *process.WritePermit;
     pub const invalid_byte_message = "write contains a value outside 0...255";
-    pub fn write(_: WriteBackend, evaluator: *Machine, permit: *WritePermit, bytes: []const u8) MachineError!transfer.WriteProgress {
+    pub fn write(_: WriteBackend, evaluator: *Machine, permit: WritePermit, bytes: []const u8) MachineError!transfer.WriteProgress {
         return switch (permit.write(bytes)) {
             .pending => .pending,
             .written => |count| .{ .written = count },

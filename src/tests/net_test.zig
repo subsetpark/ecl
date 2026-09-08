@@ -197,6 +197,11 @@ test "net: common factories validate structured bounds before opening a resource
         "[] (0 net.core.listener [] port.begin) @attempt 'err at 'kind at", "'type 'overflow 'type");
 }
 
+test "net: process endpoint selectors reject network resources" {
+    try expectStack(.{ .net = loopback_ephemeral }, listen_ephemeral ++ " 'l set " ++
+        "l wrap (proc.core.stdout port.endpoint) @attempt 'err at 'kind at l port.close", "'type");
+}
+
 test "net: policy validation is a distinct Session construction failure" {
     const invalid = [_]Policy{
         .{ .binds = .{ .exact = &.{.{ .address = "localhost", .port = 0 }} } },

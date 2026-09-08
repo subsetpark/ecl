@@ -171,8 +171,8 @@ comptime {
                 for (builtin_port.definitions(library), 0..) |definition, definition_index| {
                     env.assertStaticModuleName(definition.name);
                     if (definition.doc.len == 0) @compileError("registered builtin capability requires documentation");
-                    if (definition.factory.library() != library)
-                        @compileError("registered builtin factory belongs to another library");
+                    if (definition.body.library() != library)
+                        @compileError("registered builtin capability belongs to another library");
                     for (builtin_port.definitions(library)[0..definition_index]) |prior| {
                         if (std.mem.eql(u8, definition.name, prior.name))
                             @compileError("duplicate registered builtin capability: " ++ definition.name);

@@ -551,6 +551,7 @@ const readiness_run_tag: u64 = 4;
 const readiness_pointer_mask: u64 = ~@as(u64, 7);
 
 pub const ProcessCell = struct {
+    instance: *@import("builtin_port.zig").Instance,
     allocator: std.mem.Allocator,
     io: std.Io,
     identity: u64,
@@ -611,6 +612,7 @@ pub const ProcessCell = struct {
         errdefer owner.allocator.free(stderr);
         const execution_group = try ControllerGroup.init(owner.allocator, owner.executor.access(), cell);
         cell.* = .{
+            .instance = owner.instance,
             .allocator = owner.allocator,
             .io = owner.io,
             .identity = owner.next_identity.fetchAdd(1, .monotonic),
@@ -621,6 +623,7 @@ pub const ProcessCell = struct {
             .stdout = .{ .bytes = stdout },
             .stderr = .{ .bytes = stderr },
         };
+        owner.instance.retain();
     }
 
     fn prepareStartup(self: *ProcessCell, scope: *scheduler_api.TaskScope) error{ OutOfMemory, ScopeClosing }!void {
@@ -673,6 +676,7 @@ pub const ProcessCell = struct {
         self.allocator.free(self.stdout.bytes);
         self.allocator.free(self.stderr.bytes);
         self.controllers.deinit();
+        self.instance.release();
         Resource.destroy(self);
     }
 
@@ -737,9 +741,10 @@ pub const ProcessCell = struct {
         return external.WaitList(ProcessCell).register(self, key, target);
     }
 
-    pub fn beginWrite(self: *ProcessCell) error{OutOfMemory}!*WritePermit {
+    pub fn beginWrite(self: *ProcessCell) error{ OutOfMemory, Closed }!*WritePermit {
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        if (self.input != .open or self.io_failed) return error.Closed;
         return (try self.writers.admitWriter(self.allocator, self, std.math.maxInt(usize))).?;
     }
     fn writeTurnLocked(self: *ProcessCell, turn: bool, bytes: []const u8) WriteProgress {

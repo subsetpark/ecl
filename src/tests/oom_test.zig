@@ -1062,7 +1062,9 @@ fn stdlibSessionAllocationProbe(
             const process_source = try std.fmt.allocPrint(
                 scaffold_allocator,
                 "'proc ('spawn 'run) import " ++
-                    "proc.core.process {{'executable \"{s}\" 'args (\"block\")}} port.open pop " ++
+                    "proc.core.process {{'executable \"{s}\" 'args (\"block\")}} port.open " ++
+                    "dup proc.core.stdin port.endpoint dup [0] port.write port.finish " ++
+                    "dup proc.core.stdout port.endpoint pop dup proc.core.stderr port.endpoint pop pop " ++
                     "{{'executable \"/definitely/not/allowed\" " ++
                     "'args (\"one\" \"two\") 'cwd \"/\" " ++
                     "'env {{\"ECL_OOM_PROCESS\" \"probe\"}} 'stdin [0 1 255 2] " ++

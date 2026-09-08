@@ -2846,7 +2846,7 @@ pub const Registry = enum(usize) {
             defer self.releases.releaseValue(body);
             const document = try self.buildDocumentation(declaration.doc);
             defer self.releases.releaseHeader(env.documentationHeader(document));
-            const effect = try self.buildEffect("-- factory");
+            const effect = try self.buildEffect(declaration.body.effect());
             defer effect.retire(self.releases);
             _ = self.candidate.?.publishDefinition(try intern.internNamespace(declaration.name), .{ .word = .{
                 .body = env.quotation(body.list).?,

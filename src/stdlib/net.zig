@@ -532,11 +532,11 @@ fn write(evaluator: *Machine) MachineError!void {
 const WriteDriver = transfer.WriteDriver(WriteBackend);
 
 const WriteBackend = struct {
-    pub const WritePermit = net_port.WritePermit;
+    pub const WritePermit = *net_port.WritePermit;
     pub const invalid_byte_message = "net.write contains a value outside 0...255";
     cell: *net_port.ConnectionCell,
 
-    pub fn write(self: WriteBackend, evaluator: *Machine, permit: *WritePermit, bytes: []const u8) MachineError!transfer.WriteProgress {
+    pub fn write(self: WriteBackend, evaluator: *Machine, permit: WritePermit, bytes: []const u8) MachineError!transfer.WriteProgress {
         return switch (permit.write(bytes)) {
             .pending => .pending,
             .written => |count| .{ .written = count },

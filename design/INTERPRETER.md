@@ -1332,6 +1332,13 @@ the issuing instance before entering their typed backend; configuration
 validation and output reservation precede resource publication. Built-in
 controllers do not pass through the extension ABI.
 
+Process resource metadata pins its issuing instance through final reclamation.
+An endpoint projects a declared direction only after validating that instance
+and the resource kind. Its retained resource pin grants no scope ownership.
+The common byte drivers dispatch typed reader and writer capabilities, so
+native and built-in streams share validation and transfer continuations while
+each transport owns reader exclusion, writer admission, and FIFO ordering.
+
 Package discovery and synchronization are
 described in `ENVIRONMENT.md`; they enter the evaluator through the same module
 loader and bounded-driver conventions as other sources. Host-side lock and

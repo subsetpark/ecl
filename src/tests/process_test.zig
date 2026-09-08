@@ -160,6 +160,75 @@ test "process: common factories transfer owners and clean resources returned by 
     }, "0 'signaled 'port 'signaled", workers);
 }
 
+test "process: common endpoints stream concurrently through one-byte buffers" {
+    const fixture_path = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, fixture.process_exe, allocator);
+    defer allocator.free(fixture_path);
+    const program = try source(
+        "proc.core.process {{'executable \"{s}\" 'args (\"echo\")}} port.open 'p set " ++
+            "p proc.core.stdin port.endpoint 's set p proc.core.stdout port.endpoint 'r set " ++
+            "p proc.core.stderr port.endpoint 'd set s wrap ('w set w [0 1 255] 30 take port.write w port.finish) @spawn 'writer set " ++
+            "[] (dup len 30 <) (r 8 port.read cat) while [0 1 255] 30 take match? " ++
+            "writer task.await 'ok at len s port.finish r 8 port.read len r 8 port.read len d 8 port.read len " ++
+            "p proc.wait 'code at p port.close s wrap ([] port.write) @attempt 'err at 'kind at",
+        .{fixture_path},
+    );
+    defer allocator.free(program);
+    for ([_]u32{ 1, 8 }) |workers| try expectStackWithWorkers(program, .{
+        .executables = .{ .exact = &.{fixture_path} },
+        .stdin_capacity = 1,
+        .stdout_capacity = 1,
+        .stderr_capacity = 1,
+    }, "1 0 0 0 0 0 'io", workers);
+}
+
+test "process: common selectors borrow legacy resources and separate output from diagnostics" {
+    const fixture_path = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, fixture.process_exe, allocator);
+    defer allocator.free(fixture_path);
+    const program = try source(
+        "{{'executable \"{s}\" 'args (\"split\" \"abcd\" \"wxyz\")}} proc.spawn 'p set " ++
+            "p proc.core.stdout port.endpoint wrap ('r set [] (dup len 4 <) (r 8 port.read cat) while chars) @spawn 'out set " ++
+            "p proc.core.stderr port.endpoint wrap ('r set [] (dup len 4 <) (r 8 port.read cat) while chars) @spawn 'err set " ++
+            "out task.await 'ok at first err task.await 'ok at first p proc.wait 'code at p port.close",
+        .{fixture_path},
+    );
+    defer allocator.free(program);
+    for ([_]u32{ 1, 8 }) |workers| try expectStackWithWorkers(program, .{
+        .executables = .{ .exact = &.{fixture_path} },
+        .stdout_capacity = 1,
+        .stderr_capacity = 1,
+    }, "\"abcd\" \"wxyz\" 0", workers);
+}
+
+test "process: common and domain readers share exclusion and cancellation restores access" {
+    const fixture_path = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, fixture.process_exe, allocator);
+    defer allocator.free(fixture_path);
+    const program = try source(
+        "proc.core.process {{'executable \"{s}\" 'args (\"echo\")}} port.open 'p set " ++
+            "p proc.core.stdin port.endpoint 's set p proc.core.stdout port.endpoint 'r set " ++
+            "[] (r 1 port.read) @spawn 'a set [] (p 1 proc.read-stdout) @spawn 'b set " ++
+            "a b pair task.await-any 'err at 'kind at swap pop a task.cancel b task.cancel " ++
+            "a task.await pop b task.await pop s [9] port.write r wrap (1 port.read) @spawn 'readback set " ++
+            "p wrap [] ('q set s port.finish readback task.await 'ok at first q proc.wait pop q port.close) @give task.await 'ok at first " ++
+            "r wrap ([] port.write) @attempt 'err at 'kind at s wrap (1 port.read) @attempt 'err at 'kind at " ++
+            "r wrap (port.finish) @attempt 'err at 'kind at " ++
+            "r wrap [] (pop) 3 pack (@give) @attempt 'err at 'kind at " ++
+            "r 1 port.read len r type",
+        .{fixture_path},
+    );
+    defer allocator.free(program);
+    for ([_]u32{ 1, 8 }) |workers| try expectStackWithWorkers(program, .{
+        .executables = .{ .exact = &.{fixture_path} },
+    }, "'contract [9] 'type 'type 'type 'domain 0 'port", workers);
+}
+
+test "process: endpoint selectors reject wrong capability variants" {
+    try expectStack("proc.core.stdout proc.core.stdout match? " ++
+        "[] (proc.core.process proc.core.stdout port.endpoint) @attempt 'err at 'kind at " ++
+        "[] (net.core.listener proc.core.stdin port.endpoint) @attempt 'err at 'kind at " ++
+        "[] (0 proc.core.process port.endpoint) @attempt 'err at 'kind at " ++
+        "[] (proc.core.stdin {} port.open) @attempt 'err at 'kind at", null, "1 'type 'type 'type 'type");
+}
+
 test "process: shared port operations linearize and converge" {
     const fixture_path = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, fixture.process_exe, allocator);
     defer allocator.free(fixture_path);

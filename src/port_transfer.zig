@@ -251,6 +251,9 @@ pub fn ReadDriver(comptime Backend: type) type {
 /// The encoding and writing phases each own the reserved write ticket.
 /// Completion consumes the ticket and retains only the encoded buffer for
 /// cleanup. Failure leaves every resource owned by the driver.
+/// Backend.WritePermit is an owning capability value: write borrows it,
+/// while finish and cancel consume it. Typed backend unions need no extra
+/// allocation to participate in the common transfer state machine.
 pub fn WriteDriver(comptime Backend: type) type {
     return struct {
         const Self = @This();
@@ -260,12 +263,12 @@ pub fn WriteDriver(comptime Backend: type) type {
         bytes_value: Value,
         backend: Backend,
         state: union(enum) {
-            encoding: struct { encoder: storage.ByteVectorEncoder, permit: *Backend.WritePermit },
-            writing: struct { bytes: storage.ByteVector, permit: *Backend.WritePermit, offset: usize = 0 },
+            encoding: struct { encoder: storage.ByteVectorEncoder, permit: Backend.WritePermit },
+            writing: struct { bytes: storage.ByteVector, permit: Backend.WritePermit, offset: usize = 0 },
             complete: storage.ByteVector,
         },
 
-        pub fn init(allocator: std.mem.Allocator, port: Value, bytes: Value, backend: Backend, permit: *Backend.WritePermit) Self {
+        pub fn init(allocator: std.mem.Allocator, port: Value, bytes: Value, backend: Backend, permit: Backend.WritePermit) Self {
             return .{
                 .port = port,
                 .bytes_value = bytes,

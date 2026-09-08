@@ -2486,6 +2486,14 @@ common structured-value limits and the same host policy as `proc.spawn`.
 The returned resource supports the process words and common lifecycle words;
 retaining the factory grants no additional host authority.
 
+`proc.core.stdin`, `proc.core.stdout`, and `proc.core.stderr` are endpoint
+selectors for process resources. `port.endpoint` with stdin grants writing and
+finishing; stdout and stderr grant reading. Their byte, EOF, and single-reader
+contracts are shared with the corresponding process words. Finishing stdin
+delivers accepted bytes before closing that direction, is idempotent, and
+rejects subsequent writes, including empty writes. Endpoints share permitted
+use without owning the resource; they cannot be transferred with `@give`.
+
 A spawn specification is a dictionary with exactly these fields:
 
 - required `'executable`: an absolute string path;

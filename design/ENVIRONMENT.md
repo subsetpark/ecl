@@ -25,6 +25,8 @@ reflection, and shadowing through the same language operations.
 `net.core.listener` and `proc.core.process` export the built-in factories used
 by `port.open`. Their modules load without host grants; opening a resource
 still requires the Session's corresponding network or process authority.
+The `proc.core` endpoint selectors expose the granted process streams through
+the common port vocabulary and confer no additional host permissions.
 
 Embedded names have precedence over filesystem modules. A file on `ECL_PATH`
 cannot replace an embedded module during automatic loading. A program may
