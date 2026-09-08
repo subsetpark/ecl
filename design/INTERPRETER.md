@@ -1335,9 +1335,17 @@ controllers do not pass through the extension ABI.
 Process resource metadata pins its issuing instance through final reclamation.
 An endpoint projects a declared direction only after validating that instance
 and the resource kind. Its retained resource pin grants no scope ownership.
-The common byte drivers dispatch typed reader and writer capabilities, so
-native and built-in streams share validation and transfer continuations while
-each transport owns reader exclusion, writer admission, and FIFO ordering.
+Endpoint adapters register through one semantic interface for built-in and
+third-party resources. Registration binds typed adapter callbacks behind an
+opaque endpoint selector and one directional endpoint capability. The common
+endpoint boundary has no backend-family discriminator: it consumes byte
+progress, bounded capacity, readiness, and runtime message queues. ABI
+translation belongs to the native adapter. Common byte drivers own validation
+and transfer continuations; transports own shared reader exclusion, writer
+admission, and FIFO ordering. A write permit pins its transport independently
+and consumes both its turn and prepared interface storage on finish or
+cancellation. Adapter references are consumed only after successful capability
+publication, so failed registration leaves cleanup with the caller.
 
 Package discovery and synchronization are
 described in `ENVIRONMENT.md`; they enter the evaluator through the same module

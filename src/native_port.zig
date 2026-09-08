@@ -15,6 +15,7 @@ const byte_transport = @import("port_bytes.zig");
 const message_builder = @import("port_builder.zig");
 const message_transport = @import("port_messages.zig");
 const ResourcePublication = @import("port_resource.zig").Publication;
+const endpoint_api = @import("port_endpoint.zig");
 
 const RegisteredState = struct {
     instance: *native.ModuleInstance,
@@ -30,9 +31,15 @@ pub const RegisteredCapability = opaque {
     pub fn instance(self: *RegisteredCapability) *native.ModuleInstance {
         return self.state().instance;
     }
+    pub fn allocator(self: *RegisteredCapability) std.mem.Allocator {
+        return self.instance().portAccess().state().allocator();
+    }
     pub fn definition(self: *RegisteredCapability) descriptor.PortCapability {
         const owned = self.state();
         return owned.instance.definition(owned.definition).body.port;
+    }
+    pub fn borrowEndpoint(self: *RegisteredCapability, source: Value) endpoint_api.BorrowError!Value {
+        return borrowRegisteredEndpoint(source, self);
     }
     pub fn releasePort(self: *RegisteredCapability) void {
         const owned = self.state();
@@ -62,7 +69,7 @@ pub fn sealCapability(instance: *native.ModuleInstance, index: u32) error{OutOfM
     const result = switch (instance.definition(index).body.port) {
         .factory => try heap.createBorrowedPort(RegisteredCapability, .factory, owner.allocator(), identity, capability),
         .operation => try heap.createBorrowedPort(RegisteredCapability, .operation_selector, owner.allocator(), identity, capability),
-        .endpoint => try heap.createBorrowedPort(RegisteredCapability, .endpoint_selector, owner.allocator(), identity, capability),
+        .endpoint => try endpoint_api.Selector.create(RegisteredCapability, identity, capability),
     };
     instance.retain();
     return result;
@@ -1045,6 +1052,10 @@ const EndpointState = struct {
 /// The endpoint's variant is its complete transport authority. Its retained
 /// parent identity keeps the transport alive without transferring scope.
 pub const Endpoint = opaque {
+    pub const Permit = byte_transport.WritePermit;
+    pub fn allocator(self: *Endpoint) std.mem.Allocator {
+        return self.state().parent.cell().owner.allocator();
+    }
     fn state(self: *Endpoint) *EndpointState {
         return @ptrCast(@alignCast(self));
     }
@@ -1059,6 +1070,30 @@ pub const Endpoint = opaque {
             .writer => |pipe| pipe,
             .reader, .receiver, .sender => null,
         };
+    }
+    pub fn beginRead(self: *Endpoint) error{Busy}!void {
+        self.reader().?.beginRead() catch return error.Busy;
+    }
+    pub fn endRead(self: *Endpoint) void {
+        self.reader().?.endRead();
+    }
+    pub fn readCapacity(self: *Endpoint) usize {
+        return self.reader().?.readCapacity();
+    }
+    pub fn read(self: *Endpoint, destination: []u8) byte_transport.Read {
+        return self.reader().?.read(destination);
+    }
+    pub fn readSource(self: *Endpoint) external.ReadinessSource {
+        return self.reader().?.readSource();
+    }
+    pub fn beginWrite(self: *Endpoint) error{ OutOfMemory, Finished }!*Permit {
+        return self.writer().?.beginWrite();
+    }
+    pub fn writeBytes(permit: *Permit, source: []const u8) byte_transport.Write {
+        return permit.write(source);
+    }
+    pub fn finish(self: *Endpoint) void {
+        self.writer().?.finish();
     }
     pub fn releasePort(self: *Endpoint) void {
         const owned = self.state();
@@ -1081,14 +1116,9 @@ pub const Endpoint = opaque {
     }
 };
 
-pub fn endpointFromValue(item: Value) ?*Endpoint {
-    if (item != .port) return null;
-    return heap.portPayload(Endpoint, .endpoint, item.port);
-}
-
 /// Failure leaves both inputs owned by their caller. Success retains the
 /// source identity and publishes an attenuated borrow, never another owner.
-pub fn borrowEndpoint(parent: Value, selector: *RegisteredCapability) error{ OutOfMemory, WrongKind, Unsupported }!Value {
+fn borrowRegisteredEndpoint(parent: Value, selector: *RegisteredCapability) error{ OutOfMemory, WrongKind, Unsupported }!Value {
     const spec = switch (selector.definition()) {
         .endpoint => |endpoint| endpoint,
         else => return error.WrongKind,
@@ -1121,7 +1151,9 @@ fn createEndpoint(source: EndpointParent, spec: descriptor.EndpointDefinition) e
     const identity = owner.identity;
     owner.identity +%= 1;
     unlock(&owner.mutex);
-    const result = try heap.createBorrowedPort(Endpoint, .endpoint, owner.allocator(), identity, @ptrCast(owned));
+    const result = switch (owned.loan) {
+        inline else => |_, direction| try endpoint_api.Endpoint.create(Endpoint, @field(endpoint_api.Direction, @tagName(direction)), identity, @ptrCast(owned)),
+    };
     source.retain();
     return result;
 }

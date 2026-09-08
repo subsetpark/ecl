@@ -15,6 +15,7 @@ const dict = @import("../dict.zig");
 const intern = @import("../intern.zig");
 const Resource = @import("../port_resource.zig").Resource;
 const builtin = @import("../builtin_port.zig");
+const endpoints = @import("../port_endpoint.zig");
 
 pub const words = [_]env.BuiltinWord{
     .{ .name = "open", .doc = "( factory config -- resource ) Initialize a registered resource in the calling scope.", .primitive = open },
@@ -37,19 +38,12 @@ fn endpoint(evaluator: *machine.Machine) machine.MachineError!void {
     defer selector.deinit();
     var source = try evaluator.popValue();
     defer source.deinit();
-    const item = if (native.registeredCapability(selector.borrow(), .endpoint_selector)) |capability|
-        native.borrowEndpoint(source.borrow(), capability) catch |err| return switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            error.WrongKind => evaluator.typeError("a source of the endpoint selector's issuing kind"),
-            error.Unsupported => evaluator.fail(.domain, "source does not support this endpoint"),
-        }
-    else if (builtin.RegisteredCapability.fromValue(selector.borrow(), .endpoint_selector)) |capability|
-        builtin.borrowEndpoint(source.borrow(), capability) catch |err| return switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            error.WrongKind => evaluator.typeError("a source of the endpoint selector's issuing kind"),
-        }
-    else
-        return evaluator.typeError("an endpoint selector");
+    const capability = endpoints.Selector.fromValue(selector.borrow()) orelse return evaluator.typeError("an endpoint selector");
+    const item = capability.borrow(source.borrow()) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.WrongKind => evaluator.typeError("a source of the endpoint selector's issuing kind"),
+        error.Unsupported => evaluator.fail(.domain, "source does not support this endpoint"),
+    };
     try evaluator.pushOwned(item);
 }
 
@@ -71,53 +65,31 @@ fn read(evaluator: *machine.Machine) machine.MachineError!void {
 }
 
 const ReadDriver = transfer.ReadDriver(ReadBackend);
-const ReadBackend = union(enum) {
-    native: *bytes.Pipe,
-    process: builtin.ProcessReader,
+const ReadBackend = struct {
+    reader: *endpoints.Reader,
 
     fn fromValue(item: Value) ?ReadBackend {
-        if (native.endpointFromValue(item)) |capability| return .{ .native = capability.reader() orelse return null };
-        if (builtin.Endpoint.fromValue(item)) |capability| return .{ .process = capability.reader() orelse return null };
-        return null;
+        const capability = endpoints.Endpoint.fromValue(item) orelse return null;
+        return .{ .reader = capability.reader() orelse return null };
     }
     fn beginRead(self: ReadBackend) error{Busy}!void {
-        switch (self) {
-            .native => |pipe| pipe.beginRead() catch return error.Busy,
-            .process => |stream| stream.cell.beginRead(stream.stream) catch return error.Busy,
-        }
+        return self.reader.beginRead();
     }
     fn readCapacity(self: ReadBackend) usize {
-        return switch (self) {
-            .native => |pipe| pipe.readCapacity(),
-            .process => |stream| stream.cell.readCapacity(stream.stream),
-        };
+        return self.reader.readCapacity();
     }
     pub fn endRead(self: ReadBackend) void {
-        switch (self) {
-            .native => |pipe| pipe.endRead(),
-            .process => |stream| stream.cell.endRead(stream.stream),
-        }
+        self.reader.endRead();
     }
     pub fn readSource(self: ReadBackend) @import("../external.zig").ReadinessSource {
-        return switch (self) {
-            .native => |pipe| pipe.readSource(),
-            .process => |stream| stream.cell.readSource(stream.stream),
-        };
+        return self.reader.readSource();
     }
     pub fn read(self: ReadBackend, evaluator: *machine.Machine, buffer: []u8) machine.MachineError!transfer.ReadProgress {
-        return switch (self) {
-            .native => |pipe| switch (pipe.read(buffer)) {
-                .pending => .pending,
-                .eof => .eof,
-                .data => |count| .{ .data = count },
-                .failed => |failure| transportFailure(evaluator, failure),
-            },
-            .process => |stream| switch (stream.cell.read(stream.stream, buffer)) {
-                .pending => .pending,
-                .eof => .eof,
-                .data => |count| .{ .data = count },
-                .io => evaluator.fail(.io, "process output failed"),
-            },
+        return switch (self.reader.read(buffer)) {
+            .pending => .pending,
+            .eof => .eof,
+            .data => |count| .{ .data = count },
+            .failed => |failure| transportFailure(evaluator, failure),
         };
     }
 };
@@ -128,10 +100,11 @@ fn write(evaluator: *machine.Machine) machine.MachineError!void {
     if (input.borrow() != .list) return evaluator.typeError("a byte list");
     var item = try evaluator.popValue();
     errdefer item.deinit();
-    const permit = WriteBackend.WritePermit.admit(item.borrow()) catch |err| return switch (err) {
+    const capability = endpoints.Endpoint.fromValue(item.borrow()) orelse return evaluator.typeError("a writable byte endpoint");
+    const writer = capability.writer() orelse return evaluator.typeError("a writable byte endpoint");
+    const permit = writer.beginWrite() catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.Finished => evaluator.fail(.io, "endpoint input is finished"),
-        error.WrongKind => evaluator.typeError("a writable byte endpoint"),
     };
     errdefer permit.cancel();
     const driver = try evaluator.allocator().create(WriteDriver);
@@ -141,53 +114,13 @@ fn write(evaluator: *machine.Machine) machine.MachineError!void {
 
 const WriteDriver = transfer.WriteDriver(WriteBackend);
 const WriteBackend = struct {
-    pub const WritePermit = union(enum) {
-        native: *bytes.WritePermit,
-        process: *@import("../process_port.zig").WritePermit,
-
-        fn admit(item: Value) error{ OutOfMemory, Finished, WrongKind }!WritePermit {
-            if (native.endpointFromValue(item)) |capability| {
-                const pipe = capability.writer() orelse return error.WrongKind;
-                return .{ .native = try pipe.beginWrite() };
-            }
-            if (builtin.Endpoint.fromValue(item)) |capability| {
-                const cell = capability.writer() orelse return error.WrongKind;
-                return .{ .process = cell.beginWrite() catch |err| return switch (err) {
-                    error.OutOfMemory => error.OutOfMemory,
-                    error.Closed => error.Finished,
-                } };
-            }
-            return error.WrongKind;
-        }
-        pub fn cancel(self: WritePermit) void {
-            switch (self) {
-                inline else => |permit| permit.cancel(),
-            }
-        }
-        pub fn finish(self: WritePermit) void {
-            switch (self) {
-                inline else => |permit| permit.finish(),
-            }
-        }
-        pub fn source(self: WritePermit) @import("../external.zig").ReadinessSource {
-            return switch (self) {
-                inline else => |permit| permit.source(),
-            };
-        }
-    };
+    pub const WritePermit = *endpoints.WritePermit;
     pub const invalid_byte_message = "port.write contains a value outside 0...255";
     pub fn write(_: WriteBackend, evaluator: *machine.Machine, permit: WritePermit, buffer: []const u8) machine.MachineError!transfer.WriteProgress {
-        return switch (permit) {
-            .native => |writer| switch (writer.write(buffer)) {
-                .pending => .pending,
-                .written => |count| .{ .written = count },
-                .failed => |failure| transportFailure(evaluator, failure),
-            },
-            .process => |writer| switch (writer.write(buffer)) {
-                .pending => .pending,
-                .written => |count| .{ .written = count },
-                .io => evaluator.fail(.io, "process stdin is closed"),
-            },
+        return switch (permit.write(buffer)) {
+            .pending => .pending,
+            .written => |count| .{ .written = count },
+            .failed => |failure| transportFailure(evaluator, failure),
         };
     }
 };
@@ -195,12 +128,8 @@ const WriteBackend = struct {
 fn finish(evaluator: *machine.Machine) machine.MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
-    if (native.endpointFromValue(item.borrow())) |capability| {
-        if (capability.writer()) |pipe| pipe.finish() else if (capability.sender()) |queue| queue.finish() else return evaluator.typeError("a writable endpoint");
-    } else if (builtin.Endpoint.fromValue(item.borrow())) |capability| {
-        const cell = capability.writer() orelse return evaluator.typeError("a writable endpoint");
-        cell.closeInput();
-    } else return evaluator.typeError("a writable endpoint");
+    const capability = endpoints.Endpoint.fromValue(item.borrow()) orelse return evaluator.typeError("a writable endpoint");
+    if (capability.writer()) |writer| writer.finish() else if (capability.sender()) |queue| queue.finish() else return evaluator.typeError("a writable endpoint");
 }
 
 fn send(evaluator: *machine.Machine) machine.MachineError!void {
@@ -208,7 +137,7 @@ fn send(evaluator: *machine.Machine) machine.MachineError!void {
     defer input.deinit();
     var endpoint_value = try evaluator.popValue();
     defer endpoint_value.deinit();
-    const capability = native.endpointFromValue(endpoint_value.borrow()) orelse return evaluator.typeError("a message sender");
+    const capability = endpoints.Endpoint.fromValue(endpoint_value.borrow()) orelse return evaluator.typeError("a message sender");
     const queue = capability.sender() orelse return evaluator.typeError("a message sender");
     const driver = try evaluator.allocator().create(SendDriver);
     errdefer evaluator.allocator().destroy(driver);
@@ -263,7 +192,7 @@ const SendDriver = struct {
 fn receive(evaluator: *machine.Machine) machine.MachineError!void {
     var endpoint_value = try evaluator.popValue();
     defer endpoint_value.deinit();
-    const capability = native.endpointFromValue(endpoint_value.borrow()) orelse return evaluator.typeError("a message receiver");
+    const capability = endpoints.Endpoint.fromValue(endpoint_value.borrow()) orelse return evaluator.typeError("a message receiver");
     const queue = capability.receiver() orelse return evaluator.typeError("a message receiver");
     queue.beginRead() catch return evaluator.fail(.contract, "endpoint already has a pending receiver");
     errdefer queue.endRead();
