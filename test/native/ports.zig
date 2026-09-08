@@ -651,6 +651,9 @@ const StorageSpec = struct {
                 _ = builder.int(state.value.load(.acquire)) and builder.int(state.durable.load(.acquire)) and
                     builder.int(@intFromBool(state.transaction.load(.acquire))) and builder.list(3) and builder.result();
             },
+            5 => {
+                _ = builder.list(0) and builder.child(LookalikeStorage, .dependent) and builder.result();
+            },
             else => controller.fail(.domain, "unknown storage operation"),
         }
     }
@@ -661,6 +664,18 @@ const StorageSpec = struct {
 };
 const Storage = ecl.Port(StorageSpec);
 
+const LookalikeStorage = ecl.Port(struct {
+    pub const name = StorageSpec.name;
+    pub const State = struct { unrelated: u8 = 0 };
+    pub fn init() State {
+        return .{};
+    }
+    pub fn open(_: *State, _: *ecl.Controller) void {}
+    pub fn run(_: *State, _: u32, _: *ecl.Controller) void {}
+    pub fn cancel(_: *State) void {}
+    pub fn deinit(_: *State) void {}
+});
+
 const Cursor = ecl.Port(struct {
     pub const name = "cursor";
     pub const State = struct { parent: ?*Storage.StateType = null, position: i64 = 0, end: i64 = 0 };
@@ -670,6 +685,7 @@ const Cursor = ecl.Port(struct {
     pub fn open(state: *State, controller: *ecl.Controller) void {
         state.parent = controller.parent(Storage) orelse return controller.fail(.domain, "cursor requires a storage parent");
         if (controller.parent(Duplex) != null) return controller.fail(.contract, "parent kind was not validated");
+        if (controller.parent(LookalikeStorage) != null) return controller.fail(.contract, "same-name parent type was accepted");
         const offset = (controller.input(&.{0}) orelse return controller.fail(.type, "missing cursor offset")).int() orelse return controller.fail(.type, "expected cursor offset");
         const count = (controller.input(&.{1}) orelse return controller.fail(.type, "missing cursor count")).int() orelse return controller.fail(.type, "expected cursor count");
         if (offset < 0 or count < 0 or offset > 4 or count > 4 - offset) return controller.fail(.domain, "cursor range exceeds fixture rows");
@@ -864,6 +880,7 @@ pub const Extension = extension: {
             ecl.operation("durable", "Acknowledge durable storage separately from commit.", Storage, 2, .operation, 0),
             ecl.operation("storage-status", "Observe committed, durable, and transaction state.", Storage, 3, .operation, 0),
             ecl.operation("detached-query", "Reject parent-state access by an independent child.", Storage, 4, .operation, 0),
+            ecl.operation("lookalike-child", "Reject an unregistered type with a registered kind's name.", Storage, 5, .operation, 0),
             ecl.factory("orphan-cursor", "Reject cursor initialization without its native parent.", Cursor),
             ecl.operation("rows", "Stream complete row messages under bounded pressure.", Cursor, 0, .operation, 1),
             ecl.operation("position", "Position the cursor with a registered operation.", Cursor, 1, .operation, 0),

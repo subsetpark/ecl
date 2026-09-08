@@ -92,7 +92,7 @@ pub const MessageBuilder = opaque {
         if (!@hasDecl(P, "ecl_port_marker")) @compileError("ecl-native: child requires a declared Port type");
         return self.apply(.{ .action = .prepare_child }) and self.apply(.{
             .action = .child,
-            .scalar = capability.Scalar.symbol(P.name).wire,
+            .kind_identity = P.kindIdentity(),
             .count = @intFromEnum(switch (dependency) {
                 .independent => abi.ChildDependency.independent,
                 .dependent => abi.ChildDependency.dependent,
@@ -136,7 +136,7 @@ pub const Controller = opaque {
     pub fn parent(self: *Controller, comptime P: type) ?*P.StateType {
         comptime if (!@hasDecl(P, "ecl_port_marker")) @compileError("ecl-native: parent requires a declared Port type");
         const owned = self.state();
-        const pointer = owned.table.parent_state(owned.context, P.name.ptr, P.name.len) orelse return null;
+        const pointer = owned.table.parent_state(owned.context, P.kindIdentity()) orelse return null;
         return @ptrCast(@alignCast(pointer));
     }
     /// Own the next complete message until forwarding, returning it as the
@@ -283,6 +283,12 @@ pub fn Port(comptime Spec: type) type {
         pub const StateType = Spec.State;
         pub const LaneType = Lane;
         pub const name = Spec.name;
+        // A mutable object's address supplies nominal identity even when two
+        // specs have identical names or the linker folds identical callbacks.
+        var kind_identity: u8 = 0;
+        fn kindIdentity() *const anyopaque {
+            return &kind_identity;
+        }
         fn adapter(self: *Self) *Adapter {
             return @ptrCast(@alignCast(self));
         }
@@ -290,7 +296,7 @@ pub fn Port(comptime Spec: type) type {
             return .{ .state_size = @sizeOf(Spec.State), .state_alignment = @alignOf(Spec.State), .name_ptr = name.ptr, .name_len = name.len, .init_state = initState, .initialize = initialize, .execute = execute, .cancel = cancelState, .cleanup = cleanup, .lane_count = @typeInfo(Lane).@"enum".fields.len, .cancellation = switch (cancellation) {
                 .close_resource => .close_resource,
                 .acknowledge => .acknowledge,
-            }, .select_lane = selectLane, .cancel_operation = if (cancellation == .acknowledge) cancelOperation else null, .shutdown = if (@hasDecl(Spec, "shutdown")) shutdown else null };
+            }, .select_lane = selectLane, .cancel_operation = if (cancellation == .acknowledge) cancelOperation else null, .shutdown = if (@hasDecl(Spec, "shutdown")) shutdown else null, .identity = kindIdentity() };
         }
         fn selectLane(operation: u32) callconv(.c) u32 {
             return if (@hasDecl(Spec, "Lane")) @intCast(@intFromEnum(Spec.lane(operation))) else 0;

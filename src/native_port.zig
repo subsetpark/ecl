@@ -1352,8 +1352,7 @@ const ControllerContext = struct {
 fn context(raw: *anyopaque) *ControllerContext {
     return @ptrCast(@alignCast(raw));
 }
-fn controllerParent(raw: *anyopaque, name: [*]const u8, length: u32) callconv(.c) ?*anyopaque {
-    if (length == 0 or length > 256) return null;
+fn controllerParent(raw: *anyopaque, identity: *const anyopaque) callconv(.c) ?*anyopaque {
     const cell = context(raw).cell;
     lock(&cell.mutex);
     defer unlock(&cell.mutex);
@@ -1361,7 +1360,7 @@ fn controllerParent(raw: *anyopaque, name: [*]const u8, length: u32) callconv(.c
         .attached => |attachment| attachment.parent,
         .independent, .retired => return null,
     };
-    if (parent.instance != cell.instance or !std.mem.eql(u8, name[0..length], parent.definition.name_ptr[0..parent.definition.name_len])) return null;
+    if (parent.instance != cell.instance or parent.definition.identity != identity) return null;
     // Membership remains attached until child cleanup and controller join.
     // The parent joins it before destroying the borrowed native state.
     return parent.backend.ptr;
@@ -1475,8 +1474,7 @@ fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest
         },
         .child => {
             const configuration = builder.childConfiguration() orelse return error.InvalidState;
-            if (request.scalar.kind != .symbol or request.scalar.bytes_len == 0 or request.scalar.bytes_len > 64 * 1024) return error.InvalidValue;
-            const name = (request.scalar.bytes_ptr orelse return error.InvalidValue)[0..@intCast(request.scalar.bytes_len)];
+            const identity = request.kind_identity orelse return error.InvalidValue;
             const dependency: abi.ChildDependency = @enumFromInt(request.count);
             switch (dependency) {
                 .independent, .dependent => {},
@@ -1484,7 +1482,7 @@ fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest
             }
             var index: u32 = 0;
             const kind = while (ctx.cell.instance.validated().port(index)) |definition| : (index += 1) {
-                if (std.mem.eql(u8, name, definition.name_ptr[0..definition.name_len])) break index;
+                if (definition.identity == identity) break index;
             } else return error.InvalidState;
             const child = op.stageChild(kind, configuration, dependency) catch |err| {
                 recordControllerFailure(ctx, switch (err) {

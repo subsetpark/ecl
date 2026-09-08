@@ -612,7 +612,7 @@ pub const ValidateCursor = struct {
                 if (port.state_size == 0 or port.state_size > abi.max_port_state_bytes or
                     port.state_alignment == 0 or port.state_alignment > 64 or
                     !std.math.isPowerOfTwo(port.state_alignment) or
-                    port.init_state == null or port.initialize == null or port.execute == null or
+                    port.identity == null or port.init_state == null or port.initialize == null or port.execute == null or
                     port.cancel == null or port.cleanup == null or port.select_lane == null or
                     port.lane_count == 0 or port.lane_count > abi.max_port_lanes) return error.InvalidPortDefinition;
                 switch (port.cancellation) {
@@ -626,8 +626,10 @@ pub const ValidateCursor = struct {
                     error.InvalidName => error.InvalidName,
                 };
                 const owned_name = intern.get(intern.namespaceId(symbol));
-                for (ports[0..index]) |prior| if (std.mem.eql(u8, prior.?.name_ptr[0..prior.?.name_len], owned_name))
-                    return error.DuplicateDefinition;
+                for (ports[0..index]) |prior| {
+                    if (prior.?.identity == port.identity) return error.InvalidPortDefinition;
+                    if (std.mem.eql(u8, prior.?.name_ptr[0..prior.?.name_len], owned_name)) return error.DuplicateDefinition;
+                }
                 port.name_ptr = owned_name.ptr;
                 ports[index] = port;
             }

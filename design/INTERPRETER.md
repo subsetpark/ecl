@@ -1514,7 +1514,10 @@ before destroying backend state, while an exchange retains its task-scope
 membership until its provisional-child scope is closed.
 The permanent dependency attachment owns both its scope membership and its
 issuing parent identity. Controller parent-state projection validates that
-attachment's module and resource kind. Detaching consumes the attachment only
+attachment's module and nominal registered resource identity. Each native kind
+owns a distinct identity token pinned by its module instance; names describe
+kinds but cannot authorize typed state projection or child creation. Descriptor
+validation rejects missing or duplicate tokens. Detaching consumes the attachment only
 after child cleanup and controller join; consequently even a child's destruction
 callback may use the borrowed native parent state. Independent resources carry
 no parent-state authority, and scope transfer preserves the attachment.

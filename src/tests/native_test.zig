@@ -523,6 +523,15 @@ test "native: SDK port declarations validate state layouts and controller adapte
     definition = P.definition();
     definition.select_lane = null;
     try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &invalid);
+    definition = P.definition();
+    definition.identity = null;
+    try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &invalid);
+    var duplicates = [_]abi.PortDefinition{ P.definition(), P.definition() };
+    duplicates[1].name_ptr = "other";
+    duplicates[1].name_len = 5;
+    invalid.ports_ptr = &duplicates;
+    invalid.port_count = 2;
+    try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &invalid);
 }
 
 test "native: registered descriptors reject undeclared kinds lanes and endpoints" {
@@ -1517,6 +1526,12 @@ test "native: transferred transactions release parent state during cancellation 
     for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "portprobe.storage [] port.open 's set s portprobe.transaction [] port.call 't set " ++
         "t wrap [] (portprobe.transaction-wait [] port.call) @give 'task set 1 portprobe.await-blocked " ++
         "s port.close task task.await 'err at 'kind at portprobe.cleaned", "'cancelled 2");
+}
+
+test "native: child creation rejects an undeclared same-name native kind" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "portprobe.storage [] port.open 's set " ++
+        "s wrap (portprobe.lookalike-child [] port.call) @attempt 'err at 'kind at " ++
+        "s portprobe.storage-status [] port.call s port.close portprobe.cleaned", "'domain [0 0 0] 1");
 }
 
 test "native: parent state is unavailable to root and independent resources" {

@@ -113,9 +113,10 @@ pub const MessageBuildRequest = extern struct {
     path: ?[*]const u64 = null,
     depth: u32 = 0,
     owner: EndpointOwner = .exchange,
+    kind_identity: ?*const anyopaque = null,
 };
 pub const ControllerTable = extern struct {
-    parent_state: *const fn (*anyopaque, [*]const u8, u32) callconv(.c) ?*anyopaque,
+    parent_state: *const fn (*anyopaque, *const anyopaque) callconv(.c) ?*anyopaque,
     build_message: *const fn (*anyopaque, *const MessageBuildRequest) callconv(.c) HostStatus,
     fail_allocation: *const fn (*anyopaque) callconv(.c) void,
     receive_message: *const fn (*anyopaque, EndpointOwner, u32) callconv(.c) bool,
@@ -151,6 +152,7 @@ pub const PortDefinition = extern struct {
     select_lane: ?*const fn (u32) callconv(.c) u32 = null,
     cancel_operation: ?*const fn (*anyopaque, u32) callconv(.c) void = null,
     shutdown: ?PortControllerFn = null,
+    identity: ?*const anyopaque = null,
 };
 
 pub const CapabilityRequirement = extern struct {
@@ -440,10 +442,10 @@ comptime {
     assertRecord(InvokeResult, 16, 8);
     assertRecord(HostTable, 144, 8);
     assertRecord(Descriptor, 104, 8);
-    assertRecord(PortDefinition, 96, 8);
+    assertRecord(PortDefinition, 104, 8);
     assertRecord(PortRequest, 48, 8);
     assertRecord(PortReply, 24, 8);
-    assertRecord(MessageBuildRequest, 64, 8);
+    assertRecord(MessageBuildRequest, 72, 8);
     assertRecord(ControllerTable, 136, 8);
     assertRecord(EntryResult, 32, 8);
 
