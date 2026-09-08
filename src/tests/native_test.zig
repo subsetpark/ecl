@@ -1374,3 +1374,47 @@ test "native: message builders copy received values and reset consumed messages"
         "r port.receive 'value at 'copy at r port.receive 'value at len x port.result dict.keys len " ++
         "r port.receive 'kind at x port.close p port.close portprobe.cleaned", "42 0 0 'eof 1");
 }
+
+test "native: resource message endpoints outlive exchanges and preserve attenuation" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .message_capacity = 1, .message_queue_bytes = 8 }, "portprobe.factory [] port.open 'p set p portprobe.resource-notify [] port.call pop " ++
+        "p portprobe.resource-receiver port.endpoint 'r set r port.receive 'value at " ++
+        "p portprobe.noop [] port.begin 'x set x wrap (portprobe.resource-receiver port.endpoint) @attempt 'err at 'kind at " ++
+        "p wrap (portprobe.receiver port.endpoint) @attempt 'err at 'kind at " ++
+        "x port.close p port.close r wrap (port.receive) @attempt 'err at 'kind at portprobe.cleaned", "42 'type 'type 'io 1");
+}
+
+test "native: resource message finish and shutdown join their controllers" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .message_capacity = 1, .message_queue_bytes = 8 }, "portprobe.factory [] port.open 'p set p portprobe.resource-messages [] port.begin 'x set " ++
+        "p portprobe.resource-sender port.endpoint 's set p portprobe.resource-receiver port.endpoint 'r set " ++
+        "s 7 port.send r port.receive 'value at s port.finish r port.receive 'kind at " ++
+        "x port.await x port.close r port.receive 'kind at p port.shutdown portprobe.cleaned", "7 'eof 'eof 1");
+}
+
+test "native: resource byte endpoints make independent progress under tiny rings" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "portprobe.factory [] port.open 'p set p portprobe.resource-bytes [] port.begin 'x set " ++
+        "p portprobe.resource-input port.endpoint wrap (dup [1 2 3] port.write port.finish) @spawn 't set " ++
+        "p portprobe.resource-output port.endpoint 'r set r 8 port.read r 8 port.read r 8 port.read " ++
+        "r 8 port.read t task.await 'ok at pop x port.await x port.close p port.close portprobe.cleaned", "[1] [2] [3] [] 1");
+}
+
+test "native: resource closure discards self-retaining channel messages exactly once" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .message_capacity = 1 }, "portprobe.factory [] port.open 'p set p portprobe.resource-messages [] port.begin 'x set " ++
+        "p portprobe.resource-sender port.endpoint dup p port.send port.finish " ++
+        "x port.await x port.close p port.close p port.close portprobe.cleaned", "1");
+}
+
+test "native: cancellation interrupts resource message readers without finishing the resource" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .message_capacity = 1 }, "portprobe.factory [] port.open 'p set p portprobe.resource-messages [] port.begin 'x set " ++
+        "1 portprobe.await-blocked x port.cancel x wrap (port.await) @attempt 'err at 'kind at x port.close " ++
+        "p portprobe.resource-messages [] port.begin 'y set p portprobe.resource-sender port.endpoint 's set " ++
+        "s 42 port.send p portprobe.resource-receiver port.endpoint port.receive 'value at " ++
+        "s port.finish y port.await y port.close p port.close portprobe.cleaned", "'cancelled 42 1");
+}
+
+test "native: cancellation interrupts resource byte readers and leaves the lane reusable" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "portprobe.factory [] port.open 'p set p portprobe.resource-bytes [] port.begin 'x set " ++
+        "1 portprobe.await-blocked x port.cancel x wrap (port.await) @attempt 'err at 'kind at x port.close " ++
+        "p portprobe.resource-bytes [] port.begin 'y set p portprobe.resource-input port.endpoint dup [42] port.write port.finish " ++
+        "p portprobe.resource-output port.endpoint dup 1 port.read swap 1 port.read " ++
+        "y port.await y port.close p port.close portprobe.cleaned", "'cancelled [42] [] 1");
+}

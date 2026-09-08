@@ -231,6 +231,7 @@ pub const Cell = struct {
     shutdown_state: union(enum) { idle, requested, running, completed: ?Failure, aborted } = .idle,
     configuration: ?Value = null,
     message_budget: *message_transport.Budget,
+    resource_pipes: [64]?Protocol.Transport = .{null} ** 64,
     lanes: [abi.max_port_lanes]Operations,
 
     fn initializeAllocation(cell: *Cell, owner: *OwnerState, instance: *native.ModuleInstance, kind: u32, config: ?*const port_message.Validated) error{OutOfMemory}!void {
@@ -241,7 +242,17 @@ pub const Cell = struct {
         const group = try ControllerGroup.init(allocator, owner.executor.access(), cell);
         errdefer group.deinit();
         const message_budget = try message_transport.Budget.create(owner.host, owner.limits.message_queue_bytes);
+        errdefer message_budget.release();
         cell.* = .{ .allocator = allocator, .owner = owner, .instance = instance, .kind = kind, .definition = definition, .backend = state, .controllers = group, .message_budget = message_budget, .lanes = .{Operations.init(&cell.mutex)} ** abi.max_port_lanes };
+        errdefer for (cell.resource_pipes) |pipe| if (pipe) |transport| transport.release();
+        for (&cell.resource_pipes, 0..) |*slot, index| {
+            const endpoint = instance.validated().endpoint(kind, @intCast(index), .resource) orelse continue;
+            const transport = try Protocol.Transport.create(cell, switch (endpoint.transport) {
+                .bytes => .bytes,
+                .messages => .messages,
+            });
+            slot.* = transport;
+        }
         if (config) |validated| {
             cell.configuration = validated.value();
             heap.retainValue(validated.value());
@@ -266,6 +277,7 @@ pub const Cell = struct {
     pub fn releasePort(self: *Cell) void {
         if (self.refs.fetchSub(1, .acq_rel) != 1) return;
         if (self.configuration) |config| heap.hostDomain(self.owner.host).releaseValue(config);
+        for (self.resource_pipes) |pipe| if (pipe) |transport| transport.release();
         self.message_budget.release();
         self.instance.releasePin();
         self.allocator.free(self.backend);
@@ -347,6 +359,7 @@ pub const Cell = struct {
             var ticket = lane.front();
             while (ticket) |current| : (ticket = current.successor()) current.owner().markCancelled();
         }
+        for (self.resource_pipes) |pipe| if (pipe) |transport| transport.fail(.init(.io, "native resource is closed"), true);
         if (notify_backend) self.definition.cancel.?(self.backend.ptr);
         self.changed.broadcast(io());
         self.waits.notifyLocked(self);
@@ -359,6 +372,7 @@ pub const Cell = struct {
         unlock(&self.mutex);
         var controller_context: ControllerContext = .{ .cell = self, .invocation = .initialize };
         if (initialize) self.definition.initialize.?(self.backend.ptr, &controller_table, &controller_context);
+        controller_context.deinit();
         lock(&self.mutex);
         if (self.initialization_failure != null) self.closed.store(true, .release);
         const lane_count = if (self.closed.load(.acquire)) 1 else self.definition.lane_count + @as(u32, @intFromBool(self.definition.shutdown != null));
@@ -368,6 +382,7 @@ pub const Cell = struct {
         // The root controller owns cleanup; its reaper joins it before detach.
         lock(&self.mutex);
         unlock(&self.mutex);
+        for (self.resource_pipes) |pipe| if (pipe) |transport| transport.abort();
         self.definition.cleanup.?(self.backend.ptr);
         lock(&self.mutex);
         self.phase = .cleaned;
@@ -408,6 +423,7 @@ pub const Cell = struct {
         self.shutdown_state = .running;
         unlock(&self.mutex);
         var ctx: ControllerContext = .{ .cell = self, .invocation = .{ .shutdown = null } };
+        defer ctx.deinit();
         self.definition.shutdown.?(self.backend.ptr, &controller_table, &ctx);
         lock(&self.mutex);
         self.shutdown_state = if (self.closed.load(.acquire)) .aborted else .{ .completed = ctx.invocation.shutdown };
@@ -512,6 +528,18 @@ const Protocol = union(enum) {
                 .messages => |pair| pair.queue.release(),
             }
         }
+        fn abort(self: Transport) void {
+            switch (self) {
+                .bytes => |pair| pair.pipe.fail(.init(.io, "native resource is closed"), true),
+                .messages => |pair| pair.queue.abort(),
+            }
+        }
+        fn interrupt(self: Transport) void {
+            switch (self) {
+                .bytes => |pair| pair.pipe.interrupt(),
+                .messages => |pair| pair.queue.interrupt(),
+            }
+        }
         fn fail(self: Transport, failure: byte_transport.Failure, discard: bool) void {
             switch (self) {
                 .bytes => |pair| pair.pipe.fail(failure, discard),
@@ -573,6 +601,9 @@ pub const Operation = struct {
     waits: external.WaitList(Operation) = .{},
     protocol: Protocol,
     failure: ?Failure = null,
+    // Transport borrows this monotonic interrupt latch while the controller
+    // runs. The ticket remains the authority for terminal cancellation state.
+    transport_cancelled: std.atomic.Value(bool) = .init(false),
     ownership: external.Ownership = .provisional,
     lifetime: enum { open, closing, closed } = .open,
     terminal_result: union(enum) { available: Value, claimed, discarded },
@@ -600,10 +631,7 @@ pub const Operation = struct {
     }
     fn execute(self: *Operation, running: *controllers.Running) void {
         var ctx: ControllerContext = .{ .cell = self.cell, .invocation = .{ .operation = .{ .value = self, .running = running } } };
-        defer {
-            if (ctx.received) |item| item.release();
-            if (ctx.builder) |builder| builder.retire();
-        }
+        defer ctx.deinit();
         self.cell.definition.execute.?(self.cell.backend.ptr, self.code, &controller_table, &ctx);
     }
     fn completeResourceLocked(self: *Operation, outcome: controllers.Completion) void {
@@ -728,6 +756,10 @@ pub const Operation = struct {
         return external.readinessSource(Operation, self, interests);
     }
     fn notifyLocked(self: *Operation) void {
+        if (self.ticket.isCancelled()) {
+            self.transport_cancelled.store(true, .release);
+            for (self.cell.resource_pipes) |pipe| if (pipe) |transport| transport.interrupt();
+        }
         if (self.protocol == .registered and (self.ticket.isCancelled() or self.ticket.status() == .done)) {
             for (self.protocol.registered.pipes, 0..) |pipe, index| if (pipe) |pair| {
                 const endpoint = self.cell.instance.validated().endpoint(self.cell.kind, @intCast(index), .exchange).?;
@@ -841,8 +873,37 @@ pub fn exchangeFromValue(item: Value) ?*Operation {
     return heap.portPayload(Operation, .exchange, item.port);
 }
 
+const EndpointParent = union(enum) {
+    resource: *Cell,
+    exchange: *Operation,
+    fn cell(self: EndpointParent) *Cell {
+        return switch (self) {
+            .resource => |resource| resource,
+            .exchange => |operation| operation.cell,
+        };
+    }
+    fn retain(self: EndpointParent) void {
+        switch (self) {
+            .resource => |resource| resource.retainReadiness(),
+            .exchange => |operation| operation.retainReadiness(),
+        }
+    }
+    fn release(self: EndpointParent) void {
+        switch (self) {
+            .resource => |resource| resource.releaseReadiness(),
+            .exchange => |operation| operation.releaseReadiness(),
+        }
+    }
+    fn transport(self: EndpointParent, index: u32) ?Protocol.Transport {
+        if (index >= 64) return null;
+        return switch (self) {
+            .resource => |resource| resource.resource_pipes[index],
+            .exchange => |operation| if (operation.protocol == .registered and operation.endpoints & (@as(u64, 1) << @as(u6, @intCast(index))) != 0) operation.protocol.registered.pipes[index] else null,
+        };
+    }
+};
 const EndpointState = struct {
-    parent: Value,
+    parent: EndpointParent,
     loan: union(enum) { reader: *byte_transport.Pipe, writer: *byte_transport.Pipe, receiver: *message_transport.Queue, sender: *message_transport.Queue },
 };
 
@@ -867,9 +928,9 @@ pub const Endpoint = opaque {
     pub fn releasePort(self: *Endpoint) void {
         const owned = self.state();
         const parent = owned.parent;
-        const owner = exchangeFromValue(parent).?.cell.owner;
+        const owner = parent.cell().owner;
         owner.allocator().destroy(owned);
-        heap.hostDomain(owner.host).releaseValue(parent);
+        parent.release();
     }
     pub fn receiver(self: *Endpoint) ?*message_transport.Queue {
         return switch (self.state().loan) {
@@ -897,14 +958,17 @@ pub fn borrowEndpoint(parent: Value, selector: *RegisteredCapability) error{ Out
         .endpoint => |endpoint| endpoint,
         else => return error.WrongKind,
     };
-    const operation = exchangeFromValue(parent) orelse return error.WrongKind;
-    if (operation.cell.instance != selector.instance() or operation.cell.kind != spec.resource) return error.WrongKind;
-    if (spec.owner != .exchange or operation.protocol != .registered or operation.endpoints & (@as(u64, 1) << spec.id) == 0) return error.Unsupported;
-    const pair = operation.protocol.registered.pipes[spec.id] orelse return error.Unsupported;
-    const owner = operation.cell.owner;
+    const source: EndpointParent = switch (spec.owner) {
+        .resource => .{ .resource = if (parent == .port) heap.portPayload(Cell, .resource, parent.port) orelse return error.WrongKind else return error.WrongKind },
+        .exchange => .{ .exchange = exchangeFromValue(parent) orelse return error.WrongKind },
+    };
+    const cell = source.cell();
+    if (cell.instance != selector.instance() or cell.kind != spec.resource) return error.WrongKind;
+    const pair = source.transport(spec.id) orelse return error.Unsupported;
+    const owner = cell.owner;
     const owned = try owner.allocator().create(EndpointState);
     errdefer owner.allocator().destroy(owned);
-    owned.* = .{ .parent = parent, .loan = switch (pair) {
+    owned.* = .{ .parent = source, .loan = switch (pair) {
         .bytes => |transport| switch (spec.direction) {
             .input => .{ .writer = transport.pipe },
             .output => .{ .reader = transport.pipe },
@@ -919,7 +983,7 @@ pub fn borrowEndpoint(parent: Value, selector: *RegisteredCapability) error{ Out
     owner.identity +%= 1;
     unlock(&owner.mutex);
     const result = try heap.createBorrowedPort(Endpoint, .endpoint, owner.allocator(), identity, @ptrCast(owned));
-    heap.retainValue(parent);
+    source.retain();
     return result;
 }
 
@@ -928,6 +992,13 @@ const ControllerContext = struct {
     invocation: union(enum) { initialize, operation: struct { value: *Operation, running: *controllers.Running }, shutdown: ?Failure },
     received: ?*message_transport.Envelope = null,
     builder: ?*message_builder.Builder = null,
+    fn cancellation(self: *ControllerContext) *const std.atomic.Value(bool) {
+        return if (self.operation()) |op| &op.transport_cancelled else &self.cell.closed;
+    }
+    fn deinit(self: *ControllerContext) void {
+        if (self.received) |item| item.release();
+        if (self.builder) |builder| builder.retire();
+    }
     fn operation(self: *ControllerContext) ?*Operation {
         return switch (self.invocation) {
             .operation => |active| active.value,
@@ -1040,10 +1111,10 @@ fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest
         .clear => builder.clear(),
         .send => {
             const validated = builder.validated() orelse return error.InvalidState;
-            const pair = controllerQueue(ctx, request.endpoint, .output) orelse return error.InvalidState;
+            const pair = controllerQueue(ctx, request.owner, request.endpoint, .output) orelse return error.InvalidState;
             if (validated.footprint().bytes > ctx.cell.owner.limits.message_queue_bytes) return error.Overflow;
             const item = try message_transport.Envelope.create(ctx.cell.owner.host, validated);
-            if (!pair.controller.send(item)) {
+            if (!pair.controller.send(item, ctx.cancellation())) {
                 item.release();
                 return .invalid;
             }
@@ -1072,7 +1143,7 @@ fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest
 fn controllerRead(raw: *anyopaque, bytes: [*]u8, length: u32) callconv(.c) u32 {
     if (length == 0) return 0;
     const op = context(raw).operation() orelse return 0;
-    if (op.protocol == .registered) return controllerReadEndpoint(raw, 0, bytes, length);
+    if (op.protocol == .registered) return controllerReadEndpoint(raw, .exchange, 0, bytes, length);
     lock(&op.mutex);
     defer unlock(&op.mutex);
     while (!op.ticket.isCancelled() and op.protocol.legacy.request.len == 0 and !op.protocol.legacy.finished) op.changed.waitUncancelable(io(), &op.mutex);
@@ -1084,7 +1155,7 @@ fn controllerRead(raw: *anyopaque, bytes: [*]u8, length: u32) callconv(.c) u32 {
 fn controllerWrite(raw: *anyopaque, bytes: [*]const u8, length: u32) callconv(.c) u32 {
     if (length == 0) return 0;
     const op = context(raw).operation() orelse return 0;
-    if (op.protocol == .registered) return controllerWriteEndpoint(raw, 1, bytes, length);
+    if (op.protocol == .registered) return controllerWriteEndpoint(raw, .exchange, 1, bytes, length);
     lock(&op.mutex);
     defer unlock(&op.mutex);
     while (!op.ticket.isCancelled() and op.protocol.legacy.response.free() == 0) op.changed.waitUncancelable(io(), &op.mutex);
@@ -1103,78 +1174,105 @@ fn controllerCancelled(raw: *anyopaque) callconv(.c) bool {
     return op.ticket.isCancelled();
 }
 
-fn controllerPipe(raw: *anyopaque, index: u32, direction: enum { input, output }) ?byte_transport.Pair {
-    const op = context(raw).operation() orelse return null;
-    if (op.protocol != .registered or index >= 64) return null;
-    const endpoint = op.cell.instance.validated().endpoint(op.cell.kind, @intCast(index), .exchange) orelse return null;
+fn controllerEndpointParent(ctx: *ControllerContext, owner: abi.EndpointOwner) ?EndpointParent {
+    return switch (owner) {
+        .resource => .{ .resource = ctx.cell },
+        .exchange => .{ .exchange = ctx.operation() orelse return null },
+        _ => null,
+    };
+}
+fn controllerPipe(raw: *anyopaque, owner: abi.EndpointOwner, index: u32, direction: enum { input, output }) ?byte_transport.Pair {
+    const source = controllerEndpointParent(context(raw), owner) orelse return null;
+    const cell = source.cell();
+    if (index >= 64) return null;
+    const endpoint = cell.instance.validated().endpoint(cell.kind, @intCast(index), switch (source) {
+        .resource => .resource,
+        .exchange => .exchange,
+    }) orelse return null;
     if (endpoint.transport != .bytes or switch (direction) {
         .input => endpoint.direction != .input,
         .output => endpoint.direction != .output,
     }) return null;
-    const transport = op.protocol.registered.pipes[index] orelse return null;
+    const transport = source.transport(index) orelse return null;
     return switch (transport) {
         .bytes => |pair| pair,
         .messages => null,
     };
 }
-fn controllerReadEndpoint(raw: *anyopaque, index: u32, bytes: [*]u8, length: u32) callconv(.c) u32 {
+fn controllerReadEndpoint(raw: *anyopaque, owner: abi.EndpointOwner, index: u32, bytes: [*]u8, length: u32) callconv(.c) u32 {
     if (length == 0) return 0;
-    const pair = controllerPipe(raw, index, .input) orelse {
+    const pair = controllerPipe(raw, owner, index, .input) orelse {
         const text = "controller selected an unsupported byte input";
         controllerFail(raw, .domain, text.ptr, text.len);
         return 0;
     };
-    return @intCast(pair.controller.read(bytes[0..@min(length, 64 * 1024)]));
+    pair.pipe.beginRead() catch {
+        const text = "byte endpoint already has a pending reader";
+        controllerFail(raw, .contract, text.ptr, text.len);
+        return 0;
+    };
+    defer pair.pipe.endRead();
+    return @intCast(pair.controller.read(bytes[0..@min(length, 64 * 1024)], context(raw).cancellation()));
 }
-fn controllerWriteEndpoint(raw: *anyopaque, index: u32, bytes: [*]const u8, length: u32) callconv(.c) u32 {
+fn controllerWriteEndpoint(raw: *anyopaque, owner: abi.EndpointOwner, index: u32, bytes: [*]const u8, length: u32) callconv(.c) u32 {
     if (length == 0) return 0;
-    const pair = controllerPipe(raw, index, .output) orelse {
+    const pair = controllerPipe(raw, owner, index, .output) orelse {
         const text = "controller selected an unsupported byte output";
         controllerFail(raw, .domain, text.ptr, text.len);
         return 0;
     };
-    return @intCast(pair.controller.write(bytes[0..@min(length, 64 * 1024)]));
+    return @intCast(pair.controller.write(bytes[0..@min(length, 64 * 1024)], context(raw).cancellation()));
 }
-fn controllerFinishEndpoint(raw: *anyopaque, index: u32) callconv(.c) bool {
-    if (controllerQueue(raw, index, .output)) |pair| {
+fn controllerFinishEndpoint(raw: *anyopaque, owner: abi.EndpointOwner, index: u32) callconv(.c) bool {
+    if (controllerQueue(raw, owner, index, .output)) |pair| {
         pair.queue.finish();
     } else {
-        const pair = controllerPipe(raw, index, .output) orelse return false;
+        const pair = controllerPipe(raw, owner, index, .output) orelse return false;
         pair.pipe.finish();
     }
     return true;
 }
 
-fn controllerQueue(raw: *anyopaque, index: u32, direction: enum { input, output }) ?message_transport.Pair {
-    const op = context(raw).operation() orelse return null;
-    if (op.protocol != .registered or index >= 64) return null;
-    const endpoint = op.cell.instance.validated().endpoint(op.cell.kind, @intCast(index), .exchange) orelse return null;
+fn controllerQueue(raw: *anyopaque, owner: abi.EndpointOwner, index: u32, direction: enum { input, output }) ?message_transport.Pair {
+    const source = controllerEndpointParent(context(raw), owner) orelse return null;
+    const cell = source.cell();
+    if (index >= 64) return null;
+    const endpoint = cell.instance.validated().endpoint(cell.kind, @intCast(index), switch (source) {
+        .resource => .resource,
+        .exchange => .exchange,
+    }) orelse return null;
     if (endpoint.transport != .messages or switch (direction) {
         .input => endpoint.direction != .input,
         .output => endpoint.direction != .output,
     }) return null;
-    const transport = op.protocol.registered.pipes[index] orelse return null;
+    const transport = source.transport(index) orelse return null;
     return switch (transport) {
         .messages => |pair| pair,
         .bytes => null,
     };
 }
-fn controllerReceiveMessage(raw: *anyopaque, index: u32) callconv(.c) bool {
+fn controllerReceiveMessage(raw: *anyopaque, owner: abi.EndpointOwner, index: u32) callconv(.c) bool {
     const ctx = context(raw);
     if (ctx.received != null) return false;
-    const pair = controllerQueue(raw, index, .input) orelse return false;
-    ctx.received = pair.controller.receive();
+    const pair = controllerQueue(raw, owner, index, .input) orelse return false;
+    pair.queue.beginRead() catch {
+        const text = "message endpoint already has a pending receiver";
+        controllerFail(raw, .contract, text.ptr, text.len);
+        return false;
+    };
+    defer pair.queue.endRead();
+    ctx.received = pair.controller.receive(ctx.cancellation());
     return ctx.received != null;
 }
 fn controllerReceivedMessage(raw: *anyopaque, path: [*]const u64, depth: u32, output: *abi.ValueView) callconv(.c) bool {
     const item = context(raw).received orelse return false;
     return viewMessage(item.value(), path, depth, output);
 }
-fn controllerForwardMessage(raw: *anyopaque, index: u32) callconv(.c) bool {
+fn controllerForwardMessage(raw: *anyopaque, owner: abi.EndpointOwner, index: u32) callconv(.c) bool {
     const ctx = context(raw);
     const item = ctx.received orelse return false;
-    const pair = controllerQueue(raw, index, .output) orelse return false;
-    if (!pair.controller.send(item)) return false;
+    const pair = controllerQueue(raw, owner, index, .output) orelse return false;
+    if (!pair.controller.send(item, ctx.cancellation())) return false;
     ctx.received = null;
     return true;
 }
@@ -1212,7 +1310,7 @@ fn boundedErrorMessage(message: []const u8) []const u8 {
 fn controllerFail(raw: *anyopaque, kind: abi.ErrorKindWire, bytes: [*]const u8, length: u32) callconv(.c) void {
     const ctx = context(raw);
     const valid_kind: abi.ErrorKindWire = switch (kind) {
-        .type, .shape, .conform, .overflow, .domain, .parse, .io, .user => kind,
+        .type, .shape, .conform, .overflow, .domain, .parse, .io, .user, .contract => kind,
         _ => .io,
     };
     const failure = Failure.init(valid_kind, boundedErrorMessage(bytes[0..length]));

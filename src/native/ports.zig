@@ -86,6 +86,9 @@ pub const MessageBuilder = opaque {
     pub fn send(self: *MessageBuilder, endpoint: u6) bool {
         return self.apply(.{ .action = .finish }) and self.apply(.{ .action = .send, .endpoint = endpoint });
     }
+    pub fn sendResource(self: *MessageBuilder, endpoint: u6) bool {
+        return self.apply(.{ .action = .finish }) and self.apply(.{ .action = .send, .endpoint = endpoint, .owner = .resource });
+    }
     pub fn result(self: *MessageBuilder) bool {
         return self.apply(.{ .action = .finish }) and self.apply(.{ .action = .result });
     }
@@ -107,7 +110,7 @@ pub const Controller = opaque {
     /// result, or controller return. Refuses to discard an unconsumed message.
     pub fn receiveMessage(self: *Controller, endpoint: u6) bool {
         const owned = self.state();
-        return owned.table.receive_message(owned.context, endpoint);
+        return owned.table.receive_message(owned.context, .exchange, endpoint);
     }
     /// Borrowed view of the owned received message; the next view lookup
     /// invalidates this view. Message ownership is unchanged.
@@ -121,7 +124,7 @@ pub const Controller = opaque {
     /// retains it for retry or automatic cleanup at controller return.
     pub fn forwardMessage(self: *Controller, endpoint: u6) bool {
         const owned = self.state();
-        return owned.table.forward_message(owned.context, endpoint);
+        return owned.table.forward_message(owned.context, .exchange, endpoint);
     }
     /// Success consumes the received message into the terminal result; failure
     /// retains it. Completion is still determined by controller return.
@@ -137,21 +140,41 @@ pub const Controller = opaque {
         if (!owned.table.input(owned.context, path.ptr, @intCast(path.len), &owned.input_view)) return null;
         return @ptrCast(&owned.input_view);
     }
+    pub fn readResourceFrom(self: *Controller, endpoint: u6, bytes: []u8) usize {
+        const owned = self.state();
+        return owned.table.read_endpoint(owned.context, .resource, endpoint, bytes.ptr, @intCast(@min(bytes.len, 64 * 1024)));
+    }
+    pub fn writeResourceTo(self: *Controller, endpoint: u6, bytes: []const u8) usize {
+        const owned = self.state();
+        return owned.table.write_endpoint(owned.context, .resource, endpoint, bytes.ptr, @intCast(@min(bytes.len, 64 * 1024)));
+    }
+    pub fn finishResourceOutput(self: *Controller, endpoint: u6) bool {
+        const owned = self.state();
+        return owned.table.finish_endpoint(owned.context, .resource, endpoint);
+    }
+    pub fn receiveResourceMessage(self: *Controller, endpoint: u6) bool {
+        const owned = self.state();
+        return owned.table.receive_message(owned.context, .resource, endpoint);
+    }
+    pub fn forwardResourceMessage(self: *Controller, endpoint: u6) bool {
+        const owned = self.state();
+        return owned.table.forward_message(owned.context, .resource, endpoint);
+    }
     pub fn read(self: *Controller, bytes: []u8) usize {
         const state_value = self.state();
         return state_value.table.read(state_value.context, bytes.ptr, @intCast(@min(bytes.len, 64 * 1024)));
     }
     pub fn readFrom(self: *Controller, endpoint: u6, bytes: []u8) usize {
         const owned = self.state();
-        return owned.table.read_endpoint(owned.context, endpoint, bytes.ptr, @intCast(@min(bytes.len, 64 * 1024)));
+        return owned.table.read_endpoint(owned.context, .exchange, endpoint, bytes.ptr, @intCast(@min(bytes.len, 64 * 1024)));
     }
     pub fn writeTo(self: *Controller, endpoint: u6, bytes: []const u8) usize {
         const owned = self.state();
-        return owned.table.write_endpoint(owned.context, endpoint, bytes.ptr, @intCast(@min(bytes.len, 64 * 1024)));
+        return owned.table.write_endpoint(owned.context, .exchange, endpoint, bytes.ptr, @intCast(@min(bytes.len, 64 * 1024)));
     }
     pub fn finishOutput(self: *Controller, endpoint: u6) bool {
         const owned = self.state();
-        return owned.table.finish_endpoint(owned.context, endpoint);
+        return owned.table.finish_endpoint(owned.context, .exchange, endpoint);
     }
     pub fn write(self: *Controller, bytes: []const u8) usize {
         const state_value = self.state();

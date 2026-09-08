@@ -53,7 +53,7 @@ the loader provides no legacy adapter.
 Each native word has a declared effect and nonempty documentation. Native
 words support qualified calls, imports, `doc`, `which`, and `see`. A failing
 native call restores its operand stack. Native code may raise `'type`,
-`'shape`, `'conform`, `'overflow`, `'domain`, `'parse`, `'io`, or `'user`;
+`'shape`, `'conform`, `'overflow`, `'domain`, `'parse`, `'io`, `'user`, or `'contract`;
 other error kinds remain reserved to the runtime.
 
 A loaded native module remains loaded for the session. Repeated resolution
@@ -74,6 +74,10 @@ Each enabled byte endpoint has a bounded ring using the host's configured byte
 capacity. Output and diagnostics require concurrent consumption when both may
 fill. Controller reads and writes may return partial chunks; cancellation and
 resource closure interrupt blocked transport.
+Selectors declare whether their endpoint belongs to an exchange or a resource.
+Resource endpoints remain available across operations. Controllers address them
+with the resource variants of their endpoint methods; shutdown joins all users
+before releasing the transport.
 Message endpoints default to 16 queued messages each and a shared 1 MiB budget
 per resource; hosts may reduce either limit for pressure testing. Messages held
 by a controller retain their budget reservation until forwarding or release.

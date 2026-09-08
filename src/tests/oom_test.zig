@@ -1687,3 +1687,11 @@ test "oom: standard-library and host: native port registered builder messages" {
             "dup port.result pop port.close port.close",
     ).run);
 }
+
+test "oom: standard-library and host: native port registered resource endpoint" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.factory [] port.open dup portprobe.resource-notify [] port.call pop " ++
+            "dup portprobe.resource-receiver port.endpoint port.receive pop port.close",
+    ).run);
+}

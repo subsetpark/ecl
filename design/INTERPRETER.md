@@ -1455,6 +1455,17 @@ resources. Abortive cleanup retains the scope membership until controller
 return, including recovery acknowledgement. The lane's post-return transition
 settles that membership outside both operation and resource locks. Readiness
 registration observes terminal state under the same mutex as notification.
+Endpoint borrows retain a tagged resource or exchange lifetime, independently
+of the original heap handle. Resource transports are prepared before startup
+and survive exchange retirement. Closure wakes their blocked transport, and
+the root controller discards queued capabilities before scope detachment so
+self-referential resource messages cannot prevent final reclamation.
+Controller transport waits borrow a monotonic cancellation latch from their
+invocation. Ticket cancellation publishes that latch before notifying resource
+queues and their shared budget, without changing persistent endpoint state.
+Wait predicates check the latch under the same transport lock as notification;
+acknowledgement and controller return still govern lane reuse.
+
 Native controllers build messages through a host-owned construction stack.
 Its fixed capacity derives from the message node limit, and its owning heap
 buffer retires abandoned roots without a synchronous graph walk. Aggregate

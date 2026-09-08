@@ -2409,10 +2409,13 @@ and cleanup are distinct events. An active cancellation releases its controller
 lane only after acknowledgement and return; a controller that cannot restore
 reusable state closes its resource.
 
+Endpoints may belong to a resource or to one exchange. Resource endpoints
+retain their direction and buffered data across exchange completion; finishing
+a resource endpoint or closing its resource ends that direction.
 Endpoint capabilities preserve the source identity and cannot be transferred
 independently with `@give`. A selector from another issuing kind, or a read or
 write through the wrong direction, raises `'type`; an endpoint not permitted
-by the operation raises `'domain`. Buffered output remains readable before a
+by its source raises `'domain`. Buffered output remains readable before a
 terminal failure is raised. Once observed, EOF remains stable even if the
 exchange subsequently fails. An early input consumer exit wakes blocked writers
 with `'io`. Streaming callers must drain independent outputs concurrently when

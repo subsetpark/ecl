@@ -950,6 +950,7 @@ pub fn mapErrorKind(kind: abi.ErrorKindWire) ?machine.ErrorKind {
         .shape => .shape,
         .conform => .conform,
         .overflow => .overflow,
+        .contract => .contract,
         .domain => .domain,
         .parse => .parse,
         .io => .io,

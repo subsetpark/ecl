@@ -208,6 +208,13 @@ pub const Queue = opaque {
     fn state(self: *Queue) *QueueState {
         return @ptrCast(@alignCast(self));
     }
+    pub fn interrupt(self: *Queue) void {
+        const owned = self.state();
+        std.Io.Threaded.mutexLock(&owned.mutex);
+        owned.notifyLocked();
+        std.Io.Threaded.mutexUnlock(&owned.mutex);
+        owned.budget.returnBytes(0);
+    }
     pub fn create(budget: *Budget, capacity: usize) error{ OutOfMemory, InvalidCapacity }!Pair {
         if (capacity == 0 or capacity > max_messages) return error.InvalidCapacity;
         const owned = try budget.state().host.allocator().create(QueueState);
@@ -332,12 +339,12 @@ pub const Controller = opaque {
         return @ptrCast(@alignCast(self));
     }
     /// Success owns the removed message; EOF/failure returns null.
-    pub fn receive(self: *Controller) ?*Envelope {
+    pub fn receive(self: *Controller, cancelled: *const std.atomic.Value(bool)) ?*Envelope {
         const owned = self.state();
         std.Io.Threaded.mutexLock(&owned.mutex);
         defer std.Io.Threaded.mutexUnlock(&owned.mutex);
-        while (owned.count == 0 and owned.phase == .open) owned.changed.waitUncancelable(io(), &owned.mutex);
-        if (owned.count == 0 or owned.phase == .failed) return null;
+        while (!cancelled.load(.acquire) and owned.count == 0 and owned.phase == .open) owned.changed.waitUncancelable(io(), &owned.mutex);
+        if (cancelled.load(.acquire) or owned.count == 0 or owned.phase == .failed) return null;
         const item = owned.messages[owned.head].?;
         owned.messages[owned.head] = null;
         owned.head = (owned.head + 1) % max_messages;
@@ -346,10 +353,14 @@ pub const Controller = opaque {
         return item;
     }
     /// Consumes only on true. False retains caller ownership.
-    pub fn send(self: *Controller, item: *Envelope) bool {
+    pub fn send(self: *Controller, item: *Envelope, cancelled: *const std.atomic.Value(bool)) bool {
         const owned = self.state();
         while (true) {
             std.Io.Threaded.mutexLock(&owned.mutex);
+            if (cancelled.load(.acquire)) {
+                std.Io.Threaded.mutexUnlock(&owned.mutex);
+                return false;
+            }
             switch (owned.sendLocked(item)) {
                 .accepted => {
                     std.Io.Threaded.mutexUnlock(&owned.mutex);
@@ -367,7 +378,7 @@ pub const Controller = opaque {
                     std.Io.Threaded.mutexUnlock(&owned.mutex);
                     const budget = owned.budget.state();
                     std.Io.Threaded.mutexLock(&budget.mutex);
-                    while (epoch == budget.epoch) budget.changed.waitUncancelable(io(), &budget.mutex);
+                    while (!cancelled.load(.acquire) and epoch == budget.epoch) budget.changed.waitUncancelable(io(), &budget.mutex);
                     std.Io.Threaded.mutexUnlock(&budget.mutex);
                 },
             }

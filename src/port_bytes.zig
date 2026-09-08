@@ -136,6 +136,12 @@ pub const Pipe = opaque {
         if (owned.phase == .open or owned.phase == .finishing) owned.phase = .{ .failed = failure };
         owned.notifyLocked();
     }
+    pub fn interrupt(self: *Pipe) void {
+        const owned = self.state();
+        std.Io.Threaded.mutexLock(&owned.mutex);
+        owned.notifyLocked();
+        std.Io.Threaded.mutexUnlock(&owned.mutex);
+    }
 };
 
 /// Blocking authority is issued only alongside construction by a host owner.
@@ -144,24 +150,24 @@ pub const Controller = opaque {
     fn state(self: *Controller) *State {
         return @ptrCast(@alignCast(self));
     }
-    pub fn read(self: *Controller, bytes: []u8) usize {
+    pub fn read(self: *Controller, bytes: []u8, cancelled: *const std.atomic.Value(bool)) usize {
         const owned = self.state();
         std.Io.Threaded.mutexLock(&owned.mutex);
         defer std.Io.Threaded.mutexUnlock(&owned.mutex);
-        while (owned.ring.len == 0 and (owned.phase == .open or owned.phase == .finishing))
+        while (!cancelled.load(.acquire) and owned.ring.len == 0 and (owned.phase == .open or owned.phase == .finishing))
             owned.changed.waitUncancelable(std.Io.Threaded.global_single_threaded.io(), &owned.mutex);
-        if (owned.phase == .failed) return 0;
+        if (cancelled.load(.acquire) or owned.phase == .failed) return 0;
         const count = owned.ring.pop(bytes[0..@min(bytes.len, max_chunk)]);
         owned.notifyLocked();
         return count;
     }
-    pub fn write(self: *Controller, bytes: []const u8) usize {
+    pub fn write(self: *Controller, bytes: []const u8, cancelled: *const std.atomic.Value(bool)) usize {
         const owned = self.state();
         std.Io.Threaded.mutexLock(&owned.mutex);
         defer std.Io.Threaded.mutexUnlock(&owned.mutex);
-        while (owned.ring.free() == 0 and owned.phase == .open)
+        while (!cancelled.load(.acquire) and owned.ring.free() == 0 and owned.phase == .open)
             owned.changed.waitUncancelable(std.Io.Threaded.global_single_threaded.io(), &owned.mutex);
-        if (owned.phase != .open) return 0;
+        if (cancelled.load(.acquire) or owned.phase != .open) return 0;
         const count = @min(bytes.len, owned.ring.free(), max_chunk);
         owned.ring.push(bytes[0..count]);
         owned.notifyLocked();

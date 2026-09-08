@@ -42,6 +42,7 @@ pub const ErrorKindWire = enum(u32) {
     parse = 5,
     io = 6,
     user = 7,
+    contract = 8,
     _,
 };
 
@@ -110,18 +111,19 @@ pub const MessageBuildRequest = extern struct {
     scalar: Scalar = .{ .kind = .int },
     path: ?[*]const u64 = null,
     depth: u32 = 0,
+    owner: EndpointOwner = .exchange,
 };
 pub const ControllerTable = extern struct {
     build_message: *const fn (*anyopaque, *const MessageBuildRequest) callconv(.c) HostStatus,
     fail_allocation: *const fn (*anyopaque) callconv(.c) void,
-    receive_message: *const fn (*anyopaque, u32) callconv(.c) bool,
+    receive_message: *const fn (*anyopaque, EndpointOwner, u32) callconv(.c) bool,
     received_message: *const fn (*anyopaque, [*]const u64, u32, *ValueView) callconv(.c) bool,
-    forward_message: *const fn (*anyopaque, u32) callconv(.c) bool,
+    forward_message: *const fn (*anyopaque, EndpointOwner, u32) callconv(.c) bool,
     result_message: *const fn (*anyopaque) callconv(.c) bool,
     input: *const fn (*anyopaque, [*]const u64, u32, *ValueView) callconv(.c) bool,
-    read_endpoint: *const fn (*anyopaque, u32, [*]u8, u32) callconv(.c) u32,
-    write_endpoint: *const fn (*anyopaque, u32, [*]const u8, u32) callconv(.c) u32,
-    finish_endpoint: *const fn (*anyopaque, u32) callconv(.c) bool,
+    read_endpoint: *const fn (*anyopaque, EndpointOwner, u32, [*]u8, u32) callconv(.c) u32,
+    write_endpoint: *const fn (*anyopaque, EndpointOwner, u32, [*]const u8, u32) callconv(.c) u32,
+    finish_endpoint: *const fn (*anyopaque, EndpointOwner, u32) callconv(.c) bool,
     read: *const fn (*anyopaque, [*]u8, u32) callconv(.c) u32,
     write: *const fn (*anyopaque, [*]const u8, u32) callconv(.c) u32,
     cancelled: *const fn (*anyopaque) callconv(.c) bool,
@@ -456,7 +458,7 @@ comptime {
     // The SDK does not import machine.zig. Keeping this list closed and
     // name-stable lets the runtime assert the inverse mapping exhaustively.
     const expected_error_names = [_][]const u8{
-        "type", "shape", "conform", "overflow", "domain", "parse", "io", "user",
+        "type", "shape", "conform", "overflow", "domain", "parse", "io", "user", "contract",
     };
     const fields = @typeInfo(ErrorKindWire).@"enum".fields;
     if (fields.len != expected_error_names.len)

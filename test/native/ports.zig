@@ -99,12 +99,38 @@ fn DuplexSpec(comptime acknowledge: bool) type {
         }
         pub fn run(state: *State, code: u32, controller: *ecl.Controller) void {
             const current = &state.lanes[@intFromEnum(lane(code))];
-            if (code >= 18 and code <= 22) {
+            if (code >= 18 and code <= 25) {
                 defer if (acknowledge and controller.cancelled()) {
                     current.cancelled.store(false, .release);
                     _ = controller.acknowledgeCancellation();
                 };
+                if (code == 23) {
+                    _ = entered.fetchAdd(1, .release);
+                    while (controller.receiveResourceMessage(3)) if (!controller.forwardResourceMessage(4)) return;
+                    if (!controller.cancelled()) _ = controller.finishResourceOutput(4);
+                    return;
+                }
+                if (code == 24) {
+                    _ = entered.fetchAdd(1, .release);
+                    var bytes: [8]u8 = undefined;
+                    while (true) {
+                        const count = controller.readResourceFrom(0, &bytes);
+                        if (count == 0) break;
+                        var sent: usize = 0;
+                        while (sent < count) {
+                            const wrote = controller.writeResourceTo(1, bytes[sent..count]);
+                            if (wrote == 0) return;
+                            sent += wrote;
+                        }
+                    }
+                    if (!controller.cancelled()) _ = controller.finishResourceOutput(1);
+                    return;
+                }
                 const builder = controller.builder();
+                if (code == 25) {
+                    _ = builder.int(42) and builder.sendResource(4);
+                    return;
+                }
                 if (code == 18) {
                     for (0..8) |index| if (!builder.int(@intCast(index)) or !builder.send(4)) return;
                     return;
@@ -509,67 +535,77 @@ fn exchangeBody(call: *ecl.Call("port code count -- checksum"), schedule: *Sched
     }
     return schedule.yield();
 }
-pub const Extension = ecl.module(.{
-    .name = @import("port_fixture_options").module_name,
-    .doc = "Hermetic native port controller fixture.",
-    .ports = .{ Counter, Other, Duplex, Unacknowledged },
-    .words = .{
-        ecl.factory("factory", "Create an independently scheduled duplex resource.", Duplex),
-        ecl.operation("echo", "Echo accepted input bytes.", Duplex, 0, .receive, 3),
-        ecl.operation("checksum", "Sum accepted input bytes.", Duplex, 1, .send, 3),
-        ecl.operation("failure", "Fail with a deterministic terminal error.", Duplex, 2, .receive, 0),
-        ecl.operation("inspect", "Validate structured parameters without additional streaming.", Duplex, 6, .receive, 0),
-        ecl.operation("allocation-failure", "Report asynchronous allocation exhaustion.", Duplex, 17, .receive, 26),
-        ecl.operation("noop", "Complete without additional streaming.", Duplex, 8, .receive, 0),
-        ecl.operation("buffered-failure", "Fail after accepting output bytes.", Duplex, 10, .receive, 2),
-        ecl.operation("finished-failure", "Fail after finishing the output endpoint.", Duplex, 11, .receive, 2),
-        ecl.operation("pipeline", "Stream input, output, and independent diagnostics.", Duplex, 12, .receive, 7),
-        ecl.operation("early-exit", "Stop consuming input after one byte.", Duplex, 13, .receive, 3),
-        ecl.operation("events", "Produce unsolicited structured events under pressure.", Duplex, 18, .receive, 16),
-        ecl.operation("build-result", "Construct a nested structured result with a capability.", Duplex, 19, .receive, 0),
-        ecl.operation("duplicate-result", "Reject duplicate structured keys.", Duplex, 20, .receive, 0),
-        ecl.operation("oversize-event", "Reject oversize construction before output.", Duplex, 21, .receive, 16),
-        ecl.operation("build-received", "Copy received values and construct empty aggregates.", Duplex, 22, .receive, 24),
-        ecl.operation("messages", "Forward complete structured messages.", Duplex, 14, .receive, 24),
-        ecl.operation("message-result", "Return one structured message as the terminal result.", Duplex, 15, .receive, 8),
-        ecl.operation("message-failure", "Fail after accepting one output message.", Duplex, 16, .receive, 24),
-        ecl.operation("blocked", "Wait for an explicit controller gate.", Duplex, 3, .receive, 3),
-        ecl.endpoint("input", "Exchange byte input.", Duplex, .{ .id = 0, .transport = .bytes, .direction = .input }),
-        ecl.endpoint("output", "Exchange byte output.", Duplex, .{ .id = 1, .transport = .bytes, .direction = .output }),
-        ecl.endpoint("diagnostics", "Independent pipeline diagnostic bytes.", Duplex, .{ .id = 2, .transport = .bytes, .direction = .output }),
-        ecl.endpoint("sender", "Structured message input.", Duplex, .{ .id = 3, .transport = .messages, .direction = .input }),
-        ecl.endpoint("receiver", "Structured message output.", Duplex, .{ .id = 4, .transport = .messages, .direction = .output }),
-        ecl.word("duplex-new-ready-wait", "Create lanes with deterministic wait allocation.", createDuplexReadyWait),
-        ecl.word("duplex-exchange-ready-wait", "Exercise deterministic lane admission and wait allocation.", exchangeDuplexReadyWait),
-        ecl.word("duplex-new", "Create a port with independently progressing lanes.", createDuplex),
-        ecl.word("duplex-exchange", "Exchange on an operation-selected lane.", exchangeDuplex),
-        ecl.word("duplex-close", "Join every lane and cleanup.", closeDuplex),
-        ecl.word("unacknowledged-new", "Create a port that declines cancellation recovery.", createUnacknowledged),
-        ecl.word("unacknowledged-exchange", "Exchange without acknowledging cancellation.", exchangeUnacknowledged),
-        ecl.word("unacknowledged-close", "Join unrecoverable cancellation cleanup.", closeUnacknowledged),
-        ecl.word("new", "Create a counter port.", create),
-        ecl.word("start", "Return a scope-owned duplex exchange independently of its native call.", startExchange),
-        ecl.word("other-new", "Create the other declared port kind.", createOther),
-        ecl.word("new-ready-wait", "Observe initialization completed before wait registration.", createReadyWait),
-        ecl.word("new-fail", "Fail before publication commits.", createFailure),
-        ecl.word("pair", "Create two ports transactionally.", pair),
-        ecl.word("fail-next", "Fail the next initialization.", failNext),
-        ecl.word("block-next", "Block the next initialization.", blockNext),
-        ecl.word("unblock", "Release one blocked controller.", unblock),
-        ecl.word("reset", "Reset observations between isolated fixture runs.", reset),
-        ecl.word("await-blocked", "Wait for controller gate entries.", awaitCounter(&entered).run),
-        ecl.word("await-admitted", "Wait for operation admissions.", awaitCounter(&admitted).run),
-        ecl.word("await-waiting", "Wait for admission pressure.", awaitCounter(&waiting).run),
-        ecl.word("await-cleaned", "Wait for cleanup callbacks.", awaitCounter(&cleaned).run),
-        ecl.word("close", "Join port cleanup.", close),
-        ecl.word("other-check", "Require the other kind.", checkOther),
-        ecl.word("shutdowns", "Observe graceful callbacks.", shutdownCount),
-        ecl.word("cleaned", "Observe completed cleanup.", cleanupCount),
-        ecl.word("fail-long", "Report a bounded UTF-8 word error.", failLong),
-        ecl.word("exchange", "Stream repeated bytes and return a checksum.", exchange),
-        ecl.word("exchange-ready-wait", "Observe operation completion before wait registration.", exchangeReadyWait),
-    },
-});
+pub const Extension = extension: {
+    @setEvalBranchQuota(20_000);
+    break :extension ecl.module(.{
+        .name = @import("port_fixture_options").module_name,
+        .doc = "Hermetic native port controller fixture.",
+        .ports = .{ Counter, Other, Duplex, Unacknowledged },
+        .words = .{
+            ecl.factory("factory", "Create an independently scheduled duplex resource.", Duplex),
+            ecl.operation("echo", "Echo accepted input bytes.", Duplex, 0, .receive, 3),
+            ecl.operation("checksum", "Sum accepted input bytes.", Duplex, 1, .send, 3),
+            ecl.operation("failure", "Fail with a deterministic terminal error.", Duplex, 2, .receive, 0),
+            ecl.operation("inspect", "Validate structured parameters without additional streaming.", Duplex, 6, .receive, 0),
+            ecl.operation("allocation-failure", "Report asynchronous allocation exhaustion.", Duplex, 17, .receive, 26),
+            ecl.operation("noop", "Complete without additional streaming.", Duplex, 8, .receive, 0),
+            ecl.operation("buffered-failure", "Fail after accepting output bytes.", Duplex, 10, .receive, 2),
+            ecl.operation("finished-failure", "Fail after finishing the output endpoint.", Duplex, 11, .receive, 2),
+            ecl.operation("pipeline", "Stream input, output, and independent diagnostics.", Duplex, 12, .receive, 7),
+            ecl.operation("early-exit", "Stop consuming input after one byte.", Duplex, 13, .receive, 3),
+            ecl.operation("resource-messages", "Forward through resource-owned message channels.", Duplex, 23, .receive, 0),
+            ecl.operation("resource-bytes", "Forward through resource-owned byte streams.", Duplex, 24, .receive, 0),
+            ecl.operation("resource-notify", "Produce a resource event independently of exchange output.", Duplex, 25, .receive, 0),
+            ecl.operation("events", "Produce unsolicited structured events under pressure.", Duplex, 18, .receive, 16),
+            ecl.operation("build-result", "Construct a nested structured result with a capability.", Duplex, 19, .receive, 0),
+            ecl.operation("duplicate-result", "Reject duplicate structured keys.", Duplex, 20, .receive, 0),
+            ecl.operation("oversize-event", "Reject oversize construction before output.", Duplex, 21, .receive, 16),
+            ecl.operation("build-received", "Copy received values and construct empty aggregates.", Duplex, 22, .receive, 24),
+            ecl.operation("messages", "Forward complete structured messages.", Duplex, 14, .receive, 24),
+            ecl.operation("message-result", "Return one structured message as the terminal result.", Duplex, 15, .receive, 8),
+            ecl.operation("message-failure", "Fail after accepting one output message.", Duplex, 16, .receive, 24),
+            ecl.operation("blocked", "Wait for an explicit controller gate.", Duplex, 3, .receive, 3),
+            ecl.endpoint("resource-input", "Resource byte input.", Duplex, .{ .id = 0, .transport = .bytes, .direction = .input, .owner = .resource }),
+            ecl.endpoint("resource-output", "Resource byte output.", Duplex, .{ .id = 1, .transport = .bytes, .direction = .output, .owner = .resource }),
+            ecl.endpoint("resource-sender", "Resource structured input.", Duplex, .{ .id = 3, .transport = .messages, .direction = .input, .owner = .resource }),
+            ecl.endpoint("resource-receiver", "Resource structured output.", Duplex, .{ .id = 4, .transport = .messages, .direction = .output, .owner = .resource }),
+            ecl.endpoint("input", "Exchange byte input.", Duplex, .{ .id = 0, .transport = .bytes, .direction = .input }),
+            ecl.endpoint("output", "Exchange byte output.", Duplex, .{ .id = 1, .transport = .bytes, .direction = .output }),
+            ecl.endpoint("diagnostics", "Independent pipeline diagnostic bytes.", Duplex, .{ .id = 2, .transport = .bytes, .direction = .output }),
+            ecl.endpoint("sender", "Structured message input.", Duplex, .{ .id = 3, .transport = .messages, .direction = .input }),
+            ecl.endpoint("receiver", "Structured message output.", Duplex, .{ .id = 4, .transport = .messages, .direction = .output }),
+            ecl.word("duplex-new-ready-wait", "Create lanes with deterministic wait allocation.", createDuplexReadyWait),
+            ecl.word("duplex-exchange-ready-wait", "Exercise deterministic lane admission and wait allocation.", exchangeDuplexReadyWait),
+            ecl.word("duplex-new", "Create a port with independently progressing lanes.", createDuplex),
+            ecl.word("duplex-exchange", "Exchange on an operation-selected lane.", exchangeDuplex),
+            ecl.word("duplex-close", "Join every lane and cleanup.", closeDuplex),
+            ecl.word("unacknowledged-new", "Create a port that declines cancellation recovery.", createUnacknowledged),
+            ecl.word("unacknowledged-exchange", "Exchange without acknowledging cancellation.", exchangeUnacknowledged),
+            ecl.word("unacknowledged-close", "Join unrecoverable cancellation cleanup.", closeUnacknowledged),
+            ecl.word("new", "Create a counter port.", create),
+            ecl.word("start", "Return a scope-owned duplex exchange independently of its native call.", startExchange),
+            ecl.word("other-new", "Create the other declared port kind.", createOther),
+            ecl.word("new-ready-wait", "Observe initialization completed before wait registration.", createReadyWait),
+            ecl.word("new-fail", "Fail before publication commits.", createFailure),
+            ecl.word("pair", "Create two ports transactionally.", pair),
+            ecl.word("fail-next", "Fail the next initialization.", failNext),
+            ecl.word("block-next", "Block the next initialization.", blockNext),
+            ecl.word("unblock", "Release one blocked controller.", unblock),
+            ecl.word("reset", "Reset observations between isolated fixture runs.", reset),
+            ecl.word("await-blocked", "Wait for controller gate entries.", awaitCounter(&entered).run),
+            ecl.word("await-admitted", "Wait for operation admissions.", awaitCounter(&admitted).run),
+            ecl.word("await-waiting", "Wait for admission pressure.", awaitCounter(&waiting).run),
+            ecl.word("await-cleaned", "Wait for cleanup callbacks.", awaitCounter(&cleaned).run),
+            ecl.word("close", "Join port cleanup.", close),
+            ecl.word("other-check", "Require the other kind.", checkOther),
+            ecl.word("shutdowns", "Observe graceful callbacks.", shutdownCount),
+            ecl.word("cleaned", "Observe completed cleanup.", cleanupCount),
+            ecl.word("fail-long", "Report a bounded UTF-8 word error.", failLong),
+            ecl.word("exchange", "Stream repeated bytes and return a checksum.", exchange),
+            ecl.word("exchange-ready-wait", "Observe operation completion before wait registration.", exchangeReadyWait),
+        },
+    });
+};
 comptime {
     _ = Extension;
 }
