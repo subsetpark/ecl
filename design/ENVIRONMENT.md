@@ -82,8 +82,11 @@ Message endpoints default to 16 queued messages each and a shared 1 MiB budget
 per resource; hosts may reduce either limit for pressure testing. Messages held
 by a controller retain their budget reservation until forwarding or release.
 Controllers can receive a message, inspect it through bounded `received` paths,
-and consume it with `forwardMessage` or `resultMessage`. Failed consuming calls
+and consume it with `forwardMessage`, `resultMessage`, or `discardMessage`. Failed consuming calls
 retain ownership, and controller return cleans up an unconsumed message.
+`discardMessage` explicitly releases the input and its budget reservation;
+it returns false when no message is held. Previously constructed builder copies
+remain valid, while borrowed received-message views expire on consumption.
 The controller-local `MessageBuilder` constructs scalars, nested lists and
 dictionaries, and copies permitted input capabilities without exposing ECL
 storage. Construction and validation advance in bounded steps. Successful

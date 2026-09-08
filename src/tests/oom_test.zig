@@ -1702,3 +1702,12 @@ test "oom: standard-library and host: native port registered reply endpoint" {
         "portprobe.factory [] port.open dup portprobe.reply-result [] port.call pop port.close",
     ).run);
 }
+
+test "oom: standard-library and host: native port registered message consumption" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.factory [] port.open 'p set p portprobe.transform-message [] port.begin 'x set " ++
+            "x portprobe.sender port.endpoint 42 port.send x portprobe.receiver port.endpoint port.receive pop " ++
+            "x port.close p port.close",
+    ).run);
+}

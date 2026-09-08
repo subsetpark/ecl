@@ -102,7 +102,7 @@ fn DuplexSpec(comptime acknowledge: bool) type {
         }
         pub fn run(state: *State, code: u32, controller: *ecl.Controller) void {
             const current = &state.lanes[@intFromEnum(lane(code))];
-            if (code >= 18 and code <= 33) {
+            if (code >= 18 and code <= 35) {
                 defer if (acknowledge and controller.cancelled()) {
                     current.cancelled.store(false, .release);
                     _ = controller.acknowledgeCancellation();
@@ -139,6 +139,13 @@ fn DuplexSpec(comptime acknowledge: bool) type {
                     return;
                 }
                 const builder = controller.builder();
+                if (code == 35) {
+                    if (!controller.receiveMessage(3) or !builder.received(&.{})) return;
+                    if (!controller.discardMessage() or controller.discardMessage())
+                        return controller.fail(.contract, "received message consumption was not unique");
+                    _ = builder.send(4);
+                    return;
+                }
                 if (code == 31) {
                     if (!controller.receiveMessage(3)) return;
                     if (!builder.symbol("payload") or !builder.received(&.{}) or !builder.symbol("address") or
@@ -153,7 +160,7 @@ fn DuplexSpec(comptime acknowledge: bool) type {
                     for (0..2) |sequence| {
                         if (!builder.symbol("sequence") or !builder.int(@intCast(sequence)) or !builder.symbol("mode") or
                             !builder.int(state.watcher_mode.load(.acquire)) or !builder.dictionary(2) or !builder.send(4)) return;
-                        if (sequence == 0 and (!controller.receiveMessage(3) or !controller.resultMessage())) return;
+                        if (sequence == 0 and (!controller.receiveMessage(3) or !controller.discardMessage())) return;
                     }
                     controller.fail(.io, "watcher disconnected");
                     return;
@@ -217,7 +224,7 @@ fn DuplexSpec(comptime acknowledge: bool) type {
                 }
                 if (!controller.receiveMessage(3)) return;
                 if (!builder.symbol("discarded") or !builder.clear() or !builder.symbol("copy") or
-                    !builder.received(&.{0}) or !builder.dictionary(1) or !builder.send(4) or
+                    !builder.received(&.{0}) or !builder.dictionary(1) or !controller.discardMessage() or !builder.send(4) or
                     !builder.list(0) or !builder.send(4) or !builder.dictionary(0) or !builder.result()) return;
                 return;
             }
@@ -627,6 +634,7 @@ pub const Extension = extension: {
             ecl.operation("datagram", "Report packet metadata and explicit native loss.", Duplex, 31, .receive, 24),
             ecl.operation("watch", "Emit watcher events and a deterministic disconnect.", Duplex, 32, .receive, 24),
             ecl.operation("watch-config", "Configure a watcher on an independent controller lane.", Duplex, 33, .send, 0),
+            ecl.operation("transform-message", "Release consumed input while retaining a constructed response.", Duplex, 35, .receive, 24),
             ecl.operation("events", "Produce unsolicited structured events under pressure.", Duplex, 18, .receive, 16),
             ecl.operation("build-result", "Construct a nested structured result with a capability.", Duplex, 19, .receive, 0),
             ecl.operation("duplicate-result", "Reject duplicate structured keys.", Duplex, 20, .receive, 0),

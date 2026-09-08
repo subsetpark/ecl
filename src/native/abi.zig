@@ -120,6 +120,7 @@ pub const ControllerTable = extern struct {
     received_message: *const fn (*anyopaque, [*]const u64, u32, *ValueView) callconv(.c) bool,
     forward_message: *const fn (*anyopaque, EndpointOwner, u32) callconv(.c) bool,
     result_message: *const fn (*anyopaque) callconv(.c) bool,
+    discard_message: *const fn (*anyopaque) callconv(.c) bool,
     input: *const fn (*anyopaque, [*]const u64, u32, *ValueView) callconv(.c) bool,
     read_endpoint: *const fn (*anyopaque, EndpointOwner, u32, [*]u8, u32) callconv(.c) u32,
     write_endpoint: *const fn (*anyopaque, EndpointOwner, u32, [*]const u8, u32) callconv(.c) u32,
@@ -441,7 +442,7 @@ comptime {
     assertRecord(PortRequest, 48, 8);
     assertRecord(PortReply, 24, 8);
     assertRecord(MessageBuildRequest, 64, 8);
-    assertRecord(ControllerTable, 120, 8);
+    assertRecord(ControllerTable, 128, 8);
     assertRecord(EntryResult, 32, 8);
 
     if (@offsetOf(Definition, "callback_index") != 4 or

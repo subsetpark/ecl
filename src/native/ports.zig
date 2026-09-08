@@ -137,6 +137,12 @@ pub const Controller = opaque {
         const owned = self.state();
         return owned.table.result_message(owned.context);
     }
+    /// Success consumes the received message and expires its borrowed views.
+    /// False means no message was held. Builder copies retain their own values.
+    pub fn discardMessage(self: *Controller) bool {
+        const owned = self.state();
+        return owned.table.discard_message(owned.context);
+    }
     /// Read configuration during open, or structured parameters during run.
     /// Dictionary positions alternate key/value. Paths have at most 64 entries.
     pub fn input(self: *Controller, path: []const u64) ?*const MessageView {

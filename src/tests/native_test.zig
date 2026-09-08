@@ -1496,3 +1496,10 @@ test "native: datagram exchange scope exit interrupts full output and preserves 
         "x wrap [] (pop) @give task.await 'ok at len " ++
         "p portprobe.noop [] port.call pop x port.close p port.close portprobe.cleaned", "0 1");
 }
+
+test "native: explicit message consumption releases pressure without invalidating builder copies" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .message_capacity = 1, .message_queue_bytes = 8 }, "portprobe.factory [] port.open 'p set p portprobe.transform-message [] port.begin 'x set " ++
+        "x portprobe.sender port.endpoint 42 port.send x portprobe.receiver port.endpoint 'r set " ++
+        "r port.receive 'value at r port.receive 'kind at x port.result len " ++
+        "x port.close p port.close portprobe.cleaned", "42 'eof 0 1");
+}
