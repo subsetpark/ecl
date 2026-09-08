@@ -1457,3 +1457,42 @@ test "native: independent controller lanes cannot overlap a resource byte read" 
         "a b pair task.await-any nip 'err at 'kind at x port.cancel y port.cancel " ++
         "a task.await pop b task.await pop x port.close y port.close p port.close portprobe.cleaned", "'contract 1");
 }
+
+test "native: datagrams preserve empty payload metadata and explicit loss events" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .message_capacity = 1, .message_queue_bytes = 64 }, "portprobe.factory [] port.open 'p set p portprobe.datagram [] port.begin 'x set " ++
+        "x portprobe.sender port.endpoint 's set s wrap ([0] 4097 take port.send) @attempt 'err at 'kind at " ++
+        "s [] port.send x portprobe.receiver port.endpoint 'r set r port.receive 'value at " ++
+        "dup 'payload at len swap dup 'address at swap 'port at " ++
+        "r port.receive 'value at dup 'kind at swap 'count at r port.receive 'kind at " ++
+        "x port.result len x port.close p port.close portprobe.cleaned", "'overflow 0 '127.0.0.1 42 'loss 1 'eof 0 1");
+}
+
+test "native: watcher configuration progresses independently of a subscription and disconnect" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .message_capacity = 1, .message_queue_bytes = 64 }, "portprobe.factory [] port.open 'p set p portprobe.watch [] port.begin 'x set " ++
+        "x portprobe.receiver port.endpoint 'r set r port.receive 'value at 'mode at " ++
+        "p portprobe.watch-config 7 port.call x portprobe.sender port.endpoint [] port.send " ++
+        "r port.receive 'value at dup 'sequence at swap 'mode at " ++
+        "r wrap (port.receive) @attempt 'err at 'kind at x wrap (port.await) @attempt 'err at 'kind at " ++
+        "x port.close p port.close portprobe.cleaned", "0 7 1 7 'io 'io 1");
+}
+
+test "native: cancelled watcher subscriptions leave configuration and admission reusable" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .message_capacity = 1 }, "portprobe.factory [] port.open 'p set p portprobe.watch [] port.begin 'x set " ++
+        "x portprobe.receiver port.endpoint port.receive pop x port.cancel " ++
+        "x wrap (port.await) @attempt 'err at 'kind at x port.close " ++
+        "p portprobe.watch-config 9 port.call p portprobe.noop [] port.call pop p port.close portprobe.cleaned", "'cancelled 9 1");
+}
+
+test "native: watcher resource and exchange transfer atomically and join scope cleanup" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .message_capacity = 1 }, "portprobe.factory [] port.open 'p set p portprobe.watch [] port.begin 'x set " ++
+        "x portprobe.receiver port.endpoint 'r set r port.receive pop " ++
+        "p x pair [] (pop pop) @give task.await 'ok at len " ++
+        "r wrap (port.receive) @attempt 'err at 'kind at x port.close p port.close portprobe.cleaned", "0 'cancelled 1");
+}
+
+test "native: datagram exchange scope exit interrupts full output and preserves its resource" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .message_capacity = 1, .message_queue_bytes = 64 }, "portprobe.factory [] port.open 'p set p portprobe.datagram [] port.begin 'x set " ++
+        "x portprobe.sender port.endpoint [] port.send " ++
+        "x wrap [] (pop) @give task.await 'ok at len " ++
+        "p portprobe.noop [] port.call pop x port.close p port.close portprobe.cleaned", "0 1");
+}

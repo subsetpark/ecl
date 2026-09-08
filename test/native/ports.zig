@@ -82,12 +82,15 @@ fn DuplexSpec(comptime acknowledge: bool) type {
         pub const name = if (acknowledge) "duplex" else "unacknowledged";
         pub const Lane = enum(u64) { receive, send };
         pub const cancellation: ecl.PortCancellation = .acknowledge;
-        pub const State = struct { lanes: [2]Base.State = .{Base.State{}} ** 2 };
+        pub const State = struct {
+            lanes: [2]Base.State = .{Base.State{}} ** 2,
+            watcher_mode: std.atomic.Value(u32) = .init(0),
+        };
         pub fn init() State {
             return .{};
         }
         pub fn lane(code: u32) Lane {
-            return if (code == 1 or code == 5 or code == 29 or code == 30) .send else .receive;
+            return if (code == 1 or code == 5 or code == 29 or code == 30 or code == 33) .send else .receive;
         }
         pub fn open(state: *State, controller: *ecl.Controller) void {
             const config = controller.input(&.{}) orelse return controller.fail(.domain, "missing configuration");
@@ -99,7 +102,7 @@ fn DuplexSpec(comptime acknowledge: bool) type {
         }
         pub fn run(state: *State, code: u32, controller: *ecl.Controller) void {
             const current = &state.lanes[@intFromEnum(lane(code))];
-            if (code >= 18 and code <= 30) {
+            if (code >= 18 and code <= 33) {
                 defer if (acknowledge and controller.cancelled()) {
                     current.cancelled.store(false, .release);
                     _ = controller.acknowledgeCancellation();
@@ -136,6 +139,32 @@ fn DuplexSpec(comptime acknowledge: bool) type {
                     return;
                 }
                 const builder = controller.builder();
+                if (code == 31) {
+                    if (!controller.receiveMessage(3)) return;
+                    if (!builder.symbol("payload") or !builder.received(&.{}) or !builder.symbol("address") or
+                        !builder.symbol("127.0.0.1") or !builder.symbol("port") or !builder.int(42) or
+                        !builder.dictionary(3) or !builder.send(4)) return;
+                    if (!controller.resultMessage()) return;
+                    _ = builder.symbol("kind") and builder.symbol("loss") and builder.symbol("count") and
+                        builder.int(1) and builder.dictionary(2) and builder.send(4);
+                    return;
+                }
+                if (code == 32) {
+                    for (0..2) |sequence| {
+                        if (!builder.symbol("sequence") or !builder.int(@intCast(sequence)) or !builder.symbol("mode") or
+                            !builder.int(state.watcher_mode.load(.acquire)) or !builder.dictionary(2) or !builder.send(4)) return;
+                        if (sequence == 0 and (!controller.receiveMessage(3) or !controller.resultMessage())) return;
+                    }
+                    controller.fail(.io, "watcher disconnected");
+                    return;
+                }
+                if (code == 33) {
+                    const mode = (controller.input(&.{}) orelse return).int() orelse return controller.fail(.type, "expected watcher mode");
+                    if (mode < 0 or mode > 255) return controller.fail(.domain, "invalid watcher mode");
+                    state.watcher_mode.store(@intCast(mode), .release);
+                    _ = builder.int(mode) and builder.result();
+                    return;
+                }
                 if (code == 26) {
                     for (1..3) |id| {
                         if (!builder.symbol("id") or !builder.int(@intCast(id)) or !builder.symbol("reply") or
@@ -595,6 +624,9 @@ pub const Extension = extension: {
             ecl.operation("reply-result", "Return a retained endpoint after completion.", Duplex, 28, .receive, 8),
             ecl.operation("resource-compete-messages", "Read resource messages on an independent lane.", Duplex, 29, .send, 0),
             ecl.operation("resource-compete-bytes", "Read resource bytes on an independent lane.", Duplex, 30, .send, 0),
+            ecl.operation("datagram", "Report packet metadata and explicit native loss.", Duplex, 31, .receive, 24),
+            ecl.operation("watch", "Emit watcher events and a deterministic disconnect.", Duplex, 32, .receive, 24),
+            ecl.operation("watch-config", "Configure a watcher on an independent controller lane.", Duplex, 33, .send, 0),
             ecl.operation("events", "Produce unsolicited structured events under pressure.", Duplex, 18, .receive, 16),
             ecl.operation("build-result", "Construct a nested structured result with a capability.", Duplex, 19, .receive, 0),
             ecl.operation("duplicate-result", "Reject duplicate structured keys.", Duplex, 20, .receive, 0),
