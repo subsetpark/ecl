@@ -87,7 +87,7 @@ fn DuplexSpec(comptime acknowledge: bool) type {
             return .{};
         }
         pub fn lane(code: u32) Lane {
-            return if (code == 1 or code == 5) .send else .receive;
+            return if (code == 1 or code == 5 or code == 29 or code == 30) .send else .receive;
         }
         pub fn open(state: *State, controller: *ecl.Controller) void {
             const config = controller.input(&.{}) orelse return controller.fail(.domain, "missing configuration");
@@ -99,11 +99,20 @@ fn DuplexSpec(comptime acknowledge: bool) type {
         }
         pub fn run(state: *State, code: u32, controller: *ecl.Controller) void {
             const current = &state.lanes[@intFromEnum(lane(code))];
-            if (code >= 18 and code <= 28) {
+            if (code >= 18 and code <= 30) {
                 defer if (acknowledge and controller.cancelled()) {
                     current.cancelled.store(false, .release);
                     _ = controller.acknowledgeCancellation();
                 };
+                if (code == 29) {
+                    if (controller.receiveResourceMessage(3)) _ = controller.resultMessage();
+                    return;
+                }
+                if (code == 30) {
+                    var byte: [1]u8 = undefined;
+                    _ = controller.readResourceFrom(0, &byte);
+                    return;
+                }
                 if (code == 23) {
                     _ = entered.fetchAdd(1, .release);
                     while (controller.receiveResourceMessage(3)) if (!controller.forwardResourceMessage(4)) return;
@@ -584,6 +593,8 @@ pub const Extension = extension: {
             ecl.operation("rpc", "Request ECL replies through opaque sender endpoints.", Duplex, 26, .receive, 24),
             ecl.operation("invalid-reply", "Reject reply authority for an output endpoint.", Duplex, 27, .receive, 16),
             ecl.operation("reply-result", "Return a retained endpoint after completion.", Duplex, 28, .receive, 8),
+            ecl.operation("resource-compete-messages", "Read resource messages on an independent lane.", Duplex, 29, .send, 0),
+            ecl.operation("resource-compete-bytes", "Read resource bytes on an independent lane.", Duplex, 30, .send, 0),
             ecl.operation("events", "Produce unsolicited structured events under pressure.", Duplex, 18, .receive, 16),
             ecl.operation("build-result", "Construct a nested structured result with a capability.", Duplex, 19, .receive, 0),
             ecl.operation("duplicate-result", "Reject duplicate structured keys.", Duplex, 20, .receive, 0),

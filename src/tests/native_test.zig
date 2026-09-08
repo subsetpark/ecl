@@ -1441,3 +1441,19 @@ test "native: RPC cancellation discards queued reply capabilities and restores a
         "x wrap (port.await) @attempt 'err at 'kind at x port.close " ++
         "p portprobe.noop [] port.call pop p port.close portprobe.cleaned", "'cancelled 1");
 }
+
+test "native: independent controller lanes cannot overlap a resource message receive" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .message_capacity = 1 }, "portprobe.factory [] port.open 'p set " ++
+        "p portprobe.resource-messages [] port.begin 'x set p portprobe.resource-compete-messages [] port.begin 'y set " ++
+        "x wrap (port.await) @spawn 'a set y wrap (port.await) @spawn 'b set " ++
+        "a b pair task.await-any nip 'err at 'kind at x port.cancel y port.cancel " ++
+        "a task.await pop b task.await pop x port.close y port.close p port.close portprobe.cleaned", "'contract 1");
+}
+
+test "native: independent controller lanes cannot overlap a resource byte read" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "portprobe.factory [] port.open 'p set " ++
+        "p portprobe.resource-bytes [] port.begin 'x set p portprobe.resource-compete-bytes [] port.begin 'y set " ++
+        "x wrap (port.await) @spawn 'a set y wrap (port.await) @spawn 'b set " ++
+        "a b pair task.await-any nip 'err at 'kind at x port.cancel y port.cancel " ++
+        "a task.await pop b task.await pop x port.close y port.close p port.close portprobe.cleaned", "'contract 1");
+}
