@@ -1428,6 +1428,58 @@ test "native: bidirectional RPC interleaves notifications and correlates out of 
         "b wrap ([] port.send) @attempt 'err at 'kind at p port.close portprobe.cleaned", "7 [2 20] [1 10] 'eof 42 'io 1");
 }
 
+test "native: broker delivery messages carry one-time acknowledgement capabilities" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .message_capacity = 1 }, "portprobe.broker [] port.open 'p set p portprobe.deliver [] port.begin 'x set " ++
+        "x portprobe.deliveries port.endpoint 'r set r port.receive 'value at " ++
+        "dup 'payload at len swap 'delivery at 'd set r port.receive 'kind at x port.result pop x port.close " ++
+        "d portprobe.delivery-info [] port.call d portprobe.acknowledge [] port.call " ++
+        "d wrap (portprobe.acknowledge [] port.call) @attempt 'err at 'kind at " ++
+        "p wrap (portprobe.redeliver [] port.call) @attempt 'err at 'kind at " ++
+        "p portprobe.broker-status [] port.call p port.close d type portprobe.cleaned", "0 'eof {'id 1 'attempt 1} 1 'contract 'contract ('acknowledged 1 1) 'port 2");
+}
+
+test "native: explicit broker redelivery invalidates the previous acknowledgement" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .message_capacity = 1 }, "portprobe.broker [] port.open 'p set p portprobe.deliver [] port.begin 'x set " ++
+        "x portprobe.deliveries port.endpoint port.receive 'value at 'delivery at 'old set x port.result pop x port.close " ++
+        "p portprobe.redeliver [] port.call 'next set " ++
+        "old wrap (portprobe.acknowledge [] port.call) @attempt 'err at 'kind at " ++
+        "next portprobe.delivery-info [] port.call next portprobe.acknowledge [] port.call old port.close " ++
+        "p portprobe.broker-status [] port.call p port.close portprobe.cleaned", "'contract {'id 1 'attempt 2} 2 ('acknowledged 2 1) 3");
+}
+
+test "native: competing broker acknowledgements have one winner under admission pressure" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .max_operations = 1, .message_capacity = 1 }, "portprobe.broker [] port.open 'p set p portprobe.deliver [] port.begin 'x set " ++
+        "x portprobe.deliveries port.endpoint port.receive 'value at 'delivery at 'd set x port.result pop x port.close " ++
+        "d wrap (portprobe.acknowledge [] port.call) @spawn 'left set " ++
+        "d wrap (portprobe.acknowledge [] port.call) @spawn 'right set " ++
+        "left task.await 'a set right task.await 'b set a 'ok dict.has? b 'ok dict.has? + " ++
+        "a 'err dict.has? (a 'err at 'kind at) (b 'err at 'kind at) if " ++
+        "p portprobe.broker-status [] port.call p port.close portprobe.cleaned", "1 'contract ('acknowledged 1 1) 2");
+}
+
+test "native: discarded broker messages clean delivery owners without automatic redelivery" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .message_capacity = 1 }, "portprobe.broker [] port.open 'p set p portprobe.deliver [] port.begin 'x set x port.await x port.close " ++
+        "p portprobe.broker-status [] port.call p portprobe.redeliver [] port.call 'd set " ++
+        "d portprobe.delivery-info [] port.call p port.close portprobe.cleaned", "('pending 1 0) {'id 1 'attempt 2} 3");
+}
+
+test "native: given broker deliveries acknowledge and close in the receiving task scope" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .message_capacity = 1 }, "portprobe.broker [] port.open 'p set p portprobe.deliver [] port.begin 'x set " ++
+        "x portprobe.deliveries port.endpoint port.receive 'value at 'delivery at 'd set x port.result pop x port.close " ++
+        "d wrap [] (portprobe.acknowledge [] port.call) @give task.await 'ok at " ++
+        "p portprobe.broker-status [] port.call d wrap (portprobe.delivery-info [] port.call) @attempt 'err at 'kind at " ++
+        "p port.close portprobe.cleaned", "[1] ('acknowledged 1 0) 'io 2");
+}
+
+test "native: broker acknowledgement races explicit redelivery atomically" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .message_capacity = 1 }, "portprobe.broker [] port.open 'p set p portprobe.deliver [] port.begin 'x set " ++
+        "x portprobe.deliveries port.endpoint port.receive 'value at 'delivery at 'd set x port.result pop x port.close " ++
+        "d wrap (portprobe.acknowledge [] port.call) @spawn 'left set p wrap (portprobe.redeliver [] port.call) @spawn 'right set " ++
+        "left task.await 'a set right task.await 'b set a 'ok dict.has? b 'ok dict.has? + " ++
+        "p portprobe.broker-status [] port.call a 'ok dict.has? (['acknowledged 1 1]) (['pending 2 1]) if match? " ++
+        "p port.close portprobe.cleaned a 'ok dict.has? (2) (3) if =", "1 1 1");
+}
+
 test "native: storage cursors stream rows and position through registered operations" {
     for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .max_operations = 2, .ring_capacity = 1, .message_capacity = 1 }, "portprobe.storage [] port.open 's set s portprobe.query [1 2] port.call 'c set " ++
         "c portprobe.rows [] port.begin 'x set x portprobe.row port.endpoint 'r set " ++

@@ -745,13 +745,119 @@ const TransactionPort = ecl.Port(struct {
     }
 });
 
+const BrokerSpec = struct {
+    pub const name = "broker";
+    const Phase = union(enum) { empty, pending: u32, acknowledged: u32 };
+    pub const State = struct {
+        mutex: std.Io.Mutex = .init,
+        phase: Phase = .empty,
+        active: u32 = 0,
+    };
+    pub fn init() State {
+        return .{};
+    }
+    pub fn open(_: *State, _: *ecl.Controller) void {}
+    pub fn run(state: *State, code: u32, controller: *ecl.Controller) void {
+        const builder = controller.builder();
+        std.Io.Threaded.mutexLock(&state.mutex);
+        if (code == 2) {
+            const phase = state.phase;
+            const active = state.active;
+            std.Io.Threaded.mutexUnlock(&state.mutex);
+            const label: []const u8 = switch (phase) {
+                .empty => "empty",
+                .pending => "pending",
+                .acknowledged => "acknowledged",
+            };
+            const attempt: u32 = switch (phase) {
+                .empty => 0,
+                .pending, .acknowledged => |number| number,
+            };
+            _ = builder.symbol(label) and builder.int(attempt) and builder.int(active) and builder.list(3) and builder.result();
+            return;
+        }
+        const attempt: u32 = if (code == 0 and state.phase == .empty) 1 else if (code == 1 and state.phase == .pending) next: {
+            if (state.phase.pending == std.math.maxInt(u32)) {
+                std.Io.Threaded.mutexUnlock(&state.mutex);
+                return controller.fail(.overflow, "delivery attempt limit reached");
+            }
+            break :next state.phase.pending + 1;
+        } else {
+            std.Io.Threaded.mutexUnlock(&state.mutex);
+            return controller.fail(.contract, "delivery requires an explicit pending redelivery");
+        };
+        state.phase = .{ .pending = attempt };
+        std.Io.Threaded.mutexUnlock(&state.mutex);
+        if (code == 0) {
+            _ = builder.symbol("delivery") and builder.int(attempt) and builder.child(Delivery, .dependent) and
+                builder.symbol("payload") and builder.list(0) and builder.dictionary(2) and builder.send(0);
+        } else _ = builder.int(attempt) and builder.child(Delivery, .dependent) and builder.result();
+    }
+    pub fn cancel(_: *State) void {}
+    pub fn deinit(state: *State) void {
+        std.Io.Threaded.mutexLock(&state.mutex);
+        if (state.active != 0) @panic("broker cleanup preceded dependent delivery destruction");
+        std.Io.Threaded.mutexUnlock(&state.mutex);
+        _ = cleaned.fetchAdd(1, .release);
+    }
+};
+const Broker = ecl.Port(BrokerSpec);
+
+const Delivery = ecl.Port(struct {
+    pub const name = "delivery";
+    pub const State = struct { parent: ?*Broker.StateType = null, attempt: u32 = 0 };
+    pub fn init() State {
+        return .{};
+    }
+    pub fn open(state: *State, controller: *ecl.Controller) void {
+        const parent = controller.parent(Broker) orelse return controller.fail(.domain, "delivery requires a broker parent");
+        const attempt = (controller.input(&.{}) orelse return).int() orelse return controller.fail(.type, "expected delivery attempt");
+        std.Io.Threaded.mutexLock(&parent.mutex);
+        defer std.Io.Threaded.mutexUnlock(&parent.mutex);
+        if (parent.phase != .pending or parent.phase.pending != attempt)
+            return controller.fail(.contract, "delivery attempt is no longer pending");
+        state.* = .{ .parent = parent, .attempt = @intCast(attempt) };
+        parent.active += 1;
+    }
+    pub fn run(state: *State, code: u32, controller: *ecl.Controller) void {
+        const builder = controller.builder();
+        if (code == 1) {
+            _ = builder.symbol("id") and builder.int(1) and builder.symbol("attempt") and builder.int(state.attempt) and builder.dictionary(2) and builder.result();
+            return;
+        }
+        const parent = state.parent.?;
+        std.Io.Threaded.mutexLock(&parent.mutex);
+        const accepted = code == 0 and parent.phase == .pending and parent.phase.pending == state.attempt;
+        if (accepted) parent.phase = .{ .acknowledged = state.attempt };
+        std.Io.Threaded.mutexUnlock(&parent.mutex);
+        if (!accepted) return controller.fail(.contract, "delivery acknowledgement is stale or already consumed");
+        _ = builder.int(state.attempt) and builder.result();
+    }
+    pub fn cancel(_: *State) void {}
+    pub fn deinit(state: *State) void {
+        if (state.parent) |parent| {
+            std.Io.Threaded.mutexLock(&parent.mutex);
+            parent.active -= 1;
+            std.Io.Threaded.mutexUnlock(&parent.mutex);
+        }
+        _ = cleaned.fetchAdd(1, .release);
+    }
+});
+
 pub const Extension = extension: {
     @setEvalBranchQuota(20_000);
     break :extension ecl.module(.{
         .name = @import("port_fixture_options").module_name,
         .doc = "Hermetic native port controller fixture.",
-        .ports = .{ Counter, Other, Duplex, Unacknowledged, Storage, Cursor, TransactionPort },
+        .ports = .{ Counter, Other, Duplex, Unacknowledged, Storage, Cursor, TransactionPort, Broker, Delivery },
         .words = .{
+            ecl.factory("broker", "Open a deterministic broker session.", Broker),
+            ecl.operation("deliver", "Deliver one opaque acknowledgement capability with an empty payload.", Broker, 0, .operation, 1),
+            ecl.operation("redeliver", "Explicitly replace an unacknowledged delivery attempt.", Broker, 1, .operation, 0),
+            ecl.operation("broker-status", "Observe acknowledgement state and live deliveries.", Broker, 2, .operation, 0),
+            ecl.endpoint("deliveries", "Receive complete delivery messages.", Broker, .{ .id = 0, .transport = .messages, .direction = .output }),
+            ecl.operation("acknowledge", "Acknowledge the current delivery exactly once.", Delivery, 0, .operation, 0),
+            ecl.operation("delivery-info", "Observe delivery identity and explicit attempt number.", Delivery, 1, .operation, 0),
             ecl.factory("storage", "Open a deterministic storage session.", Storage),
             ecl.operation("query", "Create a dependent cursor from structured offset and count parameters.", Storage, 0, .operation, 0),
             ecl.operation("transaction", "Create an exclusive transaction child.", Storage, 1, .operation, 0),

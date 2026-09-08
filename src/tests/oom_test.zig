@@ -1721,6 +1721,14 @@ test "oom: standard-library and host: process port lifecycle" {
     try checkStdlibSurface(.process);
 }
 
+test "oom: standard-library and host: native port broker delivery publication" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.broker [] port.open 'p set p portprobe.deliver [] port.begin 'x set " ++
+            "x portprobe.deliveries port.endpoint port.receive 'value at 'delivery at port.close x port.close p port.close",
+    ).run);
+}
+
 test "oom: standard-library and host: native port storage transaction publication" {
     try requireSelectedOomTest(@src());
     try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
