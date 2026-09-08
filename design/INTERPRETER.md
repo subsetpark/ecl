@@ -1518,7 +1518,7 @@ host partitions the total admission budget across lanes so a saturated lane
 cannot consume another lane's progress capacity. Declared byte and message
 endpoints separate scheduler execution from controller blocking. Every exchange
 owns a validated structured request and only its declared endpoint transports.
-Every admitted native operation has a heap exchange identity and independent
+Every admitted controller operation has a heap exchange identity and independent
 scope membership. Retaining or forwarding an exchange preserves its identity
 without changing that ownership. Forwarding shares
 use, while `@give` moves ownership through the same bounded batch protocol as
@@ -1690,6 +1690,13 @@ lane argument on cancellation or completion. An operation payload and its ticket
 Queue and observer ownership independently keep that allocation alive; only
 their final release destroys the payload and ticket. A writer allocation pins
 its admitted resource until both its turn and permit ownership end.
+
+A shared exchange owner carries scope membership, cancellation settlement,
+provisional child ownership, terminal results, and readiness for registered
+controller adapters. The typed adapter supplies execution and transport, while
+the exchange owner makes cleanup wait for lane retirement and child closure.
+Adapter state contains domain selectors and backend failure data; the shared
+owner observes semantic terminal outcomes without knowing their source.
 
 Callback operations expose observation and cancellation handles. The runtime
 claims the active turn under the resource and operation locks, lends an
