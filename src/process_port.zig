@@ -217,6 +217,8 @@ const OwnedEnvironment = struct {
 /// Session-owned authority and immutable ambient inputs. Units never receive
 /// this owner directly; Patch 4 installs a narrow opaque access facade.
 pub const ProcessOwner = struct {
+    host: *const heap.HostCleanup,
+    service_live: std.atomic.Value(usize) = .init(0),
     instance: *@import("module_bindings.zig").Identity,
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -227,13 +229,14 @@ pub const ProcessOwner = struct {
     next_identity: std.atomic.Value(u64) = .init(1),
 
     pub fn init(
-        allocator: std.mem.Allocator,
+        host: *const heap.HostCleanup,
         io: std.Io,
         policy: ProcessPolicy,
         environment: []const EnvironmentEntry,
     ) PolicyError!ProcessOwner {
-        // A supervisor, three pipes, and optional timeout and escalation jobs.
-        const jobs = std.math.mul(usize, policy.max_live_ports, 6) catch return error.InvalidPolicy;
+        const allocator = host.allocator();
+        // Backend jobs plus the shared wait, control, and shutdown lanes.
+        const jobs = std.math.mul(usize, policy.max_live_ports, 9) catch return error.InvalidPolicy;
         const capacity = std.math.add(usize, jobs, 1) catch return error.InvalidPolicy;
         var effective_policy = policy;
         const captured_cwd = if (policy.initial_cwd == null)
@@ -256,6 +259,7 @@ pub const ProcessOwner = struct {
         const instance = try @import("module_bindings.zig").Identity.create(allocator);
         errdefer instance.release();
         return .{
+            .host = host,
             .instance = instance,
             .allocator = allocator,
             .io = io,
@@ -288,6 +292,16 @@ pub const ProcessOwner = struct {
 
     fn resourceAllocator(self: *ProcessOwner) std.mem.Allocator {
         return self.allocator;
+    }
+    fn reserveService(self: *ProcessOwner) error{LiveLimit}!void {
+        var observed = self.service_live.load(.acquire);
+        while (observed < self.policy.max_live_ports) {
+            if (self.service_live.cmpxchgWeak(observed, observed + 1, .acq_rel, .acquire)) |actual| observed = actual else return;
+        }
+        return error.LiveLimit;
+    }
+    fn releaseService(self: *ProcessOwner) void {
+        _ = self.service_live.fetchSub(1, .acq_rel);
     }
     fn reserveResource(self: *ProcessOwner) error{LiveLimit}!void {
         if (!self.reserveLive()) return error.LiveLimit;
@@ -662,6 +676,33 @@ pub const ProcessCell = struct {
         std.Io.Threaded.mutexUnlock(&self.mutex);
     }
 
+    fn prepareGroupStartup(self: *ProcessCell, group: *scheduler_api.ExternalGroup) error{ OutOfMemory, ScopeClosing }!void {
+        const Publication = struct {
+            cell: *ProcessCell,
+            pub fn lock(item: *@This()) void {
+                std.Io.Threaded.mutexLock(&item.cell.mutex);
+            }
+            pub fn unlock(item: *@This()) void {
+                std.Io.Threaded.mutexUnlock(&item.cell.mutex);
+            }
+            pub fn validate(item: *@This()) bool {
+                return item.cell.ownership == .provisional;
+            }
+            pub fn publish(item: *@This(), tokens: [16]?external.ScopeMembership) void {
+                item.cell.ownership = .{ .owned = tokens[0].? };
+                if (item.cell.phase == .constructing) item.cell.phase = .running;
+            }
+        };
+        var publication: Publication = .{ .cell = self };
+        var members: [16]?external.ScopeMember = @splat(null);
+        members[0] = external.scopeMember(ProcessCell, self);
+        if (!try group.publish(members, &publication)) return error.ScopeClosing;
+    }
+    fn joinBackend(self: *ProcessCell) void {
+        std.Io.Threaded.mutexLock(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        while (self.phase != .reaped) self.changed.waitUncancelable(blockingIo(), &self.mutex);
+    }
     fn failBeforeStart(self: *ProcessCell) void {
         self.kill();
         std.Io.Threaded.mutexLock(&self.mutex);
@@ -702,6 +743,7 @@ pub const ProcessCell = struct {
     fn retireExecutionLocked(self: *ProcessCell, _: controllers.Outcome(void)) void {
         Resource.retire(self);
         self.phase = .{ .reaped = self.group_state.retired };
+        self.changed.broadcast(blockingIo());
         self.notifyReadyLocked();
     }
 
@@ -1369,12 +1411,15 @@ fn translateTerm(term: std.process.Child.Term) Termination {
 
 pub fn fromValue(port: Value) ?*ProcessCell {
     if (port != .port) return null;
+    if (serviceFromValue(port)) |service| return service.adapter.backend;
     return @import("port_resource.zig").Resource.project(ProcessCell, port);
 }
 
 test "process policy rejects ambient and relative executable selection before spawn" {
     const denied = ProcessPolicy{ .executables = .{ .exact = &.{"/allowed/program"} } };
-    var owner = try ProcessOwner.init(std.testing.allocator, std.testing.io, denied, &.{});
+    var host = heap.HostOwner.init(std.testing.allocator);
+    defer host.cleanup().drain();
+    var owner = try ProcessOwner.init(host.cleanup(), std.testing.io, denied, &.{});
     defer owner.deinit();
     try std.testing.expectError(error.InvalidSpec, owner.validateSpec(.{ .executable = "program" }));
     try std.testing.expectError(error.Denied, owner.validateSpec(.{ .executable = "/other/program" }));
@@ -1390,7 +1435,7 @@ test "process: provisional rollback retains capacity until cancellation setup re
     defer std.testing.allocator.free(fixture_path);
     var host = heap.HostOwner.init(std.testing.allocator);
     defer host.cleanup().drain();
-    var owner = try ProcessOwner.init(std.testing.allocator, std.testing.io, .{
+    var owner = try ProcessOwner.init(host.cleanup(), std.testing.io, .{
         .executables = .unrestricted,
         .max_live_ports = 1,
     }, &.{});
@@ -1468,7 +1513,7 @@ test "dormant controller reaps a direct child before scope detachment" {
     var root_scope = scheduler_api.TaskScope.init(runtime_scheduler.worker());
     defer runtime_scheduler.deinit(&root_scope);
     var owner = try ProcessOwner.init(
-        std.testing.allocator,
+        host.cleanup(),
         std.testing.io,
         .unrestricted(),
         &.{},
@@ -1515,7 +1560,7 @@ test "scope shutdown cancels a blocked controller independently of port referenc
     runtime_scheduler.attachRetirement();
     var root_scope = scheduler_api.TaskScope.init(runtime_scheduler.worker());
     var owner = try ProcessOwner.init(
-        std.testing.allocator,
+        host.cleanup(),
         std.testing.io,
         .unrestricted(),
         &.{},
@@ -1529,4 +1574,285 @@ test "scope shutdown cancels a blocked controller independently of port referenc
     host.domain().releaseValue(port);
     runtime_scheduler.deinit(&root_scope);
     owner.deinit();
+}
+
+const resource_api = @import("port_resource.zig");
+const port_message = @import("port_message.zig");
+const results = @import("port_result.zig");
+const Failure = @import("port_bytes.zig").Failure;
+
+const SpecState = struct {
+    allocator: std.mem.Allocator,
+    payload: *anyopaque,
+    snapshot: *const fn (*anyopaque) ProcessSpec,
+    release: *const fn (*anyopaque) void,
+};
+/// An immutable parsed specification owns its storage across controller startup.
+pub const PreparedSpec = opaque {
+    fn state(self: *PreparedSpec) *SpecState {
+        return @ptrCast(@alignCast(self));
+    }
+    /// Success consumes the producer reference; failure retains it.
+    pub fn create(comptime Producer: type, producer: *Producer) error{OutOfMemory}!*PreparedSpec {
+        const Bridge = struct {
+            fn typed(raw: *anyopaque) *Producer {
+                return @ptrCast(@alignCast(raw));
+            }
+            fn snapshot(raw: *anyopaque) ProcessSpec {
+                return typed(raw).processSpec();
+            }
+            fn release(raw: *anyopaque) void {
+                typed(raw).release();
+            }
+        };
+        const owned = try producer.allocator().create(SpecState);
+        owned.* = .{ .allocator = producer.allocator(), .payload = producer, .snapshot = Bridge.snapshot, .release = Bridge.release };
+        return @ptrCast(owned);
+    }
+    fn snapshot(self: *PreparedSpec) ProcessSpec {
+        return self.state().snapshot(self.state().payload);
+    }
+    pub fn release(self: *PreparedSpec) void {
+        const owned = self.state();
+        owned.release(owned.payload);
+        owned.allocator.destroy(owned);
+    }
+};
+
+pub const RegisteredOperation = enum { wait, terminate, kill, capture_limits };
+pub const Service = @import("port_service.zig").Resource(ServiceAdapter);
+const ProcessExchange = @import("port_operation.zig").Exchange(OperationAdapter);
+const ServiceStorage = transfers.Resource(Service, ProcessOwner, ProcessOwner.resourceAllocator, ProcessOwner.reserveService, ProcessOwner.releaseService);
+const ServiceAdapter = struct {
+    pub const Exchange = ProcessExchange;
+    pub const Request = RegisteredOperation;
+    owner: *ProcessOwner,
+    specification: *PreparedSpec,
+    backend: ?*ProcessCell = null,
+    pub fn allocator(self: *const ServiceAdapter) std.mem.Allocator {
+        return self.owner.allocator;
+    }
+    pub fn executor(self: *const ServiceAdapter) *controllers.Executor {
+        return self.owner.executor.access();
+    }
+    pub fn nextIdentity(self: *ServiceAdapter) u64 {
+        return self.owner.instance.next();
+    }
+    pub fn operationLane(_: *ServiceAdapter, operation: RegisteredOperation) u32 {
+        return if (operation == .wait) 0 else 1;
+    }
+    pub fn prepareOperation(_: *ServiceAdapter, cell: *Service, operation: RegisteredOperation, request: *const port_message.Validated, lane: *ProcessExchange.Lane) error{OutOfMemory}!*ProcessExchange.Prepared {
+        const terminal = try results.Result.create(cell.adapter.owner.host);
+        errdefer terminal.release();
+        return ProcessExchange.prepare(.{ .cell = cell, .operation = operation, .valid_request = request.value() == .list and request.value().list.length() == 0 }, terminal, lane);
+    }
+    pub fn retire(_: *ServiceAdapter, cell: *Service) void {
+        ServiceStorage.retire(cell);
+    }
+    pub fn destroy(self: *ServiceAdapter, cell: *Service) void {
+        if (self.backend) |backend| backend.releasePort();
+        self.specification.release();
+        ServiceStorage.destroy(cell);
+    }
+    pub fn initState(_: *ServiceAdapter) void {}
+    pub fn initializeBackend(self: *ServiceAdapter, cell: *Service) void {
+        self.startBackend(cell) catch |err| cell.failInitialization(switch (err) {
+            error.OutOfMemory => .out_of_memory,
+            error.Denied, error.InvalidSpec => Failure.init(.domain, "process specification denied or invalid"),
+            error.LiveLimit => Failure.init(.domain, "host process-port limit reached"),
+            error.ScopeClosing => Failure.init(.cancelled, "process scope is closing"),
+            error.Unsupported => Failure.init(.domain, "process ports are unsupported on this target"),
+            error.Io, error.Closed => Failure.init(.io, "could not spawn process"),
+        });
+    }
+    fn startBackend(self: *ServiceAdapter, cell: *Service) (SpawnError || error{Closed})!void {
+        if (comptime !backendSupported()) return error.Unsupported;
+        const spec = self.specification.snapshot();
+        try self.owner.validateSpec(spec);
+        const group = try cell.childGroup();
+        const backend = try Resource.create(self.owner, .{spec}, ProcessCell.initializeAllocation);
+        std.Io.Threaded.mutexLock(&cell.mutex);
+        self.backend = backend;
+        if (cell.closed.load(.acquire)) backend.kill();
+        std.Io.Threaded.mutexUnlock(&cell.mutex);
+        try backend.controllers.start(.{group}, ProcessCell.prepareGroupStartup, supervisorThreadMain, ProcessCell.failBeforeStart);
+    }
+    pub fn cancel(self: *ServiceAdapter) void {
+        if (self.backend) |backend| backend.kill();
+    }
+    pub fn failTransport(_: *ServiceAdapter) void {}
+    pub fn abortTransport(_: *ServiceAdapter) void {}
+    pub fn cleanup(_: *ServiceAdapter) void {}
+    pub fn shutdown(self: *ServiceAdapter, _: *Service) ?Failure {
+        if (self.backend) |backend| {
+            backend.terminate();
+            backend.joinBackend();
+        }
+        return null;
+    }
+    fn initializeAllocation(cell: *Service, owner: *ProcessOwner, spec: *PreparedSpec, worker: *const scheduler_api.WorkerScheduler) error{OutOfMemory}!void {
+        cell.initialize(.{ .owner = owner, .specification = spec }, worker, 2, 16, true) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.InvalidLimits => unreachable,
+        };
+    }
+};
+const OperationAdapter = struct {
+    cell: *Service,
+    operation: RegisteredOperation,
+    valid_request: bool,
+    failure: ?Failure = null,
+    pub fn allocator(self: *const OperationAdapter) std.mem.Allocator {
+        return self.cell.allocator;
+    }
+    pub fn scheduler(self: *OperationAdapter) *const scheduler_api.WorkerScheduler {
+        return self.cell.scheduler;
+    }
+    pub fn resourceMutex(self: *OperationAdapter) *std.Io.Mutex {
+        return &self.cell.mutex;
+    }
+    pub fn admittedLocked(self: *OperationAdapter) void {
+        self.cell.changed.broadcast(blockingIo());
+    }
+    pub fn retireValue(self: *OperationAdapter, item: Value) void {
+        heap.hostDomain(self.cell.adapter.owner.host).releaseValue(item);
+    }
+    pub fn retainResource(self: *OperationAdapter) void {
+        self.cell.retainReadiness();
+    }
+    pub fn deinit(self: *OperationAdapter) void {
+        self.cell.releaseReadiness();
+    }
+    pub fn terminal(self: *OperationAdapter) results.Terminal {
+        return if (self.failure) |failure| .{ .failed = failure } else .success;
+    }
+    pub fn runnable(self: *OperationAdapter) bool {
+        return !self.cell.closed.load(.acquire);
+    }
+    pub fn cancelPolicy(_: *OperationAdapter) controllers.CallbackCancellation {
+        return .acknowledge;
+    }
+    pub fn cancelResourceLocked(self: *OperationAdapter, action: controllers.CancelAction) void {
+        switch (action) {
+            .close_resource => self.cell.closeLocked(),
+            .interrupt, .retired => {
+                if (self.cell.adapter.backend) |backend| {
+                    std.Io.Threaded.mutexLock(&backend.mutex);
+                    backend.changed.broadcast(blockingIo());
+                    std.Io.Threaded.mutexUnlock(&backend.mutex);
+                }
+                self.cell.changed.broadcast(blockingIo());
+                self.cell.waits.notifyLocked(self.cell);
+            },
+            .settled => {},
+        }
+    }
+    pub fn completeResourceLocked(self: *OperationAdapter, outcome: controllers.Completion) void {
+        if (outcome == .close_resource) self.cell.closeLocked();
+        self.cell.waits.notifyLocked(self.cell);
+    }
+    pub fn notifyTransport(_: *OperationAdapter, _: *ProcessExchange) void {}
+    pub fn abortTransport(_: *OperationAdapter) void {}
+    pub fn execute(self: *OperationAdapter, exchange: *ProcessExchange, running: *controllers.Running) void {
+        defer {
+            std.Io.Threaded.mutexLock(&exchange.mutex);
+            if (exchange.ticket.isCancelled()) _ = running.acknowledgeCancellation();
+            std.Io.Threaded.mutexUnlock(&exchange.mutex);
+        }
+        self.perform(exchange, running) catch |err| {
+            std.Io.Threaded.mutexLock(&exchange.mutex);
+            self.failure = switch (err) {
+                error.OutOfMemory => .out_of_memory,
+                error.Overflow => Failure.init(.overflow, "process result exceeds representable limits"),
+                else => Failure.init(.io, "process result construction failed"),
+            };
+            std.Io.Threaded.mutexUnlock(&exchange.mutex);
+        };
+    }
+    fn perform(self: *OperationAdapter, exchange: *ProcessExchange, running: *controllers.Running) @import("port_builder.zig").Error!void {
+        if (!self.valid_request) {
+            std.Io.Threaded.mutexLock(&exchange.mutex);
+            self.failure = Failure.init(.domain, "process operations require an empty request list");
+            std.Io.Threaded.mutexUnlock(&exchange.mutex);
+            return;
+        }
+        const backend = self.cell.adapter.backend.?;
+        switch (self.operation) {
+            .terminate => backend.terminate(),
+            .kill => backend.kill(),
+            .wait => {
+                std.Io.Threaded.mutexLock(&backend.mutex);
+                while (backend.phase != .reaped and !exchange.transport_cancelled.load(.acquire)) backend.changed.waitUncancelable(blockingIo(), &backend.mutex);
+                std.Io.Threaded.mutexUnlock(&backend.mutex);
+            },
+            .capture_limits => {},
+        }
+        std.Io.Threaded.mutexLock(&exchange.mutex);
+        const cancelled = exchange.ticket.isCancelled();
+        if (cancelled) _ = running.acknowledgeCancellation();
+        std.Io.Threaded.mutexUnlock(&exchange.mutex);
+        if (cancelled or self.operation == .terminate or self.operation == .kill) return;
+        const builder = try @import("port_builder.zig").Builder.create(self.cell.adapter.owner.host);
+        defer builder.retire();
+        if (self.operation == .wait) {
+            const term = backend.termination().?;
+            const info: struct { kind: []const u8, field: []const u8, number: i64 } = switch (term) {
+                .exited => |code| .{ .kind = "exited", .field = "code", .number = code },
+                .signaled => |signal| .{ .kind = "signaled", .field = "signal", .number = signal },
+                .stopped => |signal| .{ .kind = "stopped", .field = "signal", .number = signal },
+                .unknown => |status| .{ .kind = "unknown", .field = "status", .number = status },
+            };
+            try symbol(builder, "kind");
+            try symbol(builder, info.kind);
+            try symbol(builder, info.field);
+            try builder.int(info.number);
+        } else {
+            try symbol(builder, "stdout");
+            try builder.int(std.math.cast(i64, self.cell.adapter.owner.stdoutCaptureLimit()) orelse return error.Overflow);
+            try symbol(builder, "stderr");
+            try builder.int(std.math.cast(i64, self.cell.adapter.owner.stderrCaptureLimit()) orelse return error.Overflow);
+        }
+        try builder.dictionary(2);
+        try settle(builder);
+        try builder.finish();
+        try settle(builder);
+        const envelope = try @import("port_messages.zig").Envelope.create(self.cell.adapter.owner.host, builder.validated().?);
+        if (!exchange.terminal_result.replace(envelope)) envelope.release();
+    }
+    fn settle(builder: *@import("port_builder.zig").Builder) @import("port_builder.zig").Error!void {
+        while (try builder.advance() == .pending) {}
+    }
+    fn symbol(builder: *@import("port_builder.zig").Builder, name: []const u8) @import("port_builder.zig").Error!void {
+        try builder.symbol(name);
+        try settle(builder);
+    }
+};
+
+/// Consumes the parsed specification on every path, including startup rollback.
+pub fn openPrepared(access_value: *external.ProcessAccess, scope: *scheduler_api.TaskScope, spec: *PreparedSpec) SpawnError!Value {
+    const owner = ownerFromAccess(access_value);
+    const cell = prepare: {
+        errdefer spec.release();
+        try owner.validateSpec(spec.snapshot());
+        break :prepare try ServiceStorage.create(owner, .{ spec, scope.scheduler }, ServiceAdapter.initializeAllocation);
+    };
+    // From this point the service owns the specification, including rollback.
+    const item = resource_api.Resource.create(Service, .staged, owner.instance.next(), cell) catch |err| {
+        cell.releasePort();
+        return err;
+    };
+    errdefer heap.hostDomain(owner.host).releaseValue(item);
+    cell.controllers.start(.{scope}, Service.prepareStartup, Service.run, Service.abortStartup) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.ScopeClosing => error.ScopeClosing,
+        error.Io, error.Closed => error.Io,
+    };
+    return item;
+}
+pub fn serviceFromValue(item: Value) ?*Service {
+    return resource_api.Resource.project(Service, item);
+}
+
+pub fn serviceInstance(service: *Service) *@import("module_bindings.zig").Identity {
+    return service.adapter.owner.instance;
 }

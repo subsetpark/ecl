@@ -516,7 +516,7 @@ pub const Session = enum(usize) {
             const owned = try allocator.create(process_port.ProcessOwner);
             errdefer allocator.destroy(owned);
             owned.* = process_port.ProcessOwner.init(
-                allocator,
+                host_owner.cleanup(),
                 services.io,
                 policy,
                 entries,
@@ -637,10 +637,6 @@ pub const Session = enum(usize) {
         for (core.stack.items) |item| core.releaseDomain().releaseValue(item);
         core.stack.deinit(core.allocator());
         core.releaseDomain().releaseValue(core.arguments);
-        if (core.process_owner) |owner| {
-            owner.deinit();
-            core.allocator().destroy(owner);
-        }
         // Every filesystem driver retired with the scheduler above, so no
         // handle, staging entry, or quota reservation can still reference
         // these owners.
@@ -679,6 +675,10 @@ pub const Session = enum(usize) {
         // them while the issuing Owner is still alive, then let that host-only
         // authority tear down descriptors/images and drain their ECL values.
         host.drain();
+        if (core.process_owner) |owner| {
+            owner.deinit();
+            core.allocator().destroy(owner);
+        }
         const settled_native_owner = closing_native_owner.settle();
         host.drain();
         settled_native_owner.deinit();

@@ -2493,6 +2493,18 @@ common structured-value limits and the same host policy as `proc.spawn`.
 The returned resource supports the process words and common lifecycle words;
 retaining the factory grants no additional host authority.
 
+The registered operations `proc.core.wait`, `proc.core.terminate`,
+`proc.core.kill`, and `proc.core.capture-limits` require an empty request list.
+Wait returns the termination dictionary described below. Terminate and kill
+request the corresponding process action and return `[]`; they do not wait
+for process exit. Capture-limits returns a dictionary with `'stdout` and
+`'stderr` byte limits from the host policy. Wait has its own FIFO lane; the
+other operations share an independent control lane. Cancelling a wait leaves
+the process running and makes its lane reusable after cancellation settles.
+Each exchange result is claimable once, while completion observation is
+repeatable. Process exit leaves the resource open for further operations;
+closing the resource prevents new admission and joins backend cleanup.
+
 `proc.core.stdin`, `proc.core.stdout`, and `proc.core.stderr` are endpoint
 selectors for process resources. `port.endpoint` with stdin grants writing and
 finishing; stdout and stderr grant reading. Their byte, EOF, and single-reader

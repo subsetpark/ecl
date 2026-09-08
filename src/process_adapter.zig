@@ -14,6 +14,7 @@ const Failure = factories.Failure;
 const bindings = @import("module_bindings.zig");
 const endpoints = @import("port_endpoint.zig");
 const bytes = @import("port_bytes.zig");
+const exchanges = @import("port_exchange.zig");
 
 pub const registration = bindings.Registration.create(Binding);
 
@@ -25,6 +26,10 @@ const Binding = struct {
         .{ .name = "stdin", .doc = "Select the process's writable standard input.", .effect = "-- selector" },
         .{ .name = "stdout", .doc = "Select the process's readable standard output.", .effect = "-- selector" },
         .{ .name = "stderr", .doc = "Select the process's readable diagnostics.", .effect = "-- selector" },
+        .{ .name = "wait", .doc = "Wait for process termination on the wait lane; request [].", .effect = "-- operation" },
+        .{ .name = "terminate", .doc = "Request process-group termination on the control lane; request [].", .effect = "-- operation" },
+        .{ .name = "kill", .doc = "Force process-group termination on the control lane; request [].", .effect = "-- operation" },
+        .{ .name = "capture-limits", .doc = "Read the process capture limits on the control lane; request [].", .effect = "-- operation" },
     };
     pub fn bind(memory: std.mem.Allocator, inherited: *const @import("machine.zig").InheritedContext) error{OutOfMemory}!*bindings.Publication {
         const instance = if (inherited.process_access) |access| process.registeredInstance(access) else try bindings.Identity.create(memory);
@@ -51,11 +56,16 @@ const Binding = struct {
             1 => .{ .endpoint = .stdin },
             2 => .{ .endpoint = .stdout },
             3 => .{ .endpoint = .stderr },
+            4 => .{ .operation = .wait },
+            5 => .{ .operation = .terminate },
+            6 => .{ .operation = .kill },
+            7 => .{ .operation = .capture_limits },
             else => unreachable,
         } };
         const item = switch (owned.body) {
             .factory => try factories.Factory.create(RegisteredCapability, self.instance.next(), owned),
             .endpoint => try endpoints.Selector.create(RegisteredCapability, self.instance.next(), owned),
+            .operation => try exchanges.Selector.create(RegisteredCapability, self.instance.next(), owned),
         };
         self.instance.retain();
         return item;
@@ -65,12 +75,21 @@ const Binding = struct {
 const EndpointKind = enum { stdin, stdout, stderr };
 const RegisteredCapability = struct {
     issuer: *bindings.Identity,
-    body: union(enum) { factory: ?*external.ProcessAccess, endpoint: EndpointKind },
+    body: union(enum) { factory: ?*external.ProcessAccess, endpoint: EndpointKind, operation: process.RegisteredOperation },
     pub fn instance(self: *RegisteredCapability) *bindings.Identity {
         return self.issuer;
     }
     pub fn allocator(self: *RegisteredCapability) std.mem.Allocator {
         return self.issuer.allocator();
+    }
+    pub fn acceptsOperation(self: *RegisteredCapability, source: Value) bool {
+        const service = process.serviceFromValue(source) orelse return false;
+        return process.serviceInstance(service) == self.issuer;
+    }
+    pub fn beginOperation(self: *RegisteredCapability, source: Value, scope: *@import("scheduler.zig").TaskScope, request: *const message.Validated) exchanges.AdmitError!exchanges.Admission {
+        const service = process.serviceFromValue(source) orelse return error.WrongKind;
+        if (process.serviceInstance(service) != self.issuer) return error.WrongKind;
+        return service.admitOnLane(self.body.operation, scope, request);
     }
     pub fn openResource(self: *RegisteredCapability, context: factories.Context, config: *const message.Validated) error{OutOfMemory}!factories.Start {
         return open(self.allocator(), self.body.factory, context, config);
@@ -101,6 +120,7 @@ pub fn open(allocator: std.mem.Allocator, access: ?*external.ProcessAccess, cont
 const Parser = struct {
     const Target = enum { executable, cwd, argument, env_name, env_value };
     const Text = struct { source: Value, target: Target, index: usize = 0, start: usize };
+    refs: std.atomic.Value(usize) = .init(1),
     memory: std.mem.Allocator,
     access: *external.ProcessAccess,
     context: factories.Context,
@@ -122,11 +142,15 @@ const Parser = struct {
         return self.memory;
     }
     pub fn release(self: *Parser) void {
+        if (self.refs.fetchSub(1, .acq_rel) != 1) return;
         const memory = self.memory;
         memory.free(self.blob);
         if (self.args) |args| memory.free(args);
         if (self.environment) |entries| memory.free(entries);
         memory.destroy(self);
+    }
+    pub fn processSpec(self: *Parser) process.ProcessSpec {
+        return .{ .executable = self.executable.?, .cwd = self.cwd, .args = if (self.args) |args| args else &.{}, .environment = if (self.environment) |entries| entries else &.{} };
     }
     fn beginText(self: *Parser, source: Value, target: Target) bool {
         if (!source.isString()) return false;
@@ -210,12 +234,12 @@ const Parser = struct {
                 }
             },
             .launch => {
-                const resource = process.spawnFromUnit(self.access, self.context.scope.scheduler, self.context.scope, .{
-                    .executable = self.executable.?,
-                    .cwd = self.cwd,
-                    .args = if (self.args) |args| args else &.{},
-                    .environment = if (self.environment) |entries| entries else &.{},
-                }) catch |err| return switch (err) {
+                _ = self.refs.fetchAdd(1, .monotonic);
+                const prepared = process.PreparedSpec.create(Parser, self) catch |err| {
+                    self.release();
+                    return err;
+                };
+                const resource = process.openPrepared(self.access, self.context.scope, prepared) catch |err| return switch (err) {
                     error.OutOfMemory => error.OutOfMemory,
                     error.Unsupported => .{ .failed = Failure.init(.domain, "process ports are unsupported on this target") },
                     error.Denied => .{ .failed = Failure.init(.domain, "process specification denied by host policy") },
@@ -224,6 +248,8 @@ const Parser = struct {
                     error.ScopeClosing => .{ .failed = Failure.init(.cancelled, "process scope is closing") },
                     error.Io => .{ .failed = Failure.init(.io, "could not spawn process") },
                 };
+                self.config = .{ .int = 0 };
+                self.collection = .{ .int = 0 };
                 return .{ .resource = resource };
             },
         };

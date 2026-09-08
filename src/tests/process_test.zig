@@ -337,3 +337,44 @@ test "process: common close joins a producer with full output rings" {
         .stderr_capacity = 1,
     }, "'port 'signaled", workers);
 }
+
+test "process: registered operations recover the wait lane and preserve result claims" {
+    const fixture_path = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, fixture.process_exe, allocator);
+    defer allocator.free(fixture_path);
+    const program = try source(
+        "proc.core.process {{'executable \"{s}\" 'args (\"ready\")}} port.open 'p set " ++
+            "p proc.core.stdout port.endpoint 1 port.read pop " ++
+            "p proc.core.wait [] port.begin 'first set first port.cancel " ++
+            "first wrap (port.await) @attempt 'err at 'kind at first port.close " ++
+            "p proc.core.wait [] port.begin 'second set " ++
+            "p proc.core.capture-limits [] port.call 'stdout at " ++
+            "p proc.core.kill [] port.call pop " ++
+            "second port.await second port.await second port.result 'signal at " ++
+            "second wrap (port.result) @attempt 'err at 'kind at " ++
+            "p port.close second port.await second port.close",
+        .{fixture_path},
+    );
+    defer allocator.free(program);
+    for ([_]u32{ 1, 8 }) |workers| try expectStackWithWorkers(program, .{
+        .executables = .{ .exact = &.{fixture_path} },
+        .stdout_capacity = 1,
+        .stderr_capacity = 1,
+        .max_stdout_capture = 4,
+    }, "'cancelled 4 9 'contract", workers);
+}
+
+test "process: registered operations reject requests before affecting the process" {
+    const fixture_path = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, fixture.process_exe, allocator);
+    defer allocator.free(fixture_path);
+    const program = try source(
+        "proc.core.process {{'executable \"{s}\" 'args (\"echo\")}} port.open 'p set " ++
+            "p wrap (proc.core.kill [1] port.call) @attempt 'err at 'kind at " ++
+            "p proc.core.stdin port.endpoint dup [97] port.write port.finish " ++
+            "p proc.core.stdout port.endpoint 1 port.read " ++
+            "p proc.core.wait [] port.call 'code at p port.close " ++
+            "p wrap (proc.core.wait [] port.call) @attempt 'err at 'kind at",
+        .{fixture_path},
+    );
+    defer allocator.free(program);
+    try expectStack(program, .{ .executables = .{ .exact = &.{fixture_path} }, .stdout_capacity = 1 }, "'domain [97] 0 'io");
+}

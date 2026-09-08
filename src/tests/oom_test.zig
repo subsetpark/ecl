@@ -1386,7 +1386,7 @@ fn BuiltinResourceLifecycleProbe(comptime backend: enum { process, listener }, c
             // common driver and retained identities, with deterministic
             // allocation ordinals independent of pipe-thread startup.
             const setup = try std.fmt.allocPrint(scaffold, switch (backend) {
-                .process => "{{'executable \"{s}\" 'args (\"exit\" \"0\")}} proc.spawn 'p set p proc.wait pop",
+                .process => "proc.core.process {{'executable \"{s}\" 'args (\"exit\" \"0\")}} port.open 'p set p proc.wait pop",
                 .listener => "\"{s}\" pop {{'address \"127.0.0.1\" 'port 0}} net.listen 'p set",
             }, .{process_path});
             defer scaffold.free(setup);
@@ -1408,6 +1408,14 @@ test "oom: standard-library and host: common resource process close" {
 test "oom: standard-library and host: common resource process shutdown" {
     try requireSelectedOomTest(@src());
     try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, BuiltinResourceLifecycleProbe(.process, "port.shutdown").run);
+}
+
+test "oom: standard-library and host: registered process operation results" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, BuiltinResourceLifecycleProbe(
+        .process,
+        "proc.core.wait [] port.call pop p proc.core.capture-limits [] port.call pop p port.close",
+    ).run);
 }
 
 test "oom: standard-library and host: common resource listener close" {

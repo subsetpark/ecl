@@ -1699,6 +1699,15 @@ backend work and transport; ABI descriptors and operation codes remain outside
 this lifecycle. Admission preparation owns its result and resource pin before
 acquiring the publication lock, and rejection retires them after unlocking.
 
+The process adapter retains an owned parsed specification through asynchronous
+initialization. Its pipe and supervision activity belongs to the common
+resource's dependent activity group, so transferring the resource transfers
+responsibility for joining that activity. Process exit and resource closure
+are separate terminal facts: exit settles wait operations, while closure
+retires the service and its controller capacity. The issuing process owner
+outlives retained resource identities and their reclamation, including after
+scope cleanup has joined execution.
+
 A shared exchange owner carries scope membership, cancellation settlement,
 provisional child ownership, terminal results, and readiness for registered
 controller adapters. The typed adapter supplies execution and transport, while
