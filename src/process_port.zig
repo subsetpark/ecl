@@ -708,12 +708,12 @@ pub const ProcessCell = struct {
         self.releaseRef();
     }
 
-    pub fn cancelExternalMember(self: *ProcessCell) void {
-        self.controllers.with(.{true}, ProcessCell.startGrace);
+    pub fn cancelExternalMember(self: *ProcessCell, scope: *external.ScopeIdentity) void {
+        self.controllers.with(.{ true, @as(?*external.ScopeIdentity, scope) }, ProcessCell.startGrace);
     }
 
-    fn startGrace(self: *ProcessCell, discard: bool) void {
-        const escalation = self.beginGrace(discard) orelse return;
+    fn startGrace(self: *ProcessCell, discard: bool, scope: ?*external.ScopeIdentity) void {
+        const escalation = self.beginGrace(discard, scope) orelse return;
         self.controllers.spawn(.{escalation}, escalationMain) catch {
             self.escalateKill(escalation);
         };
@@ -890,7 +890,7 @@ pub const ProcessCell = struct {
     }
 
     pub fn terminate(self: *ProcessCell) void {
-        self.controllers.with(.{true}, ProcessCell.startGrace);
+        self.controllers.with(.{ true, @as(?*external.ScopeIdentity, null) }, ProcessCell.startGrace);
     }
 
     pub fn kill(self: *ProcessCell) void {
@@ -921,9 +921,10 @@ pub const ProcessCell = struct {
         return self.timed_out;
     }
 
-    fn beginGrace(self: *ProcessCell, close_process: bool) ?EscalationId {
+    fn beginGrace(self: *ProcessCell, close_process: bool, scope: ?*external.ScopeIdentity) ?EscalationId {
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        if (scope) |identity| if (!self.ownership.authorizesCancellation(identity)) return null;
         if (close_process) switch (self.phase) {
             .constructing, .running => self.phase = .{ .closing = .terminate },
             .closing, .terminal, .reaped => {},
@@ -1005,7 +1006,7 @@ pub const ProcessCell = struct {
     }
 
     fn beginPostLeaderCleanup(self: *ProcessCell) void {
-        self.controllers.with(.{false}, ProcessCell.startGrace);
+        self.controllers.with(.{ false, @as(?*external.ScopeIdentity, null) }, ProcessCell.startGrace);
     }
 
     fn escalateKill(self: *ProcessCell, escalation: EscalationId) void {

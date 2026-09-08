@@ -1428,6 +1428,63 @@ test "native: bidirectional RPC interleaves notifications and correlates out of 
         "b wrap ([] port.send) @attempt 'err at 'kind at p port.close portprobe.cleaned", "7 [2 20] [1 10] 'eof 42 'io 1");
 }
 
+test "native: result publication gives an independent child to the claiming scope" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "portprobe.factory [] port.open 'p set p portprobe.child 7 port.call 'c set " ++
+        "p port.close c portprobe.noop [] port.call len c port.close portprobe.cleaned", "0 2");
+}
+
+test "native: message publication gives an independent child to the receiving scope" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .message_capacity = 1, .message_queue_bytes = 8 }, "portprobe.factory [] port.open 'p set p portprobe.child-event [] port.begin 'x set x port.await " ++
+        "x portprobe.receiver port.endpoint port.receive 'value at 'c set x port.close p port.close " ++
+        "c portprobe.noop [] port.call len c port.close portprobe.cleaned", "0 2");
+}
+
+test "native: discarded results and builder values join provisional child cleanup" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "portprobe.factory [] port.open 'p set p portprobe.child [] port.begin dup port.await port.close " ++
+        "portprobe.cleaned p portprobe.discard-child [] port.call p port.close portprobe.cleaned", "1 42 3");
+}
+
+test "native: dependent children join before parent closure and remain closed identities" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "portprobe.factory [] port.open 'p set p portprobe.dependent-child [] port.call 'c set " ++
+        "p port.close c wrap (portprobe.noop [] port.call) @attempt 'err at 'kind at " ++
+        "c port.close c type portprobe.cleaned", "'io 'port 2");
+}
+
+test "native: transferring a dependent child retains its parent dependency" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "portprobe.factory [] port.open 'p set p portprobe.dependent-child [] port.call 'c set " ++
+        "c wrap [] (portprobe.blocked [] port.call) @give 't set 1 portprobe.await-blocked " ++
+        "p port.close t task.await 'err at 'kind at portprobe.cleaned", "'cancelled 2");
+}
+
+test "native: queued child messages are cleaned when their exchange closes" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .message_capacity = 1, .message_queue_bytes = 8 }, "portprobe.factory [] port.open 'p set p portprobe.child-event [] port.begin dup port.await port.close " ++
+        "portprobe.cleaned p port.close portprobe.cleaned", "1 2");
+}
+
+test "native: a result publishes multiple child owners atomically" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "portprobe.factory [] port.open 'p set p portprobe.child-pair [] port.call 'cs set p port.close " ++
+        "cs (portprobe.noop [] port.call len) each cs (dup port.close) each pop portprobe.cleaned", "[0 0] 3");
+}
+
+test "native: cancellation interrupts provisional child initialization and restores the lane" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "portprobe.factory [] port.open 'p set p portprobe.child 250 port.begin 'x set " ++
+        "1 portprobe.await-blocked x port.cancel x wrap (port.await) @attempt 'err at 'kind at x port.close " ++
+        "p portprobe.noop [] port.call len p port.close portprobe.cleaned", "'cancelled 0 2");
+}
+
+test "native: competing child result claims publish into exactly one task scope" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "portprobe.factory [] port.open 'p set p portprobe.child [] port.begin 'x set " ++
+        "x wrap (port.result) @spawn 'a set x wrap (port.result) @spawn 'b set " ++
+        "a task.await 'ra set b task.await 'rb set ra 'ok dict.has? rb 'ok dict.has? + " ++
+        "ra 'err dict.has? (ra 'err at 'kind at) (rb 'err at 'kind at) if " ++
+        "x port.close p port.close portprobe.cleaned", "1 'contract 2");
+}
+
+test "native: task scope exit joins unclaimed independent children" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "[] (portprobe.factory [] port.open dup portprobe.child [] port.begin dup port.await pop pop) @spawn " ++
+        "task.await 'ok at len portprobe.cleaned", "0 2");
+}
+
 test "native: reply endpoint construction cannot widen direction or completion lifetime" {
     for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.factory [] port.open 'p set " ++
         "p wrap (portprobe.invalid-reply [] port.call) @attempt 'err at 'kind at " ++

@@ -226,6 +226,7 @@ const QueueItem = union(enum) {
     task: *TaskCell,
     cancellation: *TaskCell,
     wait: *WaitSet,
+    external_group: *ExternalGroupState,
 };
 
 const QueueEntry = struct {
@@ -1069,7 +1070,7 @@ pub const TaskScope = struct {
     external_last: ?*ExternalNode = null,
     external_cancel_next: ?*ExternalNode = null,
     policy: core.Scope = .{ .open = 0 },
-    closing_owner: ?*TaskCell = null,
+    closing_owner: ?union(enum) { task: *TaskCell, external_group: *ExternalGroupState } = null,
     cancellation_walk_active: bool = false,
     owner: ?*TaskCell = null,
 
@@ -1081,6 +1082,150 @@ pub const TaskScope = struct {
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
         return self.policy.childCount();
+    }
+};
+
+const ExternalGroupState = struct {
+    allocator: std.mem.Allocator,
+    scope: TaskScope,
+    refs: std.atomic.Value(usize) = .init(1),
+    queue: QueueEntry,
+    parent: *anyopaque,
+    retain_parent: *const fn (*anyopaque) void,
+    release_parent: *const fn (*anyopaque) void,
+    complete_parent: *const fn (*anyopaque) void,
+    phase: union(enum) { open, cancelling: ScopeCancellationCursor, waiting, closed } = .open,
+
+    fn retain(self: *@This()) void {
+        _ = self.refs.fetchAdd(1, .monotonic);
+    }
+    fn release(self: *@This()) void {
+        if (self.refs.fetchSub(1, .acq_rel) != 1) return;
+        switch (self.phase) {
+            .open => if (self.scope.policy.childCount() != 0) @panic("destroying a populated external group"),
+            .closed => {},
+            .cancelling, .waiting => @panic("destroying a closing external group"),
+        }
+        // Closed metadata can outlive scheduler teardown while its controller
+        // retirement callback releases the final parent pin. Destruction uses
+        // the allocation's retained authority, never a dead scheduler facade.
+        self.allocator.destroy(self);
+    }
+    fn advance(self: *@This()) void {
+        if (!self.phase.cancelling.advance()) {
+            self.scope.scheduler.enqueue(&self.queue);
+            return;
+        }
+        self.phase.cancelling.deinit();
+        std.Io.Threaded.mutexLock(&self.scope.mutex);
+        self.scope.cancellation_walk_active = false;
+        const closed = self.scope.policy.childCount() == 0;
+        self.phase = if (closed) .closed else .waiting;
+        if (closed) self.scope.quiescent.broadcast(blockingIo()) else self.scope.closing_owner = .{ .external_group = self };
+        std.Io.Threaded.mutexUnlock(&self.scope.mutex);
+        if (closed) self.complete();
+    }
+    fn quiescent(self: *@This()) void {
+        std.Io.Threaded.mutexLock(&self.scope.mutex);
+        self.phase = .closed;
+        self.scope.quiescent.broadcast(blockingIo());
+        std.Io.Threaded.mutexUnlock(&self.scope.mutex);
+        self.complete();
+    }
+    fn complete(self: *@This()) void {
+        self.complete_parent(self.parent);
+        self.release_parent(self.parent);
+        self.release();
+    }
+};
+
+/// An owner-issued scope for external children only. Closing queues the same
+/// bounded cancellation work used by tasks; it never enters the interpreter
+/// on a controller thread. The parent owns this handle and outlives its open
+/// phase. Closure pins both until every child has propagated final retirement.
+pub const ExternalGroup = opaque {
+    fn state(self: *@This()) *ExternalGroupState {
+        return @ptrCast(@alignCast(self));
+    }
+    pub fn create(scheduler: *const WorkerScheduler, comptime Parent: type, parent: *Parent) error{OutOfMemory}!*ExternalGroup {
+        const Callbacks = struct {
+            fn retain(raw: *anyopaque) void {
+                const owner: *Parent = @ptrCast(@alignCast(raw));
+                owner.retainReadiness();
+            }
+            fn release(raw: *anyopaque) void {
+                const owner: *Parent = @ptrCast(@alignCast(raw));
+                owner.releaseReadiness();
+            }
+            fn complete(raw: *anyopaque) void {
+                const owner: *Parent = @ptrCast(@alignCast(raw));
+                owner.childrenClosed();
+            }
+        };
+        const owned = try scheduler.allocator().create(ExternalGroupState);
+        owned.* = .{
+            .allocator = scheduler.allocator(),
+            .scope = TaskScope.init(scheduler),
+            .queue = .{ .item = .{ .external_group = owned } },
+            .parent = parent,
+            .retain_parent = Callbacks.retain,
+            .release_parent = Callbacks.release,
+            .complete_parent = Callbacks.complete,
+        };
+        return @ptrCast(owned);
+    }
+    pub fn retain(self: *@This()) void {
+        self.state().retain();
+    }
+    pub fn release(self: *@This()) void {
+        self.state().release();
+    }
+    /// Consumes incoming pins on either outcome. A closed group admits none.
+    pub fn publish(self: *@This(), incoming: [16]?external.ScopeMember, guard: anytype) ExternalAttachError!bool {
+        const owned = self.state();
+        return owned.scope.scheduler.publishExternalBatch(&owned.scope, incoming, guard);
+    }
+    pub fn lockPublication(self: *@This()) void {
+        std.Io.Threaded.mutexLock(&self.state().scope.mutex);
+    }
+    pub fn unlockPublication(self: *@This()) void {
+        std.Io.Threaded.mutexUnlock(&self.state().scope.mutex);
+    }
+    pub fn acceptsPublicationLocked(self: *@This()) bool {
+        return self.state().phase == .open;
+    }
+    pub fn ownsMembership(self: *@This(), token: external.ScopeMembership) bool {
+        return token.owningScope() == @as(*anyopaque, @ptrCast(&self.state().scope));
+    }
+    pub fn close(self: *@This()) void {
+        const owned = self.state();
+        std.Io.Threaded.mutexLock(&owned.scope.mutex);
+        if (owned.phase != .open) {
+            std.Io.Threaded.mutexUnlock(&owned.scope.mutex);
+            return;
+        }
+        owned.scope.policy = scopeDecision(owned.scope.policy, .close).next;
+        beginExternalCancellationLocked(&owned.scope);
+        owned.scope.cancellation_walk_active = true;
+        owned.phase = .{ .cancelling = .{ .scope = &owned.scope, .tasks = null } };
+        owned.retain();
+        owned.retain_parent(owned.parent);
+        std.Io.Threaded.mutexUnlock(&owned.scope.mutex);
+        owned.scope.scheduler.enqueue(&owned.queue);
+    }
+    pub fn closed(self: *@This()) bool {
+        const owned = self.state();
+        std.Io.Threaded.mutexLock(&owned.scope.mutex);
+        defer std.Io.Threaded.mutexUnlock(&owned.scope.mutex);
+        return owned.phase == .closed;
+    }
+    /// Only controller execution can block on child retirement. Workers use
+    /// their parent's completion notification and continue ordinary scheduling.
+    pub fn join(self: *@This(), _: *@import("port_controller.zig").Execution) void {
+        const owned = self.state();
+        std.Io.Threaded.mutexLock(&owned.scope.mutex);
+        defer std.Io.Threaded.mutexUnlock(&owned.scope.mutex);
+        while (owned.phase != .closed) owned.scope.quiescent.waitUncancelable(blockingIo(), &owned.scope.mutex);
     }
 };
 
@@ -1259,7 +1404,7 @@ const ScopeCancellationCursor = struct {
             const node = takeExternalCancellationNode(self.scope) orelse return true;
             if (!node.cancellation_sent) {
                 node.cancellation_sent = true;
-                node.member.cancel();
+                node.member.cancel(@ptrCast(node.scope));
             }
             node.release();
         }
@@ -1685,7 +1830,7 @@ pub const WorkerScheduler = enum(usize) {
     }
 
     fn finishExternalDetach(self: *const WorkerScheduler, scope: *TaskScope) void {
-        var closing_owner: ?*TaskCell = null;
+        var closing_owner: @FieldType(TaskScope, "closing_owner") = null;
         std.Io.Threaded.mutexLock(&scope.mutex);
         const decision = scopeDecision(scope.policy, .child_terminal);
         scope.policy = decision.next;
@@ -1697,7 +1842,10 @@ pub const WorkerScheduler = enum(usize) {
             }
         }
         std.Io.Threaded.mutexUnlock(&scope.mutex);
-        if (closing_owner) |owner| self.enqueueTask(owner);
+        if (closing_owner) |owner| switch (owner) {
+            .task => |task| self.enqueueTask(task),
+            .external_group => |group| group.quiescent(),
+        };
     }
 
     pub fn runRoot(
@@ -1912,6 +2060,7 @@ pub const WorkerScheduler = enum(usize) {
             .task => |cell| self.runQueued(cell),
             .cancellation => |cell| self.runCancellation(cell),
             .wait => |wait| self.runWait(wait),
+            .external_group => |group| group.advance(),
         }
     }
 
@@ -2000,7 +2149,7 @@ pub const WorkerScheduler = enum(usize) {
         const ready = decision.command == .notify_quiescent;
         if (!ready) {
             std.debug.assert(cell.scope.closing_owner == null);
-            cell.scope.closing_owner = cell;
+            cell.scope.closing_owner = .{ .task = cell };
         }
         const start_cancellation = !ready and
             cell.scope.policy == .closing and
@@ -2040,7 +2189,7 @@ pub const WorkerScheduler = enum(usize) {
         if (closing_owner != null) cell.scope.closing_owner = null;
         std.Io.Threaded.mutexUnlock(&cell.scope.mutex);
         std.Io.Threaded.mutexUnlock(&state_.tree_mutex);
-        if (closing_owner) |owner| self.publishFinished(owner);
+        if (closing_owner) |owner| self.publishFinished(owner.task);
     }
 
     fn publishFinished(self: *const WorkerScheduler, cell: *TaskCell) void {
@@ -2224,7 +2373,7 @@ pub const WorkerScheduler = enum(usize) {
         if (closing_owner != null) cell.scope.closing_owner = null;
         std.Io.Threaded.mutexUnlock(&cell.scope.mutex);
         std.Io.Threaded.mutexUnlock(&state_.tree_mutex);
-        if (closing_owner) |owner| self.publishFinished(owner);
+        if (closing_owner) |owner| self.publishFinished(owner.task);
         self.releaseDomain().releaseHeader(cell.handle());
     }
 };
@@ -2652,7 +2801,7 @@ fn unlinkParent(cell: *TaskCell) ?*TaskCell {
     if (decision.command == .notify_quiescent) parent.quiescent.broadcast(blockingIo());
     std.Io.Threaded.mutexUnlock(&parent.mutex);
     cell.scheduler.releaseDomain().releaseHeader(cell.handle());
-    return closing_owner;
+    return if (closing_owner) |owner| owner.task else null;
 }
 
 fn workerMain(scheduler: *const WorkerScheduler) void {
@@ -2730,7 +2879,7 @@ test "native: external publication batches preserve ownership on rejection and a
             pub fn releaseExternalMember(self: *@This()) void {
                 self.refs -= 1;
             }
-            pub fn cancelExternalMember(_: *@This()) void {}
+            pub fn cancelExternalMember(_: *@This(), _: *external.ScopeIdentity) void {}
         };
         const Publication = struct {
             mutex: std.Io.Mutex = .init,
@@ -2809,7 +2958,8 @@ test "native: scope transfers preserve their owner through rollback and allocati
             pub fn releaseExternalMember(self: *@This()) void {
                 self.refs -= 1;
             }
-            pub fn cancelExternalMember(self: *@This()) void {
+            pub fn cancelExternalMember(self: *@This(), scope: *external.ScopeIdentity) void {
+                if (!self.ownership.authorizesCancellation(scope)) return;
                 self.cancellations += 1;
                 var detached = self.ownership.release();
                 detached.detachAll();
@@ -2852,6 +3002,85 @@ test "native: scope transfers preserve their owner through rollback and allocati
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
 }
 
+test "native: stale scope cancellation cannot close a published resource before deferred detach" {
+    const Probe = struct {
+        mutex: std.Io.Mutex = .init,
+        ownership: external.Ownership = .provisional,
+        refs: std.atomic.Value(usize) = .init(0),
+        cancellations: std.atomic.Value(usize) = .init(0),
+        attempted: std.Io.Event = .unset,
+        fn owner(self: *@This()) *external.Ownership {
+            return &self.ownership;
+        }
+        pub fn retainExternalMember(self: *@This()) void {
+            _ = self.refs.fetchAdd(1, .monotonic);
+        }
+        pub fn releaseExternalMember(self: *@This()) void {
+            _ = self.refs.fetchSub(1, .release);
+        }
+        pub fn cancelExternalMember(self: *@This(), scope: *external.ScopeIdentity) void {
+            std.Io.Threaded.mutexLock(&self.mutex);
+            var detached: external.Ownership.Detached = .{};
+            if (self.ownership.authorizesCancellation(scope)) {
+                _ = self.cancellations.fetchAdd(1, .release);
+                detached = self.ownership.release();
+            }
+            std.Io.Threaded.mutexUnlock(&self.mutex);
+            detached.detachAll();
+            self.attempted.set(blockingIo());
+        }
+        fn close(scope: *TaskScope) void {
+            scope.scheduler.closeRootScope(scope);
+        }
+    };
+    const Publication = struct {
+        member: *Probe,
+        previous: external.Ownership.Detached = .{},
+        pub fn lock(self: *@This()) void {
+            std.Io.Threaded.mutexLock(&self.member.mutex);
+        }
+        pub fn unlock(self: *@This()) void {
+            std.Io.Threaded.mutexUnlock(&self.member.mutex);
+        }
+        pub fn validate(self: *@This()) bool {
+            return self.member.ownership == .owned;
+        }
+        pub fn publish(self: *@This(), tokens: [16]?external.ScopeMembership) void {
+            self.previous = self.member.ownership.release();
+            self.member.ownership = .{ .owned = tokens[0].? };
+        }
+    };
+    var cleanup = heap.testing.Cleanup.init(std.testing.allocator);
+    defer cleanup.deinit();
+    var runtime = try Scheduler.init(cleanup.capability(), .cooperative, .manual);
+    var origin = TaskScope.init(runtime.worker());
+    defer runtime.deinit(&origin);
+    var destination = TaskScope.init(runtime.worker());
+    var member: Probe = .{};
+    defer {
+        var detached = member.ownership.release();
+        detached.detachAll();
+    }
+    try @import("port_transfer.zig").publishScope(Probe, &member, &origin, Probe.owner);
+    var publication: Publication = .{ .member = &member };
+    defer publication.previous.detachAll();
+    var incoming: [16]?external.ScopeMember = .{null} ** 16;
+    incoming[0] = external.scopeMember(Probe, &member);
+    try std.testing.expect(try runtime.worker().publishExternalBatch(&destination, incoming, &publication));
+    const closer = try std.Thread.spawn(.{}, Probe.close, .{&origin});
+    {
+        defer {
+            publication.previous.detachAll();
+            closer.join();
+        }
+        member.attempted.waitUncancelable(blockingIo());
+        try std.testing.expectEqual(@as(usize, 0), member.cancellations.load(.acquire));
+    }
+    runtime.worker().closeRootScope(&destination);
+    try std.testing.expectEqual(@as(usize, 1), member.cancellations.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), member.refs.load(.acquire));
+}
+
 test "native: scope cancellation observes an entire external publication batch" {
     const Publication = struct {
         const Self = @This();
@@ -2866,7 +3095,7 @@ test "native: scope cancellation observes an entire external publication batch" 
             pub fn releaseExternalMember(self: *@This()) void {
                 _ = self.refs.fetchSub(1, .release);
             }
-            pub fn cancelExternalMember(self: *@This()) void {
+            pub fn cancelExternalMember(self: *@This(), _: *external.ScopeIdentity) void {
                 if (!self.publication.published.load(.acquire)) self.publication.partial.store(true, .release);
                 self.cancellations += 1;
                 if (self.token) |*token| token.detach();

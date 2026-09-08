@@ -93,6 +93,14 @@ storage. Construction and validation advance in bounded steps. Successful
 `send` and `result` consume the completed message; failed transport keeps it
 for cleanup or retry. Construction errors invalidate the partial message, and
 `clear` explicitly starts another. Controller return discards unfinished work.
+`child(Port, dependency)` replaces the builder's top configuration with a newly
+initialized resource of a kind registered by the same module instance. Earlier
+builder values remain available for aggregate construction. The host retains
+provisional ownership until ECL receives or claims the containing value; failed
+creation retains the configuration and cleans up partial startup. The dependency
+argument is explicit: dependent children retire before the parent backend,
+while independent children can survive it. Cancellation interrupts blocked child
+startup. No child handle grants native code ECL storage or interpreter access.
 `replyEndpoint` appends an opaque sender for a declared message input of the
 current exchange. A controller can send it with a request and receive ECL's
 response through that input. Output endpoints and inputs excluded by the

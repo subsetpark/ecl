@@ -8,20 +8,34 @@ const Value = @import("value.zig").Value;
 const external = @import("external.zig");
 const scheduler = @import("scheduler.zig");
 
-/// Attach outside the resource lock, then consume the membership under it.
-/// The caller retains the cell throughout and owns backend rollback on failure.
-/// Startup must revalidate backend cancellation under the same resource lock.
+/// Prepare storage before locking, then publish membership and ownership
+/// together. The caller retains the cell throughout and owns backend rollback
+/// on failure. No cancellation sees a linked but not yet owned resource.
 pub fn publishScope(
     comptime Cell: type,
     cell: *Cell,
     scope: *scheduler.TaskScope,
     comptime ownership: fn (*Cell) *external.Ownership,
 ) error{ OutOfMemory, ScopeClosing }!void {
-    const membership = try scope.scheduler.attachExternal(scope, external.scopeMember(Cell, cell));
-    std.Io.Threaded.mutexLock(&cell.mutex);
-    var detached = ownership(cell).publish(membership);
-    std.Io.Threaded.mutexUnlock(&cell.mutex);
-    detached.detachAll();
+    const Publication = struct {
+        cell: *Cell,
+        pub fn lock(self: *@This()) void {
+            std.Io.Threaded.mutexLock(&self.cell.mutex);
+        }
+        pub fn unlock(self: *@This()) void {
+            std.Io.Threaded.mutexUnlock(&self.cell.mutex);
+        }
+        pub fn validate(self: *@This()) bool {
+            return ownership(self.cell).* == .provisional;
+        }
+        pub fn publish(self: *@This(), tokens: [16]?external.ScopeMembership) void {
+            ownership(self.cell).* = .{ .owned = tokens[0].? };
+        }
+    };
+    var publication: Publication = .{ .cell = cell };
+    var members: [16]?external.ScopeMember = .{null} ** 16;
+    members[0] = external.scopeMember(Cell, cell);
+    if (!try scope.scheduler.publishExternalBatch(scope, members, &publication)) return error.ScopeClosing;
 }
 
 /// The backend supplies only its locked lifetime predicate and ownership

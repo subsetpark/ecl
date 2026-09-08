@@ -220,7 +220,7 @@ const ReceiveDriver = struct {
                 };
                 if (!accepted) {
                     evaluator.releaseDomain().releaseValue(event);
-                    return evaluator.fail(.io, "message endpoint closed before publication");
+                    return .yielded;
                 }
                 return output.output(event);
             },
@@ -459,9 +459,10 @@ const Observe = struct {
 fn callingScope(evaluator: *machine.Machine) machine.MachineError!*scheduler.TaskScope {
     return @ptrCast(@alignCast(evaluator.unit.task_scope orelse return evaluator.fail(.cancelled, "port scope is closing")));
 }
-fn publicationFailure(evaluator: *machine.Machine, err: error{ OutOfMemory, ScopeClosing }) machine.MachineError {
+fn publicationFailure(evaluator: *machine.Machine, err: error{ OutOfMemory, ScopeClosing, Overflow }) machine.MachineError {
     return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.ScopeClosing => evaluator.fail(.cancelled, "port scope is closing"),
+        error.Overflow => evaluator.fail(.overflow, "too many resource owners in one port publication"),
     };
 }

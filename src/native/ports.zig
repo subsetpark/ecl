@@ -82,6 +82,23 @@ pub const MessageBuilder = opaque {
     pub fn replyEndpoint(self: *MessageBuilder, endpoint: u6) bool {
         return self.apply(.{ .action = .reply_endpoint, .endpoint = endpoint });
     }
+    /// Consume the completed configuration and replace it with a new resource.
+    /// Success leaves that child provisionally owned by this exchange until
+    /// ECL claims its result/message. Failure retains the configuration and
+    /// the host cleans up any failed child. Dependent children close and join
+    /// before their issuing parent's backend is destroyed; scope transfer
+    /// never detaches that dependency.
+    pub fn child(self: *MessageBuilder, comptime P: type, dependency: enum { independent, dependent }) bool {
+        if (!@hasDecl(P, "ecl_port_marker")) @compileError("ecl-native: child requires a declared Port type");
+        return self.apply(.{ .action = .prepare_child }) and self.apply(.{
+            .action = .child,
+            .scalar = capability.Scalar.symbol(P.name).wire,
+            .count = @intFromEnum(switch (dependency) {
+                .independent => abi.ChildDependency.independent,
+                .dependent => abi.ChildDependency.dependent,
+            }),
+        });
+    }
     pub fn list(self: *MessageBuilder, count: u32) bool {
         return self.apply(.{ .action = .list, .count = count });
     }

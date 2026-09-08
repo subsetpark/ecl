@@ -21,11 +21,12 @@ const Dictionary = struct {
 const Phase = union(enum) {
     idle,
     symbol: struct { bytes: []const u8, index: usize = 0, cursor: ?intern.InternInsertionCursor = null },
-    validating: struct { message: *message.Message, purpose: enum { append, finish } },
+    validating: struct { message: *message.Message, purpose: enum { append, finish, child } },
     list: struct { start: usize, materializer: list.ValueMaterializer },
     dictionary: Dictionary,
     retiring: struct { next: usize, end: usize },
     ready: *message.Message,
+    child_configuration: *message.Message,
     failed,
 };
 const State = struct {
@@ -61,7 +62,7 @@ const State = struct {
         switch (self.phase) {
             .idle, .symbol, .retiring, .failed => {},
             .validating => |validation| validation.message.retire(releases),
-            .ready => |ready| ready.retire(releases),
+            .ready, .child_configuration => |ready| ready.retire(releases),
             .list => |*building| building.materializer.retire(releases),
             .dictionary => |*building| {
                 switch (building.phase) {
@@ -76,7 +77,7 @@ const State = struct {
     }
     fn advance(self: *State) Error!poll.Progress(void) {
         switch (self.phase) {
-            .idle, .ready => return .complete,
+            .idle, .ready, .child_configuration => return .complete,
             .failed => return error.InvalidState,
             .symbol => |*symbol| {
                 if (symbol.cursor) |*cursor| switch (try cursor.advance()) {
@@ -102,6 +103,8 @@ const State = struct {
                 if (try validation.message.advance(&budget) == .pending) return .pending;
                 if (validation.purpose == .finish) {
                     self.phase = .{ .ready = validation.message };
+                } else if (validation.purpose == .child) {
+                    self.phase = .{ .child_configuration = validation.message };
                 } else {
                     try self.charge(validation.message.footprint().?);
                     const item = validation.message.view().?;
@@ -240,6 +243,40 @@ pub const Builder = opaque {
         if (owned.depth != 1) return error.InvalidState;
         const validating = try message.Message.create(owned.host.allocator(), owned.stack.values()[0], limits);
         owned.phase = .{ .validating = .{ .message = validating, .purpose = .finish } };
+    }
+    /// Seal only the top value as a child configuration. Earlier completed
+    /// values stay owned by the builder, allowing atomic multi-child results.
+    pub fn prepareChild(self: *Builder) Error!void {
+        const owned = self.state();
+        try owned.requireIdle();
+        if (owned.depth == 0) return error.InvalidState;
+        const validating = try message.Message.create(owned.host.allocator(), owned.stack.values()[owned.depth - 1], limits);
+        owned.phase = .{ .validating = .{ .message = validating, .purpose = .child } };
+    }
+    pub fn childConfiguration(self: *Builder) ?*const message.Validated {
+        const owned = self.state();
+        return if (owned.phase == .child_configuration) owned.phase.child_configuration.validated() else null;
+    }
+    /// Success replaces the configuration with a retained child. Failure
+    /// leaves both arguments owned by their callers; no allocation follows
+    /// the consuming transition.
+    pub fn replaceChild(self: *Builder, child: Value) Error!void {
+        const owned = self.state();
+        if (owned.phase != .child_configuration) return error.InvalidState;
+        if (child != .port or heap.portVariant(child.port) != .resource) return error.InvalidValue;
+        const configuration = owned.phase.child_configuration;
+        const footprint = configuration.footprint().?;
+        const next: message.Footprint = .{
+            .nodes = owned.footprint.nodes - footprint.nodes + 1,
+            .bytes = owned.footprint.bytes - footprint.bytes,
+            .capabilities = owned.footprint.capabilities - footprint.capabilities + 1,
+        };
+        if (next.nodes > limits.nodes or next.capabilities > limits.capabilities) return error.Overflow;
+        heap.retainValue(child);
+        owned.footprint = next;
+        configuration.retire(heap.hostDomain(owned.host));
+        owned.stack.replaceOwned(owned.depth - 1, child);
+        owned.phase = .idle;
     }
     pub fn advance(self: *Builder) Error!poll.Progress(void) {
         return self.state().advance() catch |err| {

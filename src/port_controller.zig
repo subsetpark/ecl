@@ -292,6 +292,7 @@ pub fn Group(comptime Cell: type, comptime Result: type, comptime lifetime: anyt
                 lifetime.retireLocked(cell, terminal);
                 var detached = lifetime.ownership(cell).release();
                 std.Io.Threaded.mutexUnlock(&cell.mutex);
+                if (@hasField(@TypeOf(lifetime), "retireAfterUnlock")) lifetime.retireAfterUnlock(cell);
                 lifetime.release(cell);
                 detached.detachAll();
             }

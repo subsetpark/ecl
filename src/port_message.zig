@@ -13,7 +13,7 @@ const Value = value.Value;
 pub const Limits = struct {
     bytes: usize = 64 * 1024,
     nodes: usize = 4096,
-    capabilities: usize = 16,
+    capabilities: u5 = 16,
 };
 
 /// Scalars are charged by their portable representation, independently of
@@ -36,6 +36,7 @@ const State = struct {
     root: Value,
     limits: Limits,
     footprint: Footprint = .{},
+    attachments: [std.math.maxInt(u5)]?*heap.PortHandle = .{null} ** std.math.maxInt(u5),
     frames: poll.ChunkStack(Frame),
     phase: union(enum) { validating, ready, failed: ValidationError } = .validating,
 
@@ -53,7 +54,10 @@ const State = struct {
                 try charge(&self.footprint.bytes, std.unicode.utf8CodepointSequenceLength(scalar) catch return error.InvalidValue, self.limits.bytes);
             },
             .symbol => |id| try charge(&self.footprint.bytes, intern.get(id).len, self.limits.bytes),
-            .port => try charge(&self.footprint.capabilities, 1, self.limits.capabilities),
+            .port => |port| {
+                try charge(&self.footprint.capabilities, 1, self.limits.capabilities);
+                self.attachments[self.footprint.capabilities - 1] = port;
+            },
             .word, .task, .module => return error.InvalidValue,
             .list, .dict => {
                 const count: usize = if (item == .list) @intCast(item.list.length()) else std.math.mul(usize, @intCast(item.dict.length()), 2) catch return error.Overflow;
@@ -154,6 +158,13 @@ pub const Message = opaque {
 /// Borrowed proof of a complete bounded validation, valid while Message owns
 /// the immutable root. Consumers retain the root before that owner retires.
 pub const Validated = opaque {
+    /// Bounded attachment borrows, pinned by the same immutable root. Repeated
+    /// occurrences remain visible so transport accounting cannot deduplicate
+    /// its charges even when ownership publication deduplicates identities.
+    pub fn attachments(self: *const Validated) []const ?*heap.PortHandle {
+        const state: *const State = @ptrCast(@alignCast(self));
+        return state.attachments[0..state.footprint.capabilities];
+    }
     pub fn footprint(self: *const Validated) Footprint {
         const state: *const State = @ptrCast(@alignCast(self));
         return state.footprint;

@@ -102,7 +102,8 @@ pub const PortReply = extern struct {
 pub const PortFn = *const fn (*anyopaque, *const PortRequest, *PortReply) callconv(.c) HostStatus;
 /// Controller streams block only their private host controller. Zero bytes
 /// denotes request EOF or cancellation; failure is reported separately.
-pub const MessageBuildAction = enum(u32) { scalar, copy_input, copy_received, list, dictionary, finish, advance, send, result, clear, reply_endpoint, _ };
+pub const MessageBuildAction = enum(u32) { scalar, copy_input, copy_received, list, dictionary, finish, advance, send, result, clear, reply_endpoint, child, prepare_child, _ };
+pub const ChildDependency = enum(u32) { independent, dependent, _ };
 pub const MessageBuildRequest = extern struct {
     size: u32 = @sizeOf(MessageBuildRequest),
     action: MessageBuildAction,

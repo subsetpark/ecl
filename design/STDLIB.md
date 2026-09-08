@@ -2385,6 +2385,16 @@ An exchange returned by a native word survives that word's invocation. Retaining
 or sending its value shares use; `@give` transfers its scope ownership. Exiting
 the owning scope aborts outstanding work and joins cancellation cleanup.
 
+New native child resources carried by a result or message remain provisionally
+owned until `port.result` or `port.receive` succeeds. A claim publishes all
+attached children into the receiving scope together; failed publication retains
+the source and its owners. Discarding an unclaimed result or queued message
+closes its provisional children, and exchange cleanup joins their retirement.
+Already published capabilities share use without moving scope ownership.
+Children declare whether they depend on their issuing parent. Parent closure
+closes and joins dependent children even after `@give`; independent children
+remain usable in their receiving scope. Closed children remain opaque identities.
+
 | Word | Effect | Contract |
 |---|---|---|
 | `port.open` | `( factory config -- resource )` | Initialize a resource and publish it into the calling scope. Failure joins cleanup through that scope. |

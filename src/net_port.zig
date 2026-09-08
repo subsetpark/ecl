@@ -576,8 +576,8 @@ pub const ListenerCell = struct {
         self.releaseRef();
     }
 
-    pub fn cancelExternalMember(self: *ListenerCell) void {
-        self.close();
+    pub fn cancelExternalMember(self: *ListenerCell, scope: *external.ScopeIdentity) void {
+        self.closeFromScope(scope);
     }
 
     pub fn retainReadiness(self: *ListenerCell) void {
@@ -619,7 +619,15 @@ pub const ListenerCell = struct {
     /// Request close without waiting on a worker. Terminal readiness follows
     /// the acceptor join and socket closure, so a completed close permits rebind.
     pub fn close(self: *ListenerCell) void {
+        self.closeFromScope(null);
+    }
+
+    fn closeFromScope(self: *ListenerCell, scope: ?*external.ScopeIdentity) void {
         std.Io.Threaded.mutexLock(&self.mutex);
+        if (scope) |identity| if (!self.ownership.authorizesCancellation(identity)) {
+            std.Io.Threaded.mutexUnlock(&self.mutex);
+            return;
+        };
         switch (self.state) {
             .dormant => |bound| {
                 self.retainRef();
@@ -1146,8 +1154,8 @@ pub const ConnectionCell = struct {
     }
 
     /// Scope closure: discard queued output and shut the socket down now.
-    pub fn cancelExternalMember(self: *ConnectionCell) void {
-        self.abort();
+    pub fn cancelExternalMember(self: *ConnectionCell, scope: *external.ScopeIdentity) void {
+        self.requestStop(.abort, scope);
     }
 
     pub fn retainReadiness(self: *ConnectionCell) void {
@@ -1248,7 +1256,7 @@ pub const ConnectionCell = struct {
     /// bytes, then shut the socket down. Idempotent. Queued input is dropped
     /// because no read can observe it after this transition.
     pub fn close(self: *ConnectionCell) void {
-        self.requestStop(.close);
+        self.requestStop(.close, null);
     }
 
     /// Attach this connection to `to_erased` while leaving its current
@@ -1274,11 +1282,15 @@ pub const ConnectionCell = struct {
     }
 
     fn abort(self: *ConnectionCell) void {
-        self.requestStop(.abort);
+        self.requestStop(.abort, null);
     }
 
-    fn requestStop(self: *ConnectionCell, reason: StopReason) void {
+    fn requestStop(self: *ConnectionCell, reason: StopReason, scope: ?*external.ScopeIdentity) void {
         std.Io.Threaded.mutexLock(&self.mutex);
+        if (scope) |identity| if (!self.ownership.authorizesCancellation(identity)) {
+            std.Io.Threaded.mutexUnlock(&self.mutex);
+            return;
+        };
         switch (self.lifecycle) {
             // No controller exists yet: the publisher, which is about to take
             // this lock, observes `stopping` and retires the cell itself.

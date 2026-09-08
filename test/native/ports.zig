@@ -96,13 +96,14 @@ fn DuplexSpec(comptime acknowledge: bool) type {
             const config = controller.input(&.{}) orelse return controller.fail(.domain, "missing configuration");
             if (config.int()) |number| {
                 if (number == 255) return controller.failOutOfMemory();
+                if (number == 250) awaitGate(&state.lanes[0].cancelled);
                 if (number < 0 or number > 255) return controller.fail(.domain, "invalid counter configuration");
                 for (&state.lanes) |*current| current.total = @intCast(number);
             } else if (config.length() != 0) controller.fail(.domain, "expected an initial counter or empty configuration");
         }
         pub fn run(state: *State, code: u32, controller: *ecl.Controller) void {
             const current = &state.lanes[@intFromEnum(lane(code))];
-            if (code >= 18 and code <= 35) {
+            if (code >= 18 and code <= 40) {
                 defer if (acknowledge and controller.cancelled()) {
                     current.cancelled.store(false, .release);
                     _ = controller.acknowledgeCancellation();
@@ -139,6 +140,21 @@ fn DuplexSpec(comptime acknowledge: bool) type {
                     return;
                 }
                 const builder = controller.builder();
+                if (code == 40) {
+                    _ = builder.int(0) and builder.child(Duplex, .independent) and
+                        builder.int(1) and builder.child(Duplex, .independent) and builder.list(2) and builder.result();
+                    return;
+                }
+                if (code >= 36 and code <= 39) {
+                    if (!builder.input(&.{}) or !builder.child(Duplex, if (code == 37) .dependent else .independent)) return;
+                    if (code == 38) {
+                        _ = builder.send(4);
+                    } else if (code == 39) {
+                        if (!builder.clear()) return;
+                        _ = builder.int(42) and builder.result();
+                    } else _ = builder.result();
+                    return;
+                }
                 if (code == 35) {
                     if (!controller.receiveMessage(3) or !builder.received(&.{})) return;
                     if (!controller.discardMessage() or controller.discardMessage())
@@ -635,6 +651,11 @@ pub const Extension = extension: {
             ecl.operation("watch", "Emit watcher events and a deterministic disconnect.", Duplex, 32, .receive, 24),
             ecl.operation("watch-config", "Configure a watcher on an independent controller lane.", Duplex, 33, .send, 0),
             ecl.operation("transform-message", "Release consumed input while retaining a constructed response.", Duplex, 35, .receive, 24),
+            ecl.operation("child", "Return an independent child resource.", Duplex, 36, .receive, 0),
+            ecl.operation("dependent-child", "Return a dependent child resource.", Duplex, 37, .receive, 0),
+            ecl.operation("child-event", "Send an independent child resource.", Duplex, 38, .receive, 16),
+            ecl.operation("discard-child", "Discard a provisional child before returning a scalar result.", Duplex, 39, .receive, 0),
+            ecl.operation("child-pair", "Return two children in one atomic result publication.", Duplex, 40, .receive, 0),
             ecl.operation("events", "Produce unsolicited structured events under pressure.", Duplex, 18, .receive, 16),
             ecl.operation("build-result", "Construct a nested structured result with a capability.", Duplex, 19, .receive, 0),
             ecl.operation("duplicate-result", "Reject duplicate structured keys.", Duplex, 20, .receive, 0),

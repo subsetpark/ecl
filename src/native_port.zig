@@ -171,7 +171,7 @@ pub const Access = opaque {
     pub fn createConfigured(self: *Access, instance: *native.ModuleInstance, kind: u32, scope: *scheduler.TaskScope, config: ?*const port_message.Validated) CreateError!Value {
         const owner = self.state();
         if (instance.validated().port(kind).?.lane_count > owner.limits.max_operations) return error.InsufficientLanes;
-        const cell = try Resource.create(owner, .{ instance, kind, config }, Cell.initializeAllocation);
+        const cell = try Resource.create(owner, .{ instance, kind, config, scope.scheduler }, Cell.initializeAllocation);
         lock(&owner.mutex);
         const identity = owner.identity;
         owner.identity +%= 1;
@@ -197,7 +197,8 @@ const ControllerGroup = controllers.Group(Cell, void, .{
     .retain = Cell.retainReadiness,
     .retireLocked = Cell.retireExecutionLocked,
     .ownership = Cell.transferOwnership,
-    .release = Cell.releasePort,
+    .release = Cell.releaseReadiness,
+    .retireAfterUnlock = Cell.retireDependency,
 });
 
 const Operations = controllers.Lane(Operation, .operation, .{
@@ -215,6 +216,7 @@ pub const Cell = struct {
     pub const Admission = union(enum) { pending, closed, invalid_operation, operation: Value };
     allocator: std.mem.Allocator,
     owner: *OwnerState,
+    scheduler: *const scheduler.WorkerScheduler,
     instance: *native.ModuleInstance,
     kind: u32,
     definition: abi.PortDefinition,
@@ -226,6 +228,9 @@ pub const Cell = struct {
     changed: std.Io.Condition = .init,
     waits: external.WaitList(Cell) = .{},
     ownership: external.Ownership = .provisional,
+    publication: union(enum) { published, provisional: *scheduler.ExternalGroup } = .published,
+    dependency: ?external.ScopeMembership = null,
+    children: ?*scheduler.ExternalGroup = null,
     phase: enum { reserved, initializing, open, closing, cleaned, joined } = .reserved,
     initialization_failure: ?Failure = null,
     shutdown_state: union(enum) { idle, requested, running, completed: ?Failure, aborted } = .idle,
@@ -234,7 +239,7 @@ pub const Cell = struct {
     resource_pipes: [64]?Protocol.Transport = .{null} ** 64,
     lanes: [abi.max_port_lanes]Operations,
 
-    fn initializeAllocation(cell: *Cell, owner: *OwnerState, instance: *native.ModuleInstance, kind: u32, config: ?*const port_message.Validated) error{OutOfMemory}!void {
+    fn initializeAllocation(cell: *Cell, owner: *OwnerState, instance: *native.ModuleInstance, kind: u32, config: ?*const port_message.Validated, worker: *const scheduler.WorkerScheduler) error{OutOfMemory}!void {
         const allocator = owner.host.allocator();
         const definition = instance.validated().port(kind).?;
         const state = try allocator.alignedAlloc(u8, .@"64", definition.state_size);
@@ -243,7 +248,7 @@ pub const Cell = struct {
         errdefer group.deinit();
         const message_budget = try message_transport.Budget.create(owner.host, owner.limits.message_queue_bytes);
         errdefer message_budget.release();
-        cell.* = .{ .allocator = allocator, .owner = owner, .instance = instance, .kind = kind, .definition = definition, .backend = state, .controllers = group, .message_budget = message_budget, .lanes = .{Operations.init(&cell.mutex)} ** abi.max_port_lanes };
+        cell.* = .{ .allocator = allocator, .owner = owner, .scheduler = worker, .instance = instance, .kind = kind, .definition = definition, .backend = state, .controllers = group, .message_budget = message_budget, .lanes = .{Operations.init(&cell.mutex)} ** abi.max_port_lanes };
         errdefer for (cell.resource_pipes) |pipe| if (pipe) |transport| transport.release();
         for (&cell.resource_pipes, 0..) |*slot, index| {
             const endpoint = instance.validated().endpoint(kind, @intCast(index), .resource) orelse continue;
@@ -263,19 +268,30 @@ pub const Cell = struct {
         _ = self.refs.fetchAdd(1, .monotonic);
     }
     pub fn releaseReadiness(self: *Cell) void {
-        self.releasePort();
+        self.release();
     }
     pub fn retainExternalMember(self: *Cell) void {
         self.retainReadiness();
     }
     pub fn releaseExternalMember(self: *Cell) void {
-        self.releasePort();
+        self.release();
     }
-    pub fn cancelExternalMember(self: *Cell) void {
-        self.close();
+    pub fn cancelExternalMember(self: *Cell, scope: *external.ScopeIdentity) void {
+        lock(&self.mutex);
+        defer unlock(&self.mutex);
+        const dependent = if (self.dependency) |token| token.authorizesCancellation(scope) else false;
+        if (self.ownership.authorizesCancellation(scope) or dependent) self.closeLocked();
     }
     pub fn releasePort(self: *Cell) void {
+        lock(&self.mutex);
+        if (self.publication == .provisional) self.closeLocked();
+        unlock(&self.mutex);
+        self.release();
+    }
+    fn release(self: *Cell) void {
         if (self.refs.fetchSub(1, .acq_rel) != 1) return;
+        if (self.publication == .provisional) self.publication.provisional.release();
+        if (self.children) |children| children.release();
         if (self.configuration) |config| heap.hostDomain(self.owner.host).releaseValue(config);
         for (self.resource_pipes) |pipe| if (pipe) |transport| transport.release();
         self.message_budget.release();
@@ -354,6 +370,7 @@ pub const Cell = struct {
         if (self.closed.swap(true, .acq_rel)) return;
         const notify_backend = self.phase == .initializing or self.phase == .open;
         self.phase = .closing;
+        if (self.children) |children| children.close();
         // Total admission, across every lane, is capped at 256.
         for (self.lanes[0..self.definition.lane_count]) |*lane| {
             var ticket = lane.front();
@@ -383,6 +400,10 @@ pub const Cell = struct {
         lock(&self.mutex);
         unlock(&self.mutex);
         for (self.resource_pipes) |pipe| if (pipe) |transport| transport.abort();
+        if (self.children) |children| {
+            children.close();
+            children.join(execution);
+        }
         self.definition.cleanup.?(self.backend.ptr);
         lock(&self.mutex);
         self.phase = .cleaned;
@@ -398,6 +419,7 @@ pub const Cell = struct {
         lock(&self.mutex);
         self.phase = if (self.closed.load(.acquire)) .closing else .open;
         self.waits.notifyLocked(self);
+        self.changed.broadcast(io());
         unlock(&self.mutex);
     }
     fn prepareStartup(cell: *Cell, scope: *scheduler.TaskScope) error{ OutOfMemory, ScopeClosing }!void {
@@ -410,6 +432,62 @@ pub const Cell = struct {
         Resource.retire(cell);
         cell.phase = .joined;
         cell.waits.notifyLocked(cell);
+        cell.changed.broadcast(io());
+    }
+    fn retireDependency(self: *Cell) void {
+        lock(&self.mutex);
+        var token = self.dependency;
+        self.dependency = null;
+        unlock(&self.mutex);
+        if (token) |*membership| membership.detach();
+    }
+    pub fn childrenClosed(_: *Cell) void {}
+    fn childGroup(self: *Cell) error{ OutOfMemory, Closed }!*scheduler.ExternalGroup {
+        lock(&self.mutex);
+        const existing = self.children;
+        unlock(&self.mutex);
+        if (existing) |group| return group;
+        const candidate = try scheduler.ExternalGroup.create(self.scheduler, Cell, self);
+        lock(&self.mutex);
+        const closed = self.closed.load(.acquire);
+        if (!closed and self.children == null) {
+            self.children = candidate;
+            unlock(&self.mutex);
+            return candidate;
+        }
+        const selected = self.children;
+        unlock(&self.mutex);
+        candidate.release();
+        return selected orelse error.Closed;
+    }
+    fn prepareChildStartup(self: *Cell, provisional: *scheduler.ExternalGroup, dependent: ?*scheduler.ExternalGroup) error{ OutOfMemory, ScopeClosing }!void {
+        const Publication = struct {
+            cell: *Cell,
+            dependency: bool,
+            pub fn lock(item: *@This()) void {
+                std.Io.Threaded.mutexLock(&item.cell.mutex);
+            }
+            pub fn unlock(item: *@This()) void {
+                std.Io.Threaded.mutexUnlock(&item.cell.mutex);
+            }
+            pub fn validate(item: *@This()) bool {
+                return !item.cell.closed.load(.acquire) and
+                    (if (item.dependency) item.cell.dependency == null else item.cell.ownership == .provisional);
+            }
+            pub fn publish(item: *@This(), tokens: [16]?external.ScopeMembership) void {
+                if (item.dependency) item.cell.dependency = tokens[0].? else item.cell.ownership = .{ .owned = tokens[0].? };
+            }
+        };
+        var publication: Publication = .{ .cell = self, .dependency = false };
+        var incoming: [16]?external.ScopeMember = .{null} ** 16;
+        incoming[0] = external.scopeMember(Cell, self);
+        if (!try provisional.publish(incoming, &publication)) return error.ScopeClosing;
+        if (dependent) |group| {
+            publication.dependency = true;
+            incoming = .{null} ** 16;
+            incoming[0] = external.scopeMember(Cell, self);
+            if (!try group.publish(incoming, &publication)) return error.ScopeClosing;
+        }
     }
     fn runShutdown(self: *Cell) void {
         lock(&self.mutex);
@@ -596,6 +674,157 @@ const Protocol = union(enum) {
     }
 };
 
+/// A fixed ownership snapshot for an atomic message/result claim. Snapshot
+/// pins and replaced memberships retire only after all publication locks are
+/// released. A changed snapshot is rejected; it never grants stale authority.
+const ResourcePublicationState = struct {
+    const Entry = struct {
+        cell: *Cell,
+        group: *scheduler.ExternalGroup,
+        membership: bool,
+        detached: external.Ownership.Detached = .{},
+    };
+    host: *const heap.HostCleanup,
+    entries: [16]?Entry = .{null} ** 16,
+    groups: [16]?*scheduler.ExternalGroup = .{null} ** 16,
+    count: usize = 0,
+    group_count: usize = 0,
+    published: bool = false,
+
+    fn capability(self: *ResourcePublicationState) *ResourcePublication {
+        return @ptrCast(self);
+    }
+
+    fn init(host: *const heap.HostCleanup, attachments: []const ?*heap.PortHandle) error{Overflow}!ResourcePublicationState {
+        var result: ResourcePublicationState = .{ .host = host };
+        errdefer result.releasePins();
+        for (attachments) |attachment| {
+            const cell = heap.portPayload(Cell, .resource, attachment orelse continue) orelse continue;
+            var duplicate = false;
+            for (result.entries[0..result.count]) |entry| if (entry.?.cell == cell) {
+                duplicate = true;
+                break;
+            };
+            if (duplicate) continue;
+            std.Io.Threaded.mutexLock(&cell.mutex);
+            if (cell.publication == .published) {
+                std.Io.Threaded.mutexUnlock(&cell.mutex);
+                continue;
+            }
+            if (result.count == result.entries.len) {
+                std.Io.Threaded.mutexUnlock(&cell.mutex);
+                return error.Overflow;
+            }
+            const group = cell.publication.provisional;
+            const membership = cell.ownership == .owned;
+            cell.retainReadiness();
+            group.retain();
+            std.Io.Threaded.mutexUnlock(&cell.mutex);
+            var index = result.count;
+            while (index != 0 and @intFromPtr(result.entries[index - 1].?.cell) > @intFromPtr(cell)) : (index -= 1)
+                result.entries[index] = result.entries[index - 1];
+            result.entries[index] = .{ .cell = cell, .group = group, .membership = membership };
+            result.count += 1;
+            var group_index: usize = 0;
+            while (group_index < result.group_count and @intFromPtr(result.groups[group_index].?) < @intFromPtr(group)) : (group_index += 1) {}
+            if (group_index < result.group_count and result.groups[group_index].? == group) continue;
+            var move = result.group_count;
+            while (move > group_index) : (move -= 1) result.groups[move] = result.groups[move - 1];
+            result.groups[group_index] = group;
+            result.group_count += 1;
+        }
+        return result;
+    }
+    pub fn members(self: *@This()) [16]?external.ScopeMember {
+        var result: [16]?external.ScopeMember = .{null} ** 16;
+        for (self.entries[0..self.count], 0..) |entry, index| {
+            if (entry.?.membership) result[index] = external.scopeMember(Cell, entry.?.cell);
+        }
+        return result;
+    }
+    pub fn lock(self: *@This()) void {
+        for (self.groups[0..self.group_count]) |group| group.?.lockPublication();
+        for (self.entries[0..self.count]) |entry| std.Io.Threaded.mutexLock(&entry.?.cell.mutex);
+    }
+    pub fn unlock(self: *@This()) void {
+        var index = self.count;
+        while (index != 0) {
+            index -= 1;
+            std.Io.Threaded.mutexUnlock(&self.entries[index].?.cell.mutex);
+        }
+        index = self.group_count;
+        while (index != 0) {
+            index -= 1;
+            self.groups[index].?.unlockPublication();
+        }
+    }
+    pub fn validate(self: *@This()) bool {
+        for (self.groups[0..self.group_count]) |group| if (!group.?.acceptsPublicationLocked()) return false;
+        for (self.entries[0..self.count]) |entry| {
+            const item = entry.?;
+            if (item.cell.publication != .provisional or item.cell.publication.provisional != item.group) return false;
+            if (item.membership) {
+                if (item.cell.ownership != .owned or !item.group.ownsMembership(item.cell.ownership.owned)) return false;
+            } else if (item.cell.ownership != .none) return false;
+        }
+        return true;
+    }
+    pub fn publish(self: *@This(), tokens: [16]?external.ScopeMembership) void {
+        for (self.entries[0..self.count], 0..) |*entry, index| {
+            const item = &entry.*.?;
+            if (item.membership) {
+                item.detached = item.cell.ownership.release();
+                item.cell.ownership = .{ .owned = tokens[index].? };
+            }
+            item.cell.publication = .published;
+        }
+        self.published = true;
+    }
+    fn releasePins(self: *@This()) void {
+        for (self.entries[0..self.count]) |*entry| {
+            const item = &entry.*.?;
+            item.detached.detachAll();
+            if (self.published) item.group.release();
+            item.group.release();
+            item.cell.releaseReadiness();
+        }
+    }
+};
+
+pub const ResourcePublication = opaque {
+    fn state(self: *@This()) *ResourcePublicationState {
+        return @ptrCast(@alignCast(self));
+    }
+    pub fn init(host: *const heap.HostCleanup, attachments: []const ?*heap.PortHandle) error{ OutOfMemory, Overflow }!?*ResourcePublication {
+        var snapshot = try ResourcePublicationState.init(host, attachments);
+        errdefer snapshot.releasePins();
+        if (snapshot.count == 0) return null;
+        const owned = try host.allocator().create(ResourcePublicationState);
+        owned.* = snapshot;
+        return owned.capability();
+    }
+    pub fn members(self: *@This()) [16]?external.ScopeMember {
+        return self.state().members();
+    }
+    pub fn lock(self: *@This()) void {
+        self.state().lock();
+    }
+    pub fn unlock(self: *@This()) void {
+        self.state().unlock();
+    }
+    pub fn validate(self: *@This()) bool {
+        return self.state().validate();
+    }
+    pub fn publish(self: *@This(), tokens: [16]?external.ScopeMembership) void {
+        self.state().publish(tokens);
+    }
+    pub fn deinit(self: *@This()) void {
+        const owned = self.state();
+        owned.releasePins();
+        owned.host.allocator().destroy(owned);
+    }
+};
+
 pub const Operation = struct {
     allocator: std.mem.Allocator,
     cell: *Cell,
@@ -611,16 +840,17 @@ pub const Operation = struct {
     // runs. The ticket remains the authority for terminal cancellation state.
     transport_cancelled: std.atomic.Value(bool) = .init(false),
     ownership: external.Ownership = .provisional,
+    children: ?*scheduler.ExternalGroup = null,
     lifetime: enum { open, closing, closed } = .open,
-    terminal_result: union(enum) { available: Value, claimed, discarded },
+    terminal_result: union(enum) { available: *message_transport.Envelope, claimed, discarded },
     endpoints: u64,
 
     fn create(cell: *Cell, code: u32, lane: u32, endpoints: u64, parameters: ?*const port_message.Validated) error{ OutOfMemory, Closed, Full }!*Operation {
         const allocator = cell.allocator;
         var protocol = try Protocol.init(cell, endpoints, parameters);
         errdefer protocol.deinit(cell);
-        const terminal_value = try list.fromValues(allocator, &.{});
-        errdefer heap.hostDomain(cell.owner.host).releaseValue(terminal_value);
+        const terminal_value = try message_transport.Envelope.empty(cell.owner.host);
+        errdefer terminal_value.release();
         const prepared = try cell.lanes[lane].prepare(allocator);
         errdefer prepared.discard();
         lock(&cell.mutex);
@@ -630,7 +860,7 @@ pub const Operation = struct {
         cell.changed.broadcast(io());
         return ticket.owner();
     }
-    fn initialize(op: *Operation, ticket: *Operations.Ticket, cell: *Cell, code: u32, lane: u32, protocol: Protocol, terminal_value: Value, endpoints: u64) void {
+    fn initialize(op: *Operation, ticket: *Operations.Ticket, cell: *Cell, code: u32, lane: u32, protocol: Protocol, terminal_value: *message_transport.Envelope, endpoints: u64) void {
         op.* = .{ .allocator = cell.allocator, .cell = cell, .code = code, .lane = lane, .ticket = ticket, .protocol = protocol, .terminal_result = .{ .available = terminal_value }, .endpoints = endpoints };
         cell.retainReadiness();
     }
@@ -680,8 +910,12 @@ pub const Operation = struct {
     pub fn releaseExternalMember(self: *Operation) void {
         self.releaseReadiness();
     }
-    pub fn cancelExternalMember(self: *Operation) void {
-        self.close();
+    pub fn cancelExternalMember(self: *Operation, scope: *external.ScopeIdentity) void {
+        lock(&self.mutex);
+        const authorized = self.ownership.authorizesCancellation(scope);
+        if (authorized and self.lifetime == .open) self.lifetime = .closing;
+        unlock(&self.mutex);
+        if (authorized) self.close();
     }
     /// Abort transport and retain scope membership until callback return. The
     /// lane's post-return hook settles membership outside both lifetime locks.
@@ -695,15 +929,15 @@ pub const Operation = struct {
     fn settleScope(self: *Operation) void {
         lock(&self.mutex);
         var detached: external.Ownership.Detached = .{};
-        var discarded: ?Value = null;
+        var discarded: ?*message_transport.Envelope = null;
         const terminal = switch (self.ticket.status()) {
             .done, .cancelled => true,
             .preparing, .queued, .active, .cancelling, .reusable => false,
         };
         const aborting = terminal and (self.lifetime != .open or self.cell.closed.load(.acquire));
+        const children = if (aborting) self.children else null;
         if (aborting) {
-            self.lifetime = .closed;
-            detached = self.ownership.release();
+            self.lifetime = .closing;
             if (self.terminal_result == .available) {
                 discarded = self.terminal_result.available;
                 self.terminal_result = .discarded;
@@ -717,8 +951,67 @@ pub const Operation = struct {
                 .bytes => {},
             };
         }
-        if (discarded) |item| heap.hostDomain(self.cell.owner.host).releaseValue(item);
+        if (discarded) |item| item.release();
+        if (children) |group| group.close();
+        if (aborting and (children == null or children.?.closed())) {
+            lock(&self.mutex);
+            self.lifetime = .closed;
+            detached = self.ownership.release();
+            self.notifyLocked();
+            unlock(&self.mutex);
+        }
         detached.detachAll();
+    }
+    pub fn childrenClosed(self: *Operation) void {
+        self.settleScope();
+    }
+    fn childGroup(self: *Operation) error{ OutOfMemory, Closed }!*scheduler.ExternalGroup {
+        lock(&self.mutex);
+        const existing = self.children;
+        unlock(&self.mutex);
+        if (existing) |group| return group;
+        const candidate = try scheduler.ExternalGroup.create(self.cell.scheduler, Operation, self);
+        lock(&self.mutex);
+        const unavailable = self.lifetime != .open or self.ticket.isCancelled();
+        if (!unavailable and self.children == null) {
+            self.children = candidate;
+            unlock(&self.mutex);
+            return candidate;
+        }
+        const selected = self.children;
+        unlock(&self.mutex);
+        candidate.release();
+        return selected orelse error.Closed;
+    }
+    fn stageChild(self: *Operation, kind: u32, configuration: *const port_message.Validated, dependency: abi.ChildDependency) CreateError!Value {
+        const parent = self.cell;
+        const owner = parent.owner;
+        if (parent.instance.validated().port(kind).?.lane_count > owner.limits.max_operations) return error.InsufficientLanes;
+        const provisional = try self.childGroup();
+        const dependent = if (dependency == .dependent) try parent.childGroup() else null;
+        const cell = try Resource.create(owner, .{ parent.instance, kind, configuration, parent.scheduler }, Cell.initializeAllocation);
+        provisional.retain();
+        cell.publication = .{ .provisional = provisional };
+        std.Io.Threaded.mutexLock(&owner.mutex);
+        const identity = owner.identity;
+        owner.identity +%= 1;
+        std.Io.Threaded.mutexUnlock(&owner.mutex);
+        const item = heap.createOwnedPort(Cell, .resource, cell.allocator, identity, cell) catch |err| {
+            cell.releasePort();
+            return err;
+        };
+        errdefer heap.hostDomain(owner.host).releaseValue(item);
+        cell.controllers.start(.{ provisional, dependent }, Cell.prepareChildStartup, Cell.run, Cell.abortStartup) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.ScopeClosing => error.ScopeClosing,
+            error.Io, error.Closed => error.Io,
+        };
+        std.Io.Threaded.mutexLock(&cell.mutex);
+        defer std.Io.Threaded.mutexUnlock(&cell.mutex);
+        while (cell.phase == .reserved or cell.phase == .initializing) cell.changed.waitUncancelable(io(), &cell.mutex);
+        if (cell.initialization_failure) |failure| if (failure == .out_of_memory) return error.OutOfMemory;
+        if (cell.phase != .open or cell.initialization_failure != null) return error.Io;
+        return item;
     }
     const Transfer = transfers.ScopeTransfer(Operation, transferOwnership, transferLive);
     fn transferOwnership(self: *Operation) *external.Ownership {
@@ -742,12 +1035,13 @@ pub const Operation = struct {
         return self.lifetime == .closed;
     }
     fn deinit(self: *Operation) void {
+        if (self.children) |children| children.release();
         self.protocol.deinit(self.cell);
         switch (self.terminal_result) {
-            .available => |item| heap.hostDomain(self.cell.owner.host).releaseValue(item),
+            .available => |item| item.release(),
             .claimed, .discarded => {},
         }
-        self.cell.releasePort();
+        self.cell.releaseReadiness();
     }
     pub fn registerReadiness(self: *Operation, key: u64, target: external.WakeTarget) external.RegisterError!external.RegisterResult {
         return external.WaitList(Operation).register(self, key, target);
@@ -769,6 +1063,7 @@ pub const Operation = struct {
     fn notifyLocked(self: *Operation) void {
         if (self.ticket.isCancelled()) {
             self.transport_cancelled.store(true, .release);
+            if (self.children) |children| children.close();
             for (self.cell.resource_pipes) |pipe| if (pipe) |transport| transport.interrupt();
         }
         if (self.protocol == .registered and (self.ticket.isCancelled() or self.ticket.status() == .done)) {
@@ -819,18 +1114,30 @@ pub const Operation = struct {
     /// The caller reserves its output capacity before entering this consuming
     /// transition. Success moves the result; every other outcome retains it.
     const Claim = union(enum) { pending, claimed, value: Value, cancelled, failed: Failure };
-    pub fn claimResult(self: *Operation, scope: *scheduler.TaskScope) error{ OutOfMemory, ScopeClosing }!Claim {
-        var publication: ResultPublication = .{ .operation = self };
-        _ = try scope.scheduler.publishExternalBatch(scope, .{null} ** 16, &publication);
+    pub fn claimResult(self: *Operation, scope: *scheduler.TaskScope) error{ OutOfMemory, ScopeClosing, Overflow }!Claim {
+        lock(&self.mutex);
+        const view = if (self.terminal_result == .available) self.terminal_result.available.borrow() else null;
+        unlock(&self.mutex);
+        defer if (view) |item| item.release();
+        const handoff = try ResourcePublication.init(self.cell.owner.host, if (view) |item| item.attachments() else &.{});
+        defer if (handoff) |publication| publication.deinit();
+        var publication: ResultPublication = .{ .operation = self, .view = view, .handoff = handoff };
+        _ = try scope.scheduler.publishExternalBatch(scope, if (handoff) |children| children.members() else .{null} ** 16, &publication);
+        if (publication.consumed) |item| item.release();
         return publication.result;
     }
     const ResultPublication = struct {
         operation: *Operation,
+        view: ?*message_transport.View,
+        handoff: ?*ResourcePublication,
+        consumed: ?*message_transport.Envelope = null,
         result: Claim = .pending,
         pub fn lock(self: *@This()) void {
             std.Io.Threaded.mutexLock(&self.operation.mutex);
+            if (self.handoff) |handoff| handoff.lock();
         }
         pub fn unlock(self: *@This()) void {
+            if (self.handoff) |handoff| handoff.unlock();
             std.Io.Threaded.mutexUnlock(&self.operation.mutex);
         }
         pub fn validate(self: *@This()) bool {
@@ -846,11 +1153,19 @@ pub const Operation = struct {
             self.result = if (op.failure) |failure| .{ .failed = failure } else switch (op.terminal_result) {
                 .claimed => .claimed,
                 .discarded => .{ .failed = Failure.init(.io, "exchange result was discarded by close") },
-                .available => |item| .{ .value = item },
+                .available => |item| available: {
+                    if (self.view == null or !self.view.?.observes(item)) break :available .pending;
+                    if (self.handoff) |handoff| if (!handoff.validate()) break :available .pending;
+                    break :available .{ .value = item.value() };
+                },
             };
             return self.result == .value;
         }
-        pub fn publish(self: *@This(), _: [16]?external.ScopeMembership) void {
+        pub fn publish(self: *@This(), tokens: [16]?external.ScopeMembership) void {
+            if (self.handoff) |handoff| handoff.publish(tokens);
+            const item = self.operation.terminal_result.available;
+            heap.retainValue(item.value());
+            self.consumed = item;
             self.operation.terminal_result = .claimed;
         }
     };
@@ -1130,6 +1445,33 @@ fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest
             defer heap.hostDomain(ctx.cell.owner.host).releaseValue(reply);
             try builder.copy(reply);
         },
+        .child => {
+            const configuration = builder.childConfiguration() orelse return error.InvalidState;
+            if (request.scalar.kind != .symbol or request.scalar.bytes_len == 0 or request.scalar.bytes_len > 64 * 1024) return error.InvalidValue;
+            const name = (request.scalar.bytes_ptr orelse return error.InvalidValue)[0..@intCast(request.scalar.bytes_len)];
+            const dependency: abi.ChildDependency = @enumFromInt(request.count);
+            switch (dependency) {
+                .independent, .dependent => {},
+                _ => return error.InvalidState,
+            }
+            var index: u32 = 0;
+            const kind = while (ctx.cell.instance.validated().port(index)) |definition| : (index += 1) {
+                if (std.mem.eql(u8, name, definition.name_ptr[0..definition.name_len])) break index;
+            } else return error.InvalidState;
+            const child = op.stageChild(kind, configuration, dependency) catch |err| {
+                recordControllerFailure(ctx, switch (err) {
+                    error.OutOfMemory => .out_of_memory,
+                    error.Limit => .init(.overflow, "native child resource limit exceeded"),
+                    error.Closed, error.ScopeClosing => .init(.io, "native child owner is closing"),
+                    error.InsufficientLanes => .init(.domain, "native child requires more controller lanes"),
+                    error.Io => .init(.io, "native child initialization failed"),
+                });
+                return if (err == error.OutOfMemory) .out_of_memory else .invalid;
+            };
+            defer heap.hostDomain(ctx.cell.owner.host).releaseValue(child);
+            try builder.replaceChild(child);
+        },
+        .prepare_child => try builder.prepareChild(),
         .list => try builder.list(request.count),
         .dictionary => try builder.dictionary(request.count),
         .finish => try builder.finish(),
@@ -1149,13 +1491,12 @@ fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest
         },
         .result => {
             const validated = builder.validated() orelse return error.InvalidState;
-            const item = validated.value();
-            heap.retainValue(item);
+            const item = try message_transport.Envelope.create(ctx.cell.owner.host, validated);
             lock(&op.mutex);
             const previous = op.terminal_result.available;
             op.terminal_result = .{ .available = item };
             unlock(&op.mutex);
-            heap.hostDomain(ctx.cell.owner.host).releaseValue(previous);
+            previous.release();
             try builder.consume();
             return .ok;
         },
@@ -1306,15 +1647,13 @@ fn controllerResultMessage(raw: *anyopaque) callconv(.c) bool {
     const ctx = context(raw);
     const op = ctx.operation() orelse return false;
     const item = ctx.received orelse return false;
-    const value = item.value();
-    heap.retainValue(value);
+    item.releaseQueueCapacity();
     lock(&op.mutex);
     const previous = op.terminal_result.available;
-    op.terminal_result = .{ .available = value };
+    op.terminal_result = .{ .available = item };
     unlock(&op.mutex);
     ctx.received = null;
-    heap.hostDomain(ctx.cell.owner.host).releaseValue(previous);
-    item.release();
+    previous.release();
     return true;
 }
 fn controllerDiscardMessage(raw: *anyopaque) callconv(.c) bool {

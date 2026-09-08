@@ -1497,6 +1497,32 @@ transition, so allocation failure cannot consume a result without publishing it.
 The driver's completion carries that reservation with its owned output; only
 the evaluator commits it after driver retirement, without further allocation.
 
+An external-child scope owns provisional native resources and separately
+represents permanent parent dependencies. It admits only external members and
+queues the scheduler's bounded cancellation cursor; native controllers cannot
+use it to re-enter ECL. Closing pins its parent until every child's final
+retirement has propagated. A resource's controller joins its dependency scope
+before destroying backend state, while an exchange retains its task-scope
+membership until its provisional-child scope is closed.
+Closed group metadata keeps its allocation authority independently of the
+scheduler facade: a final controller-retirement pin may outlive task-scope
+quiescence, but cannot require scheduler access for destruction.
+
+Validated roots carry a bounded attachment index. Results and queued messages
+retain that index with their immutable root. Claims snapshot unpublished child
+identities, prepare destination memberships outside locks, and revalidate under
+the receiving scope, source, provisional scopes, and child locks. Scope and
+child locks have stable identity ordering. A successful transition replaces
+all provisional memberships together; stale snapshots grant no destination
+authority. Replaced memberships and pins retire after unlocking. Published
+capabilities are ordinary shared uses and acquire no new ownership on receipt.
+Cancellation carries the issuing scope identity and revalidates its authority
+under the resource's lifetime lock. A cursor retaining an old membership cannot
+cancel a resource after ownership has moved, even before deferred unlinking.
+Only owner-issued creation installs dependency membership; scope transfer cannot
+reparent a resource. Heap identity release closes unpublished resources, while
+controller, scope, and readiness pins release metadata without changing use.
+
 Graceful shutdown closes operation admission and runs one registered callback
 on an independently reserved control lane. Its terminal outcome is stable.
 Abortive close interrupts that callback through the same bounded cancellation

@@ -17,6 +17,7 @@ const EnvelopeState = struct {
     host: *const heap.HostCleanup,
     value: Value,
     footprint: message.Footprint,
+    attachments: [31]?*heap.PortHandle = .{null} ** 31,
     reservation: ?*Budget = null,
     refs: std.atomic.Value(usize) = .init(1),
     fn capability(self: *EnvelopeState) *Envelope {
@@ -40,24 +41,37 @@ pub const Envelope = opaque {
     pub fn create(host: *const heap.HostCleanup, input: *const message.Validated) error{OutOfMemory}!*Envelope {
         const owned = try host.allocator().create(EnvelopeState);
         owned.* = .{ .host = host, .value = input.value(), .footprint = input.footprint() };
+        @memcpy(owned.attachments[0..input.attachments().len], input.attachments());
         heap.retainValue(owned.value);
         return owned.capability();
     }
     pub fn value(self: *Envelope) Value {
         return self.state().value;
     }
-    fn borrow(self: *Envelope) *View {
+    pub fn empty(host: *const heap.HostCleanup) error{OutOfMemory}!*Envelope {
+        const owned = try host.allocator().create(EnvelopeState);
+        errdefer host.allocator().destroy(owned);
+        const input = try @import("list.zig").fromValues(host.allocator(), &.{});
+        owned.* = .{ .host = host, .value = input, .footprint = .{ .nodes = 1 } };
+        return owned.capability();
+    }
+    pub fn borrow(self: *Envelope) *View {
         _ = self.state().refs.fetchAdd(1, .monotonic);
         return @ptrCast(self);
     }
     pub fn release(self: *Envelope) void {
+        self.releaseQueueCapacity();
+        self.state().releaseView();
+    }
+    /// Moving a delivery to a terminal result ends its queue reservation.
+    /// The caller still uniquely owns the envelope and all of its values.
+    pub fn releaseQueueCapacity(self: *Envelope) void {
         const owned = self.state();
         if (owned.reservation) |budget| {
             owned.reservation = null;
             budget.returnBytes(owned.footprint.bytes);
             budget.release();
         }
-        owned.releaseView();
     }
 };
 
@@ -68,6 +82,12 @@ pub const View = opaque {
     }
     pub fn value(self: *View) Value {
         return self.state().value;
+    }
+    pub fn attachments(self: *View) []const ?*heap.PortHandle {
+        return self.state().attachments[0..self.state().footprint.capabilities];
+    }
+    pub fn observes(self: *View, envelope: *Envelope) bool {
+        return self.state() == envelope.state();
     }
     pub fn release(self: *View) void {
         self.state().releaseView();
@@ -269,25 +289,32 @@ pub const Queue = opaque {
     }
     /// Consumes queue ownership on success. The caller keeps its peek reference
     /// on either outcome. Event construction and stack reservation precede this.
-    pub fn claim(self: *Queue, item: *View, scope: *scheduler.TaskScope) error{ OutOfMemory, ScopeClosing }!bool {
-        var publication: Publication = .{ .queue = self.state(), .item = item };
-        const accepted = try scope.scheduler.publishExternalBatch(scope, .{null} ** 16, &publication);
+    pub fn claim(self: *Queue, item: *View, scope: *scheduler.TaskScope) error{ OutOfMemory, ScopeClosing, Overflow }!bool {
+        const handoff = try @import("native_port.zig").ResourcePublication.init(self.state().budget.state().host, item.attachments());
+        defer if (handoff) |publication| publication.deinit();
+        var publication: Publication = .{ .queue = self.state(), .item = item, .handoff = handoff };
+        const accepted = try scope.scheduler.publishExternalBatch(scope, if (handoff) |children| children.members() else .{null} ** 16, &publication);
         if (accepted) item.state().capability().release();
         return accepted;
     }
     const Publication = struct {
         queue: *QueueState,
         item: *View,
+        handoff: ?*@import("native_port.zig").ResourcePublication,
         pub fn lock(self: *@This()) void {
             std.Io.Threaded.mutexLock(&self.queue.mutex);
+            if (self.handoff) |handoff| handoff.lock();
         }
         pub fn unlock(self: *@This()) void {
+            if (self.handoff) |handoff| handoff.unlock();
             std.Io.Threaded.mutexUnlock(&self.queue.mutex);
         }
         pub fn validate(self: *@This()) bool {
-            return self.queue.count != 0 and self.queue.messages[self.queue.head] == self.item.state().capability();
+            return self.queue.count != 0 and self.queue.messages[self.queue.head] == self.item.state().capability() and
+                (if (self.handoff) |handoff| handoff.validate() else true);
         }
-        pub fn publish(self: *@This(), _: [16]?external.ScopeMembership) void {
+        pub fn publish(self: *@This(), tokens: [16]?external.ScopeMembership) void {
+            if (self.handoff) |handoff| handoff.publish(tokens);
             const owned = self.queue;
             owned.messages[owned.head] = null;
             owned.head = (owned.head + 1) % max_messages;
