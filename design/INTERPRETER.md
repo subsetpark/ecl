@@ -1494,7 +1494,13 @@ teardown can await cleanup without blocking a worker. Closed heap identities ret
 their module pin independently of backend cleanup. Session shutdown closes creation,
 settles resources and calls, and releases native images only after those lifetimes.
 
-External resource publication uses the shared scope-attachment boundary. Its
+External resource publication uses the shared scope-attachment boundary.
+Membership storage for a batch of up to sixteen resources is prepared before
+publication locks are acquired. Under the receiving scope lock, one owner-issued
+guard validates the source and commits every membership with the source
+ownership transition. Cancellation can observe the whole batch or none of it.
+Rejected publication releases prepared pins outside both scope and source
+locks and leaves the source ownership unchanged. Its
 ownership state distinguishes provisional attachment from released ownership;
 a release racing initial attachment consumes the eventual membership instead of
 resurrecting a closed resource. Attachment and detachment occur outside the

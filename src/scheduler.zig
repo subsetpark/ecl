@@ -1589,29 +1589,75 @@ pub const WorkerScheduler = enum(usize) {
         scope: *TaskScope,
         incoming: external.ScopeMember,
     ) ExternalAttachError!external.ScopeMembership {
-        var member = incoming;
-        errdefer member.deinit();
-        const node = try self.allocator().create(ExternalNode);
-        errdefer self.allocator().destroy(node);
-        node.* = .{
-            .allocator = self.allocator(),
-            .scope = scope,
-            .member = member.take(),
+        const Publication = struct {
+            token: ?external.ScopeMembership = null,
+            fn lock(_: *@This()) void {}
+            fn unlock(_: *@This()) void {}
+            fn validate(_: *@This()) bool {
+                return true;
+            }
+            fn publish(self_: *@This(), tokens: [16]?external.ScopeMembership) void {
+                self_.token = tokens[0];
+            }
         };
-        errdefer node.member.deinit();
+        var publication: Publication = .{};
+        var members: [16]?external.ScopeMember = .{null} ** 16;
+        members[0] = incoming;
+        const accepted = try self.publishExternalBatch(scope, members, &publication);
+        if (!accepted) unreachable; // This publisher has no rejecting state.
+        return publication.token.?;
+    }
 
+    /// Consume all incoming member pins on either outcome. Allocate the fixed
+    /// batch before acquiring publication locks. Scope cancellation observes
+    /// either the complete publication or none of it. The guard locks its
+    /// owner-issued resources after the scope, validates without mutation, and
+    /// consumes every supplied membership in an infallible publish transition.
+    /// Guard methods must not allocate, release, detach, or acquire scope locks.
+    /// A rejected guard leaves its source ownership unchanged. The borrowed
+    /// scope and guard remain alive for this synchronous, bounded call.
+    pub fn publishExternalBatch(
+        self: *const WorkerScheduler,
+        scope: *TaskScope,
+        incoming: [16]?external.ScopeMember,
+        guard: anytype,
+    ) ExternalAttachError!bool {
+        var members = incoming;
+        defer for (&members) |*slot| if (slot.*) |*member| member.deinit();
+        var nodes: [16]?*ExternalNode = .{null} ** 16;
+        var published = false;
+        defer if (!published) {
+            for (nodes) |entry| if (entry) |node| {
+                node.member.deinit();
+                self.allocator().destroy(node);
+            };
+        };
+        for (&members, &nodes) |*slot, *entry| if (slot.*) |*member| {
+            const node = try self.allocator().create(ExternalNode);
+            node.* = .{ .allocator = self.allocator(), .scope = scope, .member = member.take(), .linked = false };
+            entry.* = node;
+        };
         std.Io.Threaded.mutexLock(&scope.mutex);
         defer std.Io.Threaded.mutexUnlock(&scope.mutex);
         if (scope.policy != .open) return error.ScopeClosing;
-        const decision = scopeDecision(scope.policy, .register_child);
-        std.debug.assert(decision.command == .none);
-        scope.policy = decision.next;
-        if (scope.external_last) |last| {
-            last.next = node;
-            node.previous = last;
-        } else scope.external_first = node;
-        scope.external_last = node;
-        return external.scopeMembership(ExternalNode, node);
+        guard.lock();
+        defer guard.unlock();
+        if (!guard.validate()) return false;
+        var tokens: [16]?external.ScopeMembership = .{null} ** 16;
+        for (nodes, &tokens) |entry, *token| if (entry) |node| {
+            const decision = scopeDecision(scope.policy, .register_child);
+            scope.policy = decision.next;
+            if (scope.external_last) |last| {
+                last.next = node;
+                node.previous = last;
+            } else scope.external_first = node;
+            scope.external_last = node;
+            node.linked = true;
+            token.* = external.scopeMembership(ExternalNode, node);
+        };
+        guard.publish(tokens);
+        published = true;
+        return true;
     }
 
     fn detachExternal(self: *const WorkerScheduler, node: *ExternalNode) void {
@@ -2671,5 +2717,142 @@ fn timerMain(scheduler: *const WorkerScheduler) void {
             // sets this event; there is no host instant worth waiting for.
             .manual => scheduler_state.timer_wake.waitUncancelable(io),
         } else scheduler_state.timer_wake.waitUncancelable(io);
+    }
+}
+
+test "native: external publication batches preserve ownership on rejection and allocation failure" {
+    const Probe = struct {
+        const Member = struct {
+            refs: usize = 0,
+            pub fn retainExternalMember(self: *@This()) void {
+                self.refs += 1;
+            }
+            pub fn releaseExternalMember(self: *@This()) void {
+                self.refs -= 1;
+            }
+            pub fn cancelExternalMember(_: *@This()) void {}
+        };
+        const Publication = struct {
+            mutex: std.Io.Mutex = .init,
+            accept: bool = false,
+            tokens: [16]?external.ScopeMembership = .{null} ** 16,
+            published: bool = false,
+            pub fn lock(self: *@This()) void {
+                std.Io.Threaded.mutexLock(&self.mutex);
+            }
+            pub fn unlock(self: *@This()) void {
+                std.Io.Threaded.mutexUnlock(&self.mutex);
+            }
+            pub fn validate(self: *@This()) bool {
+                return self.accept;
+            }
+            pub fn publish(self: *@This(), tokens: [16]?external.ScopeMembership) void {
+                self.tokens = tokens;
+                self.published = true;
+            }
+            fn detach(self: *@This()) void {
+                for (&self.tokens) |*slot| if (slot.*) |*token| token.detach();
+            }
+        };
+        fn incoming(members: *[3]Member) [16]?external.ScopeMember {
+            var result: [16]?external.ScopeMember = .{null} ** 16;
+            for (members, [_]usize{ 0, 7, 15 }) |*member, index| result[index] = external.scopeMember(Member, member);
+            return result;
+        }
+        fn run(allocator: std.mem.Allocator) !void {
+            var cleanup = heap.testing.Cleanup.init(allocator);
+            defer cleanup.deinit();
+            var runtime = try Scheduler.init(cleanup.capability(), .cooperative, .manual);
+            var scope = TaskScope.init(runtime.worker());
+            defer runtime.deinit(&scope);
+            var members: [3]Member = .{Member{}} ** 3;
+            defer for (members) |member| std.debug.assert(member.refs == 0);
+            var publication: Publication = .{};
+            defer publication.detach();
+            try std.testing.expect(!try runtime.worker().publishExternalBatch(&scope, incoming(&members), &publication));
+            try std.testing.expect(!publication.published);
+            try std.testing.expectEqual(@as(usize, 0), scope.pending());
+            for (members) |member| try std.testing.expectEqual(@as(usize, 0), member.refs);
+            publication.accept = true;
+            try std.testing.expect(try runtime.worker().publishExternalBatch(&scope, incoming(&members), &publication));
+            try std.testing.expect(publication.published);
+            try std.testing.expectEqual(@as(usize, 3), scope.pending());
+            for (members) |member| try std.testing.expectEqual(@as(usize, 1), member.refs);
+            publication.detach();
+            try std.testing.expectEqual(@as(usize, 0), scope.pending());
+            runtime.worker().closeRootScope(&scope);
+            if (runtime.worker().publishExternalBatch(&scope, incoming(&members), &publication)) |_| {
+                return error.TestUnexpectedResult;
+            } else |err| if (err != error.ScopeClosing) return err;
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
+}
+
+test "native: scope cancellation observes an entire external publication batch" {
+    const Publication = struct {
+        const Self = @This();
+        const Member = struct {
+            publication: *Self,
+            token: ?external.ScopeMembership = null,
+            refs: std.atomic.Value(usize) = .init(0),
+            cancellations: usize = 0,
+            pub fn retainExternalMember(self: *@This()) void {
+                _ = self.refs.fetchAdd(1, .monotonic);
+            }
+            pub fn releaseExternalMember(self: *@This()) void {
+                _ = self.refs.fetchSub(1, .release);
+            }
+            pub fn cancelExternalMember(self: *@This()) void {
+                if (!self.publication.published.load(.acquire)) self.publication.partial.store(true, .release);
+                self.cancellations += 1;
+                if (self.token) |*token| token.detach();
+            }
+        };
+        scope: *TaskScope,
+        members: [16]Member,
+        entered: std.Io.Event = .unset,
+        closing: std.Io.Event = .unset,
+        published: std.atomic.Value(bool) = .init(false),
+        partial: std.atomic.Value(bool) = .init(false),
+        pub fn lock(_: *@This()) void {}
+        pub fn unlock(_: *@This()) void {}
+        pub fn validate(self: *@This()) bool {
+            self.entered.set(blockingIo());
+            self.closing.waitUncancelable(blockingIo());
+            return true;
+        }
+        pub fn publish(self: *@This(), tokens: [16]?external.ScopeMembership) void {
+            for (&self.members, tokens) |*member, token| member.token = token;
+            self.published.store(true, .release);
+        }
+        fn close(self: *@This()) void {
+            self.entered.waitUncancelable(blockingIo());
+            self.closing.set(blockingIo());
+            self.scope.scheduler.closeRootScope(self.scope);
+        }
+    };
+    var cleanup = heap.testing.Cleanup.init(std.testing.allocator);
+    defer cleanup.deinit();
+    var runtime = try Scheduler.init(cleanup.capability(), .cooperative, .manual);
+    var scope = TaskScope.init(runtime.worker());
+    defer runtime.deinit(&scope);
+    var publication: Publication = .{ .scope = &scope, .members = undefined };
+    for (&publication.members) |*member| member.* = .{ .publication = &publication };
+    const closer = try std.Thread.spawn(.{}, Publication.close, .{&publication});
+    {
+        defer {
+            publication.entered.set(blockingIo());
+            closer.join();
+        }
+        var incoming: [16]?external.ScopeMember = .{null} ** 16;
+        for (&incoming, &publication.members) |*slot, *member| slot.* = external.scopeMember(Publication.Member, member);
+        try std.testing.expect(try runtime.worker().publishExternalBatch(&scope, incoming, &publication));
+    }
+    try std.testing.expect(!publication.partial.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), scope.pending());
+    for (&publication.members) |*member| {
+        try std.testing.expectEqual(@as(usize, 1), member.cancellations);
+        try std.testing.expectEqual(@as(usize, 0), member.refs.load(.acquire));
     }
 }
