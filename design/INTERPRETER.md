@@ -1358,6 +1358,14 @@ built-in resource layouts. Publication snapshots retain the common resource
 handle as well as its adapter reference, so releasing the last language value
 cannot invalidate an in-flight handoff.
 
+Registered operation selectors validate their issuing resource before request
+validation, then return an admitted exchange or admission readiness through
+the same interface for every adapter. Exchange capabilities seal their
+adapter identity, own one execution reference, and expose only cancellation,
+cleanup, and completion interests. Result observation and claiming go directly
+through the common result owner. Neither operation admission nor exchange
+observation dispatches on a backend family or uses backend readiness codes.
+
 Package discovery and synchronization are
 described in `ENVIRONMENT.md`; they enter the evaluator through the same module
 loader and bounded-driver conventions as other sources. Host-side lock and
@@ -1539,9 +1547,13 @@ paths as ordinary traffic, with no interpreter re-entry authority.
 Native terminal failures distinguish runtime allocation exhaustion from bounded
 domain error data. Endpoint transport preserves that distinction through
 buffered output and completion; cleanup retains its normal join obligations.
-Completion observation and result ownership are separate: observation remains
-repeatable, while claiming consumes an available terminal value under the
-receiving scope and exchange locks. Queue delivery uses the same scope-first
+The common result owner carries an immutable terminal fact separately from its
+available, claimed, or discarded value. Adapters publish terminal facts only
+after controller return and cancellation settlement; ABI errors are translated
+before reaching this owner. Completion observation remains repeatable, while
+claiming consumes an available terminal value under the receiving scope and
+result locks. Replacing or discarding an envelope detaches it under the result
+lock and retires it after unlocking. Queue delivery uses the same scope-first
 publication boundary. A scope that has begun closing refuses a claim without
 consuming its source. The receiving evaluator reserves stack capacity before that
 transition, so allocation failure cannot consume a result without publishing it.

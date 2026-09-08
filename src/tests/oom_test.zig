@@ -1826,7 +1826,7 @@ test "oom: standard-library and host: native port registered message consumption
 
 test "oom: standard-library and host: native port child result publication" {
     try requireSelectedOomTest(@src());
-    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortLifecycleProbe(
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
         "portprobe.factory [] port.open dup portprobe.child [] port.call port.close port.close",
     ).run);
 }

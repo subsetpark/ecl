@@ -14,7 +14,8 @@ const port_message = @import("port_message.zig");
 const byte_transport = @import("port_bytes.zig");
 const message_builder = @import("port_builder.zig");
 const message_transport = @import("port_messages.zig");
-const ResourcePublication = @import("port_resource.zig").Publication;
+const results = @import("port_result.zig");
+const exchanges = @import("port_exchange.zig");
 const resource_api = @import("port_resource.zig");
 const endpoint_api = @import("port_endpoint.zig");
 
@@ -41,6 +42,19 @@ pub const RegisteredCapability = opaque {
     }
     pub fn borrowEndpoint(self: *RegisteredCapability, source: Value) endpoint_api.BorrowError!Value {
         return borrowRegisteredEndpoint(source, self);
+    }
+    pub fn acceptsOperation(self: *RegisteredCapability, source: Value) bool {
+        return fromValue(source, self.instance(), self.definition().operation.resource) != null;
+    }
+    pub fn beginOperation(self: *RegisteredCapability, source: Value, scope: *scheduler.TaskScope, request: *const port_message.Validated) exchanges.AdmitError!exchanges.Admission {
+        const operation = self.definition().operation;
+        const cell = fromValue(source, self.instance(), operation.resource) orelse return error.WrongKind;
+        return switch (try cell.admitOnLane(operation.code, operation.lane, operation.endpoints, scope, request)) {
+            .operation => |value| .{ .exchange = value },
+            .pending => .{ .pending = cell.source(2 + @as(u64, operation.lane)) },
+            .closed => .closed,
+            .invalid_operation => .unsupported,
+        };
     }
     pub fn releasePort(self: *RegisteredCapability) void {
         const owned = self.state();
@@ -69,7 +83,7 @@ pub fn sealCapability(instance: *native.ModuleInstance, index: u32) error{OutOfM
     const capability: *RegisteredCapability = @ptrCast(owned);
     const result = switch (instance.definition(index).body.port) {
         .factory => try heap.createBorrowedPort(RegisteredCapability, .factory, owner.allocator(), identity, capability),
-        .operation => try heap.createBorrowedPort(RegisteredCapability, .operation_selector, owner.allocator(), identity, capability),
+        .operation => try exchanges.Selector.create(RegisteredCapability, identity, capability),
         .endpoint => try endpoint_api.Selector.create(RegisteredCapability, identity, capability),
     };
     instance.retain();
@@ -603,7 +617,7 @@ pub const Cell = struct {
         const identity = self.owner.identity;
         self.owner.identity +%= 1;
         unlock(&self.owner.mutex);
-        const item = heap.createOwnedPort(Operation, .exchange, self.allocator, identity, op) catch |err| {
+        const item = exchanges.Exchange.create(Operation, identity, op) catch |err| {
             op.close();
             op.releaseReadiness();
             return err;
@@ -722,6 +736,18 @@ const Protocol = struct {
 };
 
 pub const Operation = struct {
+    pub fn exchangeAllocator(self: *Operation) std.mem.Allocator {
+        return self.allocator;
+    }
+    pub fn exchangeResult(self: *Operation) *results.Result {
+        return self.terminal_result;
+    }
+    pub fn exchangeSource(self: *Operation, interest: exchanges.Interest) external.ReadinessSource {
+        return self.source(switch (interest) {
+            .completion => 8,
+            .cleanup => 4,
+        });
+    }
     const ControllerFailure = struct {
         value: Failure,
         disposition: enum { operation, resource },
@@ -742,14 +768,14 @@ pub const Operation = struct {
     ownership: external.Ownership = .provisional,
     children: ?*scheduler.ExternalGroup = null,
     lifetime: enum { open, closing, closed } = .open,
-    terminal_result: union(enum) { available: *message_transport.Envelope, claimed, discarded },
+    terminal_result: *results.Result,
     endpoints: u64,
 
     fn create(cell: *Cell, code: u32, lane: u32, endpoints: u64, parameters: *const port_message.Validated) error{ OutOfMemory, Closed, Full }!*Operation {
         const allocator = cell.allocator;
         var protocol = try Protocol.init(cell, endpoints, parameters);
         errdefer protocol.deinit(cell);
-        const terminal_value = try message_transport.Envelope.empty(cell.owner.host);
+        const terminal_value = try results.Result.create(cell.owner.host);
         errdefer terminal_value.release();
         const prepared = try cell.lanes[lane].prepare(allocator);
         errdefer prepared.discard();
@@ -760,8 +786,8 @@ pub const Operation = struct {
         cell.changed.broadcast(io());
         return ticket.owner();
     }
-    fn initialize(op: *Operation, ticket: *Operations.Ticket, cell: *Cell, code: u32, lane: u32, protocol: Protocol, terminal_value: *message_transport.Envelope, endpoints: u64) void {
-        op.* = .{ .allocator = cell.allocator, .cell = cell, .code = code, .lane = lane, .ticket = ticket, .protocol = protocol, .terminal_result = .{ .available = terminal_value }, .endpoints = endpoints };
+    fn initialize(op: *Operation, ticket: *Operations.Ticket, cell: *Cell, code: u32, lane: u32, protocol: Protocol, terminal_value: *results.Result, endpoints: u64) void {
+        op.* = .{ .allocator = cell.allocator, .cell = cell, .code = code, .lane = lane, .ticket = ticket, .protocol = protocol, .terminal_result = terminal_value, .endpoints = endpoints };
         cell.retainReadiness();
     }
     fn runnable(self: *Operation) bool {
@@ -829,7 +855,6 @@ pub const Operation = struct {
     fn settleScope(self: *Operation) void {
         lock(&self.mutex);
         var detached: external.Ownership.Detached = .{};
-        var discarded: ?*message_transport.Envelope = null;
         const terminal = switch (self.ticket.status()) {
             .done, .cancelled => true,
             .preparing, .queued, .active, .cancelling, .reusable => false,
@@ -838,10 +863,6 @@ pub const Operation = struct {
         const children = if (aborting) self.children else null;
         if (aborting) {
             self.lifetime = .closing;
-            if (self.terminal_result == .available) {
-                discarded = self.terminal_result.available;
-                self.terminal_result = .discarded;
-            }
             self.notifyLocked();
         }
         unlock(&self.mutex);
@@ -851,7 +872,7 @@ pub const Operation = struct {
                 .bytes => {},
             };
         }
-        if (discarded) |item| item.release();
+        if (aborting) self.terminal_result.discard();
         if (children) |group| group.close();
         if (aborting and (children == null or children.?.closed())) {
             lock(&self.mutex);
@@ -937,10 +958,7 @@ pub const Operation = struct {
     fn deinit(self: *Operation) void {
         if (self.children) |children| children.release();
         self.protocol.deinit(self.cell);
-        switch (self.terminal_result) {
-            .available => |item| item.release(),
-            .claimed, .discarded => {},
-        }
+        self.terminal_result.release();
         self.cell.releaseReadiness();
     }
     pub fn registerReadiness(self: *Operation, key: u64, target: external.WakeTarget) external.RegisterError!external.RegisterResult {
@@ -978,6 +996,11 @@ pub const Operation = struct {
                 } else pair.finish();
             };
         }
+        switch (self.ticket.status()) {
+            .done => self.terminal_result.complete(if (self.failure) |failure| .{ .failed = semanticFailure(failure.value) } else .success),
+            .cancelled => self.terminal_result.complete(.cancelled),
+            .preparing, .queued, .active, .cancelling, .reusable => {},
+        }
         self.changed.broadcast(io());
         self.waits.notifyLocked(self);
     }
@@ -994,78 +1017,16 @@ pub const Operation = struct {
     pub fn cancel(self: *Operation) void {
         self.ticket.cancel();
     }
-    pub fn completion(self: *Operation) union(enum) { pending, ready, cancelled, failed: Failure } {
-        lock(&self.mutex);
-        defer unlock(&self.mutex);
-        return switch (self.ticket.status()) {
-            .preparing, .queued, .active, .cancelling, .reusable => .pending,
-            .done => if (self.failure) |failure| .{ .failed = failure.value } else .ready,
-            .cancelled => .cancelled,
-        };
+    pub fn completion(self: *Operation) results.Completion {
+        return self.terminal_result.completion();
     }
-    /// The caller reserves its output capacity before entering this consuming
-    /// transition. Success moves the result; every other outcome retains it.
-    const Claim = union(enum) { pending, claimed, value: Value, cancelled, failed: Failure };
-    pub fn claimResult(self: *Operation, scope: *scheduler.TaskScope) error{ OutOfMemory, ScopeClosing, Overflow }!Claim {
-        lock(&self.mutex);
-        const view = if (self.terminal_result == .available) self.terminal_result.available.borrow() else null;
-        unlock(&self.mutex);
-        defer if (view) |item| item.release();
-        const handoff = try ResourcePublication.init(self.cell.owner.host, if (view) |item| item.attachments() else &.{});
-        defer if (handoff) |publication| publication.deinit();
-        var publication: ResultPublication = .{ .operation = self, .view = view, .handoff = handoff };
-        _ = try scope.scheduler.publishExternalBatch(scope, if (handoff) |children| children.members() else .{null} ** 16, &publication);
-        if (publication.consumed) |item| item.release();
-        return publication.result;
+    pub fn claimResult(self: *Operation, scope: *scheduler.TaskScope) error{ OutOfMemory, ScopeClosing, Overflow }!results.Claim {
+        return self.terminal_result.claim(scope);
     }
-    const ResultPublication = struct {
-        operation: *Operation,
-        view: ?*message_transport.View,
-        handoff: ?*ResourcePublication,
-        consumed: ?*message_transport.Envelope = null,
-        result: Claim = .pending,
-        pub fn lock(self: *@This()) void {
-            std.Io.Threaded.mutexLock(&self.operation.mutex);
-            if (self.handoff) |handoff| handoff.lock();
-        }
-        pub fn unlock(self: *@This()) void {
-            if (self.handoff) |handoff| handoff.unlock();
-            std.Io.Threaded.mutexUnlock(&self.operation.mutex);
-        }
-        pub fn validate(self: *@This()) bool {
-            const op = self.operation;
-            switch (op.ticket.status()) {
-                .preparing, .queued, .active, .cancelling, .reusable => return false,
-                .cancelled => {
-                    self.result = .cancelled;
-                    return false;
-                },
-                .done => {},
-            }
-            self.result = if (op.failure) |failure| .{ .failed = failure.value } else switch (op.terminal_result) {
-                .claimed => .claimed,
-                .discarded => .{ .failed = Failure.init(.io, "exchange result was discarded by close") },
-                .available => |item| available: {
-                    if (self.view == null or !self.view.?.observes(item)) break :available .pending;
-                    if (self.handoff) |handoff| if (!handoff.validate()) break :available .pending;
-                    break :available .{ .value = item.value() };
-                },
-            };
-            return self.result == .value;
-        }
-        pub fn publish(self: *@This(), tokens: [16]?external.ScopeMembership) void {
-            if (self.handoff) |handoff| handoff.publish(tokens);
-            const item = self.operation.terminal_result.available;
-            heap.retainValue(item.value());
-            self.consumed = item;
-            self.operation.terminal_result = .claimed;
-        }
-    };
 };
 
 pub fn exchangeFromValue(item: Value) ?*Operation {
-    if (item != .port) return null;
-    return heap.portPayload(Operation, .exchange, item.port);
+    return exchanges.Exchange.project(Operation, item);
 }
 
 const EndpointParent = union(enum) {
@@ -1394,11 +1355,10 @@ fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest
         .result => {
             const validated = builder.validated() orelse return error.InvalidState;
             const item = try message_transport.Envelope.create(ctx.cell.owner.host, validated);
-            lock(&op.mutex);
-            const previous = op.terminal_result.available;
-            op.terminal_result = .{ .available = item };
-            unlock(&op.mutex);
-            previous.release();
+            if (!op.terminal_result.replace(item)) {
+                item.release();
+                return .invalid;
+            }
             try builder.consume();
             return .ok;
         },
@@ -1525,12 +1485,8 @@ fn controllerResultMessage(raw: *anyopaque) callconv(.c) bool {
     const op = ctx.operation() orelse return false;
     const item = ctx.received orelse return false;
     item.releaseQueueCapacity();
-    lock(&op.mutex);
-    const previous = op.terminal_result.available;
-    op.terminal_result = .{ .available = item };
-    unlock(&op.mutex);
+    if (!op.terminal_result.replace(item)) return false;
     ctx.received = null;
-    previous.release();
     return true;
 }
 fn controllerDiscardMessage(raw: *anyopaque) callconv(.c) bool {

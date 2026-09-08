@@ -16,6 +16,7 @@ const intern = @import("../intern.zig");
 const Resource = @import("../port_resource.zig").Resource;
 const builtin = @import("../builtin_port.zig");
 const endpoints = @import("../port_endpoint.zig");
+const exchanges = @import("../port_exchange.zig");
 
 pub const words = [_]env.BuiltinWord{
     .{ .name = "open", .doc = "( factory config -- resource ) Initialize a registered resource in the calling scope.", .primitive = open },
@@ -255,23 +256,23 @@ fn startRequest(evaluator: *machine.Machine, comptime role: @import("../value.zi
     defer input.deinit();
     var capability = try evaluator.popValue();
     defer capability.deinit();
-    const registered = native.registeredCapability(capability.borrow(), role);
-    const builtin_factory = if (role == .factory) builtin.RegisteredCapability.fromValue(capability.borrow(), .factory) else null;
-    if (registered == null and builtin_factory == null)
+    const registered: ?*native.RegisteredCapability = if (role == .factory) native.registeredCapability(capability.borrow(), .factory) else null;
+    const operation_selector: ?*exchanges.Selector = if (role == .operation_selector) exchanges.Selector.fromValue(capability.borrow()) else null;
+    const builtin_factory: ?*builtin.RegisteredCapability = if (role == .factory) builtin.RegisteredCapability.fromValue(capability.borrow(), .factory) else null;
+    if (registered == null and builtin_factory == null and operation_selector == null)
         return evaluator.typeError(if (role == .factory) "a factory" else "an operation selector");
     var resource: ?heap.OwnedValue = if (role == .operation_selector) try evaluator.popValue() else null;
     defer if (resource) |*owned| owned.deinit();
-    if (resource) |owned| {
-        _ = native.fromValue(owned.borrow(), registered.?.instance(), registered.?.definition().resource()) orelse
-            return evaluator.typeError("a resource of the selector's issuing kind");
+    if (role == .operation_selector) {
+        if (!operation_selector.?.accepts(resource.?.borrow())) return evaluator.typeError("a resource of the selector's issuing kind");
     }
     const driver = try evaluator.allocator().create(Request);
     errdefer evaluator.allocator().destroy(driver);
     const validated = try message.Message.create(evaluator.allocator(), input.borrow(), .{});
     driver.* = .{
         .capability = capability.take(),
-        .kind = if (resource) |*owned|
-            .{ .operation = .{ .resource = owned.take(), .selector = registered.? } }
+        .kind = if (role == .operation_selector)
+            .{ .operation = .{ .resource = resource.?.take(), .selector = operation_selector.? } }
         else if (builtin_factory) |factory|
             .{ .builtin_factory = factory }
         else
@@ -288,7 +289,7 @@ const Request = struct {
     kind: union(enum) {
         native_factory: *native.RegisteredCapability,
         builtin_factory: *builtin.RegisteredCapability,
-        operation: struct { resource: Value, selector: *native.RegisteredCapability },
+        operation: struct { resource: Value, selector: *exchanges.Selector },
     },
     message: *message.Message,
     state: union(enum) { validating, ready, opening: Value, consumed } = .validating,
@@ -340,21 +341,19 @@ const Request = struct {
         const scope = try callingScope(evaluator);
         switch (self.kind) {
             .operation => |request| {
-                const capability = request.selector;
-                const operation = capability.definition().operation;
-                const cell = native.fromValue(request.resource, capability.instance(), operation.resource).?;
                 const output = try evaluator.reserveStack(1);
-                switch (cell.admitOnLane(operation.code, operation.lane, operation.endpoints, scope, self.message.validated().?) catch |err| return switch (err) {
+                switch (request.selector.begin(request.resource, scope, self.message.validated().?) catch |err| return switch (err) {
                     error.OutOfMemory => error.OutOfMemory,
                     error.ScopeClosing => evaluator.fail(.cancelled, "port scope is closing"),
+                    error.WrongKind => evaluator.typeError("a resource of the selector's issuing kind"),
                 }) {
-                    .operation => |exchange| {
+                    .exchange => |exchange| {
                         self.state = .consumed;
                         return output.output(exchange);
                     },
-                    .pending => try evaluator.park(.{ .external = cell.source(2 + @as(u64, operation.lane)) }),
+                    .pending => |source| try evaluator.park(.{ .external = source }),
                     .closed => return evaluator.fail(.io, "resource is closed"),
-                    .invalid_operation => return evaluator.fail(.domain, "operation lane is unavailable"),
+                    .unsupported => return evaluator.fail(.domain, "operation lane is unavailable"),
                 }
             },
             .native_factory => |capability| {
@@ -404,7 +403,7 @@ fn transportFailure(evaluator: *machine.Machine, failure: bytes.Failure) machine
 fn cancel(evaluator: *machine.Machine) machine.MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
-    const exchange = native.exchangeFromValue(item.borrow()) orelse return evaluator.typeError("an exchange");
+    const exchange = exchanges.Exchange.fromValue(item.borrow()) orelse return evaluator.typeError("an exchange");
     exchange.cancel();
 }
 
@@ -418,7 +417,7 @@ fn shutdown(evaluator: *machine.Machine) machine.MachineError!void {
 fn close(evaluator: *machine.Machine) machine.MachineError!void {
     var item = try evaluator.popValue();
     errdefer item.deinit();
-    const target: Target = if (native.exchangeFromValue(item.borrow())) |exchange|
+    const target: Target = if (exchanges.Exchange.fromValue(item.borrow())) |exchange|
         .{ .exchange = exchange }
     else if (Resource.fromValue(item.borrow())) |resource|
         .{ .resource = resource }
@@ -442,7 +441,7 @@ fn result(evaluator: *machine.Machine) machine.MachineError!void {
 fn observe(evaluator: *machine.Machine, mode: Observe.Mode) machine.MachineError!void {
     var item = try evaluator.popValue();
     errdefer item.deinit();
-    const exchange = native.exchangeFromValue(item.borrow()) orelse return evaluator.typeError("an exchange");
+    const exchange = exchanges.Exchange.fromValue(item.borrow()) orelse return evaluator.typeError("an exchange");
     try evaluator.startDriver(Observe{
         .owner = .init(item.take()),
         .target = .{ .exchange = exchange },
@@ -450,7 +449,7 @@ fn observe(evaluator: *machine.Machine, mode: Observe.Mode) machine.MachineError
     });
 }
 
-const Target = union(enum) { resource: *Resource, exchange: *native.Operation };
+const Target = union(enum) { resource: *Resource, exchange: *exchanges.Exchange };
 const Observe = struct {
     const Mode = enum { observe, close, shutdown, claim };
     pub const ownership: heap.DriverOwnership = .fields;
@@ -479,21 +478,21 @@ const Observe = struct {
                 if (self.mode == .close) {
                     exchange.close();
                     if (exchange.closed()) return .completed;
-                    try evaluator.park(.{ .external = exchange.source(4) });
+                    try evaluator.park(.{ .external = exchange.source(.cleanup) });
                 } else if (self.mode == .claim) {
                     const output = try evaluator.reserveStack(1);
                     switch (exchange.claimResult(try callingScope(evaluator)) catch |err| return publicationFailure(evaluator, err)) {
-                        .pending => try evaluator.park(.{ .external = exchange.source(8) }),
+                        .pending => try evaluator.park(.{ .external = exchange.source(.completion) }),
                         .value => |item| return output.output(item),
                         .claimed => return evaluator.fail(.contract, "exchange result has already been claimed"),
                         .cancelled => return evaluator.fail(.cancelled, "exchange was cancelled"),
-                        .failed => |failure| return fail(evaluator, failure),
+                        .failed => |failure| return transportFailure(evaluator, failure),
                     }
                 } else switch (exchange.completion()) {
-                    .pending => try evaluator.park(.{ .external = exchange.source(8) }),
+                    .pending => try evaluator.park(.{ .external = exchange.source(.completion) }),
                     .ready => return .completed,
                     .cancelled => return evaluator.fail(.cancelled, "exchange was cancelled"),
-                    .failed => |failure| return fail(evaluator, failure),
+                    .failed => |failure| return transportFailure(evaluator, failure),
                 }
             },
         }
