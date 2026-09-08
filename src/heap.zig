@@ -1793,6 +1793,9 @@ pub const ReleaseDomain = struct {
     last: ?*Header = null,
     retirement_first: ?*Retirement = null,
     retirement_last: ?*Retirement = null,
+    // Includes the active drainer's owner, not just linked nodes. Continuation
+    // requeueing carries the same charge until that owner finishes.
+    pending_owners: std.atomic.Value(usize) = .init(0),
     tombstones: std.atomic.Value(?*TombstoneNode) = .init(null),
     prefer_retirement: bool = false,
     wake: ?Wake = null,
@@ -1898,7 +1901,7 @@ pub const ReleaseDomain = struct {
         std.debug.assert(node.context == null and node.advance_fn == null and node.next == null);
         node.context = @ptrCast(owner);
         node.advance_fn = adapters.advance;
-        self.enqueueRetirement(node);
+        self.enqueueRetirement(node, .new);
     }
 
     pub fn releaseHeader(self: *ReleaseDomain, handle: anytype) void {
@@ -1907,11 +1910,14 @@ pub const ReleaseDomain = struct {
         std.debug.assert(old != 0);
         if (old != 1) return;
         _ = headerImpl(header).rc.load(.acquire);
-        self.enqueueZero(header);
+        self.enqueueZero(header, .new);
     }
 
-    fn enqueueZero(self: *ReleaseDomain, header: *Header) void {
+    const Admission = enum { new, continuation };
+
+    fn enqueueZero(self: *ReleaseDomain, header: *Header, admission: Admission) void {
         std.Io.Threaded.mutexLock(&self.queue_mutex);
+        if (admission == .new) _ = self.pending_owners.fetchAdd(1, .release);
         std.debug.assert(object(header).next_destroy == null);
         if (self.last) |last| object(last).next_destroy = header else self.first = header;
         self.last = header;
@@ -1919,8 +1925,9 @@ pub const ReleaseDomain = struct {
         self.notifyWork();
     }
 
-    fn enqueueRetirement(self: *ReleaseDomain, node: *Retirement) void {
+    fn enqueueRetirement(self: *ReleaseDomain, node: *Retirement, admission: Admission) void {
         std.Io.Threaded.mutexLock(&self.queue_mutex);
+        if (admission == .new) _ = self.pending_owners.fetchAdd(1, .release);
         std.debug.assert(node.next == null);
         if (self.retirement_last) |last| last.next = node else self.retirement_first = node;
         self.retirement_last = node;
@@ -1964,6 +1971,21 @@ pub const ReleaseDomain = struct {
         return self.first != null or self.retirement_first != null;
     }
 
+    /// Ordinary evaluation yields to reclamation at this backlog. This is an
+    /// admission watermark, not a live-heap byte limit: already-running slices
+    /// and retirement descendants may add their bounded work after it trips.
+    /// Cancellation and terminal work must remain eligible under pressure.
+    const backlog_watermark = 256;
+
+    pub fn evaluationBackpressured(self: *ReleaseDomain) bool {
+        return self.pending_owners.load(.acquire) >= backlog_watermark;
+    }
+
+    fn completeOwner(self: *ReleaseDomain) void {
+        const previous = self.pending_owners.fetchSub(1, .acq_rel);
+        if (previous == backlog_watermark) self.notifyWork();
+    }
+
     /// Returns true when the queue is empty after at most `budget` object-edge
     /// transitions. Multiple workers may help, but payload destruction is
     /// serialized so every intrusive node has one active owner.
@@ -1991,19 +2013,20 @@ pub const ReleaseDomain = struct {
                     const advance_fn = node.advance_fn.?;
                     const context = node.context.?;
                     if (!advance_fn(self, self.allocator, context)) {
-                        self.enqueueRetirement(node);
-                    }
+                        self.enqueueRetirement(node, .continuation);
+                    } else self.completeOwner();
                     continue;
                 }
             }
             if (self.popZero()) |header| {
                 self.prefer_retirement = true;
                 if (self.releaseNextChild(header)) {
-                    self.enqueueZero(header);
+                    self.enqueueZero(header, .continuation);
                 } else {
                     self.retireCodeIdentity(header);
                     freePayload(self.allocator, header);
                     self.allocator.destroy(object(header));
+                    self.completeOwner();
                 }
                 continue;
             }
@@ -2012,8 +2035,8 @@ pub const ReleaseDomain = struct {
                 const advance_fn = node.advance_fn.?;
                 const context = node.context.?;
                 if (!advance_fn(self, self.allocator, context)) {
-                    self.enqueueRetirement(node);
-                }
+                    self.enqueueRetirement(node, .continuation);
+                } else self.completeOwner();
                 continue;
             }
             return true;
@@ -2088,6 +2111,46 @@ pub const ReleaseDomain = struct {
         }
     }
 };
+
+test "retirement pressure charges active owners and continuations across quanta" {
+    const Probe = struct {
+        node: ReleaseDomain.Retirement = .{},
+        remaining: usize = 3,
+        calls: *usize,
+        first_pressure: *?bool,
+
+        pub fn advanceRetirement(domain: *ReleaseDomain, _: std.mem.Allocator, self: *@This()) bool {
+            if (self.first_pressure.* == null)
+                self.first_pressure.* = domain.evaluationBackpressured();
+            self.calls.* += 1;
+            self.remaining -= 1;
+            return self.remaining == 0;
+        }
+    };
+    for ([_]usize{ 1, 7, 256 }) |quantum| {
+        var owner = HostOwner.init(std.testing.allocator);
+        const domain = owner.domain();
+        var calls: usize = 0;
+        var first_pressure: ?bool = null;
+        const probes = try std.testing.allocator.alloc(Probe, 4096);
+        defer std.testing.allocator.free(probes);
+        // Keep owner storage alive through every retirement exit, including
+        // a failed assertion.
+        defer owner.cleanup().drain();
+        var admitted: usize = 0;
+        while (!domain.evaluationBackpressured() and admitted < probes.len) : (admitted += 1) {
+            probes[admitted] = .{ .calls = &calls, .first_pressure = &first_pressure };
+            domain.retire(&probes[admitted], &probes[admitted].node);
+        }
+        try std.testing.expect(domain.evaluationBackpressured());
+        _ = domain.tryAdvance(1);
+        try std.testing.expectEqual(true, first_pressure.?);
+        try std.testing.expect(domain.evaluationBackpressured());
+        while (!(domain.tryAdvance(quantum) orelse false)) {}
+        try std.testing.expect(!domain.evaluationBackpressured());
+        try std.testing.expectEqual(admitted * 3, calls);
+    }
+}
 
 /// Host-side ownership of a retirement domain and its blocking-cleanup seal.
 /// The owner is kept outside every scheduler-attached type; workers receive

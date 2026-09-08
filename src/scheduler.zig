@@ -234,7 +234,22 @@ const QueueEntry = struct {
     membership: union(enum) { detached, linked: ?*QueueEntry } = .detached,
 };
 
+/// A waiting evaluation owns its FIFO position; a grant reserves one execution
+/// slot until the slice returns. All transitions use the scheduler queue lock.
+const Admission = struct {
+    owner: union(enum) { root, task: *TaskCell },
+    state: union(enum) {
+        idle,
+        waiting: struct { previous: ?*Admission, next: ?*Admission = null },
+        granted,
+    } = .idle,
+};
+
 const ExecutorArbitration = struct {
+    // Object destruction includes allocator and typed retirement work, unlike
+    // a scalar kernel iteration. Return to execution/control between batches
+    // even when running tasks continuously replenish the retirement queue.
+    const retirement_quantum = 256;
     const Turn = enum { ready, retirement };
     next: Turn = .ready,
 
@@ -1288,6 +1303,7 @@ const TaskCell = struct {
     parent_membership: ParentMembership,
     queue: QueueEntry,
     cancellation_queue: QueueEntry,
+    admission: Admission,
     waiter_first: ?*WaitRegistration = null,
     waiter_last: ?*WaitRegistration = null,
     waitset: ?*WaitSet = null,
@@ -1505,6 +1521,9 @@ const WorkerState = struct {
     queue_condition: std.Io.Condition = .init,
     queue_first: ?*QueueEntry = null,
     queue_last: ?*QueueEntry = null,
+    admission_first: ?*Admission = null,
+    admission_last: ?*Admission = null,
+    admitted: usize = 0,
     stopping: bool = false,
     started: bool = false,
     threads: []std.Thread = &.{},
@@ -1643,6 +1662,7 @@ pub const WorkerScheduler = enum(usize) {
             .parent_membership = .{ .detached = parent },
             .queue = .{ .item = .{ .task = cell } },
             .cancellation_queue = .{ .item = .{ .cancellation = cell } },
+            .admission = .{ .owner = .{ .task = cell } },
         };
         cell.scope.owner = cell;
 
@@ -1865,17 +1885,26 @@ pub const WorkerScheduler = enum(usize) {
         unit: *machine.Unit,
     ) machine.MachineError!void {
         const state_ = self.privateState();
+        var admission = Admission{ .owner = .root };
         while (true) {
-            const status = machine.runSlice(unit) catch |err| {
+            if (!self.acquireAdmission(&admission, unit.cancelled.load(.acquire))) {
+                if (state_.config.isCooperative()) _ = self.runNextCooperative();
+                _ = self.releaseDomain().tryAdvance(ExecutorArbitration.retirement_quantum);
+                std.Thread.yield() catch @panic("root reclamation pressure yield failed");
+                continue;
+            }
+            const result = machine.runSlice(unit);
+            self.releaseAdmission(&admission);
+            const status = result catch |err| {
                 if (err == error.OutOfMemory) self.drainAbandonedRootWork(unit);
                 return err;
             };
-            _ = self.releaseDomain().advance(machine.kernel_poll_quantum);
+            _ = self.releaseDomain().tryAdvance(ExecutorArbitration.retirement_quantum);
             switch (status) {
                 .completed => {
                     if (unit.hasRequestedExit())
                         while (!unit.advanceSchedulerTeardown(machine.kernel_poll_quantum).complete) {
-                            _ = self.releaseDomain().tryAdvance(machine.kernel_poll_quantum);
+                            _ = self.releaseDomain().tryAdvance(ExecutorArbitration.retirement_quantum);
                         };
                     return;
                 },
@@ -1891,7 +1920,7 @@ pub const WorkerScheduler = enum(usize) {
 
     fn drainAbandonedRootWork(self: *const WorkerScheduler, unit: *machine.Unit) void {
         while (!unit.advanceSchedulerTeardown(machine.kernel_poll_quantum).complete) {
-            _ = self.releaseDomain().tryAdvance(machine.kernel_poll_quantum);
+            _ = self.releaseDomain().tryAdvance(ExecutorArbitration.retirement_quantum);
             std.Thread.yield() catch @panic("root teardown yield failed");
         }
     }
@@ -2007,6 +2036,12 @@ pub const WorkerScheduler = enum(usize) {
     fn enqueue(self: *const WorkerScheduler, entry: *QueueEntry) void {
         const state_ = self.privateState();
         std.Io.Threaded.mutexLock(&state_.queue_mutex);
+        self.enqueueLocked(entry);
+        std.Io.Threaded.mutexUnlock(&state_.queue_mutex);
+    }
+
+    fn enqueueLocked(self: *const WorkerScheduler, entry: *QueueEntry) void {
+        const state_ = self.privateState();
         std.debug.assert(entry.membership == .detached);
         if (state_.queue_last) |last| switch (last.membership) {
             .linked => |*next| next.* = entry,
@@ -2015,7 +2050,96 @@ pub const WorkerScheduler = enum(usize) {
         entry.membership = .{ .linked = null };
         state_.queue_last = entry;
         state_.queue_condition.signal(blockingIo());
-        std.Io.Threaded.mutexUnlock(&state_.queue_mutex);
+    }
+
+    fn unlinkAdmissionLocked(self: *const WorkerScheduler, node: *Admission) void {
+        const state_ = self.privateState();
+        const links = node.state.waiting;
+        if (links.previous) |previous| previous.state.waiting.next = links.next else state_.admission_first = links.next;
+        if (links.next) |next| next.state.waiting.previous = links.previous else state_.admission_last = links.previous;
+        node.state = .idle;
+    }
+
+    fn admissionLimit(self: *const WorkerScheduler) usize {
+        return switch (self.privateState().config) {
+            .cooperative => 1,
+            .worker_pool => |workers| workers +| 1,
+        };
+    }
+
+    /// Issue at most one grant per scheduler turn, before any newcomer can
+    /// acquire capacity. Waking transfers the reservation, not a hint to race.
+    fn grantAdmissionLocked(self: *const WorkerScheduler) void {
+        const state_ = self.privateState();
+        if (state_.admitted == self.admissionLimit() or self.releaseDomain().evaluationBackpressured()) return;
+        const node = state_.admission_first orelse return;
+        self.unlinkAdmissionLocked(node);
+        node.state = .granted;
+        state_.admitted += 1;
+        switch (node.owner) {
+            .root => {},
+            .task => |cell| self.enqueueLocked(&cell.queue),
+        }
+    }
+
+    fn acquireAdmission(self: *const WorkerScheduler, node: *Admission, cancelled: bool) bool {
+        const state_ = self.privateState();
+        std.Io.Threaded.mutexLock(&state_.queue_mutex);
+        defer std.Io.Threaded.mutexUnlock(&state_.queue_mutex);
+        const cancelling = switch (node.owner) {
+            .root => cancelled,
+            .task => |cell| cell.cancelled.load(.acquire),
+        };
+        if (cancelling) {
+            if (node.state == .waiting) self.unlinkAdmissionLocked(node);
+            return true;
+        }
+        if (node.state == .granted) return true;
+        // A task newly arriving here is executing its queue entry. Only a
+        // later grant may enqueue it again; direct admission stays local.
+        if (node.state == .idle and state_.admission_first == null and
+            !self.releaseDomain().evaluationBackpressured())
+        {
+            if (state_.admitted < self.admissionLimit()) {
+                state_.admitted += 1;
+                node.state = .granted;
+                return true;
+            }
+        }
+        if (node.state == .idle) {
+            node.state = .{ .waiting = .{ .previous = state_.admission_last } };
+            if (state_.admission_last) |last| last.state.waiting.next = node else state_.admission_first = node;
+            state_.admission_last = node;
+        }
+        // The root has no ready-queue entry and must also drive admission when
+        // it is the only executor, including before workers have started.
+        if (node.owner == .root) self.grantAdmissionLocked();
+        return node.state == .granted;
+    }
+
+    fn releaseAdmission(self: *const WorkerScheduler, node: *Admission) void {
+        const state_ = self.privateState();
+        std.Io.Threaded.mutexLock(&state_.queue_mutex);
+        defer std.Io.Threaded.mutexUnlock(&state_.queue_mutex);
+        switch (node.state) {
+            .idle => {}, // Cancellation bypasses ordinary admission.
+            .granted => {
+                state_.admitted -= 1;
+                node.state = .idle;
+            },
+            .waiting => unreachable,
+        }
+        self.grantAdmissionLocked();
+    }
+
+    fn cancelAdmission(self: *const WorkerScheduler, cell: *TaskCell) void {
+        const state_ = self.privateState();
+        std.Io.Threaded.mutexLock(&state_.queue_mutex);
+        defer std.Io.Threaded.mutexUnlock(&state_.queue_mutex);
+        if (cell.admission.state == .waiting) {
+            self.unlinkAdmissionLocked(&cell.admission);
+            self.enqueueLocked(&cell.queue);
+        }
     }
 
     fn popLocked(self: *const WorkerScheduler) ?*QueueEntry {
@@ -2040,6 +2164,7 @@ pub const WorkerScheduler = enum(usize) {
         const state_ = self.privateState();
         const retirement_ready = self.releaseDomain().hasPending();
         std.Io.Threaded.mutexLock(&state_.queue_mutex);
+        self.grantAdmissionLocked();
         const turn = arbitration.choose(state_.queue_first != null, retirement_ready) orelse {
             std.Io.Threaded.mutexUnlock(&state_.queue_mutex);
             return false;
@@ -2050,7 +2175,7 @@ pub const WorkerScheduler = enum(usize) {
             self.runEntry(ready);
             return true;
         }
-        if (self.releaseDomain().tryAdvance(machine.kernel_poll_quantum) == null)
+        if (self.releaseDomain().tryAdvance(ExecutorArbitration.retirement_quantum) == null)
             std.Thread.yield() catch @panic("scheduler retirement arbitration yield failed");
         return true;
     }
@@ -2067,6 +2192,7 @@ pub const WorkerScheduler = enum(usize) {
     fn execute(self: *const WorkerScheduler, cell: *TaskCell) void {
         const unit = cell.evaluatingUnit();
         const result = machine.runSlice(unit);
+        self.releaseAdmission(&cell.admission);
         if (result) |status| switch (status) {
             .yielded => {
                 std.Io.Threaded.mutexLock(&cell.mutex);
@@ -2330,6 +2456,7 @@ pub const WorkerScheduler = enum(usize) {
         std.Io.Threaded.mutexUnlock(&cell.mutex);
         switch (phase) {
             .ready => {
+                if (!self.acquireAdmission(&cell.admission, cell.cancelled.load(.acquire))) return;
                 const command = dispatch(cell);
                 if (command == .cancel_before_dispatch)
                     machine.armCancellationBeforeDispatch(cell.evaluatingUnit());
@@ -2749,6 +2876,7 @@ fn clearExternalCancellationCursor(scope: *TaskScope) void {
 
 fn cancelOne(cell: *TaskCell) core.ScopeCommand {
     _ = cell.cancelled.swap(true, .release);
+    cell.scheduler.cancelAdmission(cell);
     std.Io.Threaded.mutexLock(&cell.mutex);
     const decision = unitDecision(cell.policy, .cancel);
     cell.policy = decision.next;
@@ -2814,6 +2942,8 @@ fn workerMain(scheduler: *const WorkerScheduler) void {
             !scheduler.releaseDomain().hasPending() and
             !scheduler_state.stopping)
         {
+            scheduler.grantAdmissionLocked();
+            if (scheduler_state.queue_first != null) break;
             scheduler_state.queue_condition.waitUncancelable(blockingIo(), &scheduler_state.queue_mutex);
         }
         if (scheduler_state.stopping and scheduler_state.queue_first == null) {

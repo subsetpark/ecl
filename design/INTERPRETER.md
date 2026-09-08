@@ -740,6 +740,30 @@ detach O(1) retirement records; release cursors later walk the graph. The
 scheduler arbitrates between ready execution and retirement so a continuously
 ready program cannot strand memory, and a large retired graph cannot make
 cancellation latency proportional to the whole graph.
+The release domain charges each newly retired owner until its final step,
+including while a drainer holds it and across continuation requeues. Above a
+backlog watermark, root and worker schedulers withhold ordinary evaluation
+slices. Throttled evaluations wait in FIFO order outside the runnable queue.
+Each wake owns a reserved slice admission, so newcomers cannot consume it;
+outstanding admissions are bounded by the executor count, including the root.
+Cancellation withdraws a pressure waiter without acquiring admission. Wait
+delivery and terminal task work remain runnable. Root and worker evaluation
+use the same admission protocol, and relieving pressure wakes idle executors.
+An admitted evaluation makes at least one transition, then yields at evaluator
+step boundaries if pressure has risen. Thus in-flight producers cannot keep
+allocating for an entire instruction quantum after the backlog fills, and a
+reserved admission always carries progress even if pressure rises again.
+Already admitted slices and descendants of retired owners may add work; the
+watermark bounds accumulation across evaluation turns, not live program data
+or the size of an individual retired graph. Retirement is runnable destruction
+of unreachable owners, never a wait for an evaluating task to release a borrow.
+
+Retirement has its own object-work quantum, independent of scalar kernel
+polling. Backpressure, rather than a ratio between those quanta, prevents
+producers from continually outrunning reclamation. Root and worker turns
+attempt retirement without waiting behind another drainer, then return to
+execution and control; blocking host settlement joins remaining work at the
+public turn boundary.
 
 Cold Sessions and blocking public turns also settle or transfer retirement.
 Memory left after readers drain must be bounded by live or peak simultaneous

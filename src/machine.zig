@@ -6706,7 +6706,15 @@ pub fn run(unit: *Unit, code: *Header) MachineError!void {
 }
 
 fn loop(self: *Machine) MachineError!RunStatus {
+    var first_step = true;
     while (true) {
+        // Admission reserves progress, not a whole instruction quantum of
+        // allocation after pressure rises. Complete at least one transition
+        // before yielding so a granted waiter cannot repeatedly lose its turn.
+        // Cancellation must continue through failure and terminal cleanup.
+        if (!first_step and !self.unit.cancelled.load(.acquire) and
+            self.unit.releases.evaluationBackpressured()) return .yielded;
+        first_step = false;
         if (self.unit.native == .task_join_cleanup) {
             const cleanup = self.unit.advanceTaskJoinCleanup(kernel_poll_quantum);
             if (!cleanup.complete) return .yielded;
