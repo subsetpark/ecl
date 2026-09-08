@@ -13,7 +13,10 @@
    dup 'module at swap 'name at pair (chars) each
    "ok {}.{}" str.format io.print
    0)
-  (dup 1 at swap first pair "FAIL {}: {}" str.format io.print
+  (dup 1 at
+   dup 'module at swap 'name at pair (chars) each
+   "{}.{}" str.format
+   swap first pair "FAIL {}: {}" str.format io.print
    1)
   if)
  'report defp
