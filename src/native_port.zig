@@ -778,23 +778,42 @@ pub const Operation = struct {
     }
     /// The caller reserves its output capacity before entering this consuming
     /// transition. Success moves the result; every other outcome retains it.
-    pub fn claimResult(self: *Operation) union(enum) { pending, claimed, value: Value, cancelled, failed: Failure } {
-        lock(&self.mutex);
-        defer unlock(&self.mutex);
-        switch (self.ticket.status()) {
-            .queued, .active, .cancelling, .reusable => return .pending,
-            .cancelled => return .cancelled,
-            .done => {},
-        }
-        if (self.failure) |failure| return .{ .failed = failure };
-        const item = switch (self.terminal_result) {
-            .claimed => return .claimed,
-            .discarded => return .{ .failed = Failure.init(.io, "exchange result was discarded by close") },
-            .available => |item| item,
-        };
-        self.terminal_result = .claimed;
-        return .{ .value = item };
+    const Claim = union(enum) { pending, claimed, value: Value, cancelled, failed: Failure };
+    pub fn claimResult(self: *Operation, scope: *scheduler.TaskScope) error{ OutOfMemory, ScopeClosing }!Claim {
+        var publication: ResultPublication = .{ .operation = self };
+        _ = try scope.scheduler.publishExternalBatch(scope, .{null} ** 16, &publication);
+        return publication.result;
     }
+    const ResultPublication = struct {
+        operation: *Operation,
+        result: Claim = .pending,
+        pub fn lock(self: *@This()) void {
+            std.Io.Threaded.mutexLock(&self.operation.mutex);
+        }
+        pub fn unlock(self: *@This()) void {
+            std.Io.Threaded.mutexUnlock(&self.operation.mutex);
+        }
+        pub fn validate(self: *@This()) bool {
+            const op = self.operation;
+            switch (op.ticket.status()) {
+                .queued, .active, .cancelling, .reusable => return false,
+                .cancelled => {
+                    self.result = .cancelled;
+                    return false;
+                },
+                .done => {},
+            }
+            self.result = if (op.failure) |failure| .{ .failed = failure } else switch (op.terminal_result) {
+                .claimed => .claimed,
+                .discarded => .{ .failed = Failure.init(.io, "exchange result was discarded by close") },
+                .available => |item| .{ .value = item },
+            };
+            return self.result == .value;
+        }
+        pub fn publish(self: *@This(), _: [16]?external.ScopeMembership) void {
+            self.operation.terminal_result = .claimed;
+        }
+    };
     pub fn write(self: *Operation, bytes: []const u8) ?usize {
         lock(&self.mutex);
         defer unlock(&self.mutex);

@@ -2435,7 +2435,9 @@ A controller-held message retains its capacity reservation until forwarded,
 returned as a result, or discarded. This permits forwarding when the shared
 budget is full. Exceeding the resource's entire byte budget raises `'overflow`;
 temporary saturation parks the producer. Receiving is competing consumption,
-not broadcast. Event construction failure leaves the message queued.
+not broadcast. Event construction failure leaves the message queued. A receiving
+scope that has begun closing cannot consume a message or result; the claim
+fails with `'cancelled` without consuming the source.
 Abortive close discards queued messages and unclaimed results; a discarded
 successful result raises `'io` if claimed later. Completion observation remains
 repeatable. Existing capabilities in messages share use and retain their owner.

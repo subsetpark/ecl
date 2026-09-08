@@ -1294,3 +1294,15 @@ test "native: concurrent graceful callers invoke one callback" {
         "a task.await 'ok at pop b task.await 'ok at pop p port.close " ++
         "portprobe.shutdowns portprobe.cleaned", "1 1");
 }
+
+test "native: cancelled receiving tasks leave message and result claims available" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.factory [] port.open 'p set " ++
+        "p portprobe.message-result [] port.begin 'x set x wrap (port.result) @spawn 'a set " ++
+        "a cancel a task.await 'err at 'kind at " ++
+        "x portprobe.sender port.endpoint [42] port.send x port.result x port.close " ++
+        "p portprobe.messages [] port.begin 'y set y portprobe.receiver port.endpoint 'r set " ++
+        "r wrap (port.receive) @spawn 'b set b cancel b task.await 'err at 'kind at " ++
+        "y portprobe.sender port.endpoint dup [7] port.send port.finish " ++
+        "r port.receive 'value at r port.receive 'kind at y port.close p port.close " ++
+        "portprobe.cleaned", "'cancelled [42] 'cancelled [7] 'eof 1");
+}

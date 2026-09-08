@@ -1,6 +1,7 @@
 //! Whole-message transport. Queue occupancy is charged before publication;
 //! dequeue publication is a separate, allocation-free consuming transition.
 const std = @import("std");
+const scheduler = @import("scheduler.zig");
 const heap = @import("heap.zig");
 const external = @import("external.zig");
 const message = @import("port_message.zig");
@@ -261,21 +262,32 @@ pub const Queue = opaque {
     }
     /// Consumes queue ownership on success. The caller keeps its peek reference
     /// on either outcome. Event construction and stack reservation precede this.
-    pub fn claim(self: *Queue, item: *View) bool {
-        const owned = self.state();
-        std.Io.Threaded.mutexLock(&owned.mutex);
-        if (owned.count == 0 or owned.messages[owned.head] != item.state().capability()) {
-            std.Io.Threaded.mutexUnlock(&owned.mutex);
-            return false;
-        }
-        owned.messages[owned.head] = null;
-        owned.head = (owned.head + 1) % max_messages;
-        owned.count -= 1;
-        owned.notifyLocked();
-        std.Io.Threaded.mutexUnlock(&owned.mutex);
-        item.state().capability().release();
-        return true;
+    pub fn claim(self: *Queue, item: *View, scope: *scheduler.TaskScope) error{ OutOfMemory, ScopeClosing }!bool {
+        var publication: Publication = .{ .queue = self.state(), .item = item };
+        const accepted = try scope.scheduler.publishExternalBatch(scope, .{null} ** 16, &publication);
+        if (accepted) item.state().capability().release();
+        return accepted;
     }
+    const Publication = struct {
+        queue: *QueueState,
+        item: *View,
+        pub fn lock(self: *@This()) void {
+            std.Io.Threaded.mutexLock(&self.queue.mutex);
+        }
+        pub fn unlock(self: *@This()) void {
+            std.Io.Threaded.mutexUnlock(&self.queue.mutex);
+        }
+        pub fn validate(self: *@This()) bool {
+            return self.queue.count != 0 and self.queue.messages[self.queue.head] == self.item.state().capability();
+        }
+        pub fn publish(self: *@This(), _: [16]?external.ScopeMembership) void {
+            const owned = self.queue;
+            owned.messages[owned.head] = null;
+            owned.head = (owned.head + 1) % max_messages;
+            owned.count -= 1;
+            owned.notifyLocked();
+        }
+    };
     pub fn source(self: *Queue) external.ReadinessSource {
         return external.readinessSource(QueueState, self.state(), 0);
     }
@@ -366,6 +378,9 @@ pub const Controller = opaque {
 test "native: abandoned message publication preserves queue ownership and capacity" {
     var cleanup = heap.testing.Cleanup.init(std.testing.allocator);
     defer cleanup.deinit();
+    var runtime = try scheduler.Scheduler.init(cleanup.capability(), .cooperative, .manual);
+    var scope = scheduler.TaskScope.init(runtime.worker());
+    defer runtime.deinit(&scope);
     const budget = try Budget.create(cleanup.capability(), 8);
     defer budget.release();
     const pair = try Queue.create(budget, 1);
@@ -397,8 +412,8 @@ test "native: abandoned message publication preserves queue ownership and capaci
     const second = pair.queue.peek().message;
     defer second.release();
     try std.testing.expectEqual(@as(i64, 42), second.value().int);
-    try std.testing.expect(pair.queue.claim(second));
-    try std.testing.expect(!pair.queue.claim(second));
+    try std.testing.expect(try pair.queue.claim(second, &scope));
+    try std.testing.expect(!try pair.queue.claim(second, &scope));
     pair.queue.finish();
     try std.testing.expect(pair.queue.peek() == .eof);
 }

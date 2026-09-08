@@ -1457,7 +1457,9 @@ settles that membership outside both operation and resource locks. Readiness
 registration observes terminal state under the same mutex as notification.
 Completion observation and result ownership are separate: observation remains
 repeatable, while claiming consumes an available terminal value under the
-exchange lock. The receiving evaluator reserves stack capacity before that
+receiving scope and exchange locks. Queue delivery uses the same scope-first
+publication boundary. A scope that has begun closing refuses a claim without
+consuming its source. The receiving evaluator reserves stack capacity before that
 transition, so allocation failure cannot consume a result without publishing it.
 The driver's completion carries that reservation with its owned output; only
 the evaluator commits it after driver retirement, without further allocation.

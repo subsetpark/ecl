@@ -208,12 +208,17 @@ const ReceiveDriver = struct {
             },
             .message => |input| {
                 defer input.release();
+                const scope = try callingScope(evaluator);
                 const output = try evaluator.reserveStack(1);
                 const event = try dict.fromUniquePairs(evaluator.allocator(), evaluator.releaseDomain(), &.{
                     .{ .{ .symbol = try intern.intern("kind") }, .{ .symbol = try intern.intern("message") } },
                     .{ .{ .symbol = try intern.intern("value") }, input.value() },
                 });
-                if (!self.queue.claim(input)) {
+                const accepted = self.queue.claim(input, scope) catch |err| {
+                    evaluator.releaseDomain().releaseValue(event);
+                    return publicationFailure(evaluator, err);
+                };
+                if (!accepted) {
                     evaluator.releaseDomain().releaseValue(event);
                     return evaluator.fail(.io, "message endpoint closed before publication");
                 }
@@ -304,7 +309,7 @@ const Request = struct {
                 },
             }
         }
-        const scope: *scheduler.TaskScope = @ptrCast(@alignCast(evaluator.unit.task_scope orelse return evaluator.fail(.cancelled, "port scope is closing")));
+        const scope = try callingScope(evaluator);
         if (self.resource) |item| {
             const capability = native.registeredCapability(self.capability, .operation_selector).?;
             const operation = capability.definition().operation;
@@ -423,7 +428,7 @@ const Observe = struct {
                     try evaluator.park(.{ .external = exchange.source(4) });
                 } else if (self.mode == .claim) {
                     const output = try evaluator.reserveStack(1);
-                    switch (exchange.claimResult()) {
+                    switch (exchange.claimResult(try callingScope(evaluator)) catch |err| return publicationFailure(evaluator, err)) {
                         .pending => try evaluator.park(.{ .external = exchange.source(8) }),
                         .value => |item| return output.output(item),
                         .claimed => return evaluator.fail(.contract, "exchange result has already been claimed"),
@@ -441,3 +446,13 @@ const Observe = struct {
         return .yielded;
     }
 };
+
+fn callingScope(evaluator: *machine.Machine) machine.MachineError!*scheduler.TaskScope {
+    return @ptrCast(@alignCast(evaluator.unit.task_scope orelse return evaluator.fail(.cancelled, "port scope is closing")));
+}
+fn publicationFailure(evaluator: *machine.Machine, err: error{ OutOfMemory, ScopeClosing }) machine.MachineError {
+    return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.ScopeClosing => evaluator.fail(.cancelled, "port scope is closing"),
+    };
+}
