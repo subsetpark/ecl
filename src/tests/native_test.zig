@@ -64,6 +64,35 @@ test "native: structured terminal results preserve capabilities and are claimed 
         "x wrap (port.result) @attempt 'err at 'kind at x port.await x port.close p port.close portprobe.cleaned", "1 42 'contract 1");
 }
 
+test "native: receiving built-in resources shares use without moving scope ownership" {
+    for ([_]u32{ 1, 8 }) |workers| {
+        var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer output.deinit();
+        var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer diagnostics.deinit();
+        var runtime = try session.Session.initWithHostConfig(std.testing.allocator, &.{}, .{
+            .io = std.testing.io,
+            .output = &output.writer,
+            .diagnostics = &diagnostics.writer,
+            .ecl_path = native_fixture.directory,
+            .native_port_limits = .{ .message_capacity = 1 },
+            .net_policy = .{ .binds = .{ .exact = &.{.{ .address = "127.0.0.1", .port = 0 }} } },
+        }, .{ .worker_pool = workers });
+        defer runtime.deinit();
+        try expectOk(&runtime, "portprobe.reset {'address \"127.0.0.1\" 'port 0} net.listen 'l set " ++
+            "portprobe.factory [] port.open 'p set p portprobe.message-result [] port.begin 'x set " ++
+            "x portprobe.sender port.endpoint l port.send " ++
+            "x wrap (port.result) @spawn task.await 'ok at first l match? " ++
+            "p portprobe.messages [] port.begin 'y set y portprobe.sender port.endpoint 's set " ++
+            "y portprobe.receiver port.endpoint wrap (port.receive) @spawn 'receiver set " ++
+            "s l port.send s port.finish receiver task.await 'ok at first 'value at l match? " ++
+            "l net.local-address 'port at 0 > x port.close y port.close l port.close p port.close portprobe.cleaned");
+        var display = try runtime.stackDisplay();
+        defer display.deinit();
+        try std.testing.expectEqualStrings("1 1 1 1", display.bytes());
+    }
+}
+
 test "native: buffered messages precede terminal failure" {
     for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.factory [] port.open 'p set p portprobe.message-failure [] port.begin 'x set " ++
         "x portprobe.sender port.endpoint [] port.send x wrap (port.await) @attempt 'err at 'kind at " ++

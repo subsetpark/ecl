@@ -1539,7 +1539,11 @@ scheduler facade: a final controller-retirement pin may outlive task-scope
 quiescence, but cannot require scheduler access for destruction.
 
 Validated roots carry a bounded attachment index. Results and queued messages
-retain that index with their immutable root. Claims snapshot unpublished child
+retain that index with their immutable root. The common resource boundary owns
+their publication protocol; a closed backend union projects only resource kinds
+that can create provisional children. Already published built-in resources
+remain shared uses when carried by a native message or result.
+Claims snapshot unpublished child
 identities, prepare destination memberships outside locks, and revalidate under
 the receiving scope, source, provisional scopes, and child locks. Scope and
 child locks have stable identity ordering. A successful transition replaces

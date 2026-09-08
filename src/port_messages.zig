@@ -290,7 +290,7 @@ pub const Queue = opaque {
     /// Consumes queue ownership on success. The caller keeps its peek reference
     /// on either outcome. Event construction and stack reservation precede this.
     pub fn claim(self: *Queue, item: *View, scope: *scheduler.TaskScope) error{ OutOfMemory, ScopeClosing, Overflow }!bool {
-        const handoff = try @import("native_port.zig").ResourcePublication.init(self.state().budget.state().host, item.attachments());
+        const handoff = try @import("port_resource.zig").Publication.init(self.state().budget.state().host, item.attachments());
         defer if (handoff) |publication| publication.deinit();
         var publication: Publication = .{ .queue = self.state(), .item = item, .handoff = handoff };
         const accepted = try scope.scheduler.publishExternalBatch(scope, if (handoff) |children| children.members() else .{null} ** 16, &publication);
@@ -300,7 +300,7 @@ pub const Queue = opaque {
     const Publication = struct {
         queue: *QueueState,
         item: *View,
-        handoff: ?*@import("native_port.zig").ResourcePublication,
+        handoff: ?*@import("port_resource.zig").Publication,
         pub fn lock(self: *@This()) void {
             std.Io.Threaded.mutexLock(&self.queue.mutex);
             if (self.handoff) |handoff| handoff.lock();
