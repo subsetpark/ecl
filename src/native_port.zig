@@ -50,12 +50,7 @@ pub const RegisteredCapability = opaque {
     pub fn beginOperation(self: *RegisteredCapability, source: Value, scope: *scheduler.TaskScope, request: *const port_message.Validated) exchanges.AdmitError!exchanges.Admission {
         const operation = self.definition().operation;
         const cell = fromValue(source, self.instance(), operation.resource) orelse return error.WrongKind;
-        return switch (try cell.admitOnLane(operation.code, operation.lane, operation.endpoints, scope, request)) {
-            .operation => |value| .{ .exchange = value },
-            .pending => .{ .pending = cell.source(2 + @as(u64, operation.lane)) },
-            .closed => .closed,
-            .invalid_operation => .unsupported,
-        };
+        return cell.admitOnLane(.{ .code = operation.code, .lane = operation.lane, .endpoints = operation.endpoints }, scope, request);
     }
     pub fn openResource(self: *RegisteredCapability, opening: factories.Context, config: *const port_message.Validated) error{OutOfMemory}!factories.Start {
         const issuer = self.instance();
@@ -199,8 +194,10 @@ pub const Access = opaque {
     /// its independent retained reference before any controller starts.
     pub fn createConfigured(self: *Access, instance: *native.ModuleInstance, kind: u32, scope: *scheduler.TaskScope, config: *const port_message.Validated) CreateError!Value {
         const owner = self.state();
-        if (instance.validated().port(kind).?.lane_count > owner.limits.max_operations) return error.InsufficientLanes;
-        const cell = try Resource.create(owner, .{ instance, kind, config, scope.scheduler }, Cell.initializeAllocation);
+        const cell = Resource.create(owner, .{ instance, kind, config, scope.scheduler }, ResourceAdapter.initializeAllocation) catch |err| return switch (err) {
+            error.InvalidLimits => error.InsufficientLanes,
+            else => |failure| failure,
+        };
         lock(&owner.mutex);
         const identity = owner.identity;
         owner.identity +%= 1;
@@ -222,104 +219,85 @@ pub const Access = opaque {
     }
 };
 
-const ControllerGroup = controllers.Group(Cell, void, .{
-    .retain = Cell.retainReadiness,
-    .retireLocked = Cell.retireExecutionLocked,
-    .ownership = Cell.transferOwnership,
-    .release = Cell.releaseReadiness,
-    .retireAfterUnlock = Cell.retireDependency,
-});
-
-const Operations = Operation.Lane;
-
-pub const Cell = struct {
-    pub fn resourceInitialization(self: *Cell) resource_api.Initialization {
-        return switch (self.initialized()) {
-            .ready => .ready,
-            .pending => .{ .pending = self.source(0) },
-            .failed => |failure| .{ .failed = semanticFailure(failure) },
-        };
-    }
-    pub fn resourceAllocator(self: *Cell) std.mem.Allocator {
-        return self.allocator;
-    }
-    pub fn resourceClose(self: *Cell) void {
-        self.close();
-    }
-    pub fn resourceJoined(self: *Cell) bool {
-        return self.joined();
-    }
-    pub fn resourceSource(self: *Cell) external.ReadinessSource {
-        return self.source(1);
-    }
-    pub fn resourceShutdown(self: *Cell) resource_api.Shutdown {
-        return switch (self.shutdown()) {
-            .pending => .pending,
-            .ready => .ready,
-            .unsupported => .unsupported,
-            .failed => |failure| .{ .failed = semanticFailure(failure) },
-        };
-    }
-    pub fn resourcePublicationMutex(self: *Cell) *std.Io.Mutex {
-        return &self.mutex;
-    }
-    pub fn resourcePublicationGroupLocked(self: *Cell) ?*scheduler.ExternalGroup {
-        return switch (self.publication) {
-            .published => null,
-            .provisional => |group| group,
-        };
-    }
-    pub fn resourceOwnershipLocked(self: *Cell) *external.Ownership {
-        return &self.ownership;
-    }
-    pub fn resourceMarkPublishedLocked(self: *Cell) void {
-        self.publication = .published;
-    }
-    pub fn resourceMember(self: *Cell) external.ScopeMember {
-        return external.scopeMember(Cell, self);
-    }
-    pub const Admission = union(enum) { pending, closed, invalid_operation, operation: Value };
-    allocator: std.mem.Allocator,
+pub const Cell = @import("port_service.zig").Resource(ResourceAdapter);
+const ResourceAdapter = struct {
+    pub const Exchange = @import("port_operation.zig").Exchange(OperationAdapter);
+    pub const Request = struct { code: u32, lane: u32, endpoints: u64 };
     owner: *OwnerState,
-    scheduler: *const scheduler.WorkerScheduler,
     instance: *native.ModuleInstance,
     kind: u32,
     definition: abi.PortDefinition,
     backend: []align(64) u8,
-    controllers: *ControllerGroup,
-    refs: std.atomic.Value(u32) = .init(1),
-    closed: std.atomic.Value(bool) = .init(false),
-    mutex: std.Io.Mutex = .init,
-    changed: std.Io.Condition = .init,
-    waits: external.WaitList(Cell) = .{},
-    ownership: external.Ownership = .provisional,
-    publication: union(enum) { published, provisional: *scheduler.ExternalGroup } = .published,
-    dependency: union(enum) {
-        independent,
-        attached: struct { parent: *Cell, membership: external.ScopeMembership },
-        retired,
-    } = .independent,
-    children: ?*scheduler.ExternalGroup = null,
-    phase: enum { reserved, initializing, open, closing, cleaned, joined } = .reserved,
-    initialization_failure: ?Failure = null,
-    shutdown_state: union(enum) { idle, requested, running, completed: ?Failure, aborted } = .idle,
     configuration: ?Value = null,
     message_budget: *message_transport.Budget,
     resource_pipes: [64]?Protocol.Transport = .{null} ** 64,
-    lanes: [abi.max_port_lanes]Operations,
-
-    fn initializeAllocation(cell: *Cell, owner: *OwnerState, instance: *native.ModuleInstance, kind: u32, config: *const port_message.Validated, worker: *const scheduler.WorkerScheduler) error{OutOfMemory}!void {
-        const allocator = owner.host.allocator();
+    pub fn allocator(self: *const ResourceAdapter) std.mem.Allocator {
+        return self.owner.host.allocator();
+    }
+    pub fn executor(self: *const ResourceAdapter) *controllers.Executor {
+        return self.owner.executor.access();
+    }
+    pub fn nextIdentity(self: *ResourceAdapter) u64 {
+        lock(&self.owner.mutex);
+        defer unlock(&self.owner.mutex);
+        const identity = self.owner.identity;
+        self.owner.identity +%= 1;
+        return identity;
+    }
+    pub fn operationLane(_: *ResourceAdapter, selected: Request) u32 {
+        return selected.lane;
+    }
+    pub fn prepareOperation(_: *ResourceAdapter, cell: *Cell, selected: Request, request: *const port_message.Validated, lane: *Operation.Lane) error{OutOfMemory}!*Operation.Prepared {
+        return OperationAdapter.prepare(cell, selected.code, selected.lane, selected.endpoints, request, lane);
+    }
+    pub fn retire(_: *ResourceAdapter, cell: *Cell) void {
+        Resource.retire(cell);
+    }
+    pub fn destroy(self: *ResourceAdapter, cell: *Cell) void {
+        if (self.configuration) |config| heap.hostDomain(self.owner.host).releaseValue(config);
+        for (self.resource_pipes) |pipe| if (pipe) |transport| transport.release();
+        self.message_budget.release();
+        self.instance.releasePin();
+        cell.allocator.free(self.backend);
+        Resource.destroy(cell);
+    }
+    pub fn initState(self: *ResourceAdapter) void {
+        self.definition.init_state.?(self.backend.ptr);
+    }
+    pub fn initializeBackend(self: *ResourceAdapter, cell: *Cell) void {
+        var ctx: ControllerContext = .{ .cell = cell, .invocation = .initialize };
+        defer ctx.deinit();
+        self.definition.initialize.?(self.backend.ptr, &controller_table, &ctx);
+    }
+    pub fn cancel(self: *ResourceAdapter) void {
+        self.definition.cancel.?(self.backend.ptr);
+    }
+    pub fn failTransport(self: *ResourceAdapter) void {
+        for (self.resource_pipes) |pipe| if (pipe) |transport| transport.fail(.init(.io, "native resource is closed"), true);
+    }
+    pub fn abortTransport(self: *ResourceAdapter) void {
+        for (self.resource_pipes) |pipe| if (pipe) |transport| transport.abort();
+    }
+    pub fn cleanup(self: *ResourceAdapter) void {
+        self.definition.cleanup.?(self.backend.ptr);
+    }
+    pub fn shutdown(self: *ResourceAdapter, cell: *Cell) ?byte_transport.Failure {
+        var ctx: ControllerContext = .{ .cell = cell, .invocation = .{ .shutdown = null } };
+        defer ctx.deinit();
+        self.definition.shutdown.?(self.backend.ptr, &controller_table, &ctx);
+        return if (ctx.invocation.shutdown) |failure| semanticFailure(failure) else null;
+    }
+    fn initializeAllocation(cell: *Cell, owner: *OwnerState, instance: *native.ModuleInstance, kind: u32, config: *const port_message.Validated, worker: *const scheduler.WorkerScheduler) error{ OutOfMemory, InvalidLimits }!void {
+        const memory = owner.host.allocator();
         const definition = instance.validated().port(kind).?;
-        const state = try allocator.alignedAlloc(u8, .@"64", definition.state_size);
-        errdefer allocator.free(state);
-        const group = try ControllerGroup.init(allocator, owner.executor.access(), cell);
-        errdefer group.deinit();
+        const state = try memory.alignedAlloc(u8, .@"64", definition.state_size);
+        errdefer memory.free(state);
         const message_budget = try message_transport.Budget.create(owner.host, owner.limits.message_queue_bytes);
         errdefer message_budget.release();
-        cell.* = .{ .allocator = allocator, .owner = owner, .scheduler = worker, .instance = instance, .kind = kind, .definition = definition, .backend = state, .controllers = group, .message_budget = message_budget, .lanes = .{Operations.init(&cell.mutex)} ** abi.max_port_lanes };
-        errdefer for (cell.resource_pipes) |pipe| if (pipe) |transport| transport.release();
-        for (&cell.resource_pipes, 0..) |*slot, index| {
+        try cell.initialize(.{ .owner = owner, .instance = instance, .kind = kind, .definition = definition, .backend = state, .message_budget = message_budget }, worker, definition.lane_count, owner.limits.max_operations, definition.shutdown != null);
+        errdefer cell.controllers.deinit();
+        errdefer for (cell.adapter.resource_pipes) |pipe| if (pipe) |transport| transport.release();
+        for (&cell.adapter.resource_pipes, 0..) |*slot, index| {
             const endpoint = instance.validated().endpoint(kind, @intCast(index), .resource) orelse continue;
             const transport = try Protocol.Transport.create(cell, switch (endpoint.transport) {
                 .bytes => .bytes,
@@ -327,311 +305,9 @@ pub const Cell = struct {
             });
             slot.* = transport;
         }
-        cell.configuration = config.value();
+        cell.adapter.configuration = config.value();
         heap.retainValue(config.value());
         instance.retain();
-    }
-    pub fn retainReadiness(self: *Cell) void {
-        _ = self.refs.fetchAdd(1, .monotonic);
-    }
-    pub fn releaseReadiness(self: *Cell) void {
-        self.release();
-    }
-    pub fn retainExternalMember(self: *Cell) void {
-        self.retainReadiness();
-    }
-    pub fn releaseExternalMember(self: *Cell) void {
-        self.release();
-    }
-    pub fn cancelExternalMember(self: *Cell, scope: *external.ScopeIdentity) void {
-        lock(&self.mutex);
-        defer unlock(&self.mutex);
-        const dependent = switch (self.dependency) {
-            .attached => |attachment| attachment.membership.authorizesCancellation(scope),
-            .independent, .retired => false,
-        };
-        if (self.ownership.authorizesCancellation(scope) or dependent) self.closeLocked();
-    }
-    pub fn releasePort(self: *Cell) void {
-        lock(&self.mutex);
-        if (self.publication == .provisional) self.closeLocked();
-        unlock(&self.mutex);
-        self.release();
-    }
-    fn release(self: *Cell) void {
-        if (self.refs.fetchSub(1, .acq_rel) != 1) return;
-        if (self.publication == .provisional) self.publication.provisional.release();
-        if (self.children) |children| children.release();
-        if (self.configuration) |config| heap.hostDomain(self.owner.host).releaseValue(config);
-        for (self.resource_pipes) |pipe| if (pipe) |transport| transport.release();
-        self.message_budget.release();
-        self.instance.releasePin();
-        self.allocator.free(self.backend);
-        self.controllers.deinit();
-        Resource.destroy(self);
-    }
-    pub fn registerReadiness(self: *Cell, key: u64, target: external.WakeTarget) external.RegisterError!external.RegisterResult {
-        return external.WaitList(Cell).register(self, key, target);
-    }
-    pub fn readyLocked(self: *Cell, key: u64) bool {
-        return switch (key) {
-            0 => self.phase != .reserved and self.phase != .initializing,
-            1 => self.phase == .joined,
-            else => self.closed.load(.acquire) or self.shutdown_state != .idle or key - 2 >= self.definition.lane_count or
-                self.lanes[key - 2].hasCapacity(self.laneCapacity(@intCast(key - 2))),
-        };
-    }
-    pub fn wakeReasonLocked(_: *Cell, _: u64) external.Wake {
-        return .ready;
-    }
-    fn laneCapacity(self: *Cell, lane: u32) u32 {
-        const total = self.owner.limits.max_operations;
-        const lanes = self.definition.lane_count;
-        return total / lanes + @as(u32, @intFromBool(lane < total % lanes));
-    }
-    pub fn admissionSource(self: *Cell, code: u32) external.ReadinessSource {
-        return self.source(2 + @as(u64, self.definition.select_lane.?(code)));
-    }
-    pub fn source(self: *Cell, key: u64) external.ReadinessSource {
-        return external.readinessSource(Cell, self, key);
-    }
-    pub fn initialized(self: *Cell) union(enum) { pending, ready, failed: Failure } {
-        lock(&self.mutex);
-        defer unlock(&self.mutex);
-        return switch (self.phase) {
-            .reserved, .initializing => .pending,
-            .open => .ready,
-            .closing, .cleaned, .joined => .{ .failed = self.initialization_failure orelse Failure.init(.io, "native port is closed") },
-        };
-    }
-    pub fn joined(self: *Cell) bool {
-        lock(&self.mutex);
-        defer unlock(&self.mutex);
-        return self.phase == .joined;
-    }
-    pub fn close(self: *Cell) void {
-        lock(&self.mutex);
-        defer unlock(&self.mutex);
-        self.closeLocked();
-    }
-    pub fn shutdown(self: *Cell) union(enum) { pending, ready, unsupported, failed: Failure } {
-        lock(&self.mutex);
-        defer unlock(&self.mutex);
-        if (self.definition.shutdown == null) return .unsupported;
-        switch (self.shutdown_state) {
-            .idle => {
-                if (self.closed.load(.acquire)) {
-                    self.shutdown_state = .aborted;
-                } else {
-                    self.shutdown_state = .requested;
-                    self.changed.broadcast(io());
-                    self.waits.notifyLocked(self);
-                }
-            },
-            .requested, .running, .completed, .aborted => {},
-        }
-        if (self.phase != .joined) return .pending;
-        return switch (self.shutdown_state) {
-            .completed => |failure| if (failure) |value| .{ .failed = value } else .ready,
-            .idle, .requested, .running, .aborted => .{ .failed = Failure.init(.io, "resource closed before graceful shutdown completed") },
-        };
-    }
-    fn closeLocked(self: *Cell) void {
-        if (self.closed.swap(true, .acq_rel)) return;
-        const notify_backend = self.phase == .initializing or self.phase == .open;
-        self.phase = .closing;
-        if (self.children) |children| children.close();
-        // Total admission, across every lane, is capped at 256.
-        for (self.lanes[0..self.definition.lane_count]) |*lane| {
-            var ticket = lane.front();
-            while (ticket) |current| : (ticket = current.successor()) current.owner().markCancelled();
-        }
-        for (self.resource_pipes) |pipe| if (pipe) |transport| transport.fail(.init(.io, "native resource is closed"), true);
-        if (notify_backend) self.definition.cancel.?(self.backend.ptr);
-        self.changed.broadcast(io());
-        self.waits.notifyLocked(self);
-    }
-    fn run(execution: *controllers.Execution, self: *Cell) void {
-        lock(&self.mutex);
-        self.definition.init_state.?(self.backend.ptr);
-        const initialize = !self.closed.load(.acquire);
-        if (initialize) self.phase = .initializing;
-        unlock(&self.mutex);
-        var controller_context: ControllerContext = .{ .cell = self, .invocation = .initialize };
-        if (initialize) self.definition.initialize.?(self.backend.ptr, &controller_table, &controller_context);
-        controller_context.deinit();
-        lock(&self.mutex);
-        if (self.initialization_failure != null) self.closed.store(true, .release);
-        const lane_count = if (self.closed.load(.acquire)) 1 else self.definition.lane_count + @as(u32, @intFromBool(self.definition.shutdown != null));
-        unlock(&self.mutex);
-        execution.runLanes(lane_count, self, Cell.runLane, Cell.failLaneStartup, Cell.publishInitialization);
-        // Every operation executor and cancellation notification has finished.
-        // The root controller owns cleanup; its reaper joins it before detach.
-        lock(&self.mutex);
-        unlock(&self.mutex);
-        for (self.resource_pipes) |pipe| if (pipe) |transport| transport.abort();
-        if (self.children) |children| {
-            children.close();
-            children.join(execution);
-        }
-        self.definition.cleanup.?(self.backend.ptr);
-        lock(&self.mutex);
-        self.phase = .cleaned;
-        unlock(&self.mutex);
-    }
-    fn failLaneStartup(self: *Cell) void {
-        lock(&self.mutex);
-        self.initialization_failure = Failure.init(.io, "cannot start native controller lane");
-        self.closeLocked();
-        unlock(&self.mutex);
-    }
-    fn publishInitialization(self: *Cell) void {
-        lock(&self.mutex);
-        self.phase = if (self.closed.load(.acquire)) .closing else .open;
-        self.waits.notifyLocked(self);
-        self.changed.broadcast(io());
-        unlock(&self.mutex);
-    }
-    fn prepareStartup(cell: *Cell, scope: *scheduler.TaskScope) error{ OutOfMemory, ScopeClosing }!void {
-        try transfers.publishScope(Cell, cell, scope, Cell.transferOwnership);
-    }
-    fn abortStartup(cell: *Cell) void {
-        cell.closed.store(true, .release);
-    }
-    fn retireExecutionLocked(cell: *Cell, _: controllers.Outcome(void)) void {
-        Resource.retire(cell);
-        cell.phase = .joined;
-        cell.waits.notifyLocked(cell);
-        cell.changed.broadcast(io());
-    }
-    fn retireDependency(self: *Cell) void {
-        lock(&self.mutex);
-        var token: ?external.ScopeMembership = switch (self.dependency) {
-            .attached => |attachment| attachment.membership,
-            .independent, .retired => null,
-        };
-        self.dependency = .retired;
-        unlock(&self.mutex);
-        if (token) |*membership| membership.detach();
-    }
-    pub fn childrenClosed(_: *Cell) void {}
-    fn childGroup(self: *Cell) error{ OutOfMemory, Closed }!*scheduler.ExternalGroup {
-        lock(&self.mutex);
-        const existing = self.children;
-        unlock(&self.mutex);
-        if (existing) |group| return group;
-        const candidate = try scheduler.ExternalGroup.create(self.scheduler, Cell, self);
-        lock(&self.mutex);
-        const closed = self.closed.load(.acquire);
-        if (!closed and self.children == null) {
-            self.children = candidate;
-            unlock(&self.mutex);
-            return candidate;
-        }
-        const selected = self.children;
-        unlock(&self.mutex);
-        candidate.release();
-        return selected orelse error.Closed;
-    }
-    const Parent = struct { cell: *Cell, group: *scheduler.ExternalGroup };
-    fn prepareChildStartup(self: *Cell, provisional: *scheduler.ExternalGroup, dependent: ?Parent) error{ OutOfMemory, ScopeClosing }!void {
-        const Publication = struct {
-            cell: *Cell,
-            parent: ?*Cell,
-            pub fn lock(item: *@This()) void {
-                std.Io.Threaded.mutexLock(&item.cell.mutex);
-            }
-            pub fn unlock(item: *@This()) void {
-                std.Io.Threaded.mutexUnlock(&item.cell.mutex);
-            }
-            pub fn validate(item: *@This()) bool {
-                return !item.cell.closed.load(.acquire) and
-                    (if (item.parent != null) item.cell.dependency == .independent else item.cell.ownership == .provisional);
-            }
-            pub fn publish(item: *@This(), tokens: [16]?external.ScopeMembership) void {
-                if (item.parent) |parent| {
-                    item.cell.dependency = .{ .attached = .{ .parent = parent, .membership = tokens[0].? } };
-                } else item.cell.ownership = .{ .owned = tokens[0].? };
-            }
-        };
-        var publication: Publication = .{ .cell = self, .parent = null };
-        var incoming: [16]?external.ScopeMember = .{null} ** 16;
-        incoming[0] = external.scopeMember(Cell, self);
-        if (!try provisional.publish(incoming, &publication)) return error.ScopeClosing;
-        if (dependent) |parent| {
-            publication.parent = parent.cell;
-            incoming = .{null} ** 16;
-            incoming[0] = external.scopeMember(Cell, self);
-            if (!try parent.group.publish(incoming, &publication)) return error.ScopeClosing;
-        }
-    }
-    fn runShutdown(self: *Cell) void {
-        lock(&self.mutex);
-        while (self.shutdown_state == .idle and !self.closed.load(.acquire))
-            self.changed.waitUncancelable(io(), &self.mutex);
-        if (self.closed.load(.acquire)) {
-            self.shutdown_state = .aborted;
-            unlock(&self.mutex);
-            return;
-        }
-        self.shutdown_state = .running;
-        unlock(&self.mutex);
-        var ctx: ControllerContext = .{ .cell = self, .invocation = .{ .shutdown = null } };
-        defer ctx.deinit();
-        self.definition.shutdown.?(self.backend.ptr, &controller_table, &ctx);
-        lock(&self.mutex);
-        self.shutdown_state = if (self.closed.load(.acquire)) .aborted else .{ .completed = ctx.invocation.shutdown };
-        self.closeLocked();
-        unlock(&self.mutex);
-    }
-    fn runLane(self: *Cell, index: usize) void {
-        if (index == self.definition.lane_count) return self.runShutdown();
-        const lane = &self.lanes[index];
-        while (true) {
-            lock(&self.mutex);
-            while (!lane.dispatchable() and !self.closed.load(.acquire)) self.changed.waitUncancelable(io(), &self.mutex);
-            const finished = lane.empty();
-            unlock(&self.mutex);
-            if (finished) return;
-            _ = lane.runNext();
-        }
-    }
-    pub fn admitOnLane(self: *Cell, code: u32, lane: u32, endpoints: u64, scope: *scheduler.TaskScope, request: *const port_message.Validated) error{ OutOfMemory, ScopeClosing }!Admission {
-        lock(&self.mutex);
-        const closed = self.closed.load(.acquire) or self.shutdown_state != .idle;
-        const invalid = lane >= self.definition.lane_count;
-        const full = !invalid and !self.lanes[lane].hasCapacity(self.laneCapacity(lane));
-        unlock(&self.mutex);
-        if (closed) return .closed;
-        if (invalid) return .invalid_operation;
-        if (full) return .pending;
-        const op = OperationAdapter.create(self, code, lane, endpoints, request) catch |err| return switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            error.Closed => .closed,
-            error.Full => .pending,
-        };
-        lock(&self.owner.mutex);
-        const identity = self.owner.identity;
-        self.owner.identity +%= 1;
-        unlock(&self.owner.mutex);
-        return .{ .operation = try op.publish(identity, scope) };
-    }
-
-    const Transfer = transfers.ScopeTransfer(Cell, transferOwnership, transferLive);
-    fn transferOwnership(self: *Cell) *external.Ownership {
-        return &self.ownership;
-    }
-    fn transferLive(self: *Cell) bool {
-        return !self.closed.load(.acquire);
-    }
-    pub fn prepareScopeTransfer(self: *Cell, from: *anyopaque, to: *anyopaque) heap.PortTransferError!void {
-        return Transfer.prepare(self, from, to);
-    }
-    pub fn commitScopeTransfer(self: *Cell) void {
-        Transfer.commit(self);
-    }
-    pub fn abortScopeTransfer(self: *Cell) void {
-        Transfer.abort(self);
     }
 };
 
@@ -648,14 +324,14 @@ const Protocol = struct {
             // a tag whose payload was never initialized during rollback.
             switch (kind) {
                 .bytes => {
-                    const pair = byte_transport.create(cell.owner.host, cell.owner.limits.ring_capacity) catch |err| return switch (err) {
+                    const pair = byte_transport.create(cell.adapter.owner.host, cell.adapter.owner.limits.ring_capacity) catch |err| return switch (err) {
                         error.OutOfMemory => error.OutOfMemory,
                         error.InvalidCapacity => unreachable,
                     };
                     return .{ .bytes = pair };
                 },
                 .messages => {
-                    const pair = message_transport.Queue.create(cell.message_budget, cell.owner.limits.message_capacity) catch |err| return switch (err) {
+                    const pair = message_transport.Queue.create(cell.adapter.message_budget, cell.adapter.owner.limits.message_capacity) catch |err| return switch (err) {
                         error.OutOfMemory => error.OutOfMemory,
                         error.InvalidCapacity => unreachable,
                     };
@@ -702,7 +378,7 @@ const Protocol = struct {
         for (&result.pipes, 0..) |*pipe, index| {
             const id: u6 = @intCast(index);
             if (endpoints & (@as(u64, 1) << id) == 0) continue;
-            const definition = cell.instance.validated().endpoint(cell.kind, id, .exchange).?;
+            const definition = cell.adapter.instance.validated().endpoint(cell.adapter.kind, id, .exchange).?;
             const transport = try Transport.create(cell, switch (definition.transport) {
                 .bytes => .bytes,
                 .messages => .messages,
@@ -713,7 +389,7 @@ const Protocol = struct {
     }
     fn deinit(self: *Protocol, cell: *Cell) void {
         for (self.pipes) |pipe| if (pipe) |pair| pair.release();
-        heap.hostDomain(cell.owner.host).releaseValue(self.parameters);
+        heap.hostDomain(cell.adapter.owner.host).releaseValue(self.parameters);
     }
 };
 
@@ -739,7 +415,7 @@ const OperationAdapter = struct {
         self.cell.changed.broadcast(io());
     }
     pub fn retireValue(self: *OperationAdapter, item: Value) void {
-        heap.hostDomain(self.cell.owner.host).releaseValue(item);
+        heap.hostDomain(self.cell.adapter.owner.host).releaseValue(item);
     }
     pub fn retainResource(self: *OperationAdapter) void {
         self.cell.retainReadiness();
@@ -757,20 +433,12 @@ const OperationAdapter = struct {
             .bytes => {},
         };
     }
-    pub fn create(cell: *Cell, code: u32, lane: u32, endpoints: u64, parameters: *const port_message.Validated) error{ OutOfMemory, Closed, Full }!*Operation {
-        const operation_allocator = cell.allocator;
+    pub fn prepare(cell: *Cell, code: u32, lane: u32, endpoints: u64, parameters: *const port_message.Validated, queue: *Operation.Lane) error{OutOfMemory}!*Operation.Prepared {
         var protocol = try Protocol.init(cell, endpoints, parameters);
         errdefer protocol.deinit(cell);
-        const terminal_value = try results.Result.create(cell.owner.host);
+        const terminal_value = try results.Result.create(cell.adapter.owner.host);
         errdefer terminal_value.release();
-        const prepared = try cell.lanes[lane].prepare(operation_allocator);
-        errdefer prepared.discard();
-        lock(&cell.mutex);
-        defer unlock(&cell.mutex);
-        if (cell.closed.load(.acquire) or cell.shutdown_state != .idle) return error.Closed;
-        const ticket = prepared.admit(cell.laneCapacity(lane), .{ OperationAdapter{ .cell = cell, .code = code, .lane = lane, .protocol = protocol, .endpoints = endpoints }, terminal_value }, Operation.initialize) orelse return error.Full;
-        cell.changed.broadcast(io());
-        return ticket.owner();
+        return Operation.prepare(.{ .cell = cell, .code = code, .lane = lane, .protocol = protocol, .endpoints = endpoints }, terminal_value, queue);
     }
     pub fn runnable(self: *OperationAdapter) bool {
         return !self.cell.closed.load(.acquire);
@@ -778,14 +446,14 @@ const OperationAdapter = struct {
     pub fn execute(self: *OperationAdapter, operation: *Operation, running: *controllers.Running) void {
         var ctx: ControllerContext = .{ .cell = self.cell, .invocation = .{ .operation = .{ .value = operation, .running = running } } };
         defer ctx.deinit();
-        self.cell.definition.execute.?(self.cell.backend.ptr, self.code, &controller_table, &ctx);
+        self.cell.adapter.definition.execute.?(self.cell.adapter.backend.ptr, self.code, &controller_table, &ctx);
     }
     pub fn completeResourceLocked(self: *OperationAdapter, outcome: controllers.Completion) void {
         if (outcome == .close_resource or (self.failure != null and self.failure.?.disposition == .resource)) self.cell.closeLocked();
         self.cell.waits.notifyLocked(self.cell);
     }
     pub fn cancelPolicy(self: *OperationAdapter) controllers.CallbackCancellation {
-        return switch (self.cell.definition.cancellation) {
+        return switch (self.cell.adapter.definition.cancellation) {
             .close_resource => .close_resource,
             .acknowledge => .acknowledge,
             _ => unreachable,
@@ -795,7 +463,7 @@ const OperationAdapter = struct {
         const cell = self.cell;
         switch (action) {
             .close_resource => cell.closeLocked(),
-            .interrupt => cell.definition.cancel_operation.?(cell.backend.ptr, self.lane),
+            .interrupt => cell.adapter.definition.cancel_operation.?(cell.adapter.backend.ptr, self.lane),
             .retired => {
                 cell.changed.broadcast(io());
                 cell.waits.notifyLocked(cell);
@@ -805,11 +473,11 @@ const OperationAdapter = struct {
     }
     pub fn notifyTransport(self: *OperationAdapter, operation: *Operation) void {
         if (operation.ticket.isCancelled()) {
-            for (self.cell.resource_pipes) |pipe| if (pipe) |transport| transport.interrupt();
+            for (self.cell.adapter.resource_pipes) |pipe| if (pipe) |transport| transport.interrupt();
         }
         if (operation.ticket.isCancelled() or operation.ticket.status() == .done) {
             for (self.protocol.pipes, 0..) |pipe, index| if (pipe) |pair| {
-                const endpoint = self.cell.instance.validated().endpoint(self.cell.kind, @intCast(index), .exchange).?;
+                const endpoint = self.cell.adapter.instance.validated().endpoint(self.cell.adapter.kind, @intCast(index), .exchange).?;
                 if (operation.ticket.isCancelled()) {
                     pair.fail(byte_transport.Failure.init(.cancelled, "exchange was cancelled"), false);
                 } else if (endpoint.direction == .input) {
@@ -825,11 +493,13 @@ const OperationAdapter = struct {
     }
     fn stageChild(self: *OperationAdapter, operation: *Operation, kind: u32, configuration: *const port_message.Validated, dependency: abi.ChildDependency) CreateError!Value {
         const parent = self.cell;
-        const owner = parent.owner;
-        if (parent.instance.validated().port(kind).?.lane_count > owner.limits.max_operations) return error.InsufficientLanes;
+        const owner = parent.adapter.owner;
         const provisional = try operation.childGroup();
         const dependent: ?Cell.Parent = if (dependency == .dependent) .{ .cell = parent, .group = try parent.childGroup() } else null;
-        const cell = try Resource.create(owner, .{ parent.instance, kind, configuration, parent.scheduler }, Cell.initializeAllocation);
+        const cell = Resource.create(owner, .{ parent.adapter.instance, kind, configuration, parent.scheduler }, ResourceAdapter.initializeAllocation) catch |err| return switch (err) {
+            error.InvalidLimits => error.InsufficientLanes,
+            else => |failure| failure,
+        };
         provisional.retain();
         cell.publication = .{ .provisional = provisional };
         std.Io.Threaded.mutexLock(&owner.mutex);
@@ -883,7 +553,7 @@ const EndpointParent = union(enum) {
     fn transport(self: EndpointParent, index: u32) ?Protocol.Transport {
         if (index >= 64) return null;
         return switch (self) {
-            .resource => |resource| resource.resource_pipes[index],
+            .resource => |resource| resource.adapter.resource_pipes[index],
             .exchange => |operation| if (operation.adapter.endpoints & (@as(u64, 1) << @as(u6, @intCast(index))) != 0) operation.adapter.protocol.pipes[index] else null,
         };
     }
@@ -898,7 +568,7 @@ const EndpointState = struct {
 pub const Endpoint = opaque {
     pub const Permit = byte_transport.WritePermit;
     pub fn allocator(self: *Endpoint) std.mem.Allocator {
-        return self.state().parent.cell().owner.allocator();
+        return self.state().parent.cell().adapter.owner.allocator();
     }
     fn state(self: *Endpoint) *EndpointState {
         return @ptrCast(@alignCast(self));
@@ -942,7 +612,7 @@ pub const Endpoint = opaque {
     pub fn releasePort(self: *Endpoint) void {
         const owned = self.state();
         const parent = owned.parent;
-        const owner = parent.cell().owner;
+        const owner = parent.cell().adapter.owner;
         owner.allocator().destroy(owned);
         parent.release();
     }
@@ -972,13 +642,13 @@ fn borrowRegisteredEndpoint(parent: Value, selector: *RegisteredCapability) erro
         .exchange => .{ .exchange = exchangeFromValue(parent) orelse return error.WrongKind },
     };
     const cell = source.cell();
-    if (cell.instance != selector.instance() or cell.kind != spec.resource) return error.WrongKind;
+    if (cell.adapter.instance != selector.instance() or cell.adapter.kind != spec.resource) return error.WrongKind;
     return createEndpoint(source, spec);
 }
 
 fn createEndpoint(source: EndpointParent, spec: descriptor.EndpointDefinition) error{ OutOfMemory, Unsupported }!Value {
     const pair = source.transport(spec.id) orelse return error.Unsupported;
-    const owner = source.cell().owner;
+    const owner = source.cell().adapter.owner;
     const owned = try owner.allocator().create(EndpointState);
     errdefer owner.allocator().destroy(owned);
     owned.* = .{ .parent = source, .loan = switch (pair) {
@@ -1032,16 +702,16 @@ fn controllerParent(raw: *anyopaque, identity: *const anyopaque) callconv(.c) ?*
         .attached => |attachment| attachment.parent,
         .independent, .retired => return null,
     };
-    if (parent.instance != cell.instance or parent.definition.identity != identity) return null;
+    if (parent.adapter.instance != cell.adapter.instance or parent.adapter.definition.identity != identity) return null;
     // Membership remains attached until child cleanup and controller join.
     // The parent joins it before destroying the borrowed native state.
-    return parent.backend.ptr;
+    return parent.adapter.backend.ptr;
 }
 
 fn controllerInput(raw: *anyopaque, path: [*]const u64, depth: u32, output: *abi.ValueView) callconv(.c) bool {
     if (depth > abi.max_read_path_depth or output.size != @sizeOf(abi.ValueView)) return false;
     const ctx = context(raw);
-    const root: ?Value = if (ctx.operation()) |operation| operation.adapter.protocol.parameters else ctx.cell.configuration;
+    const root: ?Value = if (ctx.operation()) |operation| operation.adapter.protocol.parameters else ctx.cell.adapter.configuration;
     return viewMessage(root, path, depth, output);
 }
 fn viewMessage(root: ?Value, path: [*]const u64, depth: u32, output: *abi.ValueView) bool {
@@ -1098,7 +768,7 @@ fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest
     const op = ctx.operation() orelse return error.InvalidState;
     if (controllerCancelled(ctx)) return .invalid;
     if (ctx.builder == null) {
-        const builder = try message_builder.Builder.create(ctx.cell.owner.host);
+        const builder = try message_builder.Builder.create(ctx.cell.adapter.owner.host);
         ctx.builder = builder;
     }
     const builder = ctx.builder.?;
@@ -1130,13 +800,13 @@ fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest
         },
         .reply_endpoint => {
             if (request.endpoint >= 64) return error.InvalidState;
-            const spec = ctx.cell.instance.validated().endpoint(ctx.cell.kind, @intCast(request.endpoint), .exchange) orelse return error.InvalidState;
+            const spec = ctx.cell.adapter.instance.validated().endpoint(ctx.cell.adapter.kind, @intCast(request.endpoint), .exchange) orelse return error.InvalidState;
             if (spec.transport != .messages or spec.direction != .input) return error.InvalidState;
             const reply = createEndpoint(.{ .exchange = op }, spec) catch |err| return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 error.Unsupported => error.InvalidState,
             };
-            defer heap.hostDomain(ctx.cell.owner.host).releaseValue(reply);
+            defer heap.hostDomain(ctx.cell.adapter.owner.host).releaseValue(reply);
             try builder.copy(reply);
         },
         .child => {
@@ -1148,7 +818,7 @@ fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest
                 _ => return error.InvalidState,
             }
             var index: u32 = 0;
-            const kind = while (ctx.cell.instance.validated().port(index)) |definition| : (index += 1) {
+            const kind = while (ctx.cell.adapter.instance.validated().port(index)) |definition| : (index += 1) {
                 if (definition.identity == identity) break index;
             } else return error.InvalidState;
             const child = op.adapter.stageChild(op, kind, configuration, dependency) catch |err| {
@@ -1161,7 +831,7 @@ fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest
                 });
                 return if (err == error.OutOfMemory) .out_of_memory else .invalid;
             };
-            defer heap.hostDomain(ctx.cell.owner.host).releaseValue(child);
+            defer heap.hostDomain(ctx.cell.adapter.owner.host).releaseValue(child);
             try builder.replaceChild(child);
         },
         .prepare_child => try builder.prepareChild(),
@@ -1173,8 +843,8 @@ fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest
         .send => {
             const validated = builder.validated() orelse return error.InvalidState;
             const pair = controllerQueue(ctx, request.owner, request.endpoint, .output) orelse return error.InvalidState;
-            if (validated.footprint().bytes > ctx.cell.owner.limits.message_queue_bytes) return error.Overflow;
-            const item = try message_transport.Envelope.create(ctx.cell.owner.host, validated);
+            if (validated.footprint().bytes > ctx.cell.adapter.owner.limits.message_queue_bytes) return error.Overflow;
+            const item = try message_transport.Envelope.create(ctx.cell.adapter.owner.host, validated);
             if (!pair.controller.send(item, ctx.cancellation())) {
                 item.release();
                 return .invalid;
@@ -1184,7 +854,7 @@ fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest
         },
         .result => {
             const validated = builder.validated() orelse return error.InvalidState;
-            const item = try message_transport.Envelope.create(ctx.cell.owner.host, validated);
+            const item = try message_transport.Envelope.create(ctx.cell.adapter.owner.host, validated);
             if (!op.terminal_result.replace(item)) {
                 item.release();
                 return .invalid;
@@ -1219,7 +889,7 @@ fn controllerPipe(raw: *anyopaque, owner: abi.EndpointOwner, index: u32, directi
     const source = controllerEndpointParent(context(raw), owner) orelse return null;
     const cell = source.cell();
     if (index >= 64) return null;
-    const endpoint = cell.instance.validated().endpoint(cell.kind, @intCast(index), switch (source) {
+    const endpoint = cell.adapter.instance.validated().endpoint(cell.adapter.kind, @intCast(index), switch (source) {
         .resource => .resource,
         .exchange => .exchange,
     }) orelse return null;
@@ -1271,7 +941,7 @@ fn controllerQueue(raw: *anyopaque, owner: abi.EndpointOwner, index: u32, direct
     const source = controllerEndpointParent(context(raw), owner) orelse return null;
     const cell = source.cell();
     if (index >= 64) return null;
-    const endpoint = cell.instance.validated().endpoint(cell.kind, @intCast(index), switch (source) {
+    const endpoint = cell.adapter.instance.validated().endpoint(cell.adapter.kind, @intCast(index), switch (source) {
         .resource => .resource,
         .exchange => .exchange,
     }) orelse return null;
@@ -1328,7 +998,7 @@ fn controllerDiscardMessage(raw: *anyopaque) callconv(.c) bool {
 }
 fn controllerAcknowledge(raw: *anyopaque) callconv(.c) bool {
     const ctx = context(raw);
-    if (ctx.cell.closed.load(.acquire) or ctx.cell.definition.cancellation != .acknowledge) return false;
+    if (ctx.cell.closed.load(.acquire) or ctx.cell.adapter.definition.cancellation != .acknowledge) return false;
     const op = ctx.operation() orelse return false;
     lock(&op.mutex);
     defer unlock(&op.mutex);
@@ -1367,9 +1037,7 @@ fn recordControllerFailure(ctx: *ControllerContext, failure: Failure) void {
         recordOperationFailure(op, .{ .value = failure, .disposition = .operation });
     } else switch (ctx.invocation) {
         .initialize => {
-            lock(&ctx.cell.mutex);
-            storeControllerFailure(&ctx.cell.initialization_failure, failure);
-            unlock(&ctx.cell.mutex);
+            ctx.cell.failInitialization(semanticFailure(failure));
         },
         .shutdown => storeControllerFailure(&ctx.invocation.shutdown, failure),
         .operation => unreachable,
@@ -1397,5 +1065,5 @@ pub fn fromValue(value: Value, instance: *native.ModuleInstance, kind: u32) ?*Ce
         else => return null,
     };
     const cell = resource_api.Resource.project(Cell, .{ .port = handle }) orelse return null;
-    return if (cell.instance == instance and cell.kind == kind) cell else null;
+    return if (cell.adapter.instance == instance and cell.adapter.kind == kind) cell else null;
 }

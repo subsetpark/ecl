@@ -46,11 +46,50 @@ pub fn Exchange(comptime Adapter: type) type {
         lifetime: enum { open, closing, closed } = .open,
         terminal_result: *results.Result,
 
-        /// Consumes prepared adapter storage and result into an admitted lane entry.
-        /// The adapter's resource pin is acquired before execution becomes visible.
-        pub fn initialize(self: *Operation, ticket: *Lane.Ticket, adapter: Adapter, result: *results.Result) void {
+        const Preparation = struct {
+            allocator: std.mem.Allocator,
+            node: *Lane.Prepared,
+            phase: union(enum) { ready: struct { adapter: Adapter, result: *results.Result }, admitted },
+        };
+        pub const Prepared = opaque {
+            fn state(self: *Prepared) *Preparation {
+                return @ptrCast(@alignCast(self));
+            }
+            /// Called under the issuing resource lock. Success consumes the
+            /// prepared payload into its lane; rejection retains it unchanged.
+            /// In both cases, deinit retires this wrapper after unlocking.
+            pub fn admit(self: *Prepared, limit: usize) ?*Operation {
+                const owned = self.state();
+                const ready = owned.phase.ready;
+                const ticket = owned.node.admit(limit, .{ ready.adapter, ready.result }, initialize) orelse return null;
+                owned.phase = .admitted;
+                return ticket.owner();
+            }
+            pub fn deinit(self: *Prepared) void {
+                const owned = self.state();
+                switch (owned.phase) {
+                    .ready => |*ready| {
+                        owned.node.discard();
+                        ready.result.release();
+                        ready.adapter.deinit();
+                    },
+                    .admitted => {},
+                }
+                owned.allocator.destroy(owned);
+            }
+        };
+        /// Success consumes the adapter and result and pins the resource.
+        /// Failure retains both. All allocation precedes admission locking.
+        pub fn prepare(adapter: Adapter, result: *results.Result, lane: *Lane) error{OutOfMemory}!*Prepared {
+            const owned = try adapter.allocator().create(Preparation);
+            errdefer adapter.allocator().destroy(owned);
+            const node = try lane.prepare(adapter.allocator());
+            owned.* = .{ .allocator = adapter.allocator(), .node = node, .phase = .{ .ready = .{ .adapter = adapter, .result = result } } };
+            owned.phase.ready.adapter.retainResource();
+            return @ptrCast(owned);
+        }
+        fn initialize(self: *Operation, ticket: *Lane.Ticket, adapter: Adapter, result: *results.Result) void {
             self.* = .{ .allocator = adapter.allocator(), .adapter = adapter, .ticket = ticket, .terminal_result = result };
-            self.adapter.retainResource();
         }
         /// Consumes the admitted observer on every path. Success publishes both
         /// the capability and scope membership before making the lane runnable;

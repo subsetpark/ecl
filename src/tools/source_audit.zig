@@ -137,7 +137,8 @@ const source_groups = [_]SourceGroup{
     .{ .production = true, .files = &.{
         "scheduler.zig",     "scheduler_core.zig",  "external.zig",      "process_port.zig",    "console.zig",       "task_prims.zig",     "filesystem_port.zig", "package_authority.zig", "directory_order.zig",
         "net_port.zig",      "byte_ring.zig",       "port_transfer.zig", "port_controller.zig", "port_message.zig",  "port_failure.zig",   "port_builder.zig",    "port_bytes.zig",        "port_messages.zig",
-        "port_resource.zig", "module_bindings.zig", "port_endpoint.zig", "port_result.zig",     "port_exchange.zig", "port_operation.zig", "port_factory.zig",    "process_adapter.zig",   "net_adapter.zig",
+        "port_resource.zig", "module_bindings.zig", "port_endpoint.zig", "port_result.zig",     "port_exchange.zig", "port_operation.zig", "port_service.zig",    "port_factory.zig",      "process_adapter.zig",
+        "net_adapter.zig",
     }, .sources = &.{
         @embedFile("../scheduler.zig"),       @embedFile("../scheduler_core.zig"),
         @embedFile("../external.zig"),        @embedFile("../process_port.zig"),
@@ -151,8 +152,8 @@ const source_groups = [_]SourceGroup{
         @embedFile("../port_resource.zig"),   @embedFile("../module_bindings.zig"),
         @embedFile("../port_endpoint.zig"),   @embedFile("../port_result.zig"),
         @embedFile("../port_exchange.zig"),   @embedFile("../port_operation.zig"),
-        @embedFile("../port_factory.zig"),    @embedFile("../process_adapter.zig"),
-        @embedFile("../net_adapter.zig"),
+        @embedFile("../port_service.zig"),    @embedFile("../port_factory.zig"),
+        @embedFile("../process_adapter.zig"), @embedFile("../net_adapter.zig"),
     } },
     // The installed author SDK, its sized ABI records, validation, loader,
     // and transactional-call boundary form one separately rooted component.

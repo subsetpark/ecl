@@ -1691,6 +1691,14 @@ Queue and observer ownership independently keep that allocation alive; only
 their final release destroys the payload and ticket. A writer allocation pins
 its admitted resource until both its turn and permit ownership end.
 
+The common controller service validates lane capacity, admits prepared
+exchanges, supplies admission readiness, sequences initialization and graceful
+shutdown, interrupts outstanding operations, and joins execution and dependent
+children before cleanup becomes observable. Adapter state supplies typed
+backend work and transport; ABI descriptors and operation codes remain outside
+this lifecycle. Admission preparation owns its result and resource pin before
+acquiring the publication lock, and rejection retires them after unlocking.
+
 A shared exchange owner carries scope membership, cancellation settlement,
 provisional child ownership, terminal results, and readiness for registered
 controller adapters. The typed adapter supplies execution and transport, while
