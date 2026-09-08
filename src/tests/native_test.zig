@@ -62,6 +62,16 @@ test "native: common requests reject executable values oversize data and foreign
         "p port.close portprobe.cleaned", "'type 'overflow 'type 1");
 }
 
+test "native: common call composes result claiming and exchange cleanup" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.factory [] port.open 'p set p portprobe.noop [] port.call " ++
+        "p portprobe.noop [] port.call p port.close portprobe.cleaned", "() () 1");
+}
+
+test "native: common call closes failed exchanges and leaves its resource usable" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.factory [] port.open 'p set p wrap (portprobe.failure [] port.call) @attempt " ++
+        "'err at 'kind at p portprobe.noop [] port.call pop p port.close portprobe.cleaned", "'domain 1");
+}
+
 test "native: byte endpoints preserve exact bytes finish and stable eof" {
     for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.factory [] port.open 'p set p portprobe.echo [] port.begin 'x set " ++
         "x portprobe.input port.endpoint 'w set x portprobe.output port.endpoint 'r set " ++

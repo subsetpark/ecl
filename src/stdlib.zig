@@ -54,7 +54,11 @@ const Module = struct {
 };
 
 const modules = [_]Module{
-    .{ .name = "port", .entry = .{ .builtin = &@import("stdlib/port.zig").words } },
+    .{ .name = "port", .entry = .{ .source = .{
+        .name = "<stdlib:port>",
+        .text = @embedFile("stdlib/port.ecl"),
+    } } },
+    .{ .name = "port.core", .entry = .{ .builtin = &@import("stdlib/port.zig").words } },
     .{ .name = "task", .entry = .{ .builtin = &@import("task_prims.zig").words } },
     .{ .name = "dict", .entry = .{ .builtin = &dict_module.words } },
     .{ .name = "error", .entry = .{ .source = .{

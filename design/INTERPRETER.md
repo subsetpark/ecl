@@ -1401,6 +1401,12 @@ preserves accepted output unless cleanup is abortive. Cancellation wakes blocked
 transport independently of the operation lane. Copies are bounded per turn,
 and endpoint drivers use the shared resumable byte-transfer machinery.
 
+The `port` vocabulary is an embedded ECL module over the host operations in
+`port.core`. Its non-streaming call composition uses the same exchange result
+claim and cleanup boundary as explicit callers. It observes the result through
+an inline error boundary and closes the exchange before forwarding that outcome,
+without introducing a second task-scope owner for returned resources.
+
 Configuration and initial requests cross a bounded validation boundary before
 resource creation or operation admission. A nominal validated view grants
 retention of their immutable roots. Controllers receive only read-only wire

@@ -549,6 +549,7 @@ test "module sources: formatter and standard modules use @defm" {
     defer runtime.deinit();
     const exports = [_][]const u8{
         "port.await",
+        "port.core.await",
         "task.pending",
         "dict.from-pairs",
         "error.new",

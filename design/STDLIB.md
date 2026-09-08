@@ -2389,6 +2389,7 @@ the owning scope aborts outstanding work and joins cancellation cleanup.
 |---|---|---|
 | `port.open` | `( factory config -- resource )` | Initialize a resource and publish it into the calling scope. Failure joins cleanup through that scope. |
 | `port.begin` | `( resource operation request -- exchange )` | Admit a registered operation on its declared FIFO lane, parking while admission capacity is full. |
+| `port.call` | `( resource operation request -- value )` | Begin, claim the result, and close the exchange. Requires no additional streaming input or output. |
 | `port.endpoint` | `( source selector -- endpoint )` | Borrow a direction-specific endpoint permitted by the exchange's operation. Currently supports native exchange byte endpoints. |
 | `port.read` | `( readable max -- bytes )` | Read up to a positive maximum; `[]` denotes stable EOF. Overlapping readers raise `'contract`. |
 | `port.write` | `( writable bytes -- )` | Accept a complete byte list under bounded pressure. Concurrent calls execute FIFO and remain contiguous. |
@@ -2413,6 +2414,10 @@ terminal failure is raised. Once observed, EOF remains stable even if the
 exchange subsequently fails. An early input consumer exit wakes blocked writers
 with `'io`. Streaming callers must drain independent outputs concurrently when
 necessary for progress; waiting for completion does not drain them.
+
+`port.call` is an ECL composition. It closes the exchange before returning its
+result or re-raising its terminal error. It leaves the resource with its owner.
+The public `port` module composes the host operations exported by `port.core`.
 
 Configuration and initial requests may contain integers, floats, characters,
 symbols, lists, dictionaries, and port capabilities. Executable words, tasks,

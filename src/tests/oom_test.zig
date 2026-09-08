@@ -259,6 +259,7 @@ fn runExpectedLanguageError(runtime: *session.Session, name: []const u8, source:
 }
 
 const allocation_failure_shard_count = 4;
+const AllocationShape = enum { deterministic, concurrent };
 
 fn checkAllocationFailureShard(
     backing_allocator: std.mem.Allocator,
@@ -354,6 +355,7 @@ fn checkPostInitAllocationFailureShard(
     ordinal_shard_index: usize,
     ordinal_shard_count: usize,
     worker_index: usize,
+    comptime shape: AllocationShape,
 ) !void {
     var failure_offset = ordinal_shard_index + worker_index * ordinal_shard_count;
     const stride = allocation_failure_shard_count * ordinal_shard_count;
@@ -364,7 +366,10 @@ fn checkPostInitAllocationFailureShard(
             if (failing.has_induced_failure) {
                 return error.SwallowedOutOfMemoryError;
             }
-            return error.NondeterministicMemoryUsage;
+            if (shape == .deterministic) return error.NondeterministicMemoryUsage;
+            // A controller may complete before a readiness registration is
+            // needed. No allocation failed in this shorter execution.
+            if (failing.allocated_bytes != failing.freed_bytes) return error.MemoryLeakDetected;
         } else |err| switch (err) {
             error.OutOfMemory => {
                 if (!failing.has_induced_failure) return error.UnexpectedOutOfMemory;
@@ -405,7 +410,15 @@ fn checkAllPostInitAllocationFailuresParallel(
         probe,
         0,
         1,
+        .deterministic,
     );
+}
+
+/// Concurrent controllers can elide wait allocations. Sweep the observed
+/// allocation high-water mark, requiring propagation and complete reclamation
+/// for every induced failure; shorter executions must also reclaim everything.
+fn checkConcurrentPostInitAllocationFailures(backing_allocator: std.mem.Allocator, comptime probe: anytype) !void {
+    return checkPostInitAllocationFailureOrdinalShard(backing_allocator, probe, 0, 1, .concurrent);
 }
 
 /// Exhausts one residue class of a probe's post-init allocation ordinals.
@@ -419,17 +432,21 @@ fn checkPostInitAllocationFailureOrdinalShard(
     comptime probe: anytype,
     comptime ordinal_shard_index: usize,
     comptime ordinal_shard_count: usize,
+    comptime shape: AllocationShape,
 ) !void {
     comptime {
         if (ordinal_shard_count == 0) @compileError("an OOM ordinal shard count must be nonzero");
         if (ordinal_shard_index >= ordinal_shard_count) @compileError("an OOM ordinal shard index must be in range");
     }
     var warm = std.testing.FailingAllocator.init(backing_allocator, .{});
-    _ = try probe(&warm, null);
+    const warm_start = try probe(&warm, null);
 
     var baseline = std.testing.FailingAllocator.init(backing_allocator, .{});
     const first_failure_index = try probe(&baseline, null);
-    const needed_alloc_count = baseline.alloc_index - first_failure_index;
+    const needed_alloc_count = if (shape == .concurrent)
+        @max(warm.alloc_index - warm_start, baseline.alloc_index - first_failure_index)
+    else
+        baseline.alloc_index - first_failure_index;
     if (needed_alloc_count == 0) return error.MissingAllocationCoverage;
 
     const Context = struct {
@@ -446,6 +463,7 @@ fn checkPostInitAllocationFailureOrdinalShard(
                 ordinal_shard_index,
                 ordinal_shard_count,
                 context.worker_index,
+                shape,
             ) catch |err| {
                 context.result = err;
             };
@@ -1376,9 +1394,33 @@ test "oom: standard-library and host: native port registered capability publicat
     ).run);
 }
 
+test "oom: standard-library and host: native port registered vocabulary publication" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortProbe(
+        "'port.core ('open) import 'port ('call) import",
+        "",
+    ).run);
+}
+
+test "oom: standard-library and host: native port registered concurrent allocation accounting" {
+    try requireSelectedOomTest(@src());
+    const Probe = struct {
+        fn run(failing: *std.testing.FailingAllocator, failure_offset: ?usize) !usize {
+            const start = failing.alloc_index;
+            if (failure_offset) |offset| failing.fail_index = start + offset;
+            // Deliberately swallow allocation failure to prove that allowing
+            // an omitted asynchronous wait does not allow a lost OOM error.
+            const storage = failing.allocator().alloc(u8, 1) catch return start;
+            failing.allocator().free(storage);
+            return start;
+        }
+    };
+    try std.testing.expectError(error.SwallowedOutOfMemoryError, checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, Probe.run));
+}
+
 test "oom: standard-library and host: native port registered open and begin" {
     try requireSelectedOomTest(@src());
-    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortLifecycleProbe(
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
         "portprobe.factory [] port.open dup portprobe.noop [] port.begin " ++
             "dup port.result pop port.close port.close",
     ).run);
@@ -1386,10 +1428,17 @@ test "oom: standard-library and host: native port registered open and begin" {
 
 test "oom: standard-library and host: native port registered byte input" {
     try requireSelectedOomTest(@src());
-    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortLifecycleProbe(
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
         "portprobe.factory [] port.open dup portprobe.echo [] port.begin " ++
             "dup portprobe.input port.endpoint [1] port.write " ++
             "dup portprobe.input port.endpoint port.finish port.close port.close",
+    ).run);
+}
+
+test "oom: standard-library and host: native port registered call composition" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.factory [] port.open dup portprobe.noop [] port.call pop port.close",
     ).run);
 }
 
@@ -1444,6 +1493,7 @@ fn checkStdlibSurfaceOrdinalShard(
         SurfaceProbe(surface).run,
         ordinal_shard_index,
         ordinal_shard_count,
+        .deterministic,
     );
 }
 

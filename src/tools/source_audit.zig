@@ -1055,6 +1055,7 @@ const source_unit_constructors = [_][]const u8{"@serve"};
 const dynamic_context_words = [_][]const u8{ "*file*", "*module*" };
 const first_party_definition_sources = [_][:0]const u8{
     @embedFile("../prelude.ecl"),
+    @embedFile("../stdlib/port.ecl"),
     @embedFile("../stdlib/result.ecl"),
     @embedFile("../stdlib/str.ecl"),
     @embedFile("../stdlib/table.ecl"),
