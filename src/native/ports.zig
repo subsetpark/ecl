@@ -1,11 +1,8 @@
-//! Typed native resource declarations and invocation-local port operations.
+//! Typed native resource declarations and host-owned controller exchanges.
 const abi = @import("ecl-native-abi");
 const capability = @import("capability.zig");
 
 pub const Cancellation = enum { close_resource, acknowledge };
-
-pub const Progress = union(enum) { ready, pending, failed, candidate: capability.Candidate, bytes: u32 };
-pub const Interests = packed struct(u32) { readable: bool = true, writable: bool = true, reserved: u30 = 0 };
 
 pub const ControllerState = struct { table: *const abi.ControllerTable, context: *anyopaque, input_view: abi.ValueView = .{ .kind = .list } };
 
@@ -200,8 +197,7 @@ pub const Controller = opaque {
         return owned.table.forward_message(owned.context, .resource, endpoint);
     }
     pub fn read(self: *Controller, bytes: []u8) usize {
-        const state_value = self.state();
-        return state_value.table.read(state_value.context, bytes.ptr, @intCast(@min(bytes.len, 64 * 1024)));
+        return self.readFrom(0, bytes);
     }
     pub fn readFrom(self: *Controller, endpoint: u6, bytes: []u8) usize {
         const owned = self.state();
@@ -216,8 +212,7 @@ pub const Controller = opaque {
         return owned.table.finish_endpoint(owned.context, .exchange, endpoint);
     }
     pub fn write(self: *Controller, bytes: []const u8) usize {
-        const state_value = self.state();
-        return state_value.table.write(state_value.context, bytes.ptr, @intCast(@min(bytes.len, 64 * 1024)));
+        return self.writeTo(1, bytes);
     }
     pub fn cancelled(self: *Controller) bool {
         return self.state().table.cancelled(self.state().context);
@@ -250,8 +245,6 @@ pub const Controller = opaque {
         owned.table.fail_resource(owned.context, kind, bounded.ptr, @intCast(bounded.len));
     }
 };
-
-pub const Adapter = struct { invocation: *capability.Invocation, definition: u32 };
 
 /// `init` constructs bounded initial state before publication. `open` precedes
 /// all lane runs, and `deinit` follows their completion. Runs in distinct lanes
@@ -288,7 +281,6 @@ pub fn Port(comptime Spec: type) type {
             @compileError("ecl-native: Port callbacks have invalid signatures");
     }
     return opaque {
-        const Self = @This();
         pub const ecl_port_marker = void;
         pub const StateType = Spec.State;
         pub const LaneType = Lane;
@@ -298,9 +290,6 @@ pub fn Port(comptime Spec: type) type {
         var kind_identity: u8 = 0;
         fn kindIdentity() *const anyopaque {
             return &kind_identity;
-        }
-        fn adapter(self: *Self) *Adapter {
-            return @ptrCast(@alignCast(self));
         }
         pub fn definition() abi.PortDefinition {
             return .{ .state_size = @sizeOf(Spec.State), .state_alignment = @alignOf(Spec.State), .name_ptr = name.ptr, .name_len = name.len, .init_state = initState, .initialize = initialize, .execute = execute, .cancel = cancelState, .cleanup = cleanup, .lane_count = @typeInfo(Lane).@"enum".fields.len, .cancellation = switch (cancellation) {
@@ -335,62 +324,6 @@ pub fn Port(comptime Spec: type) type {
         }
         fn cleanup(raw: *anyopaque) callconv(.c) void {
             Spec.deinit(@ptrCast(@alignCast(raw)));
-        }
-        fn request(self: *Self, request_value: abi.PortRequest) error{OutOfMemory}!Progress {
-            var reply: abi.PortReply = .{};
-            const adapter_value = self.adapter();
-            const status = (adapter_value.invocation.host.port orelse return .failed)(adapter_value.invocation.context, &request_value, &reply);
-            if (status == .yield_required) return .pending;
-            if (status == .out_of_memory) return error.OutOfMemory;
-            if (status != .ok) return .failed;
-            return switch (reply.status) {
-                .pending => .pending,
-                .failed => .failed,
-                .ready => switch (request_value.action) {
-                    .create, .export_exchange => .{ .candidate = @enumFromInt(reply.candidate) },
-                    .read, .write => .{ .bytes = reply.transferred },
-                    else => .ready,
-                },
-                _ => .failed,
-            };
-        }
-        pub fn create(self: *Self, slot: u32) error{OutOfMemory}!Progress {
-            return self.request(.{ .action = .create, .definition = self.adapter().definition, .slot = slot });
-        }
-        pub fn check(self: *Self, port: capability.Candidate) error{OutOfMemory}!Progress {
-            return self.request(.{ .action = .check, .definition = self.adapter().definition, .port = @intFromEnum(port) });
-        }
-        pub fn begin(self: *Self, slot: u32, port: capability.Candidate, operation: u32) error{OutOfMemory}!Progress {
-            return self.request(.{ .action = .begin, .definition = self.adapter().definition, .slot = slot, .port = @intFromEnum(port), .operation = operation });
-        }
-        /// Offers an admitted exchange as an ordinary opaque value. Successful
-        /// callback publication preserves scope ownership beyond this call;
-        /// callback failure closes it and joins cancellation through its scope.
-        pub fn exportExchange(self: *Self, slot: u32) error{OutOfMemory}!Progress {
-            return self.request(.{ .action = .export_exchange, .definition = self.adapter().definition, .slot = slot });
-        }
-        pub fn write(self: *Self, slot: u32, bytes: []const u8) error{OutOfMemory}!Progress {
-            return self.request(.{ .action = .write, .definition = self.adapter().definition, .slot = slot, .bytes = @constCast(bytes.ptr), .length = @intCast(@min(bytes.len, 64 * 1024)) });
-        }
-        pub fn read(self: *Self, slot: u32, bytes: []u8) error{OutOfMemory}!Progress {
-            return self.request(.{ .action = .read, .definition = self.adapter().definition, .slot = slot, .bytes = bytes.ptr, .length = @intCast(@min(bytes.len, 64 * 1024)) });
-        }
-        pub fn finishRequest(self: *Self, slot: u32) error{OutOfMemory}!Progress {
-            return self.request(.{ .action = .finish_request, .definition = self.adapter().definition, .slot = slot });
-        }
-        pub fn result(self: *Self, slot: u32) error{OutOfMemory}!Progress {
-            return self.request(.{ .action = .result, .definition = self.adapter().definition, .slot = slot });
-        }
-        /// Park on the requested stream directions (or terminal completion).
-        /// Return `.yield` from the native callback after `.pending`.
-        pub fn wait(self: *Self, slot: u32, interests: Interests) error{OutOfMemory}!Progress {
-            return self.request(.{ .action = .wait, .definition = self.adapter().definition, .slot = slot, .interests = @bitCast(interests) });
-        }
-        pub fn close(self: *Self, slot: u32, port: capability.Candidate) error{OutOfMemory}!Progress {
-            return self.request(.{ .action = .close, .definition = self.adapter().definition, .slot = slot, .port = @intFromEnum(port) });
-        }
-        pub fn release(self: *Self, slot: u32) error{OutOfMemory}!Progress {
-            return self.request(.{ .action = .release, .definition = self.adapter().definition, .slot = slot });
         }
     };
 }

@@ -271,7 +271,6 @@ pub const ModuleInstance = opaque {
     /// capability.
     pub fn mintHostTable(self: *const ModuleInstance, full: abi.HostTable) abi.HostTable {
         var result = full;
-        if (!self.hasCapability(.ports)) result.port = null;
         if (!self.hasCapability(.build_values)) {
             result.build_list_append = null;
             result.build_list_finish = null;

@@ -369,21 +369,22 @@ ownership authority.
 
 Declare package resources with `const P = ecl.Port(Spec)` and include `P` in
 the module's `.ports` tuple. `Spec` supplies `name`, `State`, `init`, `open`,
-`run`, `cancel`, and `deinit`; the SDK checks their signatures. Word callbacks
-request `*P` and a `Reschedule` capability. The host owns each port's state,
-controller execution, scope membership, operation queues, and library lifetime.
-See [`test/native/ports.zig`](test/native/ports.zig) for a complete streaming
-example with serialized and independently progressing kinds.
+`run`, `cancel`, and `deinit`; the SDK checks their signatures. Export factories,
+operation selectors, and endpoint selectors with `ecl.factory`, `ecl.operation`,
+and `ecl.endpoint`. These bindings are opaque capabilities tied to the registered
+kind and module instance. The host owns resource state, exchanges, controller
+execution, scope membership, queues, and library lifetime.
 
-`create(slot)` publishes a candidate once initialization succeeds. `begin`
-admits an operation; `write`, `finishRequest`, `read`, and `result` advance its
-byte protocol. Both streams can return partial progress. Advance writing and
-reading together: filling the request before draining the response can deadlock
-a bidirectional protocol. On pending progress, call `wait` with the needed stream
-directions and return `.yield`. Resume through the same operation slot, keeping
-only encoding offsets and owned data in continuation state. Views and candidates
-must be obtained again in each invocation. `release` retires a slot and cancels
-unfinished work; `close` is idempotent and completes after controller cleanup.
+ECL uses `port.open` and `port.begin` with bounded structured configuration and
+requests. `port.endpoint` selects byte or message directions. Streaming programs
+write and drain output concurrently, then finish input, observe completion, and
+close the exchange. `port.result` claims a structured result once; `port.await`
+remains repeatable. Non-streaming operations use the ECL `port.call` composition.
+Scope exit joins cleanup, and `@give` transfers resource or exchange ownership.
+See the [native fixtures](test/native/ports.zig) and executable
+[storage](examples/port-storage/README.md), [broker](examples/port-broker/README.md),
+[multiplexed channel](examples/port-multiplex/README.md), and
+[native buffer](examples/port-device/README.md) examples.
 
 Controller callbacks receive private state and a `Controller` with bounded
 byte-stream access, cancellation observation, and error reporting. Stream waits

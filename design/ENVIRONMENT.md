@@ -64,6 +64,10 @@ ABI v4 modules also export documented factory, operation-selector, and
 endpoint-selector bindings through `ecl.factory`, `ecl.operation`, and
 `ecl.endpoint`. Bindings are ordinary opaque ECL values with module-instance
 identity. Their complete registration validates before the module is visible.
+Resource operations belong to host-owned exchanges. Ordinary native callbacks
+can forward their opaque identities; controller execution and cleanup continue
+independently of callback return. Suspension of an ordinary word uses its
+separate `Reschedule` capability.
 `port.open` and `port.begin` accept structured configuration and parameters;
 controllers read them through bounded `Controller.input` paths. Each request
 allows at most 64 KiB of scalar/text data, 4,096 aggregate nodes, and 16 port

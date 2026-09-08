@@ -9,8 +9,6 @@ pub const Controller = ports.Controller;
 pub const MessageView = ports.MessageView;
 pub const MessageBuilder = ports.MessageBuilder;
 pub const PortCancellation = ports.Cancellation;
-pub const PortProgress = ports.Progress;
-pub const PortInterests = ports.Interests;
 
 pub const Outcome = capability.Outcome;
 pub const ErrorKind = capability.ErrorKind;
@@ -312,8 +310,7 @@ pub fn word(
     var build_values = false;
     var reschedule = false;
     var RescheduleType: type = void;
-    var uses_ports = false;
-    for (function.params[1..], 1..) |parameter, parameter_index| {
+    for (function.params[1..]) |parameter| {
         if (parameter.type == null) @compileError("ecl-native: callback capabilities must have concrete types");
         if (parameter.type.? == *BuildValues) {
             if (build_values) @compileError("ecl-native: callback names a capability more than once");
@@ -325,15 +322,10 @@ pub fn word(
 
             reschedule = true;
             RescheduleType = @typeInfo(parameter.type.?).pointer.child;
-        } else if (isPortPointer(parameter.type.?)) {
-            for (function.params[1..parameter_index]) |prior| if (prior.type.? == parameter.type.?)
-                @compileError("ecl-native: callback names a capability more than once");
-            uses_ports = true;
         } else {
             @compileError("ecl-native: callback parameter is not a supported capability");
         }
     }
-    if (uses_ports and !reschedule) @compileError("ecl-native: Port operations require Reschedule");
     const CallbackValue = callback_fn;
     const WordName = word_name;
     const WordDocumentation = word_documentation;
@@ -383,7 +375,7 @@ pub fn word(
         }
 
         pub fn invoke(
-            comptime Ports: anytype,
+            comptime _: anytype,
             host: *const abi.HostTable,
             context: *anyopaque,
             output: *abi.InvokeResult,
@@ -401,16 +393,12 @@ pub fn word(
                     return;
                 }
             else {};
-            var port_states: [function.params.len]ports.Adapter = .{ports.Adapter{ .invocation = &call_state.invocation, .definition = 0 }} ** function.params.len;
             // SAFETY: every callback parameter is initialized by the exhaustive capability dispatch below.
             var arguments: std.meta.ArgsTuple(Callback) = undefined;
             arguments[0] = call;
             inline for (function.params[1..], 1..) |parameter, index| {
                 const T = parameter.type.?;
-                if (comptime T == *BuildValues) arguments[index] = @ptrCast(&build_state) else if (comptime isReschedulePointer(T)) arguments[index] = NativeRescheduleType.adapterPointer(&reschedule_state) else {
-                    port_states[index].definition = comptime portIndex(Ports, @typeInfo(T).pointer.child);
-                    arguments[index] = @ptrCast(&port_states[index]);
-                }
+                if (comptime T == *BuildValues) arguments[index] = @ptrCast(&build_state) else arguments[index] = NativeRescheduleType.adapterPointer(&reschedule_state);
             }
             const result = @call(.auto, callback, arguments);
             const outcome = result catch |err| switch (err) {
@@ -658,18 +646,4 @@ fn identifier(bytes: []const u8) bool {
 
 fn asciiAlpha(byte: u8) bool {
     return std.ascii.isAlphabetic(byte);
-}
-
-fn isPortPointer(comptime T: type) bool {
-    return switch (@typeInfo(T)) {
-        .pointer => |p| p.size == .one and switch (@typeInfo(p.child)) {
-            .@"opaque" => @hasDecl(p.child, "ecl_port_marker"),
-            else => false,
-        },
-        else => false,
-    };
-}
-fn portIndex(comptime Ports: anytype, comptime P: type) u32 {
-    inline for (Ports, 0..) |Declared, index| if (Declared == P) return index;
-    @compileError("ecl-native: callback port capability is not declared by the module");
 }

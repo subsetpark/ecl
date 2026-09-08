@@ -107,10 +107,10 @@ test "native: message exchanges transfer scope ownership and clean up exactly on
         "p x pair [] (pop pop) @give task.await 'ok at len x type p type portprobe.cleaned", "0 'port 'port 1");
 }
 
-test "native: exported exchange transfers ownership and joins cancellation on scope exit" {
-    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.duplex-new 'p set p 3 portprobe.start 'x set 1 portprobe.await-blocked " ++
+test "native: exchange transfer joins cancellation on scope exit" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.factory [] port.open 'p set p portprobe.block 1 port.begin 'x set 1 portprobe.await-blocked " ++
         "x wrap [] (pop) @give task.await 'ok at pop " ++
-        "x type p 1 7 portprobe.duplex-exchange p portprobe.duplex-close portprobe.cleaned", "'port 7 1");
+        "x type p portprobe.step 7 port.call p port.close portprobe.cleaned", "'port 7 1");
 }
 
 test "native: registered capabilities retain identity across ordinary module bindings" {
@@ -129,7 +129,7 @@ test "native: common open and begin preserve structured configuration and parame
 test "native: common requests reject executable values oversize data and foreign selectors" {
     for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "[] (portprobe.factory (pop) port.open) @attempt 'err at 'kind at " ++
         "[] (portprobe.factory [0] 4096 take port.open) @attempt 'err at 'kind at " ++
-        "portprobe.other-new 'p set [] (p portprobe.failure [] port.begin) @attempt 'err at 'kind at " ++
+        "portprobe.other [] port.open 'p set [] (p portprobe.failure [] port.begin) @attempt 'err at 'kind at " ++
         "p port.close portprobe.cleaned", "'type 'overflow 'type 1");
 }
 
@@ -216,31 +216,31 @@ test "native: early consumer completion interrupts a blocked byte producer" {
         "x port.close p port.close portprobe.cleaned", "'io [7] 1");
 }
 
-test "native: an exported exchange remains owned when only a borrowed use is sent" {
-    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.duplex-new 'p set p 3 portprobe.start 'x set 1 portprobe.await-blocked " ++
+test "native: an exchange remains owned when only a borrowed use is sent" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.factory [] port.open 'p set p portprobe.block 1 port.begin 'x set 1 portprobe.await-blocked " ++
         "x wrap (pop) @spawn task.await 'ok at pop " ++
         "portprobe.cleaned x wrap [] (pop) @give task.await 'ok at pop " ++
-        "p 1 5 portprobe.duplex-exchange p portprobe.duplex-close portprobe.cleaned", "0 5 1");
+        "p portprobe.step 5 port.call p port.close portprobe.cleaned", "0 5 1");
 }
 
 test "native: common exchange await repeats and cancel waits for acknowledged return" {
-    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.duplex-new 'p set " ++
-        "p 1 portprobe.start 'done set done port.await done port.await done port.close done port.close " ++
-        "p 3 portprobe.start 'x set 1 portprobe.await-blocked x port.cancel x port.cancel " ++
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.factory [] port.open 'p set " ++
+        "p portprobe.noop [] port.begin 'done set done port.await done port.await done port.close done port.close " ++
+        "p portprobe.block 1 port.begin 'x set 1 portprobe.await-blocked x port.cancel x port.cancel " ++
         "x wrap (port.await) @attempt 'err at 'kind at " ++
         "x wrap (port.await) @attempt 'err at 'kind at " ++
-        "x port.close x port.close p 1 9 portprobe.duplex-exchange p port.close portprobe.cleaned", "'cancelled 'cancelled 9 1");
+        "x port.close x port.close p portprobe.step 9 port.call p port.close portprobe.cleaned", "'cancelled 'cancelled 9 1");
 }
 
 test "native: common exchange failure is repeatable and separate from cleanup" {
-    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.duplex-new 'p set p 2 portprobe.start 'x set " ++
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.factory [] port.open 'p set p portprobe.failure [] port.begin 'x set " ++
         "x wrap (port.await) @attempt 'err at 'kind at " ++
         "x wrap (port.await) @attempt 'err at 'kind at " ++
         "x port.close p port.close portprobe.cleaned", "'domain 'domain 1");
 }
 
 test "native: exactly one concurrent caller claims an exchange result" {
-    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.duplex-new 'p set p 1 portprobe.start 'x set " ++
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.factory [] port.open 'p set p portprobe.noop [] port.begin 'x set " ++
         "x wrap (port.result) @spawn 'a set x wrap (port.result) @spawn 'b set " ++
         "a task.await 'ra set b task.await 'rb set " ++
         "ra 'ok dict.has? rb 'ok dict.has? + " ++
@@ -248,104 +248,104 @@ test "native: exactly one concurrent caller claims an exchange result" {
         "x port.await x port.close p port.close portprobe.cleaned", "1 'contract 1");
 }
 
-test "native: independent lanes retain admission capacity under blocked stream pressure" {
-    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.duplex-new 'p set p wrap (3 0 portprobe.duplex-exchange) @spawn 't set " ++
-        "1 portprobe.await-blocked p wrap (0 9 portprobe.duplex-exchange) @spawn 'q set " ++
-        "1 portprobe.await-waiting p 1 65 portprobe.duplex-exchange " ++
-        "q cancel q await pop portprobe.unblock t await 'ok at first p portprobe.duplex-close", "65 1");
+test "native: independent lanes retain admission capacity while a controller is blocked" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.factory [] port.open 'p set p wrap (portprobe.block 1 port.call) @spawn 't set " ++
+        "1 portprobe.await-blocked p wrap (portprobe.signal-waiting portprobe.receive-step 9 port.call) @spawn 'q set " ++
+        "1 portprobe.await-waiting p portprobe.step 65 port.call " ++
+        "q cancel q await pop portprobe.unblock t await 'ok at first p port.close", "65 1");
 }
 
 test "native: acknowledged active cancellation preserves subsequent lane operations" {
-    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.duplex-new 'p set p wrap (3 0 portprobe.duplex-exchange) @spawn 't set " ++
-        "1 portprobe.await-blocked p wrap (1 17 portprobe.duplex-exchange) @spawn 'q set " ++
-        "2 portprobe.await-admitted t cancel t await 'err at 'kind at " ++
-        "q await 'ok at first p 1 65 portprobe.duplex-exchange p portprobe.duplex-close portprobe.cleaned", "'cancelled 17 82 1");
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.factory [] port.open 'p set p wrap (portprobe.block 1 port.call) @spawn 't set " ++
+        "1 portprobe.await-blocked p portprobe.step 17 port.begin 'q set " ++
+        "t cancel t await 'err at 'kind at " ++
+        "q port.result q port.close p portprobe.step 65 port.call p port.close portprobe.cleaned", "'cancelled 17 82 1");
 }
 
 test "native: unacknowledged cancellation closes every lane and joins cleanup" {
-    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.unacknowledged-new 'p set p wrap (3 0 portprobe.unacknowledged-exchange) @spawn 'a set " ++
-        "p wrap (5 0 portprobe.unacknowledged-exchange) @spawn 'b set " ++
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.unrecoverable [] port.open 'p set p wrap (portprobe.unrecoverable-block 1 port.call) @spawn 'a set " ++
+        "p wrap (portprobe.unrecoverable-send 1 port.call) @spawn 'b set " ++
         "2 portprobe.await-blocked a cancel a await 'err at 'kind at b await 'err at 'kind at " ++
-        "p portprobe.unacknowledged-close portprobe.cleaned", "'cancelled 'io 1");
+        "p port.close portprobe.cleaned", "'cancelled 'cancelled 1");
 }
 
 test "native: closing and transferring independent lanes preserves resource ownership" {
-    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.duplex-new 'p set p wrap (3 0 portprobe.duplex-exchange) @spawn 'a set " ++
-        "p wrap (5 0 portprobe.duplex-exchange) @spawn 'b set 2 portprobe.await-blocked " ++
-        "p wrap [] (portprobe.duplex-close) @give await 'ok at pop " ++
-        "a await 'err at 'kind at b await 'err at 'kind at portprobe.cleaned", "'io 'io 1");
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.factory [] port.open 'p set p wrap (portprobe.block 1 port.call) @spawn 'a set " ++
+        "p wrap (portprobe.block-send 1 port.call) @spawn 'b set 2 portprobe.await-blocked " ++
+        "p wrap [] (port.close) @give await 'ok at pop " ++
+        "a await 'err at 'kind at b await 'err at 'kind at portprobe.cleaned", "'cancelled 'cancelled 1");
 }
 
 test "native: creation refuses an operation budget smaller than its lane count" {
-    try expectPortProgram(1, 1, "[] (portprobe.duplex-new) @attempt 'err at 'kind at portprobe.cleaned", "'domain 0");
+    try expectPortProgram(1, 1, "[] (portprobe.factory [] port.open) @attempt 'err at 'kind at portprobe.cleaned", "'domain 0");
 }
 
 test "native: blocked controllers leave another port and task runnable" {
-    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.new 'p set p wrap (3 0 portprobe.exchange) @spawn 't set " ++
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.counter [] port.open 'p set p wrap (portprobe.counter-block 1 port.call) @spawn 't set " ++
         "1 portprobe.await-blocked [] (7) @spawn await 'ok at first " ++
-        "portprobe.new 1 4 portprobe.exchange portprobe.unblock t await 'ok at first p portprobe.close", "7 4 1");
+        "portprobe.counter [] port.open portprobe.counter-step 4 port.call portprobe.unblock t await 'ok at first p port.close", "7 4 1");
 }
 
 test "native: cancellation before admission and while queued preserves the port" {
     for ([_]u32{ 1, 8 }) |workers| {
-        try expectPortProgram(workers, 1, "portprobe.new 'p set p wrap (3 0 portprobe.exchange) @spawn 't set " ++
-            "1 portprobe.await-blocked p wrap (1 2 portprobe.exchange) @spawn 'q set " ++
+        try expectPortProgram(workers, 1, "portprobe.counter [] port.open 'p set p wrap (portprobe.counter-block 1 port.call) @spawn 't set " ++
+            "1 portprobe.await-blocked p wrap (portprobe.signal-waiting portprobe.counter-step 2 port.call) @spawn 'q set " ++
             "1 portprobe.await-waiting q cancel q await pop portprobe.unblock t await 'ok at first " ++
-            "p 1 2 portprobe.exchange p portprobe.close", "1 3");
-        try expectPortProgram(workers, 2, "portprobe.new 'p set p wrap (3 0 portprobe.exchange) @spawn 't set " ++
-            "1 portprobe.await-blocked p wrap (1 2 portprobe.exchange) @spawn 'q set " ++
-            "2 portprobe.await-admitted q cancel q await pop portprobe.unblock t await 'ok at first " ++
-            "p 1 2 portprobe.exchange p portprobe.close", "1 3");
+            "p portprobe.counter-step 2 port.call p port.close", "1 3");
+        try expectPortProgram(workers, 2, "portprobe.counter [] port.open 'p set p wrap (portprobe.counter-block 1 port.call) @spawn 't set " ++
+            "1 portprobe.await-blocked p portprobe.counter-step 2 port.begin 'q set " ++
+            "q port.cancel q port.close portprobe.unblock t await 'ok at first " ++
+            "p portprobe.counter-step 2 port.call p port.close", "1 3");
     }
 }
 
 test "native: active cancellation interrupts backend waits and cancels its queue" {
-    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.new 'p set p wrap (3 0 portprobe.exchange) @spawn 't set " ++
-        "1 portprobe.await-blocked p wrap (1 2 portprobe.exchange) @spawn 'q set " ++
-        "2 portprobe.await-admitted t cancel t await 'err at 'kind at q await 'err at 'kind at " ++
-        "p portprobe.close p portprobe.close portprobe.cleaned", "'cancelled 'io 1");
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.counter [] port.open 'p set p wrap (portprobe.counter-block 1 port.call) @spawn 't set " ++
+        "1 portprobe.await-blocked p portprobe.counter-step 2 port.begin 'q set " ++
+        "t cancel t await 'err at 'kind at q wrap (port.await) @attempt 'err at 'kind at q port.close " ++
+        "p port.close p port.close portprobe.cleaned", "'cancelled 'cancelled 1");
 }
 
 test "native: admitted operations execute in order under queue pressure" {
-    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.new 'p set p wrap (3 0 portprobe.exchange) @spawn 't set " ++
-        "1 portprobe.await-blocked p wrap (1 2 portprobe.exchange) @spawn 'q set " ++
-        "2 portprobe.await-admitted p wrap (1 4 portprobe.exchange) @spawn 'r set " ++
-        "1 portprobe.await-waiting portprobe.unblock t await 'ok at first q await 'ok at first " ++
-        "r await 'ok at first p portprobe.close", "1 3 7");
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.counter [] port.open 'p set p wrap (portprobe.counter-block 1 port.call) @spawn 't set " ++
+        "1 portprobe.await-blocked p portprobe.counter-step 2 port.begin 'q set " ++
+        "p wrap (portprobe.signal-waiting portprobe.counter-step 4 port.call) @spawn 'r set " ++
+        "1 portprobe.await-waiting portprobe.unblock t await 'ok at first q port.result q port.close " ++
+        "r await 'ok at first p port.close", "1 3 7");
 }
 
 test "native: initialization cancellation and concurrent close join cleanup" {
     for ([_]u32{ 1, 8 }) |workers| {
-        try expectPortProgram(workers, 2, "portprobe.block-next [] (portprobe.new) @spawn 't set " ++
+        try expectPortProgram(workers, 2, "portprobe.block-next [] (portprobe.counter [] port.open) @spawn 't set " ++
             "1 portprobe.await-blocked t cancel t await pop 1 portprobe.await-cleaned portprobe.cleaned", "1");
-        try expectPortProgram(workers, 2, "portprobe.new 'p set p wrap (3 0 portprobe.exchange) @spawn 't set " ++
-            "1 portprobe.await-blocked p wrap (portprobe.close) @spawn 'a set " ++
-            "p wrap (portprobe.close) @spawn 'b set a await pop b await pop t await 'err at 'kind at " ++
-            "portprobe.cleaned", "'io 1");
+        try expectPortProgram(workers, 2, "portprobe.counter [] port.open 'p set p wrap (portprobe.counter-block 1 port.call) @spawn 't set " ++
+            "1 portprobe.await-blocked p wrap (port.close) @spawn 'a set " ++
+            "p wrap (port.close) @spawn 'b set a await pop b await pop t await 'err at 'kind at " ++
+            "portprobe.cleaned", "'cancelled 1");
     }
 }
 
 test "native: transfer preserves active operations and rolls back multiple ports" {
     for ([_]u32{ 1, 8 }) |workers| {
-        try expectPortProgram(workers, 2, "portprobe.new 'p set p wrap (3 0 portprobe.exchange) @spawn 't set " ++
-            "1 portprobe.await-blocked p wrap [] (portprobe.unblock 1 2 portprobe.exchange) @give await 'ok at first " ++
-            "t await 'ok at first p portprobe.close portprobe.cleaned", "3 1 1");
-        try expectPortProgram(workers, 2, "portprobe.pair 'q set 'p set q portprobe.close " ++
+        try expectPortProgram(workers, 2, "portprobe.counter [] port.open 'p set p wrap (portprobe.counter-block 1 port.call) @spawn 't set " ++
+            "1 portprobe.await-blocked p wrap [] (portprobe.unblock portprobe.counter-step 2 port.call) @give await 'ok at first " ++
+            "t await 'ok at first p port.close portprobe.cleaned", "3 1 1");
+        try expectPortProgram(workers, 2, "portprobe.counter [] port.open portprobe.counter [] port.open 'q set 'p set q port.close " ++
             "p q pair [] (pop pop) 3 pack (@give) @attempt 'err at 'kind at " ++
-            "p 1 2 portprobe.exchange p portprobe.close portprobe.cleaned", "'domain 2 2");
+            "p portprobe.counter-step 2 port.call p port.close portprobe.cleaned", "'domain 2 2");
     }
 }
 
 test "native: close races transfer and controller completion without duplicate cleanup" {
-    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.new 'p set p wrap (3 0 portprobe.exchange) @spawn 't set " ++
-        "1 portprobe.await-blocked p wrap (portprobe.close) @spawn 'c set " ++
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.counter [] port.open 'p set p wrap (portprobe.counter-block 1 port.call) @spawn 't set " ++
+        "1 portprobe.await-blocked p wrap (port.close) @spawn 'c set " ++
         "p wrap [] (pop) 3 pack (@give) @attempt pop portprobe.unblock " ++
-        "c await 'ok at pop t await pop p portprobe.close portprobe.cleaned", "1");
+        "c await 'ok at pop t await pop p port.close portprobe.cleaned", "1");
 }
 
-test "native: initialization and publication failures clean provisional resources" {
-    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.fail-next [] (portprobe.new) @attempt 'err at 'kind at " ++
-        "1 portprobe.await-cleaned [] (portprobe.new-fail) @attempt 'err at 'kind at " ++
+test "native: initialization and failed task publication join resource cleanup" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.fail-next [] (portprobe.counter [] port.open) @attempt 'err at 'kind at " ++
+        "1 portprobe.await-cleaned [] (portprobe.counter [] port.open pop sample.fail-user) @spawn task.await 'err at 'kind at " ++
         "2 portprobe.await-cleaned portprobe.cleaned", "'domain 'user 2");
 }
 
@@ -362,16 +362,21 @@ test "native: live capacity is reserved before initialization and released by cl
         .native_port_limits = .{ .max_live_ports = 1 },
     }, .{ .worker_pool = 1 });
     defer runtime.deinit();
-    try expectOk(&runtime, "portprobe.reset portprobe.new 'p set");
-    try expectErrorContains(&runtime, "portprobe.new", &.{ "'kind 'domain", "live limit" });
-    try expectOk(&runtime, "p portprobe.close portprobe.new portprobe.close");
-    try expectErrorContains(&runtime, "portprobe.pair", &.{ "'kind 'domain", "live limit" });
+    try expectOk(&runtime, "portprobe.reset portprobe.counter [] port.open 'p set");
+    try expectErrorContains(&runtime, "portprobe.counter [] port.open", &.{ "'kind 'domain", "capacity" });
+    try expectOk(&runtime, "p port.close portprobe.counter [] port.open port.close");
+    try expectOk(&runtime, "[] (portprobe.counter [] port.open portprobe.counter [] port.open) @spawn task.await 'err at 'kind at");
+    var capacity_error = try runtime.stackDisplay();
+    defer capacity_error.deinit();
+    try std.testing.expectEqualStrings("'domain", capacity_error.bytes());
+    try expectOk(&runtime, "pop");
     try expectOk(&runtime, "3 portprobe.await-cleaned portprobe.cleaned");
     try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[0].int);
 }
 
-test "native: completion preceding wait registration remains observable" {
-    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.new-ready-wait dup 1 2 portprobe.exchange-ready-wait swap portprobe.close", "2");
+test "native: completion remains observable after another task has awaited it" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.counter [] port.open 'p set p portprobe.counter-step 2 port.begin 'x set " ++
+        "x port.await x wrap (port.await) @spawn task.await 'ok at pop x port.result x port.close p port.close", "2");
 }
 
 test "native: Session shutdown joins active controllers before releasing images" {
@@ -391,7 +396,7 @@ test "native: Session shutdown joins active controllers before releasing images"
                 .ecl_path = native_fixture.directory,
             }, .{ .worker_pool = workers });
             defer runtime.deinit();
-            try expectOk(&runtime, "portprobe.new wrap (3 0 portprobe.exchange) @spawn pop 1 portprobe.await-blocked");
+            try expectOk(&runtime, "portprobe.counter [] port.open wrap (portprobe.counter-block 1 port.call) @spawn pop 1 portprobe.await-blocked");
         }
         // A second Session pins the same fixture image solely to observe the
         // first Session's completed cleanup through an ordinary native word.
@@ -399,6 +404,11 @@ test "native: Session shutdown joins active controllers before releasing images"
         try std.testing.expectEqual(@as(i64, 1), observer.stackItems()[0].int);
     }
 }
+
+const streamCounter = "'count set 'resource set resource portprobe.counter-echo [] port.begin 'exchange set " ++
+    "exchange portprobe.counter-input port.endpoint wrap ('w set w [1] count take port.write w port.finish) @spawn 'writer set " ++
+    "exchange portprobe.counter-output port.endpoint 'r set 0 (dup count <) (r 4096 port.read len +) while " ++
+    "writer task.await 'ok at pop exchange port.await exchange port.close ";
 
 test "native: package ports stream beyond capacity and retain ordered state" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
@@ -413,7 +423,8 @@ test "native: package ports stream beyond capacity and retain ordered state" {
         .native_port_limits = .{ .ring_capacity = 8 },
     }, .{ .worker_pool = 1 });
     defer runtime.deinit();
-    try expectOk(&runtime, "portprobe.new 'p set p 0 10000 portprobe.exchange p 1 2 portprobe.exchange p 1 3 portprobe.exchange p portprobe.close p portprobe.close");
+    try expectOk(&runtime, "portprobe.counter [] port.open 'p set p 10000 " ++ streamCounter ++
+        "p portprobe.counter-step 2 port.call p portprobe.counter-step 3 port.call p port.close p port.close");
     try std.testing.expectEqual(@as(i64, 10000), runtime.stackItems()[0].int);
     try std.testing.expectEqual(@as(i64, 18), runtime.stackItems()[1].int);
     try std.testing.expectEqual(@as(i64, 21), runtime.stackItems()[2].int);
@@ -426,16 +437,16 @@ test "native: package port kinds, operation failure, forwarding and terminal ide
     defer diagnostics.deinit();
     var runtime = try initRuntime(&output.writer, &diagnostics.writer, native_fixture.directory);
     defer runtime.deinit();
-    try expectOk(&runtime, "portprobe.new 'p set");
-    try expectOk(&runtime, "portprobe.other-new 'q set q portprobe.other-check");
-    try expectErrorContains(&runtime, "q portprobe.close", &.{"'kind 'type"});
-    try expectErrorContains(&runtime, "p portprobe.other-check", &.{"'kind 'type"});
-    try expectErrorContains(&runtime, "p foreignport.close", &.{"'kind 'type"});
-    try expectErrorContains(&runtime, "p 2 0 portprobe.exchange", &.{ "'kind 'domain", "deliberate operation failure" });
-    try expectOk(&runtime, "p 1 3 portprobe.exchange p wrap sample.nested-port p match? p portprobe.close p portprobe.close");
+    try expectOk(&runtime, "portprobe.counter [] port.open 'p set");
+    try expectOk(&runtime, "portprobe.other [] port.open 'q set q portprobe.other-step 0 port.call pop");
+    try expectErrorContains(&runtime, "q portprobe.counter-step 0 port.call", &.{"'kind 'type"});
+    try expectErrorContains(&runtime, "p portprobe.other-step 0 port.call pop", &.{"'kind 'type"});
+    try expectErrorContains(&runtime, "p foreignport.counter-step 0 port.call", &.{"'kind 'type"});
+    try expectErrorContains(&runtime, "p portprobe.counter-failure [] port.call", &.{ "'kind 'domain", "deliberate operation failure" });
+    try expectOk(&runtime, "p portprobe.counter-step 3 port.call p wrap sample.nested-port p match? p port.close p port.close");
     try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[0].int);
     try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[1].int);
-    try expectErrorContains(&runtime, "p 1 0 portprobe.exchange", &.{"'kind 'io"});
+    try expectErrorContains(&runtime, "p portprobe.counter-step 0 port.call", &.{"'kind 'io"});
 }
 
 test "native: package port scope transfer and rollback" {
@@ -445,11 +456,11 @@ test "native: package port scope transfer and rollback" {
     defer diagnostics.deinit();
     var runtime = try initRuntime(&output.writer, &diagnostics.writer, native_fixture.directory);
     defer runtime.deinit();
-    try expectOk(&runtime, "portprobe.new 'p set p wrap dup cat [] (pop pop) 3 pack (@give) @attempt pop p 1 2 portprobe.exchange");
+    try expectOk(&runtime, "portprobe.counter [] port.open 'p set p wrap dup cat [] (pop pop) 3 pack (@give) @attempt pop p portprobe.counter-step 2 port.call");
     try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[0].int);
-    try expectOk(&runtime, "p wrap [] (1 3 portprobe.exchange) @give task.await 'ok at first");
+    try expectOk(&runtime, "p wrap [] (portprobe.counter-step 3 port.call) @give task.await 'ok at first");
     try std.testing.expectEqual(@as(i64, 5), runtime.stackItems()[1].int);
-    try expectErrorContains(&runtime, "p 1 0 portprobe.exchange", &.{"'kind 'io"});
+    try expectErrorContains(&runtime, "p portprobe.counter-step 0 port.call", &.{"'kind 'io"});
 }
 
 test "native: streaming crosses the default ring capacity" {
@@ -459,7 +470,7 @@ test "native: streaming crosses the default ring capacity" {
     defer diagnostics.deinit();
     var runtime = try initRuntime(&output.writer, &diagnostics.writer, native_fixture.directory);
     defer runtime.deinit();
-    try expectOk(&runtime, "portprobe.new dup 0 131073 portprobe.exchange swap portprobe.close");
+    try expectOk(&runtime, "portprobe.counter [] port.open 'p set p 131073 " ++ streamCounter ++ "p port.close");
     try std.testing.expectEqual(@as(i64, 131073), runtime.stackItems()[0].int);
 }
 
@@ -470,10 +481,10 @@ test "native: bounded controller errors preserve UTF-8 and the backend error kin
     defer diagnostics.deinit();
     var runtime = try initRuntime(&output.writer, &diagnostics.writer, native_fixture.directory);
     defer runtime.deinit();
-    try expectOk(&runtime, "portprobe.new 'p set");
-    try expectErrorContains(&runtime, "p 4 0 portprobe.exchange", &.{"'kind 'io"});
+    try expectOk(&runtime, "portprobe.counter [] port.open 'p set");
+    try expectErrorContains(&runtime, "p portprobe.counter-long-failure [] port.call", &.{"'kind 'io"});
     try expectErrorContains(&runtime, "portprobe.fail-long", &.{"'kind 'io"});
-    try expectOk(&runtime, "p 1 2 portprobe.exchange p portprobe.close");
+    try expectOk(&runtime, "p portprobe.counter-step 2 port.call p port.close");
     try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[0].int);
 }
 
@@ -1074,7 +1085,7 @@ test "native: reflection exposes native origin effects documentation and capabil
         "<native:sample.increment> requires call build-values\nreschedule",
     ) != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "requires call, build-values, reschedule") != null);
-    try expectOk(&runtime, "'portprobe.new which 'portprobe.new see");
+    try expectOk(&runtime, "'portprobe.signal-waiting which 'portprobe.signal-waiting see");
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "requires call, reschedule, ports") != null);
     var display = try runtime.stackDisplay();
     defer display.deinit();
@@ -1274,7 +1285,7 @@ test "native: graceful shutdown has independent progress and joins cleanup once"
 }
 
 test "native: unsupported graceful shutdown preserves abortive cleanup" {
-    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.new 'p set " ++
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.counter [] port.open 'p set " ++
         "p wrap (port.shutdown) @attempt 'err at 'kind at portprobe.cleaned " ++
         "p port.close p wrap (port.shutdown) @attempt 'err at 'kind at " ++
         "portprobe.shutdowns portprobe.cleaned", "'domain 0 'domain 0 1");

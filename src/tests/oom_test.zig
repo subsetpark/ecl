@@ -1529,32 +1529,32 @@ test "oom: standard-library and host: native port registered message event publi
 
 test "oom: standard-library and host: native port lifecycle creation and admission" {
     try requireSelectedOomTest(@src());
-    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortLifecycleProbe(
-        "portprobe.new-ready-wait 1 2 portprobe.exchange-ready-wait pop",
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.counter [] port.open portprobe.counter-step 2 port.call pop",
     ).run);
 }
 
 test "oom: standard-library and host: native port lifecycle independent lanes" {
     try requireSelectedOomTest(@src());
-    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortLifecycleProbe(
-        "portprobe.duplex-new-ready-wait dup 0 2 portprobe.duplex-exchange-ready-wait pop " ++
-            "wrap [] (1 2 portprobe.duplex-exchange-ready-wait) @give task.await pop",
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.factory [] port.open dup portprobe.receive-step 2 port.call pop " ++
+            "wrap [] (portprobe.step 2 port.call) @give task.await pop",
     ).run);
 }
 
-test "oom: standard-library and host: native port lifecycle exported exchange" {
+test "oom: standard-library and host: native port lifecycle registered exchange" {
     try requireSelectedOomTest(@src());
-    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortLifecycleProbe(
-        "portprobe.duplex-new-ready-wait dup 1 portprobe.start dup port.await dup port.result pop " ++
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.factory [] port.open dup portprobe.noop [] port.begin dup port.await dup port.result pop " ++
             "wrap [] (port.close) @give task.await pop port.close",
     ).run);
 }
 
 test "oom: standard-library and host: native port lifecycle transfer and rollback" {
     try requireSelectedOomTest(@src());
-    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortLifecycleProbe(
-        "portprobe.new-ready-wait dup wrap dup cat [] (pop pop) 3 pack (@give) @attempt pop " ++
-            "wrap [] (1 2 portprobe.exchange-ready-wait) @give task.await pop",
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.counter [] port.open dup wrap dup cat [] (pop pop) 3 pack (@give) @attempt pop " ++
+            "wrap [] (portprobe.counter-step 2 port.call) @give task.await pop",
     ).run);
 }
 

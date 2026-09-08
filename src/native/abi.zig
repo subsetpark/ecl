@@ -76,30 +76,9 @@ pub const Candidate = u64;
 
 pub const max_port_definitions = 64;
 pub const max_port_state_bytes = 1 << 20;
-pub const max_operation_slots = 16;
 pub const max_port_lanes = 16;
 pub const PortCancellation = enum(u32) { close_resource, acknowledge, _ };
 
-pub const PortAction = enum(u32) { create, check, begin, write, finish_request, read, result, wait, close, release, export_exchange, _ };
-pub const PortStatus = enum(u32) { ready, pending, failed, _ };
-pub const PortRequest = extern struct {
-    size: u32 = @sizeOf(PortRequest),
-    action: PortAction,
-    definition: u32,
-    slot: u32 = 0,
-    port: Candidate = 0,
-    operation: u32 = 0,
-    interests: u32 = 3,
-    bytes: ?[*]u8 = null,
-    length: u32 = 0,
-};
-pub const PortReply = extern struct {
-    size: u32 = @sizeOf(PortReply),
-    status: PortStatus = .ready,
-    candidate: Candidate = 0,
-    transferred: u32 = 0,
-};
-pub const PortFn = *const fn (*anyopaque, *const PortRequest, *PortReply) callconv(.c) HostStatus;
 /// Controller streams block only their private host controller. Zero bytes
 /// denotes request EOF or cancellation; failure is reported separately.
 pub const MessageBuildAction = enum(u32) { scalar, copy_input, copy_received, list, dictionary, finish, advance, send, result, clear, reply_endpoint, child, prepare_child, _ };
@@ -128,8 +107,6 @@ pub const ControllerTable = extern struct {
     read_endpoint: *const fn (*anyopaque, EndpointOwner, u32, [*]u8, u32) callconv(.c) u32,
     write_endpoint: *const fn (*anyopaque, EndpointOwner, u32, [*]const u8, u32) callconv(.c) u32,
     finish_endpoint: *const fn (*anyopaque, EndpointOwner, u32) callconv(.c) bool,
-    read: *const fn (*anyopaque, [*]u8, u32) callconv(.c) u32,
-    write: *const fn (*anyopaque, [*]const u8, u32) callconv(.c) u32,
     cancelled: *const fn (*anyopaque) callconv(.c) bool,
     acknowledge_cancellation: *const fn (*anyopaque) callconv(.c) bool,
     fail: *const fn (*anyopaque, ErrorKindWire, [*]const u8, u32) callconv(.c) void,
@@ -343,7 +320,6 @@ pub const HostTable = extern struct {
     build_dict_append: ?BuildDictAppendFn,
     build_dict_finish: ?BuildDictFinishFn,
     forward_path: ?ForwardPathFn = null,
-    port: ?PortFn = null,
 };
 
 pub const Invoke = *const fn (
@@ -441,13 +417,11 @@ comptime {
     assertRecord(ValueView, 40, 8);
     assertRecord(Scalar, 32, 8);
     assertRecord(InvokeResult, 16, 8);
-    assertRecord(HostTable, 144, 8);
+    assertRecord(HostTable, 136, 8);
     assertRecord(Descriptor, 104, 8);
     assertRecord(PortDefinition, 104, 8);
-    assertRecord(PortRequest, 48, 8);
-    assertRecord(PortReply, 24, 8);
     assertRecord(MessageBuildRequest, 72, 8);
-    assertRecord(ControllerTable, 144, 8);
+    assertRecord(ControllerTable, 128, 8);
     assertRecord(EntryResult, 32, 8);
 
     if (@offsetOf(Definition, "callback_index") != 4 or

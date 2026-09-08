@@ -4,7 +4,6 @@ const ecl = @import("ecl-native");
 var shutdowns: std.atomic.Value(u32) = .init(0);
 var cleaned: std.atomic.Value(u32) = .init(0);
 var entered: std.atomic.Value(u32) = .init(0);
-var admitted: std.atomic.Value(u32) = .init(0);
 var waiting: std.atomic.Value(u32) = .init(0);
 var fail_open: std.atomic.Value(bool) = .init(false);
 var block_open: std.atomic.Value(bool) = .init(false);
@@ -34,6 +33,15 @@ fn Spec(comptime label: []const u8) type {
             if (fail_open.swap(false, .acq_rel)) controller.fail(.domain, "deliberate initialization failure");
         }
         pub fn run(state: *State, code: u32, controller: *ecl.Controller) void {
+            if (code >= 41 and code <= 44) {
+                const amount = (controller.input(&.{}) orelse return).int() orelse return controller.fail(.type, "expected counter increment");
+                if (amount < 0 or amount > 255) return controller.fail(.domain, "invalid counter increment");
+                if (code == 42 or code == 43) awaitGate(&state.cancelled);
+                if (controller.cancelled()) return;
+                state.total +%= @intCast(amount);
+                _ = controller.builder().int(state.total) and controller.builder().result();
+                return;
+            }
             if (code == 4) {
                 controller.fail(.io, ("x" ** 4095) ++ "€");
                 return;
@@ -90,7 +98,7 @@ fn DuplexSpec(comptime acknowledge: bool) type {
             return .{};
         }
         pub fn lane(code: u32) Lane {
-            return if (code == 1 or code == 5 or code == 29 or code == 30 or code == 33) .send else .receive;
+            return if (code == 1 or code == 5 or code == 29 or code == 30 or code == 33 or code == 41 or code == 43) .send else .receive;
         }
         pub fn open(state: *State, controller: *ecl.Controller) void {
             const config = controller.input(&.{}) orelse return controller.fail(.domain, "missing configuration");
@@ -342,129 +350,13 @@ fn checkParameters(controller: *ecl.Controller) bool {
 const Duplex = ecl.Port(DuplexSpec(true));
 const Unacknowledged = ecl.Port(DuplexSpec(false));
 
-fn createDuplex(call: *ecl.Call("-- port"), _: *Schedule, port: *Duplex) ecl.CallbackResult {
-    return createPort(call, port);
-}
-fn createUnacknowledged(call: *ecl.Call("-- port"), _: *Schedule, port: *Unacknowledged) ecl.CallbackResult {
-    return createPort(call, port);
-}
-fn createPort(call: *ecl.Call("-- port"), port: anytype) ecl.CallbackResult {
-    return switch (try port.create(0)) {
-        .candidate => |candidate| call.complete(.{candidate}),
-        .pending => blk: {
-            _ = try port.wait(0, .{});
-            break :blk .yield;
-        },
-        else => .fail,
-    };
-}
-fn closeDuplex(call: *ecl.Call("port --"), _: *Schedule, port: *Duplex) ecl.CallbackResult {
-    return closePort(call, port);
-}
-fn closeUnacknowledged(call: *ecl.Call("port --"), _: *Schedule, port: *Unacknowledged) ecl.CallbackResult {
-    return closePort(call, port);
-}
-fn closePort(call: *ecl.Call("port --"), port: anytype) ecl.CallbackResult {
-    return switch (try port.close(0, try call.forward(0))) {
-        .ready => call.complete(.{}),
-        .pending => blk: {
-            _ = try port.wait(0, .{});
-            break :blk .yield;
-        },
-        else => .fail,
-    };
-}
-fn exchangeDuplex(call: *ecl.Call("port code count -- checksum"), schedule: *Schedule, port: *Duplex) ecl.CallbackResult {
-    return exchangeBody(call, schedule, port, true);
-}
-fn exchangeUnacknowledged(call: *ecl.Call("port code count -- checksum"), schedule: *Schedule, port: *Unacknowledged) ecl.CallbackResult {
-    return exchangeBody(call, schedule, port, true);
-}
-
-const Continuation = struct {
-    pub const State = struct { admitted: bool = false, admission_wait: bool = false, finished: bool = false, terminal_wait: bool = false, sent: u64 = 0, received: u64 = 0, sum: i64 = 0 };
+const Schedule = ecl.Reschedule(struct {
+    pub const State = u8;
     pub fn init() State {
-        return .{};
+        return 0;
     }
     pub fn deinit(_: *State) void {}
-};
-const Schedule = ecl.Reschedule(Continuation);
-fn startExchange(call: *ecl.Call("port code -- exchange"), _: *Schedule, port: *Duplex) ecl.CallbackResult {
-    const code = call.input(1).int() orelse return call.fail(.type, "expected operation code");
-    if (code < 0 or code > 5) return call.fail(.domain, "unknown operation");
-    switch (try port.begin(0, try call.forward(0), @intCast(code))) {
-        .pending => {
-            _ = try port.wait(0, .{});
-            return .yield;
-        },
-        .ready => {},
-        else => return .fail,
-    }
-    _ = try port.finishRequest(0);
-    return switch (try port.exportExchange(0)) {
-        .candidate => |exchange_value| call.complete(.{exchange_value}),
-        .pending => .yield,
-        else => .fail,
-    };
-}
-fn create(call: *ecl.Call("-- port"), _: *Schedule, port: *Counter) ecl.CallbackResult {
-    return switch (try port.create(0)) {
-        .candidate => |candidate| call.complete(.{candidate}),
-        .pending => blk: {
-            _ = try port.wait(0, .{});
-            break :blk .yield;
-        },
-        else => .fail,
-    };
-}
-fn createOther(call: *ecl.Call("-- port"), _: *Schedule, port: *Other) ecl.CallbackResult {
-    return switch (try port.create(0)) {
-        .candidate => |candidate| call.complete(.{candidate}),
-        .pending => blk: {
-            _ = try port.wait(0, .{});
-            break :blk .yield;
-        },
-        else => .fail,
-    };
-}
-// Always register exactly one readiness wait, after initialization is ready.
-// This also gives allocation sweeps stable ordinals independent of controller
-// scheduling, while exercising completion before registration.
-fn createReadyWait(call: *ecl.Call("-- port"), schedule: *Schedule, port: *Counter) ecl.CallbackResult {
-    return createReadyWaitBody(call, schedule, port);
-}
-fn createDuplexReadyWait(call: *ecl.Call("-- port"), schedule: *Schedule, port: *Duplex) ecl.CallbackResult {
-    return createReadyWaitBody(call, schedule, port);
-}
-fn createReadyWaitBody(call: *ecl.Call("-- port"), schedule: *Schedule, port: anytype) ecl.CallbackResult {
-    return switch (try port.create(0)) {
-        .candidate => |candidate| blk: {
-            if (schedule.state().terminal_wait) break :blk call.complete(.{candidate});
-            schedule.state().terminal_wait = true;
-            _ = try port.wait(0, .{});
-            break :blk .yield;
-        },
-        .pending => schedule.yield(),
-        else => .fail,
-    };
-}
-fn close(call: *ecl.Call("port --"), _: *Schedule, port: *Counter) ecl.CallbackResult {
-    return switch (try port.close(0, try call.forward(0))) {
-        .ready => call.complete(.{}),
-        .pending => blk: {
-            _ = try port.wait(0, .{});
-            break :blk .yield;
-        },
-        else => .fail,
-    };
-}
-fn checkOther(call: *ecl.Call("port --"), _: *Schedule, port: *Other) ecl.CallbackResult {
-    return switch (try port.check(try call.forward(0))) {
-        .ready => call.complete(.{}),
-        .pending => .yield,
-        else => .fail,
-    };
-}
+});
 fn cleanupCount(call: *ecl.Call("-- n")) ecl.CallbackResult {
     return call.complete(.{ecl.Scalar.int(cleaned.load(.acquire))});
 }
@@ -485,7 +377,6 @@ fn reset(call: *ecl.Call("--")) ecl.CallbackResult {
     shutdowns.store(0, .release);
     cleaned.store(0, .release);
     entered.store(0, .release);
-    admitted.store(0, .release);
     waiting.store(0, .release);
     fail_open.store(false, .release);
     block_open.store(false, .release);
@@ -512,114 +403,9 @@ fn awaitCounter(comptime counter: *std.atomic.Value(u32)) type {
         }
     };
 }
-fn createFailure(call: *ecl.Call("--"), _: *Schedule, port: *Counter) ecl.CallbackResult {
-    return switch (try port.create(0)) {
-        .candidate => call.fail(.user, "deliberate publication rollback"),
-        .pending => blk: {
-            _ = try port.wait(0, .{});
-            break :blk .yield;
-        },
-        else => .fail,
-    };
-}
-fn pair(call: *ecl.Call("-- left right"), _: *Schedule, port: *Counter) ecl.CallbackResult {
-    var candidates: [2]ecl.Candidate = undefined;
-    for (&candidates, 0..) |*candidate, index| switch (try port.create(@intCast(index))) {
-        .candidate => |item| candidate.* = item,
-        .pending => {
-            _ = try port.wait(@intCast(index), .{});
-            return .yield;
-        },
-        else => return .fail,
-    };
-    return call.complete(.{ candidates[0], candidates[1] });
-}
-// Sends repeated bytes while draining the response. The scalar result makes
-// large streaming tests independent of aggregate builder storage.
-fn exchange(call: *ecl.Call("port code count -- checksum"), schedule: *Schedule, port: *Counter) ecl.CallbackResult {
-    return exchangeBody(call, schedule, port, true);
-}
-fn exchangeDuplexReadyWait(call: *ecl.Call("port code count -- checksum"), schedule: *Schedule, port: *Duplex) ecl.CallbackResult {
-    return exchangeBody(call, schedule, port, false);
-}
-fn exchangeReadyWait(call: *ecl.Call("port code count -- checksum"), schedule: *Schedule, port: *Counter) ecl.CallbackResult {
-    return exchangeBody(call, schedule, port, false);
-}
-fn exchangeBody(call: *ecl.Call("port code count -- checksum"), schedule: *Schedule, port: anytype, comptime park_pending: bool) ecl.CallbackResult {
-    const code = call.input(1).int() orelse return call.fail(.type, "expected opcode");
-    const count = call.input(2).int() orelse return call.fail(.type, "expected count");
-    if (code < 0 or code > 5 or count < 0) return call.fail(.domain, "invalid operation");
-    const state = schedule.state();
-    if (!state.admitted) switch (try port.begin(0, try call.forward(0), @intCast(code))) {
-        .ready => {
-            state.admitted = true;
-            _ = admitted.fetchAdd(1, .release);
-        },
-        .pending => {
-            if (!state.admission_wait) {
-                state.admission_wait = true;
-                _ = waiting.fetchAdd(1, .release);
-            }
-            if (park_pending) {
-                _ = try port.wait(0, .{});
-                return .yield;
-            }
-            return schedule.yield();
-        },
-        else => return .fail,
-    };
-    while (schedule.consume(1)) {
-        var progress = false;
-        if (state.sent < count) {
-            const bytes = [_]u8{1} ** 64;
-            switch (try port.write(0, bytes[0..@intCast(@min(64, @as(u64, @intCast(count)) - state.sent))])) {
-                .bytes => |n| {
-                    state.sent += n;
-                    progress = n != 0;
-                },
-                .pending => {},
-                else => return .fail,
-            }
-        } else if (!state.finished) switch (try port.finishRequest(0)) {
-            .ready => {
-                state.finished = true;
-                progress = true;
-            },
-            .pending => {},
-            else => return .fail,
-        };
-        var bytes: [64]u8 = undefined;
-        switch (try port.read(0, &bytes)) {
-            .bytes => |n| {
-                for (bytes[0..n]) |byte| state.sum += byte;
-                state.received += n;
-                progress = progress or n != 0;
-            },
-            .pending => {},
-            else => return .fail,
-        }
-        const expected: u64 = if (code == 0) @intCast(count) else if (code == 1 or code == 3 or code == 5) 1 else 0;
-        if (state.finished and state.received == expected) switch (try port.result(0)) {
-            .ready => {
-                if (!park_pending and !state.terminal_wait) {
-                    state.terminal_wait = true;
-                    _ = try port.wait(0, .{ .readable = false, .writable = false });
-                    return .yield;
-                }
-                return call.complete(.{ecl.Scalar.int(state.sum)});
-            },
-            .pending => {},
-            else => return .fail,
-        };
-        if (!progress) {
-            if (park_pending) {
-                _ = try port.wait(0, .{ .writable = !state.finished });
-                return .yield;
-            }
-            return schedule.yield();
-        }
-    }
-    return schedule.yield();
+fn signalWaiting(call: *ecl.Call("--")) ecl.CallbackResult {
+    _ = waiting.fetchAdd(1, .release);
+    return call.complete(.{});
 }
 const StorageSpec = struct {
     pub const name = "storage";
@@ -1070,6 +856,24 @@ pub const Extension = extension: {
         .doc = "Hermetic native port controller fixture.",
         .ports = .{ Counter, Other, Duplex, Unacknowledged, Storage, Cursor, TransactionPort, Broker, Delivery, Device, Buffer, Multiplex, Channel },
         .words = .{
+            ecl.factory("counter", "Open a single-lane counter.", Counter),
+            ecl.operation("counter-step", "Apply a bounded structured increment.", Counter, 41, .operation, 0),
+            ecl.operation("counter-block", "Block before applying a structured increment.", Counter, 42, .operation, 0),
+            ecl.operation("counter-failure", "Report an ordinary counter operation error.", Counter, 2, .operation, 0),
+            ecl.operation("counter-long-failure", "Report a bounded UTF-8 error.", Counter, 4, .operation, 0),
+            ecl.operation("counter-echo", "Echo exact byte streams through a single lane.", Counter, 0, .operation, 3),
+            ecl.endpoint("counter-input", "Write counter stream input.", Counter, .{ .id = 0, .transport = .bytes, .direction = .input }),
+            ecl.endpoint("counter-output", "Read counter stream output.", Counter, .{ .id = 1, .transport = .bytes, .direction = .output }),
+            ecl.factory("other", "Open a distinct counter kind.", Other),
+            ecl.operation("other-step", "Apply a bounded increment to the other kind.", Other, 41, .operation, 0),
+            ecl.operation("step", "Apply an increment on the send lane.", Duplex, 41, .send, 0),
+            ecl.operation("receive-step", "Apply an increment on the receive lane.", Duplex, 44, .receive, 0),
+            ecl.operation("block", "Block a recoverable receive operation.", Duplex, 42, .receive, 0),
+            ecl.operation("block-send", "Block a recoverable send operation.", Duplex, 43, .send, 0),
+            ecl.factory("unrecoverable", "Open a resource that refuses cancellation recovery.", Unacknowledged),
+            ecl.operation("unrecoverable-block", "Block the unrecoverable receive lane.", Unacknowledged, 42, .receive, 0),
+            ecl.operation("unrecoverable-send", "Block the unrecoverable send lane.", Unacknowledged, 43, .send, 0),
+            ecl.word("signal-waiting", "Mark a caller's checkpoint before bounded admission.", signalWaiting),
             ecl.factory("multiplex", "Open a deterministic multiplexed connection.", Multiplex),
             ecl.operation("channel", "Open a dependent channel with an opaque identity.", Multiplex, 0, .operation, 0),
             ecl.operation("disconnect", "Fail the connection after emitting its final diagnostic.", Multiplex, 1, .operation, 1),
@@ -1153,35 +957,16 @@ pub const Extension = extension: {
             ecl.endpoint("diagnostics", "Independent pipeline diagnostic bytes.", Duplex, .{ .id = 2, .transport = .bytes, .direction = .output }),
             ecl.endpoint("sender", "Structured message input.", Duplex, .{ .id = 3, .transport = .messages, .direction = .input }),
             ecl.endpoint("receiver", "Structured message output.", Duplex, .{ .id = 4, .transport = .messages, .direction = .output }),
-            ecl.word("duplex-new-ready-wait", "Create lanes with deterministic wait allocation.", createDuplexReadyWait),
-            ecl.word("duplex-exchange-ready-wait", "Exercise deterministic lane admission and wait allocation.", exchangeDuplexReadyWait),
-            ecl.word("duplex-new", "Create a port with independently progressing lanes.", createDuplex),
-            ecl.word("duplex-exchange", "Exchange on an operation-selected lane.", exchangeDuplex),
-            ecl.word("duplex-close", "Join every lane and cleanup.", closeDuplex),
-            ecl.word("unacknowledged-new", "Create a port that declines cancellation recovery.", createUnacknowledged),
-            ecl.word("unacknowledged-exchange", "Exchange without acknowledging cancellation.", exchangeUnacknowledged),
-            ecl.word("unacknowledged-close", "Join unrecoverable cancellation cleanup.", closeUnacknowledged),
-            ecl.word("new", "Create a counter port.", create),
-            ecl.word("start", "Return a scope-owned duplex exchange independently of its native call.", startExchange),
-            ecl.word("other-new", "Create the other declared port kind.", createOther),
-            ecl.word("new-ready-wait", "Observe initialization completed before wait registration.", createReadyWait),
-            ecl.word("new-fail", "Fail before publication commits.", createFailure),
-            ecl.word("pair", "Create two ports transactionally.", pair),
             ecl.word("fail-next", "Fail the next initialization.", failNext),
             ecl.word("block-next", "Block the next initialization.", blockNext),
             ecl.word("unblock", "Release one blocked controller.", unblock),
             ecl.word("reset", "Reset observations between isolated fixture runs.", reset),
             ecl.word("await-blocked", "Wait for controller gate entries.", awaitCounter(&entered).run),
-            ecl.word("await-admitted", "Wait for operation admissions.", awaitCounter(&admitted).run),
             ecl.word("await-waiting", "Wait for admission pressure.", awaitCounter(&waiting).run),
             ecl.word("await-cleaned", "Wait for cleanup callbacks.", awaitCounter(&cleaned).run),
-            ecl.word("close", "Join port cleanup.", close),
-            ecl.word("other-check", "Require the other kind.", checkOther),
             ecl.word("shutdowns", "Observe graceful callbacks.", shutdownCount),
             ecl.word("cleaned", "Observe completed cleanup.", cleanupCount),
             ecl.word("fail-long", "Report a bounded UTF-8 word error.", failLong),
-            ecl.word("exchange", "Stream repeated bytes and return a checksum.", exchange),
-            ecl.word("exchange-ready-wait", "Observe operation completion before wait registration.", exchangeReadyWait),
         },
     });
 };

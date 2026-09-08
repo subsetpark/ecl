@@ -1435,29 +1435,31 @@ retention of their immutable roots. Controllers receive only read-only wire
 views with bounded paths, never heap handles or allocator authority. Root
 retirement follows the containing resource or exchange lifetime.
 
-Ordinary native words receive invocation-local port
-capabilities and address suspended work through runtime-owned operation slots.
+Ordinary native words may forward opaque port values. Registered factories,
+operations, and endpoints grant resource authority through the common API;
+host-owned exchange identities carry suspended controller work independently
+of ordinary native invocations.
 Cancellation notification is a bounded concurrent callback; initialization,
 execution, and cleanup belong to host-owned controllers. Initialization precedes
 all lane execution, and cleanup follows every lane executor’s completion.
 
 The native resource owner reserves Session capacity before attaching a provisional
 cell to its scope. Initialization cannot run before the heap identity, membership,
-and controller lifetime are owned. Successful call commit publishes provisional
-ports; rollback closes them. Ordered lanes use the same FIFO ticket boundary
+and controller lifetime are owned. Opening publishes an initialized resource
+to its caller; failed opening closes and joins provisional startup. Ordered lanes use the same FIFO ticket boundary
 as network and process writers. A ticket holds its lane through cancellation
 until execution acknowledges reuse and returns, or the resource closes. The
 operation phase is the authority for dispatch and cancellation; no independent
 active-operation pointer can disagree with it. Native
-kinds' registered operation selectors declare lanes; legacy native word
-adapters select them with a bounded, state-independent classifier. The
+kinds' registered operation selectors declare lanes, validated against a
+bounded, state-independent classifier. The
 host partitions the total admission budget across lanes so a saturated lane
-cannot consume another lane's progress capacity. Request and response rings
-separate scheduler execution from controller blocking.
+cannot consume another lane's progress capacity. Declared byte and message
+endpoints separate scheduler execution from controller blocking. Every exchange
+owns a validated structured request and only its declared endpoint transports.
 Every admitted native operation has a heap exchange identity and independent
-scope membership. Invocation slots retain those identities across suspension;
-they no longer own raw operation storage. Publishing an exchange as a native
-result preserves its scope ownership beyond callback return. Forwarding shares
+scope membership. Retaining or forwarding an exchange preserves its identity
+without changing that ownership. Forwarding shares
 use, while `@give` moves ownership through the same bounded batch protocol as
 resources. Abortive cleanup retains the scope membership until controller
 return, including recovery acknowledgement. The lane's post-return transition
