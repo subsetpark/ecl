@@ -28,6 +28,18 @@
  (port.core.write)
  'write def
 
+ ### def send
+ (sender message -- :
+  "Atomically enqueue one bounded structured message, including an empty value.")
+ (port.core.send)
+ 'send def
+
+ ### def receive
+ (receiver -- event :
+  "Receive {'kind 'message 'value value} or {'kind 'eof}; one receiver may wait.")
+ (port.core.receive)
+ 'receive def
+
  ### def finish
  (writable -- : "Finish input after admitted writes. Idempotent.")
  (port.core.finish)

@@ -10,6 +10,9 @@ const poll = @import("../poll.zig");
 const scheduler = @import("../scheduler.zig");
 const bytes = @import("../port_bytes.zig");
 const transfer = @import("../port_transfer.zig");
+const messages = @import("../port_messages.zig");
+const dict = @import("../dict.zig");
+const intern = @import("../intern.zig");
 
 pub const words = [_]env.BuiltinWord{
     .{ .name = "open", .doc = "( factory config -- resource ) Initialize a registered resource in the calling scope.", .primitive = open },
@@ -17,6 +20,8 @@ pub const words = [_]env.BuiltinWord{
     .{ .name = "endpoint", .effect = "source selector -- endpoint", .doc = "Obtain an attenuated endpoint capability supported by its source.", .primitive = endpoint },
     .{ .name = "read", .doc = "( readable max -- bytes ) Read a positive byte chunk, or [] at stable EOF.", .primitive = read },
     .{ .name = "write", .doc = "( writable bytes -- ) Accept a complete byte list in FIFO order under bounded pressure.", .primitive = write },
+    .{ .name = "send", .doc = "( sender message -- ) Atomically enqueue a bounded structured message.", .primitive = send },
+    .{ .name = "receive", .doc = "( receiver -- event ) Receive one whole message or an EOF event.", .primitive = receive },
     .{ .name = "finish", .effect = "writable --", .doc = "Finish input after previously accepted data. Idempotent.", .primitive = finish },
     .{ .name = "cancel", .effect = "exchange --", .doc = "Request exchange cancellation. Completion remains observable.", .primitive = cancel },
     .{ .name = "close", .doc = "( port -- ) Abort a resource or exchange and join its cleanup. Idempotent.", .primitive = close },
@@ -110,9 +115,113 @@ fn finish(evaluator: *machine.Machine) machine.MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
     const capability = native.endpointFromValue(item.borrow()) orelse return evaluator.typeError("a writable endpoint");
-    const pipe = capability.writer() orelse return evaluator.typeError("a writable endpoint");
-    pipe.finish();
+    if (capability.writer()) |pipe| pipe.finish() else if (capability.sender()) |queue| queue.finish() else return evaluator.typeError("a writable endpoint");
 }
+
+fn send(evaluator: *machine.Machine) machine.MachineError!void {
+    var input = try evaluator.popValue();
+    defer input.deinit();
+    var endpoint_value = try evaluator.popValue();
+    defer endpoint_value.deinit();
+    const capability = native.endpointFromValue(endpoint_value.borrow()) orelse return evaluator.typeError("a message sender");
+    const queue = capability.sender() orelse return evaluator.typeError("a message sender");
+    const driver = try evaluator.allocator().create(SendDriver);
+    errdefer evaluator.allocator().destroy(driver);
+    const validating = try message.Message.create(evaluator.allocator(), input.borrow(), .{});
+    driver.* = .{ .endpoint = endpoint_value.take(), .queue = queue, .state = .{ .validating = validating } };
+    evaluator.adoptDriver(driver);
+}
+
+const SendDriver = struct {
+    pub const address_stable_driver = {};
+    pub const ownership: heap.DriverOwnership = .self_owned;
+    endpoint: Value,
+    queue: *messages.Queue,
+    state: union(enum) { validating: *message.Message, ready: *messages.Envelope, consumed },
+
+    pub fn deinit(self: *SendDriver, releases: *heap.ReleaseDomain, _: std.mem.Allocator) void {
+        switch (self.state) {
+            .validating => |input| input.retire(releases),
+            .ready => |input| input.release(),
+            .consumed => {},
+        }
+        releases.releaseValue(self.endpoint);
+    }
+    pub fn advance(evaluator: *machine.Machine, self: *SendDriver) machine.MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        if (self.state == .validating) {
+            const input = self.state.validating;
+            var budget = poll.WorkBudget.init(machine.kernel_poll_quantum);
+            const progress = input.advance(&budget) catch |err| return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                error.InvalidValue => evaluator.typeError("a structured message without executable words, tasks, or modules"),
+                error.Overflow => evaluator.fail(.overflow, "port message exceeds its structured value limits"),
+            };
+            if (progress == .pending) return .yielded;
+            const envelope = try self.queue.envelope(input.validated().?);
+            self.state = .{ .ready = envelope };
+            input.retire(evaluator.releaseDomain());
+        }
+        switch (self.queue.send(self.state.ready)) {
+            .accepted => {
+                self.state = .consumed;
+                return .completed;
+            },
+            .pending => |source| try evaluator.park(.{ .external = source }),
+            .overflow => return evaluator.fail(.overflow, "message exceeds the resource queue byte budget"),
+            .failed => |failure| return evaluator.fail(failure.kind, failure.text[0..failure.len]),
+        }
+        return .yielded;
+    }
+};
+
+fn receive(evaluator: *machine.Machine) machine.MachineError!void {
+    var endpoint_value = try evaluator.popValue();
+    defer endpoint_value.deinit();
+    const capability = native.endpointFromValue(endpoint_value.borrow()) orelse return evaluator.typeError("a message receiver");
+    const queue = capability.receiver() orelse return evaluator.typeError("a message receiver");
+    queue.beginRead() catch return evaluator.fail(.contract, "endpoint already has a pending receiver");
+    errdefer queue.endRead();
+    const driver = try evaluator.allocator().create(ReceiveDriver);
+    driver.* = .{ .endpoint = endpoint_value.take(), .queue = queue };
+    evaluator.adoptDriver(driver);
+}
+
+const ReceiveDriver = struct {
+    pub const address_stable_driver = {};
+    pub const ownership: heap.DriverOwnership = .self_owned;
+    endpoint: Value,
+    queue: *messages.Queue,
+    pub fn deinit(self: *ReceiveDriver, releases: *heap.ReleaseDomain, _: std.mem.Allocator) void {
+        self.queue.endRead();
+        releases.releaseValue(self.endpoint);
+    }
+    pub fn advance(evaluator: *machine.Machine, self: *ReceiveDriver) machine.MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        switch (self.queue.peek()) {
+            .pending => try evaluator.park(.{ .external = self.queue.source() }),
+            .failed => |failure| return evaluator.fail(failure.kind, failure.text[0..failure.len]),
+            .eof => {
+                const output = try evaluator.reserveStack(1);
+                return output.output(try dict.fromUniquePairs(evaluator.allocator(), evaluator.releaseDomain(), &.{.{ .{ .symbol = try intern.intern("kind") }, .{ .symbol = try intern.intern("eof") } }}));
+            },
+            .message => |input| {
+                defer input.release();
+                const output = try evaluator.reserveStack(1);
+                const event = try dict.fromUniquePairs(evaluator.allocator(), evaluator.releaseDomain(), &.{
+                    .{ .{ .symbol = try intern.intern("kind") }, .{ .symbol = try intern.intern("message") } },
+                    .{ .{ .symbol = try intern.intern("value") }, input.value() },
+                });
+                if (!self.queue.claim(input)) {
+                    evaluator.releaseDomain().releaseValue(event);
+                    return evaluator.fail(.io, "message endpoint closed before publication");
+                }
+                return output.output(event);
+            },
+        }
+        return .yielded;
+    }
+};
 
 fn open(evaluator: *machine.Machine) machine.MachineError!void {
     try startRequest(evaluator, .factory);

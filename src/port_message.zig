@@ -154,6 +154,10 @@ pub const Message = opaque {
 /// Borrowed proof of a complete bounded validation, valid while Message owns
 /// the immutable root. Consumers retain the root before that owner retires.
 pub const Validated = opaque {
+    pub fn footprint(self: *const Validated) Footprint {
+        const state: *const State = @ptrCast(@alignCast(self));
+        return state.footprint;
+    }
     pub fn value(self: *const Validated) Value {
         const state: *const State = @ptrCast(@alignCast(self));
         return state.root;

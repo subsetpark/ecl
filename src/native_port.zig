@@ -13,6 +13,7 @@ const list = @import("list.zig");
 const descriptor = @import("native_descriptor.zig");
 const port_message = @import("port_message.zig");
 const byte_transport = @import("port_bytes.zig");
+const message_transport = @import("port_messages.zig");
 
 const RegisteredState = struct {
     instance: *native.ModuleInstance,
@@ -80,11 +81,14 @@ pub const Limits = struct {
     max_live_ports: u32 = 64,
     max_operations: u32 = 16,
     ring_capacity: u32 = 64 * 1024,
+    message_capacity: u32 = 16,
+    message_queue_bytes: u32 = 1024 * 1024,
 
     pub fn validate(self: Limits) error{InvalidLimits}!void {
         if (self.max_live_ports == 0 or self.max_live_ports > 4096 or
             self.max_operations == 0 or self.max_operations > 256 or
-            self.ring_capacity == 0 or self.ring_capacity > 16 * 1024 * 1024)
+            self.ring_capacity == 0 or self.ring_capacity > 16 * 1024 * 1024 or
+            self.message_capacity == 0 or self.message_capacity > 16 or self.message_queue_bytes == 0)
             return error.InvalidLimits;
     }
 };
@@ -234,6 +238,7 @@ pub const Cell = struct {
     phase: enum { reserved, initializing, open, closing, cleaned, joined } = .reserved,
     initialization_failure: ?Failure = null,
     configuration: ?Value = null,
+    message_budget: *message_transport.Budget,
     lanes: [abi.max_port_lanes]Operations,
 
     fn initializeAllocation(cell: *Cell, owner: *OwnerState, instance: *native.ModuleInstance, kind: u32, config: ?*const port_message.Validated) error{OutOfMemory}!void {
@@ -242,7 +247,9 @@ pub const Cell = struct {
         const state = try allocator.alignedAlloc(u8, .@"64", definition.state_size);
         errdefer allocator.free(state);
         const group = try ControllerGroup.init(allocator, owner.executor.access(), cell);
-        cell.* = .{ .allocator = allocator, .owner = owner, .instance = instance, .kind = kind, .definition = definition, .backend = state, .controllers = group, .lanes = .{Operations.init(&cell.mutex)} ** abi.max_port_lanes };
+        errdefer group.deinit();
+        const message_budget = try message_transport.Budget.create(owner.host, owner.limits.message_queue_bytes);
+        cell.* = .{ .allocator = allocator, .owner = owner, .instance = instance, .kind = kind, .definition = definition, .backend = state, .controllers = group, .message_budget = message_budget, .lanes = .{Operations.init(&cell.mutex)} ** abi.max_port_lanes };
         if (config) |validated| {
             cell.configuration = validated.value();
             heap.retainValue(validated.value());
@@ -267,6 +274,7 @@ pub const Cell = struct {
     pub fn releasePort(self: *Cell) void {
         if (self.refs.fetchSub(1, .acq_rel) != 1) return;
         if (self.configuration) |config| heap.hostDomain(self.owner.host).releaseValue(config);
+        self.message_budget.release();
         self.instance.releasePin();
         self.allocator.free(self.backend);
         self.controllers.deinit();
@@ -439,7 +447,51 @@ pub const Cell = struct {
 
 const Protocol = union(enum) {
     legacy: struct { request: Ring, response: Ring, finished: bool = false },
-    registered: struct { parameters: Value, pipes: [64]?byte_transport.Pair = .{null} ** 64 },
+    registered: struct { parameters: Value, pipes: [64]?Transport = .{null} ** 64 },
+
+    const Transport = union(enum) {
+        bytes: byte_transport.Pair,
+        messages: message_transport.Pair,
+        fn create(cell: *Cell, kind: enum { bytes, messages }) error{OutOfMemory}!Transport {
+            // Construct a complete transport before publishing its variant in
+            // an owning slot. Fallible arm initializers can otherwise expose
+            // a tag whose payload was never initialized during rollback.
+            switch (kind) {
+                .bytes => {
+                    const pair = byte_transport.create(cell.owner.host, cell.owner.limits.ring_capacity) catch |err| return switch (err) {
+                        error.OutOfMemory => error.OutOfMemory,
+                        error.InvalidCapacity => unreachable,
+                    };
+                    return .{ .bytes = pair };
+                },
+                .messages => {
+                    const pair = message_transport.Queue.create(cell.message_budget, cell.owner.limits.message_capacity) catch |err| return switch (err) {
+                        error.OutOfMemory => error.OutOfMemory,
+                        error.InvalidCapacity => unreachable,
+                    };
+                    return .{ .messages = pair };
+                },
+            }
+        }
+        fn release(self: Transport) void {
+            switch (self) {
+                .bytes => |pair| pair.pipe.release(),
+                .messages => |pair| pair.queue.release(),
+            }
+        }
+        fn fail(self: Transport, failure: byte_transport.Failure, discard: bool) void {
+            switch (self) {
+                .bytes => |pair| pair.pipe.fail(failure, discard),
+                .messages => |pair| pair.queue.fail(failure),
+            }
+        }
+        fn finish(self: Transport) void {
+            switch (self) {
+                .bytes => |pair| pair.pipe.finish(),
+                .messages => |pair| pair.queue.finish(),
+            }
+        }
+    };
 
     fn init(cell: *Cell, endpoints: u64, parameters: ?*const port_message.Validated) error{OutOfMemory}!Protocol {
         const input = parameters orelse {
@@ -455,10 +507,11 @@ const Protocol = union(enum) {
             const id: u6 = @intCast(index);
             if (endpoints & (@as(u64, 1) << id) == 0) continue;
             const definition = cell.instance.validated().endpoint(cell.kind, id, .exchange).?;
-            if (definition.transport == .bytes) pipe.* = byte_transport.create(cell.owner.host, cell.owner.limits.ring_capacity) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.InvalidCapacity => unreachable,
-            };
+            const transport = try Transport.create(cell, switch (definition.transport) {
+                .bytes => .bytes,
+                .messages => .messages,
+            });
+            pipe.* = transport;
         }
         return result;
     }
@@ -469,7 +522,7 @@ const Protocol = union(enum) {
                 cell.allocator.free(legacy.response.bytes);
             },
             .registered => |registered| {
-                for (registered.pipes) |pipe| if (pipe) |pair| pair.pipe.release();
+                for (registered.pipes) |pipe| if (pipe) |pair| pair.release();
                 heap.hostDomain(cell.owner.host).releaseValue(registered.parameters);
             },
         }
@@ -489,7 +542,7 @@ pub const Operation = struct {
     failure: ?Failure = null,
     ownership: external.Ownership = .provisional,
     lifetime: enum { open, closing, closed } = .open,
-    terminal_result: union(enum) { available: Value, claimed },
+    terminal_result: union(enum) { available: Value, claimed, discarded },
     endpoints: u64,
 
     fn create(cell: *Cell, code: u32, lane: u32, endpoints: u64, parameters: ?*const port_message.Validated) error{ OutOfMemory, Closed, Full }!*Operation {
@@ -514,6 +567,7 @@ pub const Operation = struct {
     }
     fn execute(self: *Operation, running: *controllers.Running) void {
         var ctx: ControllerContext = .{ .cell = self.cell, .operation = self, .running = running };
+        defer if (ctx.received) |item| item.release();
         self.cell.definition.execute.?(self.cell.backend.ptr, self.code, &controller_table, &ctx);
     }
     fn completeResourceLocked(self: *Operation, outcome: controllers.Completion) void {
@@ -566,16 +620,29 @@ pub const Operation = struct {
     fn settleScope(self: *Operation) void {
         lock(&self.mutex);
         var detached: external.Ownership.Detached = .{};
+        var discarded: ?Value = null;
         const terminal = switch (self.ticket.status()) {
             .done, .cancelled => true,
             .queued, .active, .cancelling, .reusable => false,
         };
-        if (self.lifetime == .closing and terminal) {
+        const aborting = terminal and (self.lifetime != .open or self.cell.closed.load(.acquire));
+        if (aborting) {
             self.lifetime = .closed;
             detached = self.ownership.release();
+            if (self.terminal_result == .available) {
+                discarded = self.terminal_result.available;
+                self.terminal_result = .discarded;
+            }
             self.notifyLocked();
         }
         unlock(&self.mutex);
+        if (aborting and self.protocol == .registered) {
+            for (self.protocol.registered.pipes) |transport| if (transport) |pair| switch (pair) {
+                .messages => |channel| channel.queue.abort(),
+                .bytes => {},
+            };
+        }
+        if (discarded) |item| heap.hostDomain(self.cell.owner.host).releaseValue(item);
         detached.detachAll();
     }
     const Transfer = transfers.ScopeTransfer(Operation, transferOwnership, transferLive);
@@ -603,7 +670,7 @@ pub const Operation = struct {
         self.protocol.deinit(self.cell);
         switch (self.terminal_result) {
             .available => |item| heap.hostDomain(self.cell.owner.host).releaseValue(item),
-            .claimed => {},
+            .claimed, .discarded => {},
         }
         self.cell.releasePort();
     }
@@ -629,12 +696,12 @@ pub const Operation = struct {
             for (self.protocol.registered.pipes, 0..) |pipe, index| if (pipe) |pair| {
                 const endpoint = self.cell.instance.validated().endpoint(self.cell.kind, @intCast(index), .exchange).?;
                 if (self.ticket.isCancelled()) {
-                    pair.pipe.fail(byte_transport.Failure.init(.cancelled, "exchange was cancelled"), false);
+                    pair.fail(byte_transport.Failure.init(.cancelled, "exchange was cancelled"), false);
                 } else if (endpoint.direction == .input) {
-                    pair.pipe.fail(byte_transport.Failure.init(.io, "exchange input consumer completed"), true);
+                    pair.fail(byte_transport.Failure.init(.io, "exchange input consumer completed"), true);
                 } else if (self.failure) |failure| {
-                    pair.pipe.fail(byte_transport.Failure.init(descriptor.mapErrorKind(failure.kind) orelse .io, failure.message[0..failure.len]), false);
-                } else pair.pipe.finish();
+                    pair.fail(byte_transport.Failure.init(descriptor.mapErrorKind(failure.kind) orelse .io, failure.message[0..failure.len]), false);
+                } else pair.finish();
             };
         }
         self.changed.broadcast(io());
@@ -680,6 +747,7 @@ pub const Operation = struct {
         if (self.failure) |failure| return .{ .failed = failure };
         const item = switch (self.terminal_result) {
             .claimed => return .claimed,
+            .discarded => return .{ .failed = Failure.init(.io, "exchange result was discarded by close") },
             .available => |item| item,
         };
         self.terminal_result = .claimed;
@@ -717,7 +785,7 @@ pub fn exchangeFromValue(item: Value) ?*Operation {
 
 const EndpointState = struct {
     parent: Value,
-    loan: union(enum) { reader: *byte_transport.Pipe, writer: *byte_transport.Pipe },
+    loan: union(enum) { reader: *byte_transport.Pipe, writer: *byte_transport.Pipe, receiver: *message_transport.Queue, sender: *message_transport.Queue },
 };
 
 /// The endpoint's variant is its complete transport authority. Its retained
@@ -729,13 +797,13 @@ pub const Endpoint = opaque {
     pub fn reader(self: *Endpoint) ?*byte_transport.Pipe {
         return switch (self.state().loan) {
             .reader => |pipe| pipe,
-            .writer => null,
+            .writer, .receiver, .sender => null,
         };
     }
     pub fn writer(self: *Endpoint) ?*byte_transport.Pipe {
         return switch (self.state().loan) {
             .writer => |pipe| pipe,
-            .reader => null,
+            .reader, .receiver, .sender => null,
         };
     }
     pub fn releasePort(self: *Endpoint) void {
@@ -744,6 +812,18 @@ pub const Endpoint = opaque {
         const owner = exchangeFromValue(parent).?.cell.owner;
         owner.allocator().destroy(owned);
         heap.hostDomain(owner.host).releaseValue(parent);
+    }
+    pub fn receiver(self: *Endpoint) ?*message_transport.Queue {
+        return switch (self.state().loan) {
+            .receiver => |queue| queue,
+            .reader, .writer, .sender => null,
+        };
+    }
+    pub fn sender(self: *Endpoint) ?*message_transport.Queue {
+        return switch (self.state().loan) {
+            .sender => |queue| queue,
+            .reader, .writer, .receiver => null,
+        };
     }
 };
 
@@ -766,9 +846,15 @@ pub fn borrowEndpoint(parent: Value, selector: *RegisteredCapability) error{ Out
     const owner = operation.cell.owner;
     const owned = try owner.allocator().create(EndpointState);
     errdefer owner.allocator().destroy(owned);
-    owned.* = .{ .parent = parent, .loan = switch (spec.direction) {
-        .input => .{ .writer = pair.pipe },
-        .output => .{ .reader = pair.pipe },
+    owned.* = .{ .parent = parent, .loan = switch (pair) {
+        .bytes => |transport| switch (spec.direction) {
+            .input => .{ .writer = transport.pipe },
+            .output => .{ .reader = transport.pipe },
+        },
+        .messages => |transport| switch (spec.direction) {
+            .input => .{ .sender = transport.queue },
+            .output => .{ .receiver = transport.queue },
+        },
     } };
     lock(&owner.mutex);
     const identity = owner.identity;
@@ -779,7 +865,7 @@ pub fn borrowEndpoint(parent: Value, selector: *RegisteredCapability) error{ Out
     return result;
 }
 
-const ControllerContext = struct { cell: *Cell, operation: ?*Operation, running: ?*controllers.Running = null };
+const ControllerContext = struct { cell: *Cell, operation: ?*Operation, running: ?*controllers.Running = null, received: ?*message_transport.Envelope = null };
 fn context(raw: *anyopaque) *ControllerContext {
     return @ptrCast(@alignCast(raw));
 }
@@ -790,6 +876,10 @@ fn controllerInput(raw: *anyopaque, path: [*]const u64, depth: u32, output: *abi
         .legacy => null,
         .registered => |registered| registered.parameters,
     } else ctx.cell.configuration;
+    return viewMessage(root, path, depth, output);
+}
+fn viewMessage(root: ?Value, path: [*]const u64, depth: u32, output: *abi.ValueView) bool {
+    if (depth > abi.max_read_path_depth or output.size != @sizeOf(abi.ValueView)) return false;
     var item = root orelse {
         if (depth != 0) return false;
         output.* = .{ .kind = .list };
@@ -859,7 +949,11 @@ fn controllerPipe(raw: *anyopaque, index: u32, direction: enum { input, output }
         .input => endpoint.direction != .input,
         .output => endpoint.direction != .output,
     }) return null;
-    return op.protocol.registered.pipes[index];
+    const transport = op.protocol.registered.pipes[index] orelse return null;
+    return switch (transport) {
+        .bytes => |pair| pair,
+        .messages => null,
+    };
 }
 fn controllerReadEndpoint(raw: *anyopaque, index: u32, bytes: [*]u8, length: u32) callconv(.c) u32 {
     if (length == 0) return 0;
@@ -880,8 +974,61 @@ fn controllerWriteEndpoint(raw: *anyopaque, index: u32, bytes: [*]const u8, leng
     return @intCast(pair.controller.write(bytes[0..@min(length, 64 * 1024)]));
 }
 fn controllerFinishEndpoint(raw: *anyopaque, index: u32) callconv(.c) bool {
-    const pair = controllerPipe(raw, index, .output) orelse return false;
-    pair.pipe.finish();
+    if (controllerQueue(raw, index, .output)) |pair| {
+        pair.queue.finish();
+    } else {
+        const pair = controllerPipe(raw, index, .output) orelse return false;
+        pair.pipe.finish();
+    }
+    return true;
+}
+
+fn controllerQueue(raw: *anyopaque, index: u32, direction: enum { input, output }) ?message_transport.Pair {
+    const op = context(raw).operation orelse return null;
+    if (op.protocol != .registered or index >= 64) return null;
+    const endpoint = op.cell.instance.validated().endpoint(op.cell.kind, @intCast(index), .exchange) orelse return null;
+    if (endpoint.transport != .messages or switch (direction) {
+        .input => endpoint.direction != .input,
+        .output => endpoint.direction != .output,
+    }) return null;
+    const transport = op.protocol.registered.pipes[index] orelse return null;
+    return switch (transport) {
+        .messages => |pair| pair,
+        .bytes => null,
+    };
+}
+fn controllerReceiveMessage(raw: *anyopaque, index: u32) callconv(.c) bool {
+    const ctx = context(raw);
+    if (ctx.received != null) return false;
+    const pair = controllerQueue(raw, index, .input) orelse return false;
+    ctx.received = pair.controller.receive();
+    return ctx.received != null;
+}
+fn controllerReceivedMessage(raw: *anyopaque, path: [*]const u64, depth: u32, output: *abi.ValueView) callconv(.c) bool {
+    const item = context(raw).received orelse return false;
+    return viewMessage(item.value(), path, depth, output);
+}
+fn controllerForwardMessage(raw: *anyopaque, index: u32) callconv(.c) bool {
+    const ctx = context(raw);
+    const item = ctx.received orelse return false;
+    const pair = controllerQueue(raw, index, .output) orelse return false;
+    if (!pair.controller.send(item)) return false;
+    ctx.received = null;
+    return true;
+}
+fn controllerResultMessage(raw: *anyopaque) callconv(.c) bool {
+    const ctx = context(raw);
+    const op = ctx.operation orelse return false;
+    const item = ctx.received orelse return false;
+    const value = item.value();
+    heap.retainValue(value);
+    lock(&op.mutex);
+    const previous = op.terminal_result.available;
+    op.terminal_result = .{ .available = value };
+    unlock(&op.mutex);
+    ctx.received = null;
+    heap.hostDomain(ctx.cell.owner.host).releaseValue(previous);
+    item.release();
     return true;
 }
 fn controllerAcknowledge(raw: *anyopaque) callconv(.c) bool {
@@ -917,7 +1064,7 @@ fn controllerFail(raw: *anyopaque, kind: abi.ErrorKindWire, bytes: [*]const u8, 
         unlock(&ctx.cell.mutex);
     }
 }
-const controller_table: abi.ControllerTable = .{ .input = controllerInput, .read_endpoint = controllerReadEndpoint, .write_endpoint = controllerWriteEndpoint, .finish_endpoint = controllerFinishEndpoint, .read = controllerRead, .write = controllerWrite, .cancelled = controllerCancelled, .acknowledge_cancellation = controllerAcknowledge, .fail = controllerFail };
+const controller_table: abi.ControllerTable = .{ .receive_message = controllerReceiveMessage, .received_message = controllerReceivedMessage, .forward_message = controllerForwardMessage, .result_message = controllerResultMessage, .input = controllerInput, .read_endpoint = controllerReadEndpoint, .write_endpoint = controllerWriteEndpoint, .finish_endpoint = controllerFinishEndpoint, .read = controllerRead, .write = controllerWrite, .cancelled = controllerCancelled, .acknowledge_cancellation = controllerAcknowledge, .fail = controllerFail };
 
 pub fn fromValue(value: Value, instance: *native.ModuleInstance, kind: u32) ?*Cell {
     const handle = switch (value) {

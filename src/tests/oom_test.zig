@@ -1452,6 +1452,23 @@ test "oom: standard-library and host: native port registered byte output" {
     ).run);
 }
 
+test "oom: standard-library and host: native port registered message input and result" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.factory [] port.open dup portprobe.message-result [] port.begin " ++
+            "dup portprobe.sender port.endpoint [1] port.send dup port.result pop port.close port.close",
+    ).run);
+}
+
+test "oom: standard-library and host: native port registered message event publication" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortProbe(
+        "dup portprobe.receiver port.endpoint port.receive pop port.close port.close",
+        "portprobe.factory [] port.open dup portprobe.messages [] port.begin " ++
+            "dup portprobe.sender port.endpoint dup [1] port.send port.finish dup port.await",
+    ).run);
+}
+
 test "oom: standard-library and host: native port lifecycle creation and admission" {
     try requireSelectedOomTest(@src());
     try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortLifecycleProbe(

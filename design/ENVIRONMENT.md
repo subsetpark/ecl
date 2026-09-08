@@ -74,6 +74,12 @@ Each enabled byte endpoint has a bounded ring using the host's configured byte
 capacity. Output and diagnostics require concurrent consumption when both may
 fill. Controller reads and writes may return partial chunks; cancellation and
 resource closure interrupt blocked transport.
+Message endpoints default to 16 queued messages each and a shared 1 MiB budget
+per resource; hosts may reduce either limit for pressure testing. Messages held
+by a controller retain their budget reservation until forwarding or release.
+Controllers can receive a message, inspect it through bounded `received` paths,
+and consume it with `forwardMessage` or `resultMessage`. Failed consuming calls
+retain ownership, and controller return cleans up an unconsumed message.
 Their words can forward opaque ports through aggregates, stream operations,
 and explicitly close them. Operations execute in FIFO order within a declared
 lane. A port defaults to one lane; multiple lanes and different ports can

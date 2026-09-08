@@ -97,6 +97,22 @@ fn DuplexSpec(comptime acknowledge: bool) type {
         }
         pub fn run(state: *State, code: u32, controller: *ecl.Controller) void {
             const current = &state.lanes[@intFromEnum(lane(code))];
+            if (code >= 14 and code <= 16) {
+                defer if (acknowledge and controller.cancelled()) {
+                    current.cancelled.store(false, .release);
+                    _ = controller.acknowledgeCancellation();
+                };
+                while (controller.receiveMessage(3)) {
+                    if (controller.received(&.{}) == null) return controller.fail(.domain, "missing received message view");
+                    if (code == 15) {
+                        if (!controller.resultMessage()) controller.fail(.domain, "result publication failed");
+                        return;
+                    }
+                    if (!controller.forwardMessage(4)) return;
+                    if (code == 16) return controller.fail(.domain, "failure after buffered message");
+                }
+                return;
+            }
             if (code == 8) return;
             if (code == 10 or code == 11) {
                 _ = controller.writeTo(1, &.{ 4, 5, 6 });
@@ -455,10 +471,15 @@ pub const Extension = ecl.module(.{
         ecl.operation("finished-failure", "Fail after finishing the output endpoint.", Duplex, 11, .receive, 2),
         ecl.operation("pipeline", "Stream input, output, and independent diagnostics.", Duplex, 12, .receive, 7),
         ecl.operation("early-exit", "Stop consuming input after one byte.", Duplex, 13, .receive, 3),
+        ecl.operation("messages", "Forward complete structured messages.", Duplex, 14, .receive, 24),
+        ecl.operation("message-result", "Return one structured message as the terminal result.", Duplex, 15, .receive, 8),
+        ecl.operation("message-failure", "Fail after accepting one output message.", Duplex, 16, .receive, 24),
         ecl.operation("blocked", "Wait for an explicit controller gate.", Duplex, 3, .receive, 3),
         ecl.endpoint("input", "Exchange byte input.", Duplex, .{ .id = 0, .transport = .bytes, .direction = .input }),
         ecl.endpoint("output", "Exchange byte output.", Duplex, .{ .id = 1, .transport = .bytes, .direction = .output }),
         ecl.endpoint("diagnostics", "Independent pipeline diagnostic bytes.", Duplex, .{ .id = 2, .transport = .bytes, .direction = .output }),
+        ecl.endpoint("sender", "Structured message input.", Duplex, .{ .id = 3, .transport = .messages, .direction = .input }),
+        ecl.endpoint("receiver", "Structured message output.", Duplex, .{ .id = 4, .transport = .messages, .direction = .output }),
         ecl.word("duplex-new-ready-wait", "Create lanes with deterministic wait allocation.", createDuplexReadyWait),
         ecl.word("duplex-exchange-ready-wait", "Exercise deterministic lane admission and wait allocation.", exchangeDuplexReadyWait),
         ecl.word("duplex-new", "Create a port with independently progressing lanes.", createDuplex),

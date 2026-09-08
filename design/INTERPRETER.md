@@ -1401,6 +1401,20 @@ preserves accepted output unless cleanup is abortive. Cancellation wakes blocked
 transport independently of the operation lane. Copies are bounded per turn,
 and endpoint drivers use the shared resumable byte-transfer machinery.
 
+Message endpoints use `port_messages.zig`, with bounded queues and one shared
+resource byte budget. Unique delivery ownership is distinct from retained
+observation. A validated envelope carries its capacity reservation through
+controller receipt and forwarding, preventing an input producer from consuming
+the capacity needed to forward that same message. Scheduler receivers prepare
+their event and reserve stack capacity before claiming the queue's delivery;
+failed preparation leaves queue ownership intact. Budget readiness has its own
+mutex and generation, so returning shared capacity never locks another queue.
+Terminal failure preserves accepted output; abortive cleanup detaches queued
+messages and unclaimed results before retiring their graphs outside publication
+locks. This breaks capability cycles through an exchange's own messages or
+result. Scope membership remains until controller return and this retirement
+handoff have completed.
+
 The `port` vocabulary is an embedded ECL module over the host operations in
 `port.core`. Its non-streaming call composition uses the same exchange result
 claim and cleanup boundary as explicit callers. It observes the result through

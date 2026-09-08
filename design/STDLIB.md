@@ -2390,10 +2390,12 @@ the owning scope aborts outstanding work and joins cancellation cleanup.
 | `port.open` | `( factory config -- resource )` | Initialize a resource and publish it into the calling scope. Failure joins cleanup through that scope. |
 | `port.begin` | `( resource operation request -- exchange )` | Admit a registered operation on its declared FIFO lane, parking while admission capacity is full. |
 | `port.call` | `( resource operation request -- value )` | Begin, claim the result, and close the exchange. Requires no additional streaming input or output. |
-| `port.endpoint` | `( source selector -- endpoint )` | Borrow a direction-specific endpoint permitted by the exchange's operation. Currently supports native exchange byte endpoints. |
+| `port.endpoint` | `( source selector -- endpoint )` | Borrow a direction-specific endpoint permitted by the exchange's operation. Currently supports native exchange byte and message endpoints. |
 | `port.read` | `( readable max -- bytes )` | Read up to a positive maximum; `[]` denotes stable EOF. Overlapping readers raise `'contract`. |
 | `port.write` | `( writable bytes -- )` | Accept a complete byte list under bounded pressure. Concurrent calls execute FIFO and remain contiguous. |
-| `port.finish` | `( writable -- )` | Finish input after admitted writes. Idempotent; later writes raise `'io`. |
+| `port.send` | `( sender message -- )` | Enqueue one complete structured message atomically, parking under pressure. Empty values are valid messages. |
+| `port.receive` | `( receiver -- event )` | Return `{'kind 'message 'value value}` or `{'kind 'eof}`. Overlapping receivers raise `'contract`. |
+| `port.finish` | `( writable-or-sender -- )` | Finish input after accepted data. Idempotent; later writes or sends raise `'io`. |
 | `port.await` | `( exchange -- )` | Wait for successful completion or raise the terminal error. Repeatable; does not drain output. |
 | `port.result` | `( exchange -- value )` | Wait and claim the terminal result once. A later successful-result claim raises `'contract`. |
 | `port.cancel` | `( exchange -- )` | Request cancellation idempotently. Completion remains observable and waits for controller return. |
@@ -2425,6 +2427,17 @@ and modules are rejected recursively with `'type`. Each value is bounded by
 64 KiB of scalar/text bytes, 4,096 nodes, and 16 capability occurrences; exceeding
 a bound raises `'overflow` before initialization or admission. Retaining an
 existing resource in a request shares use and does not transfer its scope.
+
+Messages and terminal results use the same structured-value bounds. Default
+message capacity is 16 per endpoint and a shared 1 MiB byte budget per resource.
+A controller-held message retains its capacity reservation until forwarded,
+returned as a result, or discarded. This permits forwarding when the shared
+budget is full. Exceeding the resource's entire byte budget raises `'overflow`;
+temporary saturation parks the producer. Receiving is competing consumption,
+not broadcast. Event construction failure leaves the message queued.
+Abortive close discards queued messages and unclaimed results; a discarded
+successful result raises `'io` if claimed later. Completion observation remains
+repeatable. Existing capabilities in messages share use and retain their owner.
 
 ## proc
 

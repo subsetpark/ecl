@@ -17,6 +17,10 @@ fn expectPortProgram(workers: u32, max_operations: u32, source: []const u8, expe
 }
 
 fn expectPortProgramAtCapacity(workers: u32, max_operations: u32, capacity: u32, source: []const u8, expected: []const u8) !void {
+    return expectPortProgramWithLimits(workers, .{ .ring_capacity = capacity, .max_operations = max_operations }, source, expected);
+}
+
+fn expectPortProgramWithLimits(workers: u32, limits: @import("../native_port.zig").Limits, source: []const u8, expected: []const u8) !void {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
@@ -26,7 +30,7 @@ fn expectPortProgramAtCapacity(workers: u32, max_operations: u32, capacity: u32,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
         .ecl_path = native_fixture.directory,
-        .native_port_limits = .{ .ring_capacity = capacity, .max_operations = max_operations },
+        .native_port_limits = limits,
     }, .{ .worker_pool = workers });
     defer runtime.deinit();
     try expectOk(&runtime, "'task ('await 'cancel) import portprobe.reset");
@@ -34,6 +38,73 @@ fn expectPortProgramAtCapacity(workers: u32, max_operations: u32, capacity: u32,
     var display = try runtime.stackDisplay();
     defer display.deinit();
     try std.testing.expectEqualStrings(expected, display.bytes());
+}
+
+test "native: message endpoints preserve empty values boundaries and stable eof" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .message_capacity = 1 }, "portprobe.factory [] port.open 'p set p portprobe.messages [] port.begin 'x set " ++
+        "x portprobe.sender port.endpoint 's set x portprobe.receiver port.endpoint 'r set " ++
+        "s [] port.send r port.receive dup 'kind at swap 'value at len " ++
+        "s {'address [127 0 0 1] 'port 42 'payload [0 255]} port.send " ++
+        "r port.receive 'value at {'address [127 0 0 1] 'port 42 'payload [0 255]} match? " ++
+        "s port.finish s port.finish r port.receive 'kind at r port.receive 'kind at " ++
+        "x port.await x port.close p port.close portprobe.cleaned", "'message 0 1 'eof 'eof 1");
+}
+
+test "native: messages retain budget credit while the controller forwards them" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .message_capacity = 1, .message_queue_bytes = 8 }, "portprobe.factory [] port.open 'p set p portprobe.messages [] port.begin 'x set " ++
+        "x portprobe.sender port.endpoint wrap ('s set s 1 port.send s 2 port.send s 3 port.send s port.finish) @spawn 'producer set " ++
+        "x portprobe.receiver port.endpoint 'r set r port.receive 'value at r port.receive 'value at r port.receive 'value at " ++
+        "r port.receive 'kind at producer task.await 'ok at pop x port.await x port.close p port.close portprobe.cleaned", "1 2 3 'eof 1");
+}
+
+test "native: structured terminal results preserve capabilities and are claimed once" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.factory [] port.open 'p set p portprobe.message-result [] port.begin 'x set " ++
+        "x portprobe.sender port.endpoint p 42 pair port.send x port.await " ++
+        "x port.result dup first p match? swap 1 at " ++
+        "x wrap (port.result) @attempt 'err at 'kind at x port.await x port.close p port.close portprobe.cleaned", "1 42 'contract 1");
+}
+
+test "native: buffered messages precede terminal failure" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.factory [] port.open 'p set p portprobe.message-failure [] port.begin 'x set " ++
+        "x portprobe.sender port.endpoint [] port.send x wrap (port.await) @attempt 'err at 'kind at " ++
+        "x portprobe.receiver port.endpoint 'r set r port.receive 'value at len " ++
+        "r wrap (port.receive) @attempt 'err at 'kind at x port.close p port.close portprobe.cleaned", "'domain 0 'domain 1");
+}
+
+test "native: message validation and endpoint attenuation fail without partial delivery" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .message_queue_bytes = 8 }, "portprobe.factory [] port.open 'p set p portprobe.messages [] port.begin 'x set " ++
+        "x portprobe.sender port.endpoint 's set x portprobe.receiver port.endpoint 'r set " ++
+        "s wrap ([1 2] port.send) @attempt 'err at 'kind at " ++
+        "s wrap ((dup) port.send) @attempt 'err at 'kind at " ++
+        "s wrap (port.receive) @attempt 'err at 'kind at " ++
+        "r wrap ([] port.send) @attempt 'err at 'kind at " ++
+        "s 7 port.send r port.receive 'value at s port.finish x port.await x port.close p port.close portprobe.cleaned", "'overflow 'type 'type 'type 7 1");
+}
+
+test "native: competing message receivers reject overlap and cancellation restores the lane" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.factory [] port.open 'p set p portprobe.messages [] port.begin 'x set " ++
+        "x portprobe.receiver port.endpoint 'r set r wrap (port.receive) @spawn 'a set r wrap (port.receive) @spawn 'b set " ++
+        "a b pair task.await-any 'err at 'kind at swap pop x port.cancel " ++
+        "a task.await pop b task.await pop x port.close p portprobe.noop [] port.call pop p port.close portprobe.cleaned", "'contract 1");
+}
+
+test "native: cancellation interrupts message producers under shared budget pressure" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .message_capacity = 1, .message_queue_bytes = 8 }, "portprobe.factory [] port.open 'p set p portprobe.messages [] port.begin 'x set " ++
+        "x portprobe.sender port.endpoint wrap ('s set [7] 64 take (s swap port.send) for) @spawn 'producer set " ++
+        "x portprobe.receiver port.endpoint port.receive 'value at x port.cancel " ++
+        "producer task.await 'err at 'kind at x port.close p port.close portprobe.cleaned", "7 'cancelled 1");
+}
+
+test "native: abortive cleanup breaks queued and terminal exchange capability cycles" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.factory [] port.open 'p set p portprobe.messages [] port.begin 'x set " ++
+        "x portprobe.sender port.endpoint dup x port.send port.finish x port.await x port.close " ++
+        "p portprobe.message-result [] port.begin 'y set y portprobe.sender port.endpoint y port.send y port.await y port.close " ++
+        "x type y type p port.close portprobe.cleaned", "'port 'port 1");
+}
+
+test "native: message exchanges transfer scope ownership and clean up exactly once" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.factory [] port.open 'p set p portprobe.messages [] port.begin 'x set " ++
+        "p x pair [] (pop pop) @give task.await 'ok at len x type p type portprobe.cleaned", "0 'port 'port 1");
 }
 
 test "native: exported exchange transfers ownership and joins cancellation on scope exit" {

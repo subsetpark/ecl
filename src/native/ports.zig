@@ -45,6 +45,32 @@ pub const Controller = opaque {
     fn state(self: *Controller) *ControllerState {
         return @ptrCast(@alignCast(self));
     }
+    /// Own the next complete message until forwarding, returning it as the
+    /// result, or controller return. Refuses to discard an unconsumed message.
+    pub fn receiveMessage(self: *Controller, endpoint: u6) bool {
+        const owned = self.state();
+        return owned.table.receive_message(owned.context, endpoint);
+    }
+    /// Borrowed view of the owned received message; the next view lookup
+    /// invalidates this view. Message ownership is unchanged.
+    pub fn received(self: *Controller, path: []const u64) ?*const MessageView {
+        if (path.len > abi.max_read_path_depth) return null;
+        const owned = self.state();
+        if (!owned.table.received_message(owned.context, path.ptr, @intCast(path.len), &owned.input_view)) return null;
+        return @ptrCast(&owned.input_view);
+    }
+    /// Success consumes the received message into the output queue. Failure
+    /// retains it for retry or automatic cleanup at controller return.
+    pub fn forwardMessage(self: *Controller, endpoint: u6) bool {
+        const owned = self.state();
+        return owned.table.forward_message(owned.context, endpoint);
+    }
+    /// Success consumes the received message into the terminal result; failure
+    /// retains it. Completion is still determined by controller return.
+    pub fn resultMessage(self: *Controller) bool {
+        const owned = self.state();
+        return owned.table.result_message(owned.context);
+    }
     /// Read configuration during open, or structured parameters during run.
     /// Dictionary positions alternate key/value. Paths have at most 64 entries.
     pub fn input(self: *Controller, path: []const u64) ?*const MessageView {
