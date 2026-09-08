@@ -1428,6 +1428,51 @@ test "native: bidirectional RPC interleaves notifications and correlates out of 
         "b wrap ([] port.send) @attempt 'err at 'kind at p port.close portprobe.cleaned", "7 [2 20] [1 10] 'eof 42 'io 1");
 }
 
+test "native: storage cursors stream rows and position through registered operations" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .max_operations = 2, .ring_capacity = 1, .message_capacity = 1 }, "portprobe.storage [] port.open 's set s portprobe.query [1 2] port.call 'c set " ++
+        "c portprobe.rows [] port.begin 'x set x portprobe.row port.endpoint 'r set " ++
+        "r port.receive 'value at 'id at r port.receive 'value at 'value at r port.receive 'kind at " ++
+        "x port.result pop x port.close c portprobe.position 2 port.call " ++
+        "c portprobe.rows [] port.begin 'y set y portprobe.row port.endpoint 'r set " ++
+        "r port.receive 'value at 'value at r port.receive 'kind at y port.result pop y port.close " ++
+        "c port.close s port.close portprobe.cleaned", "1 2 'eof 2 2 'eof 2");
+}
+
+test "native: cancelling a full cursor queue leaves its storage session usable" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .max_operations = 2, .message_capacity = 1 }, "portprobe.storage [] port.open 's set s portprobe.query [0 4] port.call 'c set " ++
+        "c portprobe.rows [] port.begin 'x set 1 portprobe.await-blocked x port.cancel " ++
+        "x wrap (port.await) @attempt 'err at 'kind at x port.close " ++
+        "s portprobe.storage-status [] port.call s port.close portprobe.cleaned", "'cancelled [0 0 0] 2");
+}
+
+test "native: storage transactions are exclusive and commit does not imply durability" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "portprobe.storage [] port.open 's set s portprobe.transaction [] port.call 't set " ++
+        "s wrap (portprobe.transaction [] port.call) @attempt 'err at 'kind at " ++
+        "t portprobe.transaction-write 41 port.call s portprobe.storage-status [] port.call " ++
+        "t portprobe.commit [] port.call t wrap (portprobe.commit [] port.call) @attempt 'err at 'kind at " ++
+        "s portprobe.storage-status [] port.call s portprobe.durable [] port.call t port.close " ++
+        "s portprobe.storage-status [] port.call s port.close portprobe.cleaned", "'contract 41 [0 0 1] 41 'contract [41 0 1] 41 [41 41 0] 2");
+}
+
+test "native: discarded transaction results release exclusivity before exchange close returns" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "portprobe.storage [] port.open 's set s portprobe.transaction [] port.begin 'x set " ++
+        "x port.await x port.close s portprobe.storage-status [] port.call " ++
+        "s portprobe.transaction [] port.call 't set s port.close " ++
+        "t wrap (portprobe.transaction-write 1 port.call) @attempt 'err at 'kind at portprobe.cleaned", "[0 0 0] 'io 3");
+}
+
+test "native: transferred transactions release parent state during cancellation cleanup" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "portprobe.storage [] port.open 's set s portprobe.transaction [] port.call 't set " ++
+        "t wrap [] (portprobe.transaction-wait [] port.call) @give 'task set 1 portprobe.await-blocked " ++
+        "s port.close task task.await 'err at 'kind at portprobe.cleaned", "'cancelled 2");
+}
+
+test "native: parent state is unavailable to root and independent resources" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "[] (portprobe.orphan-cursor [0 1] port.open) @attempt 'err at 'kind at 1 portprobe.await-cleaned " ++
+        "portprobe.storage [] port.open 's set " ++
+        "s wrap (portprobe.detached-query [0 1] port.call) @attempt 'err at 'kind at s port.close portprobe.cleaned", "'domain 'io 3");
+}
+
 test "native: result publication gives an independent child to the claiming scope" {
     for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "portprobe.factory [] port.open 'p set p portprobe.child 7 port.call 'c set " ++
         "p port.close c portprobe.noop [] port.call len c port.close portprobe.cleaned", "0 2");

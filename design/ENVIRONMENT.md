@@ -101,6 +101,12 @@ creation retains the configuration and cleans up partial startup. The dependency
 argument is explicit: dependent children retire before the parent backend,
 while independent children can survive it. Cancellation interrupts blocked child
 startup. No child handle grants native code ECL storage or interpreter access.
+`Controller.parent(Port)` borrows the issuing parent's native state only for a
+dependent child of that registered kind in the same module instance. Roots,
+independent children, and wrong kinds return null. The borrow remains valid
+through child cleanup, including parent closure and scope transfers. Native
+libraries synchronize shared state across controllers; this access grants no
+ECL heap, allocator, or interpreter authority.
 `replyEndpoint` appends an opaque sender for a declared message input of the
 current exchange. A controller can send it with a request and receive ECL's
 response through that input. Output endpoints and inputs excluded by the

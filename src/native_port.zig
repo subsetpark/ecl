@@ -229,7 +229,11 @@ pub const Cell = struct {
     waits: external.WaitList(Cell) = .{},
     ownership: external.Ownership = .provisional,
     publication: union(enum) { published, provisional: *scheduler.ExternalGroup } = .published,
-    dependency: ?external.ScopeMembership = null,
+    dependency: union(enum) {
+        independent,
+        attached: struct { parent: *Cell, membership: external.ScopeMembership },
+        retired,
+    } = .independent,
     children: ?*scheduler.ExternalGroup = null,
     phase: enum { reserved, initializing, open, closing, cleaned, joined } = .reserved,
     initialization_failure: ?Failure = null,
@@ -279,7 +283,10 @@ pub const Cell = struct {
     pub fn cancelExternalMember(self: *Cell, scope: *external.ScopeIdentity) void {
         lock(&self.mutex);
         defer unlock(&self.mutex);
-        const dependent = if (self.dependency) |token| token.authorizesCancellation(scope) else false;
+        const dependent = switch (self.dependency) {
+            .attached => |attachment| attachment.membership.authorizesCancellation(scope),
+            .independent, .retired => false,
+        };
         if (self.ownership.authorizesCancellation(scope) or dependent) self.closeLocked();
     }
     pub fn releasePort(self: *Cell) void {
@@ -436,8 +443,11 @@ pub const Cell = struct {
     }
     fn retireDependency(self: *Cell) void {
         lock(&self.mutex);
-        var token = self.dependency;
-        self.dependency = null;
+        var token: ?external.ScopeMembership = switch (self.dependency) {
+            .attached => |attachment| attachment.membership,
+            .independent, .retired => null,
+        };
+        self.dependency = .retired;
         unlock(&self.mutex);
         if (token) |*membership| membership.detach();
     }
@@ -460,10 +470,11 @@ pub const Cell = struct {
         candidate.release();
         return selected orelse error.Closed;
     }
-    fn prepareChildStartup(self: *Cell, provisional: *scheduler.ExternalGroup, dependent: ?*scheduler.ExternalGroup) error{ OutOfMemory, ScopeClosing }!void {
+    const Parent = struct { cell: *Cell, group: *scheduler.ExternalGroup };
+    fn prepareChildStartup(self: *Cell, provisional: *scheduler.ExternalGroup, dependent: ?Parent) error{ OutOfMemory, ScopeClosing }!void {
         const Publication = struct {
             cell: *Cell,
-            dependency: bool,
+            parent: ?*Cell,
             pub fn lock(item: *@This()) void {
                 std.Io.Threaded.mutexLock(&item.cell.mutex);
             }
@@ -472,21 +483,23 @@ pub const Cell = struct {
             }
             pub fn validate(item: *@This()) bool {
                 return !item.cell.closed.load(.acquire) and
-                    (if (item.dependency) item.cell.dependency == null else item.cell.ownership == .provisional);
+                    (if (item.parent != null) item.cell.dependency == .independent else item.cell.ownership == .provisional);
             }
             pub fn publish(item: *@This(), tokens: [16]?external.ScopeMembership) void {
-                if (item.dependency) item.cell.dependency = tokens[0].? else item.cell.ownership = .{ .owned = tokens[0].? };
+                if (item.parent) |parent| {
+                    item.cell.dependency = .{ .attached = .{ .parent = parent, .membership = tokens[0].? } };
+                } else item.cell.ownership = .{ .owned = tokens[0].? };
             }
         };
-        var publication: Publication = .{ .cell = self, .dependency = false };
+        var publication: Publication = .{ .cell = self, .parent = null };
         var incoming: [16]?external.ScopeMember = .{null} ** 16;
         incoming[0] = external.scopeMember(Cell, self);
         if (!try provisional.publish(incoming, &publication)) return error.ScopeClosing;
-        if (dependent) |group| {
-            publication.dependency = true;
+        if (dependent) |parent| {
+            publication.parent = parent.cell;
             incoming = .{null} ** 16;
             incoming[0] = external.scopeMember(Cell, self);
-            if (!try group.publish(incoming, &publication)) return error.ScopeClosing;
+            if (!try parent.group.publish(incoming, &publication)) return error.ScopeClosing;
         }
     }
     fn runShutdown(self: *Cell) void {
@@ -988,7 +1001,7 @@ pub const Operation = struct {
         const owner = parent.owner;
         if (parent.instance.validated().port(kind).?.lane_count > owner.limits.max_operations) return error.InsufficientLanes;
         const provisional = try self.childGroup();
-        const dependent = if (dependency == .dependent) try parent.childGroup() else null;
+        const dependent: ?Cell.Parent = if (dependency == .dependent) .{ .cell = parent, .group = try parent.childGroup() } else null;
         const cell = try Resource.create(owner, .{ parent.instance, kind, configuration, parent.scheduler }, Cell.initializeAllocation);
         provisional.retain();
         cell.publication = .{ .provisional = provisional };
@@ -1339,6 +1352,21 @@ const ControllerContext = struct {
 fn context(raw: *anyopaque) *ControllerContext {
     return @ptrCast(@alignCast(raw));
 }
+fn controllerParent(raw: *anyopaque, name: [*]const u8, length: u32) callconv(.c) ?*anyopaque {
+    if (length == 0 or length > 256) return null;
+    const cell = context(raw).cell;
+    lock(&cell.mutex);
+    defer unlock(&cell.mutex);
+    const parent = switch (cell.dependency) {
+        .attached => |attachment| attachment.parent,
+        .independent, .retired => return null,
+    };
+    if (parent.instance != cell.instance or !std.mem.eql(u8, name[0..length], parent.definition.name_ptr[0..parent.definition.name_len])) return null;
+    // Membership remains attached until child cleanup and controller join.
+    // The parent joins it before destroying the borrowed native state.
+    return parent.backend.ptr;
+}
+
 fn controllerInput(raw: *anyopaque, path: [*]const u64, depth: u32, output: *abi.ValueView) callconv(.c) bool {
     if (depth > abi.max_read_path_depth or output.size != @sizeOf(abi.ValueView)) return false;
     const ctx = context(raw);
@@ -1712,7 +1740,7 @@ fn storeControllerFailure(destination: *?Failure, failure: Failure) void {
     if (destination.* != null and failure != .out_of_memory) return;
     destination.* = failure;
 }
-const controller_table: abi.ControllerTable = .{ .discard_message = controllerDiscardMessage, .build_message = controllerBuildMessage, .fail_allocation = controllerFailAllocation, .receive_message = controllerReceiveMessage, .received_message = controllerReceivedMessage, .forward_message = controllerForwardMessage, .result_message = controllerResultMessage, .input = controllerInput, .read_endpoint = controllerReadEndpoint, .write_endpoint = controllerWriteEndpoint, .finish_endpoint = controllerFinishEndpoint, .read = controllerRead, .write = controllerWrite, .cancelled = controllerCancelled, .acknowledge_cancellation = controllerAcknowledge, .fail = controllerFail };
+const controller_table: abi.ControllerTable = .{ .parent_state = controllerParent, .discard_message = controllerDiscardMessage, .build_message = controllerBuildMessage, .fail_allocation = controllerFailAllocation, .receive_message = controllerReceiveMessage, .received_message = controllerReceivedMessage, .forward_message = controllerForwardMessage, .result_message = controllerResultMessage, .input = controllerInput, .read_endpoint = controllerReadEndpoint, .write_endpoint = controllerWriteEndpoint, .finish_endpoint = controllerFinishEndpoint, .read = controllerRead, .write = controllerWrite, .cancelled = controllerCancelled, .acknowledge_cancellation = controllerAcknowledge, .fail = controllerFail };
 
 pub fn fromValue(value: Value, instance: *native.ModuleInstance, kind: u32) ?*Cell {
     const handle = switch (value) {

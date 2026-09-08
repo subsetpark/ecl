@@ -115,6 +115,7 @@ pub const MessageBuildRequest = extern struct {
     owner: EndpointOwner = .exchange,
 };
 pub const ControllerTable = extern struct {
+    parent_state: *const fn (*anyopaque, [*]const u8, u32) callconv(.c) ?*anyopaque,
     build_message: *const fn (*anyopaque, *const MessageBuildRequest) callconv(.c) HostStatus,
     fail_allocation: *const fn (*anyopaque) callconv(.c) void,
     receive_message: *const fn (*anyopaque, EndpointOwner, u32) callconv(.c) bool,
@@ -443,7 +444,7 @@ comptime {
     assertRecord(PortRequest, 48, 8);
     assertRecord(PortReply, 24, 8);
     assertRecord(MessageBuildRequest, 64, 8);
-    assertRecord(ControllerTable, 128, 8);
+    assertRecord(ControllerTable, 136, 8);
     assertRecord(EntryResult, 32, 8);
 
     if (@offsetOf(Definition, "callback_index") != 4 or

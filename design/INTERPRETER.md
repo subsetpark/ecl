@@ -1512,6 +1512,12 @@ use it to re-enter ECL. Closing pins its parent until every child's final
 retirement has propagated. A resource's controller joins its dependency scope
 before destroying backend state, while an exchange retains its task-scope
 membership until its provisional-child scope is closed.
+The permanent dependency attachment owns both its scope membership and its
+issuing parent identity. Controller parent-state projection validates that
+attachment's module and resource kind. Detaching consumes the attachment only
+after child cleanup and controller join; consequently even a child's destruction
+callback may use the borrowed native parent state. Independent resources carry
+no parent-state authority, and scope transfer preserves the attachment.
 Closed group metadata keeps its allocation authority independently of the
 scheduler facade: a final controller-retirement pin may outlive task-scope
 quiescence, but cannot require scheduler access for destruction.

@@ -621,13 +621,151 @@ fn exchangeBody(call: *ecl.Call("port code count -- checksum"), schedule: *Sched
     }
     return schedule.yield();
 }
+const StorageSpec = struct {
+    pub const name = "storage";
+    pub const State = struct {
+        value: std.atomic.Value(i64) = .init(0),
+        durable: std.atomic.Value(i64) = .init(0),
+        transaction: std.atomic.Value(bool) = .init(false),
+    };
+    pub fn init() State {
+        return .{};
+    }
+    pub fn open(_: *State, _: *ecl.Controller) void {}
+    pub fn run(state: *State, code: u32, controller: *ecl.Controller) void {
+        const builder = controller.builder();
+        switch (code) {
+            0, 4 => {
+                _ = builder.input(&.{}) and builder.child(Cursor, if (code == 0) .dependent else .independent) and builder.result();
+            },
+            1 => {
+                if (state.transaction.load(.acquire)) return controller.fail(.contract, "transaction is already active");
+                _ = builder.list(0) and builder.child(TransactionPort, .dependent) and builder.result();
+            },
+            2 => {
+                const durable = state.value.load(.acquire);
+                state.durable.store(durable, .release);
+                _ = builder.int(durable) and builder.result();
+            },
+            3 => {
+                _ = builder.int(state.value.load(.acquire)) and builder.int(state.durable.load(.acquire)) and
+                    builder.int(@intFromBool(state.transaction.load(.acquire))) and builder.list(3) and builder.result();
+            },
+            else => controller.fail(.domain, "unknown storage operation"),
+        }
+    }
+    pub fn cancel(_: *State) void {}
+    pub fn deinit(_: *State) void {
+        _ = cleaned.fetchAdd(1, .release);
+    }
+};
+const Storage = ecl.Port(StorageSpec);
+
+const Cursor = ecl.Port(struct {
+    pub const name = "cursor";
+    pub const State = struct { parent: ?*Storage.StateType = null, position: i64 = 0, end: i64 = 0 };
+    pub fn init() State {
+        return .{};
+    }
+    pub fn open(state: *State, controller: *ecl.Controller) void {
+        state.parent = controller.parent(Storage) orelse return controller.fail(.domain, "cursor requires a storage parent");
+        if (controller.parent(Duplex) != null) return controller.fail(.contract, "parent kind was not validated");
+        const offset = (controller.input(&.{0}) orelse return controller.fail(.type, "missing cursor offset")).int() orelse return controller.fail(.type, "expected cursor offset");
+        const count = (controller.input(&.{1}) orelse return controller.fail(.type, "missing cursor count")).int() orelse return controller.fail(.type, "expected cursor count");
+        if (offset < 0 or count < 0 or offset > 4 or count > 4 - offset) return controller.fail(.domain, "cursor range exceeds fixture rows");
+        state.position = offset;
+        state.end = offset + count;
+    }
+    pub fn run(state: *State, code: u32, controller: *ecl.Controller) void {
+        const builder = controller.builder();
+        switch (code) {
+            0 => while (state.position < state.end) : (state.position += 1) {
+                if (!builder.symbol("id") or !builder.int(state.position) or !builder.symbol("value") or
+                    !builder.int(state.parent.?.value.load(.acquire) + state.position) or !builder.dictionary(2) or !builder.send(0)) return;
+                _ = entered.fetchAdd(1, .release);
+            },
+            1 => {
+                const position = (controller.input(&.{}) orelse return).int() orelse return controller.fail(.type, "expected position");
+                if (position < 0 or position > state.end) return controller.fail(.domain, "position exceeds cursor range");
+                state.position = position;
+                _ = builder.int(position) and builder.result();
+            },
+            else => controller.fail(.domain, "unknown cursor operation"),
+        }
+    }
+    pub fn cancel(_: *State) void {}
+    pub fn deinit(_: *State) void {
+        _ = cleaned.fetchAdd(1, .release);
+    }
+});
+
+const TransactionPort = ecl.Port(struct {
+    pub const name = "transaction";
+    pub const State = struct {
+        parent: ?*Storage.StateType = null,
+        pending: i64 = 0,
+        committed: bool = false,
+    };
+    pub fn init() State {
+        return .{};
+    }
+    pub fn open(state: *State, controller: *ecl.Controller) void {
+        const parent = controller.parent(Storage) orelse return controller.fail(.domain, "transaction requires a storage parent");
+        if (parent.transaction.cmpxchgStrong(false, true, .acq_rel, .acquire) != null)
+            return controller.fail(.contract, "transaction is already active");
+        state.parent = parent;
+        state.pending = parent.value.load(.acquire);
+    }
+    pub fn run(state: *State, code: u32, controller: *ecl.Controller) void {
+        const builder = controller.builder();
+        if (state.committed) return controller.fail(.contract, "transaction is already committed");
+        switch (code) {
+            0 => {
+                state.pending = (controller.input(&.{}) orelse return).int() orelse return controller.fail(.type, "expected transaction value");
+                _ = builder.int(state.pending) and builder.result();
+            },
+            1 => {
+                state.parent.?.value.store(state.pending, .release);
+                state.committed = true;
+                _ = builder.int(state.pending) and builder.result();
+            },
+            2 => {
+                _ = entered.fetchAdd(1, .release);
+                if (controller.receiveMessage(0)) _ = controller.discardMessage();
+            },
+            else => controller.fail(.domain, "unknown transaction operation"),
+        }
+    }
+    pub fn cancel(_: *State) void {}
+    pub fn deinit(state: *State) void {
+        // This write deliberately occurs during destruction. The parent's
+        // dependency join must keep its native state alive through this point.
+        if (state.parent) |parent| parent.transaction.store(false, .release);
+        _ = cleaned.fetchAdd(1, .release);
+    }
+});
+
 pub const Extension = extension: {
     @setEvalBranchQuota(20_000);
     break :extension ecl.module(.{
         .name = @import("port_fixture_options").module_name,
         .doc = "Hermetic native port controller fixture.",
-        .ports = .{ Counter, Other, Duplex, Unacknowledged },
+        .ports = .{ Counter, Other, Duplex, Unacknowledged, Storage, Cursor, TransactionPort },
         .words = .{
+            ecl.factory("storage", "Open a deterministic storage session.", Storage),
+            ecl.operation("query", "Create a dependent cursor from structured offset and count parameters.", Storage, 0, .operation, 0),
+            ecl.operation("transaction", "Create an exclusive transaction child.", Storage, 1, .operation, 0),
+            ecl.operation("durable", "Acknowledge durable storage separately from commit.", Storage, 2, .operation, 0),
+            ecl.operation("storage-status", "Observe committed, durable, and transaction state.", Storage, 3, .operation, 0),
+            ecl.operation("detached-query", "Reject parent-state access by an independent child.", Storage, 4, .operation, 0),
+            ecl.factory("orphan-cursor", "Reject cursor initialization without its native parent.", Cursor),
+            ecl.operation("rows", "Stream complete row messages under bounded pressure.", Cursor, 0, .operation, 1),
+            ecl.operation("position", "Position the cursor with a registered operation.", Cursor, 1, .operation, 0),
+            ecl.endpoint("row", "Read complete cursor rows.", Cursor, .{ .id = 0, .transport = .messages, .direction = .output }),
+            ecl.operation("transaction-write", "Stage an uncommitted value.", TransactionPort, 0, .operation, 0),
+            ecl.operation("commit", "Commit once without implying durability.", TransactionPort, 1, .operation, 0),
+            ecl.operation("transaction-wait", "Block until input or cancellation.", TransactionPort, 2, .operation, 1),
+            ecl.endpoint("transaction-input", "Transaction control input.", TransactionPort, .{ .id = 0, .transport = .messages, .direction = .input }),
             ecl.factory("factory", "Create an independently scheduled duplex resource.", Duplex),
             ecl.operation("echo", "Echo accepted input bytes.", Duplex, 0, .receive, 3),
             ecl.operation("checksum", "Sum accepted input bytes.", Duplex, 1, .send, 3),

@@ -128,6 +128,17 @@ pub const Controller = opaque {
     pub fn builder(self: *Controller) *MessageBuilder {
         return @ptrCast(self);
     }
+    /// Borrow the issuing parent's native state when this resource was
+    /// created as its dependent child. A root, independent child, or wrong
+    /// parent kind returns null. The borrow lasts through child cleanup;
+    /// native code must synchronize shared access across controller lanes.
+    /// No ECL value, heap, allocator, or interpreter authority is exposed.
+    pub fn parent(self: *Controller, comptime P: type) ?*P.StateType {
+        comptime if (!@hasDecl(P, "ecl_port_marker")) @compileError("ecl-native: parent requires a declared Port type");
+        const owned = self.state();
+        const pointer = owned.table.parent_state(owned.context, P.name.ptr, P.name.len) orelse return null;
+        return @ptrCast(@alignCast(pointer));
+    }
     /// Own the next complete message until forwarding, returning it as the
     /// result, or controller return. Refuses to discard an unconsumed message.
     pub fn receiveMessage(self: *Controller, endpoint: u6) bool {
@@ -269,6 +280,7 @@ pub fn Port(comptime Spec: type) type {
     return opaque {
         const Self = @This();
         pub const ecl_port_marker = void;
+        pub const StateType = Spec.State;
         pub const LaneType = Lane;
         pub const name = Spec.name;
         fn adapter(self: *Self) *Adapter {
