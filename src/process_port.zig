@@ -217,7 +217,7 @@ const OwnedEnvironment = struct {
 /// Session-owned authority and immutable ambient inputs. Units never receive
 /// this owner directly; Patch 4 installs a narrow opaque access facade.
 pub const ProcessOwner = struct {
-    instance: *@import("builtin_port.zig").Instance,
+    instance: *@import("module_bindings.zig").Identity,
     allocator: std.mem.Allocator,
     io: std.Io,
     policy: OwnedPolicy,
@@ -253,7 +253,7 @@ pub const ProcessOwner = struct {
             environment,
         );
         errdefer owned_environment.deinit(allocator);
-        const instance = try @import("builtin_port.zig").Instance.create(allocator, .process);
+        const instance = try @import("module_bindings.zig").Identity.create(allocator);
         errdefer instance.release();
         return .{
             .instance = instance,
@@ -379,7 +379,7 @@ pub fn stdoutCaptureLimit(access_value: *external.ProcessAccess) usize {
 }
 
 /// Borrow the library identity already owned by the Session's process service.
-pub fn registeredInstance(access_value: *external.ProcessAccess) *@import("builtin_port.zig").Instance {
+pub fn registeredInstance(access_value: *external.ProcessAccess) *@import("module_bindings.zig").Identity {
     return ownerFromAccess(access_value).instance;
 }
 
@@ -570,7 +570,7 @@ pub const ProcessCell = struct {
         self.terminate();
         return if (self.termination() != null) .ready else .pending;
     }
-    instance: *@import("builtin_port.zig").Instance,
+    instance: *@import("module_bindings.zig").Identity,
     allocator: std.mem.Allocator,
     io: std.Io,
     identity: u64,

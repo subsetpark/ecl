@@ -3673,7 +3673,7 @@ pub const Machine = struct {
         ) error{OutOfMemory}!void {
             const provenance = switch (entry) {
                 .source => |source| source.name,
-                .native, .builtin, .registered_builtin => intern.get(intern.moduleId(self.name)),
+                .native, .builtin, .bindings => intern.get(intern.moduleId(self.name)),
             };
             var candidate = heap.Owned([]u8).init(try evaluator.unit.allocator.dupe(u8, provenance));
             const materializer = kernel_storage.Utf8Materializer.init(
@@ -4198,7 +4198,7 @@ pub const Machine = struct {
             const text = switch (entry) {
                 .source => |source| try evaluator.unit.allocator.dupe(u8, source.text),
                 .native => |descriptor| return self.transferStatic(evaluator, transfer, descriptor),
-                .builtin, .registered_builtin => return self.transferBuiltin(evaluator, transfer, entry),
+                .builtin, .bindings => return self.transferBuiltin(evaluator, transfer, entry),
             };
             const source_name = transfer.candidate.take();
             const completion = self.sourceCompletion(transfer, .standard_library, null);
@@ -4218,7 +4218,7 @@ pub const Machine = struct {
             const registry = evaluator.unit.inherited.registry.?;
             const publication = switch (entry) {
                 .builtin => |words| try modules.Registry.BuiltinCandidateCursor.init(registry, words),
-                .registered_builtin => |registration| registered: {
+                .bindings => |registration| registered: {
                     const binding = try registration.bind(evaluator.allocator(), &evaluator.unit.inherited);
                     defer binding.release();
                     break :registered try modules.Registry.BuiltinCandidateCursor.initRegistered(registry, binding);

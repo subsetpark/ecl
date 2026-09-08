@@ -1329,7 +1329,10 @@ A module candidate publishes sealed capabilities as literal word
 bodies and pins its instance until publication or abandonment. Capability
 values retain that identity independently of service cleanup. Module registration
 binds immutable service grants inside the adapter, so module loading does not
-select a resource backend. Factories register through one opaque opening
+select a resource backend. A generic module-constant provider carries names,
+effects, documentation, and sealed values; domain adapters own their declarations
+and typed service grants. Retained issuer metadata has no backend discriminator.
+Factories register through one opaque opening
 interface: bounded configuration validation precedes admission, resumable
 openings own partial work, and resource initialization precedes stack publication.
 The opening borrows its factory and validated request until retirement. It derives

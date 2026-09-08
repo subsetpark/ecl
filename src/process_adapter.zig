@@ -11,6 +11,79 @@ const process = @import("process_port.zig");
 const factories = @import("port_factory.zig");
 const message = @import("port_message.zig");
 const Failure = factories.Failure;
+const bindings = @import("module_bindings.zig");
+const endpoints = @import("port_endpoint.zig");
+const bytes = @import("port_bytes.zig");
+
+pub const registration = bindings.Registration.create(Binding);
+
+const Binding = struct {
+    instance: *bindings.Identity,
+    access: ?*external.ProcessAccess,
+    pub const definitions: []const bindings.Definition = &.{
+        .{ .name = "process", .doc = "Create a process using the Session's executable grant.", .effect = "-- factory" },
+        .{ .name = "stdin", .doc = "Select the process's writable standard input.", .effect = "-- selector" },
+        .{ .name = "stdout", .doc = "Select the process's readable standard output.", .effect = "-- selector" },
+        .{ .name = "stderr", .doc = "Select the process's readable diagnostics.", .effect = "-- selector" },
+    };
+    pub fn bind(memory: std.mem.Allocator, inherited: *const @import("machine.zig").InheritedContext) error{OutOfMemory}!*bindings.Publication {
+        const instance = if (inherited.process_access) |access| process.registeredInstance(access) else try bindings.Identity.create(memory);
+        if (inherited.process_access != null) instance.retain();
+        errdefer instance.release();
+        const owned = try instance.allocator().create(Binding);
+        errdefer instance.allocator().destroy(owned);
+        owned.* = .{ .instance = instance, .access = inherited.process_access };
+        return bindings.Publication.create(Binding, owned);
+    }
+    pub fn allocator(self: *Binding) std.mem.Allocator {
+        return self.instance.allocator();
+    }
+    pub fn release(self: *Binding) void {
+        const memory = self.allocator();
+        self.instance.release();
+        memory.destroy(self);
+    }
+    pub fn seal(self: *Binding, index: usize) error{OutOfMemory}!Value {
+        const owned = try self.allocator().create(RegisteredCapability);
+        errdefer self.allocator().destroy(owned);
+        owned.* = .{ .issuer = self.instance, .body = switch (index) {
+            0 => .{ .factory = self.access },
+            1 => .{ .endpoint = .stdin },
+            2 => .{ .endpoint = .stdout },
+            3 => .{ .endpoint = .stderr },
+            else => unreachable,
+        } };
+        const item = switch (owned.body) {
+            .factory => try factories.Factory.create(RegisteredCapability, self.instance.next(), owned),
+            .endpoint => try endpoints.Selector.create(RegisteredCapability, self.instance.next(), owned),
+        };
+        self.instance.retain();
+        return item;
+    }
+};
+
+const EndpointKind = enum { stdin, stdout, stderr };
+const RegisteredCapability = struct {
+    issuer: *bindings.Identity,
+    body: union(enum) { factory: ?*external.ProcessAccess, endpoint: EndpointKind },
+    pub fn instance(self: *RegisteredCapability) *bindings.Identity {
+        return self.issuer;
+    }
+    pub fn allocator(self: *RegisteredCapability) std.mem.Allocator {
+        return self.issuer.allocator();
+    }
+    pub fn openResource(self: *RegisteredCapability, context: factories.Context, config: *const message.Validated) error{OutOfMemory}!factories.Start {
+        return open(self.allocator(), self.body.factory, context, config);
+    }
+    pub fn borrowEndpoint(self: *RegisteredCapability, source: Value) endpoints.BorrowError!Value {
+        return borrowRegisteredEndpoint(source, self);
+    }
+    pub fn releasePort(self: *RegisteredCapability) void {
+        const issuer = self.issuer;
+        issuer.allocator().destroy(self);
+        issuer.release();
+    }
+};
 
 pub fn open(allocator: std.mem.Allocator, access: ?*external.ProcessAccess, context: factories.Context, config: *const message.Validated) error{OutOfMemory}!factories.Start {
     if (config.value() != .dict) return .{ .failed = Failure.init(.type, "expected a process specification dict") };
@@ -157,3 +230,105 @@ const Parser = struct {
         return .yielded;
     }
 };
+
+const EndpointState = struct {
+    cell: *process.ProcessCell,
+    kind: EndpointKind,
+    fn capability(self: *EndpointState) *Endpoint {
+        return @ptrCast(self);
+    }
+};
+
+pub const ProcessReader = struct { cell: *process.ProcessCell, stream: process.Stream };
+
+/// An attenuated borrow pins resource metadata, without owning its scope or
+/// keeping its backend open. Reader exclusion and write ordering belong to
+/// the resource's transports and are shared with the domain words.
+pub const Endpoint = opaque {
+    pub const Permit = process.WritePermit;
+    pub fn allocator(self: *Endpoint) std.mem.Allocator {
+        return self.state().cell.allocator;
+    }
+    fn state(self: *Endpoint) *EndpointState {
+        return @ptrCast(@alignCast(self));
+    }
+    pub fn reader(self: *Endpoint) ?ProcessReader {
+        const owned = self.state();
+        return switch (owned.kind) {
+            .stdin => null,
+            .stdout => .{ .cell = owned.cell, .stream = .stdout },
+            .stderr => .{ .cell = owned.cell, .stream = .stderr },
+        };
+    }
+    pub fn writer(self: *Endpoint) ?*process.ProcessCell {
+        const owned = self.state();
+        return switch (owned.kind) {
+            .stdin => owned.cell,
+            .stdout, .stderr => null,
+        };
+    }
+    pub fn beginRead(self: *Endpoint) error{Busy}!void {
+        const stream = self.reader().?;
+        stream.cell.beginRead(stream.stream) catch return error.Busy;
+    }
+    pub fn endRead(self: *Endpoint) void {
+        const stream = self.reader().?;
+        stream.cell.endRead(stream.stream);
+    }
+    pub fn readCapacity(self: *Endpoint) usize {
+        const stream = self.reader().?;
+        return stream.cell.readCapacity(stream.stream);
+    }
+    pub fn read(self: *Endpoint, destination: []u8) bytes.Read {
+        const stream = self.reader().?;
+        return switch (stream.cell.read(stream.stream, destination)) {
+            .pending => .pending,
+            .eof => .eof,
+            .data => |count| .{ .data = count },
+            .io => .{ .failed = bytes.Failure.init(.io, "process output failed") },
+        };
+    }
+    pub fn readSource(self: *Endpoint) @import("external.zig").ReadinessSource {
+        const stream = self.reader().?;
+        return stream.cell.readSource(stream.stream);
+    }
+    pub fn beginWrite(self: *Endpoint) error{ OutOfMemory, Finished }!*Permit {
+        return self.writer().?.beginWrite() catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.Closed => error.Finished,
+        };
+    }
+    pub fn writeBytes(permit: *Permit, source: []const u8) bytes.Write {
+        return switch (permit.write(source)) {
+            .pending => .pending,
+            .written => |count| .{ .written = count },
+            .io => .{ .failed = bytes.Failure.init(.io, "process stdin is closed") },
+        };
+    }
+    pub fn finish(self: *Endpoint) void {
+        self.writer().?.closeInput();
+    }
+    pub fn releasePort(self: *Endpoint) void {
+        const owned = self.state();
+        const cell = owned.cell;
+        cell.allocator.destroy(owned);
+        cell.releaseReadiness();
+    }
+};
+
+/// Borrows both arguments. Success owns one resource pin and one endpoint
+/// value; failure neither changes scope ownership nor retains a partial pin.
+fn borrowRegisteredEndpoint(parent: Value, selector: *RegisteredCapability) error{ OutOfMemory, WrongKind }!Value {
+    const cell = process.fromValue(parent) orelse return error.WrongKind;
+    if (cell.instance != selector.instance()) return error.WrongKind;
+    const owned = try cell.allocator.create(EndpointState);
+    errdefer cell.allocator.destroy(owned);
+    owned.* = .{ .cell = cell, .kind = selector.body.endpoint };
+    const identity = cell.instance.next();
+    const result = switch (owned.kind) {
+        .stdin => try endpoints.Endpoint.create(Endpoint, .writer, identity, owned.capability()),
+        .stdout, .stderr => try endpoints.Endpoint.create(Endpoint, .reader, identity, owned.capability()),
+    };
+    cell.retainReadiness();
+    return result;
+}

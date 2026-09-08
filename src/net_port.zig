@@ -193,7 +193,7 @@ const OwnedPolicy = struct {
 /// writes wake bytes. No path takes a listener mutex while holding a
 /// connection cell mutex.
 pub const NetOwner = struct {
-    instance: *@import("builtin_port.zig").Instance,
+    instance: *@import("module_bindings.zig").Identity,
     allocator: std.mem.Allocator,
     io: std.Io,
     policy: OwnedPolicy,
@@ -212,7 +212,7 @@ pub const NetOwner = struct {
         const capacity = std.math.add(usize, jobs, 1) catch return error.InvalidPolicy;
         var owned_policy = try OwnedPolicy.init(allocator, policy);
         errdefer owned_policy.deinit(allocator);
-        const instance = try @import("builtin_port.zig").Instance.create(allocator, .network);
+        const instance = try @import("module_bindings.zig").Identity.create(allocator);
         errdefer instance.release();
         return .{
             .instance = instance,
@@ -1519,7 +1519,7 @@ pub fn listenFromUnit(
 }
 
 /// Borrow the library identity already owned by the Session's network service.
-pub fn registeredInstance(access_value: *external.NetAccess) *@import("builtin_port.zig").Instance {
+pub fn registeredInstance(access_value: *external.NetAccess) *@import("module_bindings.zig").Identity {
     return ownerFromAccess(access_value).instance;
 }
 

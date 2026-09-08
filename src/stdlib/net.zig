@@ -177,7 +177,7 @@ fn listen(evaluator: *Machine) MachineError!void {
 }
 
 fn openListener(evaluator: *Machine, input: Value) MachineError!Value {
-    return switch (try @import("../net_factory.zig").open(evaluator.unit.inherited.net_access, .{ .scope = @ptrCast(@alignCast(evaluator.unit.task_scope.?)) }, input)) {
+    return switch (try @import("../net_adapter.zig").open(evaluator.unit.inherited.net_access, .{ .scope = @ptrCast(@alignCast(evaluator.unit.task_scope.?)) }, input)) {
         .resource => |resource| resource,
         .opening => unreachable,
         .failed => |failure| switch (failure.report) {

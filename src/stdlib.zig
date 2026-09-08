@@ -11,7 +11,7 @@
 const std = @import("std");
 const abi = @import("native-abi");
 const env = @import("env.zig");
-const builtin_port = @import("builtin_port.zig");
+const module_bindings = @import("module_bindings.zig");
 const Csv = @import("stdlib/csv.zig").Extension;
 const json_module = @import("stdlib/json.zig");
 const http_module = @import("stdlib/http.zig");
@@ -41,7 +41,7 @@ pub const Entry = union(enum) {
     /// external module may hold and no ECL program can express.
     builtin: []const env.BuiltinWord,
     /// Typed backend capabilities, published as ordinary module constants.
-    registered_builtin: builtin_port.Registration,
+    bindings: *const module_bindings.Registration,
 };
 
 /// Embedded ECL source plus the provenance name errors raised inside it
@@ -97,10 +97,10 @@ const modules = [_]Module{
         .text = @embedFile("stdlib/http/response.ecl"),
     } } },
     .{ .name = "proc", .entry = .{ .builtin = &proc_module.words } },
-    .{ .name = "proc.core", .entry = .{ .registered_builtin = builtin_port.registration(.process) } },
+    .{ .name = "proc.core", .entry = .{ .bindings = @import("process_adapter.zig").registration } },
     .{ .name = "fs", .entry = .{ .builtin = &fs_module.words } },
     .{ .name = "net", .entry = .{ .builtin = &net_module.words } },
-    .{ .name = "net.core", .entry = .{ .registered_builtin = builtin_port.registration(.network) } },
+    .{ .name = "net.core", .entry = .{ .bindings = @import("net_adapter.zig").registration } },
     .{ .name = "path", .entry = .{ .source = .{
         .name = "<stdlib:path>",
         .text = @embedFile("stdlib/path.ecl"),
@@ -167,11 +167,11 @@ comptime {
                     @compileError("embedded module provenance is empty: " ++ module.name);
             },
             .native => {},
-            .registered_builtin => |registration| {
-                for (registration.declarations, 0..) |definition, definition_index| {
+            .bindings => |registration| {
+                for (registration.declarations(), 0..) |definition, definition_index| {
                     env.assertStaticModuleName(definition.name);
                     if (definition.doc.len == 0) @compileError("registered builtin capability requires documentation");
-                    for (registration.declarations[0..definition_index]) |prior| {
+                    for (registration.declarations()[0..definition_index]) |prior| {
                         if (std.mem.eql(u8, definition.name, prior.name))
                             @compileError("duplicate registered builtin capability: " ++ definition.name);
                     }

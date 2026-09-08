@@ -9,6 +9,58 @@ const net = @import("net_port.zig");
 const external = @import("external.zig");
 const factories = @import("port_factory.zig");
 const Failure = factories.Failure;
+const bindings = @import("module_bindings.zig");
+
+pub const registration = bindings.Registration.create(Binding);
+
+const Binding = struct {
+    instance: *bindings.Identity,
+    access: ?*external.NetAccess,
+    pub const definitions: []const bindings.Definition = &.{
+        .{ .name = "listener", .doc = "Create a TCP listener using the Session's listen grant.", .effect = "-- factory" },
+    };
+    pub fn bind(memory: std.mem.Allocator, inherited: *const @import("machine.zig").InheritedContext) error{OutOfMemory}!*bindings.Publication {
+        const instance = if (inherited.net_access) |access| net.registeredInstance(access) else try bindings.Identity.create(memory);
+        if (inherited.net_access != null) instance.retain();
+        errdefer instance.release();
+        const owned = try instance.allocator().create(Binding);
+        errdefer instance.allocator().destroy(owned);
+        owned.* = .{ .instance = instance, .access = inherited.net_access };
+        return bindings.Publication.create(Binding, owned);
+    }
+    pub fn allocator(self: *Binding) std.mem.Allocator {
+        return self.instance.allocator();
+    }
+    pub fn release(self: *Binding) void {
+        const memory = self.allocator();
+        self.instance.release();
+        memory.destroy(self);
+    }
+    pub fn seal(self: *Binding, _: usize) error{OutOfMemory}!Value {
+        const owned = try self.allocator().create(Factory);
+        errdefer self.allocator().destroy(owned);
+        owned.* = .{ .instance = self.instance, .access = self.access };
+        const item = try factories.Factory.create(Factory, self.instance.next(), owned);
+        self.instance.retain();
+        return item;
+    }
+};
+
+const Factory = struct {
+    instance: *bindings.Identity,
+    access: ?*external.NetAccess,
+    pub fn allocator(self: *Factory) std.mem.Allocator {
+        return self.instance.allocator();
+    }
+    pub fn openResource(self: *Factory, context: factories.Context, config: *const @import("port_message.zig").Validated) error{OutOfMemory}!factories.Start {
+        return open(self.access, context, config.value());
+    }
+    pub fn releasePort(self: *Factory) void {
+        const instance = self.instance;
+        instance.allocator().destroy(self);
+        instance.release();
+    }
+};
 
 fn failed(kind: @import("machine.zig").ErrorKind, text: []const u8, address: Value, port: Value, reason: []const u8) error{OutOfMemory}!factories.Start {
     var failure = Failure.init(kind, text);
