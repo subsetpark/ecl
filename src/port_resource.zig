@@ -1,130 +1,199 @@
-//! Borrowed resource lifecycle capabilities. The caller pins the originating
-//! port value for the complete borrow; dispatch never grants backend authority
-//! through an erased pointer or a language-supplied discriminator.
+//! Registered resource lifecycle and provisional publication. Adapters bind
+//! semantic callbacks at construction; the core owns their identity and pins
+//! without depending on any concrete backend type.
 const std = @import("std");
 const scheduler = @import("scheduler.zig");
 const heap = @import("heap.zig");
 const external = @import("external.zig");
-const native = @import("native_port.zig");
-const net = @import("net_port.zig");
-const process = @import("process_port.zig");
+const transport = @import("port_bytes.zig");
 const Value = @import("value.zig").Value;
 
-pub const Shutdown = union(enum) { pending, ready, unsupported, failed: native.Failure };
+pub const Shutdown = union(enum) { pending, ready, unsupported, failed: transport.Failure };
+pub const Initialization = union(enum) { ready, pending: external.ReadinessSource, failed: transport.Failure };
+pub const PublicationMode = enum { direct, staged };
 
-pub const Resource = union(enum) {
-    native: *native.Cell,
-    listener: *net.ListenerCell,
-    connection: *net.ConnectionCell,
-    process: *process.ProcessCell,
+const ProvisionalTable = struct {
+    mutex: *const fn (*anyopaque) *std.Io.Mutex,
+    group: *const fn (*anyopaque) ?*scheduler.ExternalGroup,
+    ownership: *const fn (*anyopaque) *external.Ownership,
+    publish: *const fn (*anyopaque) void,
+    member: *const fn (*anyopaque) external.ScopeMember,
+};
+const Table = struct {
+    initialization: *const fn (*anyopaque) Initialization,
+    close: *const fn (*anyopaque) void,
+    joined: *const fn (*anyopaque) bool,
+    source: *const fn (*anyopaque) external.ReadinessSource,
+    shutdown: *const fn (*anyopaque) Shutdown,
+    release: *const fn (*anyopaque) void,
+    prepare: *const fn (*anyopaque, *anyopaque, *anyopaque) heap.PortTransferError!void,
+    commit: *const fn (*anyopaque) void,
+    abort: *const fn (*anyopaque) void,
+};
+const State = struct {
+    allocator: std.mem.Allocator,
+    refs: std.atomic.Value(usize) = .init(1),
+    payload: *anyopaque,
+    type_id: *const u8,
+    table: *const Table,
+    provisional: ?*const ProvisionalTable,
+};
+fn Bridge(comptime Adapter: type) type {
+    return struct {
+        // Mutable storage gives each adapter a nominal, non-mergeable identity.
+        var identity: u8 = 0;
+        fn typed(raw: *anyopaque) *Adapter {
+            return @ptrCast(@alignCast(raw));
+        }
+        fn close(raw: *anyopaque) void {
+            typed(raw).resourceClose();
+        }
+        fn initialization(raw: *anyopaque) Initialization {
+            return typed(raw).resourceInitialization();
+        }
+        fn joined(raw: *anyopaque) bool {
+            return typed(raw).resourceJoined();
+        }
+        fn source(raw: *anyopaque) external.ReadinessSource {
+            return typed(raw).resourceSource();
+        }
+        fn shutdown(raw: *anyopaque) Shutdown {
+            return typed(raw).resourceShutdown();
+        }
+        fn release(raw: *anyopaque) void {
+            typed(raw).releasePort();
+        }
+        fn prepare(raw: *anyopaque, from: *anyopaque, to: *anyopaque) heap.PortTransferError!void {
+            return typed(raw).prepareScopeTransfer(from, to);
+        }
+        fn commit(raw: *anyopaque) void {
+            typed(raw).commitScopeTransfer();
+        }
+        fn abort(raw: *anyopaque) void {
+            typed(raw).abortScopeTransfer();
+        }
+        const table: Table = .{ .initialization = initialization, .close = close, .joined = joined, .source = source, .shutdown = shutdown, .release = release, .prepare = prepare, .commit = commit, .abort = abort };
+        fn mutex(raw: *anyopaque) *std.Io.Mutex {
+            return typed(raw).resourcePublicationMutex();
+        }
+        fn group(raw: *anyopaque) ?*scheduler.ExternalGroup {
+            return typed(raw).resourcePublicationGroupLocked();
+        }
+        fn ownership(raw: *anyopaque) *external.Ownership {
+            return typed(raw).resourceOwnershipLocked();
+        }
+        fn publish(raw: *anyopaque) void {
+            typed(raw).resourceMarkPublishedLocked();
+        }
+        fn member(raw: *anyopaque) external.ScopeMember {
+            return typed(raw).resourceMember();
+        }
+        const provisional: ProvisionalTable = .{ .mutex = mutex, .group = group, .ownership = ownership, .publish = publish, .member = member };
+    };
+}
 
-    pub fn fromValue(item: Value) ?Resource {
+/// Registered resource semantics, shared by every adapter. Only registration
+/// sees its concrete type; consumers cannot recover backend authority.
+pub const Resource = opaque {
+    fn state(self: *Resource) *State {
+        return @ptrCast(@alignCast(self));
+    }
+    /// Success consumes one adapter reference. Failure retains that reference.
+    /// Allocation authority is derived from the adapter's owning resource.
+    pub fn create(comptime Adapter: type, comptime publication: PublicationMode, identity: u64, adapter: *Adapter) error{OutOfMemory}!Value {
+        const allocator = adapter.resourceAllocator();
+        const owned = try allocator.create(State);
+        errdefer allocator.destroy(owned);
+        owned.* = .{ .allocator = allocator, .payload = adapter, .type_id = &Bridge(Adapter).identity, .table = &Bridge(Adapter).table, .provisional = switch (publication) {
+            .direct => null,
+            .staged => &Bridge(Adapter).provisional,
+        } };
+        return heap.createOwnedPort(Resource, .resource, allocator, identity, @ptrCast(owned));
+    }
+    pub fn fromValue(item: Value) ?*Resource {
         if (item != .port) return null;
-        if (heap.portPayload(native.Cell, .resource, item.port)) |cell| return .{ .native = cell };
-        if (heap.portPayload(net.ListenerCell, .resource, item.port)) |cell| return .{ .listener = cell };
-        if (heap.portPayload(net.ConnectionCell, .resource, item.port)) |cell| return .{ .connection = cell };
-        if (heap.portPayload(process.ProcessCell, .resource, item.port)) |cell| return .{ .process = cell };
-        return null;
+        return heap.portPayload(Resource, .resource, item.port);
     }
-
-    pub fn close(self: Resource) void {
-        switch (self) {
-            inline .native, .listener => |cell| cell.close(),
-            .connection => |cell| cell.abort(),
-            .process => |cell| cell.kill(),
-        }
+    /// Adapter-side typed projection. A different registered adapter cannot
+    /// reinterpret a resource, including after its backend has closed.
+    pub fn project(comptime Adapter: type, item: Value) ?*Adapter {
+        const self = fromValue(item) orelse return null;
+        if (self.state().type_id != &Bridge(Adapter).identity) return null;
+        return @ptrCast(@alignCast(self.state().payload));
     }
-
-    /// Readiness means cleanup has joined, independently of byte drainage,
-    /// output EOF, or the terminal result of an operation.
-    pub fn joined(self: Resource) bool {
-        return switch (self) {
-            .native => |cell| cell.joined(),
-            .listener => |cell| cell.drained(),
-            .connection => |cell| cell.joined(),
-            .process => |cell| cell.termination() != null,
-        };
+    pub fn close(self: *Resource) void {
+        self.state().table.close(self.state().payload);
     }
-
-    pub fn source(self: Resource) external.ReadinessSource {
-        return switch (self) {
-            .native => |cell| cell.source(1),
-            .listener => |cell| cell.drainSource(),
-            .connection => |cell| cell.joinSource(),
-            .process => |cell| cell.waitSource(),
-        };
+    pub fn initialization(self: *Resource) Initialization {
+        return self.state().table.initialization(self.state().payload);
     }
-
-    pub fn shutdown(self: Resource) Shutdown {
-        switch (self) {
-            .native => |cell| return switch (cell.shutdown()) {
-                .pending => .pending,
-                .ready => .ready,
-                .unsupported => .unsupported,
-                .failed => |failure| .{ .failed = failure },
-            },
-            inline .listener, .connection => |cell| cell.close(),
-            .process => |cell| cell.terminate(),
-        }
-        return if (self.joined()) .ready else .pending;
+    pub fn joined(self: *Resource) bool {
+        return self.state().table.joined(self.state().payload);
+    }
+    pub fn source(self: *Resource) external.ReadinessSource {
+        return self.state().table.source(self.state().payload);
+    }
+    pub fn shutdown(self: *Resource) Shutdown {
+        return self.state().table.shutdown(self.state().payload);
+    }
+    pub fn prepareScopeTransfer(self: *Resource, from: *anyopaque, to: *anyopaque) heap.PortTransferError!void {
+        return self.state().table.prepare(self.state().payload, from, to);
+    }
+    pub fn commitScopeTransfer(self: *Resource) void {
+        self.state().table.commit(self.state().payload);
+    }
+    pub fn abortScopeTransfer(self: *Resource) void {
+        self.state().table.abort(self.state().payload);
+    }
+    fn retain(self: *Resource) void {
+        _ = self.state().refs.fetchAdd(1, .monotonic);
+    }
+    pub fn releasePort(self: *Resource) void {
+        const owned = self.state();
+        if (owned.refs.fetchSub(1, .acq_rel) != 1) return;
+        owned.table.release(owned.payload);
+        owned.allocator.destroy(owned);
     }
 };
 
-/// Only backend variants capable of staging children grant provisional
-/// publication authority. Directly scope-published built-ins have no such
-/// authority; retaining them in a message shares their use unchanged.
-const ProvisionalResource = union(enum) {
-    native: *native.Cell,
+/// Registration explicitly grants provisional publication authority. Sharing
+/// an already-published resource never changes its owning scope.
+const ProvisionalResource = struct {
+    resource: *Resource,
 
     fn fromHandle(handle: *heap.PortHandle) ?ProvisionalResource {
         const resource = Resource.fromValue(.{ .port = handle }) orelse return null;
-        return switch (resource) {
-            .native => |cell| .{ .native = cell },
-            .listener, .connection, .process => null,
-        };
+        if (resource.state().provisional == null) return null;
+        return .{ .resource = resource };
     }
     fn identity(self: ProvisionalResource) usize {
-        return switch (self) {
-            inline else => |cell| @intFromPtr(cell),
-        };
+        return @intFromPtr(self.resource.state().payload);
     }
     fn mutex(self: ProvisionalResource) *std.Io.Mutex {
-        return switch (self) {
-            inline else => |cell| &cell.mutex,
-        };
+        const owned = self.resource.state();
+        return owned.provisional.?.mutex(owned.payload);
     }
     fn groupLocked(self: ProvisionalResource) ?*scheduler.ExternalGroup {
-        return switch (self) {
-            inline else => |cell| switch (cell.publication) {
-                .published => null,
-                .provisional => |group| group,
-            },
-        };
+        const owned = self.resource.state();
+        return owned.provisional.?.group(owned.payload);
     }
     fn ownershipLocked(self: ProvisionalResource) *external.Ownership {
-        return switch (self) {
-            inline else => |cell| &cell.ownership,
-        };
+        const owned = self.resource.state();
+        return owned.provisional.?.ownership(owned.payload);
     }
     fn markPublishedLocked(self: ProvisionalResource) void {
-        switch (self) {
-            inline else => |cell| cell.publication = .published,
-        }
+        const owned = self.resource.state();
+        owned.provisional.?.publish(owned.payload);
     }
     fn member(self: ProvisionalResource) external.ScopeMember {
-        return switch (self) {
-            inline else => |cell| external.scopeMember(@TypeOf(cell.*), cell),
-        };
+        const owned = self.resource.state();
+        return owned.provisional.?.member(owned.payload);
     }
     fn retainReadiness(self: ProvisionalResource) void {
-        switch (self) {
-            inline else => |cell| cell.retainReadiness(),
-        }
+        self.resource.retain();
     }
     fn releaseReadiness(self: ProvisionalResource) void {
-        switch (self) {
-            inline else => |cell| cell.releaseReadiness(),
-        }
+        self.resource.releasePort();
     }
 };
 

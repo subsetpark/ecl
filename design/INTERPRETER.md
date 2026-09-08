@@ -1347,6 +1347,17 @@ and consumes both its turn and prepared interface storage on finish or
 cancellation. Adapter references are consumed only after successful capability
 publication, so failed registration leaves cleanup with the caller.
 
+Resources use the same registered lifecycle interface for every adapter.
+The core dispatches close, graceful shutdown, cleanup readiness, and ownership
+transfer without inspecting backend types. Registration derives allocation
+authority from the resource owner and seals a nominal adapter identity for
+adapter-side projection. A resource explicitly grants either direct ownership
+or provisional publication support. Atomic handoff consumes only the latter
+capability's ownership projection; it has no knowledge of native libraries or
+built-in resource layouts. Publication snapshots retain the common resource
+handle as well as its adapter reference, so releasing the last language value
+cannot invalidate an in-flight handoff.
+
 Package discovery and synchronization are
 described in `ENVIRONMENT.md`; they enter the evaluator through the same module
 loader and bounded-driver conventions as other sources. Host-side lock and

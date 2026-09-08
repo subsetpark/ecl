@@ -328,7 +328,7 @@ pub const ProcessOwner = struct {
             error.Io, error.Closed => error.Io,
         };
 
-        const port = heap.createOwnedPort(ProcessCell, .resource, self.allocator, cell.identity, cell) catch {
+        const port = @import("port_resource.zig").Resource.create(ProcessCell, .direct, cell.identity, cell) catch {
             cell.kill();
             return error.OutOfMemory;
         };
@@ -551,6 +551,25 @@ const readiness_run_tag: u64 = 4;
 const readiness_pointer_mask: u64 = ~@as(u64, 7);
 
 pub const ProcessCell = struct {
+    pub fn resourceInitialization(_: *ProcessCell) @import("port_resource.zig").Initialization {
+        return .ready;
+    }
+    pub fn resourceAllocator(self: *ProcessCell) std.mem.Allocator {
+        return self.allocator;
+    }
+    pub fn resourceClose(self: *ProcessCell) void {
+        self.kill();
+    }
+    pub fn resourceJoined(self: *ProcessCell) bool {
+        return self.termination() != null;
+    }
+    pub fn resourceSource(self: *ProcessCell) external.ReadinessSource {
+        return self.waitSource();
+    }
+    pub fn resourceShutdown(self: *ProcessCell) @import("port_resource.zig").Shutdown {
+        self.terminate();
+        return if (self.termination() != null) .ready else .pending;
+    }
     instance: *@import("builtin_port.zig").Instance,
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -1350,7 +1369,7 @@ fn translateTerm(term: std.process.Child.Term) Termination {
 
 pub fn fromValue(port: Value) ?*ProcessCell {
     if (port != .port) return null;
-    return heap.portPayload(ProcessCell, .resource, port.port);
+    return @import("port_resource.zig").Resource.project(ProcessCell, port);
 }
 
 test "process policy rejects ambient and relative executable selection before spawn" {

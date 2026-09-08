@@ -15,6 +15,7 @@ const byte_transport = @import("port_bytes.zig");
 const message_builder = @import("port_builder.zig");
 const message_transport = @import("port_messages.zig");
 const ResourcePublication = @import("port_resource.zig").Publication;
+const resource_api = @import("port_resource.zig");
 const endpoint_api = @import("port_endpoint.zig");
 
 const RegisteredState = struct {
@@ -103,6 +104,13 @@ pub const Limits = struct {
 
 pub const Failure = @import("port_failure.zig").Failure(abi.ErrorKindWire);
 
+fn semanticFailure(failure: Failure) byte_transport.Failure {
+    return switch (failure) {
+        .out_of_memory => .out_of_memory,
+        .report => |report| byte_transport.Failure.init(descriptor.mapErrorKind(report.kind) orelse .io, report.message[0..report.len]),
+    };
+}
+
 const Resource = transfers.Resource(Cell, OwnerState, OwnerState.allocator, OwnerState.reserveLive, OwnerState.releaseLive);
 
 const OwnerState = struct {
@@ -177,7 +185,7 @@ pub const Access = opaque {
         const identity = owner.identity;
         owner.identity +%= 1;
         unlock(&owner.mutex);
-        const item = heap.createOwnedPort(Cell, .resource, cell.allocator, identity, cell) catch |err| {
+        const item = resource_api.Resource.create(Cell, .staged, identity, cell) catch |err| {
             cell.releasePort();
             return err;
         };
@@ -214,6 +222,51 @@ const Operations = controllers.Lane(Operation, .operation, .{
 });
 
 pub const Cell = struct {
+    pub fn resourceInitialization(self: *Cell) resource_api.Initialization {
+        return switch (self.initialized()) {
+            .ready => .ready,
+            .pending => .{ .pending = self.source(0) },
+            .failed => |failure| .{ .failed = semanticFailure(failure) },
+        };
+    }
+    pub fn resourceAllocator(self: *Cell) std.mem.Allocator {
+        return self.allocator;
+    }
+    pub fn resourceClose(self: *Cell) void {
+        self.close();
+    }
+    pub fn resourceJoined(self: *Cell) bool {
+        return self.joined();
+    }
+    pub fn resourceSource(self: *Cell) external.ReadinessSource {
+        return self.source(1);
+    }
+    pub fn resourceShutdown(self: *Cell) resource_api.Shutdown {
+        return switch (self.shutdown()) {
+            .pending => .pending,
+            .ready => .ready,
+            .unsupported => .unsupported,
+            .failed => |failure| .{ .failed = semanticFailure(failure) },
+        };
+    }
+    pub fn resourcePublicationMutex(self: *Cell) *std.Io.Mutex {
+        return &self.mutex;
+    }
+    pub fn resourcePublicationGroupLocked(self: *Cell) ?*scheduler.ExternalGroup {
+        return switch (self.publication) {
+            .published => null,
+            .provisional => |group| group,
+        };
+    }
+    pub fn resourceOwnershipLocked(self: *Cell) *external.Ownership {
+        return &self.ownership;
+    }
+    pub fn resourceMarkPublishedLocked(self: *Cell) void {
+        self.publication = .published;
+    }
+    pub fn resourceMember(self: *Cell) external.ScopeMember {
+        return external.scopeMember(Cell, self);
+    }
     pub const Admission = union(enum) { pending, closed, invalid_operation, operation: Value };
     allocator: std.mem.Allocator,
     owner: *OwnerState,
@@ -843,7 +896,7 @@ pub const Operation = struct {
         const identity = owner.identity;
         owner.identity +%= 1;
         std.Io.Threaded.mutexUnlock(&owner.mutex);
-        const item = heap.createOwnedPort(Cell, .resource, cell.allocator, identity, cell) catch |err| {
+        const item = resource_api.Resource.create(Cell, .staged, identity, cell) catch |err| {
             cell.releasePort();
             return err;
         };
@@ -1124,7 +1177,7 @@ fn borrowRegisteredEndpoint(parent: Value, selector: *RegisteredCapability) erro
         else => return error.WrongKind,
     };
     const source: EndpointParent = switch (spec.owner) {
-        .resource => .{ .resource = if (parent == .port) heap.portPayload(Cell, .resource, parent.port) orelse return error.WrongKind else return error.WrongKind },
+        .resource => .{ .resource = resource_api.Resource.project(Cell, parent) orelse return error.WrongKind },
         .exchange => .{ .exchange = exchangeFromValue(parent) orelse return error.WrongKind },
     };
     const cell = source.cell();
@@ -1557,6 +1610,6 @@ pub fn fromValue(value: Value, instance: *native.ModuleInstance, kind: u32) ?*Ce
         .port => |port| port,
         else => return null,
     };
-    const cell = heap.portPayload(Cell, .resource, handle) orelse return null;
+    const cell = resource_api.Resource.project(Cell, .{ .port = handle }) orelse return null;
     return if (cell.instance == instance and cell.kind == kind) cell else null;
 }

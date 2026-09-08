@@ -326,7 +326,7 @@ pub const NetOwner = struct {
 
         try transfers.publishScope(ListenerCell, cell, scope, ListenerCell.transferOwnership);
 
-        return heap.createOwnedPort(ListenerCell, .resource, self.allocator, cell.identity, cell) catch
+        return @import("port_resource.zig").Resource.create(ListenerCell, .direct, cell.identity, cell) catch
             return error.OutOfMemory;
     }
 };
@@ -480,6 +480,25 @@ pub const AcceptSlot = struct {
 /// value, the scope member, registered waits, and the acceptor thread; the
 /// terminal transition returns socket capacity after any acceptor joins.
 pub const ListenerCell = struct {
+    pub fn resourceInitialization(_: *ListenerCell) @import("port_resource.zig").Initialization {
+        return .ready;
+    }
+    pub fn resourceAllocator(self: *ListenerCell) std.mem.Allocator {
+        return self.allocator;
+    }
+    pub fn resourceClose(self: *ListenerCell) void {
+        self.close();
+    }
+    pub fn resourceJoined(self: *ListenerCell) bool {
+        return self.drained();
+    }
+    pub fn resourceSource(self: *ListenerCell) external.ReadinessSource {
+        return self.drainSource();
+    }
+    pub fn resourceShutdown(self: *ListenerCell) @import("port_resource.zig").Shutdown {
+        self.close();
+        return if (self.drained()) .ready else .pending;
+    }
     allocator: std.mem.Allocator,
     io: std.Io,
     owner: *NetOwner,
@@ -1002,6 +1021,25 @@ const ConnectionGroup = controllers.Group(ConnectionCell, ConnectionCell.StopRea
 });
 
 pub const ConnectionCell = struct {
+    pub fn resourceInitialization(_: *ConnectionCell) @import("port_resource.zig").Initialization {
+        return .ready;
+    }
+    pub fn resourceAllocator(self: *ConnectionCell) std.mem.Allocator {
+        return self.allocator;
+    }
+    pub fn resourceClose(self: *ConnectionCell) void {
+        self.abort();
+    }
+    pub fn resourceJoined(self: *ConnectionCell) bool {
+        return self.joined();
+    }
+    pub fn resourceSource(self: *ConnectionCell) external.ReadinessSource {
+        return self.joinSource();
+    }
+    pub fn resourceShutdown(self: *ConnectionCell) @import("port_resource.zig").Shutdown {
+        self.close();
+        return if (self.joined()) .ready else .pending;
+    }
     allocator: std.mem.Allocator,
     identity: u64,
     refs: std.atomic.Value(usize) = .init(1),
@@ -1067,7 +1105,7 @@ pub const ConnectionCell = struct {
                 error.Io, error.Closed => .resources,
             };
         };
-        const port = heap.createOwnedPort(ConnectionCell, .resource, owner.allocator, cell.identity, cell) catch {
+        const port = @import("port_resource.zig").Resource.create(ConnectionCell, .direct, cell.identity, cell) catch {
             cell.abort();
             cell.releaseRef();
             return error.OutOfMemory;
@@ -1501,14 +1539,14 @@ pub fn pollAcceptFromUnit(
 /// Typed projection of a port value; null for any other port kind or value.
 pub fn fromValue(port: Value) ?*ListenerCell {
     if (port != .port) return null;
-    return heap.portPayload(ListenerCell, .resource, port.port);
+    return @import("port_resource.zig").Resource.project(ListenerCell, port);
 }
 
 /// Typed projection of a connection port; null for a listener, a process
 /// port, or any other value.
 pub fn connectionFromValue(port: Value) ?*ConnectionCell {
     if (port != .port) return null;
-    return heap.portPayload(ConnectionCell, .resource, port.port);
+    return @import("port_resource.zig").Resource.project(ConnectionCell, port);
 }
 
 fn ownerFromAccess(access_value: *external.NetAccess) *NetOwner {

@@ -296,7 +296,7 @@ const Request = struct {
     pub fn deinit(self: *Request, releases: *heap.ReleaseDomain, _: std.mem.Allocator) void {
         switch (self.state) {
             .opening => |item| {
-                heap.portPayload(native.Cell, .resource, item.port).?.close();
+                Resource.fromValue(item).?.close();
                 releases.releaseValue(item);
             },
             .validating, .ready, .consumed => {},
@@ -323,13 +323,13 @@ const Request = struct {
         }
         if (self.state == .opening) {
             const item = self.state.opening;
-            const cell = heap.portPayload(native.Cell, .resource, item.port).?;
-            switch (cell.initialized()) {
-                .pending => {
-                    try evaluator.park(.{ .external = cell.source(0) });
+            const resource = Resource.fromValue(item).?;
+            switch (resource.initialization()) {
+                .pending => |source| {
+                    try evaluator.park(.{ .external = source });
                     return .yielded;
                 },
-                .failed => |failure| return fail(evaluator, failure),
+                .failed => |failure| return transportFailure(evaluator, failure),
                 .ready => {
                     const output = try evaluator.reserveStack(1);
                     self.state = .consumed;
@@ -450,7 +450,7 @@ fn observe(evaluator: *machine.Machine, mode: Observe.Mode) machine.MachineError
     });
 }
 
-const Target = union(enum) { resource: Resource, exchange: *native.Operation };
+const Target = union(enum) { resource: *Resource, exchange: *native.Operation };
 const Observe = struct {
     const Mode = enum { observe, close, shutdown, claim };
     pub const ownership: heap.DriverOwnership = .fields;
@@ -467,7 +467,7 @@ const Observe = struct {
                         .pending => {},
                         .ready => return .completed,
                         .unsupported => return evaluator.fail(.domain, "resource does not support graceful shutdown"),
-                        .failed => |failure| return fail(evaluator, failure),
+                        .failed => |failure| return transportFailure(evaluator, failure),
                     }
                 } else {
                     resource.close();
