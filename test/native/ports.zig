@@ -860,13 +860,150 @@ const Delivery = ecl.Port(struct {
     }
 });
 
+const DeviceSpec = struct {
+    pub const name = "device";
+    pub const State = struct {
+        buffers: std.atomic.Value(u32) = .init(0),
+        working: std.atomic.Value(u32) = .init(0),
+        completed: std.atomic.Value(u32) = .init(0),
+    };
+    pub fn init() State {
+        return .{};
+    }
+    pub fn open(_: *State, _: *ecl.Controller) void {}
+    pub fn run(state: *State, code: u32, controller: *ecl.Controller) void {
+        const builder = controller.builder();
+        switch (code) {
+            0 => {
+                _ = builder.input(&.{}) and builder.child(Buffer, .dependent) and builder.result();
+            },
+            1 => {
+                _ = builder.int(state.buffers.load(.acquire)) and builder.int(state.working.load(.acquire)) and
+                    builder.int(state.completed.load(.acquire)) and builder.list(3) and builder.result();
+            },
+            else => controller.fail(.domain, "unknown device operation"),
+        }
+    }
+    pub fn cancel(_: *State) void {}
+    pub fn deinit(state: *State) void {
+        if (state.buffers.load(.acquire) != 0 or state.working.load(.acquire) != 0)
+            @panic("device destruction preceded backend work and buffer cleanup");
+        _ = cleaned.fetchAdd(1, .release);
+    }
+};
+const Device = ecl.Port(DeviceSpec);
+
+const BufferSpec = struct {
+    pub const name = "buffer";
+    pub const Lane = enum(u32) { compute, control };
+    pub const cancellation: ecl.PortCancellation = .acknowledge;
+    pub const State = struct {
+        parent: ?*Device.StateType = null,
+        mutex: std.Io.Mutex = .init,
+        changed: std.Io.Condition = .init,
+        bytes: [8]u8 = .{0} ** 8,
+        ready: bool = false,
+        stopped: bool = false,
+        working: bool = false,
+        checksum: u32 = 0,
+    };
+    pub fn init() State {
+        return .{};
+    }
+    pub fn lane(code: u32) Lane {
+        return if (code == 0) .compute else .control;
+    }
+    pub fn open(state: *State, controller: *ecl.Controller) void {
+        const parent = controller.parent(Device) orelse return controller.fail(.domain, "buffer requires a device parent");
+        const byte = (controller.input(&.{}) orelse return).int() orelse return controller.fail(.type, "expected buffer byte");
+        if (byte < 0 or byte > 255) return controller.fail(.domain, "buffer byte must be in 0...255");
+        state.parent = parent;
+        state.bytes = .{@as(u8, @intCast(byte))} ** 8;
+        _ = parent.buffers.fetchAdd(1, .release);
+    }
+    fn work(state: *State) void {
+        std.Io.Threaded.mutexLock(&state.mutex);
+        defer std.Io.Threaded.mutexUnlock(&state.mutex);
+        state.working = true;
+        _ = state.parent.?.working.fetchAdd(1, .release);
+        _ = entered.fetchAdd(1, .release);
+        while (!state.ready and !state.stopped) state.changed.waitUncancelable(fixtureIo(), &state.mutex);
+        if (!state.stopped) {
+            state.checksum = 0;
+            for (state.bytes) |byte| state.checksum += byte;
+            state.ready = false;
+            _ = state.parent.?.completed.fetchAdd(1, .release);
+        }
+        _ = state.parent.?.working.fetchSub(1, .release);
+        state.working = false;
+    }
+    pub fn run(state: *State, code: u32, controller: *ecl.Controller) void {
+        if (code == 0) {
+            // The native worker borrows only backend state. A controller must
+            // join it before acknowledging cancellation or publishing a result.
+            const worker = std.Thread.spawn(.{}, work, .{state}) catch return controller.fail(.io, "cannot start device work");
+            worker.join();
+            if (controller.cancelled()) {
+                std.Io.Threaded.mutexLock(&state.mutex);
+                state.stopped = false;
+                std.Io.Threaded.mutexUnlock(&state.mutex);
+                _ = controller.acknowledgeCancellation();
+                return;
+            }
+            _ = controller.builder().int(state.checksum) and controller.builder().result();
+            return;
+        }
+        defer if (controller.cancelled()) {
+            _ = controller.acknowledgeCancellation();
+        };
+        switch (code) {
+            1 => {
+                std.Io.Threaded.mutexLock(&state.mutex);
+                state.ready = true;
+                state.changed.broadcast(fixtureIo());
+                std.Io.Threaded.mutexUnlock(&state.mutex);
+            },
+            2 => {
+                const index = (controller.input(&.{0}) orelse return).int() orelse return controller.fail(.type, "expected buffer index");
+                const byte = (controller.input(&.{1}) orelse return).int() orelse return controller.fail(.type, "expected buffer byte");
+                if (index < 0 or index >= 8 or byte < 0 or byte > 255) return controller.fail(.domain, "invalid positioned buffer update");
+                std.Io.Threaded.mutexLock(&state.mutex);
+                state.bytes[@intCast(index)] = @intCast(byte);
+                std.Io.Threaded.mutexUnlock(&state.mutex);
+            },
+            else => controller.fail(.domain, "unknown buffer operation"),
+        }
+    }
+    pub fn cancelOperation(state: *State, selected: Lane) void {
+        if (selected == .compute) cancel(state);
+    }
+    pub fn cancel(state: *State) void {
+        std.Io.Threaded.mutexLock(&state.mutex);
+        state.stopped = true;
+        state.changed.broadcast(fixtureIo());
+        std.Io.Threaded.mutexUnlock(&state.mutex);
+    }
+    pub fn deinit(state: *State) void {
+        if (state.working) @panic("buffer destruction preceded native worker return");
+        if (state.parent) |parent| _ = parent.buffers.fetchSub(1, .release);
+        _ = cleaned.fetchAdd(1, .release);
+    }
+};
+const Buffer = ecl.Port(BufferSpec);
+
 pub const Extension = extension: {
     @setEvalBranchQuota(20_000);
     break :extension ecl.module(.{
         .name = @import("port_fixture_options").module_name,
         .doc = "Hermetic native port controller fixture.",
-        .ports = .{ Counter, Other, Duplex, Unacknowledged, Storage, Cursor, TransactionPort, Broker, Delivery },
+        .ports = .{ Counter, Other, Duplex, Unacknowledged, Storage, Cursor, TransactionPort, Broker, Delivery, Device, Buffer },
         .words = .{
+            ecl.factory("device", "Open a deterministic native compute device.", Device),
+            ecl.operation("buffer", "Create an opaque dependent eight-byte buffer.", Device, 0, .operation, 0),
+            ecl.operation("device-status", "Observe live buffers and backend work.", Device, 1, .operation, 0),
+            ecl.operation("compute", "Defer a checksum on a native worker until completion or cancellation.", Buffer, 0, .compute, 0),
+            ecl.operation("complete-work", "Permit deferred work on the independent control lane.", Buffer, 1, .control, 0),
+            ecl.operation("buffer-update", "Apply a positioned buffer byte update.", Buffer, 2, .control, 0),
             ecl.factory("broker", "Open a deterministic broker session.", Broker),
             ecl.operation("deliver", "Deliver one opaque acknowledgement capability with an empty payload.", Broker, 0, .operation, 1),
             ecl.operation("redeliver", "Explicitly replace an unacknowledged delivery attempt.", Broker, 1, .operation, 0),

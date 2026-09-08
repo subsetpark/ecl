@@ -1437,6 +1437,58 @@ test "native: bidirectional RPC interleaves notifications and correlates out of 
         "b wrap ([] port.send) @attempt 'err at 'kind at p port.close portprobe.cleaned", "7 [2 20] [1 10] 'eof 42 'io 1");
 }
 
+test "native: opaque buffers defer native work until their independent control lane completes it" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "portprobe.device [] port.open 'd set d portprobe.buffer 3 port.call 'b set " ++
+        "b portprobe.compute [] port.begin 'x set 1 portprobe.await-blocked d portprobe.device-status [] port.call " ++
+        "b portprobe.buffer-update [2 9] port.call pop b portprobe.complete-work [] port.call pop " ++
+        "x port.result x port.await x port.close d portprobe.device-status [] port.call " ++
+        "d port.close b type portprobe.cleaned", "[1 1 0] 30 [1 0 1] 'port 2");
+}
+
+test "native: buffer cancellation joins backend work before acknowledging lane reuse" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "portprobe.device [] port.open 'd set d portprobe.buffer 4 port.call 'b set " ++
+        "b portprobe.compute [] port.begin 'x set 1 portprobe.await-blocked x port.cancel " ++
+        "x wrap (port.await) @attempt 'err at 'kind at x port.close d portprobe.device-status [] port.call " ++
+        "b portprobe.compute [] port.begin 'y set 2 portprobe.await-blocked b portprobe.complete-work [] port.call pop " ++
+        "y port.result y port.close d portprobe.device-status [] port.call d port.close portprobe.cleaned", "'cancelled [1 0 0] 32 [1 0 1] 2");
+}
+
+test "native: queued buffer cancellation never starts backend work" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 4, 1, "portprobe.device [] port.open 'd set d portprobe.buffer 2 port.call 'b set " ++
+        "b portprobe.compute [] port.begin 'x set 1 portprobe.await-blocked b portprobe.compute [] port.begin 'y set " ++
+        "y port.cancel y wrap (port.await) @attempt 'err at 'kind at y port.close " ++
+        "b portprobe.complete-work [] port.call pop x port.result x port.close " ++
+        "d portprobe.device-status [] port.call d port.close portprobe.cleaned", "'cancelled 16 [1 0 1] 2");
+}
+
+test "native: buffer children progress while a sibling is cancelled" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "portprobe.device [] port.open 'd set " ++
+        "d portprobe.buffer 1 port.call 'a set d portprobe.buffer 5 port.call 'b set " ++
+        "a portprobe.compute [] port.begin 'x set b portprobe.compute [] port.begin 'y set 2 portprobe.await-blocked " ++
+        "x port.cancel x wrap (port.await) @attempt 'err at 'kind at x port.close " ++
+        "d portprobe.device-status [] port.call b portprobe.complete-work [] port.call pop y port.result y port.close " ++
+        "d port.close portprobe.cleaned", "'cancelled [2 1 0] 40 3");
+}
+
+test "native: device closure joins backend work on transferred buffer children" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "portprobe.device [] port.open 'd set d portprobe.buffer 1 port.call 'b set " ++
+        "b wrap [] (portprobe.compute [] port.call) @give 'task set 1 portprobe.await-blocked " ++
+        "d port.close task task.await 'err at 'kind at b type portprobe.cleaned", "'cancelled 'port 2");
+}
+
+test "native: task scope exit joins outstanding native buffer work" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "[] (portprobe.device [] port.open 'd set " ++
+        "d portprobe.buffer 1 port.call 'b set b portprobe.compute [] port.begin 'x set 1 portprobe.await-blocked) " ++
+        "@spawn task.await 'ok at len portprobe.cleaned", "0 2");
+}
+
+test "native: discarded buffer results and failed initialization release device ownership" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "portprobe.device [] port.open 'd set " ++
+        "d portprobe.buffer 1 port.begin 'x set x port.await x port.close d portprobe.device-status [] port.call " ++
+        "d wrap (portprobe.buffer 256 port.call) @attempt 'err at 'kind at d portprobe.device-status [] port.call " ++
+        "d port.close portprobe.cleaned", "[0 0 0] 'io [0 0 0] 3");
+}
+
 test "native: broker delivery messages carry one-time acknowledgement capabilities" {
     for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .message_capacity = 1 }, "portprobe.broker [] port.open 'p set p portprobe.deliver [] port.begin 'x set " ++
         "x portprobe.deliveries port.endpoint 'r set r port.receive 'value at " ++
