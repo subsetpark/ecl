@@ -435,7 +435,7 @@ pub const Cell = struct {
         const lane = &self.lanes[index];
         while (true) {
             lock(&self.mutex);
-            while (lane.empty() and !self.closed.load(.acquire)) self.changed.waitUncancelable(io(), &self.mutex);
+            while (!lane.dispatchable() and !self.closed.load(.acquire)) self.changed.waitUncancelable(io(), &self.mutex);
             const finished = lane.empty();
             unlock(&self.mutex);
             if (finished) return;
@@ -474,6 +474,12 @@ pub const Cell = struct {
             heap.hostDomain(self.owner.host).releaseValue(item);
         }
         try transfers.publishScope(Operation, op, scope, Operation.transferOwnership);
+        lock(&self.mutex);
+        lock(&op.mutex);
+        if (op.ownership.live()) _ = op.ticket.publish();
+        unlock(&op.mutex);
+        self.changed.broadcast(io());
+        unlock(&self.mutex);
         return .{ .operation = item };
     }
     const Transfer = transfers.ScopeTransfer(Cell, transferOwnership, transferLive);
@@ -615,10 +621,12 @@ pub const Operation = struct {
         errdefer protocol.deinit(cell);
         const terminal_value = try list.fromValues(allocator, &.{});
         errdefer heap.hostDomain(cell.owner.host).releaseValue(terminal_value);
+        const prepared = try cell.lanes[lane].prepare(allocator);
+        errdefer prepared.discard();
         lock(&cell.mutex);
         defer unlock(&cell.mutex);
         if (cell.closed.load(.acquire) or cell.shutdown_state != .idle) return error.Closed;
-        const ticket = try cell.lanes[lane].admit(allocator, cell.laneCapacity(lane), .{ cell, code, lane, protocol, terminal_value, endpoints }, initialize) orelse return error.Full;
+        const ticket = prepared.admit(cell.laneCapacity(lane), .{ cell, code, lane, protocol, terminal_value, endpoints }, initialize) orelse return error.Full;
         cell.changed.broadcast(io());
         return ticket.owner();
     }
@@ -650,7 +658,10 @@ pub const Operation = struct {
         switch (action) {
             .close_resource => cell.closeLocked(),
             .interrupt => cell.definition.cancel_operation.?(cell.backend.ptr, self.lane),
-            .retired => cell.waits.notifyLocked(cell),
+            .retired => {
+                cell.changed.broadcast(io());
+                cell.waits.notifyLocked(cell);
+            },
             .settled => {},
         }
     }
@@ -687,7 +698,7 @@ pub const Operation = struct {
         var discarded: ?Value = null;
         const terminal = switch (self.ticket.status()) {
             .done, .cancelled => true,
-            .queued, .active, .cancelling, .reusable => false,
+            .preparing, .queued, .active, .cancelling, .reusable => false,
         };
         const aborting = terminal and (self.lifetime != .open or self.cell.closed.load(.acquire));
         if (aborting) {
@@ -791,7 +802,7 @@ pub const Operation = struct {
         lock(&self.mutex);
         defer unlock(&self.mutex);
         return switch (self.ticket.status()) {
-            .queued, .active => .pending,
+            .preparing, .queued, .active => .pending,
             .done => if (self.failure) |failure| .{ .failed = failure } else .ready,
             .cancelling, .reusable, .cancelled => .{ .failed = Failure.init(.io, "native port operation was cancelled") },
         };
@@ -800,7 +811,7 @@ pub const Operation = struct {
         lock(&self.mutex);
         defer unlock(&self.mutex);
         return switch (self.ticket.status()) {
-            .queued, .active, .cancelling, .reusable => .pending,
+            .preparing, .queued, .active, .cancelling, .reusable => .pending,
             .done => if (self.failure) |failure| .{ .failed = failure } else .ready,
             .cancelled => .cancelled,
         };
@@ -825,7 +836,7 @@ pub const Operation = struct {
         pub fn validate(self: *@This()) bool {
             const op = self.operation;
             switch (op.ticket.status()) {
-                .queued, .active, .cancelling, .reusable => return false,
+                .preparing, .queued, .active, .cancelling, .reusable => return false,
                 .cancelled => {
                     self.result = .cancelled;
                     return false;

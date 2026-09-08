@@ -1455,6 +1455,12 @@ resources. Abortive cleanup retains the scope membership until controller
 return, including recovery acknowledgement. The lane's post-return transition
 settles that membership outside both operation and resource locks. Readiness
 registration observes terminal state under the same mutex as notification.
+Lane admission starts in a preparation state that owns its FIFO reservation
+but cannot execute. Opaque admission storage is allocated before acquiring the
+publication lock; capacity rejection retains that uninitialized candidate.
+Publishing the exchange handle and scope membership makes
+the ticket dispatchable. Cancellation can retire an unpublished reservation,
+and a late publication cannot restore it or invoke the backend.
 Endpoint borrows retain a tagged resource or exchange lifetime, independently
 of the original heap handle. Resource transports are prepared before startup
 and survive exchange retirement. Closure wakes their blocked transport, and
