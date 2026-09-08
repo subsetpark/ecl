@@ -143,6 +143,37 @@ test "process: common factories preserve byte streams and repeatable termination
     }, "[0] [1] [255] 0 0 'port", workers);
 }
 
+test "process: common factories preserve unicode arguments environment and working directory" {
+    const fixture_path = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, fixture.process_exe, allocator);
+    defer allocator.free(fixture_path);
+    const expected = "cwd=/\nprobe=é🌍\narg[0]=\narg[1]=λ\n";
+    const program = try source(
+        "proc.core.process {{'executable \"{s}\" 'args (\"inspect\" \"\" \"λ\") 'cwd \"/\" 'env {{\"ECL_PROCESS_PROBE\" \"é🌍\"}}}} port.open 'p set " ++
+            "p proc.core.stdout port.endpoint 'r set [] (dup len {d} <) (r 8 port.read cat) while chars " ++
+            "\"cwd=/\\nprobe=é🌍\\narg[0]=\\narg[1]=λ\\n\" match? r 8 port.read p proc.wait 'code at p port.close",
+        .{ fixture_path, expected.len },
+    );
+    defer allocator.free(program);
+    for ([_]u32{ 1, 8 }) |workers| try expectStackWithWorkers(program, .{
+        .executables = .{ .exact = &.{fixture_path} },
+        .stdout_capacity = 1,
+    }, "1 [] 0", workers);
+}
+
+test "process: common factories reject malformed fields before publishing a resource" {
+    const fixture_path = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, fixture.process_exe, allocator);
+    defer allocator.free(fixture_path);
+    const program = try source(
+        "[] (proc.core.process {{'executable \"{s}\" 'args [1]}} port.open) @attempt 'err at 'kind at " ++
+            "[] (proc.core.process {{'executable \"{s}\" 'env {{\"A\" 1}}}} port.open) @attempt 'err at 'kind at " ++
+            "[] (proc.core.process {{'executable \"{s}\" 'unknown 1}} port.open) @attempt 'err at 'kind at " ++
+            "proc.core.process {{'executable \"{s}\" 'args (\"exit\" \"0\")}} port.open dup proc.wait 'code at swap port.close",
+        .{ fixture_path, fixture_path, fixture_path, fixture_path },
+    );
+    defer allocator.free(program);
+    try expectStack(program, .{ .executables = .{ .exact = &.{fixture_path} }, .max_live_ports = 1 }, "'type 'type 'domain 0");
+}
+
 test "process: common factories transfer owners and clean resources returned by closed scopes" {
     const fixture_path = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, fixture.process_exe, allocator);
     defer allocator.free(fixture_path);

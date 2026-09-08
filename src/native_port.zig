@@ -16,6 +16,7 @@ const message_builder = @import("port_builder.zig");
 const message_transport = @import("port_messages.zig");
 const results = @import("port_result.zig");
 const exchanges = @import("port_exchange.zig");
+const factories = @import("port_factory.zig");
 const resource_api = @import("port_resource.zig");
 const endpoint_api = @import("port_endpoint.zig");
 
@@ -56,6 +57,16 @@ pub const RegisteredCapability = opaque {
             .invalid_operation => .unsupported,
         };
     }
+    pub fn openResource(self: *RegisteredCapability, opening: factories.Context, config: *const port_message.Validated) error{OutOfMemory}!factories.Start {
+        const issuer = self.instance();
+        const resource = issuer.portAccess().createConfigured(issuer, self.definition().factory, opening.scope, config) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.Limit, error.InsufficientLanes => .{ .failed = factories.Failure.init(.domain, "port resource capacity is exhausted") },
+            error.Closed, error.Io => .{ .failed = factories.Failure.init(.io, "port resource creation failed") },
+            error.ScopeClosing => .{ .failed = factories.Failure.init(.cancelled, "port scope is closing") },
+        };
+        return .{ .resource = resource };
+    }
     pub fn releasePort(self: *RegisteredCapability) void {
         const owned = self.state();
         const issuer = owned.instance;
@@ -63,11 +74,6 @@ pub const RegisteredCapability = opaque {
         issuer.releasePin();
     }
 };
-
-pub fn registeredCapability(item: Value, comptime role: @import("value.zig").PortVariant) ?*RegisteredCapability {
-    if (item != .port) return null;
-    return heap.portPayload(RegisteredCapability, role, item.port);
-}
 
 /// Module publication owns the returned reference on success. Failure retains
 /// the caller's module pin and publishes no partially initialized capability.
@@ -82,7 +88,7 @@ pub fn sealCapability(instance: *native.ModuleInstance, index: u32) error{OutOfM
     unlock(&owner.mutex);
     const capability: *RegisteredCapability = @ptrCast(owned);
     const result = switch (instance.definition(index).body.port) {
-        .factory => try heap.createBorrowedPort(RegisteredCapability, .factory, owner.allocator(), identity, capability),
+        .factory => try factories.Factory.create(RegisteredCapability, identity, capability),
         .operation => try exchanges.Selector.create(RegisteredCapability, identity, capability),
         .endpoint => try endpoint_api.Selector.create(RegisteredCapability, identity, capability),
     };

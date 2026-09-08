@@ -2,7 +2,6 @@
 const env = @import("../env.zig");
 const heap = @import("../heap.zig");
 const machine = @import("../machine.zig");
-const native = @import("../native_port.zig");
 const Value = @import("../value.zig").Value;
 const std = @import("std");
 const message = @import("../port_message.zig");
@@ -14,7 +13,7 @@ const messages = @import("../port_messages.zig");
 const dict = @import("../dict.zig");
 const intern = @import("../intern.zig");
 const Resource = @import("../port_resource.zig").Resource;
-const builtin = @import("../builtin_port.zig");
+const factories = @import("../port_factory.zig");
 const endpoints = @import("../port_endpoint.zig");
 const exchanges = @import("../port_exchange.zig");
 
@@ -256,10 +255,9 @@ fn startRequest(evaluator: *machine.Machine, comptime role: @import("../value.zi
     defer input.deinit();
     var capability = try evaluator.popValue();
     defer capability.deinit();
-    const registered: ?*native.RegisteredCapability = if (role == .factory) native.registeredCapability(capability.borrow(), .factory) else null;
+    const factory: ?*factories.Factory = if (role == .factory) factories.Factory.fromValue(capability.borrow()) else null;
     const operation_selector: ?*exchanges.Selector = if (role == .operation_selector) exchanges.Selector.fromValue(capability.borrow()) else null;
-    const builtin_factory: ?*builtin.RegisteredCapability = if (role == .factory) builtin.RegisteredCapability.fromValue(capability.borrow(), .factory) else null;
-    if (registered == null and builtin_factory == null and operation_selector == null)
+    if (factory == null and operation_selector == null)
         return evaluator.typeError(if (role == .factory) "a factory" else "an operation selector");
     var resource: ?heap.OwnedValue = if (role == .operation_selector) try evaluator.popValue() else null;
     defer if (resource) |*owned| owned.deinit();
@@ -273,10 +271,8 @@ fn startRequest(evaluator: *machine.Machine, comptime role: @import("../value.zi
         .capability = capability.take(),
         .kind = if (role == .operation_selector)
             .{ .operation = .{ .resource = resource.?.take(), .selector = operation_selector.? } }
-        else if (builtin_factory) |factory|
-            .{ .builtin_factory = factory }
         else
-            .{ .native_factory = registered.? },
+            .{ .factory = factory.? },
         .message = validated,
     };
     evaluator.adoptDriver(driver);
@@ -287,12 +283,11 @@ const Request = struct {
     pub const ownership: heap.DriverOwnership = .self_owned;
     capability: Value,
     kind: union(enum) {
-        native_factory: *native.RegisteredCapability,
-        builtin_factory: *builtin.RegisteredCapability,
+        factory: *factories.Factory,
         operation: struct { resource: Value, selector: *exchanges.Selector },
     },
     message: *message.Message,
-    state: union(enum) { validating, ready, opening: Value, consumed } = .validating,
+    state: union(enum) { validating, ready, preparing: *factories.Opening, opening: Value, consumed } = .validating,
 
     pub fn deinit(self: *Request, releases: *heap.ReleaseDomain, _: std.mem.Allocator) void {
         switch (self.state) {
@@ -300,13 +295,14 @@ const Request = struct {
                 Resource.fromValue(item).?.close();
                 releases.releaseValue(item);
             },
+            .preparing => |opening| opening.release(),
             .validating, .ready, .consumed => {},
         }
         self.message.retire(releases);
         releases.releaseValue(self.capability);
         switch (self.kind) {
             .operation => |operation| releases.releaseValue(operation.resource),
-            .native_factory, .builtin_factory => {},
+            .factory => {},
         }
     }
 
@@ -321,6 +317,19 @@ const Request = struct {
             };
             if (progress == .pending) return .yielded;
             self.state = .ready;
+        }
+        if (self.state == .preparing) {
+            const opening = self.state.preparing;
+            switch (try opening.advance(machine.kernel_poll_quantum)) {
+                .yielded => {},
+                .pending => |source| try evaluator.park(.{ .external = source }),
+                .failed => |failure| return factoryFailure(evaluator, failure),
+                .resource => |item| {
+                    self.state = .{ .opening = item };
+                    opening.release();
+                },
+            }
+            return .yielded;
         }
         if (self.state == .opening) {
             const item = self.state.opening;
@@ -356,41 +365,20 @@ const Request = struct {
                     .unsupported => return evaluator.fail(.domain, "operation lane is unavailable"),
                 }
             },
-            .native_factory => |capability| {
-                const instance = capability.instance();
-                const item = instance.portAccess().createConfigured(instance, capability.definition().factory, scope, self.message.validated().?) catch |err| return switch (err) {
-                    error.OutOfMemory => error.OutOfMemory,
-                    error.Limit, error.InsufficientLanes => evaluator.fail(.domain, "port resource capacity is exhausted"),
-                    error.Closed, error.Io => evaluator.fail(.io, "port resource creation failed"),
-                    error.ScopeClosing => evaluator.fail(.cancelled, "port scope is closing"),
-                };
-                self.state = .{ .opening = item };
-            },
-            .builtin_factory => |factory| {
-                switch (factory.definition().factory) {
-                    .listener => {
-                        const output = try evaluator.reserveStack(1);
-                        const item = try @import("net.zig").openRegistered(evaluator, self.message.validated().?.value(), factory.instance());
-                        self.state = .consumed;
-                        return output.output(item);
-                    },
-                    .process => {
-                        const next = try @import("proc.zig").prepareRegistered(evaluator, self.message.validated().?.value(), factory.instance());
-                        evaluator.retireDriver(self);
-                        next.install(evaluator);
-                        return .detached;
-                    },
-                }
+            .factory => |factory| switch (try factory.open(.{ .scope = scope }, self.message.validated().?)) {
+                .resource => |item| self.state = .{ .opening = item },
+                .opening => |opening| self.state = .{ .preparing = opening },
+                .failed => |failure| return factoryFailure(evaluator, failure),
             },
         }
         return .yielded;
     }
 };
 
-fn fail(evaluator: *machine.Machine, failure: native.Failure) machine.MachineError {
-    return switch (failure) {
+fn factoryFailure(evaluator: *machine.Machine, failure: factories.Failure) machine.MachineError {
+    return switch (failure.report) {
         .out_of_memory => error.OutOfMemory,
-        .report => |report| evaluator.fail(@import("../native_descriptor.zig").mapErrorKind(report.kind) orelse .io, report.message[0..report.len]),
+        .report => |report| evaluator.failWithDetails(report.kind, report.message[0..report.len], failure.details),
     };
 }
 fn transportFailure(evaluator: *machine.Machine, failure: bytes.Failure) machine.MachineError {

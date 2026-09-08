@@ -2756,7 +2756,7 @@ pub const Registry = enum(usize) {
         releases: *heap.ReleaseDomain,
         source: union(enum) {
             words: []const env.BuiltinWord,
-            registered: *@import("builtin_port.zig").Instance,
+            registered: *@import("builtin_port.zig").Publication,
         },
         candidate: ?OwnedImage,
         word_index: usize = 0,
@@ -2777,7 +2777,7 @@ pub const Registry = enum(usize) {
         /// cursor owns its independent pin until publication or abandonment.
         pub fn initRegistered(
             registry: *Registry,
-            instance: *@import("builtin_port.zig").Instance,
+            instance: *@import("builtin_port.zig").Publication,
         ) error{OutOfMemory}!BuiltinCandidateCursor {
             const candidate = try registry.createImage();
             instance.retain();
@@ -2838,7 +2838,7 @@ pub const Registry = enum(usize) {
             return .pending;
         }
 
-        fn publishCapability(self: *BuiltinCandidateCursor, instance: *@import("builtin_port.zig").Instance) Error!BuiltinCandidateProgress {
+        fn publishCapability(self: *BuiltinCandidateCursor, instance: *@import("builtin_port.zig").Publication) Error!BuiltinCandidateProgress {
             const declaration = instance.declarations()[self.word_index];
             const capability = try instance.seal(self.word_index);
             defer self.releases.releaseValue(capability);

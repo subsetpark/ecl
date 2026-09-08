@@ -1,13 +1,74 @@
 //! Registered capabilities for typed, in-process resource backends. A library
 //! instance owns identity independently of its host service's operational life.
 const std = @import("std");
-const heap = @import("heap.zig");
 const Value = @import("value.zig").Value;
 const process = @import("process_port.zig");
 const endpoints = @import("port_endpoint.zig");
 const bytes = @import("port_bytes.zig");
+const factories = @import("port_factory.zig");
+const external = @import("external.zig");
 
 pub const Library = enum { network, process };
+const Grant = union(Library) { network: ?*external.NetAccess, process: ?*external.ProcessAccess };
+pub const Registration = struct {
+    declarations: []const Definition,
+    bind: *const fn (std.mem.Allocator, *const @import("machine.zig").InheritedContext) error{OutOfMemory}!*Publication,
+};
+
+pub fn registration(comptime library: Library) Registration {
+    for (definitions(library)) |definition| {
+        if (definition.body.library() != library) @compileError("registered capability belongs to another library");
+    }
+    const Binding = struct {
+        fn bind(allocator: std.mem.Allocator, inherited: *const @import("machine.zig").InheritedContext) error{OutOfMemory}!*Publication {
+            const grant: Grant = switch (library) {
+                .network => .{ .network = inherited.net_access },
+                .process => .{ .process = inherited.process_access },
+            };
+            const existing: ?*Instance = switch (grant) {
+                .network => |access| if (access) |given| @import("net_port.zig").registeredInstance(given) else null,
+                .process => |access| if (access) |given| process.registeredInstance(given) else null,
+            };
+            const instance = existing orelse try Instance.create(allocator, library);
+            if (existing != null) instance.retain();
+            errdefer instance.release();
+            const owned = try allocator.create(PublicationState);
+            owned.* = .{ .allocator = allocator, .instance = instance, .grant = grant };
+            return @ptrCast(owned);
+        }
+    };
+    return .{ .declarations = definitions(library), .bind = Binding.bind };
+}
+
+const PublicationState = struct {
+    allocator: std.mem.Allocator,
+    instance: *Instance,
+    grant: Grant,
+    refs: std.atomic.Value(usize) = .init(1),
+};
+
+/// Module publication binds service authority once. Language capabilities pin
+/// the issuer, while their grant borrows remain enclosed by Session shutdown.
+pub const Publication = opaque {
+    fn state(self: *Publication) *PublicationState {
+        return @ptrCast(@alignCast(self));
+    }
+    pub fn retain(self: *Publication) void {
+        _ = self.state().refs.fetchAdd(1, .monotonic);
+    }
+    pub fn release(self: *Publication) void {
+        const owned = self.state();
+        if (owned.refs.fetchSub(1, .acq_rel) != 1) return;
+        owned.instance.release();
+        owned.allocator.destroy(owned);
+    }
+    pub fn declarations(self: *Publication) []const Definition {
+        return self.state().instance.declarations();
+    }
+    pub fn seal(self: *Publication, index: usize) error{OutOfMemory}!Value {
+        return self.state().instance.seal(index, self.state().grant);
+    }
+};
 pub const FactoryKind = enum {
     listener,
     process,
@@ -105,14 +166,14 @@ pub const Instance = opaque {
     }
     /// Borrows the instance on both outcomes. Success owns a separate pin and
     /// the returned heap reference; failure publishes no capability.
-    pub fn seal(self: *Instance, index: usize) error{OutOfMemory}!Value {
+    fn seal(self: *Instance, index: usize, grant: Grant) error{OutOfMemory}!Value {
         const allocator = self.state().allocator;
         const owned = try allocator.create(RegisteredState);
         errdefer allocator.destroy(owned);
-        owned.* = .{ .instance = self, .definition = self.declarations()[index].body };
+        owned.* = .{ .instance = self, .definition = self.declarations()[index].body, .grant = grant };
         const identity = self.state().next_identity.fetchAdd(1, .monotonic);
         const result = switch (owned.definition) {
-            .factory => try heap.createBorrowedPort(RegisteredCapability, .factory, allocator, identity, owned.capability()),
+            .factory => try factories.Factory.create(RegisteredCapability, identity, owned.capability()),
             .endpoint => try endpoints.Selector.create(RegisteredCapability, identity, owned.capability()),
         };
         self.retain();
@@ -123,6 +184,7 @@ pub const Instance = opaque {
 const RegisteredState = struct {
     instance: *Instance,
     definition: Body,
+    grant: Grant,
     fn capability(self: *RegisteredState) *RegisteredCapability {
         return @ptrCast(self);
     }
@@ -132,10 +194,6 @@ pub const RegisteredCapability = opaque {
     fn state(self: *RegisteredCapability) *RegisteredState {
         return @ptrCast(@alignCast(self));
     }
-    pub fn fromValue(item: Value, comptime role: @import("value.zig").PortVariant) ?*RegisteredCapability {
-        if (item != .port) return null;
-        return heap.portPayload(RegisteredCapability, role, item.port);
-    }
     pub fn instance(self: *RegisteredCapability) *Instance {
         return self.state().instance;
     }
@@ -144,6 +202,12 @@ pub const RegisteredCapability = opaque {
     }
     pub fn definition(self: *RegisteredCapability) Body {
         return self.state().definition;
+    }
+    pub fn openResource(self: *RegisteredCapability, context: factories.Context, config: *const @import("port_message.zig").Validated) error{OutOfMemory}!factories.Start {
+        return switch (self.definition().factory) {
+            .listener => @import("net_factory.zig").open(self.state().grant.network, context, config.value()),
+            .process => @import("process_factory.zig").open(self.allocator(), self.state().grant.process, context, config),
+        };
     }
     pub fn borrowEndpoint(self: *RegisteredCapability, source: Value) endpoints.BorrowError!Value {
         return borrowRegisteredEndpoint(source, self);

@@ -197,10 +197,11 @@ const ErrorDataKey = enum {
     port,
 };
 const ErrorData = struct {
-    key: ErrorDataKey,
+    key: union(enum) { builtin: ErrorDataKey, symbol: u32 },
     value: Value,
 };
-const empty_error_data = ErrorData{ .key = .needed, .value = .{ .int = 0 } };
+const empty_error_data = ErrorData{ .key = .{ .builtin = .needed }, .value = .{ .int = 0 } };
+pub const ErrorDetail = struct { symbol: u32, value: Value };
 /// Provenance attached to one filesystem failure. Values are borrowed; the
 /// pending failure retains what it records.
 pub const FilesystemErrorData = struct {
@@ -248,7 +249,7 @@ pub const EclErr = struct {
     fn addData(self: *EclErr, key: ErrorDataKey, item: Value) void {
         std.debug.assert(self.data_len < self.data.len);
         heap.retainValue(item);
-        self.data[self.data_len] = .{ .key = key, .value = item };
+        self.data[self.data_len] = .{ .key = .{ .builtin = key }, .value = item };
         self.data_len += 1;
     }
     fn setMessage(self: *EclErr, message: []const u8) void {
@@ -526,7 +527,10 @@ const OrdinaryErrorCursor = struct {
                     self.state = .{ .data_insert = .{
                         .base = data.base,
                         .index = data.index,
-                        .cursor = intern.insertionCursor(@tagName(self.failure.data[data.index].key)),
+                        .cursor = intern.insertionCursor(switch (self.failure.data[data.index].key) {
+                            .builtin => |key| @tagName(key),
+                            .symbol => |symbol| intern.get(symbol),
+                        }),
                     } };
                 } else if (self.location) |located| {
                     self.state = .{ .source = .{
@@ -4214,21 +4218,10 @@ pub const Machine = struct {
             const registry = evaluator.unit.inherited.registry.?;
             const publication = switch (entry) {
                 .builtin => |words| try modules.Registry.BuiltinCandidateCursor.init(registry, words),
-                .registered_builtin => |library| registered: {
-                    const instance = switch (library) {
-                        .network => if (evaluator.unit.inherited.net_access) |access| retained: {
-                            const issuer = @import("net_port.zig").registeredInstance(access);
-                            issuer.retain();
-                            break :retained issuer;
-                        } else try @import("builtin_port.zig").Instance.create(evaluator.allocator(), library),
-                        .process => if (evaluator.unit.inherited.process_access) |access| retained: {
-                            const issuer = @import("process_port.zig").registeredInstance(access);
-                            issuer.retain();
-                            break :retained issuer;
-                        } else try @import("builtin_port.zig").Instance.create(evaluator.allocator(), library),
-                    };
-                    defer instance.release();
-                    break :registered try modules.Registry.BuiltinCandidateCursor.initRegistered(registry, instance);
+                .registered_builtin => |registration| registered: {
+                    const binding = try registration.bind(evaluator.allocator(), &evaluator.unit.inherited);
+                    defer binding.release();
+                    break :registered try modules.Registry.BuiltinCandidateCursor.initRegistered(registry, binding);
                 },
                 .source, .native => unreachable,
             };
@@ -5498,6 +5491,18 @@ pub const Machine = struct {
         self.unit.installPendingFailure(EclErr.init(kind, message));
         if (self.unit.active_word != no_word) self.unit.pendingFailure().word = self.unit.active_word;
         return error.Ecl;
+    }
+    /// Borrows bounded adapter diagnostics; the pending failure owns the
+    /// retained values independently of the request's subsequent retirement.
+    pub fn failWithDetails(self: *Machine, kind: ErrorKind, message: []const u8, details: [3]?ErrorDetail) MachineError {
+        const failure = self.fail(kind, message);
+        const pending = self.unit.pendingFailure();
+        for (details) |detail| if (detail) |entry| {
+            heap.retainValue(entry.value);
+            pending.data[pending.data_len] = .{ .key = .{ .symbol = entry.symbol }, .value = entry.value };
+            pending.data_len += 1;
+        };
+        return failure;
     }
     fn failAtSource(
         self: *Machine,

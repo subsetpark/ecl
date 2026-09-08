@@ -1327,10 +1327,15 @@ Each granted Session service owns its registered library instance. A library
 loaded without a grant owns an inert instance with no host authority.
 A module candidate publishes sealed capabilities as literal word
 bodies and pins its instance until publication or abandonment. Capability
-values retain that identity independently of service cleanup. Factories check
-the issuing instance before entering their typed backend; configuration
-validation and output reservation precede resource publication. Built-in
-controllers do not pass through the extension ABI.
+values retain that identity independently of service cleanup. Module registration
+binds immutable service grants inside the adapter, so module loading does not
+select a resource backend. Factories register through one opaque opening
+interface: bounded configuration validation precedes admission, resumable
+openings own partial work, and resource initialization precedes stack publication.
+The opening borrows its factory and validated request until retirement. It derives
+its scheduler from the calling scope and never receives an interpreter callback.
+Bounded diagnostic details retain their values before the request retires.
+Built-in controllers do not pass through the extension ABI.
 
 Process resource metadata pins its issuing instance through final reclamation.
 An endpoint projects a declared direction only after validating that instance

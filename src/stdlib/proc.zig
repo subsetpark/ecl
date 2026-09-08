@@ -92,25 +92,6 @@ fn beginSpec(evaluator: *Machine, mode: SpecDriver.Mode) MachineError!void {
     evaluator.adoptDriver(try prepareSpec(evaluator, mode, spec.borrow()));
 }
 
-/// A fully initialized successor owns its specification independently of the
-/// common request driver. Installation consumes it without another allocation.
-pub const PreparedSpawn = opaque {
-    pub fn install(self: *PreparedSpawn, evaluator: *Machine) void {
-        const driver: *SpecDriver = @ptrCast(@alignCast(self));
-        evaluator.adoptDriver(driver);
-    }
-};
-
-/// Borrows the specification and issuer on both outcomes. Success returns a
-/// successor that must be installed after retiring the caller's continuation.
-pub fn prepareRegistered(evaluator: *Machine, spec: Value, instance: *@import("../builtin_port.zig").Instance) MachineError!*PreparedSpawn {
-    if (evaluator.unit.inherited.process_access) |access| {
-        if (process.registeredInstance(access) != instance)
-            return evaluator.typeError("a factory issued by this process library instance");
-    }
-    return @ptrCast(try prepareSpec(evaluator, .spawn, spec));
-}
-
 fn prepareSpec(evaluator: *Machine, mode: SpecDriver.Mode, spec: Value) MachineError!*SpecDriver {
     if (spec != .dict) return evaluator.typeError("a process specification dict");
     const access = evaluator.unit.inherited.process_access orelse
