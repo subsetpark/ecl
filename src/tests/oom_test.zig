@@ -1662,3 +1662,10 @@ test "oom: standard-library and host: process port lifecycle" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.process);
 }
+
+test "oom: standard-library and host: native port registered graceful shutdown" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.factory [] port.open dup port.shutdown port.close",
+    ).run);
+}

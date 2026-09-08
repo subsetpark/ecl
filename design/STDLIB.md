@@ -2399,6 +2399,7 @@ the owning scope aborts outstanding work and joins cancellation cleanup.
 | `port.await` | `( exchange -- )` | Wait for successful completion or raise the terminal error. Repeatable; does not drain output. |
 | `port.result` | `( exchange -- value )` | Wait and claim the terminal result once. A later successful-result claim raises `'contract`. |
 | `port.cancel` | `( exchange -- )` | Request cancellation idempotently. Completion remains observable and waits for controller return. |
+| `port.shutdown` | `( resource -- )` | Stop new admission, perform registered graceful shutdown, and join cleanup. Unsupported resources raise `'domain`. Repeated calls observe the same outcome. |
 | `port.close` | `( resource-or-exchange -- )` | Abort and join cleanup. Idempotent. Currently accepts native resources and exchanges. |
 
 A cancelled exchange raises `'cancelled` from `port.await` and `port.result`.

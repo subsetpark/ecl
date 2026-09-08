@@ -24,6 +24,7 @@ pub const words = [_]env.BuiltinWord{
     .{ .name = "receive", .doc = "( receiver -- event ) Receive one whole message or an EOF event.", .primitive = receive },
     .{ .name = "finish", .effect = "writable --", .doc = "Finish input after previously accepted data. Idempotent.", .primitive = finish },
     .{ .name = "cancel", .effect = "exchange --", .doc = "Request exchange cancellation. Completion remains observable.", .primitive = cancel },
+    .{ .name = "shutdown", .doc = "( resource -- ) Perform registered graceful shutdown and join cleanup.", .primitive = shutdown },
     .{ .name = "close", .doc = "( port -- ) Abort a resource or exchange and join its cleanup. Idempotent.", .primitive = close },
     .{ .name = "await", .doc = "( exchange -- ) Observe successful exchange completion or its terminal failure without draining output.", .primitive = awaitExchange },
     .{ .name = "result", .doc = "( exchange -- value ) Wait and claim an exchange result exactly once. Later claims raise 'contract.", .primitive = result },
@@ -347,6 +348,14 @@ fn cancel(evaluator: *machine.Machine) machine.MachineError!void {
     exchange.cancel();
 }
 
+fn shutdown(evaluator: *machine.Machine) machine.MachineError!void {
+    var item = try evaluator.popValue();
+    errdefer item.deinit();
+    if (item.borrow() != .port) return evaluator.typeError("a resource");
+    const resource = heap.portPayload(native.Cell, .resource, item.borrow().port) orelse return evaluator.typeError("a resource");
+    try evaluator.startDriver(Observe{ .owner = .init(item.take()), .target = .{ .resource = resource }, .mode = .shutdown });
+}
+
 fn close(evaluator: *machine.Machine) machine.MachineError!void {
     var item = try evaluator.popValue();
     errdefer item.deinit();
@@ -384,7 +393,7 @@ fn observe(evaluator: *machine.Machine, mode: Observe.Mode) machine.MachineError
 
 const Target = union(enum) { resource: *native.Cell, exchange: *native.Operation };
 const Observe = struct {
-    const Mode = enum { observe, close, claim };
+    const Mode = enum { observe, close, shutdown, claim };
     pub const ownership: heap.DriverOwnership = .fields;
     owner: heap.Owned(Value),
     target: Target,
@@ -394,8 +403,17 @@ const Observe = struct {
         try evaluator.pollKernel();
         switch (self.target) {
             .resource => |resource| {
-                resource.close();
-                if (resource.joined()) return .completed;
+                if (self.mode == .shutdown) {
+                    switch (resource.shutdown()) {
+                        .pending => {},
+                        .ready => return .completed,
+                        .unsupported => return evaluator.fail(.domain, "resource does not support graceful shutdown"),
+                        .failed => |failure| return evaluator.fail(@import("../native_descriptor.zig").mapErrorKind(failure.kind) orelse .io, failure.message[0..failure.len]),
+                    }
+                } else {
+                    resource.close();
+                    if (resource.joined()) return .completed;
+                }
                 try evaluator.park(.{ .external = resource.source(1) });
             },
             .exchange => |exchange| {

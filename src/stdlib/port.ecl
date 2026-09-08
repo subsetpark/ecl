@@ -60,6 +60,12 @@
  (port.core.cancel)
  'cancel def
 
+ ### def shutdown
+ (resource -- :
+  "Perform registered graceful shutdown and join cleanup. Unsupported resources raise 'domain.")
+ (port.core.shutdown)
+ 'shutdown def
+
  ### def close
  (resource-or-exchange -- : "Abort and join cleanup. Idempotent.")
  (port.core.close)

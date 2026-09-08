@@ -1255,3 +1255,42 @@ test "native: cancellation after a yield preserves the pre-call operand stack" {
     try std.testing.expectEqual(@as(usize, 1), runtime.stackItems().len);
     try std.testing.expectEqual(@as(i64, 5), runtime.stackItems()[0].int);
 }
+
+test "native: graceful shutdown has independent progress and joins cleanup once" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.factory [] port.open 'p set " ++
+        "p portprobe.blocked [] port.begin 'x set 1 portprobe.await-blocked " ++
+        "p port.shutdown p port.shutdown p port.close " ++
+        "x wrap (port.await) @attempt 'err at 'kind at x port.close " ++
+        "portprobe.shutdowns portprobe.cleaned", "'cancelled 1 1");
+}
+
+test "native: unsupported graceful shutdown preserves abortive cleanup" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.new 'p set " ++
+        "p wrap (port.shutdown) @attempt 'err at 'kind at portprobe.cleaned " ++
+        "p port.close p wrap (port.shutdown) @attempt 'err at 'kind at " ++
+        "portprobe.shutdowns portprobe.cleaned", "'domain 0 'domain 0 1");
+}
+
+test "native: graceful failure is repeatable after joined cleanup" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.factory 254 port.open 'p set " ++
+        "p wrap (port.shutdown) @attempt 'err at 'kind at portprobe.cleaned " ++
+        "p wrap (port.shutdown) @attempt 'err at 'kind at p port.close " ++
+        "portprobe.shutdowns portprobe.cleaned", "'domain 1 'domain 1 1");
+}
+
+test "native: abort interrupts blocked graceful shutdown and joins its callback" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.factory 253 port.open 'p set " ++
+        "p wrap (port.shutdown) @spawn 's set 1 portprobe.await-blocked " ++
+        "p wrap (portprobe.noop [] port.begin) @attempt 'err at 'kind at " ++
+        "p port.close s task.await 'err at 'kind at " ++
+        "p wrap (port.shutdown) @attempt 'err at 'kind at " ++
+        "portprobe.shutdowns portprobe.cleaned", "'io 'io 'io 1 1");
+}
+
+test "native: concurrent graceful callers invoke one callback" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.factory 253 port.open 'p set " ++
+        "p wrap (port.shutdown) @spawn 'a set 1 portprobe.await-blocked " ++
+        "p wrap (port.shutdown) @spawn 'b set portprobe.unblock " ++
+        "a task.await 'ok at pop b task.await 'ok at pop p port.close " ++
+        "portprobe.shutdowns portprobe.cleaned", "1 1");
+}

@@ -1462,6 +1462,12 @@ transition, so allocation failure cannot consume a result without publishing it.
 The driver's completion carries that reservation with its owned output; only
 the evaluator commits it after driver retirement, without further allocation.
 
+Graceful shutdown closes operation admission and runs one registered callback
+on an independently reserved control lane. Its terminal outcome is stable.
+Abortive close interrupts that callback through the same bounded cancellation
+path as other backend work. The root joins both operation and control lanes
+before cleanup; callback return alone never grants cleanup authority.
+
 Closing cancels active and queued work and prevents further admission. Cancelling
 only a queued operation removes that operation. Active cancellation either
 closes the cell or invokes its declared recovery protocol. Recovery requires

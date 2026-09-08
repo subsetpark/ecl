@@ -141,7 +141,7 @@ pub const Owner = opaque {
         try limits.validate();
         const state_value = try host.allocator().create(OwnerState);
         errdefer host.allocator().destroy(state_value);
-        state_value.* = .{ .host = host, .limits = limits, .executor = try controllers.Owner.init(host.allocator(), @as(usize, limits.max_live_ports) * @min(limits.max_operations, abi.max_port_lanes) + 1) };
+        state_value.* = .{ .host = host, .limits = limits, .executor = try controllers.Owner.init(host.allocator(), @as(usize, limits.max_live_ports) * (@min(limits.max_operations, abi.max_port_lanes) + 1) + 1) };
         return ownerFromState(state_value);
     }
     pub fn access(self: *Owner) *Access {
@@ -237,6 +237,7 @@ pub const Cell = struct {
     ownership: external.Ownership = .provisional,
     phase: enum { reserved, initializing, open, closing, cleaned, joined } = .reserved,
     initialization_failure: ?Failure = null,
+    shutdown_state: union(enum) { idle, requested, running, completed: ?Failure, aborted } = .idle,
     configuration: ?Value = null,
     message_budget: *message_transport.Budget,
     lanes: [abi.max_port_lanes]Operations,
@@ -287,7 +288,7 @@ pub const Cell = struct {
         return switch (key) {
             0 => self.phase != .reserved and self.phase != .initializing,
             1 => self.phase == .joined,
-            else => self.closed.load(.acquire) or key - 2 >= self.definition.lane_count or
+            else => self.closed.load(.acquire) or self.shutdown_state != .idle or key - 2 >= self.definition.lane_count or
                 self.lanes[key - 2].hasCapacity(self.laneCapacity(@intCast(key - 2))),
         };
     }
@@ -324,6 +325,28 @@ pub const Cell = struct {
         defer unlock(&self.mutex);
         self.closeLocked();
     }
+    pub fn shutdown(self: *Cell) union(enum) { pending, ready, unsupported, failed: Failure } {
+        lock(&self.mutex);
+        defer unlock(&self.mutex);
+        if (self.definition.shutdown == null) return .unsupported;
+        switch (self.shutdown_state) {
+            .idle => {
+                if (self.closed.load(.acquire)) {
+                    self.shutdown_state = .aborted;
+                } else {
+                    self.shutdown_state = .requested;
+                    self.changed.broadcast(io());
+                    self.waits.notifyLocked(self);
+                }
+            },
+            .requested, .running, .completed, .aborted => {},
+        }
+        if (self.phase != .joined) return .pending;
+        return switch (self.shutdown_state) {
+            .completed => |failure| if (failure) |value| .{ .failed = value } else .ready,
+            .idle, .requested, .running, .aborted => .{ .failed = Failure.init(.io, "resource closed before graceful shutdown completed") },
+        };
+    }
     fn closeLocked(self: *Cell) void {
         if (self.closed.swap(true, .acq_rel)) return;
         const notify_backend = self.phase == .initializing or self.phase == .open;
@@ -343,11 +366,11 @@ pub const Cell = struct {
         const initialize = !self.closed.load(.acquire);
         if (initialize) self.phase = .initializing;
         unlock(&self.mutex);
-        var controller_context: ControllerContext = .{ .cell = self, .operation = null };
+        var controller_context: ControllerContext = .{ .cell = self, .invocation = .initialize };
         if (initialize) self.definition.initialize.?(self.backend.ptr, &controller_table, &controller_context);
         lock(&self.mutex);
         if (self.initialization_failure != null) self.closed.store(true, .release);
-        const lane_count = if (self.closed.load(.acquire)) 1 else self.definition.lane_count;
+        const lane_count = if (self.closed.load(.acquire)) 1 else self.definition.lane_count + @as(u32, @intFromBool(self.definition.shutdown != null));
         unlock(&self.mutex);
         execution.runLanes(lane_count, self, Cell.runLane, Cell.failLaneStartup, Cell.publishInitialization);
         // Every operation executor and cancellation notification has finished.
@@ -382,7 +405,26 @@ pub const Cell = struct {
         cell.phase = .joined;
         cell.waits.notifyLocked(cell);
     }
+    fn runShutdown(self: *Cell) void {
+        lock(&self.mutex);
+        while (self.shutdown_state == .idle and !self.closed.load(.acquire))
+            self.changed.waitUncancelable(io(), &self.mutex);
+        if (self.closed.load(.acquire)) {
+            self.shutdown_state = .aborted;
+            unlock(&self.mutex);
+            return;
+        }
+        self.shutdown_state = .running;
+        unlock(&self.mutex);
+        var ctx: ControllerContext = .{ .cell = self, .invocation = .{ .shutdown = null } };
+        self.definition.shutdown.?(self.backend.ptr, &controller_table, &ctx);
+        lock(&self.mutex);
+        self.shutdown_state = if (self.closed.load(.acquire)) .aborted else .{ .completed = ctx.invocation.shutdown };
+        self.closeLocked();
+        unlock(&self.mutex);
+    }
     fn runLane(self: *Cell, index: usize) void {
+        if (index == self.definition.lane_count) return self.runShutdown();
         const lane = &self.lanes[index];
         while (true) {
             lock(&self.mutex);
@@ -399,7 +441,7 @@ pub const Cell = struct {
     }
     pub fn admitOnLane(self: *Cell, code: u32, lane: u32, endpoints: u64, scope: *scheduler.TaskScope, request: ?*const port_message.Validated) error{ OutOfMemory, ScopeClosing }!Admission {
         lock(&self.mutex);
-        const closed = self.closed.load(.acquire);
+        const closed = self.closed.load(.acquire) or self.shutdown_state != .idle;
         const invalid = lane >= self.definition.lane_count;
         const full = !invalid and !self.lanes[lane].hasCapacity(self.laneCapacity(lane));
         unlock(&self.mutex);
@@ -553,7 +595,7 @@ pub const Operation = struct {
         errdefer heap.hostDomain(cell.owner.host).releaseValue(terminal_value);
         lock(&cell.mutex);
         defer unlock(&cell.mutex);
-        if (cell.closed.load(.acquire)) return error.Closed;
+        if (cell.closed.load(.acquire) or cell.shutdown_state != .idle) return error.Closed;
         const ticket = try cell.lanes[lane].admit(allocator, cell.laneCapacity(lane), .{ cell, code, lane, protocol, terminal_value, endpoints }, initialize) orelse return error.Full;
         cell.changed.broadcast(io());
         return ticket.owner();
@@ -566,7 +608,7 @@ pub const Operation = struct {
         return !self.cell.closed.load(.acquire);
     }
     fn execute(self: *Operation, running: *controllers.Running) void {
-        var ctx: ControllerContext = .{ .cell = self.cell, .operation = self, .running = running };
+        var ctx: ControllerContext = .{ .cell = self.cell, .invocation = .{ .operation = .{ .value = self, .running = running } } };
         defer if (ctx.received) |item| item.release();
         self.cell.definition.execute.?(self.cell.backend.ptr, self.code, &controller_table, &ctx);
     }
@@ -865,14 +907,24 @@ pub fn borrowEndpoint(parent: Value, selector: *RegisteredCapability) error{ Out
     return result;
 }
 
-const ControllerContext = struct { cell: *Cell, operation: ?*Operation, running: ?*controllers.Running = null, received: ?*message_transport.Envelope = null };
+const ControllerContext = struct {
+    cell: *Cell,
+    invocation: union(enum) { initialize, operation: struct { value: *Operation, running: *controllers.Running }, shutdown: ?Failure },
+    received: ?*message_transport.Envelope = null,
+    fn operation(self: *ControllerContext) ?*Operation {
+        return switch (self.invocation) {
+            .operation => |active| active.value,
+            .initialize, .shutdown => null,
+        };
+    }
+};
 fn context(raw: *anyopaque) *ControllerContext {
     return @ptrCast(@alignCast(raw));
 }
 fn controllerInput(raw: *anyopaque, path: [*]const u64, depth: u32, output: *abi.ValueView) callconv(.c) bool {
     if (depth > abi.max_read_path_depth or output.size != @sizeOf(abi.ValueView)) return false;
     const ctx = context(raw);
-    const root: ?Value = if (ctx.operation) |operation| switch (operation.protocol) {
+    const root: ?Value = if (ctx.operation()) |operation| switch (operation.protocol) {
         .legacy => null,
         .registered => |registered| registered.parameters,
     } else ctx.cell.configuration;
@@ -909,7 +961,7 @@ fn viewMessage(root: ?Value, path: [*]const u64, depth: u32, output: *abi.ValueV
 }
 fn controllerRead(raw: *anyopaque, bytes: [*]u8, length: u32) callconv(.c) u32 {
     if (length == 0) return 0;
-    const op = context(raw).operation orelse return 0;
+    const op = context(raw).operation() orelse return 0;
     if (op.protocol == .registered) return controllerReadEndpoint(raw, 0, bytes, length);
     lock(&op.mutex);
     defer unlock(&op.mutex);
@@ -921,7 +973,7 @@ fn controllerRead(raw: *anyopaque, bytes: [*]u8, length: u32) callconv(.c) u32 {
 }
 fn controllerWrite(raw: *anyopaque, bytes: [*]const u8, length: u32) callconv(.c) u32 {
     if (length == 0) return 0;
-    const op = context(raw).operation orelse return 0;
+    const op = context(raw).operation() orelse return 0;
     if (op.protocol == .registered) return controllerWriteEndpoint(raw, 1, bytes, length);
     lock(&op.mutex);
     defer unlock(&op.mutex);
@@ -935,14 +987,14 @@ fn controllerWrite(raw: *anyopaque, bytes: [*]const u8, length: u32) callconv(.c
 fn controllerCancelled(raw: *anyopaque) callconv(.c) bool {
     const ctx = context(raw);
     if (ctx.cell.closed.load(.acquire)) return true;
-    const op = ctx.operation orelse return false;
+    const op = ctx.operation() orelse return false;
     lock(&op.mutex);
     defer unlock(&op.mutex);
     return op.ticket.isCancelled();
 }
 
 fn controllerPipe(raw: *anyopaque, index: u32, direction: enum { input, output }) ?byte_transport.Pair {
-    const op = context(raw).operation orelse return null;
+    const op = context(raw).operation() orelse return null;
     if (op.protocol != .registered or index >= 64) return null;
     const endpoint = op.cell.instance.validated().endpoint(op.cell.kind, @intCast(index), .exchange) orelse return null;
     if (endpoint.transport != .bytes or switch (direction) {
@@ -984,7 +1036,7 @@ fn controllerFinishEndpoint(raw: *anyopaque, index: u32) callconv(.c) bool {
 }
 
 fn controllerQueue(raw: *anyopaque, index: u32, direction: enum { input, output }) ?message_transport.Pair {
-    const op = context(raw).operation orelse return null;
+    const op = context(raw).operation() orelse return null;
     if (op.protocol != .registered or index >= 64) return null;
     const endpoint = op.cell.instance.validated().endpoint(op.cell.kind, @intCast(index), .exchange) orelse return null;
     if (endpoint.transport != .messages or switch (direction) {
@@ -1018,7 +1070,7 @@ fn controllerForwardMessage(raw: *anyopaque, index: u32) callconv(.c) bool {
 }
 fn controllerResultMessage(raw: *anyopaque) callconv(.c) bool {
     const ctx = context(raw);
-    const op = ctx.operation orelse return false;
+    const op = ctx.operation() orelse return false;
     const item = ctx.received orelse return false;
     const value = item.value();
     heap.retainValue(value);
@@ -1034,10 +1086,10 @@ fn controllerResultMessage(raw: *anyopaque) callconv(.c) bool {
 fn controllerAcknowledge(raw: *anyopaque) callconv(.c) bool {
     const ctx = context(raw);
     if (ctx.cell.closed.load(.acquire) or ctx.cell.definition.cancellation != .acknowledge) return false;
-    const op = ctx.operation orelse return false;
+    const op = ctx.operation() orelse return false;
     lock(&op.mutex);
     defer unlock(&op.mutex);
-    const running = ctx.running orelse return false;
+    const running = ctx.invocation.operation.running;
     return running.acknowledgeCancellation();
 }
 fn boundedErrorMessage(message: []const u8) []const u8 {
@@ -1054,14 +1106,18 @@ fn controllerFail(raw: *anyopaque, kind: abi.ErrorKindWire, bytes: [*]const u8, 
         _ => .io,
     };
     const failure = Failure.init(valid_kind, boundedErrorMessage(bytes[0..length]));
-    if (ctx.operation) |op| {
+    if (ctx.operation()) |op| {
         lock(&op.mutex);
         op.failure = failure;
         unlock(&op.mutex);
-    } else {
-        lock(&ctx.cell.mutex);
-        ctx.cell.initialization_failure = failure;
-        unlock(&ctx.cell.mutex);
+    } else switch (ctx.invocation) {
+        .initialize => {
+            lock(&ctx.cell.mutex);
+            ctx.cell.initialization_failure = failure;
+            unlock(&ctx.cell.mutex);
+        },
+        .shutdown => ctx.invocation.shutdown = failure,
+        .operation => unreachable,
     }
 }
 const controller_table: abi.ControllerTable = .{ .receive_message = controllerReceiveMessage, .received_message = controllerReceivedMessage, .forward_message = controllerForwardMessage, .result_message = controllerResultMessage, .input = controllerInput, .read_endpoint = controllerReadEndpoint, .write_endpoint = controllerWriteEndpoint, .finish_endpoint = controllerFinishEndpoint, .read = controllerRead, .write = controllerWrite, .cancelled = controllerCancelled, .acknowledge_cancellation = controllerAcknowledge, .fail = controllerFail };

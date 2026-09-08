@@ -105,7 +105,11 @@ when their lane is full. The operation budget is partitioned across lanes,
 reserving at least one slot for each; creation fails with `'domain` when the
 budget cannot cover the declared lanes. Idle capacity is not borrowed across
 lanes. Forced close interrupts all lanes and waits for terminal cleanup.
-Graceful shutdown is a separate, resource-specific operation. Cancellation
+A kind may register an optional `shutdown` callback. `port.shutdown` invokes it
+once on an independent control lane and waits for all callbacks and cleanup.
+It may overlap operation callbacks; `cancel` must interrupt its backend waits.
+Failure remains observable on repeated shutdown calls. Unsupported shutdown
+raises `'domain`, and abortive `port.close` remains available. Cancellation
 never promises to reverse external effects or accepted stream bytes.
 These resource limits do not sandbox native code.
 

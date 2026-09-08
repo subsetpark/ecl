@@ -133,6 +133,7 @@ pub const PortDefinition = extern struct {
     cancellation: PortCancellation = .close_resource,
     select_lane: ?*const fn (u32) callconv(.c) u32 = null,
     cancel_operation: ?*const fn (*anyopaque, u32) callconv(.c) void = null,
+    shutdown: ?PortControllerFn = null,
 };
 
 pub const CapabilityRequirement = extern struct {
@@ -422,7 +423,7 @@ comptime {
     assertRecord(InvokeResult, 16, 8);
     assertRecord(HostTable, 144, 8);
     assertRecord(Descriptor, 104, 8);
-    assertRecord(PortDefinition, 88, 8);
+    assertRecord(PortDefinition, 96, 8);
     assertRecord(PortRequest, 48, 8);
     assertRecord(PortReply, 24, 8);
     assertRecord(ControllerTable, 104, 8);

@@ -121,7 +121,9 @@ pub const Adapter = struct { invocation: *capability.Invocation, definition: u32
 /// all lane runs, and `deinit` follows their completion. Runs in distinct lanes
 /// may overlap; same-lane runs are FIFO. `cancel` may run concurrently
 /// with `open` or `run`: it must be bounded, thread-safe, and interrupt backend
-/// waits. It never races `deinit`. Cleanup runs even when `open` fails.
+/// waits. Optional `shutdown` runs independently of operation lanes, stops new
+/// admission, and is joined before `deinit`. It may race `run` and `cancel`;
+/// cancellation must interrupt its waits too. Cleanup runs even when `open` fails.
 pub fn Port(comptime Spec: type) type {
     const Lane = if (@hasDecl(Spec, "Lane")) Spec.Lane else enum { operation };
     const cancellation: Cancellation = if (@hasDecl(Spec, "cancellation")) Spec.cancellation else .close_resource;
@@ -136,6 +138,8 @@ pub fn Port(comptime Spec: type) type {
             @compileError("ecl-native: Port lanes require fn lane(u32) Lane");
         if (cancellation == .acknowledge and (!@hasDecl(Spec, "cancelOperation") or @TypeOf(Spec.cancelOperation) != fn (*Spec.State, Lane) void))
             @compileError("ecl-native: recoverable cancellation requires fn cancelOperation(*State, Lane) void");
+        if (@hasDecl(Spec, "shutdown") and @TypeOf(Spec.shutdown) != fn (*Spec.State, *Controller) void)
+            @compileError("ecl-native: shutdown requires fn (*State, *Controller) void");
         for (.{ "State", "name", "init", "open", "run", "cancel", "deinit" }) |name|
             if (!@hasDecl(Spec, name)) @compileError("ecl-native: Port spec requires State, name, init, open, run, cancel, and deinit");
         if (@sizeOf(Spec.State) == 0 or @sizeOf(Spec.State) > abi.max_port_state_bytes or @alignOf(Spec.State) > 64)
@@ -159,7 +163,7 @@ pub fn Port(comptime Spec: type) type {
             return .{ .state_size = @sizeOf(Spec.State), .state_alignment = @alignOf(Spec.State), .name_ptr = name.ptr, .name_len = name.len, .init_state = initState, .initialize = initialize, .execute = execute, .cancel = cancelState, .cleanup = cleanup, .lane_count = @typeInfo(Lane).@"enum".fields.len, .cancellation = switch (cancellation) {
                 .close_resource => .close_resource,
                 .acknowledge => .acknowledge,
-            }, .select_lane = selectLane, .cancel_operation = if (cancellation == .acknowledge) cancelOperation else null };
+            }, .select_lane = selectLane, .cancel_operation = if (cancellation == .acknowledge) cancelOperation else null, .shutdown = if (@hasDecl(Spec, "shutdown")) shutdown else null };
         }
         fn selectLane(operation: u32) callconv(.c) u32 {
             return if (@hasDecl(Spec, "Lane")) @intCast(@intFromEnum(Spec.lane(operation))) else 0;
@@ -174,6 +178,10 @@ pub fn Port(comptime Spec: type) type {
         fn initialize(raw: *anyopaque, table: *const abi.ControllerTable, context: *anyopaque) callconv(.c) void {
             var state: ControllerState = .{ .table = table, .context = context };
             Spec.open(@ptrCast(@alignCast(raw)), @ptrCast(&state));
+        }
+        fn shutdown(raw: *anyopaque, table: *const abi.ControllerTable, context: *anyopaque) callconv(.c) void {
+            var state: ControllerState = .{ .table = table, .context = context };
+            Spec.shutdown(@ptrCast(@alignCast(raw)), @ptrCast(&state));
         }
         fn execute(raw: *anyopaque, operation: u32, table: *const abi.ControllerTable, context: *anyopaque) callconv(.c) void {
             var state: ControllerState = .{ .table = table, .context = context };

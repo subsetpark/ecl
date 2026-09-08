@@ -1,6 +1,7 @@
 // zlint-disable homeless-try -- Zig validates the SDK callback error unions.
 const std = @import("std");
 const ecl = @import("ecl-native");
+var shutdowns: std.atomic.Value(u32) = .init(0);
 var cleaned: std.atomic.Value(u32) = .init(0);
 var entered: std.atomic.Value(u32) = .init(0);
 var admitted: std.atomic.Value(u32) = .init(0);
@@ -155,6 +156,14 @@ fn DuplexSpec(comptime acknowledge: bool) type {
                 _ = controller.acknowledgeCancellation();
             }
         }
+        pub fn shutdown(state: *State, controller: *ecl.Controller) void {
+            _ = shutdowns.fetchAdd(1, .release);
+            const config = (controller.input(&.{}) orelse return).int() orelse 0;
+            if (config == 254) return controller.fail(.domain, "deliberate shutdown failure");
+            if (config == 253) awaitGate(&state.lanes[0].cancelled);
+            // Completing the graceful callback permits the runtime to close
+            // remaining exchanges and join their cancellation return.
+        }
         pub fn cancelOperation(state: *State, selected: Lane) void {
             Base.cancel(&state.lanes[@intFromEnum(selected)]);
         }
@@ -307,6 +316,9 @@ fn checkOther(call: *ecl.Call("port --"), _: *Schedule, port: *Other) ecl.Callba
 fn cleanupCount(call: *ecl.Call("-- n")) ecl.CallbackResult {
     return call.complete(.{ecl.Scalar.int(cleaned.load(.acquire))});
 }
+fn shutdownCount(call: *ecl.Call("-- n")) ecl.CallbackResult {
+    return call.complete(.{ecl.Scalar.int(shutdowns.load(.acquire))});
+}
 fn failLong(call: *ecl.Call("--")) ecl.CallbackResult {
     return call.fail(.io, ("x" ** 4095) ++ "€");
 }
@@ -318,6 +330,7 @@ fn unblock(call: *ecl.Call("--")) ecl.CallbackResult {
     return call.complete(.{});
 }
 fn reset(call: *ecl.Call("--")) ecl.CallbackResult {
+    shutdowns.store(0, .release);
     cleaned.store(0, .release);
     entered.store(0, .release);
     admitted.store(0, .release);
@@ -504,6 +517,7 @@ pub const Extension = ecl.module(.{
         ecl.word("await-cleaned", "Wait for cleanup callbacks.", awaitCounter(&cleaned).run),
         ecl.word("close", "Join port cleanup.", close),
         ecl.word("other-check", "Require the other kind.", checkOther),
+        ecl.word("shutdowns", "Observe graceful callbacks.", shutdownCount),
         ecl.word("cleaned", "Observe completed cleanup.", cleanupCount),
         ecl.word("fail-long", "Report a bounded UTF-8 word error.", failLong),
         ecl.word("exchange", "Stream repeated bytes and return a checksum.", exchange),
