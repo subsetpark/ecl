@@ -13,6 +13,34 @@ pub const Write = union(enum) { pending, written: usize, failed: Failure };
 const Writers = controllers.Lane(State, .writer, .{ .retain = State.retainReadiness, .release = State.releaseReadiness, .write = State.writeLocked, .notify = State.notifyLocked, .source = State.source });
 pub const WritePermit = Writers.Writer;
 
+/// A stream's terminal fact cannot be replaced by later resource failure or
+/// cleanup. The transport owns the lock and decides when accepted writers have
+/// finished; every adapter uses these same monotonic transitions.
+pub fn StreamPhase(comptime Fault: type) type {
+    return union(enum) {
+        open,
+        finishing,
+        eof,
+        failed: Fault,
+
+        pub fn terminal(self: @This()) bool {
+            return switch (self) {
+                .open, .finishing => false,
+                .eof, .failed => true,
+            };
+        }
+        pub fn finish(self: *@This()) void {
+            if (self.* == .open) self.* = .finishing;
+        }
+        pub fn complete(self: *@This()) void {
+            if (!self.terminal()) self.* = .eof;
+        }
+        pub fn fail(self: *@This(), failure: Fault) void {
+            if (!self.terminal()) self.* = .{ .failed = failure };
+        }
+    };
+}
+
 const State = struct {
     host: *const heap.HostCleanup,
     allocator: std.mem.Allocator,
@@ -23,7 +51,7 @@ const State = struct {
     ring: Ring,
     writers: Writers,
     reader: bool = false,
-    phase: union(enum) { open, finishing, eof, failed: Failure } = .open,
+    phase: StreamPhase(Failure) = .open,
 
     fn capabilities(self: *State) Pair {
         return .{ .pipe = @ptrCast(self), .controller = @ptrCast(self) };
@@ -51,7 +79,7 @@ const State = struct {
         return .{ .written = count };
     }
     fn notifyLocked(self: *State) void {
-        if (self.phase == .finishing and self.writers.empty()) self.phase = .eof;
+        if (self.phase == .finishing and self.writers.empty()) self.phase.complete();
         self.changed.broadcast(std.Io.Threaded.global_single_threaded.io());
         self.waits.notifyLocked(self);
     }
@@ -127,7 +155,7 @@ pub const Pipe = opaque {
         const owned = self.state();
         std.Io.Threaded.mutexLock(&owned.mutex);
         defer std.Io.Threaded.mutexUnlock(&owned.mutex);
-        if (owned.phase == .open) owned.phase = .finishing;
+        owned.phase.finish();
         owned.notifyLocked();
     }
     pub fn fail(self: *Pipe, failure: Failure, discard: bool) void {
@@ -135,7 +163,7 @@ pub const Pipe = opaque {
         std.Io.Threaded.mutexLock(&owned.mutex);
         defer std.Io.Threaded.mutexUnlock(&owned.mutex);
         if (discard) owned.ring.discard();
-        if (owned.phase == .open or owned.phase == .finishing) owned.phase = .{ .failed = failure };
+        owned.phase.fail(failure);
         owned.notifyLocked();
     }
     pub fn interrupt(self: *Pipe) void {

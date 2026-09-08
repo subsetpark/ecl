@@ -1,25 +1,8 @@
 //! Scope-owned TCP listeners and connections behind opaque ECL port values.
 //!
-//! A `NetPolicy` names the address and port pairs a Session may bind once, at
-//! construction. `NetOwner` copies it, keeps the live-listener and
-//! live-connection quotas, and is the only factory for `ListenerCell`: a bound
-//! socket whose lifetime belongs to the creating unit's task scope, never to
-//! the language value reference count. Bind is four bounded syscalls on the
-//! worker (socket, bind, listen, getsockname). Accepting starts one
-//! acceptor job per listener on the first `accept`; it waits in `poll` on
-//! the listening socket and a wake pipe and takes a connection from the kernel
-//! backlog only while an ECL `accept` is outstanding and a live-connection
-//! slot is free. The slot is acquired at `accept4` time, under the listener
-//! mutex; while the quota is full the acceptor stops polling the listening
-//! socket and waits on its wake pipe alone, which every connection release
-//! signals, so a waiting accept holds no slot and the connection stays in the
-//! kernel backlog until one frees. Each accepted socket is
-//! a `ConnectionCell` owned by the accepting unit's scope, with bounded
-//! receive and send rings serviced by exactly one controller thread that
-//! polls a non-blocking socket and a wake pipe; that thread alone owns the
-//! descriptor, the quota slot, and the scope membership until it publishes
-//! the terminal state. Closing is one idempotent transition shared by the
-//! `close` word and scope cancellation.
+//! Registered resources and exchanges share the common controller service.
+//! Typed backend activity owns sockets, bounded rings, and wake descriptors;
+//! provisional accepted connections publish through the exchange result owner.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -184,15 +167,17 @@ const OwnedPolicy = struct {
 };
 
 /// Session-owned authority. Units never receive this owner; they receive the
-/// opaque `external.NetAccess` and `listenFromUnit`.
+/// opaque `external.NetAccess`.
 ///
 /// Lock order: the acceptor registry mutex is a leaf. It is taken while
-/// holding a listener mutex (`beginAccept` registers under it) and while
+/// holding a listener mutex (initialization registers the acceptor) and while
 /// holding a connection cell mutex (terminal retirement returns capacity
 /// under it), and nothing is taken while it is held: `releaseConnection` only
 /// writes wake bytes. No path takes a listener mutex while holding a
 /// connection cell mutex.
 pub const NetOwner = struct {
+    host: *const heap.HostCleanup,
+    service_live: std.atomic.Value(usize) = .init(0),
     instance: *@import("module_bindings.zig").Identity,
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -207,14 +192,17 @@ pub const NetOwner = struct {
     acceptors_mutex: std.Io.Mutex = .init,
     acceptors_first: ?*ListenerCell.Acceptor = null,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, policy: NetPolicy) PolicyError!NetOwner {
+    pub fn init(host: *const heap.HostCleanup, io: std.Io, policy: NetPolicy) PolicyError!NetOwner {
+        const allocator = host.allocator();
         const jobs = std.math.add(usize, policy.limits.max_live_listeners, policy.limits.max_live_connections) catch return error.InvalidPolicy;
-        const capacity = std.math.add(usize, jobs, 1) catch return error.InvalidPolicy;
+        const service_jobs = std.math.mul(usize, jobs, 5) catch return error.InvalidPolicy;
+        const capacity = std.math.add(usize, service_jobs, 1) catch return error.InvalidPolicy;
         var owned_policy = try OwnedPolicy.init(allocator, policy);
         errdefer owned_policy.deinit(allocator);
         const instance = try @import("module_bindings.zig").Identity.create(allocator);
         errdefer instance.release();
         return .{
+            .host = host,
             .instance = instance,
             .allocator = allocator,
             .io = io,
@@ -305,6 +293,18 @@ pub const NetOwner = struct {
         defer std.Io.Threaded.mutexUnlock(&self.acceptors_mutex);
         if (acceptor.previous) |previous| previous.next = acceptor.next else self.acceptors_first = acceptor.next;
         if (acceptor.next) |next| next.previous = acceptor.previous;
+    }
+
+    fn reserveService(self: *NetOwner) error{LiveLimit}!void {
+        const limit = self.policy.limits.max_live_listeners + self.policy.limits.max_live_connections;
+        var count = self.service_live.load(.acquire);
+        while (count < limit) {
+            count = self.service_live.cmpxchgWeak(count, count + 1, .acq_rel, .acquire) orelse return;
+        }
+        return error.LiveLimit;
+    }
+    fn releaseService(self: *NetOwner) void {
+        _ = self.service_live.fetchSub(1, .acq_rel);
     }
 
     pub fn listen(
@@ -470,9 +470,9 @@ pub const AcceptSlot = struct {
     const State = union(enum) {
         waiting: *AcceptedResource.Candidate,
         ready: *AcceptedSocket,
-        failed: AcceptFailure,
+        failed: struct { reason: AcceptFailure, candidate: *AcceptedResource.Candidate },
         taken,
-        closed,
+        closed: *AcceptedResource.Candidate,
     };
 };
 
@@ -517,6 +517,7 @@ pub const ListenerCell = struct {
         dormant: Bound,
         accepting: *Acceptor,
         closing: *Acceptor,
+        retiring: Bound,
         closed: IpAddress,
     };
 
@@ -545,11 +546,12 @@ pub const ListenerCell = struct {
             errdefer cell.owner.unregisterAcceptor(owned);
             cell.retainRef();
             errdefer cell.releaseRef();
+            cell.state = .{ .accepting = owned };
+            errdefer cell.state = .{ .dormant = bound };
             cell.owner.executor.access().spawn(ListenerCell.acceptorMain, .{owned}, retireAcceptor) catch |err| return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 error.Io, error.Closed => error.Io,
             };
-            cell.state = .{ .accepting = owned };
         }
 
         fn destroy(self: *Acceptor) void {
@@ -562,13 +564,18 @@ pub const ListenerCell = struct {
     const Waits = WaitList(ListenerCell);
 
     fn initializeAllocation(cell: *ListenerCell, owner: *NetOwner, address: IpAddress) ListenError!void {
-        const server = try bindListening(address, owner.policy.limits.kernel_backlog);
+        var server = try bindListening(address, owner.policy.limits.kernel_backlog);
+        errdefer server.deinit(owner.io);
         cell.* = .{
             .allocator = owner.allocator,
             .io = owner.io,
             .owner = owner,
             .identity = owner.next_identity.fetchAdd(1, .monotonic),
             .state = .{ .dormant = .{ .server = server, .address = server.socket.address } },
+        };
+        Acceptor.start(cell, cell.state.dormant) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.Closed, error.Io => error.Io,
         };
     }
 
@@ -663,7 +670,7 @@ pub const ListenerCell = struct {
                 self.changed.broadcast(blockingIo());
                 std.Io.Threaded.mutexUnlock(&self.mutex);
             },
-            .closing, .closed => std.Io.Threaded.mutexUnlock(&self.mutex),
+            .closing, .retiring, .closed => std.Io.Threaded.mutexUnlock(&self.mutex),
         }
     }
 
@@ -671,12 +678,13 @@ pub const ListenerCell = struct {
         var server = bound.server;
         server.deinit(self.io);
         self.state = .{ .closed = bound.address };
+        self.changed.broadcast(blockingIo());
         ListenerResource.retire(self);
         var slot = self.slots_first;
         while (slot) |current| : (slot = current.next) {
             if (current.state == .waiting) {
-                current.state.waiting.deinit();
-                current.state = .closed;
+                const candidate = current.state.waiting;
+                current.state = .{ .closed = candidate };
             }
         }
         self.waits.notifyLocked(self);
@@ -701,7 +709,7 @@ pub const ListenerCell = struct {
         return switch (self.state) {
             .dormant => |bound| bound.address,
             .accepting => |acceptor| acceptor.bound.address,
-            .closing, .closed => null,
+            .closing, .retiring, .closed => null,
         };
     }
 
@@ -712,6 +720,7 @@ pub const ListenerCell = struct {
         return switch (self.state) {
             .dormant => |bound| bound.address,
             .accepting, .closing => |acceptor| acceptor.bound.address,
+            .retiring => |bound| bound.address,
             .closed => |address| address,
         };
     }
@@ -726,21 +735,19 @@ pub const ListenerCell = struct {
         return slot.state != .waiting;
     }
 
-    /// Link an accept slot and start the acceptor thread if it is not
-    /// running. Fails before anything parks. No quota slot is taken here:
-    /// the acceptor acquires one with the socket.
+    /// Prepare outside the publication lock, then link one accept demand.
+    /// The acceptor acquires connection capacity only with a socket.
     pub fn beginAccept(self: *ListenerCell) AcceptError!*AcceptSlot {
-        std.Io.Threaded.mutexLock(&self.mutex);
-        defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        switch (self.state) {
-            .dormant, .accepting => {},
-            .closing, .closed => return error.Closed,
-        }
         const slot = try self.allocator.create(AcceptSlot);
         errdefer self.allocator.destroy(slot);
         const candidate = try AcceptedResource.prepare(self.owner);
         errdefer candidate.deinit();
-        if (self.state == .dormant) try Acceptor.start(self, self.state.dormant);
+        std.Io.Threaded.mutexLock(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        switch (self.state) {
+            .accepting => {},
+            .dormant, .closing, .retiring, .closed => return error.Closed,
+        }
         slot.* = .{ .state = .{ .waiting = candidate } };
         if (self.slots_last) |last| {
             last.next = slot;
@@ -778,7 +785,7 @@ pub const ListenerCell = struct {
             },
             .failed => |failure| {
                 std.Io.Threaded.mutexUnlock(&self.mutex);
-                return switch (failure) {
+                return switch (failure.reason) {
                     .resources => .resources,
                     .io => .io,
                 };
@@ -809,14 +816,15 @@ pub const ListenerCell = struct {
         slot.linked = false;
         std.debug.assert(self.demand != 0);
         self.demand -= 1;
-        var orphan: ?*AcceptedSocket = null;
-        switch (slot.state) {
-            .ready => |ready| orphan = ready,
-            .waiting => |candidate| candidate.deinit(),
-            .failed, .closed, .taken => {},
-        }
+        const retired = slot.state;
+        slot.state = .taken;
         std.Io.Threaded.mutexUnlock(&self.mutex);
-        if (orphan) |accepted| accepted.deinit();
+        switch (retired) {
+            .ready => |accepted| accepted.deinit(),
+            .waiting, .closed => |candidate| candidate.deinit(),
+            .failed => |failure| failure.candidate.deinit(),
+            .taken => {},
+        }
         self.allocator.destroy(slot);
     }
 
@@ -881,12 +889,11 @@ pub const ListenerCell = struct {
             self.waits.notifyLocked(self);
         }
         const bound = acceptor.bound;
-        acceptor.destroy();
-        if (self.state == .closing) return self.finalizeCloseLocked(bound);
-        self.state = .{ .dormant = bound };
-        self.releaseRef();
-        self.changed.broadcast(blockingIo());
+        self.state = .{ .retiring = bound };
         std.Io.Threaded.mutexUnlock(&self.mutex);
+        acceptor.destroy();
+        std.Io.Threaded.mutexLock(&self.mutex);
+        self.finalizeCloseLocked(bound);
     }
 
     fn acceptOneLocked(self: *ListenerCell, acceptor: *Acceptor) void {
@@ -905,12 +912,14 @@ pub const ListenerCell = struct {
             error.Io => return self.failSlotLocked(slot, .io),
         };
         slot.state = .{ .ready = accepted };
+        self.changed.broadcast(blockingIo());
         self.waits.notifyLocked(self);
     }
 
     fn failSlotLocked(self: *ListenerCell, slot: *AcceptSlot, failure: AcceptFailure) void {
-        slot.state.waiting.deinit();
-        slot.state = .{ .failed = failure };
+        const candidate = slot.state.waiting;
+        slot.state = .{ .failed = .{ .reason = failure, .candidate = candidate } };
+        self.changed.broadcast(blockingIo());
         self.waits.notifyLocked(self);
     }
 };
@@ -1045,6 +1054,7 @@ pub const ConnectionCell = struct {
     identity: u64,
     refs: std.atomic.Value(usize) = .init(1),
     mutex: std.Io.Mutex = .init,
+    changed: std.Io.Condition = .init,
     lifecycle: Lifecycle = .prepared,
     accepted: *AcceptedSocket,
     controllers: *ConnectionGroup,
@@ -1055,7 +1065,7 @@ pub const ConnectionCell = struct {
     output: enum { open, finishing, eof } = .open,
     reader_active: bool = false,
     /// The peer has finished sending; queued bytes remain readable.
-    peer_eof: bool = false,
+    receive_phase: @import("port_bytes.zig").StreamPhase(Failure) = .open,
     /// The socket failed; set once, never cleared.
     failure: ?Failure = null,
     writers: Writers,
@@ -1155,6 +1165,16 @@ pub const ConnectionCell = struct {
             .running => unreachable,
         }
     }
+    fn prepareGroupStartup(self: *ConnectionCell, group: *scheduler_api.ExternalGroup) error{ OutOfMemory, ScopeClosing }!void {
+        try transfers.publishGroup(ConnectionCell, self, group, ConnectionCell.transferOwnership);
+        std.Io.Threaded.mutexLock(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        switch (self.lifecycle) {
+            .prepared => self.lifecycle = .running,
+            .stopping, .terminal => return error.ScopeClosing,
+            .running => unreachable,
+        }
+    }
     fn abortStartup(_: *ConnectionCell) void {}
 
     fn retireExecutionLocked(self: *ConnectionCell, outcome: controllers.Outcome(StopReason)) void {
@@ -1166,6 +1186,8 @@ pub const ConnectionCell = struct {
         std.Io.Threaded.closeFd(self.wake[0]);
         std.Io.Threaded.closeFd(self.wake[1]);
         self.lifecycle = .{ .terminal = reason };
+        if (self.failureLocked()) |failure| self.receive_phase.fail(failure);
+        self.changed.broadcast(blockingIo());
         self.waits.notifyLocked(self);
     }
 
@@ -1240,8 +1262,8 @@ pub const ConnectionCell = struct {
         return self.receive.bytes.len;
     }
 
-    /// Queued bytes first; then the reason nothing more can arrive; then EOF;
-    /// otherwise pending. Local closure outranks a later peer failure.
+    /// Queued bytes precede the stream's terminal fact. Resource cleanup
+    /// cannot replace EOF that this direction has already established.
     pub fn read(self: *ConnectionCell, destination: []u8) ReadProgress {
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
@@ -1251,9 +1273,11 @@ pub const ConnectionCell = struct {
             if (was_full) self.signalLocked();
             return .{ .data = count };
         }
-        if (self.failureLocked()) |failure| return .{ .failed = failure };
-        if (self.peer_eof) return .eof;
-        return .pending;
+        return switch (self.receive_phase) {
+            .open, .finishing => .pending,
+            .eof => .eof,
+            .failed => |failure| .{ .failed = failure },
+        };
     }
 
     pub fn readSource(self: *ConnectionCell) external.ReadinessSource {
@@ -1367,6 +1391,7 @@ pub const ConnectionCell = struct {
             std.Io.Threaded.mutexUnlock(&self.mutex);
             return;
         };
+        self.receive_phase.fail(.closed);
         switch (self.lifecycle) {
             // No controller exists yet: the publisher, which is about to take
             // this lock, observes `stopping` and retires the cell itself.
@@ -1421,7 +1446,7 @@ pub const ConnectionCell = struct {
 
     pub fn readyLocked(self: *ConnectionCell, key: u64) bool {
         if (key == readiness_read)
-            return self.receive.len != 0 or self.peer_eof or self.failureLocked() != null;
+            return self.receive.len != 0 or self.receive_phase.terminal();
         if (key == readiness_drain) return self.drainedLocked();
         if (key == readiness_join) return self.lifecycle == .terminal;
         const node: *const WritePermit = @ptrFromInt(key);
@@ -1434,6 +1459,7 @@ pub const ConnectionCell = struct {
             .CONNRESET, .PIPE, .NOTCONN => .reset,
             else => .io,
         };
+        self.receive_phase.fail(self.failure.?);
         self.send.discard();
         self.waits.notifyLocked(self);
     }
@@ -1445,7 +1471,7 @@ pub const ConnectionCell = struct {
             .running => if (self.failure != null)
                 .{ .read = false, .write = false, .finalize = .failed }
             else
-                .{ .read = !self.peer_eof and self.receive.free() != 0, .write = self.send.len != 0, .finalize = null },
+                .{ .read = !self.receive_phase.terminal() and self.receive.free() != 0, .write = self.send.len != 0, .finalize = null },
             .stopping => |reason| switch (reason) {
                 .abort, .failed => .{ .read = false, .write = false, .finalize = reason },
                 .close => if (self.send.len == 0 or self.failure != null)
@@ -1501,7 +1527,7 @@ pub const ConnectionCell = struct {
                 std.Io.Threaded.mutexLock(&self.mutex);
                 switch (posix.errno(rc)) {
                     .SUCCESS => if (rc == 0) {
-                        self.peer_eof = true;
+                        self.receive_phase.complete();
                         self.waits.notifyLocked(self);
                     } else {
                         if (self.lifecycle == .running) self.receive.push(block[0..@intCast(rc)]);
@@ -1539,38 +1565,18 @@ pub const ConnectionCell = struct {
     }
 };
 
-pub fn listenFromUnit(
-    access_value: *external.NetAccess,
-    scheduler_erased: *const anyopaque,
-    scope_erased: *anyopaque,
-    address: IpAddress,
-) ListenError!Value {
-    const runtime_scheduler: *const scheduler_api.WorkerScheduler = @ptrCast(@alignCast(scheduler_erased));
-    const scope: *scheduler_api.TaskScope = @ptrCast(@alignCast(scope_erased));
-    return ownerFromAccess(access_value).listen(runtime_scheduler, scope, address);
-}
-
 /// Borrow the library identity already owned by the Session's network service.
 pub fn registeredInstance(access_value: *external.NetAccess) *@import("module_bindings.zig").Identity {
     return ownerFromAccess(access_value).instance;
 }
 
-/// `ListenerCell.pollAccept` for callers holding the unit's type-erased
-/// scheduler and scope pointers.
-pub fn pollAcceptFromUnit(
-    cell: *ListenerCell,
-    slot: *AcceptSlot,
-    scheduler_erased: *const anyopaque,
-    scope_erased: *anyopaque,
-) error{OutOfMemory}!AcceptProgress {
-    const runtime_scheduler: *const scheduler_api.WorkerScheduler = @ptrCast(@alignCast(scheduler_erased));
-    const scope: *scheduler_api.TaskScope = @ptrCast(@alignCast(scope_erased));
-    return cell.pollAccept(slot, runtime_scheduler, scope);
-}
-
 /// Typed projection of a port value; null for any other port kind or value.
 pub fn fromValue(port: Value) ?*ListenerCell {
     if (port != .port) return null;
+    if (serviceFromValue(port)) |service| return switch (service.adapter.backend) {
+        .listener => |backend| backend,
+        else => null,
+    };
     return @import("port_resource.zig").Resource.project(ListenerCell, port);
 }
 
@@ -1578,6 +1584,10 @@ pub fn fromValue(port: Value) ?*ListenerCell {
 /// port, or any other value.
 pub fn connectionFromValue(port: Value) ?*ConnectionCell {
     if (port != .port) return null;
+    if (serviceFromValue(port)) |service| return switch (service.adapter.backend) {
+        .connection => |backend| backend,
+        else => null,
+    };
     return @import("port_resource.zig").Resource.project(ConnectionCell, port);
 }
 
@@ -1601,13 +1611,17 @@ test "net policy rejects unparseable, duplicate, and zero-limit grants" {
         .{ .binds = .unrestricted, .limits = .{ .receive_capacity = 0 } },
         .{ .binds = .unrestricted, .limits = .{ .send_capacity = 0 } },
     };
+    var host = heap.HostOwner.init(allocator);
+    defer host.cleanup().drain();
     for (invalid) |policy| {
-        try std.testing.expectError(error.InvalidPolicy, NetOwner.init(allocator, io, policy));
+        try std.testing.expectError(error.InvalidPolicy, NetOwner.init(host.cleanup(), io, policy));
     }
 }
 
 test "net policy admits exact normalized binds and treats port zero as ephemeral only" {
-    var owner = try NetOwner.init(std.testing.allocator, std.testing.io, .{ .binds = .{ .exact = &.{
+    var host = heap.HostOwner.init(std.testing.allocator);
+    defer host.cleanup().drain();
+    var owner = try NetOwner.init(host.cleanup(), std.testing.io, .{ .binds = .{ .exact = &.{
         .{ .address = "127.0.0.1", .port = 0 },
         .{ .address = "::1", .port = 4000 },
     } } });
@@ -1618,7 +1632,7 @@ test "net policy admits exact normalized binds and treats port zero as ephemeral
     try std.testing.expect(!owner.policy.allows(try parseLiteral("::1", 0)));
     try std.testing.expect(owner.policy.allows(try parseLiteral("::1", 4000)));
     try std.testing.expect(!owner.policy.allows(try parseLiteral("127.0.0.2", 0)));
-    var unrestricted = try NetOwner.init(std.testing.allocator, std.testing.io, .{ .binds = .unrestricted });
+    var unrestricted = try NetOwner.init(host.cleanup(), std.testing.io, .{ .binds = .unrestricted });
     defer unrestricted.deinit();
     try std.testing.expect(unrestricted.policy.allows(try parseLiteral("10.0.0.1", 1)));
 }
@@ -1666,13 +1680,13 @@ const LoopbackHarness = struct {
         self.runtime_scheduler.attachRetirement();
         self.root_scope = scheduler_api.TaskScope.init(self.runtime_scheduler.worker());
         errdefer self.runtime_scheduler.deinit(&self.root_scope);
-        self.owner = try NetOwner.init(allocator, std.testing.io, .{ .binds = .unrestricted, .limits = limits });
+        self.owner = try NetOwner.init(self.host.cleanup(), std.testing.io, .{ .binds = .unrestricted, .limits = limits });
     }
 
     fn deinit(self: *LoopbackHarness) void {
         self.runtime_scheduler.deinit(&self.root_scope);
-        self.owner.deinit();
         self.host.cleanup().drain();
+        self.owner.deinit();
     }
 
     fn listen(self: *LoopbackHarness, address: IpAddress) !Value {
@@ -2120,4 +2134,345 @@ test "net: output finish preserves admitted writer turns and the reverse stream"
     try readExact(cell, &target, &actual);
     try std.testing.expectEqualStrings("ok", &actual);
     cell.close();
+}
+
+const port_resource = @import("port_resource.zig");
+const port_message = @import("port_message.zig");
+const port_result = @import("port_result.zig");
+const port_builder = @import("port_builder.zig");
+const PortFailure = @import("port_bytes.zig").Failure;
+pub const RegisteredOperation = enum { accept, local_address, peer_address };
+pub const Service = @import("port_service.zig").Resource(ServiceAdapter);
+const NetworkExchange = @import("port_operation.zig").Exchange(OperationAdapter);
+const ServiceStorage = transfers.Resource(Service, NetOwner, NetOwner.resourceAllocator, NetOwner.reserveService, NetOwner.releaseService);
+const Backend = union(enum) {
+    listener_configuration: IpAddress,
+    listener: *ListenerCell,
+    accepted: *AcceptedSocket,
+    connection_initializing,
+    connection: *ConnectionCell,
+};
+const ServiceAdapter = struct {
+    pub const Exchange = @import("port_operation.zig").Exchange(OperationAdapter);
+    pub const Request = RegisteredOperation;
+    owner: *NetOwner,
+    backend: Backend,
+    pub fn allocator(self: *const ServiceAdapter) std.mem.Allocator {
+        return self.owner.allocator;
+    }
+    pub fn executor(self: *const ServiceAdapter) *controllers.Executor {
+        return self.owner.executor.access();
+    }
+    pub fn nextIdentity(self: *ServiceAdapter) u64 {
+        return self.owner.instance.next();
+    }
+    pub fn operationLane(_: *ServiceAdapter, operation: RegisteredOperation) u32 {
+        return if (operation == .accept) 0 else 1;
+    }
+    pub fn prepareOperation(_: *ServiceAdapter, cell: *Service, operation: RegisteredOperation, request: *const port_message.Validated, lane: *NetworkExchange.Lane) error{OutOfMemory}!*NetworkExchange.Prepared {
+        const terminal = try port_result.Result.create(cell.adapter.owner.host);
+        errdefer terminal.release();
+        const request_value = request.value();
+        return Exchange.prepare(.{ .cell = cell, .operation = operation, .valid_request = request_value == .list and request_value.list.length() == 0 }, terminal, lane);
+    }
+    pub fn retire(_: *ServiceAdapter, cell: *Service) void {
+        ServiceStorage.retire(cell);
+    }
+    pub fn destroy(self: *ServiceAdapter, cell: *Service) void {
+        switch (self.backend) {
+            .listener_configuration, .connection_initializing => {},
+            .listener => |backend| backend.releasePort(),
+            .accepted => |accepted| accepted.deinit(),
+            .connection => |backend| backend.releasePort(),
+        }
+        ServiceStorage.destroy(cell);
+    }
+    pub fn initState(_: *ServiceAdapter) void {}
+    pub fn initializeBackend(self: *ServiceAdapter, cell: *Service) void {
+        self.startBackend(cell) catch |err| cell.failInitialization(switch (err) {
+            error.OutOfMemory => .out_of_memory,
+            error.LiveLimit => PortFailure.init(.domain, "host listener limit reached"),
+            error.AddressInUse => PortFailure.init(.io, "address already in use"),
+            error.AddressUnavailable => PortFailure.init(.io, "address is unavailable on this host"),
+            error.Resources => PortFailure.init(.io, "host lacks network resources"),
+            error.Unsupported => PortFailure.init(.io, "host does not support this address family or protocol"),
+            error.ScopeClosing, error.Closed => PortFailure.init(.cancelled, "network resource initialization was cancelled"),
+            else => PortFailure.init(.io, "network resource initialization failed"),
+        });
+    }
+    fn startBackend(self: *ServiceAdapter, cell: *Service) !void {
+        const group = try cell.childGroup();
+        switch (self.backend) {
+            .listener_configuration => |address| {
+                const backend = try ListenerResource.create(self.owner, .{address}, ListenerCell.initializeAllocation);
+                errdefer {
+                    backend.close();
+                    std.Io.Threaded.mutexLock(&backend.mutex);
+                    while (backend.state != .closed) backend.changed.waitUncancelable(blockingIo(), &backend.mutex);
+                    std.Io.Threaded.mutexUnlock(&backend.mutex);
+                }
+                std.Io.Threaded.mutexLock(&cell.mutex);
+                self.backend = .{ .listener = backend };
+                if (cell.closed.load(.acquire)) backend.close();
+                std.Io.Threaded.mutexUnlock(&cell.mutex);
+                try transfers.publishGroup(ListenerCell, backend, group, ListenerCell.transferOwnership);
+            },
+            .accepted => |accepted| {
+                // Move the staged socket before preparation: prepare consumes on failure too.
+                std.Io.Threaded.mutexLock(&cell.mutex);
+                self.backend = .connection_initializing;
+                std.Io.Threaded.mutexUnlock(&cell.mutex);
+                const backend = try ConnectionCell.prepare(self.owner, accepted);
+                std.Io.Threaded.mutexLock(&cell.mutex);
+                self.backend = .{ .connection = backend };
+                if (cell.closed.load(.acquire)) backend.abort();
+                std.Io.Threaded.mutexUnlock(&cell.mutex);
+                try backend.controllers.start(.{group}, ConnectionCell.prepareGroupStartup, ConnectionCell.controllerMain, ConnectionCell.abortStartup);
+            },
+            .listener, .connection, .connection_initializing => unreachable,
+        }
+    }
+    pub fn cancel(self: *ServiceAdapter) void {
+        switch (self.backend) {
+            .listener_configuration, .accepted, .connection_initializing => {},
+            .listener => |backend| backend.close(),
+            .connection => |backend| backend.abort(),
+        }
+    }
+    pub fn failTransport(_: *ServiceAdapter) void {}
+    pub fn abortTransport(_: *ServiceAdapter) void {}
+    pub fn cleanup(_: *ServiceAdapter) void {}
+    pub fn shutdown(self: *ServiceAdapter, _: *Service) ?PortFailure {
+        switch (self.backend) {
+            .listener => |backend| {
+                backend.close();
+                std.Io.Threaded.mutexLock(&backend.mutex);
+                while (backend.state != .closed) backend.changed.waitUncancelable(blockingIo(), &backend.mutex);
+                std.Io.Threaded.mutexUnlock(&backend.mutex);
+            },
+            .connection => |backend| {
+                backend.close();
+                std.Io.Threaded.mutexLock(&backend.mutex);
+                while (backend.lifecycle != .terminal) backend.changed.waitUncancelable(blockingIo(), &backend.mutex);
+                std.Io.Threaded.mutexUnlock(&backend.mutex);
+            },
+            .listener_configuration, .accepted, .connection_initializing => unreachable,
+        }
+        return null;
+    }
+    fn initializeAllocation(cell: *Service, owner: *NetOwner, backend: Backend, worker: *const scheduler_api.WorkerScheduler) error{OutOfMemory}!void {
+        cell.initialize(.{ .owner = owner, .backend = backend }, worker, 2, 16, true) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.InvalidLimits => unreachable,
+        };
+    }
+};
+const OperationAdapter = struct {
+    cell: *Service,
+    operation: RegisteredOperation,
+    valid_request: bool,
+    failure: ?PortFailure = null,
+    pub fn allocator(self: *const OperationAdapter) std.mem.Allocator {
+        return self.cell.allocator;
+    }
+    pub fn scheduler(self: *OperationAdapter) *const scheduler_api.WorkerScheduler {
+        return self.cell.scheduler;
+    }
+    pub fn resourceMutex(self: *OperationAdapter) *std.Io.Mutex {
+        return &self.cell.mutex;
+    }
+    pub fn admittedLocked(self: *OperationAdapter) void {
+        self.cell.changed.broadcast(blockingIo());
+    }
+    pub fn retireValue(self: *OperationAdapter, item: Value) void {
+        heap.hostDomain(self.cell.adapter.owner.host).releaseValue(item);
+    }
+    pub fn retainResource(self: *OperationAdapter) void {
+        self.cell.retainReadiness();
+    }
+    pub fn deinit(self: *OperationAdapter) void {
+        self.cell.releaseReadiness();
+    }
+    pub fn terminal(self: *OperationAdapter) port_result.Terminal {
+        return if (self.failure) |failure| .{ .failed = failure } else .success;
+    }
+    pub fn runnable(self: *OperationAdapter) bool {
+        return !self.cell.closed.load(.acquire);
+    }
+    pub fn cancelPolicy(_: *OperationAdapter) controllers.CallbackCancellation {
+        return .acknowledge;
+    }
+    pub fn cancelResourceLocked(self: *OperationAdapter, action: controllers.CancelAction) void {
+        switch (action) {
+            .close_resource => self.cell.closeLocked(),
+            .interrupt, .retired => {
+                if (self.cell.adapter.backend == .listener) {
+                    const backend = self.cell.adapter.backend.listener;
+                    std.Io.Threaded.mutexLock(&backend.mutex);
+                    backend.changed.broadcast(blockingIo());
+                    std.Io.Threaded.mutexUnlock(&backend.mutex);
+                }
+                self.cell.changed.broadcast(blockingIo());
+                self.cell.waits.notifyLocked(self.cell);
+            },
+            .settled => {},
+        }
+    }
+    pub fn completeResourceLocked(self: *OperationAdapter, outcome: controllers.Completion) void {
+        if (outcome == .close_resource) self.cell.closeLocked();
+        self.cell.waits.notifyLocked(self.cell);
+    }
+    pub fn notifyTransport(_: *OperationAdapter, _: *NetworkExchange) void {}
+    pub fn abortTransport(_: *OperationAdapter) void {}
+    pub fn execute(self: *OperationAdapter, exchange: *NetworkExchange, running: *controllers.Running) void {
+        defer {
+            std.Io.Threaded.mutexLock(&exchange.mutex);
+            if (exchange.ticket.isCancelled()) _ = running.acknowledgeCancellation();
+            std.Io.Threaded.mutexUnlock(&exchange.mutex);
+        }
+        self.perform(exchange) catch |err| {
+            std.Io.Threaded.mutexLock(&exchange.mutex);
+            self.failure = switch (err) {
+                error.OutOfMemory => .out_of_memory,
+                error.Cancelled, error.ScopeClosing => PortFailure.init(.cancelled, "network operation was cancelled"),
+                error.Closed => PortFailure.init(.io, "network resource is closed"),
+                error.Overflow => PortFailure.init(.overflow, "network result exceeds message limits"),
+                else => PortFailure.init(.io, "network operation failed"),
+            };
+            std.Io.Threaded.mutexUnlock(&exchange.mutex);
+        };
+    }
+    fn perform(self: *OperationAdapter, exchange: *NetworkExchange) !void {
+        if (!self.valid_request) {
+            std.Io.Threaded.mutexLock(&exchange.mutex);
+            self.failure = PortFailure.init(.domain, "network operations require an empty request list");
+            std.Io.Threaded.mutexUnlock(&exchange.mutex);
+            return;
+        }
+        const builder = try port_builder.Builder.create(self.cell.adapter.owner.host);
+        defer builder.retire();
+        if (self.operation == .accept) {
+            const listener = self.cell.adapter.backend.listener;
+            const slot = try listener.beginAccept();
+            defer listener.endAccept(slot);
+            std.Io.Threaded.mutexLock(&listener.mutex);
+            while (slot.state == .waiting and !exchange.transport_cancelled.load(.acquire)) listener.changed.waitUncancelable(blockingIo(), &listener.mutex);
+            const accepted: error{ Cancelled, Closed, Resources, Io }!*AcceptedSocket = if (exchange.transport_cancelled.load(.acquire)) error.Cancelled else switch (slot.state) {
+                .ready => |socket| taken: {
+                    slot.state = .taken;
+                    break :taken socket;
+                },
+                .failed => |failure| switch (failure.reason) {
+                    .resources => error.Resources,
+                    .io => error.Io,
+                },
+                .closed, .taken => error.Closed,
+                .waiting => unreachable,
+            };
+            std.Io.Threaded.mutexUnlock(&listener.mutex);
+            const socket = try accepted;
+            const resource = try self.stageAccepted(exchange, socket);
+            defer self.retireValue(resource);
+            try builder.copy(resource);
+            try settle(builder);
+        } else {
+            const address: IpAddress = switch (self.cell.adapter.backend) {
+                .listener => |backend| backend.localAddress() orelse return error.Io,
+                .connection => |backend| switch (backend.observeEndpoint(if (self.operation == .local_address) .local else .peer)) {
+                    .available => |address| address,
+                    .closed => return error.Io,
+                },
+                else => unreachable,
+            };
+            try symbol(builder, "address");
+            var buffer: [64]u8 = undefined;
+            const text = formatAddress(address, &buffer);
+            for (text) |byte| try builder.char(byte);
+            try builder.list(text.len);
+            try settle(builder);
+            try symbol(builder, "port");
+            try builder.int(address.getPort());
+            try builder.dictionary(2);
+            try settle(builder);
+        }
+        try builder.finish();
+        try settle(builder);
+        const envelope = try @import("port_messages.zig").Envelope.create(self.cell.adapter.owner.host, builder.validated().?);
+        if (!exchange.terminal_result.replace(envelope)) envelope.release();
+    }
+    /// Consumes the accepted socket on success and failure. A successful value
+    /// remains owned by the exchange until atomic result publication.
+    fn stageAccepted(self: *OperationAdapter, exchange: *NetworkExchange, accepted: *AcceptedSocket) !Value {
+        const cell = prepare: {
+            errdefer accepted.deinit();
+            break :prepare try ServiceStorage.create(self.cell.adapter.owner, .{ Backend{ .accepted = accepted }, self.cell.scheduler }, ServiceAdapter.initializeAllocation);
+        };
+        const provisional = exchange.childGroup() catch |err| {
+            cell.releasePort();
+            return err;
+        };
+        provisional.retain();
+        cell.publication = .{ .provisional = provisional };
+        const resource = port_resource.Resource.create(Service, .staged, self.cell.adapter.owner.instance.next(), cell) catch |err| {
+            cell.releasePort();
+            return err;
+        };
+        errdefer self.retireValue(resource);
+        try cell.controllers.start(.{ provisional, @as(?Service.Parent, null) }, Service.prepareChildStartup, Service.run, Service.abortStartup);
+        std.Io.Threaded.mutexLock(&cell.mutex);
+        defer std.Io.Threaded.mutexUnlock(&cell.mutex);
+        while (cell.phase == .reserved or cell.phase == .initializing) cell.changed.waitUncancelable(blockingIo(), &cell.mutex);
+        if (cell.initialization_failure) |failure| if (failure == .out_of_memory) return error.OutOfMemory;
+        if (cell.phase != .open or cell.initialization_failure != null) return error.Io;
+        return resource;
+    }
+    fn settle(builder: *port_builder.Builder) port_builder.Error!void {
+        while (try builder.advance() == .pending) {}
+    }
+    fn symbol(builder: *port_builder.Builder, text: []const u8) port_builder.Error!void {
+        try builder.symbol(text);
+        try settle(builder);
+    }
+};
+
+/// Create an initialized resource through the common controller service.
+pub fn openPrepared(access_value: *external.NetAccess, scope: *scheduler_api.TaskScope, address: IpAddress) ListenError!Value {
+    const owner = ownerFromAccess(access_value);
+    const normalized = normalize(address);
+    if (!owner.policy.allows(normalized)) return error.Denied;
+    const cell = try ServiceStorage.create(owner, .{ Backend{ .listener_configuration = normalized }, scope.scheduler }, ServiceAdapter.initializeAllocation);
+    const resource = port_resource.Resource.create(Service, .staged, owner.instance.next(), cell) catch |err| {
+        cell.releasePort();
+        return err;
+    };
+    errdefer heap.hostDomain(owner.host).releaseValue(resource);
+    cell.controllers.start(.{scope}, Service.prepareStartup, Service.run, Service.abortStartup) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.ScopeClosing => error.ScopeClosing,
+        error.Io, error.Closed => error.Io,
+    };
+    return resource;
+}
+pub fn serviceFromValue(item: Value) ?*Service {
+    return port_resource.Resource.project(Service, item);
+}
+pub fn serviceInstance(service: *Service) *@import("module_bindings.zig").Identity {
+    return service.adapter.owner.instance;
+}
+pub fn supportsOperation(service: *Service, operation: RegisteredOperation) bool {
+    return switch (service.adapter.backend) {
+        .listener, .listener_configuration => operation != .peer_address,
+        .connection, .accepted, .connection_initializing => operation != .accept,
+    };
+}
+fn formatAddress(address: IpAddress, buffer: []u8) []const u8 {
+    var writer = std.Io.Writer.fixed(buffer);
+    switch (address) {
+        .ip4 => |ip4| writer.print("{d}.{d}.{d}.{d}", .{ ip4.bytes[0], ip4.bytes[1], ip4.bytes[2], ip4.bytes[3] }) catch unreachable,
+        .ip6 => |ip6| {
+            const unresolved: std.Io.net.Ip6Address.Unresolved = .{ .bytes = ip6.bytes, .interface_name = null };
+            writer.print("{f}", .{unresolved}) catch unreachable;
+        },
+    }
+    return writer.buffered();
 }

@@ -1273,6 +1273,10 @@ test "oom: standard-library and host: host: project initialization propagates ev
 }
 
 fn checkStdlibSurface(comptime surface: StdlibSurface) !void {
+    // Registered network startup and operations can finish before a waiter
+    // allocates its readiness storage; allocation counts depend on progress.
+    if (surface == .net or surface == .net_connection or surface == .net_give)
+        return checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, SurfaceProbe(surface).run);
     try checkAllPostInitAllocationFailuresParallel(
         std.heap.smp_allocator,
         SurfaceProbe(surface).run,
@@ -1898,4 +1902,51 @@ test "oom: standard-library and host: native port child batch publication" {
     try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortLifecycleProbe(
         "portprobe.factory [] port.open dup portprobe.child-pair [] port.call (dup port.close) each pop port.close",
     ).run);
+}
+
+fn NetAcceptResultProbe(comptime operation: []const u8) type {
+    return struct {
+        fn run(failing: *std.testing.FailingAllocator, failure_offset: ?usize) !usize {
+            var locked_allocator = LockedAllocator{ .child = failing.allocator() };
+            var output_buffer: [256]u8 = undefined;
+            var output = std.Io.Writer.fixed(&output_buffer);
+            var diagnostics_buffer: [256]u8 = undefined;
+            var diagnostics = std.Io.Writer.fixed(&diagnostics_buffer);
+            var runtime = try session.Session.initWithHostConfig(locked_allocator.allocator(), &.{}, .{
+                .io = std.testing.io,
+                .output = &output,
+                .diagnostics = &diagnostics,
+                .net_policy = .{ .binds = .unrestricted, .limits = .{
+                    .max_live_connections = 1,
+                    .receive_capacity = 1,
+                    .send_capacity = 1,
+                } },
+            }, .cooperative);
+            defer runtime.deinit();
+            try runOk(&runtime, "oom-net-result-setup.ecl", "net.core.listener {'address \"127.0.0.1\" 'port 0} port.open 'l set " ++
+                "l net.core.local-address [] port.call 'port at");
+            const port = port: {
+                var rendered = try runtime.stackDisplay();
+                defer rendered.deinit();
+                break :port try std.fmt.parseInt(u16, std.mem.trim(u8, rendered.bytes(), " \n"), 10);
+            };
+            const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(port) };
+            const peer = try address.connect(std.testing.io, .{ .mode = .stream });
+            defer peer.close(std.testing.io);
+            const first_failure_index = failing.alloc_index;
+            if (failure_offset) |offset| failing.fail_index = first_failure_index + offset;
+            try runOk(&runtime, "oom-net-result.ecl", "pop l net.core.accept [] " ++ operation);
+            return first_failure_index;
+        }
+    };
+}
+
+test "oom: standard-library and host: accepted connection result publication" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NetAcceptResultProbe("port.call port.close").run);
+}
+
+test "oom: standard-library and host: accepted connection result discard" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NetAcceptResultProbe("port.begin dup port.await port.close").run);
 }

@@ -12,6 +12,7 @@ const Failure = factories.Failure;
 const bindings = @import("module_bindings.zig");
 const endpoints = @import("port_endpoint.zig");
 const bytes = @import("port_bytes.zig");
+const exchanges = @import("port_exchange.zig");
 
 pub const registration = bindings.Registration.create(Binding);
 
@@ -22,6 +23,9 @@ const Binding = struct {
         .{ .name = "listener", .doc = "Create a TCP listener using the Session's listen grant.", .effect = "-- factory" },
         .{ .name = "input", .doc = "Select the connection's readable byte stream.", .effect = "-- selector" },
         .{ .name = "output", .doc = "Select the connection's writable byte stream; finish sends EOF after admitted writes.", .effect = "-- selector" },
+        .{ .name = "accept", .doc = "Accept an independent connection on the accept lane; request [].", .effect = "-- operation" },
+        .{ .name = "local-address", .doc = "Return the recorded local address on the control lane; request [].", .effect = "-- operation" },
+        .{ .name = "peer-address", .doc = "Return the connection's peer address on the control lane; request [].", .effect = "-- operation" },
     };
     pub fn bind(memory: std.mem.Allocator, inherited: *const @import("machine.zig").InheritedContext) error{OutOfMemory}!*bindings.Publication {
         const instance = if (inherited.net_access) |access| net.registeredInstance(access) else try bindings.Identity.create(memory);
@@ -41,6 +45,19 @@ const Binding = struct {
         memory.destroy(self);
     }
     pub fn seal(self: *Binding, index: usize) error{OutOfMemory}!Value {
+        if (index >= 3) {
+            const owned = try self.allocator().create(Operation);
+            errdefer self.allocator().destroy(owned);
+            owned.* = .{ .instance = self.instance, .operation = switch (index) {
+                3 => .accept,
+                4 => .local_address,
+                5 => .peer_address,
+                else => unreachable,
+            } };
+            const item = try exchanges.Selector.create(Operation, self.instance.next(), owned);
+            self.instance.retain();
+            return item;
+        }
         if (index != 0) {
             const owned = try self.allocator().create(Selector);
             errdefer self.allocator().destroy(owned);
@@ -55,6 +72,27 @@ const Binding = struct {
         const item = try factories.Factory.create(Factory, self.instance.next(), owned);
         self.instance.retain();
         return item;
+    }
+};
+
+const Operation = struct {
+    instance: *bindings.Identity,
+    operation: net.RegisteredOperation,
+    pub fn allocator(self: *Operation) std.mem.Allocator {
+        return self.instance.allocator();
+    }
+    pub fn acceptsOperation(self: *Operation, source: Value) bool {
+        const service = net.serviceFromValue(source) orelse return false;
+        return net.serviceInstance(service) == self.instance and net.supportsOperation(service, self.operation);
+    }
+    pub fn beginOperation(self: *Operation, source: Value, scope: *@import("scheduler.zig").TaskScope, request: *const @import("port_message.zig").Validated) exchanges.AdmitError!exchanges.Admission {
+        if (!self.acceptsOperation(source)) return error.WrongKind;
+        return net.serviceFromValue(source).?.admitOnLane(self.operation, scope, request);
+    }
+    pub fn releasePort(self: *Operation) void {
+        const instance = self.instance;
+        instance.allocator().destroy(self);
+        instance.release();
     }
 };
 
@@ -201,7 +239,7 @@ pub fn open(access: ?*external.NetAccess, context: factories.Context, input: Val
     const parsed = net.parseLiteral(buffer[0..used], @intCast(port.int)) catch
         return failed(.domain, "net.listen 'address is not an IP literal", address, port, "invalid");
     const granted = access orelse return failed(.domain, "listening is unavailable in this session", address, port, "unavailable");
-    const resource = net.listenFromUnit(granted, context.scope.scheduler, context.scope, parsed) catch |err| return switch (err) {
+    const resource = net.openPrepared(granted, context.scope, parsed) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.Denied => failed(.domain, "net.listen address and port are denied by host policy", address, port, "denied"),
         error.LiveLimit => failed(.domain, "host listener limit reached", address, port, "limit"),

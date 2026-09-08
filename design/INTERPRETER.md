@@ -976,205 +976,83 @@ Session cannot publish quiescence while an operation still owns any of them.
 The filesystem read, write, and publication primitives run on the worker in
 these bounded quanta, the same convention the archive and package-store
 drivers already use. Process pipes, native callbacks, and network ports use
-host-owned controller jobs. A network listener owns a
-socket and starts its one acceptor thread only when a unit first parks in
-`accept`.
+host-owned controller jobs. Network resource initialization owns socket and
+acceptor startup before publication.
 
 Every failure maps a host error to one closed reason vocabulary at the
 `filesystem_port` boundary and attaches the operation, root, path (or both
 ends of a transfer), and reason to the pending failure, so programs branch on
 stable symbols and never on errno names.
 
-### Network listeners are scope-owned sockets with a lazy acceptor
+### Network resources use registered controllers
 
-Inbound listening follows the filesystem model, not the process model. A Host
-may supply a `NetPolicy`: either an unrestricted grant or an exact allowlist
-of address and port pairs, plus a maximum live-listener count and the kernel
-accept backlog. Session construction copies the policy into a `NetOwner`,
-parsing every address once through `std.Io.net.IpAddress.parse` (literals
-only, never resolution) and normalizing IPv4-mapped IPv6 addresses to IPv4, so
-grant comparison is over parsed values and no spelling of an address can
-bypass an entry. A literal that does not parse, two entries that normalize to
-the same address and port, a zero limit, or an unsupported target fails with
-`InvalidHostPolicy` rather than `OutOfMemory`. The owner mints one opaque
-`NetAccess`; Units receive only that and cannot reach the owner, the socket,
-or the descriptor.
+Session construction validates and copies the host's listen policy into a
+network owner. Exact grants compare parsed, normalized IP addresses and ports;
+no alternate literal spelling widens authority. The owner derives allocation
+and retirement from the Session host and outlives retained resource identities.
+Workers receive its opaque access capability. Resource initialization, accept,
+and socket I/O execute through host-owned controllers.
 
-`listen` runs four bounded syscalls on the worker — socket, bind, listen, and
-getsockname, all through `std.Io.net.IpAddress.listen`, which stores the
-resolved local address on the returned socket — and never parks; a listener
-that is never asked to accept has no controller thread, readiness source, or
-wait registration. The order is the process port's: validate the configuration, check
-the grant, reserve live capacity with resource storage, open the socket,
-attach the initialized cell to the calling unit's scope, and then publish its
-heap identity. Factory rollback returns storage and capacity; once the cell
-owns the socket, scope-attachment and publication failures close through the
-same terminal transition.
+The common resource service owns controller lanes, scope membership,
+cancellation, and joined cleanup. Its network adapter owns typed listener or
+connection state. Listener initialization binds the socket and starts its
+acceptor before the initialized resource becomes visible. The private prepared
+state owns rollback; the accepting state owns the socket, wake descriptors,
+and registry entry together. Closing wakes the acceptor and retains that
+bundle until controller return. Retirement first detaches the acceptor under
+the listener lock, then destroys its storage outside that lock. Terminal publication follows descriptor
+closure and quota return, so joined cleanup permits rebinding. An acceptor
+failure closes its resource instead of silently restarting it.
 
-A listener's exhaustive state owns either a dormant bound socket, an accepting
-job, a closing job, or terminal address metadata. An accepting job owns the
-bound socket, its wake descriptors, and its registry entry together. The
-registry exposes only live wake pipes and removes an entry before its
-owner closes those descriptors. Failed submission returns the socket to
-its dormant owner and destroys all provisional job resources. Joined retirement
-returns the socket to dormancy on an acceptor failure, or closes it if shutdown
-was requested. No independent running flag or optional wake pipe carries
-lifetime authority.
+Both task scopes and resource-dependent activity groups publish initial
+membership and ownership atomically, with storage prepared before locking.
+The backend's activity belongs to the service's group. Transferring the service
+changes scope ownership without detaching that activity or its cleanup duty.
+The service joins the group before cleanup becomes observable. An initialization
+failure before group attachment still closes and joins the private backend.
 
-Explicit close and scope cancellation take the same transition under the
-listener mutex. A dormant socket closes immediately; an accepting job receives
-a wake and retains its resources until joined retirement. Terminal readiness
-follows socket closure and capacity return, so completed `net.close` permits
-immediate rebinding. The terminal state retains the recorded address for
-identity and failure metadata, but `local-address` reports only an open bound
-endpoint. Value, scope, readiness, and execution references keep the cell
-alive independently; only final reference release destroys terminal metadata.
+An accept exchange occupies its FIFO lane through cancellation acknowledgement
+and controller return. Address operations progress on a separate lane. The
+acceptor consumes the kernel backlog only for an outstanding slot with
+connection capacity available. Prepared slot storage is allocated outside the
+listener lock; linking and admission under the lock do not allocate. A slot's
+exhaustive state owns candidate storage through waiting, failure, or closure,
+an accepted socket and its reservation, or no payload after consumption. Slot
+removal moves that payload out under the lock and reclaims it after unlocking. A waiting
+slot consumes no connection capacity. Failed and cancelled handoffs dispose
+of their own payload exactly once.
 
-Every failure maps a `std.Io.net.IpAddress.ListenError` to one closed reason
-vocabulary at the `net_port` boundary — `'in-use`, `'unavailable`,
-`'resources`, `'unsupported`, `'io` — and the `net` module attaches the
-requested address, the requested port, and the reason to the pending failure.
-Refusals before the host is reached are `'domain` with reasons `'unavailable`,
-`'denied`, and `'limit`, matching the process and filesystem capabilities.
+An accepted socket carries its close authority, quota reservation, and immutable
+local and peer addresses together. The accept exchange moves it into a new
+common resource with no listener dependency. The new service initializes the
+connection backend in its own activity group. Until result publication, the
+exchange's provisional group owns that resource. `port.result` atomically
+publishes it into the receiving scope; failed publication leaves provisional
+ownership intact. Closing the listener cannot close a claimed independent
+connection or consume a completed exchange's result.
 
-### Network connections extend the controller model
+Connection state distinguishes prepared, running, stopping, and terminal
+execution. Its controller owns a nonblocking socket, a wake pipe, and bounded
+receive and send rings. Producers and readers use readiness capabilities and
+hold no worker while parked. One reader may wait per input endpoint. Writer
+permits carry FIFO turns, including through resumable byte validation; each
+call remains contiguous. Finishing output rejects new writers while preserving
+admitted turns and queued bytes, and sends directional EOF only after they
+drain. Peer EOF leaves buffered input readable and the reverse direction open.
 
-Accepting, reading, and writing block indefinitely at the kernel and have no
-worker-side readiness source, so they follow the process-pipe model rather
-than the filesystem model: host-owned controller jobs perform the blocking
-calls and hand results to the scheduler through bounded queues and the
-readiness capabilities in `external.zig`. A parked unit holds no worker. The
-shared executor joins the socket job before its retirement callback
-closes descriptors, releases the live reservation, and detaches scope membership.
+Graceful shutdown refuses new writes, drains accepted output, and then shuts
+the socket down. Abortive closure discards queued output and interrupts polling
+through the wake pipe. A transport failure records one terminal reason and
+wakes observers; buffered input precedes that failure. Socket retirement closes
+descriptors and releases connection capacity only once, independently of the
+remaining identity references. No worker holds a descriptor outside this owner.
 
-Ownership is carried by consuming types rather than by convention. An
-`OwnedSocket` closes its descriptor at most once; a `ConnectionReservation`
-releases its quota slot at most once; an `AcceptedSocket` bundles both with
-the connection's `Endpoints` (the peer from `accept`, the local end from
-`getsockname`, so a wildcard listener's connection reports the address it was
-actually reached on). No other production code in `net_port.zig` calls
-`closeFd` on a connection socket or decrements the connection counter. Each
-outstanding `accept` owns an `AcceptSlot` whose state is exhaustive:
-`waiting` (owning candidate storage, but neither a socket nor capacity), `ready`
-(holding an `AcceptedSocket`), `failed`, `taken`, or `closed`. `endAccept`
-releases whatever the slot still holds, so a cancelled accept can neither
-leak a socket nor release a slot twice, and a waiting accept costs the
-connection quota nothing.
-
-The listener gains one acceptor thread, started by the first `beginAccept`
-and never before. It waits in `poll` on the listening socket, switched to
-non-blocking, and on the read end of a private wake pipe. It does not block
-in `std.Io.net.Server.accept`: `shutdown(2)` on a listening socket does not
-wake a blocked `accept` on macOS, closing a descriptor another thread is
-blocked on is a reuse hazard everywhere, and `netAcceptPosix` treats `EAGAIN`
-as a bug, so the non-blocking socket that `poll` requires would trip it. When
-`poll` reports the socket readable, the acceptor takes the listener mutex,
-rechecks that a waiting slot exists, and activates its candidate storage.
-The resource factory reserves connection capacity before the non-blocking
-accept call and returns capacity if initialization cannot complete. Successful
-activation gives the slot one accepted socket allocation carrying capacity. When
-no capacity is available the acceptor makes no syscall: the connection
-stays in the kernel backlog, the acceptor marks itself quota-blocked, and it
-polls only its wake pipe, not the listening socket, until a release wake
-arrives, so a full quota spins no thread and takes no socket it cannot own.
-Because
-`endAccept` takes the same mutex, the two cannot interleave: if the
-cancellation wins, no `accept4` runs and the connection stays in the kernel
-backlog for the next accept; if the accept wins, the socket belongs to that
-slot and the cancellation closes exactly that socket. The syscall under the
-lock is bounded because the socket is non-blocking. The number of sockets
-taken and not yet handed over therefore never exceeds the number of
-outstanding accepts (`queued <= demand`), and an idle program leaves
-backpressure in the kernel backlog. A connection aborted between `poll` and
-`accept4` is skipped; descriptor and buffer exhaustion mark the slot `failed`
-with a `resources` reason rather than failing the thread. Readiness keys are
-slot pointers, so a wake reaches the slot's owner and the owning driver takes
-exactly its own socket. `ListenerCell.close` writes one byte to the wake pipe
-and lets it return from `poll`. The shared executor joins the acceptor before
-closing the socket and publishing close readiness. A closing unit parks on
-that readiness; scope cancellation requests the same transition without
-waiting. Completion proves the address can be rebound, and neither worker
-progress nor cancellation depends on servicing the retirement queue inline.
-
-A `ConnectionCell` has exactly one controller thread. The socket is
-non-blocking, and the controller waits in one `poll` over the socket and the
-read end of its own wake pipe, asking for readability only while the receive
-ring has room and the peer has not finished sending, and for writability only
-while the send ring holds bytes. Workers touch only the rings, the flags, and
-the wait list, and they write one byte to the wake pipe whenever they change
-something the controller's interest depends on: bytes queued to send, room
-freed in a full receive ring, or a stop request. One thread owning both
-directions is what removes the races a reader/writer pair invites: there is
-no second lease to mint before the first thread can finish, no writer failure
-that leaves a reader blocked, and one code path that performs final cleanup.
-
-The cell's `Lifecycle` is exhaustive and switched under one mutex:
-`prepared` (allocated, no thread), `running` (the controller owns the
-socket), `stopping` with a reason (`close` or `abort`), and `terminal` with
-the reason it stopped for. Publication completes every fallible step before
-concurrency begins: allocate the cell, the rings, and the wake pipe; attach
-the member to the *accepting* unit's `TaskScope` (never the listener's, so the
-listener may close first and a per-connection child owns exactly its own
-connection); then, under the cell mutex, move `prepared` to `running` and
-spawn the controller. A scope cancellation that arrives between the attach and
-that lock hold finds `prepared`, records `stopping`, and the publisher seeing
-`stopping` retires the cell without starting a thread and detaches the
-membership it just received, so a scope is never left waiting on a controller
-that does not exist; one that arrives after the lock hold finds `running` and
-signals the controller through the wake pipe. Every failure before the thread
-starts closes the socket, releases the reservation, publishes `terminal`, and
-detaches any membership through the same `finalizeLocked`, which asserts it
-runs once.
-
-Explicit `close` moves `running` to `stopping(close)`: new writes fail
-`'closed`, queued input is dropped because no read can observe it, and the
-controller keeps polling for writability until the send ring is empty, then
-performs `shutdown(SHUT_RDWR)` and finalizes. Scope cancellation
-(`cancelExternalMember`) moves to `stopping(abort)`, discards the send ring,
-and the controller shuts down and finalizes at once, so quiescence never waits
-on a peer. A socket error in either direction records one `Failure` (`reset`
-for `ECONNRESET`, `EPIPE`, and `ENOTCONN`; `io` otherwise), discards the send
-ring, and the controller shuts down and finalizes on its next turn, so a
-failed write can never leave the other direction blocked. End of stream from
-the peer is not termination: the flag is recorded, queued bytes stay readable,
-and the program may still write until it closes. A wake on the cell's wait
-list is always `.ready`: a socket failure is a change in the cell's
-observable state that the driver polls, not a failure of the wait service, so
-every failure reaches the word with the peer's address, port, and reason.
-
-Reads and writes observe the cell through one locked snapshot each. `read`
-returns queued bytes first; otherwise the reason nothing more can arrive
-(`closed` when the program or its scope stopped the connection, which
-outranks a later peer failure; `reset` or `io` for a socket failure); otherwise
-`eof`; otherwise pending. `write` fails for the same reasons, parks while its
-permit is not at the head of the queue or the ring is full, and otherwise
-queues bytes and signals the controller. At most one reader may be pending,
-and writes are serialized by permits in arrival order, as for process streams.
-`observeEndpoint(kind)` selects the local or peer address from the immutable
-`Endpoints` and reports it as `available` while no failure reason applies and
-as `closed` otherwise, so a terminal connection never exposes an address as if
-it were live and a closed `local-address` names the local end rather than the
-peer. A peer that never reads leaves at most `send_capacity` bytes queued
-after an explicit `close`; `write` parked until those bytes entered the ring,
-so the bound is the ring and nothing else.
-
-The connection quota (`max_live_connections`) is a second compare-exchange
-counter on `NetOwner` beside the listener quota. It is reserved when a socket
-is taken from the backlog, never when an accept parks, so it bounds live
-connections only and `accept` has no `'limit` failure. `NetOwner` keeps a
-registry of running acceptors, and `releaseConnection` wakes each of them
-through its pipe, so an acceptor blocked at the quota rechecks the counter as
-soon as any connection in the Session releases its slot; a wake byte means
-"drain and recheck", and only the stop flag distinguishes shutdown from a
-release. The registry mutex is the leaf of the lock order: it is taken
-beneath listener and connection cell mutexes, and nothing is acquired while
-it is held. `ListenerCell.close` waits for its acceptor to exit, so no cell is
-on the registry after `close` returns, and `NetOwner.deinit` asserts an empty
-registry and zero counters, which holds because Session teardown closes the
-root scope and every running controller holds the membership the scope waits
-on. Failures on a connection are `'io` with the peer's address and port and
-one of `'closed`, `'reset`, `'io`; the listener quota alone refuses with
-`'domain` `'limit`; the mapping has one owner in `net_port.zig`.
+The acceptor registry lends only live wake pipes. It removes a record before
+closing those descriptors. Returning connection capacity wakes quota-blocked
+acceptors without taking their listener mutexes. The registry mutex is a leaf
+in the lock order; no listener or connection mutex is acquired beneath it.
+Session teardown joins resource scopes and settles retained values before
+destroying the network owner and its executor.
 
 ### Absolute deadlines govern timer races
 
@@ -1470,6 +1348,13 @@ preserves accepted output unless cleanup is abortive. Cancellation wakes blocked
 transport independently of the operation lane. Copies are bounded per turn,
 and endpoint drivers use the shared resumable byte-transfer machinery.
 
+Every byte transport uses the same monotonic stream phase for pending finish,
+EOF, and failure. Accepted bytes precede its terminal fact. Once established,
+EOF or failure cannot be replaced by a later resource error or cleanup. Process
+outputs record terminal facts separately, so failure of another pipe cannot
+rewrite an output that has finished. TCP receive EOF likewise survives closing
+the resource and borrowing another endpoint.
+
 Message endpoints use `port_messages.zig`, with bounded queues and one shared
 resource byte budget. Unique delivery ownership is distinct from retained
 observation. A validated envelope carries its capacity reservation through
@@ -1676,8 +1561,7 @@ all jobs have joined and all borrowed callbacks have returned. Only that
 transition can publish terminal facts, drop the group's execution pin, and
 detach scope memberships. The backend does not supply an independent reference
 or a claimed quiescence condition at completion. Retained value references
-remain independent of this execution lifetime. A listener's dormant socket
-needs no controller; its active acceptor joins before terminal detachment.
+remain independent of this execution lifetime. A listener's acceptor joins before terminal detachment.
 
 An ordered controller lane binds its resource lock and owns admission,
 dispatch, and queue retirement. Opaque prepared storage is allocated outside
@@ -1698,6 +1582,15 @@ children before cleanup becomes observable. Adapter state supplies typed
 backend work and transport; ABI descriptors and operation codes remain outside
 this lifecycle. Admission preparation owns its result and resource pin before
 acquiring the publication lock, and rejection retires them after unlocking.
+
+TCP resources use the same service and exchange owners. Their adapters bind
+listening sockets during initialization and prepare operation storage before
+publication locks. An accepted socket moves with its connection quota into a
+provisional child resource owned by the accepting exchange. Claim publication
+transfers the resource into the receiving scope without a listener dependency.
+The service owns backend activity through a dependent group and joins it before
+resource cleanup becomes observable. Both task scopes and dependent groups use
+one atomic initial-membership publication boundary.
 
 The process adapter retains an owned parsed specification through asynchronous
 initialization. Its pipe and supervision activity belongs to the common

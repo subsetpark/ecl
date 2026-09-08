@@ -245,11 +245,18 @@ free. `net.read` and `net.write` exchange exact byte lists through bounded
 queues of the host capacities, parking on readiness without holding a worker;
 `net.peer-address` and `net.local-address` report both ends. `net.close` on a
 connection delivers queued bytes and then shuts the socket down, while scope
-closure aborts it. The live-connection maximum bounds descriptors and
-controller threads per Session: at the maximum `net.accept` waits, leaving
+closure aborts it. Registered TCP factories and operations use the common
+resource controller service, with 16 admitted operations per resource. Accepts
+occupy one FIFO lane; address operations have an independent lane. An accepted
+connection remains provisionally owned by its exchange until result publication
+and is independent of the listener after acceptance.
+
+The live-connection maximum bounds descriptors and backend controllers per
+Session: at the maximum `net.accept` waits, leaving
 the peer in the kernel backlog, and proceeds when a connection closes; a
-waiting accept holds no slot. Only the listener maximum is refused, as
-`'domain` with reason `'limit`. Zero for any limit is a Session construction
+waiting accept holds no slot. The listener maximum is refused as `'domain`.
+Controller failures use the common port error contract; pre-admission grant
+refusals retain their policy reason. Zero for any limit is a Session construction
 error. TLS and protocol framing remain outside this contract; they belong to
 the protocol modules built over a connection.
 

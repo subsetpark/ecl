@@ -309,7 +309,7 @@ const Server = struct {
     runner: Runner,
 
     /// Heap-allocated so the runner thread's pointer to `runner` stays valid;
-    /// `finish` or `abandon` frees it.
+    /// The caller retains ownership until `deinit` joins and frees it.
     fn start(runtime: *Runtime, port: u16, prelude: []const u8, config: []const u8, rows: []const u8, default_row: []const u8) !*Server {
         const program = try std.fmt.allocPrint(
             allocator,
@@ -333,18 +333,18 @@ const Server = struct {
         allocator.destroy(self);
     }
 
-    /// Close the listener through a request and expect the serving unit to
-    /// have failed `'io 'closed`.
+    /// Borrow the server through graceful stop and completion observation.
+    /// Shutdown ends admitted accepts; later admission observes closure.
     fn finish(self: *Server) !void {
-        defer self.destroy();
         _ = try exchange(self.port, close_listener_request);
         try self.runner.join();
-        try self.runtime.expectDisplay("'io 'closed");
+        try self.runtime.run("'none match? swap dup 'io match? swap 'cancelled match? or and");
+        try self.runtime.expectDisplay("1");
     }
 
     /// Best-effort teardown after a failed assertion so the runner thread
     /// never outlives the Session.
-    fn abandon(self: *Server) void {
+    fn deinit(self: *Server) void {
         defer self.destroy();
         // A server that already ended has nobody accepting, so a request to
         // it would never see EOF; only a live one needs closing.
@@ -356,9 +356,8 @@ const Server = struct {
         };
     }
 
-    /// Join a server that ended on its own (its handler cancelled it).
+    /// Borrow a server that ended on its own and join its runner.
     fn joinEnded(self: *Server) !void {
-        defer self.destroy();
         try self.runner.join();
     }
 };
@@ -372,7 +371,7 @@ test "http server: a request is materialized with method target path query lower
         // Body: the request without its peer; header x-peer: the peer text.
         "\"/a/b\" (dup 'peer at swap 'peer del str {'status 200 'headers {} 'body \"\"} 'body rolldown put " ++
             "swap wrap \"x-peer\" swap pair dict.from-flat 'headers swap put) ", not_found_default);
-    errdefer server.abandon();
+    defer server.deinit();
     const observed = try exchange(port, "GET /a/b?x=1&y=2 HTTP/1.1\r\nHost: h\r\nX-Multi: one\r\nX-Multi: two\r\nContent-Length: 3\r\n\r\nabc");
     try expectStatus(observed, "HTTP/1.1 200 OK");
     try std.testing.expectEqualStrings(
@@ -393,7 +392,7 @@ test "http server: string and byte-list bodies are written with content-length a
     const port = try runtime.listen("l");
     const server = try Server.start(&runtime, port, "", "{}", "\"/s\" (pop {'status 200 'headers {} 'body \"ok\"}) " ++
         "\"/b\" (pop {'status 200 'headers {} 'body [111 107]}) ", not_found_default);
-    errdefer server.abandon();
+    defer server.deinit();
     try expectResponse(try exchange(port, "GET /s HTTP/1.1\r\nHost: h\r\n\r\n"), ok_response);
     try expectResponse(try exchange(port, "GET /b HTTP/1.1\r\nHost: h\r\n\r\n"), ok_response);
     // HEAD keeps the status line and headers, including the length the body
@@ -411,7 +410,7 @@ test "http server: repeated response headers are written once per value" {
     defer runtime.close();
     const port = try runtime.listen("l");
     const server = try Server.start(&runtime, port, "", "{}", "\"/c\" (pop {'status 200 'headers {\"Set-Cookie\" (\"a=1\" \"b=2\")} 'body \"\"}) ", not_found_default);
-    errdefer server.abandon();
+    defer server.deinit();
     try expectResponse(
         try exchange(port, "GET /c HTTP/1.1\r\nHost: h\r\n\r\n"),
         "HTTP/1.1 200 OK\r\nSet-Cookie: a=1\r\nSet-Cookie: b=2\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -425,7 +424,7 @@ test "http server: a content-length body is delivered as an exact byte list incl
     defer runtime.close();
     const port = try runtime.listen("l");
     const server = try Server.start(&runtime, port, "", "{}", "\"/\" ('body at str {'status 200 'headers {} 'body \"\"} 'body rolldown put) ", not_found_default);
-    errdefer server.abandon();
+    defer server.deinit();
     const observed = try exchange(port, "POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 4\r\n\r\n" ++ [_]u8{ 0, 255, 10, 13 });
     try expectStatus(observed, "HTTP/1.1 200 OK");
     try std.testing.expectEqualStrings("[0 255 10 13]", observed.body());
@@ -439,7 +438,7 @@ test "http server: malformed request lines and headers are answered 400 and clos
     const port = try runtime.listen("l");
     // The default row answers 200 too, so a 400 proves the handler never ran.
     const server = try Server.start(&runtime, port, "", "{}", ok_row, "(pop {'status 200 'headers {} 'body \"ok\"})");
-    errdefer server.abandon();
+    defer server.deinit();
     try expectStatus(try exchange(port, "GARBAGE\r\n\r\n"), "HTTP/1.1 400 Bad Request");
     try expectStatus(try exchange(port, "GET / HTTP/1.1\r\nHost: h\r\nNoColon\r\n\r\n"), "HTTP/1.1 400 Bad Request");
     try expectStatus(try exchange(port, "GET /  HTTP/1.1\r\nHost: h\r\n\r\n"), "HTTP/1.1 400 Bad Request");
@@ -468,7 +467,7 @@ test "http server: chunked requests are answered 411 and unsupported versions 50
     defer runtime.close();
     const port = try runtime.listen("l");
     const server = try Server.start(&runtime, port, "", "{}", ok_row, not_found_default);
-    errdefer server.abandon();
+    defer server.deinit();
     try expectStatus(try exchange(port, "POST /ok HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n"), "HTTP/1.1 411 Length Required");
     try expectStatus(try exchange(port, "GET /ok HTTP/2.0\r\n\r\n"), "HTTP/1.1 505 HTTP Version Not Supported");
     try expectResponse(try exchange(port, "GET /ok HTTP/1.0\r\n\r\n"), ok_response);
@@ -481,7 +480,7 @@ test "http server: header and body limits are answered 431 and 413" {
     defer runtime.close();
     const port = try runtime.listen("l");
     const server = try Server.start(&runtime, port, "", "{'max-header-bytes 64 'max-body-bytes 4}", ok_row, not_found_default);
-    errdefer server.abandon();
+    defer server.deinit();
     const long_head = "GET /ok HTTP/1.1\r\nX: " ++ ("a" ** 100) ++ "\r\n\r\n";
     try expectStatus(try exchange(port, long_head), "HTTP/1.1 431 Request Header Fields Too Large");
     try expectStatus(try exchange(port, "POST /ok HTTP/1.1\r\nHost: h\r\nContent-Length: 5\r\n\r\nhello"), "HTTP/1.1 413 Content Too Large");
@@ -495,7 +494,7 @@ test "http server: the read deadline answers 408 and closes" {
     defer runtime.close();
     const port = try runtime.listen("l");
     const server = try Server.start(&runtime, port, "", "{'read-timeout-ms 20}", ok_row, not_found_default);
-    errdefer server.abandon();
+    defer server.deinit();
     // The peer never finishes its head. Once the connection child has
     // registered the reader's deadline, the clock moves past it.
     const stalled = try Peer.start(port, .{ .send = "GET /ok HTTP/1.1\r\nHost:" });
@@ -522,7 +521,7 @@ test "http server: max-in-flight stops accepting until a request completes" {
         const port = try runtime.listen("l");
         const gate_port = try runtime.listen("l2");
         const server = try Server.start(&runtime, port, gate_prelude, "{'max-in-flight 1}", gate_rows, not_found_default);
-        errdefer server.abandon();
+        defer server.deinit();
         const slow = try Peer.start(port, .{ .send = "GET /slow HTTP/1.1\r\nHost: h\r\n\r\n" });
         slow.waitFlushed();
         const probe = try Peer.start(port, .{ .send = "GET /probe HTTP/1.1\r\nHost: h\r\n\r\n" });
@@ -546,7 +545,7 @@ test "http server: max-in-flight stops accepting until a request completes" {
         const port = try runtime.listen("l");
         const gate_port = try runtime.listen("l2");
         const server = try Server.start(&runtime, port, gate_prelude, "{'max-in-flight 2}", gate_rows, not_found_default);
-        errdefer server.abandon();
+        defer server.deinit();
         const slow = try Peer.start(port, .{ .send = "GET /slow HTTP/1.1\r\nHost: h\r\n\r\n" });
         slow.waitFlushed();
         const probe_seen = try exchange(port, "GET /probe HTTP/1.1\r\nHost: h\r\n\r\n");
@@ -572,7 +571,7 @@ test "http server: handler failures extra results malformed responses and reserv
         "\"/malformed\" (pop 7) " ++
         "\"/reserved\" (pop {'status 200 'headers {\"content-length\" \"1\"} 'body \"x\"}) " ++
         ok_row, not_found_default);
-    errdefer server.abandon();
+    defer server.deinit();
     for ([_][]const u8{ "/raise", "/extra", "/malformed", "/reserved" }) |path| {
         const request = try std.fmt.allocPrint(allocator, "GET {s} HTTP/1.1\r\nHost: h\r\n\r\n", .{path});
         defer allocator.free(request);
@@ -589,7 +588,7 @@ test "http server: cancellation cancels in-flight requests and leaves the caller
     const port = try runtime.listen("l");
     _ = try runtime.listen("l2");
     const server = try Server.start(&runtime, port, gate_prelude, "{}", gate_rows, not_found_default);
-    errdefer server.abandon();
+    defer server.deinit();
     const slow = try Peer.start(port, .{ .send = "GET /slow HTTP/1.1\r\nHost: h\r\n\r\n" });
     slow.waitFlushed();
     // Nobody releases the gate: the slow request is in flight when the stop
@@ -603,13 +602,13 @@ test "http server: cancellation cancels in-flight requests and leaves the caller
     try runtime.expectDisplay(try std.fmt.bufPrint(&expected, "{d}", .{port}));
 }
 
-test "http server: closing the listener fails the serving unit with io closed" {
+test "http server: closing the listener propagates accept cancellation or closed admission" {
     var runtime: Runtime = .{};
     try runtime.open(loopback_ephemeral, .cooperative);
     defer runtime.close();
     const port = try runtime.listen("l");
     const server = try Server.start(&runtime, port, "", "{}", ok_row, not_found_default);
-    errdefer server.abandon();
+    defer server.deinit();
     try expectResponse(try exchange(port, "GET /ok HTTP/1.1\r\nHost: h\r\n\r\n"), ok_response);
     try server.finish();
 }
@@ -620,7 +619,7 @@ test "http server: a peer that connects and closes without sending is closed sil
     defer runtime.close();
     const port = try runtime.listen("l");
     const server = try Server.start(&runtime, port, "", "{}", ok_row, not_found_default);
-    errdefer server.abandon();
+    defer server.deinit();
     const silent = try Peer.start(port, .connect_then_close);
     try expectSilentClose(silent.join());
     try expectResponse(try exchange(port, "GET /ok HTTP/1.1\r\nHost: h\r\n\r\n"), ok_response);
@@ -657,7 +656,7 @@ test "http server: concurrent requests under the worker pool are each answered e
     defer runtime.close();
     const port = try runtime.listen("l");
     const server = try Server.start(&runtime, port, "", "{}", "", "('path at {'status 200 'headers {} 'body \"\"} 'body rolldown put)");
-    errdefer server.abandon();
+    defer server.deinit();
     var peers: [8]*Peer = undefined;
     var requests: [8][]u8 = undefined;
     var started: usize = 0;

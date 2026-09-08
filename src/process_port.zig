@@ -552,8 +552,8 @@ pub const ProcessCell = struct {
     stderr: Ring,
     input: InputState = .open,
     stdin_done: bool = false,
-    stdout_done: bool = false,
-    stderr_done: bool = false,
+    stdout_phase: @import("port_bytes.zig").StreamPhase(void) = .open,
+    stderr_phase: @import("port_bytes.zig").StreamPhase(void) = .open,
     io_failed: bool = false,
     discard_outputs: bool = false,
     stdout_reader_active: bool = false,
@@ -625,27 +625,12 @@ pub const ProcessCell = struct {
     }
 
     fn prepareGroupStartup(self: *ProcessCell, group: *scheduler_api.ExternalGroup) error{ OutOfMemory, ScopeClosing }!void {
-        const Publication = struct {
-            cell: *ProcessCell,
-            pub fn lock(item: *@This()) void {
-                std.Io.Threaded.mutexLock(&item.cell.mutex);
-            }
-            pub fn unlock(item: *@This()) void {
-                std.Io.Threaded.mutexUnlock(&item.cell.mutex);
-            }
-            pub fn validate(item: *@This()) bool {
-                return item.cell.ownership == .provisional;
-            }
-            pub fn publish(item: *@This(), tokens: [16]?external.ScopeMembership) void {
-                item.cell.ownership = .{ .owned = tokens[0].? };
-                if (item.cell.phase == .constructing) item.cell.phase = .running;
-            }
-        };
-        var publication: Publication = .{ .cell = self };
-        var members: [16]?external.ScopeMember = @splat(null);
-        members[0] = external.scopeMember(ProcessCell, self);
-        if (!try group.publish(members, &publication)) return error.ScopeClosing;
+        try transfers.publishGroup(ProcessCell, self, group, processOwnership);
+        std.Io.Threaded.mutexLock(&self.mutex);
+        if (self.phase == .constructing) self.phase = .running;
+        std.Io.Threaded.mutexUnlock(&self.mutex);
     }
+
     fn joinBackend(self: *ProcessCell) void {
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
@@ -803,17 +788,20 @@ pub const ProcessCell = struct {
     pub fn read(self: *ProcessCell, stream: Stream, destination: []u8) ReadProgress {
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        const ring, const done = switch (stream) {
-            .stdout => .{ &self.stdout, self.stdout_done },
-            .stderr => .{ &self.stderr, self.stderr_done },
+        const ring, const phase = switch (stream) {
+            .stdout => .{ &self.stdout, self.stdout_phase },
+            .stderr => .{ &self.stderr, self.stderr_phase },
         };
         if (ring.len != 0) {
             const count = ring.pop(destination);
             self.changed.broadcast(blockingIo());
             return .{ .data = count };
         }
-        if (done) return if (self.io_failed) .io else .eof;
-        return .pending;
+        return switch (phase) {
+            .open, .finishing => .pending,
+            .eof => .eof,
+            .failed => .io,
+        };
     }
 
     pub fn readSource(self: *ProcessCell, stream: Stream) external.ReadinessSource {
@@ -976,8 +964,8 @@ pub const ProcessCell = struct {
 
     pub fn readyLocked(self: *ProcessCell, key: u64) bool {
         return switch (key) {
-            readiness_stdout => self.stdout.len != 0 or self.stdout_done,
-            readiness_stderr => self.stderr.len != 0 or self.stderr_done,
+            readiness_stdout => self.stdout.len != 0 or self.stdout_phase.terminal(),
+            readiness_stderr => self.stderr.len != 0 or self.stderr_phase.terminal(),
             readiness_terminal => self.phase == .reaped,
             else => {
                 const node: *WritePermit = @ptrFromInt(key);
@@ -1049,7 +1037,7 @@ pub const ProcessCell = struct {
         std.Io.Threaded.mutexUnlock(&self.mutex);
 
         std.Io.Threaded.mutexLock(&self.mutex);
-        while (!self.stdin_done or !self.stdout_done or !self.stderr_done)
+        while (!self.stdin_done or !self.stdout_phase.terminal() or !self.stderr_phase.terminal())
             self.changed.waitUncancelable(blockingIo(), &self.mutex);
         self.group_state = .{ .retired = translated };
         std.Io.Threaded.mutexUnlock(&self.mutex);
@@ -1078,8 +1066,8 @@ pub const ProcessCell = struct {
                 self.stdin_done = true;
                 self.input = .broken;
             },
-            .stdout => self.stdout_done = true,
-            .stderr => self.stderr_done = true,
+            .stdout => self.stdout_phase.fail({}),
+            .stderr => self.stderr_phase.fail({}),
         }
         self.changed.broadcast(blockingIo());
         self.notifyReadyLocked();
@@ -1153,10 +1141,11 @@ pub const ProcessCell = struct {
             std.Io.Threaded.mutexUnlock(&self.mutex);
         }
         std.Io.Threaded.mutexLock(&self.mutex);
-        switch (stream) {
-            .stdout => self.stdout_done = true,
-            .stderr => self.stderr_done = true,
-        }
+        const phase = switch (stream) {
+            .stdout => &self.stdout_phase,
+            .stderr => &self.stderr_phase,
+        };
+        if (self.io_failed) phase.fail({}) else phase.complete();
         self.changed.broadcast(blockingIo());
         self.notifyReadyLocked();
         std.Io.Threaded.mutexUnlock(&self.mutex);

@@ -546,7 +546,7 @@ pub const Session = enum(usize) {
         const net_owner = if (host) |services| if (services.net_policy) |policy| owner: {
             const owned = try allocator.create(net_port.NetOwner);
             errdefer allocator.destroy(owned);
-            owned.* = net_port.NetOwner.init(allocator, services.io, policy) catch |err| switch (err) {
+            owned.* = net_port.NetOwner.init(host_owner.cleanup(), services.io, policy) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.InvalidPolicy => return error.InvalidHostPolicy,
             };
@@ -644,12 +644,6 @@ pub const Session = enum(usize) {
             owner.deinit();
             core.allocator().destroy(owner);
         }
-        // Every listener closed when the scheduler closed the root scope, so
-        // the live count is zero here.
-        if (core.net_owner) |owner| {
-            owner.deinit();
-            core.allocator().destroy(owner);
-        }
         if (core.package_owner) |owner| {
             owner.deinit();
             core.allocator().destroy(owner);
@@ -675,6 +669,10 @@ pub const Session = enum(usize) {
         // them while the issuing Owner is still alive, then let that host-only
         // authority tear down descriptors/images and drain their ECL values.
         host.drain();
+        if (core.net_owner) |owner| {
+            owner.deinit();
+            core.allocator().destroy(owner);
+        }
         if (core.process_owner) |owner| {
             owner.deinit();
             core.allocator().destroy(owner);

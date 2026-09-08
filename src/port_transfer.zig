@@ -8,16 +8,8 @@ const Value = @import("value.zig").Value;
 const external = @import("external.zig");
 const scheduler = @import("scheduler.zig");
 
-/// Prepare storage before locking, then publish membership and ownership
-/// together. The caller retains the cell throughout and owns backend rollback
-/// on failure. No cancellation sees a linked but not yet owned resource.
-pub fn publishScope(
-    comptime Cell: type,
-    cell: *Cell,
-    scope: *scheduler.TaskScope,
-    comptime ownership: fn (*Cell) *external.Ownership,
-) error{ OutOfMemory, ScopeClosing }!void {
-    const Publication = struct {
+fn InitialPublication(comptime Cell: type, comptime ownership: fn (*Cell) *external.Ownership) type {
+    return struct {
         cell: *Cell,
         pub fn lock(self: *@This()) void {
             std.Io.Threaded.mutexLock(&self.cell.mutex);
@@ -32,10 +24,24 @@ pub fn publishScope(
             ownership(self.cell).* = .{ .owned = tokens[0].? };
         }
     };
-    var publication: Publication = .{ .cell = cell };
-    var members: [16]?external.ScopeMember = .{null} ** 16;
+}
+
+/// Publish membership and ownership atomically. The caller retains the cell
+/// and owns backend rollback on failure.
+pub fn publishScope(comptime Cell: type, cell: *Cell, scope: *scheduler.TaskScope, comptime ownership: fn (*Cell) *external.Ownership) error{ OutOfMemory, ScopeClosing }!void {
+    var publication: InitialPublication(Cell, ownership) = .{ .cell = cell };
+    var members: [16]?external.ScopeMember = @splat(null);
     members[0] = external.scopeMember(Cell, cell);
     if (!try scope.scheduler.publishExternalBatch(scope, members, &publication)) return error.ScopeClosing;
+}
+
+/// Bind backend activity to its owning resource's group using the same atomic
+/// publication as task-owned resources. Failure retains caller ownership.
+pub fn publishGroup(comptime Cell: type, cell: *Cell, group: *scheduler.ExternalGroup, comptime ownership: fn (*Cell) *external.Ownership) error{ OutOfMemory, ScopeClosing }!void {
+    var publication: InitialPublication(Cell, ownership) = .{ .cell = cell };
+    var members: [16]?external.ScopeMember = @splat(null);
+    members[0] = external.scopeMember(Cell, cell);
+    if (!try group.publish(members, &publication)) return error.ScopeClosing;
 }
 
 /// The backend supplies only its locked lifetime predicate and ownership

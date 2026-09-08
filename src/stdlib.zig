@@ -21,7 +21,6 @@ const io_module = @import("stdlib/io.zig");
 const dict_module = @import("stdlib/dict.zig");
 const rand_module = @import("stdlib/rand.zig");
 const fs_module = @import("stdlib/fs.zig");
-const net_module = @import("stdlib/net.zig");
 const clock_module = @import("stdlib/clock.zig");
 const time_module = @import("stdlib/time.zig");
 
@@ -101,7 +100,10 @@ const modules = [_]Module{
     } } },
     .{ .name = "proc.core", .entry = .{ .bindings = @import("process_adapter.zig").registration } },
     .{ .name = "fs", .entry = .{ .builtin = &fs_module.words } },
-    .{ .name = "net", .entry = .{ .builtin = &net_module.words } },
+    .{ .name = "net", .entry = .{ .source = .{
+        .name = "<stdlib:net>",
+        .text = @embedFile("stdlib/net.ecl"),
+    } } },
     .{ .name = "net.core", .entry = .{ .bindings = @import("net_adapter.zig").registration } },
     .{ .name = "path", .entry = .{ .source = .{
         .name = "<stdlib:path>",

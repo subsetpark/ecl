@@ -2044,9 +2044,10 @@ Beyond that bound, and at the host's live-connection maximum, further
 connections wait in the kernel backlog.
 
 `@serve` does not return. The serving unit ends only when it is cancelled,
-failing `'cancelled`, or when an acceptor's `net.accept` fails `'io` (a
-listener closed elsewhere is `'io` `'closed`), in which case that error is
-raised from `@serve`. Either ending cancels and quiesces every acceptor,
+failing `'cancelled`, or when an acceptor's `net.accept` fails, in which case
+that error is raised from `@serve`. Abortive listener closure cancels an admitted
+accept; graceful shutdown may instead report backend closure as `'io`. Admission
+after closure raises `'io`. Either ending cancels and quiesces every acceptor,
 reader, and handler child by the ordinary scope rules and closes every
 connection those children own. The listener itself is untouched: `@serve`
 never calls `net.close` on the listener it was given, which stays the
@@ -2220,170 +2221,103 @@ become floats. JSON null and booleans become the ordinary symbols `'null`,
 
 ## net
 
-Host-backed TCP listeners and connections. The module is present in every
-standard image, but binding a socket is `'domain` unless the Session host
-supplied listen authority, and a program can reach a connection only through a
-listener it was allowed to bind. The CLI supplies an explicit unrestricted
-grant; embedding hosts default to none and may instead name an exact allowlist
-of address and port pairs, a maximum number of live listeners, the kernel
-accept backlog, a maximum number of live connections (default 64), and the
-receive and send capacities of each connection (default 64 KiB each).
+TCP resources under an explicit Session listen grant. The CLI grants listening;
+embedding hosts grant none by default and may restrict exact normalized IP
+literals and ports, listener and connection counts, backlog, and byte-ring
+capacities. Port zero authorizes an ephemeral bind only. Names are never
+resolved. IPv4-mapped IPv6 literals normalize to IPv4. Binding uses address
+reuse, so a closed connection's `TIME_WAIT` does not prevent rebinding; two
+live listeners cannot hold the same address and port.
 
-`net.core.listener` is the registered listener factory. Applying `port.open`
-to it and a listen configuration creates the same scope-owned listener as
-`net.listen`, subject to the common structured-value limits. The returned
-resource supports `net.accept`, address inspection, `port.shutdown`, and
-`port.close`. Retaining the factory grants no additional host authority.
+The public words are ECL compositions over `net.core.listener`, the registered
+operations `net.core.accept`, `net.core.local-address`, and
+`net.core.peer-address`, and the endpoint selectors `net.core.input` and
+`net.core.output`. Each operation requires `[]`. Accept occupies its FIFO lane
+until completion or cancellation. Address operations use an independent control
+lane. Factories and selectors are opaque identity capabilities; possession
+never widens the Session's host grant.
 
-`net.core.input` and `net.core.output` select a connection's readable and writable
-byte endpoints. They share reader exclusion and FIFO writes with `net.read` and
-`net.write`. Finishing output delivers admitted writes before sending EOF to the
-peer; input remains readable. Finish is idempotent, and later writes fail `'io`,
-including empty writes. Closing the resource aborts both directions; retaining an
-endpoint preserves its identity without keeping the connection open.
+Listeners and connections belong to task scopes. Retaining or sending a port
+shares use; `@give` transfers ownership. A newly accepted connection remains
+provisionally owned by its exchange until `port.result` publishes it into the
+receiving scope. Failed publication retains that provisional ownership, and
+closing an unclaimed exchange closes the connection. Accepted connections are
+independent of their listener, including after listener closure. Scope closure
+aborts its resources and joins socket cleanup even while identities remain
+retained elsewhere.
 
-A listen configuration is a dictionary with exactly these fields:
+A listener takes a connection from the kernel backlog only for an active
+accept with connection capacity available. At capacity, accept parks until a
+connection closes. A waiting accept holds no connection slot. Admission itself
+is bounded by the resource's operation capacity; additional callers park.
+Competing accepts consume distinct connections and do not broadcast. A peer
+that aborts before acceptance is skipped. The runtime does not retry a failed
+operation or reopen a failed resource.
 
-- required `'address`: a string holding an IPv4 or IPv6 literal; and
-- required `'port`: an integer in `0...65535`, where `0` requests an ephemeral
-  port.
-
-Addresses are literals only: no name resolution and no interface scope id. A
-non-dictionary configuration is `'type`; a missing, unknown, or repeated field
-is `'domain`; a non-string address or non-integer port is `'type`; a port
-outside the range or a literal that does not parse is `'domain` with `'reason`
-`'invalid` and the offending `'address` and `'port` attached. The
-configuration is validated before authority is consulted, and authority is
-checked before the operating system is reached.
-
-Grants are exact. A request matches a grant entry when the two addresses are
-equal after normalization (an IPv4-mapped IPv6 literal such as
-`::ffff:127.0.0.1` equals `127.0.0.1`) and the ports are equal; a grant entry
-whose port is `0` admits only a request whose port is `0`. Every refusal is
-`'domain` with a `'reason` symbol and the requested `'address` and `'port`
-attached: `'unavailable` when the Session has no listen authority, `'denied`
-when no entry admits the request, and `'limit` when the number of live
-listeners already equals the host maximum. A host failure to bind or listen is
-`'io` with the same `'address` and `'port` and one of the closed reasons
-`'in-use`, `'unavailable` (the address is not local), `'resources`,
-`'unsupported`, or `'io`.
-
-A listener is an opaque identity capability that prints `<port:N>` and has
-type `'port`; it exposes no descriptor and cannot be passed through JSON.
-Native words can view and forward its opaque identity. `proc` words reject a listener with `'type`, and `net` words
-reject a process port with `'type`. The socket is bound and listening before
-the value is returned, so a returned listener is ready, and `local-address`,
-which returns the bound endpoint without parking, is the whole readiness
-protocol. `accept` is the only listener word that parks.
-The listener belongs to the creating unit's task scope: scope closure closes
-the socket and releases the live-listener slot even if a listener value is
-stored elsewhere, and `close` performs the same idempotent transition early.
-Ownership changes only through `@give`, which makes a new child unit the owner
-for the rest of that child's life. The socket is bound with address
-reuse, so a port that a closed connection left in `TIME_WAIT` can be bound
-again at once; two live listeners still cannot hold one address and port.
-
-A connection is likewise an opaque `'port` value, disjoint from listeners and
-process ports: a listener word applied to a connection, a connection word
-applied to a listener, and either applied to a process port or a non-port are
-`'type`. A connection belongs to the task scope of the unit that called
-`accept`, not to the listener's scope: closing that scope aborts the
-connection even while its value is retained elsewhere, and closing the
-listener leaves accepted connections open. `@give` hands a connection to a
-child unit, which then owns it for the rest of its life. A connection that is not accepted
-stays in the kernel backlog; the runtime takes a connection from the backlog
-only while an `accept` is outstanding and the number of live connections is
-below the host maximum, so an idle program applies no backpressure of its own
-beyond the backlog. At the maximum every `accept` keeps waiting, its peer
-stays in the backlog, and it proceeds once a connection closes and releases
-its slot. A waiting `accept` holds no slot: the maximum bounds live
-connections only, and any number of units may accept concurrently under any
-maximum. `accept` fails only `'io` (`'closed`, `'resources`, or `'io`) or
-`'cancelled`; the `'limit` refusal belongs to `listen` alone.
-
-Bytes are ordinary integer lists whose elements are all in `0...255`, exactly
-as for process streams; the module decodes no text. Each connection has a
-bounded receive queue and a bounded send queue of the host capacities. At most
-one `read` may be pending on a connection; overlap is `'contract`. Writes are
-serialized in scheduler-arrival order and each call's bytes remain
-contiguous. Parking on a connection holds no worker. Failures on a connection
-are `'io` carrying the peer's `'address` and `'port` and one closed reason:
-`'closed` after the connection was closed locally, `'reset` when the peer has
-gone (a reset, or a write to a peer that has already closed), and `'io` for
-every other host failure, including a transmission timeout. Cancelling a unit
-parked in `accept`, `read`, or `write` fails only that unit with `'cancelled`;
-bytes the peer had already sent remain available to the next `read`, and a
-connection accepted for a cancelled `accept` is closed. There is no deadline
-on any connection word; a deadline is `@spawn` with `task.await-for` and `task.cancel`.
-TLS, framing, and every protocol limit belong to the modules built over a
-connection, not to this module.
+Byte endpoints preserve exact integer bytes in `0...255`; they perform no text
+decoding. Reads have a single-pending-reader rule. Writes execute FIFO and each
+call stays contiguous under bounded pressure. `port.finish` on the output
+endpoint rejects new writers and sends EOF after admitted writers and queued
+bytes drain, while the input direction remains readable. Framing, TLS,
+encoding, and protocol limits belong to libraries. Deadlines compose tasks
+with `task.await-for`, cancellation, and joining.
 
 ### accept
-`( listener -- connection )` — Park until a peer connects, then return the
-connection as a port owned by the calling unit's task scope. Any number of
-units may park in `accept` on one listener; each connection wakes exactly one
-of them. A closed listener, whether closed before the call or while parked, is
-`'io` with `'reason` `'closed` and the listener's address and port attached.
-While live connections equal the host maximum the word keeps waiting, its
-peer stays in the kernel backlog, and it proceeds when any connection in the
-Session closes; it never fails `'domain` `'limit`. A connection the peer aborted
-before it was accepted is skipped silently. Exhaustion of descriptors or
-socket buffers is `'io` `'resources`; any other host failure is `'io` `'io`.
-A non-listener is `'type`.
+`( listener -- connection )` — Wait for a peer and claim the accepted resource
+into the calling scope. A non-listener is `'type`. Abortive listener closure
+cancels admitted accepts; graceful shutdown may instead report backend closure
+as `'io`. A new call after closure is `'io`. Socket or buffer exhaustion
+and host failures are `'io`. Cancelling an accept closes any connection still
+provisionally owned by that exchange. Completed exchanges retain their own
+result and cleanup lifetime independently of the listener.
 
 ### close
-`( port -- )` — Close a listener or a connection. On a listener: close the
-socket now, release its live-listener slot, and detach it from its task
-scope; every unit parked in `accept` on it fails `'io` `'closed`, and the same
-address and port may be bound again once `close` returns. On a connection:
-refuse further writes, deliver the bytes already queued for the peer, then
-shut the socket down so the peer observes end of stream; later `read`,
-`write`, `peer-address`, and `local-address` calls are `'io` `'closed`.
-Closing a connection parks until those bytes have reached the kernel or the
-connection fails, which is what lets a unit close and end in the same breath
-without its own scope closure discarding them; cancelling the parked close
-abandons whatever is still queued.
-Idempotent in both cases: closing a port that is already closed, whether by
-an earlier `close` or by scope closure, does nothing and does not fail. A
-non-port, or a process port, is `'type`.
+`( resource -- )` — Compose `port.shutdown`: perform registered graceful
+shutdown and join cleanup. A listener closes its socket and ends admitted
+accepts with `'io` or `'cancelled`. A connection delivers accepted writes to the kernel before closing
+its socket; this does not establish peer receipt or an external acknowledgement.
+Cancelling shutdown may discard remaining queued bytes. Repeated graceful
+shutdown observes the same outcome. Graceful shutdown after abortive closure
+raises `'io`; `port.close` supplies idempotent abortive cleanup. This composition
+also accepts other resources with registered graceful shutdown.
 
 ### listen
-`( config -- listener )` — Bind and listen on the configured address and port
-and return the listener once the socket is accepting connections at the
-kernel. Configuration, authority, and host failures are described above.
+`( config -- listener )` — Open `net.core.listener` with a dictionary containing
+exactly `'address` (an IPv4 or IPv6 literal string) and `'port` (an integer in
+`0...65535`). The returned socket is already listening. A non-dict or wrongly
+typed field is `'type`; missing or unknown fields, invalid literals or ports,
+unavailable authority, denied binds, and exhausted listener capacity are
+`'domain`. Common structured-value limits also apply. Host bind and listen
+failures are `'io`. Configuration and grant refusals include the requested
+address, port, and reason where available; controller and lifecycle failures
+report the common error kind and message.
 
 ### local-address
-`( port -- address )` — Return `{'address string 'port int}` for the local end
-of a bound listener or an open connection. The address is the canonical text
-of the IP literal (dotted quad for IPv4; RFC 5952 form without brackets for
-IPv6) and the port is the bound port, which for an ephemeral listener is the
-kernel-assigned port. A closed listener or connection is `'io` with `'reason`
-`'closed` and the address and port it held attached. A non-port, or a process
-port, is `'type`.
+`( resource -- address )` — Return `{'address string 'port int}` for an open
+listener or connection. IPv4 uses dotted-quad text; IPv6 uses RFC 5952 text
+without brackets. An ephemeral listener reports its assigned port; a connection
+accepted through a wildcard listener reports the actual local endpoint.
+A wrong resource kind is `'type`; closure or backend failure is `'io`.
 
 ### peer-address
-`( connection -- address )` — Return `{'address string 'port int}` for the
-peer end of an open connection, in the same canonical text as
-`local-address`. A closed connection is `'io` with `'reason` `'closed` and the
-recorded peer address and port attached. A non-connection is `'type`.
+`( connection -- address )` — Return the peer endpoint in the same dictionary
+shape and canonical text. A non-connection is `'type`; closure or backend
+failure is `'io`.
 
 ### read
-`( connection max -- bytes )` — Read at most `max` exact bytes, and at most
-the host receive capacity, parking when nothing is queued. Return `[]` only at
-stable end of stream; later reads also return `[]`. A non-connection is
-`'type`; a non-integer `max` is `'type`; a `max` that is not positive is
-`'domain`. A second read while one is pending is `'contract`. After a local
-`close` the read is `'io` `'closed`; a peer reset is `'io` `'reset`; any other
-host failure is `'io` `'io`, each with the peer's address and port attached.
+`( connection max -- bytes )` — Read at most positive `max` bytes, bounded by
+the host receive capacity. Park when no data is ready. Return `[]` only at
+stable EOF; later reads also return `[]`. A wrong capability or non-integer
+maximum is `'type`; a nonpositive maximum is `'domain`; an overlapping read
+is `'contract`. Buffered bytes precede a transport failure, which raises `'io`.
+Abortive closure may discard buffered bytes.
 
 ### write
-`( connection bytes -- )` — Queue exact bytes for the peer, parking under
-bounded send pressure. Calls are serialized in scheduler-arrival order and
-each call's bytes remain contiguous. A non-list is `'type` and an element
-outside `0...255` is `'domain`; a string must be converted with `bytes` first.
-After a local `close` the write is `'io` `'closed`; a peer that has reset or
-already closed is `'io` `'reset`; any other host failure is `'io` `'io`, each
-with the peer's address and port attached.
+`( connection bytes -- )` — Accept a complete byte list under bounded FIFO
+pressure. A non-list is `'type`; an element outside `0...255` is `'domain`.
+Convert strings explicitly with `bytes`. Finished input, closure, peer reset,
+and other transport failures raise `'io`. Acceptance is distinct from delivery,
+output EOF, and resource cleanup.
 
 ## port
 
@@ -2431,7 +2365,8 @@ of their listener. `port.close` may discard queued connection bytes. Both words
 join socket cleanup. For a process, `port.shutdown` requests process-group
 termination with the host's escalation policy; `port.close` requests immediate
 process-group kill. Both join process cleanup, including blocked pipe transport.
-The stable termination remains observable through `proc.wait`.
+A completed process wait exchange remains observable after resource closure;
+new wait operations require an open resource.
 
 A cancelled exchange raises `'cancelled` from `port.await` and `port.result`.
 Observation does not consume the result. Native operations that produce only
