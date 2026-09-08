@@ -10,6 +10,8 @@ const external = @import("external.zig");
 const factories = @import("port_factory.zig");
 const Failure = factories.Failure;
 const bindings = @import("module_bindings.zig");
+const endpoints = @import("port_endpoint.zig");
+const bytes = @import("port_bytes.zig");
 
 pub const registration = bindings.Registration.create(Binding);
 
@@ -18,6 +20,8 @@ const Binding = struct {
     access: ?*external.NetAccess,
     pub const definitions: []const bindings.Definition = &.{
         .{ .name = "listener", .doc = "Create a TCP listener using the Session's listen grant.", .effect = "-- factory" },
+        .{ .name = "input", .doc = "Select the connection's readable byte stream.", .effect = "-- selector" },
+        .{ .name = "output", .doc = "Select the connection's writable byte stream; finish sends EOF after admitted writes.", .effect = "-- selector" },
     };
     pub fn bind(memory: std.mem.Allocator, inherited: *const @import("machine.zig").InheritedContext) error{OutOfMemory}!*bindings.Publication {
         const instance = if (inherited.net_access) |access| net.registeredInstance(access) else try bindings.Identity.create(memory);
@@ -36,7 +40,15 @@ const Binding = struct {
         self.instance.release();
         memory.destroy(self);
     }
-    pub fn seal(self: *Binding, _: usize) error{OutOfMemory}!Value {
+    pub fn seal(self: *Binding, index: usize) error{OutOfMemory}!Value {
+        if (index != 0) {
+            const owned = try self.allocator().create(Selector);
+            errdefer self.allocator().destroy(owned);
+            owned.* = .{ .instance = self.instance, .direction = if (index == 1) .reader else .writer };
+            const item = try endpoints.Selector.create(Selector, self.instance.next(), owned);
+            self.instance.retain();
+            return item;
+        }
         const owned = try self.allocator().create(Factory);
         errdefer self.allocator().destroy(owned);
         owned.* = .{ .instance = self.instance, .access = self.access };
@@ -45,6 +57,89 @@ const Binding = struct {
         return item;
     }
 };
+
+const Selector = struct {
+    instance: *bindings.Identity,
+    direction: enum { reader, writer },
+    pub fn allocator(self: *Selector) std.mem.Allocator {
+        return self.instance.allocator();
+    }
+    pub fn borrowEndpoint(self: *Selector, source: Value) endpoints.BorrowError!Value {
+        const cell = net.connectionFromValue(source) orelse return error.WrongKind;
+        if (cell.instance != self.instance) return error.WrongKind;
+        const owned = try self.allocator().create(Endpoint);
+        errdefer self.allocator().destroy(owned);
+        owned.* = .{ .cell = cell };
+        const item = switch (self.direction) {
+            .reader => try endpoints.Endpoint.create(Endpoint, .reader, self.instance.next(), owned),
+            .writer => try endpoints.Endpoint.create(Endpoint, .writer, self.instance.next(), owned),
+        };
+        cell.retainReadiness();
+        return item;
+    }
+    pub fn releasePort(self: *Selector) void {
+        const instance = self.instance;
+        instance.allocator().destroy(self);
+        instance.release();
+    }
+};
+
+const Endpoint = struct {
+    cell: *net.ConnectionCell,
+    pub const Permit = net.WritePermit;
+    pub fn allocator(self: *Endpoint) std.mem.Allocator {
+        return self.cell.allocator;
+    }
+    pub fn beginRead(self: *Endpoint) error{Busy}!void {
+        self.cell.beginRead() catch return error.Busy;
+    }
+    pub fn endRead(self: *Endpoint) void {
+        self.cell.endRead();
+    }
+    pub fn readCapacity(self: *Endpoint) usize {
+        return self.cell.readCapacity();
+    }
+    pub fn read(self: *Endpoint, destination: []u8) bytes.Read {
+        return switch (self.cell.read(destination)) {
+            .pending => .pending,
+            .eof => .eof,
+            .data => |count| .{ .data = count },
+            .failed => |failure| .{ .failed = transportFailure(failure) },
+        };
+    }
+    pub fn readSource(self: *Endpoint) external.ReadinessSource {
+        return self.cell.readSource();
+    }
+    pub fn beginWrite(self: *Endpoint) error{ OutOfMemory, Finished }!*Permit {
+        return self.cell.beginWrite() catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.Closed, error.Reset, error.Io => error.Finished,
+        };
+    }
+    pub fn writeBytes(permit: *Permit, source: []const u8) bytes.Write {
+        return switch (permit.write(source)) {
+            .pending => .pending,
+            .written => |count| .{ .written = count },
+            .failed => |failure| .{ .failed = transportFailure(failure) },
+        };
+    }
+    pub fn finish(self: *Endpoint) void {
+        self.cell.finishOutput();
+    }
+    pub fn releasePort(self: *Endpoint) void {
+        const cell = self.cell;
+        cell.allocator.destroy(self);
+        cell.releaseReadiness();
+    }
+};
+
+fn transportFailure(failure: net.Failure) bytes.Failure {
+    return .init(.io, switch (failure) {
+        .closed => "connection is closed",
+        .reset => "connection was reset",
+        .io => "connection transport failed",
+    });
+}
 
 const Factory = struct {
     instance: *bindings.Identity,

@@ -1674,6 +1674,46 @@ test "oom: standard-library and host: host: network connections propagate every 
     try checkStdlibSurface(.net_connection);
 }
 
+test "oom: standard-library and host: common network endpoint publication and transport" {
+    try requireSelectedOomTest(@src());
+    const Probe = struct {
+        fn run(failing: *std.testing.FailingAllocator, failure_offset: ?usize) !usize {
+            var locked = LockedAllocator{ .child = failing.allocator() };
+            var output_buffer: [256]u8 = undefined;
+            var output = std.Io.Writer.fixed(&output_buffer);
+            var diagnostics_buffer: [256]u8 = undefined;
+            var diagnostics = std.Io.Writer.fixed(&diagnostics_buffer);
+            var runtime = try session.Session.initWithHostConfig(locked.allocator(), &.{}, .{
+                .io = std.testing.io,
+                .output = &output,
+                .diagnostics = &diagnostics,
+                .net_policy = .{ .binds = .{ .exact = &.{.{ .address = "127.0.0.1", .port = 0 }} }, .limits = .{ .receive_capacity = 1, .send_capacity = 1 } },
+            }, .cooperative);
+            defer runtime.deinit();
+            try runOk(&runtime, "oom-net-endpoint-setup.ecl", "net.core.listener {'address \"127.0.0.1\" 'port 0} port.open 'l set l net.local-address 'port at");
+            const port = port: {
+                var rendered = try runtime.stackDisplay();
+                defer rendered.deinit();
+                break :port try std.fmt.parseInt(u16, std.mem.trim(u8, rendered.bytes(), " \n"), 10);
+            };
+            const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(port) };
+            const peer = try address.connect(std.testing.io, .{ .mode = .stream });
+            defer peer.close(std.testing.io);
+            var writer = peer.writer(std.testing.io, &.{});
+            try writer.interface.writeAll("ok");
+            try writer.interface.flush();
+            if (std.posix.system.shutdown(peer.socket.handle, std.posix.SHUT.WR) != 0) return error.ShutdownFailed;
+            try runOk(&runtime, "oom-net-endpoint-accept.ecl", "pop l net.accept 'c set");
+            const first_failure_index = failing.alloc_index;
+            if (failure_offset) |offset| failing.fail_index = first_failure_index + offset;
+            try runOk(&runtime, "oom-net-endpoint.ecl", "c net.core.input port.endpoint 'r set c net.core.output port.endpoint 'w set " ++
+                "w [0 255] port.write w port.finish r 1 port.read pop r 1 port.read pop r 1 port.read pop c port.close");
+            return first_failure_index;
+        }
+    };
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, Probe.run);
+}
+
 test "oom: standard-library and host: host: HTTP propagates every allocation failure" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.http);

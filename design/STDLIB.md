@@ -2235,6 +2235,13 @@ to it and a listen configuration creates the same scope-owned listener as
 resource supports `net.accept`, address inspection, `port.shutdown`, and
 `port.close`. Retaining the factory grants no additional host authority.
 
+`net.core.input` and `net.core.output` select a connection's readable and writable
+byte endpoints. They share reader exclusion and FIFO writes with `net.read` and
+`net.write`. Finishing output delivers admitted writes before sending EOF to the
+peer; input remains readable. Finish is idempotent, and later writes fail `'io`,
+including empty writes. Closing the resource aborts both directions; retaining an
+endpoint preserves its identity without keeping the connection open.
+
 A listen configuration is a dictionary with exactly these fields:
 
 - required `'address`: a string holding an IPv4 or IPv6 literal; and

@@ -1341,6 +1341,10 @@ Bounded diagnostic details retain their values before the request retires.
 Built-in controllers do not pass through the extension ABI.
 
 Process resource metadata pins its issuing instance through final reclamation.
+Connection metadata carries the same issuer lifetime. Its outgoing transport
+distinguishes open, finishing, and EOF: finish closes admission, existing writer
+permits preserve their turns, and the controller ends that direction after both
+the writer lane and byte ring empty. Incoming progress is independent.
 An endpoint projects a declared direction only after validating that instance
 and the resource kind. Its retained resource pin grants no scope ownership.
 Endpoint adapters register through one semantic interface for built-in and

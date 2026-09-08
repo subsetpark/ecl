@@ -52,7 +52,7 @@ const Runtime = struct {
     }
 
     fn close(self: *Runtime) void {
-        self.session.deinit();
+        if (self.session != .consumed) self.session.deinit();
         test_heap.retire(&self.heap);
     }
 
@@ -494,6 +494,8 @@ const posix = std.posix;
 const Script = union(enum) {
     /// Connect, then read until EOF.
     read_until_eof,
+    /// Reply only after observing the server's send-side EOF.
+    read_eof_then_reply: []const u8,
     /// Connect, write the bytes, then read until EOF.
     write_then_read_until_eof: []const u8,
     /// Connect, write the bytes, then close at once so the server sees EOF.
@@ -562,7 +564,7 @@ const Peer = struct {
         var reader = stream.reader(io, &read_buffer);
         var writer = stream.writer(io, &.{});
         switch (script) {
-            .read_until_eof => {},
+            .read_until_eof, .read_eof_then_reply => {},
             .write_then_read_until_eof => |payload| {
                 try writer.interface.writeAll(payload);
                 try writer.interface.flush();
@@ -603,6 +605,10 @@ const Peer = struct {
             };
             if (count == 0) {
                 observed.eof = true;
+                if (script == .read_eof_then_reply) {
+                    try writer.interface.writeAll(script.read_eof_then_reply);
+                    try writer.interface.flush();
+                }
                 return observed;
             }
             observed.received_len += count;
@@ -627,6 +633,56 @@ fn listenerPort(runtime: *Runtime) !u16 {
     try std.testing.expect(port != 0);
     try runtime.run("pop");
     return port;
+}
+
+test "net: common endpoints finish output while preserving input and closed identity" {
+    for ([_]u32{ 1, 8 }) |workers| {
+        var runtime: Runtime = .{};
+        try runtime.open(.{ .net = .{
+            .binds = .{ .exact = &.{.{ .address = "127.0.0.1", .port = 0 }} },
+            .limits = .{ .receive_capacity = 1, .send_capacity = 1 },
+        } }, .{ .worker_pool = workers });
+        defer runtime.close();
+        const port = try listenerPort(&runtime);
+        var peer: ?*Peer = try Peer.start(port, .{ .read_eof_then_reply = "ok" });
+        defer if (peer) |remaining| {
+            runtime.session.deinit();
+            _ = remaining.join();
+        };
+        try runtime.run("l net.accept 'c set c net.core.input port.endpoint 'r set c net.core.output port.endpoint 'w set " ++
+            "w [0 1 255] port.write w port.finish w port.finish " ++
+            "r 8 port.read r 8 port.read r 8 port.read r 8 port.read " ++
+            "[] (w [] port.write) @attempt 'err at 'kind at " ++
+            "c port.close c port.close w type r type " ++
+            "[] (r 1 port.read) @attempt 'err at 'kind at");
+        try runtime.expectDisplay("[111] [107] [] [] 'io 'port 'port 'io");
+        const observed = peer.?.join();
+        peer = null;
+        try expectPeerBytes(observed, &.{ 0, 1, 255 });
+    }
+}
+
+test "net: common endpoint selectors reject foreign resources and wrong directions" {
+    try expectStack(.{}, "net.core.input dup type swap net.core.input match? " ++
+        "[] (net.core.listener net.core.input port.endpoint) @attempt 'err at 'kind at", "'port 1 'type");
+    var runtime: Runtime = .{};
+    try runtime.open(.{ .net = loopback_ephemeral }, .cooperative);
+    defer runtime.close();
+    const port = try listenerPort(&runtime);
+    var peer: ?*Peer = try Peer.start(port, .read_until_eof);
+    defer if (peer) |remaining| {
+        runtime.session.deinit();
+        _ = remaining.join();
+    };
+    try runtime.run("l net.accept 'c set c net.core.input port.endpoint 'r set c net.core.output port.endpoint 'w set " ++
+        "[] (w 1 port.read) @attempt 'err at 'kind at " ++
+        "[] (r [] port.write) @attempt 'err at 'kind at " ++
+        "[] (r port.finish) @attempt 'err at 'kind at " ++
+        "[] (c proc.core.stdout port.endpoint) @attempt 'err at 'kind at c port.close");
+    try runtime.expectDisplay("'type 'type 'type 'type");
+    const observed = peer.?.join();
+    peer = null;
+    try expectPeerBytes(observed, "");
 }
 
 test "net: accept parks until a peer connects and yields a connection port" {

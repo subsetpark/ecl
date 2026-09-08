@@ -1041,6 +1041,7 @@ pub const ConnectionCell = struct {
         return if (self.joined()) .ready else .pending;
     }
     allocator: std.mem.Allocator,
+    instance: *@import("module_bindings.zig").Identity,
     identity: u64,
     refs: std.atomic.Value(usize) = .init(1),
     mutex: std.Io.Mutex = .init,
@@ -1051,6 +1052,7 @@ pub const ConnectionCell = struct {
     wake: [2]posix.fd_t,
     receive: Ring,
     send: Ring,
+    output: enum { open, finishing, eof } = .open,
     reader_active: bool = false,
     /// The peer has finished sending; queued bytes remain readable.
     peer_eof: bool = false,
@@ -1129,6 +1131,7 @@ pub const ConnectionCell = struct {
         const execution_group = try ConnectionGroup.init(owner.allocator, owner.executor.access(), cell);
         cell.* = .{
             .allocator = owner.allocator,
+            .instance = owner.instance,
             .identity = owner.next_identity.fetchAdd(1, .monotonic),
             .accepted = accepted,
             .controllers = execution_group,
@@ -1138,6 +1141,7 @@ pub const ConnectionCell = struct {
             .receive = .{ .bytes = receive },
             .send = .{ .bytes = send },
         };
+        cell.instance.retain();
         return cell;
     }
 
@@ -1182,6 +1186,7 @@ pub const ConnectionCell = struct {
         self.allocator.free(self.send.bytes);
         self.accepted.deinit();
         self.controllers.deinit();
+        self.instance.release();
         self.allocator.destroy(self);
     }
 
@@ -1286,11 +1291,26 @@ pub const ConnectionCell = struct {
         return external.readinessSource(ConnectionCell, self, readiness_join);
     }
 
-    pub fn beginWrite(self: *ConnectionCell) error{OutOfMemory}!*WritePermit {
+    pub fn beginWrite(self: *ConnectionCell) error{ OutOfMemory, Closed, Reset, Io }!*WritePermit {
         const prepared = try self.writers.prepare(self.allocator);
+        errdefer prepared.discard();
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        if (self.failureLocked()) |failure| return switch (failure) {
+            .closed => error.Closed,
+            .reset => error.Reset,
+            .io => error.Io,
+        };
+        if (self.output != .open) return error.Closed;
         return prepared.admitWriter(self, std.math.maxInt(usize)).?;
+    }
+    /// Finish only the outgoing direction. Every admitted writer retains its
+    /// FIFO turn; the controller sends EOF after those writers and bytes drain.
+    pub fn finishOutput(self: *ConnectionCell) void {
+        std.Io.Threaded.mutexLock(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        if (self.output == .open) self.output = .finishing;
+        self.signalLocked();
     }
     fn writeTurnLocked(self: *ConnectionCell, turn: bool, bytes: []const u8) WriteProgress {
         if (self.failureLocked()) |failure| return .{ .failed = failure };
@@ -1304,6 +1324,7 @@ pub const ConnectionCell = struct {
         return external.readinessSource(ConnectionCell, self, key);
     }
     fn notifyWritersLocked(self: *ConnectionCell) void {
+        self.signalLocked();
         self.waits.notifyLocked(self);
     }
 
@@ -1440,6 +1461,17 @@ pub const ConnectionCell = struct {
         var block: [4096]u8 = undefined;
         const finalize_reason: StopReason = loop: while (true) {
             std.Io.Threaded.mutexLock(&self.mutex);
+            if (self.lifecycle == .running and self.output == .finishing and self.writers.empty() and self.send.len == 0 and self.failure == null) {
+                const rc = posix.system.shutdown(self.accepted.socket.fd.?, posix.SHUT.WR);
+                switch (posix.errno(rc)) {
+                    .SUCCESS => self.output = .eof,
+                    .INTR => {
+                        std.Io.Threaded.mutexUnlock(&self.mutex);
+                        continue;
+                    },
+                    else => |code| self.noteFailureLocked(code),
+                }
+            }
             const interest = self.interestLocked();
             const socket_fd = self.accepted.socket.fd.?;
             const wake_fd = self.wake[0];
@@ -2046,4 +2078,46 @@ test "net: writer tickets cancel queued and active writers without closing the c
     var actual: [3]u8 = undefined;
     try reader.interface.readSliceAll(&actual);
     try std.testing.expectEqualStrings("acd", &actual);
+}
+
+test "net: output finish preserves admitted writer turns and the reverse stream" {
+    // SAFETY: init fills the harness before any use or destruction.
+    var harness: LoopbackHarness = undefined;
+    try harness.init(std.testing.allocator, .{ .send_capacity = 8, .receive_capacity = 8 });
+    defer harness.deinit();
+    const listener_port = try harness.listen(.{ .ip4 = .loopback(0) });
+    defer harness.host.domain().releaseValue(listener_port);
+    const listener = fromValue(listener_port).?;
+    const peer = try connectLoopback(listener.localAddress().?.getPort());
+    defer peer.close(std.testing.io);
+    var target: TestTarget = .{};
+    const port = try harness.acceptOne(listener, &target);
+    defer harness.host.domain().releaseValue(port);
+    const cell = connectionFromValue(port).?;
+    var first: ?*WritePermit = try cell.beginWrite();
+    defer if (first) |permit| permit.cancel();
+    var second: ?*WritePermit = try cell.beginWrite();
+    defer if (second) |permit| permit.cancel();
+    cell.finishOutput();
+    cell.finishOutput();
+    try std.testing.expectError(error.Closed, cell.beginWrite());
+    try std.testing.expect(second.?.write("b") == .pending);
+    try std.testing.expectEqual(WriteProgress{ .written = 1 }, first.?.write("a"));
+    first.?.finish();
+    first = null;
+    try std.testing.expectEqual(WriteProgress{ .written = 1 }, second.?.write("b"));
+    second.?.finish();
+    second = null;
+    var buffer: [8]u8 = undefined;
+    var reader = peer.reader(std.testing.io, &buffer);
+    var actual: [2]u8 = undefined;
+    try reader.interface.readSliceAll(&actual);
+    try std.testing.expectEqualStrings("ab", &actual);
+    try std.testing.expectError(error.EndOfStream, reader.interface.takeByte());
+    var writer = peer.writer(std.testing.io, &.{});
+    try writer.interface.writeAll("ok");
+    try writer.interface.flush();
+    try readExact(cell, &target, &actual);
+    try std.testing.expectEqualStrings("ok", &actual);
+    cell.close();
 }

@@ -429,7 +429,12 @@ fn write(evaluator: *Machine) MachineError!void {
     var connection = try evaluator.popValue();
     errdefer connection.deinit();
     const cell = try connectionCell(evaluator, connection.borrow());
-    const permit = try cell.beginWrite();
+    const permit = cell.beginWrite() catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.Closed => failConnection(evaluator, cell, .closed),
+        error.Reset => failConnection(evaluator, cell, .reset),
+        error.Io => failConnection(evaluator, cell, .io),
+    };
     errdefer permit.cancel();
     const driver = try evaluator.allocator().create(WriteDriver);
     driver.* = .init(evaluator.allocator(), connection.take(), bytes.take(), .{ .cell = cell }, permit);
