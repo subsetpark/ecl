@@ -80,6 +80,9 @@ by a controller retain their budget reservation until forwarding or release.
 Controllers can receive a message, inspect it through bounded `received` paths,
 and consume it with `forwardMessage` or `resultMessage`. Failed consuming calls
 retain ownership, and controller return cleans up an unconsumed message.
+Controllers report allocation exhaustion with `failOutOfMemory`; observation
+through results, endpoints, opening, or shutdown preserves the runtime OOM
+outcome and still performs normal cleanup.
 Their words can forward opaque ports through aggregates, stream operations,
 and explicitly close them. Operations execute in FIFO order within a declared
 lane. A port defaults to one lane; multiple lanes and different ports can

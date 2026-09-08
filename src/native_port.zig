@@ -93,17 +93,7 @@ pub const Limits = struct {
     }
 };
 
-pub const Failure = struct {
-    kind: abi.ErrorKindWire,
-    message: [abi.max_error_message_bytes]u8 = .{0} ** abi.max_error_message_bytes,
-    len: u32,
-
-    pub fn init(kind: abi.ErrorKindWire, message: []const u8) Failure {
-        var result: Failure = .{ .kind = kind, .len = @intCast(@min(message.len, abi.max_error_message_bytes)) };
-        @memcpy(result.message[0..result.len], message[0..result.len]);
-        return result;
-    }
-};
+pub const Failure = @import("port_failure.zig").Failure(abi.ErrorKindWire);
 
 const Resource = transfers.Resource(Cell, OwnerState, OwnerState.allocator, OwnerState.reserveLive, OwnerState.releaseLive);
 
@@ -742,7 +732,10 @@ pub const Operation = struct {
                 } else if (endpoint.direction == .input) {
                     pair.fail(byte_transport.Failure.init(.io, "exchange input consumer completed"), true);
                 } else if (self.failure) |failure| {
-                    pair.fail(byte_transport.Failure.init(descriptor.mapErrorKind(failure.kind) orelse .io, failure.message[0..failure.len]), false);
+                    pair.fail(switch (failure) {
+                        .out_of_memory => .out_of_memory,
+                        .report => |report| byte_transport.Failure.init(descriptor.mapErrorKind(report.kind) orelse .io, report.message[0..report.len]),
+                    }, false);
                 } else pair.finish();
             };
         }
@@ -1125,21 +1118,33 @@ fn controllerFail(raw: *anyopaque, kind: abi.ErrorKindWire, bytes: [*]const u8, 
         _ => .io,
     };
     const failure = Failure.init(valid_kind, boundedErrorMessage(bytes[0..length]));
+    recordControllerFailure(ctx, failure);
+}
+fn controllerFailAllocation(raw: *anyopaque) callconv(.c) void {
+    recordControllerFailure(context(raw), .out_of_memory);
+}
+fn recordControllerFailure(ctx: *ControllerContext, failure: Failure) void {
     if (ctx.operation()) |op| {
         lock(&op.mutex);
-        op.failure = failure;
+        storeControllerFailure(&op.failure, failure);
         unlock(&op.mutex);
     } else switch (ctx.invocation) {
         .initialize => {
             lock(&ctx.cell.mutex);
-            ctx.cell.initialization_failure = failure;
+            storeControllerFailure(&ctx.cell.initialization_failure, failure);
             unlock(&ctx.cell.mutex);
         },
-        .shutdown => ctx.invocation.shutdown = failure,
+        .shutdown => storeControllerFailure(&ctx.invocation.shutdown, failure),
         .operation => unreachable,
     }
 }
-const controller_table: abi.ControllerTable = .{ .receive_message = controllerReceiveMessage, .received_message = controllerReceivedMessage, .forward_message = controllerForwardMessage, .result_message = controllerResultMessage, .input = controllerInput, .read_endpoint = controllerReadEndpoint, .write_endpoint = controllerWriteEndpoint, .finish_endpoint = controllerFinishEndpoint, .read = controllerRead, .write = controllerWrite, .cancelled = controllerCancelled, .acknowledge_cancellation = controllerAcknowledge, .fail = controllerFail };
+fn storeControllerFailure(destination: *?Failure, failure: Failure) void {
+    // Allocation exhaustion cannot be masked by a later domain error from a
+    // controller unwinding a failed host builder or transport operation.
+    if (destination.*) |existing| if (existing == .out_of_memory) return;
+    destination.* = failure;
+}
+const controller_table: abi.ControllerTable = .{ .fail_allocation = controllerFailAllocation, .receive_message = controllerReceiveMessage, .received_message = controllerReceivedMessage, .forward_message = controllerForwardMessage, .result_message = controllerResultMessage, .input = controllerInput, .read_endpoint = controllerReadEndpoint, .write_endpoint = controllerWriteEndpoint, .finish_endpoint = controllerFinishEndpoint, .read = controllerRead, .write = controllerWrite, .cancelled = controllerCancelled, .acknowledge_cancellation = controllerAcknowledge, .fail = controllerFail };
 
 pub fn fromValue(value: Value, instance: *native.ModuleInstance, kind: u32) ?*Cell {
     const handle = switch (value) {

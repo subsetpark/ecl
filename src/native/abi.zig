@@ -102,6 +102,7 @@ pub const PortFn = *const fn (*anyopaque, *const PortRequest, *PortReply) callco
 /// Controller streams block only their private host controller. Zero bytes
 /// denotes request EOF or cancellation; failure is reported separately.
 pub const ControllerTable = extern struct {
+    fail_allocation: *const fn (*anyopaque) callconv(.c) void,
     receive_message: *const fn (*anyopaque, u32) callconv(.c) bool,
     received_message: *const fn (*anyopaque, [*]const u64, u32, *ValueView) callconv(.c) bool,
     forward_message: *const fn (*anyopaque, u32) callconv(.c) bool,
@@ -426,7 +427,7 @@ comptime {
     assertRecord(PortDefinition, 96, 8);
     assertRecord(PortRequest, 48, 8);
     assertRecord(PortReply, 24, 8);
-    assertRecord(ControllerTable, 104, 8);
+    assertRecord(ControllerTable, 112, 8);
     assertRecord(EntryResult, 32, 8);
 
     if (@offsetOf(Definition, "callback_index") != 4 or

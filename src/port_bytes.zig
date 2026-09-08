@@ -7,21 +7,7 @@ const Ring = @import("byte_ring.zig").Ring;
 const ErrorKind = @import("machine.zig").ErrorKind;
 const max_chunk = 64 * 1024;
 
-pub const Failure = struct {
-    kind: ErrorKind,
-    text: [4096]u8,
-    len: usize,
-
-    pub fn init(kind: ErrorKind, text: []const u8) Failure {
-        // SAFETY: only the prefix initialized below is exposed through len.
-        var result: Failure = .{ .kind = kind, .text = undefined, .len = @min(text.len, 4096) };
-        if (result.len < text.len) while (result.len != 0 and text[result.len] & 0xc0 == 0x80) {
-            result.len -= 1;
-        };
-        @memcpy(result.text[0..result.len], text[0..result.len]);
-        return result;
-    }
-};
+pub const Failure = @import("port_failure.zig").Failure(ErrorKind);
 pub const Read = union(enum) { pending, eof, data: usize, failed: Failure };
 pub const Write = union(enum) { pending, written: usize, failed: Failure };
 const Writers = controllers.Lane(State, .writer, .{ .retain = State.retainReadiness, .release = State.releaseReadiness, .write = State.writeLocked, .notify = State.notifyLocked, .source = State.source });

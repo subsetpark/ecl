@@ -92,6 +92,7 @@ fn DuplexSpec(comptime acknowledge: bool) type {
         pub fn open(state: *State, controller: *ecl.Controller) void {
             const config = controller.input(&.{}) orelse return controller.fail(.domain, "missing configuration");
             if (config.int()) |number| {
+                if (number == 255) return controller.failOutOfMemory();
                 if (number < 0 or number > 255) return controller.fail(.domain, "invalid counter configuration");
                 for (&state.lanes) |*current| current.total = @intCast(number);
             } else if (config.length() != 0) controller.fail(.domain, "expected an initial counter or empty configuration");
@@ -112,6 +113,11 @@ fn DuplexSpec(comptime acknowledge: bool) type {
                     if (!controller.forwardMessage(4)) return;
                     if (code == 16) return controller.fail(.domain, "failure after buffered message");
                 }
+                return;
+            }
+            if (code == 17) {
+                controller.failOutOfMemory();
+                controller.fail(.domain, "must not mask allocation exhaustion");
                 return;
             }
             if (code == 8) return;
@@ -159,6 +165,7 @@ fn DuplexSpec(comptime acknowledge: bool) type {
         pub fn shutdown(state: *State, controller: *ecl.Controller) void {
             _ = shutdowns.fetchAdd(1, .release);
             const config = (controller.input(&.{}) orelse return).int() orelse 0;
+            if (config == 252) return controller.failOutOfMemory();
             if (config == 254) return controller.fail(.domain, "deliberate shutdown failure");
             if (config == 253) awaitGate(&state.lanes[0].cancelled);
             // Completing the graceful callback permits the runtime to close
@@ -479,6 +486,7 @@ pub const Extension = ecl.module(.{
         ecl.operation("checksum", "Sum accepted input bytes.", Duplex, 1, .send, 3),
         ecl.operation("failure", "Fail with a deterministic terminal error.", Duplex, 2, .receive, 0),
         ecl.operation("inspect", "Validate structured parameters without additional streaming.", Duplex, 6, .receive, 0),
+        ecl.operation("allocation-failure", "Report asynchronous allocation exhaustion.", Duplex, 17, .receive, 26),
         ecl.operation("noop", "Complete without additional streaming.", Duplex, 8, .receive, 0),
         ecl.operation("buffered-failure", "Fail after accepting output bytes.", Duplex, 10, .receive, 2),
         ecl.operation("finished-failure", "Fail after finishing the output endpoint.", Duplex, 11, .receive, 2),

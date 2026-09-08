@@ -109,6 +109,12 @@ pub const Controller = opaque {
         const value = self.state();
         return value.table.acknowledge_cancellation(value.context);
     }
+    /// Report allocation exhaustion as the runtime OOM outcome. It remains
+    /// observable through completion and endpoints, and cleanup still joins.
+    pub fn failOutOfMemory(self: *Controller) void {
+        const owned = self.state();
+        owned.table.fail_allocation(owned.context);
+    }
     pub fn fail(self: *Controller, kind: capability.ErrorKind, message: []const u8) void {
         const bounded = capability.boundedErrorMessage(message);
         self.state().table.fail(self.state().context, kind, bounded.ptr, @intCast(bounded.len));

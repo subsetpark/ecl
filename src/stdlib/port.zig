@@ -76,7 +76,7 @@ const ReadBackend = struct {
             .pending => .pending,
             .eof => .eof,
             .data => |count| .{ .data = count },
-            .failed => |failure| evaluator.fail(failure.kind, failure.text[0..failure.len]),
+            .failed => |failure| transportFailure(evaluator, failure),
         };
     }
 };
@@ -107,7 +107,7 @@ const WriteBackend = struct {
         return switch (permit.write(buffer)) {
             .pending => .pending,
             .written => |count| .{ .written = count },
-            .failed => |failure| evaluator.fail(failure.kind, failure.text[0..failure.len]),
+            .failed => |failure| transportFailure(evaluator, failure),
         };
     }
 };
@@ -170,7 +170,7 @@ const SendDriver = struct {
             },
             .pending => |source| try evaluator.park(.{ .external = source }),
             .overflow => return evaluator.fail(.overflow, "message exceeds the resource queue byte budget"),
-            .failed => |failure| return evaluator.fail(failure.kind, failure.text[0..failure.len]),
+            .failed => |failure| return transportFailure(evaluator, failure),
         }
         return .yielded;
     }
@@ -201,7 +201,7 @@ const ReceiveDriver = struct {
         try evaluator.pollKernel();
         switch (self.queue.peek()) {
             .pending => try evaluator.park(.{ .external = self.queue.source() }),
-            .failed => |failure| return evaluator.fail(failure.kind, failure.text[0..failure.len]),
+            .failed => |failure| return transportFailure(evaluator, failure),
             .eof => {
                 const output = try evaluator.reserveStack(1);
                 return output.output(try dict.fromUniquePairs(evaluator.allocator(), evaluator.releaseDomain(), &.{.{ .{ .symbol = try intern.intern("kind") }, .{ .symbol = try intern.intern("eof") } }}));
@@ -343,7 +343,16 @@ const Request = struct {
 };
 
 fn fail(evaluator: *machine.Machine, failure: native.Failure) machine.MachineError {
-    return evaluator.fail(@import("../native_descriptor.zig").mapErrorKind(failure.kind) orelse .io, failure.message[0..failure.len]);
+    return switch (failure) {
+        .out_of_memory => error.OutOfMemory,
+        .report => |report| evaluator.fail(@import("../native_descriptor.zig").mapErrorKind(report.kind) orelse .io, report.message[0..report.len]),
+    };
+}
+fn transportFailure(evaluator: *machine.Machine, failure: bytes.Failure) machine.MachineError {
+    return switch (failure) {
+        .out_of_memory => error.OutOfMemory,
+        .report => |report| evaluator.fail(report.kind, report.message[0..report.len]),
+    };
 }
 
 fn cancel(evaluator: *machine.Machine) machine.MachineError!void {
@@ -413,7 +422,7 @@ const Observe = struct {
                         .pending => {},
                         .ready => return .completed,
                         .unsupported => return evaluator.fail(.domain, "resource does not support graceful shutdown"),
-                        .failed => |failure| return evaluator.fail(@import("../native_descriptor.zig").mapErrorKind(failure.kind) orelse .io, failure.message[0..failure.len]),
+                        .failed => |failure| return fail(evaluator, failure),
                     }
                 } else {
                     resource.close();
@@ -433,13 +442,13 @@ const Observe = struct {
                         .value => |item| return output.output(item),
                         .claimed => return evaluator.fail(.contract, "exchange result has already been claimed"),
                         .cancelled => return evaluator.fail(.cancelled, "exchange was cancelled"),
-                        .failed => |failure| return evaluator.fail(@import("../native_descriptor.zig").mapErrorKind(failure.kind) orelse .io, failure.message[0..failure.len]),
+                        .failed => |failure| return fail(evaluator, failure),
                     }
                 } else switch (exchange.completion()) {
                     .pending => try evaluator.park(.{ .external = exchange.source(8) }),
                     .ready => return .completed,
                     .cancelled => return evaluator.fail(.cancelled, "exchange was cancelled"),
-                    .failed => |failure| return evaluator.fail(@import("../native_descriptor.zig").mapErrorKind(failure.kind) orelse .io, failure.message[0..failure.len]),
+                    .failed => |failure| return fail(evaluator, failure),
                 }
             },
         }

@@ -135,8 +135,8 @@ const source_groups = [_]SourceGroup{
     // vocabulary in external.zig and are opened only by their Session-owned
     // owner.
     .{ .production = true, .files = &.{
-        "scheduler.zig", "scheduler_core.zig", "external.zig",      "process_port.zig",    "console.zig",      "task_prims.zig", "filesystem_port.zig", "package_authority.zig", "directory_order.zig",
-        "net_port.zig",  "byte_ring.zig",      "port_transfer.zig", "port_controller.zig", "port_message.zig", "port_bytes.zig", "port_messages.zig",
+        "scheduler.zig", "scheduler_core.zig", "external.zig",      "process_port.zig",    "console.zig",      "task_prims.zig",   "filesystem_port.zig", "package_authority.zig", "directory_order.zig",
+        "net_port.zig",  "byte_ring.zig",      "port_transfer.zig", "port_controller.zig", "port_message.zig", "port_failure.zig", "port_bytes.zig",      "port_messages.zig",
     }, .sources = &.{
         @embedFile("../scheduler.zig"),       @embedFile("../scheduler_core.zig"),
         @embedFile("../external.zig"),        @embedFile("../process_port.zig"),
@@ -145,7 +145,8 @@ const source_groups = [_]SourceGroup{
         @embedFile("../directory_order.zig"), @embedFile("../net_port.zig"),
         @embedFile("../byte_ring.zig"),       @embedFile("../port_transfer.zig"),
         @embedFile("../port_controller.zig"), @embedFile("../port_message.zig"),
-        @embedFile("../port_bytes.zig"),      @embedFile("../port_messages.zig"),
+        @embedFile("../port_failure.zig"),    @embedFile("../port_bytes.zig"),
+        @embedFile("../port_messages.zig"),
     } },
     // The installed author SDK, its sized ABI records, validation, loader,
     // and transactional-call boundary form one separately rooted component.

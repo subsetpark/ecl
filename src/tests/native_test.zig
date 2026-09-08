@@ -1306,3 +1306,45 @@ test "native: cancelled receiving tasks leave message and result claims availabl
         "r port.receive 'value at r port.receive 'kind at y port.close p port.close " ++
         "portprobe.cleaned", "'cancelled [42] 'cancelled [7] 'eof 1");
 }
+
+test "native: allocation failure survives controller and endpoint boundaries" {
+    for ([_]u32{ 1, 8 }) |workers| {
+        var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer output.deinit();
+        var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer diagnostics.deinit();
+        var runtime = try session.Session.initWithHostConfig(std.testing.allocator, &.{}, .{
+            .io = std.testing.io,
+            .output = &output.writer,
+            .diagnostics = &diagnostics.writer,
+            .ecl_path = native_fixture.directory,
+        }, .{ .worker_pool = workers });
+        defer runtime.deinit();
+        for ([_][]const u8{
+            "port.await",                                    "port.result", "portprobe.output port.endpoint 1 port.read",
+            "portprobe.receiver port.endpoint port.receive",
+        }) |observe| {
+            try expectOk(&runtime, "portprobe.reset portprobe.factory [] port.open 'p set");
+            const source = try std.fmt.allocPrint(std.testing.allocator, "p portprobe.allocation-failure [] port.begin {s}", .{observe});
+            defer std.testing.allocator.free(source);
+            try std.testing.expectError(error.OutOfMemory, runtime.runUnit("native-oom.ecl", source));
+            try expectOk(&runtime, "p port.close portprobe.cleaned");
+            var display = try runtime.stackDisplay();
+            defer display.deinit();
+            try std.testing.expectEqualStrings("1", display.bytes());
+            try expectOk(&runtime, "pop");
+        }
+        try expectOk(&runtime, "portprobe.reset portprobe.factory 252 port.open 'p set");
+        try std.testing.expectError(error.OutOfMemory, runtime.runUnit("native-shutdown-oom.ecl", "p port.shutdown"));
+        try expectOk(&runtime, "p port.close portprobe.cleaned");
+        var display = try runtime.stackDisplay();
+        defer display.deinit();
+        try std.testing.expectEqualStrings("1", display.bytes());
+        try expectOk(&runtime, "pop portprobe.reset");
+        try std.testing.expectError(error.OutOfMemory, runtime.runUnit("native-open-oom.ecl", "portprobe.factory 255 port.open"));
+        try expectOk(&runtime, "1 portprobe.await-cleaned portprobe.cleaned");
+        var opened = try runtime.stackDisplay();
+        defer opened.deinit();
+        try std.testing.expectEqualStrings("1", opened.bytes());
+    }
+}

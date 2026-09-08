@@ -1455,6 +1455,9 @@ resources. Abortive cleanup retains the scope membership until controller
 return, including recovery acknowledgement. The lane's post-return transition
 settles that membership outside both operation and resource locks. Readiness
 registration observes terminal state under the same mutex as notification.
+Native terminal failures distinguish runtime allocation exhaustion from bounded
+domain error data. Endpoint transport preserves that distinction through
+buffered output and completion; cleanup retains its normal join obligations.
 Completion observation and result ownership are separate: observation remains
 repeatable, while claiming consumes an available terminal value under the
 receiving scope and exchange locks. Queue delivery uses the same scope-first

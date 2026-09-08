@@ -1008,7 +1008,10 @@ const PortSlot = union(enum) {
 
 fn portFailure(call: *Transaction, reply: *abi.PortReply, failure: native_port.Failure) abi.HostStatus {
     reply.status = .failed;
-    return hostFail(call, failure.kind, &failure.message, failure.len);
+    return switch (failure) {
+        .out_of_memory => .out_of_memory,
+        .report => |report| hostFail(call, report.kind, &report.message, report.len),
+    };
 }
 fn portError(call: *Transaction, reply: *abi.PortReply, kind: abi.ErrorKindWire, message: []const u8) abi.HostStatus {
     return portFailure(call, reply, .init(kind, message));
