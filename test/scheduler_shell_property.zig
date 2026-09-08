@@ -81,11 +81,25 @@ fn appendTasks(writer: *std.Io.Writer, width: usize) !void {
 
 fn runShellScenario(encoded: u16) !void {
     const scenario = Scenario.decode(encoded);
+    errdefer std.log.err("scheduler scenario: operation={s}, width={d}, workers={s}, encoded={d}", .{
+        @tagName(scenario.operation), scenario.width, scenario.workers, encoded,
+    });
     var source_buffer = std.Io.Writer.Allocating.init(allocator);
     defer source_buffer.deinit();
     var expected_buffer = std.Io.Writer.Allocating.init(allocator);
     defer expected_buffer.deinit();
     var expected_exit: u8 = 0;
+
+    switch (scenario.operation) {
+        .kernel_fairness, .result_fairness, .raise_fairness, .infra_fairness => {
+            // Load the observer before spawning finite competitors. A cold
+            // qualified lookup can park the parent while both children finish;
+            // await-any then correctly chooses the lowest terminal index,
+            // which says nothing about cooperative fairness.
+            try source_buffer.writer.writeAll("'task ('await-any) import ");
+        },
+        else => {},
+    }
 
     switch (scenario.operation) {
         .par_each => {

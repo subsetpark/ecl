@@ -598,7 +598,7 @@ test "e2e: ecl test runs the default stateful runner" {
         .stdout_contains = &.{
             "ok app.suite.first\n",
             "ok app.suite.second\n",
-            "FAIL {'module 'app.suite 'name 'third-fails}",
+            "FAIL app.suite.third-fails: {'err ",
             "ok app.suite.z-after\n",
         },
         .stderr = "",
