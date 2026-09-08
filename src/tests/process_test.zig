@@ -13,6 +13,10 @@ fn source(comptime template: []const u8, arguments: anytype) ![]u8 {
 }
 
 fn expectStack(program: []const u8, policy: ?process.ProcessPolicy, expected: []const u8) !void {
+    return expectStackWithWorkers(program, policy, expected, 2);
+}
+
+fn expectStackWithWorkers(program: []const u8, policy: ?process.ProcessPolicy, expected: []const u8, workers: u32) !void {
     var heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&heap);
     var output_buffer: [256]u8 = undefined;
@@ -28,7 +32,7 @@ fn expectStack(program: []const u8, policy: ?process.ProcessPolicy, expected: []
             .diagnostics = &diagnostics.writer,
             .process_policy = policy,
         },
-        .{ .worker_pool = 2 },
+        .{ .worker_pool = workers },
     );
     defer runtime.deinit();
     switch (try runtime.runUnit("<process-test>", program)) {
@@ -152,4 +156,42 @@ test "process: stream reads bound storage by the selected pipe capacity" {
         },
         "[97 98 99 100] [119 120 121 122] {'kind 'exited 'code 0}",
     );
+}
+
+test "process: common shutdown and close join distinct termination paths" {
+    const fixture_path = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, fixture.process_exe, allocator);
+    defer allocator.free(fixture_path);
+    for ([_]u32{ 1, 8 }) |workers| {
+        for ([_][]const u8{ "port.shutdown", "port.close" }, [_][]const u8{ "15", "9" }) |closing, expected| {
+            const program = try source(
+                "{{'executable \"{s}\" 'args (\"ready\")}} proc.spawn 'p set " ++
+                    "p 1 proc.read-stdout pop " ++
+                    "p {s} p {s} p proc.wait 'signal at",
+                .{ fixture_path, closing, closing },
+            );
+            defer allocator.free(program);
+            try expectStackWithWorkers(program, .{
+                .executables = .{ .exact = &.{fixture_path} },
+                .stdin_capacity = 1,
+                .stdout_capacity = 1,
+                .stderr_capacity = 1,
+            }, expected, workers);
+        }
+    }
+}
+
+test "process: common close joins a producer with full output rings" {
+    const fixture_path = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, fixture.process_exe, allocator);
+    defer allocator.free(fixture_path);
+    const program = try source(
+        "{{'executable \"{s}\" 'args (\"flood\")}} proc.spawn 'p set " ++
+            "p 1 proc.read-stdout pop p port.close p port.close p type p proc.wait 'kind at",
+        .{fixture_path},
+    );
+    defer allocator.free(program);
+    for ([_]u32{ 1, 8 }) |workers| try expectStackWithWorkers(program, .{
+        .executables = .{ .exact = &.{fixture_path} },
+        .stdout_capacity = 1,
+        .stderr_capacity = 1,
+    }, "'port 'signaled", workers);
 }

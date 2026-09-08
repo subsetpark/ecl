@@ -751,6 +751,37 @@ test "net: close flushes queued bytes before the peer observes EOF and is idempo
     try expectPeerBytes(peer.join(), "ok");
 }
 
+test "net: common shutdown drains connections and closes listeners independently" {
+    for ([_]u32{ 1, 8 }) |workers| {
+        var runtime: Runtime = .{};
+        var policy = loopback_ephemeral;
+        policy.limits.send_capacity = 1;
+        try runtime.open(.{ .net = policy }, .{ .worker_pool = workers });
+        defer runtime.close();
+        const port = try listenerPort(&runtime);
+        const peer = try Peer.start(port, .read_until_eof);
+        try runtime.run("l net.accept 'c set l port.shutdown l port.close " ++
+            "c [111 107] net.write c port.shutdown c port.shutdown c port.close c type");
+        try runtime.expectDisplay("'port");
+        try expectPeerBytes(peer.join(), "ok");
+        try std.testing.expectEqual(Probe.refused, try probe(port));
+    }
+}
+
+test "net: common close interrupts a connection reader and preserves closed identity" {
+    for ([_]u32{ 1, 8 }) |workers| {
+        var runtime: Runtime = .{};
+        try runtime.open(.{ .net = loopback_ephemeral }, .{ .worker_pool = workers });
+        defer runtime.close();
+        const port = try listenerPort(&runtime);
+        const peer = try Peer.start(port, .read_until_eof);
+        try runtime.run("l net.accept 'c set [] (c 1 net.read) @spawn 'reader set " ++
+            "c port.close c port.close reader task.await 'err at 'kind at c type l port.close");
+        try runtime.expectDisplay("'io 'port");
+        try expectPeerBytes(peer.join(), "");
+    }
+}
+
 test "net: closing a listener wakes parked acceptors with io closed and leaves accepted connections open" {
     var runtime: Runtime = .{};
     try runtime.open(.{ .net = loopback_ephemeral }, .cooperative);

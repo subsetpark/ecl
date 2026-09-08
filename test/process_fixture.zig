@@ -13,7 +13,9 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, mode, "split")) return split(init, arguments[2..]);
     if (std.mem.eql(u8, mode, "exit")) return exitWith(arguments[2..]);
     if (std.mem.eql(u8, mode, "large")) return large(init, arguments[2..]);
+    if (std.mem.eql(u8, mode, "flood")) return flood(init);
     if (std.mem.eql(u8, mode, "block")) return block(init);
+    if (std.mem.eql(u8, mode, "ready")) return readyBlock(init);
     if (std.mem.eql(u8, mode, "close-stdin")) return closeStdin(init);
     if (std.mem.eql(u8, mode, "first-byte")) return firstByte(init);
     if (std.mem.eql(u8, mode, "ignore-term")) return ignoreTerm(init);
@@ -103,6 +105,19 @@ fn large(init: std.process.Init, arguments: []const []const u8) !void {
     }
 }
 
+fn flood(init: std.process.Init) !void {
+    var output_buffer: [4096]u8 = undefined;
+    var output = stdoutWriter(init.io, &output_buffer);
+    var error_buffer: [4096]u8 = undefined;
+    var error_output = stderrWriter(init.io, &error_buffer);
+    while (true) {
+        try output.interface.writeAll("o" ** 4096);
+        try output.interface.flush();
+        try error_output.interface.writeAll("e" ** 4096);
+        try error_output.interface.flush();
+    }
+}
+
 fn block(init: std.process.Init) !void {
     var input_buffer: [256]u8 = undefined;
     var input = std.Io.File.stdin().reader(init.io, &input_buffer);
@@ -139,6 +154,10 @@ fn firstByte(init: std.process.Init) !void {
 
 fn ignoreTerm(init: std.process.Init) !void {
     ignoreTermSignal();
+    try readyBlock(init);
+}
+
+fn readyBlock(init: std.process.Init) !void {
     var output_buffer: [1]u8 = undefined;
     var output = stdoutWriter(init.io, &output_buffer);
     try output.interface.writeByte(1);

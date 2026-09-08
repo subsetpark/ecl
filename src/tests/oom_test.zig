@@ -1360,6 +1360,64 @@ fn NativePortLifecycleProbe(comptime source: []const u8) type {
     return NativePortProbe(source, "portprobe.cleaned pop");
 }
 
+fn BuiltinResourceLifecycleProbe(comptime backend: enum { process, listener }, comptime closing: []const u8) type {
+    return struct {
+        fn run(failing: *std.testing.FailingAllocator, failure_offset: ?usize) !usize {
+            var locked_allocator = LockedAllocator{ .child = failing.allocator() };
+            const allocator = locked_allocator.allocator();
+            const scaffold = std.testing.allocator;
+            const process_path = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, process_fixture.process_exe, scaffold);
+            defer scaffold.free(process_path);
+            var output_buffer: [256]u8 = undefined;
+            var output = std.Io.Writer.fixed(&output_buffer);
+            var diagnostics_buffer: [256]u8 = undefined;
+            var diagnostics = std.Io.Writer.fixed(&diagnostics_buffer);
+            var runtime = try session.Session.initWithHostConfig(allocator, &.{}, .{
+                .io = std.testing.io,
+                .output = &output,
+                .diagnostics = &diagnostics,
+                .process_policy = .{ .executables = .{ .exact = &.{process_path} } },
+                .net_policy = .{ .binds = .{ .exact = &.{.{ .address = "127.0.0.1", .port = 0 }} } },
+            }, .cooperative);
+            defer runtime.deinit();
+            // Join the process before injection: these probes cover the
+            // common driver and retained identities, with deterministic
+            // allocation ordinals independent of pipe-thread startup.
+            const setup = try std.fmt.allocPrint(scaffold, switch (backend) {
+                .process => "{{'executable \"{s}\" 'args (\"exit\" \"0\")}} proc.spawn 'p set p proc.wait pop",
+                .listener => "\"{s}\" pop {{'address \"127.0.0.1\" 'port 0}} net.listen 'p set",
+            }, .{process_path});
+            defer scaffold.free(setup);
+            try runOk(&runtime, "oom-resource-setup.ecl", setup);
+            try runOk(&runtime, "oom-port-load.ecl", "[] (0 port.close) @attempt pop");
+            const first_failure_index = failing.alloc_index;
+            if (failure_offset) |offset| failing.fail_index = first_failure_index + offset;
+            try runOk(&runtime, "oom-resource-close.ecl", "p " ++ closing ++ " p port.close");
+            return first_failure_index;
+        }
+    };
+}
+
+test "oom: standard-library and host: common resource process close" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, BuiltinResourceLifecycleProbe(.process, "port.close").run);
+}
+
+test "oom: standard-library and host: common resource process shutdown" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, BuiltinResourceLifecycleProbe(.process, "port.shutdown").run);
+}
+
+test "oom: standard-library and host: common resource listener close" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, BuiltinResourceLifecycleProbe(.listener, "port.close").run);
+}
+
+test "oom: standard-library and host: common resource listener shutdown" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, BuiltinResourceLifecycleProbe(.listener, "port.shutdown").run);
+}
+
 fn NativePortProbe(comptime source: []const u8, comptime setup: []const u8) type {
     return struct {
         fn run(failing: *std.testing.FailingAllocator, failure_offset: ?usize) !usize {

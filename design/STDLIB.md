@@ -2400,7 +2400,7 @@ remain usable in their receiving scope. Closed children remain opaque identities
 | `port.open` | `( factory config -- resource )` | Initialize a resource and publish it into the calling scope. Failure joins cleanup through that scope. |
 | `port.begin` | `( resource operation request -- exchange )` | Admit a registered operation on its declared FIFO lane, parking while admission capacity is full. |
 | `port.call` | `( resource operation request -- value )` | Begin, claim the result, and close the exchange. Requires no additional streaming input or output. |
-| `port.endpoint` | `( source selector -- endpoint )` | Borrow a direction-specific endpoint permitted by the exchange's operation. Currently supports native exchange byte and message endpoints. |
+| `port.endpoint` | `( source selector -- endpoint )` | Borrow a direction-specific endpoint supported by its resource or permitted by its exchange's operation. Currently supports native byte and message endpoints. |
 | `port.read` | `( readable max -- bytes )` | Read up to a positive maximum; `[]` denotes stable EOF. Overlapping readers raise `'contract`. |
 | `port.write` | `( writable bytes -- )` | Accept a complete byte list under bounded pressure. Concurrent calls execute FIFO and remain contiguous. |
 | `port.send` | `( sender message -- )` | Enqueue one complete structured message atomically, parking under pressure. Empty values are valid messages. |
@@ -2410,7 +2410,15 @@ remain usable in their receiving scope. Closed children remain opaque identities
 | `port.result` | `( exchange -- value )` | Wait and claim the terminal result once. A later successful-result claim raises `'contract`. |
 | `port.cancel` | `( exchange -- )` | Request cancellation idempotently. Completion remains observable and waits for controller return. |
 | `port.shutdown` | `( resource -- )` | Stop new admission, perform registered graceful shutdown, and join cleanup. Unsupported resources raise `'domain`. Repeated calls observe the same outcome. |
-| `port.close` | `( resource-or-exchange -- )` | Abort and join cleanup. Idempotent. Currently accepts native resources and exchanges. |
+| `port.close` | `( resource-or-exchange -- )` | Abort and join cleanup. Idempotent. Accepts native resources and exchanges, TCP listeners and connections, and process resources. |
+
+For TCP resources, `port.shutdown` closes a listener or delivers a connection's
+accepted writes before closing its socket. Accepted connections remain independent
+of their listener. `port.close` may discard queued connection bytes. Both words
+join socket cleanup. For a process, `port.shutdown` requests process-group
+termination with the host's escalation policy; `port.close` requests immediate
+process-group kill. Both join process cleanup, including blocked pipe transport.
+The stable termination remains observable through `proc.wait`.
 
 A cancelled exchange raises `'cancelled` from `port.await` and `port.result`.
 Observation does not consume the result. Native operations that produce only

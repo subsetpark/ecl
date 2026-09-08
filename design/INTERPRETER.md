@@ -1388,6 +1388,14 @@ validated resource kinds, fixed operation lanes, and endpoint permissions;
 registration rejects duplicate endpoint identities and undeclared permissions
 before publishing any binding.
 
+Resource lifecycle dispatch uses a closed, typed backend union
+(`port_resource.zig`). A borrowed lifecycle capability requires a retained port
+identity throughout its use. Native resources, TCP listeners and connections,
+and processes report joined cleanup through their owning controller state.
+Connection cleanup readiness is distinct from send-ring drainage: returning the
+last accepted byte to the kernel does not prove the socket controller has joined.
+Common close and shutdown drivers park on cleanup readiness for every backend.
+
 Registered byte endpoints use a shared bounded transport (`port_bytes.zig`).
 An exchange owns its pipes; each attenuated endpoint retains the exchange and
 exposes only its declared direction. A sealed descriptor index resolves endpoint

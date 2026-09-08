@@ -971,6 +971,7 @@ const readiness_read: u64 = 1;
 /// Waits for the send ring to empty, so `close` can promise that the bytes it
 /// was asked to deliver have actually left for the peer.
 const readiness_drain: u64 = 2;
+const readiness_join: u64 = 3;
 
 /// Why a connection can no longer carry bytes in a direction.
 pub const Failure = enum { closed, reset, io };
@@ -1232,6 +1233,16 @@ pub const ConnectionCell = struct {
         return external.readinessSource(ConnectionCell, self, readiness_drain);
     }
 
+    pub fn joined(self: *ConnectionCell) bool {
+        std.Io.Threaded.mutexLock(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        return self.lifecycle == .terminal;
+    }
+
+    pub fn joinSource(self: *ConnectionCell) external.ReadinessSource {
+        return external.readinessSource(ConnectionCell, self, readiness_join);
+    }
+
     pub fn beginWrite(self: *ConnectionCell) error{OutOfMemory}!*WritePermit {
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
@@ -1281,7 +1292,7 @@ pub const ConnectionCell = struct {
         Transfer.abort(self);
     }
 
-    fn abort(self: *ConnectionCell) void {
+    pub fn abort(self: *ConnectionCell) void {
         self.requestStop(.abort, null);
     }
 
@@ -1347,6 +1358,7 @@ pub const ConnectionCell = struct {
         if (key == readiness_read)
             return self.receive.len != 0 or self.peer_eof or self.failureLocked() != null;
         if (key == readiness_drain) return self.drainedLocked();
+        if (key == readiness_join) return self.lifecycle == .terminal;
         const node: *const WritePermit = @ptrFromInt(key);
         return !node.linked() or (node.active() and self.send.free() != 0) or self.failureLocked() != null;
     }

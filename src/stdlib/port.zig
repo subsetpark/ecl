@@ -13,6 +13,7 @@ const transfer = @import("../port_transfer.zig");
 const messages = @import("../port_messages.zig");
 const dict = @import("../dict.zig");
 const intern = @import("../intern.zig");
+const Resource = @import("../port_resource.zig").Resource;
 
 pub const words = [_]env.BuiltinWord{
     .{ .name = "open", .doc = "( factory config -- resource ) Initialize a registered resource in the calling scope.", .primitive = open },
@@ -365,8 +366,7 @@ fn cancel(evaluator: *machine.Machine) machine.MachineError!void {
 fn shutdown(evaluator: *machine.Machine) machine.MachineError!void {
     var item = try evaluator.popValue();
     errdefer item.deinit();
-    if (item.borrow() != .port) return evaluator.typeError("a resource");
-    const resource = heap.portPayload(native.Cell, .resource, item.borrow().port) orelse return evaluator.typeError("a resource");
+    const resource = Resource.fromValue(item.borrow()) orelse return evaluator.typeError("a resource");
     try evaluator.startDriver(Observe{ .owner = .init(item.take()), .target = .{ .resource = resource }, .mode = .shutdown });
 }
 
@@ -375,10 +375,10 @@ fn close(evaluator: *machine.Machine) machine.MachineError!void {
     errdefer item.deinit();
     const target: Target = if (native.exchangeFromValue(item.borrow())) |exchange|
         .{ .exchange = exchange }
-    else if (item.borrow() == .port) resource: {
-        const resource = heap.portPayload(native.Cell, .resource, item.borrow().port) orelse return evaluator.typeError("a resource or exchange");
-        break :resource .{ .resource = resource };
-    } else return evaluator.typeError("a resource or exchange");
+    else if (Resource.fromValue(item.borrow())) |resource|
+        .{ .resource = resource }
+    else
+        return evaluator.typeError("a resource or exchange");
     try evaluator.startDriver(Observe{
         .owner = .init(item.take()),
         .target = target,
@@ -405,7 +405,7 @@ fn observe(evaluator: *machine.Machine, mode: Observe.Mode) machine.MachineError
     });
 }
 
-const Target = union(enum) { resource: *native.Cell, exchange: *native.Operation };
+const Target = union(enum) { resource: Resource, exchange: *native.Operation };
 const Observe = struct {
     const Mode = enum { observe, close, shutdown, claim };
     pub const ownership: heap.DriverOwnership = .fields;
@@ -428,7 +428,7 @@ const Observe = struct {
                     resource.close();
                     if (resource.joined()) return .completed;
                 }
-                try evaluator.park(.{ .external = resource.source(1) });
+                try evaluator.park(.{ .external = resource.source() });
             },
             .exchange => |exchange| {
                 if (self.mode == .close) {
