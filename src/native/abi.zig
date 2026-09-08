@@ -133,6 +133,7 @@ pub const ControllerTable = extern struct {
     cancelled: *const fn (*anyopaque) callconv(.c) bool,
     acknowledge_cancellation: *const fn (*anyopaque) callconv(.c) bool,
     fail: *const fn (*anyopaque, ErrorKindWire, [*]const u8, u32) callconv(.c) void,
+    fail_resource: *const fn (*anyopaque, ErrorKindWire, [*]const u8, u32) callconv(.c) void,
 };
 pub const PortControllerFn = *const fn (*anyopaque, *const ControllerTable, *anyopaque) callconv(.c) void;
 pub const PortOperationFn = *const fn (*anyopaque, u32, *const ControllerTable, *anyopaque) callconv(.c) void;
@@ -446,7 +447,7 @@ comptime {
     assertRecord(PortRequest, 48, 8);
     assertRecord(PortReply, 24, 8);
     assertRecord(MessageBuildRequest, 72, 8);
-    assertRecord(ControllerTable, 136, 8);
+    assertRecord(ControllerTable, 144, 8);
     assertRecord(EntryResult, 32, 8);
 
     if (@offsetOf(Definition, "callback_index") != 4 or

@@ -1437,6 +1437,78 @@ test "native: bidirectional RPC interleaves notifications and correlates out of 
         "b wrap ([] port.send) @attempt 'err at 'kind at p port.close portprobe.cleaned", "7 [2 20] [1 10] 'eof 42 'io 1");
 }
 
+test "native: multiplexed channels preserve boundaries and independent progress under pressure" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .message_capacity = 1 }, "portprobe.multiplex [] port.open 'p set " ++
+        "p portprobe.channel 1 port.call 'a set p portprobe.channel 2 port.call 'b set " ++
+        "a portprobe.channel-stream [] port.begin 'x set x portprobe.channel-input port.endpoint 'xi set " ++
+        "xi [] port.send xi [1] port.send 2 portprobe.await-blocked " ++
+        "b portprobe.channel-stream [] port.begin 'y set y portprobe.channel-input port.endpoint [] port.send " ++
+        "y portprobe.channel-output port.endpoint port.receive 'value at dup 'channel at swap 'payload at len " ++
+        "y portprobe.channel-input port.endpoint port.finish y port.await y port.close " ++
+        "x port.cancel x wrap (port.await) @attempt 'err at 'kind at x port.close " ++
+        "a portprobe.channel-stream [] port.begin 'z set z portprobe.channel-input port.endpoint [3] port.send " ++
+        "z portprobe.channel-output port.endpoint port.receive 'value at 'payload at " ++
+        "z portprobe.channel-input port.endpoint port.finish z port.await z port.close p port.close portprobe.cleaned", "2 0 'cancelled [3] 3");
+}
+
+test "native: connection failure interrupts child channels and preserves its accepted diagnostic" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .message_capacity = 1 }, "portprobe.multiplex [] port.open 'p set " ++
+        "p portprobe.channel 1 port.call 'a set p portprobe.channel 2 port.call 'b set " ++
+        "a portprobe.channel-stream [] port.begin 'x set x portprobe.channel-input port.endpoint 'xi set " ++
+        "xi [] port.send xi [1] port.send 2 portprobe.await-blocked b portprobe.channel-stream [] port.begin 'y set " ++
+        "p portprobe.disconnect [] port.begin 'f set f wrap (port.await) @attempt 'err at 'kind at " ++
+        "p wrap (portprobe.channel-count [] port.call) @attempt 'err at 'kind at " ++
+        "x wrap (port.await) @attempt 'err at 'kind at y wrap (port.await) @attempt 'err at 'kind at p port.close " ++
+        "f portprobe.disconnect-event port.endpoint 'events set events port.receive 'value at " ++
+        "events wrap (port.receive) @attempt 'err at 'kind at f wrap (port.await) @attempt 'err at 'kind at " ++
+        "a wrap (portprobe.channel-stream [] port.begin) @attempt 'err at 'kind at " ++
+        "f port.close x port.close y port.close portprobe.cleaned", "'io 'io 'cancelled 'cancelled 9 'io 'io 'io 3");
+}
+
+test "native: resource failure preserves allocation exhaustion and retirement in either report order" {
+    for ([_]u32{ 1, 8 }) |workers| {
+        var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer output.deinit();
+        var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer diagnostics.deinit();
+        var runtime = try session.Session.initWithHostConfig(std.testing.allocator, &.{}, .{
+            .io = std.testing.io,
+            .output = &output.writer,
+            .diagnostics = &diagnostics.writer,
+            .ecl_path = native_fixture.directory,
+        }, .{ .worker_pool = workers });
+        defer runtime.deinit();
+        for ([_][]const u8{ "0", "1" }) |order| for ([_][]const u8{ "port.await", "port.result" }) |observe| {
+            try expectOk(&runtime, "portprobe.reset portprobe.multiplex [] port.open 'p set");
+            const source = try std.fmt.allocPrint(std.testing.allocator, "p portprobe.fatal-allocation-failure {s} port.begin {s}", .{ order, observe });
+            defer std.testing.allocator.free(source);
+            try std.testing.expectError(error.OutOfMemory, runtime.runUnit("native-resource-oom.ecl", source));
+            try expectErrorContains(&runtime, "p portprobe.channel-count [] port.begin", &.{"'kind 'io"});
+            try expectOk(&runtime, "p port.close portprobe.cleaned");
+            var display = try runtime.stackDisplay();
+            defer display.deinit();
+            try std.testing.expectEqualStrings("1", display.bytes());
+            try expectOk(&runtime, "pop");
+        };
+    }
+}
+
+test "native: connection failure reaches transferred channel owners" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .message_capacity = 1 }, "portprobe.multiplex [] port.open 'p set " ++
+        "p portprobe.channel 1 port.call 'a set a wrap [] (portprobe.channel-stream [] port.begin 'x set " ++
+        "x portprobe.channel-input port.endpoint 'input set input [] port.send input [1] port.send x port.await) @give 'task set " ++
+        "2 portprobe.await-blocked p portprobe.disconnect [] port.begin 'f set f wrap (port.await) @attempt 'err at 'kind at " ++
+        "task task.await 'err at 'kind at p port.close f port.close a type portprobe.cleaned", "'io 'cancelled 'port 2");
+}
+
+test "native: discarded channel results and scope exit join their dependent controllers" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .message_capacity = 1 }, "[] (portprobe.multiplex [] port.open 'p set " ++
+        "p portprobe.channel 1 port.begin 'discarded set discarded port.await discarded port.close " ++
+        "p portprobe.channel-count [] port.call p portprobe.channel 2 port.call 'a set " ++
+        "a portprobe.channel-stream [] port.begin 'x set x portprobe.channel-input port.endpoint 'input set " ++
+        "input [] port.send input [1] port.send 2 portprobe.await-blocked) @spawn task.await 'ok at first portprobe.cleaned", "0 3");
+}
+
 test "native: opaque buffers defer native work until their independent control lane completes it" {
     for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "portprobe.device [] port.open 'd set d portprobe.buffer 3 port.call 'b set " ++
         "b portprobe.compute [] port.begin 'x set 1 portprobe.await-blocked d portprobe.device-status [] port.call " ++

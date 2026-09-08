@@ -991,13 +991,94 @@ const BufferSpec = struct {
 };
 const Buffer = ecl.Port(BufferSpec);
 
+const MultiplexSpec = struct {
+    pub const name = "multiplex";
+    pub const State = struct { channels: std.atomic.Value(u32) = .init(0) };
+    pub fn init() State {
+        return .{};
+    }
+    pub fn open(_: *State, _: *ecl.Controller) void {}
+    pub fn run(state: *State, code: u32, controller: *ecl.Controller) void {
+        const builder = controller.builder();
+        switch (code) {
+            0 => {
+                _ = builder.input(&.{}) and builder.child(Channel, .dependent) and builder.result();
+            },
+            1 => {
+                if (!builder.int(9) or !builder.send(0)) return;
+                controller.failResource(.io, "multiplexed connection disconnected");
+            },
+            2 => {
+                _ = builder.int(state.channels.load(.acquire)) and builder.result();
+            },
+            3 => {
+                const order = (controller.input(&.{}) orelse return).int() orelse 0;
+                if (order == 0) controller.failResource(.io, "device is unusable");
+                controller.failOutOfMemory();
+                controller.failResource(.io, "device is unusable");
+            },
+            else => controller.fail(.domain, "unknown multiplexed operation"),
+        }
+    }
+    pub fn cancel(_: *State) void {}
+    pub fn deinit(state: *State) void {
+        if (state.channels.load(.acquire) != 0) @panic("connection destruction preceded channel cleanup");
+        _ = cleaned.fetchAdd(1, .release);
+    }
+};
+const Multiplex = ecl.Port(MultiplexSpec);
+const Channel = ecl.Port(struct {
+    pub const name = "channel";
+    pub const Lane = enum(u32) { operation };
+    pub fn lane(_: u32) Lane {
+        return .operation;
+    }
+    pub const cancellation: ecl.PortCancellation = .acknowledge;
+    pub const State = struct { parent: ?*Multiplex.StateType = null, id: i64 = 0 };
+    pub fn init() State {
+        return .{};
+    }
+    pub fn open(state: *State, controller: *ecl.Controller) void {
+        const parent = controller.parent(Multiplex) orelse return controller.fail(.domain, "channel requires a connection parent");
+        const id = (controller.input(&.{}) orelse return).int() orelse return controller.fail(.type, "expected channel id");
+        state.* = .{ .parent = parent, .id = id };
+        _ = parent.channels.fetchAdd(1, .release);
+    }
+    pub fn run(state: *State, _: u32, controller: *ecl.Controller) void {
+        defer if (controller.cancelled()) {
+            _ = controller.acknowledgeCancellation();
+        };
+        const builder = controller.builder();
+        while (controller.receiveMessage(0)) {
+            _ = entered.fetchAdd(1, .release);
+            if (!builder.symbol("channel") or !builder.int(state.id) or !builder.symbol("payload") or
+                !builder.received(&.{}) or !controller.discardMessage() or !builder.dictionary(2) or !builder.send(1)) return;
+        }
+    }
+    pub fn cancelOperation(_: *State, _: Lane) void {}
+    pub fn cancel(_: *State) void {}
+    pub fn deinit(state: *State) void {
+        if (state.parent) |parent| _ = parent.channels.fetchSub(1, .release);
+        _ = cleaned.fetchAdd(1, .release);
+    }
+});
+
 pub const Extension = extension: {
     @setEvalBranchQuota(20_000);
     break :extension ecl.module(.{
         .name = @import("port_fixture_options").module_name,
         .doc = "Hermetic native port controller fixture.",
-        .ports = .{ Counter, Other, Duplex, Unacknowledged, Storage, Cursor, TransactionPort, Broker, Delivery, Device, Buffer },
+        .ports = .{ Counter, Other, Duplex, Unacknowledged, Storage, Cursor, TransactionPort, Broker, Delivery, Device, Buffer, Multiplex, Channel },
         .words = .{
+            ecl.factory("multiplex", "Open a deterministic multiplexed connection.", Multiplex),
+            ecl.operation("channel", "Open a dependent channel with an opaque identity.", Multiplex, 0, .operation, 0),
+            ecl.operation("disconnect", "Fail the connection after emitting its final diagnostic.", Multiplex, 1, .operation, 1),
+            ecl.operation("channel-count", "Observe live dependent channels.", Multiplex, 2, .operation, 0),
+            ecl.operation("fatal-allocation-failure", "Preserve allocation exhaustion while retiring the resource.", Multiplex, 3, .operation, 0),
+            ecl.endpoint("disconnect-event", "Receive the final connection diagnostic.", Multiplex, .{ .id = 0, .transport = .messages, .direction = .output }),
+            ecl.operation("channel-stream", "Stream complete channel messages until finish or cancellation.", Channel, 0, .operation, 3),
+            ecl.endpoint("channel-input", "Send a complete message on one channel.", Channel, .{ .id = 0, .transport = .messages, .direction = .input }),
+            ecl.endpoint("channel-output", "Receive complete messages tagged with their channel.", Channel, .{ .id = 1, .transport = .messages, .direction = .output }),
             ecl.factory("device", "Open a deterministic native compute device.", Device),
             ecl.operation("buffer", "Create an opaque dependent eight-byte buffer.", Device, 0, .operation, 0),
             ecl.operation("device-status", "Observe live buffers and backend work.", Device, 1, .operation, 0),

@@ -119,6 +119,12 @@ Their words can forward opaque ports through aggregates, stream operations,
 and explicitly close them. Operations execute in FIFO order within a declared
 lane. A port defaults to one lane; multiple lanes and different ports can
 progress independently. An ordinary operation error leaves the port usable.
+`Controller.failResource` reports a terminal error that also makes the resource
+unusable after the controller returns. Accepted output on that exchange remains
+readable before its error; other operations and dependent children are
+interrupted. `port.close` joins the resulting cleanup. Native backend workers
+must be joined before their controller returns, including when it reports a
+resource failure.
 Cancelling queued work removes only that operation. Active cancellation closes
 the resource by default. A kind may instead support recovery: its interrupted
 controller must acknowledge reusable state and finish before the lane executes

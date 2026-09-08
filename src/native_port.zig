@@ -839,6 +839,10 @@ pub const ResourcePublication = opaque {
 };
 
 pub const Operation = struct {
+    const ControllerFailure = struct {
+        value: Failure,
+        disposition: enum { operation, resource },
+    };
     allocator: std.mem.Allocator,
     cell: *Cell,
     code: u32,
@@ -848,7 +852,7 @@ pub const Operation = struct {
     changed: std.Io.Condition = .init,
     waits: external.WaitList(Operation) = .{},
     protocol: Protocol,
-    failure: ?Failure = null,
+    failure: ?ControllerFailure = null,
     // Transport borrows this monotonic interrupt latch while the controller
     // runs. The ticket remains the authority for terminal cancellation state.
     transport_cancelled: std.atomic.Value(bool) = .init(false),
@@ -886,7 +890,7 @@ pub const Operation = struct {
         self.cell.definition.execute.?(self.cell.backend.ptr, self.code, &controller_table, &ctx);
     }
     fn completeResourceLocked(self: *Operation, outcome: controllers.Completion) void {
-        if (outcome == .close_resource) self.cell.closeLocked();
+        if (outcome == .close_resource or (self.failure != null and self.failure.?.disposition == .resource)) self.cell.closeLocked();
         self.cell.waits.notifyLocked(self.cell);
     }
     fn cancelPolicy(self: *Operation) controllers.CallbackCancellation {
@@ -947,7 +951,7 @@ pub const Operation = struct {
             .done, .cancelled => true,
             .preparing, .queued, .active, .cancelling, .reusable => false,
         };
-        const aborting = terminal and (self.lifetime != .open or self.cell.closed.load(.acquire));
+        const aborting = terminal and self.lifetime != .open;
         const children = if (aborting) self.children else null;
         if (aborting) {
             self.lifetime = .closing;
@@ -1087,7 +1091,7 @@ pub const Operation = struct {
                 } else if (endpoint.direction == .input) {
                     pair.fail(byte_transport.Failure.init(.io, "exchange input consumer completed"), true);
                 } else if (self.failure) |failure| {
-                    pair.fail(switch (failure) {
+                    pair.fail(switch (failure.value) {
                         .out_of_memory => .out_of_memory,
                         .report => |report| byte_transport.Failure.init(descriptor.mapErrorKind(report.kind) orelse .io, report.message[0..report.len]),
                     }, false);
@@ -1099,6 +1103,10 @@ pub const Operation = struct {
     }
     fn markCancelled(self: *Operation) void {
         lock(&self.mutex);
+        // The resource's lane list contains only outstanding exchanges.
+        // Abort their ownership explicitly; a completed exchange has its own
+        // scope lifetime and must not infer abortion from resource closure.
+        if (self.lifetime == .open) self.lifetime = .closing;
         self.ticket.requestCancellation();
         self.notifyLocked();
         unlock(&self.mutex);
@@ -1111,7 +1119,7 @@ pub const Operation = struct {
         defer unlock(&self.mutex);
         return switch (self.ticket.status()) {
             .preparing, .queued, .active => .pending,
-            .done => if (self.failure) |failure| .{ .failed = failure } else .ready,
+            .done => if (self.failure) |failure| .{ .failed = failure.value } else .ready,
             .cancelling, .reusable, .cancelled => .{ .failed = Failure.init(.io, "native port operation was cancelled") },
         };
     }
@@ -1120,7 +1128,7 @@ pub const Operation = struct {
         defer unlock(&self.mutex);
         return switch (self.ticket.status()) {
             .preparing, .queued, .active, .cancelling, .reusable => .pending,
-            .done => if (self.failure) |failure| .{ .failed = failure } else .ready,
+            .done => if (self.failure) |failure| .{ .failed = failure.value } else .ready,
             .cancelled => .cancelled,
         };
     }
@@ -1163,7 +1171,7 @@ pub const Operation = struct {
                 },
                 .done => {},
             }
-            self.result = if (op.failure) |failure| .{ .failed = failure } else switch (op.terminal_result) {
+            self.result = if (op.failure) |failure| .{ .failed = failure.value } else switch (op.terminal_result) {
                 .claimed => .claimed,
                 .discarded => .{ .failed = Failure.init(.io, "exchange result was discarded by close") },
                 .available => |item| available: {
@@ -1706,22 +1714,28 @@ fn boundedErrorMessage(message: []const u8) []const u8 {
     return message[0..end];
 }
 fn controllerFail(raw: *anyopaque, kind: abi.ErrorKindWire, bytes: [*]const u8, length: u32) callconv(.c) void {
+    recordControllerFailure(context(raw), reportedFailure(kind, bytes[0..length]));
+}
+fn controllerFailResource(raw: *anyopaque, kind: abi.ErrorKindWire, bytes: [*]const u8, length: u32) callconv(.c) void {
     const ctx = context(raw);
+    const failure = reportedFailure(kind, bytes[0..length]);
+    if (ctx.operation()) |op| {
+        recordOperationFailure(op, .{ .value = failure, .disposition = .resource });
+    } else recordControllerFailure(ctx, failure);
+}
+fn reportedFailure(kind: abi.ErrorKindWire, bytes: []const u8) Failure {
     const valid_kind: abi.ErrorKindWire = switch (kind) {
         .type, .shape, .conform, .overflow, .domain, .parse, .io, .user, .contract => kind,
         _ => .io,
     };
-    const failure = Failure.init(valid_kind, boundedErrorMessage(bytes[0..length]));
-    recordControllerFailure(ctx, failure);
+    return Failure.init(valid_kind, boundedErrorMessage(bytes));
 }
 fn controllerFailAllocation(raw: *anyopaque) callconv(.c) void {
     recordControllerFailure(context(raw), .out_of_memory);
 }
 fn recordControllerFailure(ctx: *ControllerContext, failure: Failure) void {
     if (ctx.operation()) |op| {
-        lock(&op.mutex);
-        storeControllerFailure(&op.failure, failure);
-        unlock(&op.mutex);
+        recordOperationFailure(op, .{ .value = failure, .disposition = .operation });
     } else switch (ctx.invocation) {
         .initialize => {
             lock(&ctx.cell.mutex);
@@ -1732,13 +1746,21 @@ fn recordControllerFailure(ctx: *ControllerContext, failure: Failure) void {
         .operation => unreachable,
     }
 }
+fn recordOperationFailure(op: *Operation, failure: Operation.ControllerFailure) void {
+    lock(&op.mutex);
+    defer unlock(&op.mutex);
+    if (op.failure) |*prior| {
+        if (failure.value == .out_of_memory) prior.value = failure.value;
+        if (failure.disposition == .resource) prior.disposition = .resource;
+    } else op.failure = failure;
+}
 fn storeControllerFailure(destination: *?Failure, failure: Failure) void {
     // Preserve the originating failure during controller unwind. Allocation
     // exhaustion takes precedence and cannot be masked by a later report.
     if (destination.* != null and failure != .out_of_memory) return;
     destination.* = failure;
 }
-const controller_table: abi.ControllerTable = .{ .parent_state = controllerParent, .discard_message = controllerDiscardMessage, .build_message = controllerBuildMessage, .fail_allocation = controllerFailAllocation, .receive_message = controllerReceiveMessage, .received_message = controllerReceivedMessage, .forward_message = controllerForwardMessage, .result_message = controllerResultMessage, .input = controllerInput, .read_endpoint = controllerReadEndpoint, .write_endpoint = controllerWriteEndpoint, .finish_endpoint = controllerFinishEndpoint, .read = controllerRead, .write = controllerWrite, .cancelled = controllerCancelled, .acknowledge_cancellation = controllerAcknowledge, .fail = controllerFail };
+const controller_table: abi.ControllerTable = .{ .fail_resource = controllerFailResource, .parent_state = controllerParent, .discard_message = controllerDiscardMessage, .build_message = controllerBuildMessage, .fail_allocation = controllerFailAllocation, .receive_message = controllerReceiveMessage, .received_message = controllerReceivedMessage, .forward_message = controllerForwardMessage, .result_message = controllerResultMessage, .input = controllerInput, .read_endpoint = controllerReadEndpoint, .write_endpoint = controllerWriteEndpoint, .finish_endpoint = controllerFinishEndpoint, .read = controllerRead, .write = controllerWrite, .cancelled = controllerCancelled, .acknowledge_cancellation = controllerAcknowledge, .fail = controllerFail };
 
 pub fn fromValue(value: Value, instance: *native.ModuleInstance, kind: u32) ?*Cell {
     const handle = switch (value) {

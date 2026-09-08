@@ -239,6 +239,16 @@ pub const Controller = opaque {
         const bounded = capability.boundedErrorMessage(message);
         self.state().table.fail(self.state().context, kind, bounded.ptr, @intCast(bounded.len));
     }
+    /// Fail this invocation and retire its resource after controller return.
+    /// The failed exchange retains its accepted output and terminal error;
+    /// outstanding operations and dependent children are then interrupted.
+    /// Native backend work must still be joined before returning. This does
+    /// not synchronously join the resource from its own controller.
+    pub fn failResource(self: *Controller, kind: capability.ErrorKind, message: []const u8) void {
+        const bounded = capability.boundedErrorMessage(message);
+        const owned = self.state();
+        owned.table.fail_resource(owned.context, kind, bounded.ptr, @intCast(bounded.len));
+    }
 };
 
 pub const Adapter = struct { invocation: *capability.Invocation, definition: u32 };

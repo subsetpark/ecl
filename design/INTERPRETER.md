@@ -1521,6 +1521,17 @@ validation rejects missing or duplicate tokens. Detaching consumes the attachmen
 after child cleanup and controller join; consequently even a child's destruction
 callback may use the borrowed native parent state. Independent resources carry
 no parent-state authority, and scope transfer preserves the attachment.
+Controller failures carry both a terminal cause and an operation or resource
+disposition. A resource failure retires its failing exchange before closing
+the resource and interrupting dependent children. This preserves the exchange's
+accepted output and repeatable terminal observation while preventing subsequent
+admission. Cleanup remains asynchronous to the reporting controller and joins
+all dependent work before backend destruction.
+Exchange retirement follows its own ownership state. Resource closure marks
+only outstanding lane members for abort; it cannot retroactively discard a
+completed exchange's result or buffered output. Terminal observation, result
+claiming, and explicit exchange cleanup therefore remain independent of the
+issuing resource's cleanup timing.
 Closed group metadata keeps its allocation authority independently of the
 scheduler facade: a final controller-retirement pin may outlive task-scope
 quiescence, but cannot require scheduler access for destruction.
