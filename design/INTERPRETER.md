@@ -1637,9 +1637,12 @@ remain independent of this execution lifetime. A listener's dormant socket
 needs no controller; its active acceptor joins before terminal detachment.
 
 An ordered controller lane binds its resource lock and owns admission,
-dispatch, and queue retirement. Admission allocates and initializes a node
-before publishing any capability and pins the operation or resource until
-retirement. There is no externally held unadmitted ticket and no independent
+dispatch, and queue retirement. Opaque prepared storage is allocated outside
+the resource lock for both operations and writers. Admission under that lock
+validates capacity, initializes and links the node without allocation, and pins
+the operation or resource until retirement. Rejected admission retains the
+prepared storage for reuse or destruction after unlocking. There is no
+externally held unadmitted ticket and no independent
 lane argument on cancellation or completion. An operation payload and its ticket share one allocation and reference count.
 Queue and observer ownership independently keep that allocation alive; only
 their final release destroys the payload and ticket. A writer allocation pins

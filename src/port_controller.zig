@@ -581,20 +581,6 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
         pub fn hasCapacity(self: *const Self, limit: usize) bool {
             return self.count < limit;
         }
-        fn allocate(self: *Self, allocator: std.mem.Allocator, limit: usize) error{OutOfMemory}!?*Node {
-            if (!self.hasCapacity(limit)) return null;
-            const node = try allocator.create(Node);
-            node.allocator = allocator;
-            node.lane = self;
-            node.refs = .init(2);
-            node.previous = self.last;
-            node.next = null;
-            node.phase = if (self.first == null) .active else .queued;
-            node.execution = if (owns_cell) .preparing else .queued;
-            node.executing = false;
-            // The owning payload is initialized by the factory before append.
-            return node;
-        }
         fn append(self: *Self, node: *Node) void {
             if (self.last) |last| last.next = node else self.first = node;
             self.last = node;
@@ -614,6 +600,7 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
             /// candidate; capacity rejection retains it without initializing
             /// or consuming args. Initialization cannot allocate or fail.
             pub fn admit(self: *Prepared, limit: usize, args: anytype, comptime initialize: anytype) ?*Ticket {
+                if (!owns_cell) @compileError("stream lanes admit writer permits");
                 const node = self.entry();
                 const lane = node.lane;
                 if (!lane.hasCapacity(limit)) return null;
@@ -628,20 +615,30 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
                 lane.append(node);
                 return ticket;
             }
+            /// Requires the issuing resource lock. Success consumes the
+            /// candidate and retains the resource; rejection retains the
+            /// candidate and borrows the resource. Neither outcome allocates.
+            pub fn admitWriter(self: *Prepared, cell: *Cell, limit: usize) ?*Writer {
+                if (owns_cell) @compileError("callback lanes admit operation observers");
+                const node = self.entry();
+                const lane = node.lane;
+                if (!lane.hasCapacity(limit)) return null;
+                node.refs = .init(2);
+                node.previous = lane.last;
+                node.next = null;
+                node.phase = if (lane.first == null) .active else .queued;
+                node.execution = .queued;
+                node.executing = false;
+                node.cell = cell;
+                callbacks.retain(cell);
+                lane.append(node);
+                return @ptrCast(node);
+            }
         };
         pub fn prepare(self: *Self, allocator: std.mem.Allocator) error{OutOfMemory}!*Prepared {
-            if (!owns_cell) @compileError("stream lanes admit writer permits");
             const node = try allocator.create(Node);
             node.allocator = allocator;
             node.lane = self;
-            return @ptrCast(node);
-        }
-        pub fn admitWriter(self: *Self, allocator: std.mem.Allocator, cell: *Cell, limit: usize) error{OutOfMemory}!?*Writer {
-            if (owns_cell) @compileError("callback lanes admit operation observers");
-            const node = try self.allocate(allocator, limit) orelse return null;
-            node.cell = cell;
-            callbacks.retain(cell);
-            self.append(node);
             return @ptrCast(node);
         }
         /// One lane executor owns dispatch. The runtime establishes both locks,
@@ -756,16 +753,22 @@ test "native: shared lane owns admission and writer retirement" {
     defer for (owned) |entry| {
         if (entry) |writer| writer.cancel();
     };
-    owned[0] = try lane.admitWriter(std.testing.allocator, &probe, 2);
-    owned[1] = try lane.admitWriter(std.testing.allocator, &probe, 2);
-    try std.testing.expect((try lane.admitWriter(std.testing.allocator, &probe, 2)) == null);
+    const first_prepared = try lane.prepare(std.testing.allocator);
+    owned[0] = first_prepared.admitWriter(&probe, 2);
+    const second_prepared = try lane.prepare(std.testing.allocator);
+    owned[1] = second_prepared.admitWriter(&probe, 2);
+    var pending: ?*Queue.Prepared = try lane.prepare(std.testing.allocator);
+    defer if (pending) |prepared| prepared.discard();
+    try std.testing.expect(pending.?.admitWriter(&probe, 2) == null);
+    try std.testing.expectEqual(@as(usize, 2), probe.pins);
     const first = owned[0].?;
     const second = owned[1].?;
     try std.testing.expectEqual(@as(?usize, 2), first.write("ab"));
     try std.testing.expect(second.write("x") == null);
     owned[1] = null;
     second.cancel();
-    owned[2] = try lane.admitWriter(std.testing.allocator, &probe, 2);
+    owned[2] = pending.?.admitWriter(&probe, 2);
+    pending = null;
     const third = owned[2].?;
     try std.testing.expect(!third.active());
     owned[0] = null;

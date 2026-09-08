@@ -742,10 +742,12 @@ pub const ProcessCell = struct {
     }
 
     pub fn beginWrite(self: *ProcessCell) error{ OutOfMemory, Closed }!*WritePermit {
+        const prepared = try self.writers.prepare(self.allocator);
+        errdefer prepared.discard();
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
         if (self.input != .open or self.io_failed) return error.Closed;
-        return (try self.writers.admitWriter(self.allocator, self, std.math.maxInt(usize))).?;
+        return prepared.admitWriter(self, std.math.maxInt(usize)).?;
     }
     fn writeTurnLocked(self: *ProcessCell, turn: bool, bytes: []const u8) WriteProgress {
         if (self.input != .open or self.io_failed) return .io;

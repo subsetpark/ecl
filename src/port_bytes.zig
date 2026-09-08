@@ -116,10 +116,12 @@ pub const Pipe = opaque {
     }
     pub fn beginWrite(self: *Pipe) error{ OutOfMemory, Finished }!*WritePermit {
         const owned = self.state();
+        const prepared = try owned.writers.prepare(owned.host.allocator());
+        errdefer prepared.discard();
         std.Io.Threaded.mutexLock(&owned.mutex);
         defer std.Io.Threaded.mutexUnlock(&owned.mutex);
         if (owned.phase != .open) return error.Finished;
-        return (try owned.writers.admitWriter(owned.host.allocator(), owned, std.math.maxInt(usize))).?;
+        return prepared.admitWriter(owned, std.math.maxInt(usize)).?;
     }
     pub fn finish(self: *Pipe) void {
         const owned = self.state();

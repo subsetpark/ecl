@@ -1249,9 +1249,10 @@ pub const ConnectionCell = struct {
     }
 
     pub fn beginWrite(self: *ConnectionCell) error{OutOfMemory}!*WritePermit {
+        const prepared = try self.writers.prepare(self.allocator);
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        return (try self.writers.admitWriter(self.allocator, self, std.math.maxInt(usize))).?;
+        return prepared.admitWriter(self, std.math.maxInt(usize)).?;
     }
     fn writeTurnLocked(self: *ConnectionCell, turn: bool, bytes: []const u8) WriteProgress {
         if (self.failureLocked()) |failure| return .{ .failed = failure };
