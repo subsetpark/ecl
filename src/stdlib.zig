@@ -20,7 +20,6 @@ const pkg_store_module = @import("stdlib/pkg_store.zig");
 const io_module = @import("stdlib/io.zig");
 const dict_module = @import("stdlib/dict.zig");
 const rand_module = @import("stdlib/rand.zig");
-const proc_module = @import("stdlib/proc.zig");
 const fs_module = @import("stdlib/fs.zig");
 const net_module = @import("stdlib/net.zig");
 const clock_module = @import("stdlib/clock.zig");
@@ -96,7 +95,10 @@ const modules = [_]Module{
         .name = "<stdlib:http.response>",
         .text = @embedFile("stdlib/http/response.ecl"),
     } } },
-    .{ .name = "proc", .entry = .{ .builtin = &proc_module.words } },
+    .{ .name = "proc", .entry = .{ .source = .{
+        .name = "<stdlib:proc>",
+        .text = @embedFile("stdlib/proc.ecl"),
+    } } },
     .{ .name = "proc.core", .entry = .{ .bindings = @import("process_adapter.zig").registration } },
     .{ .name = "fs", .entry = .{ .builtin = &fs_module.words } },
     .{ .name = "net", .entry = .{ .builtin = &net_module.words } },

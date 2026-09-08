@@ -286,7 +286,7 @@ widen the grant.
 
 Time zones, locale-sensitive formatting, leap-second tables, timers that run
 callbacks, and periodic scheduling are outside this contract. Process
-deadlines (`'timeout-ms`) continue to run on a per-process host timer.
+deadlines (`'timeout-ms`) use the same scheduler clock through `task.await-for`.
 
 ## Host-backed data contracts
 

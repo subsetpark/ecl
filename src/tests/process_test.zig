@@ -90,14 +90,14 @@ test "process: authority is explicit and policy validation precedes spawn" {
         .name = "missing process authority",
         .source = program,
         .kind = "domain",
-        .word = "proc.spawn",
+        .word = "port.core.open",
         .message_contains = "unavailable",
     });
     try expectError(program, .{ .executables = .{ .exact = &.{"/definitely/not/the/fixture"} } }, .{
         .name = "denied executable",
         .source = program,
         .kind = "domain",
-        .word = "proc.spawn",
+        .word = "port.core.open",
         .message_contains = "denied",
     });
 }
@@ -179,16 +179,16 @@ test "process: common factories transfer owners and clean resources returned by 
     defer allocator.free(fixture_path);
     const program = try source(
         "proc.core.process {{'executable \"{s}\" 'args (\"block\")}} port.open 'p set " ++
-            "p wrap [] (port.close) @give task.await 'ok at len p proc.wait 'kind at " ++
+            "p wrap [] (port.close) @give task.await 'ok at len [] (p proc.wait) @attempt 'err at 'kind at " ++
             "[] (proc.core.process {{'executable \"{s}\" 'args (\"block\")}} port.open) @spawn " ++
-            "task.await 'ok at first dup type swap proc.wait 'kind at",
+            "task.await 'ok at first dup type swap wrap (proc.wait) @attempt 'err at 'kind at",
         .{ fixture_path, fixture_path },
     );
     defer allocator.free(program);
     for ([_]u32{ 1, 8 }) |workers| try expectStackWithWorkers(program, .{
         .executables = .{ .exact = &.{fixture_path} },
         .max_live_ports = 1,
-    }, "0 'signaled 'port 'signaled", workers);
+    }, "0 'io 'port 'io", workers);
 }
 
 test "process: common endpoints stream concurrently through one-byte buffers" {
@@ -212,7 +212,7 @@ test "process: common endpoints stream concurrently through one-byte buffers" {
     }, "1 0 0 0 0 0 'io", workers);
 }
 
-test "process: common selectors borrow legacy resources and separate output from diagnostics" {
+test "process: common selectors borrow process resources and separate output from diagnostics" {
     const fixture_path = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, fixture.process_exe, allocator);
     defer allocator.free(fixture_path);
     const program = try source(
@@ -300,15 +300,15 @@ test "process: stream reads bound storage by the selected pipe capacity" {
     );
 }
 
-test "process: common shutdown and close join distinct termination paths" {
+test "process: common shutdown and close join cleanup and reject new operations" {
     const fixture_path = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, fixture.process_exe, allocator);
     defer allocator.free(fixture_path);
     for ([_]u32{ 1, 8 }) |workers| {
-        for ([_][]const u8{ "port.shutdown", "port.close" }, [_][]const u8{ "15", "9" }) |closing, expected| {
+        for ([_][]const u8{ "port.shutdown", "port.close" }, [_][]const u8{ "'io", "'io" }) |closing, expected| {
             const program = try source(
                 "{{'executable \"{s}\" 'args (\"ready\")}} proc.spawn 'p set " ++
                     "p 1 proc.read-stdout pop " ++
-                    "p {s} p {s} p proc.wait 'signal at",
+                    "p {s} p {s} [] (p proc.wait) @attempt 'err at 'kind at",
                 .{ fixture_path, closing, closing },
             );
             defer allocator.free(program);
@@ -327,7 +327,7 @@ test "process: common close joins a producer with full output rings" {
     defer allocator.free(fixture_path);
     const program = try source(
         "{{'executable \"{s}\" 'args (\"flood\")}} proc.spawn 'p set " ++
-            "p 1 proc.read-stdout pop p port.close p port.close p type p proc.wait 'kind at",
+            "p 1 proc.read-stdout pop p port.close p port.close p type [] (p proc.wait) @attempt 'err at 'kind at",
         .{fixture_path},
     );
     defer allocator.free(program);
@@ -335,7 +335,7 @@ test "process: common close joins a producer with full output rings" {
         .executables = .{ .exact = &.{fixture_path} },
         .stdout_capacity = 1,
         .stderr_capacity = 1,
-    }, "'port 'signaled", workers);
+    }, "'port 'io", workers);
 }
 
 test "process: registered operations recover the wait lane and preserve result claims" {
@@ -377,4 +377,44 @@ test "process: registered operations reject requests before affecting the proces
     );
     defer allocator.free(program);
     try expectStack(program, .{ .executables = .{ .exact = &.{fixture_path} }, .stdout_capacity = 1 }, "'domain [97] 0 'io");
+}
+
+test "process: run composes concurrent bounded capture and deadlines" {
+    const fixture_path = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, fixture.process_exe, allocator);
+    defer allocator.free(fixture_path);
+    const program = try source(
+        "{{'executable \"{s}\" 'args (\"split\" \"abc\" \"de\")}} proc.run " ++
+            "dup 'stdout at swap dup 'stderr at swap 'term at 'code at " ++
+            "{{'executable \"{s}\" 'args (\"echo\") 'stdin [0 1 255]}} proc.run 'stdout at " ++
+            "[] ({{'executable \"{s}\" 'args (\"large\" \"16\" \"0\") 'stdout-limit 2}} proc.run) @attempt 'err at 'kind at " ++
+            "[] ({{'executable \"{s}\" 'args (\"block\") 'timeout-ms 0}} proc.run) @attempt 'err at 'kind at",
+        .{ fixture_path, fixture_path, fixture_path, fixture_path },
+    );
+    defer allocator.free(program);
+    for ([_]u32{ 1, 8 }) |workers| try expectStackWithWorkers(program, .{
+        .executables = .{ .exact = &.{fixture_path} },
+        .stdin_capacity = 1,
+        .stdout_capacity = 1,
+        .stderr_capacity = 1,
+        .max_stdout_capture = 4,
+        .max_stderr_capture = 4,
+    }, "[97 98 99] [100 101] 0 [0 1 255] 'overflow 'timeout", workers);
+}
+
+test "process: wait observes broken input after the final accepted write" {
+    const fixture_path = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, fixture.process_exe, allocator);
+    defer allocator.free(fixture_path);
+    const program = try source(
+        "{{'executable \"{s}\" 'args (\"close-stdin\")}} proc.spawn 'p set " ++
+            "p 1 proc.read-stdout p [1] proc.write p proc.close-input " ++
+            "[] (p proc.wait) @attempt 'err at 'kind at p port.close",
+        .{fixture_path},
+    );
+    defer allocator.free(program);
+    for ([_]u32{ 1, 8 }) |workers| try expectStackWithWorkers(program, .{
+        .executables = .{ .exact = &.{fixture_path} },
+        .stdin_capacity = 1,
+        .stdout_capacity = 1,
+        .stderr_capacity = 1,
+    }, "[33] 'io", workers);
 }

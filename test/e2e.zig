@@ -187,7 +187,7 @@ test "e2e: proc run captures split output termination timeout and overflow" {
     defer broken.deinit();
     try broken.expect(.{
         .exit_code = 1,
-        .stderr_contains = &.{ "'kind 'io", "process pipe operation failed" },
+        .stderr_contains = &.{"'kind 'io"},
     });
 
     const limited = try std.fmt.allocPrint(
@@ -241,7 +241,7 @@ test "e2e: proc scope cancellation kills and reaps the process group" {
     defer result.deinit();
     try result.expect(.{
         .exit_code = 0,
-        .stdout_contains = &.{ "[100 101 115 99 101 110 100 97 110 116 61", "<port:1>" },
+        .stdout_contains = &.{ "[100 101 115 99 101 110 100 97 110 116 61", "<port:" },
         .stderr = "",
     });
     const processes = try descendantProcesses(result.stdout);

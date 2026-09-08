@@ -2486,6 +2486,8 @@ but process creation is `'domain` unless the Session host supplied process
 authority. The CLI supplies an explicit unrestricted policy; embedding hosts
 default to none and may restrict exact executable paths, working directories,
 environment inheritance, live ports, queue sizes, and run-capture sizes.
+The public words are ECL compositions over registered process capabilities,
+common port transport, and task primitives.
 
 `proc.core.process` is the registered process factory. Applying `port.open`
 to it and a spawn specification creates a process resource subject to the
@@ -2565,6 +2567,11 @@ Capture overflow kills and cleans the process before raising `'overflow`.
 Deadline expiry does the same before raising `'timeout`; task cancellation is
 `'cancelled`. Spawn, pipe, broken-input, and reap failures are `'io`. These
 run-only fields are rejected by `spawn`.
+The deadline covers the child task that opens and runs the process. Output
+collectors enforce their limits independently; a failed collector cancels the
+remaining work and joins resource cleanup. Successful input acceptance is
+distinct from backend pipe completion, and a later broken pipe still fails
+the run.
 
 ### spawn
 `( spec -- port )` — Start the directly named executable with stdin, stdout,
@@ -2590,6 +2597,8 @@ available. Any number of waiters and later calls receive the same dictionary:
 - `{'kind 'unknown 'status n}`.
 
 A nonzero exit code is ordinary termination data, not an ECL error.
+A pipe failure raises `'io`. Waiting requires an open resource; after closure,
+observe a previously completed exchange instead of admitting another wait.
 
 ### write
 `( port bytes -- )` — Queue exact stdin bytes, parking under bounded pressure.

@@ -1054,22 +1054,20 @@ fn stdlibSessionAllocationProbe(
                 "[] (\"GET\" \"http://127.0.0.1:1/x\" http.request.new http.send) @attempt pop",
         ),
         .process => {
-            // A successful live capture has scheduling-dependent readiness
-            // cardinality and therefore cannot be an oracle for allocation
-            // ordinals. Exercise controller construction and scope teardown
-            // with one allowed spawn, then drive every run-only parser and
-            // launch allocation deterministically up to policy rejection.
+            // Cover controller construction, a minimal successful concurrent
+            // feed/capture, and run-option validation through policy rejection.
             const process_source = try std.fmt.allocPrint(
                 scaffold_allocator,
                 "'proc ('spawn 'run) import " ++
                     "proc.core.process {{'executable \"{s}\" 'args (\"block\" \"λ\") 'cwd \"/\" 'env {{\"ECL_OOM_PROCESS\" \"é🌍\"}}}} port.open " ++
                     "dup proc.core.stdin port.endpoint dup [0] port.write port.finish " ++
                     "dup proc.core.stdout port.endpoint pop dup proc.core.stderr port.endpoint pop pop " ++
+                    "{{'executable \"{s}\" 'args (\"echo\") 'stdin [0 1]}} proc.run pop " ++
                     "{{'executable \"/definitely/not/allowed\" " ++
                     "'args (\"one\" \"two\") 'cwd \"/\" " ++
                     "'env {{\"ECL_OOM_PROCESS\" \"probe\"}} 'stdin [0 1 255 2] " ++
                     "'stdout-limit 8 'stderr-limit 8 'timeout-ms 1}} run",
-                .{process_path},
+                .{ process_path, process_path },
             );
             defer scaffold_allocator.free(process_source);
             try runExpectedLanguageError(&runtime, "oom-process.ecl", process_source);
@@ -1768,7 +1766,8 @@ test "oom: standard-library and host: package: CLI operation propagates every al
 }
 test "oom: standard-library and host: process port lifecycle" {
     try requireSelectedOomTest(@src());
-    try checkStdlibSurface(.process);
+    // Concurrent readers and controller results may avoid wait allocations.
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, SurfaceProbe(.process).run);
 }
 
 test "oom: standard-library and host: native port multiplexed channel publication" {

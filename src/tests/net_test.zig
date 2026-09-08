@@ -362,7 +362,7 @@ test "net: listeners are opaque port values distinct from process ports" {
         .name = "proc word on a listener",
         .source = listen_ephemeral,
         .kind = "type",
-        .word = "proc.wait",
+        .word = "port.core.begin",
     });
     const spawn = try std.fmt.allocPrint(
         allocator,
@@ -1156,16 +1156,16 @@ test "net: a process port is givable too, and dies with the unit it was given to
     const program = try std.fmt.allocPrint(
         allocator,
         "'proc ('spawn 'wait) import {{'executable \"{s}\" 'args (\"block\")}} spawn" ++
-            " dup wrap [] (pop) @give task.await pop wait 'kind at",
+            " dup wrap [] (pop) @give task.await pop wrap (wait) @attempt 'err at 'kind at",
         .{fixture_path},
     );
     defer allocator.free(program);
-    // The child owns the process, so its end kills the group: the wait the
-    // caller then performs completes instead of blocking on a live child.
+    // Scope exit joins the child-owned process. Retaining its identity does
+    // not permit the caller to admit a new operation after closure.
     try runtime.run(program);
     var display = try runtime.session.stackDisplay();
     defer display.deinit();
-    try std.testing.expectEqualStrings("'signaled", std.mem.trim(u8, display.bytes(), " \n"));
+    try std.testing.expectEqualStrings("'io", std.mem.trim(u8, display.bytes(), " \n"));
 }
 
 test "net: @give with no ports is @spawn, and the given ports are the deepest stack values" {

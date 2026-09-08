@@ -921,14 +921,14 @@ owns process-group authority. Stdin independently transitions
 through `open`, `closing`, `closed_cleanly`, or `broken`; `proc.run` cannot
 publish success until it observes a terminal stdin state, so a late background
 EPIPE remains observable even after all input entered the bounded queue.
-Compound `proc.run` readiness uses an opaque process-owned cursor over an
-exhaustive set of stdout-terminal, stderr-terminal, input-terminal,
-I/O-failure, and reap edges. Polling returns only previously unobserved edges
-and consumes them under the process lock, while registration compares newly
-published edges with that cursor.
-Buffered bytes and writable queue capacity remain level-triggered. A failure
-published after polling still wakes the driver, while an observed failure
-cannot turn later pipe or reap readiness into a scheduler hot loop.
+The ECL `proc.run` composition uses separate tasks for input, each output
+stream, and a registered wait exchange. It observes task completion in arrival
+order, so a failed collector or pipe operation cannot be hidden behind a
+blocked sibling. A containing task owns the resource, and task cancellation
+joins that ownership before the caller sees a deadline or transport failure.
+Capture retains bounded chunks and materializes the final byte lists through
+ordinary resumable list operations. Deadlines use the scheduler's shared
+clock and task wait arbitration.
 
 Every `proc.write` call acquires its nominal write ticket when the call reaches
 the primitive, before resumable byte validation and encoding. A driver owns

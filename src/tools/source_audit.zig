@@ -81,15 +81,14 @@ const source_groups = [_]SourceGroup{
     // Builtin-backed stdlib modules hold host authority the SDK withholds, so
     // they are ordinary production sources under the bounded-traversal rules.
     .{ .production = true, .files = &.{
-        "stdlib/dict.zig",  "stdlib/rand.zig", "stdlib/json.zig", "stdlib/http.zig", "stdlib/proc.zig", "stdlib/archive.zig", "stdlib/pkg_store.zig", "stdlib/fs.zig",
+        "stdlib/dict.zig",  "stdlib/rand.zig", "stdlib/json.zig", "stdlib/http.zig", "stdlib/archive.zig", "stdlib/pkg_store.zig", "stdlib/fs.zig",
         "stdlib/clock.zig", "stdlib/time.zig", "stdlib/net.zig",
     }, .sources = &.{
-        @embedFile("../stdlib/dict.zig"),      @embedFile("../stdlib/rand.zig"),
-        @embedFile("../stdlib/json.zig"),      @embedFile("../stdlib/http.zig"),
-        @embedFile("../stdlib/proc.zig"),      @embedFile("../stdlib/archive.zig"),
-        @embedFile("../stdlib/pkg_store.zig"), @embedFile("../stdlib/fs.zig"),
-        @embedFile("../stdlib/clock.zig"),     @embedFile("../stdlib/time.zig"),
-        @embedFile("../stdlib/net.zig"),
+        @embedFile("../stdlib/dict.zig"),    @embedFile("../stdlib/rand.zig"),
+        @embedFile("../stdlib/json.zig"),    @embedFile("../stdlib/http.zig"),
+        @embedFile("../stdlib/archive.zig"), @embedFile("../stdlib/pkg_store.zig"),
+        @embedFile("../stdlib/fs.zig"),      @embedFile("../stdlib/clock.zig"),
+        @embedFile("../stdlib/time.zig"),    @embedFile("../stdlib/net.zig"),
     } },
     .{ .production = true, .files = &.{
         "combinators.zig",
@@ -1063,6 +1062,7 @@ const dynamic_context_words = [_][]const u8{ "*file*", "*module*" };
 const first_party_definition_sources = [_][:0]const u8{
     @embedFile("../prelude.ecl"),
     @embedFile("../stdlib/port.ecl"),
+    @embedFile("../stdlib/proc.ecl"),
     @embedFile("../stdlib/result.ecl"),
     @embedFile("../stdlib/str.ecl"),
     @embedFile("../stdlib/table.ecl"),

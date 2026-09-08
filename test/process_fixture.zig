@@ -132,6 +132,10 @@ fn block(init: std.process.Init) !void {
 
 fn closeStdin(init: std.process.Init) !void {
     std.Io.File.stdin().close(init.io);
+    var buffer: [16]u8 = undefined;
+    var output = stdoutWriter(init.io, &buffer);
+    try output.interface.writeAll("!");
+    try output.interface.flush();
     var forever: std.Io.Event = .unset;
     forever.waitUncancelable(init.io);
 }

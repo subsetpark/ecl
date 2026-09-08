@@ -377,28 +377,9 @@ fn ownerFromAccess(access_value: *external.ProcessAccess) *ProcessOwner {
     return @ptrCast(@alignCast(access_value));
 }
 
-pub fn spawnFromUnit(
-    access_value: *external.ProcessAccess,
-    scheduler_erased: *const anyopaque,
-    scope_erased: *anyopaque,
-    spec: ProcessSpec,
-) SpawnError!Value {
-    const runtime_scheduler: *const scheduler_api.WorkerScheduler = @ptrCast(@alignCast(scheduler_erased));
-    const scope: *scheduler_api.TaskScope = @ptrCast(@alignCast(scope_erased));
-    return ownerFromAccess(access_value).spawn(runtime_scheduler, scope, spec);
-}
-
-pub fn stdoutCaptureLimit(access_value: *external.ProcessAccess) usize {
-    return ownerFromAccess(access_value).stdoutCaptureLimit();
-}
-
 /// Borrow the library identity already owned by the Session's process service.
 pub fn registeredInstance(access_value: *external.ProcessAccess) *@import("module_bindings.zig").Identity {
     return ownerFromAccess(access_value).instance;
-}
-
-pub fn stderrCaptureLimit(access_value: *external.ProcessAccess) usize {
-    return ownerFromAccess(access_value).stderrCaptureLimit();
 }
 
 fn pathWithin(root: []const u8, candidate: []const u8) bool {
@@ -518,12 +499,6 @@ const InputState = enum {
     }
 };
 
-pub const InputTerminal = enum {
-    pending,
-    closed_cleanly,
-    broken,
-};
-
 const ControllerGroup = controllers.Group(ProcessCell, void, .{ .retain = ProcessCell.retainRef, .retireLocked = ProcessCell.retireExecutionLocked, .ownership = processOwnership, .release = ProcessCell.releaseRef });
 
 const ProcessTransfer = transfers.ScopeTransfer(ProcessCell, processOwnership, processLive);
@@ -536,33 +511,9 @@ fn processLive(cell: *ProcessCell) bool {
 
 pub const WritePermit = Writers.Writer;
 
-pub const RunEdge = enum {
-    stdout_terminal,
-    stderr_terminal,
-    input_terminal,
-    io_failure,
-    reaped,
-};
-
-pub const RunCursor = opaque {};
-
-const RunObservation = struct {
-    permit: ?*WritePermit = null,
-    observed: std.EnumSet(RunEdge) = .initEmpty(),
-    active: bool = false,
-};
-
-pub const RunPoll = struct {
-    edges: std.EnumSet(RunEdge),
-    input: InputTerminal,
-    termination: ?Termination,
-};
-
 const readiness_stdout: u64 = 1;
 const readiness_stderr: u64 = 2;
 const readiness_terminal: u64 = 3;
-const readiness_run_tag: u64 = 4;
-const readiness_pointer_mask: u64 = ~@as(u64, 7);
 
 pub const ProcessCell = struct {
     pub fn resourceInitialization(_: *ProcessCell) @import("port_resource.zig").Initialization {
@@ -609,9 +560,6 @@ pub const ProcessCell = struct {
     stderr_reader_active: bool = false,
     writers: Writers,
     waits: external.WaitList(ProcessCell) = .{},
-    timeout_done: std.Io.Event = .unset,
-    timed_out: bool = false,
-    run_observation: RunObservation = .{},
 
     fn initializeAllocation(cell: *ProcessCell, owner: *ProcessOwner, spec: ProcessSpec) SpawnError!void {
         var environment = std.process.Environ.Map.init(owner.allocator);
@@ -825,67 +773,6 @@ pub const ProcessCell = struct {
         self.waits.notifyLocked(self);
     }
 
-    pub fn beginRun(self: *ProcessCell) *RunCursor {
-        std.Io.Threaded.mutexLock(&self.mutex);
-        defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        if (self.run_observation.active) @panic("process already has an active run cursor");
-        self.run_observation = .{ .active = true };
-        return @ptrCast(&self.run_observation);
-    }
-
-    pub fn endRun(self: *ProcessCell, cursor: *RunCursor) void {
-        const observation = self.runObservation(cursor);
-        std.Io.Threaded.mutexLock(&self.mutex);
-        observation.* = .{};
-        std.Io.Threaded.mutexUnlock(&self.mutex);
-    }
-
-    /// Atomically consumes every run-terminal edge currently visible.
-    pub fn pollRun(
-        self: *ProcessCell,
-        cursor: *RunCursor,
-    ) RunPoll {
-        const observation = self.runObservation(cursor);
-        std.Io.Threaded.mutexLock(&self.mutex);
-        defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        const edges = self.runEdgesLocked();
-        const new_edges = edges.differenceWith(observation.observed);
-        observation.observed = observation.observed.unionWith(edges);
-        return .{
-            .edges = new_edges,
-            .input = switch (self.input) {
-                .open, .closing => .pending,
-                .closed_cleanly => .closed_cleanly,
-                .broken => .broken,
-            },
-            .termination = switch (self.phase) {
-                .reaped => |result| result,
-                .constructing, .running, .closing, .terminal => null,
-            },
-        };
-    }
-
-    pub fn runSource(
-        self: *ProcessCell,
-        cursor: *RunCursor,
-        permit: ?*WritePermit,
-    ) external.ReadinessSource {
-        const observation = self.runObservation(cursor);
-        std.Io.Threaded.mutexLock(&self.mutex);
-        observation.permit = permit;
-        std.Io.Threaded.mutexUnlock(&self.mutex);
-        const pointer: u64 = @intFromPtr(observation);
-        std.debug.assert(pointer & ~readiness_pointer_mask == 0);
-        return external.readinessSource(ProcessCell, self, pointer | readiness_run_tag);
-    }
-
-    fn runObservation(self: *ProcessCell, cursor: *RunCursor) *RunObservation {
-        const observation: *RunObservation = @ptrCast(@alignCast(cursor));
-        if (observation != &self.run_observation or !observation.active)
-            @panic("run cursor belongs to another process");
-        return observation;
-    }
-
     pub fn beginRead(self: *ProcessCell, stream: Stream) error{ReaderActive}!void {
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
@@ -957,46 +844,12 @@ pub const ProcessCell = struct {
         std.Io.Threaded.mutexUnlock(&self.mutex);
     }
 
-    pub fn inputTerminal(self: *ProcessCell) InputTerminal {
-        std.Io.Threaded.mutexLock(&self.mutex);
-        defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        return switch (self.input) {
-            .open, .closing => .pending,
-            .closed_cleanly => .closed_cleanly,
-            .broken => .broken,
-        };
-    }
-
     pub fn terminate(self: *ProcessCell) void {
         self.controllers.with(.{ true, @as(?*external.ScopeIdentity, null) }, ProcessCell.startGrace);
     }
 
     pub fn kill(self: *ProcessCell) void {
         self.issueKill(null);
-    }
-
-    pub fn armTimeout(self: *ProcessCell, milliseconds: u64) error{Io}!void {
-        if (milliseconds == 0) {
-            std.Io.Threaded.mutexLock(&self.mutex);
-            switch (self.phase) {
-                .constructing, .running => self.timed_out = true,
-                .closing, .terminal, .reaped => {},
-            }
-            const expired = self.timed_out;
-            std.Io.Threaded.mutexUnlock(&self.mutex);
-            if (expired) self.kill();
-            return;
-        }
-        self.controllers.spawn(.{milliseconds}, timeoutThreadMain) catch |err| switch (err) {
-            error.Closed => return,
-            error.OutOfMemory, error.Io => return error.Io,
-        };
-    }
-
-    pub fn timedOut(self: *ProcessCell) bool {
-        std.Io.Threaded.mutexLock(&self.mutex);
-        defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        return self.timed_out;
     }
 
     fn beginGrace(self: *ProcessCell, close_process: bool, scope: ?*external.ScopeIdentity) ?EscalationId {
@@ -1109,27 +962,19 @@ pub const ProcessCell = struct {
 
     fn recordSignalFailureLocked(self: *ProcessCell) void {
         self.io_failed = true;
+        self.changed.broadcast(blockingIo());
         self.notifyReadyLocked();
     }
 
     fn recordIoFailure(self: *ProcessCell) void {
         std.Io.Threaded.mutexLock(&self.mutex);
         self.io_failed = true;
+        self.changed.broadcast(blockingIo());
         self.notifyReadyLocked();
         std.Io.Threaded.mutexUnlock(&self.mutex);
     }
 
     pub fn readyLocked(self: *ProcessCell, key: u64) bool {
-        if (key & ~readiness_pointer_mask == readiness_run_tag) {
-            const pointer = key & readiness_pointer_mask;
-            const observation: *const RunObservation = @ptrFromInt(pointer);
-            const write_ready = if (observation.permit) |permit| ready: {
-                const node = permit;
-                break :ready self.writeReadyLocked(node);
-            } else false;
-            return self.stdout.len != 0 or self.stderr.len != 0 or write_ready or
-                !self.runEdgesLocked().subsetOf(observation.observed);
-        }
         return switch (key) {
             readiness_stdout => self.stdout.len != 0 or self.stdout_done,
             readiness_stderr => self.stderr.len != 0 or self.stderr_done,
@@ -1146,24 +991,8 @@ pub const ProcessCell = struct {
             self.input != .open or self.io_failed;
     }
 
-    pub fn wakeReasonLocked(self: *ProcessCell, key: u64) external.Wake {
-        if (key & ~readiness_pointer_mask == readiness_run_tag) return .ready;
+    pub fn wakeReasonLocked(self: *ProcessCell, _: u64) external.Wake {
         return if (self.io_failed) .io else .ready;
-    }
-
-    fn runEdgesLocked(self: *ProcessCell) std.EnumSet(RunEdge) {
-        var edges: std.EnumSet(RunEdge) = .initEmpty();
-        inline for (std.enums.values(RunEdge)) |edge| {
-            const present = switch (edge) {
-                .stdout_terminal => self.stdout_done and self.stdout.len == 0,
-                .stderr_terminal => self.stderr_done and self.stderr.len == 0,
-                .input_terminal => self.input.terminal(),
-                .io_failure => self.io_failed,
-                .reaped => self.phase == .reaped,
-            };
-            if (present) edges.insert(edge);
-        }
-        return edges;
     }
 
     fn notifyReadyLocked(self: *ProcessCell) void {
@@ -1223,7 +1052,6 @@ pub const ProcessCell = struct {
         while (!self.stdin_done or !self.stdout_done or !self.stderr_done)
             self.changed.waitUncancelable(blockingIo(), &self.mutex);
         self.group_state = .{ .retired = translated };
-        self.timeout_done.set(blockingIo());
         std.Io.Threaded.mutexUnlock(&self.mutex);
 
         self.allocator.destroy(group);
@@ -1334,26 +1162,6 @@ pub const ProcessCell = struct {
         std.Io.Threaded.mutexUnlock(&self.mutex);
     }
 };
-
-fn timeoutThreadMain(_: *controllers.Execution, cell: *ProcessCell, milliseconds: u64) void {
-    const duration: std.Io.Clock.Duration = .{
-        .raw = .fromMilliseconds(@intCast(milliseconds)),
-        .clock = .awake,
-    };
-    cell.timeout_done.waitTimeout(cell.io, .{ .duration = duration }) catch |err| switch (err) {
-        error.Timeout => {
-            std.Io.Threaded.mutexLock(&cell.mutex);
-            switch (cell.phase) {
-                .constructing, .running => cell.timed_out = true,
-                .closing, .terminal, .reaped => {},
-            }
-            const expired = cell.timed_out;
-            std.Io.Threaded.mutexUnlock(&cell.mutex);
-            if (expired) cell.kill();
-        },
-        error.Canceled => {},
-    };
-}
 
 fn escalationMain(
     _: *controllers.Execution,
@@ -1782,8 +1590,15 @@ const OperationAdapter = struct {
             .kill => backend.kill(),
             .wait => {
                 std.Io.Threaded.mutexLock(&backend.mutex);
-                while (backend.phase != .reaped and !exchange.transport_cancelled.load(.acquire)) backend.changed.waitUncancelable(blockingIo(), &backend.mutex);
+                while (backend.phase != .reaped and !backend.io_failed and backend.input != .broken and !exchange.transport_cancelled.load(.acquire)) backend.changed.waitUncancelable(blockingIo(), &backend.mutex);
+                const failed = backend.io_failed or backend.input == .broken;
                 std.Io.Threaded.mutexUnlock(&backend.mutex);
+                if (failed) {
+                    std.Io.Threaded.mutexLock(&exchange.mutex);
+                    self.failure = Failure.init(.io, "process pipe operation failed");
+                    std.Io.Threaded.mutexUnlock(&exchange.mutex);
+                    return;
+                }
             },
             .capture_limits => {},
         }
