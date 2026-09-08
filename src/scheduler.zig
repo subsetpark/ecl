@@ -2789,6 +2789,69 @@ test "native: external publication batches preserve ownership on rejection and a
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
 }
 
+test "native: scope transfers preserve their owner through rollback and allocation failure" {
+    const Probe = struct {
+        const Member = struct {
+            mutex: std.Io.Mutex = .init,
+            ownership: external.Ownership = .provisional,
+            refs: usize = 0,
+            cancellations: usize = 0,
+            const Transfer = @import("port_transfer.zig").ScopeTransfer(@This(), owner, live);
+            fn owner(self: *@This()) *external.Ownership {
+                return &self.ownership;
+            }
+            fn live(self: *@This()) bool {
+                return self.cancellations == 0;
+            }
+            pub fn retainExternalMember(self: *@This()) void {
+                self.refs += 1;
+            }
+            pub fn releaseExternalMember(self: *@This()) void {
+                self.refs -= 1;
+            }
+            pub fn cancelExternalMember(self: *@This()) void {
+                self.cancellations += 1;
+                var detached = self.ownership.release();
+                detached.detachAll();
+            }
+        };
+        fn run(allocator: std.mem.Allocator) !void {
+            var cleanup = heap.testing.Cleanup.init(allocator);
+            defer cleanup.deinit();
+            var runtime = try Scheduler.init(cleanup.capability(), .cooperative, .manual);
+            var origin = TaskScope.init(runtime.worker());
+            defer runtime.deinit(&origin);
+            var destination = TaskScope.init(runtime.worker());
+            var stranger = TaskScope.init(runtime.worker());
+            var member: Member = .{};
+            defer std.debug.assert(member.refs == 0);
+            defer {
+                var detached = member.ownership.release();
+                detached.detachAll();
+            }
+            try @import("port_transfer.zig").publishScope(Member, &member, &origin, Member.owner);
+            try std.testing.expectError(error.NotOwner, Member.Transfer.prepare(&member, &stranger, &destination));
+            try std.testing.expectEqual(@as(usize, 0), destination.pending());
+            try Member.Transfer.prepare(&member, &origin, &destination);
+            try std.testing.expectError(error.Busy, Member.Transfer.prepare(&member, &origin, &stranger));
+            Member.Transfer.abort(&member);
+            try std.testing.expectEqual(@as(usize, 0), destination.pending());
+            try std.testing.expectEqual(@as(usize, 1), origin.pending());
+            try Member.Transfer.prepare(&member, &origin, &destination);
+            Member.Transfer.commit(&member);
+            try std.testing.expectError(error.NotOwner, Member.Transfer.prepare(&member, &origin, &stranger));
+            runtime.worker().closeRootScope(&origin);
+            runtime.worker().closeRootScope(&stranger);
+            try std.testing.expectEqual(@as(usize, 0), member.cancellations);
+            try std.testing.expectEqual(@as(usize, 1), destination.pending());
+            runtime.worker().closeRootScope(&destination);
+            try std.testing.expectEqual(@as(usize, 1), member.cancellations);
+            try std.testing.expectEqual(@as(usize, 0), member.refs);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
+}
+
 test "native: scope cancellation observes an entire external publication batch" {
     const Publication = struct {
         const Self = @This();

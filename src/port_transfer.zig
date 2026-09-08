@@ -44,22 +44,35 @@ pub fn ScopeTransfer(
             std.Io.Threaded.mutexUnlock(&cell.mutex);
             if (rejected) |err| return err;
 
-            // Scope cancellation takes the scope lock before the cell lock.
-            // Allocating and attaching under the cell lock would reverse it.
-            var token = try destination.scheduler.attachExternal(destination, external.scopeMember(Cell, cell));
-            std.Io.Threaded.mutexLock(&cell.mutex);
-            const owner = ownership(cell);
-            const valid = live(cell) and switch (owner.*) {
-                .owned => |current| current.owningScope() == from,
-                .none, .provisional, .transferring => false,
-            };
-            if (valid) owner.beginTransfer(token);
-            std.Io.Threaded.mutexUnlock(&cell.mutex);
-            if (!valid) {
-                token.detach();
-                return error.Closed;
-            }
+            // Prepared storage grants no cancellation authority. Revalidate
+            // the origin under both publication locks before linking the
+            // destination: even a transient stale membership could cancel a
+            // resource that has already moved to another owner.
+            var publication: Publication = .{ .cell = cell, .origin = from };
+            var incoming: [16]?external.ScopeMember = .{null} ** 16;
+            incoming[0] = external.scopeMember(Cell, cell);
+            if (!try destination.scheduler.publishExternalBatch(destination, incoming, &publication)) return error.Closed;
         }
+
+        const Publication = struct {
+            cell: *Cell,
+            origin: *anyopaque,
+            pub fn lock(self: *@This()) void {
+                std.Io.Threaded.mutexLock(&self.cell.mutex);
+            }
+            pub fn unlock(self: *@This()) void {
+                std.Io.Threaded.mutexUnlock(&self.cell.mutex);
+            }
+            pub fn validate(self: *@This()) bool {
+                return live(self.cell) and switch (ownership(self.cell).*) {
+                    .owned => |current| current.owningScope() == self.origin,
+                    .none, .provisional, .transferring => false,
+                };
+            }
+            pub fn publish(self: *@This(), tokens: [16]?external.ScopeMembership) void {
+                ownership(self.cell).beginTransfer(tokens[0].?);
+            }
+        };
 
         pub fn commit(cell: *Cell) void {
             std.Io.Threaded.mutexLock(&cell.mutex);

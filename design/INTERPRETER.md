@@ -1600,8 +1600,11 @@ Retaining a closed value does not retain a live-capacity reservation.
 
 Network, process, and native ports share the same scope-transfer boundary.
 Backends supply their locked lifetime predicate and ownership location; the
-shared protocol authorizes the origin, attaches the destination outside the
-cell lock, revalidates ownership, and consumes commit or rollback. Backend
+shared protocol prepares destination storage outside publication locks, then
+revalidates the origin under the destination scope and resource locks before
+linking cancellation authority and recording the transfer together. Rejected
+preparation never grants the destination authority, even temporarily. Commit
+and rollback consume the resulting ownership transition. Backend
 shutdown retains its own execution model while using the common ownership,
 readiness, and byte-ring representations.
 
