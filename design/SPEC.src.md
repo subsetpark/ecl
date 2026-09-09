@@ -837,6 +837,10 @@ interned name space grows only through reading source, `parse`, `intern`, and
 the module loaders; words that materialize values from external data produce
 strings, never symbols.
 
+`word` converts a symbol to an executable word with the same spelling, without
+resolving or executing it. The result has no captured definition scope and
+resolves where it is invoked. Non-symbol operands are `'type`.
+
 ## Modules
 
 A module is a value; a *registration* is the assignment of a module to a public

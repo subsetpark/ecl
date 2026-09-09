@@ -140,6 +140,24 @@ test "conversion: symbol is lookup-only and intern is the one word that creates"
     try expectError(&runtime, "[1 2] intern", &.{"'kind 'type"});
 }
 
+test "conversion: word converts symbols to dynamically resolved executable words" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    try expectStack(&runtime, "'dup word type", "'word");
+    try expectStack(&runtime, "'foo.bar word symbol", "'foo.bar");
+    try expectStack(&runtime, "'unbound-conversion-word word chars", "\"unbound-conversion-word\"");
+    try expectStack(&runtime, "2 3 '+ word execute", "5");
+    try expectStack(&runtime, "2 3 'core.+ word execute", "5");
+    try expectStack(&runtime, "'later-word word (42) 'later-word def execute", "42");
+    try expectStack(&runtime, "'dup word () cons 7 swap call", "7 7");
+    try expectError(&runtime, "word", &.{"'kind 'underflow"});
+    try expectError(&runtime, "42 word", &.{ "'kind 'type", "'word 'word" });
+    try expectError(&runtime, "\"dup\" word", &.{"'kind 'type"});
+    try expectError(&runtime, "(dup) first word", &.{"'kind 'type"});
+}
+
 test "conversion: data-facing words never intern their input" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();

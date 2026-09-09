@@ -35,6 +35,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "bytes", .primitive = bytesWord, .effect = "value -- bytes", .doc = "Encode a string as UTF-8 into a byte list, or return a byte list unchanged." },
         .{ .name = "symbol", .primitive = symbolWord, .effect = "value -- symbol", .doc = "Return a symbol or word as a symbol, or the already-interned symbol a string spells; " ++
             "a spelling that was never interned is 'domain." },
+        .{ .name = "word", .primitive = wordWord, .effect = "symbol -- word", .doc = "Convert a symbol to an executable word that resolves where it is invoked." },
         .{ .name = "intern", .primitive = internWord, .effect = "value -- symbol", .doc = "Return a symbol or word as a symbol, or create the symbol a string spells, growing the " ++
             "process-lifetime name table when it is new." },
         .{ .name = "int", .primitive = intWord, .effect = "value -- int", .doc = "Return an int unchanged, a char's codepoint, or the value of an integer-literal string." },
@@ -504,6 +505,13 @@ const ByteListIdentityDriver = struct {
 };
 
 const SymbolConversion = enum { lookup, insert };
+
+fn wordWord(evaluator: *Machine) MachineError!void {
+    var item = try evaluator.popValue();
+    defer item.deinit();
+    if (item.borrow() != .symbol) return evaluator.typeError("a symbol");
+    try evaluator.pushOwned(.{ .word = .{ .name = item.borrow().symbol } });
+}
 
 fn symbolWord(evaluator: *Machine) MachineError!void {
     return startSymbolConversion(evaluator, .lookup);

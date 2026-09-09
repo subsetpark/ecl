@@ -1304,6 +1304,17 @@ it is `'domain`. Parking, nesting, and a second module's slot are
 active `within` application. `'domain` outside one, `'underflow` on an
 empty draft. Outputs reach the caller only if the application publishes.
 
+### word
+`( symbol -- word )` — Convert a symbol to an executable word with the same
+spelling. Conversion does not resolve the name or execute it. The result
+resolves where it is invoked, without a captured definition scope. Any
+non-symbol operand is `'type`.
+
+```ecl
+2 3 '+ word execute
+# => 5
+```
+
 ### words
 `( -- )` — Print the visible dictionary in sorted order.
 
