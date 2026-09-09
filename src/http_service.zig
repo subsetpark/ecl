@@ -64,7 +64,8 @@ pub const Limits = struct {
             self.outbound_bytes > 16 * 1024 * 1024 or self.encoded_bytes > 64 * 1024 * 1024 or
             self.decoded_bytes > 64 * 1024 * 1024 or self.header_bytes == 0 or self.header_bytes > 64 * 1024 or
             self.header_fields == 0 or self.header_fields > 256 or self.transport_bytes == 0 or
-            self.transport_bytes > 64 * 1024 or self.scratch_bytes == 0) return error.InvalidConfig;
+            self.transport_bytes > 64 * 1024 or self.scratch_bytes == 0 or
+            self.scratch_bytes > 16 * 1024 * 1024) return error.InvalidConfig;
     }
 };
 const Service = struct {

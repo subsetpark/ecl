@@ -475,11 +475,21 @@ fn runHttp(runtime: *session.Session, source: []const u8, expected: []const u8) 
     var display = try runtime.stackDisplay();
     defer display.deinit();
     try std.testing.expectEqualStrings(expected, display.bytes());
-    _ = try runtime.runUnit("<clear>", "stack len (pop) times");
+    switch (try runtime.runUnit("<clear>", "stack len (pop) times")) {
+        .ok => {},
+        .incomplete => return error.UnexpectedIncomplete,
+        .err => |failure| {
+            runtime.release(failure);
+            return error.UnexpectedLanguageError;
+        },
+    }
 }
 
 test "http: transfer limits reject complete and chunked bodies without partial responses" {
-    var server = try Fixture.start(39550);
+    var server = Fixture.start(39550) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
     defer server.stop();
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
@@ -518,7 +528,10 @@ test "http: preparation limits count UTF-8 bytes and repeated header occurrences
 }
 
 test "http: redirect bodies share the cumulative transfer budget" {
-    var server = try Fixture.start(39560);
+    var server = Fixture.start(39560) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
     defer server.stop();
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
@@ -547,7 +560,10 @@ test "http: manual deadlines and task cancellation interrupt blocked response so
     for ([_]session.Config{ .cooperative, .{ .worker_pool = 1 } }) |config| {
         for ([_][]const u8{ "/stall-head", "/stall-body" }) |path| {
             inline for ([_]bool{ false, true }) |cancel| {
-                var server = try Fixture.start(39570);
+                var server = Fixture.start(39570) catch |err| switch (err) {
+                    error.FileNotFound => return error.SkipZigTest,
+                    else => return err,
+                };
                 defer server.stop();
                 var inputs = try runtime_fixture.Fixture.init();
                 defer inputs.deinit();
@@ -584,7 +600,10 @@ test "http: manual deadlines and task cancellation interrupt blocked response so
 }
 
 test "http: compressed and repeated response header limits are enforced before normalization" {
-    var server = try Fixture.start(39590);
+    var server = Fixture.start(39590) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
     defer server.stop();
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
@@ -608,7 +627,10 @@ test "http: compressed and repeated response header limits are enforced before n
 }
 
 test "http: Session shutdown joins a request blocked in response headers" {
-    var server = try Fixture.start(39600);
+    var server = Fixture.start(39600) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
     defer server.stop();
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
@@ -637,7 +659,10 @@ test "http: cancellation interrupts a completely full response transport" {
             self.event.set(std.testing.io);
         }
     };
-    var server = try Fixture.start(39610);
+    var server = Fixture.start(39610) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
     defer server.stop();
     var cleanup = heap_api.testing.Cleanup.init(allocator);
     defer cleanup.deinit();
@@ -667,7 +692,10 @@ test "http: cancellation interrupts a completely full response transport" {
 }
 
 test "http: a 303 redirect changes a bodyless method override to GET" {
-    var server = try Fixture.start(39620);
+    var server = Fixture.start(39620) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
     defer server.stop();
     try expectStack(server.port, "{{'target \"http://127.0.0.1:{d}/redirect-see-other\" 'method \"DELETE\"}} http.get 'body at", "\"GET|0||\"");
 }

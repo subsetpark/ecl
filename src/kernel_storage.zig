@@ -350,6 +350,7 @@ pub const StringEncoder = struct {
 
     pub fn advanceLimited(self: *StringEncoder, budget: usize, limit: usize) (error{ OutOfMemory, InvalidCodepoint, Overflow })!StringEncodeResult {
         std.debug.assert(budget != 0 and self.phase != .complete);
+        if (self.byte_count > limit) return error.Overflow;
         const count: usize = @intCast(self.string.list.length());
         var remaining = budget;
         while (remaining != 0 and self.index != count) : (remaining -= 1) {

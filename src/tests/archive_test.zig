@@ -311,6 +311,7 @@ const ConcurrentResult = struct {
 
 fn concurrentUnpack(result: *ConcurrentResult) void {
     var heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&heap);
     var output_buffer: [256]u8 = undefined;
     var output = std.Io.Writer.Discarding.init(&output_buffer);
     var diagnostics_buffer: [256]u8 = undefined;
@@ -332,7 +333,6 @@ fn concurrentUnpack(result: *ConcurrentResult) void {
     const outcome = runtime.runUnit("<archive-race>", result.source) catch {
         result.unexpected.store(true, .release);
         runtime.deinit();
-        test_heap.retire(&heap);
         return;
     };
     switch (outcome) {
@@ -350,7 +350,6 @@ fn concurrentUnpack(result: *ConcurrentResult) void {
         },
     }
     runtime.deinit();
-    test_heap.retire(&heap);
 }
 
 test "archive: unpack-tgz preserves existing destinations and has one concurrent winner" {

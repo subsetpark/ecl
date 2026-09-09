@@ -1658,8 +1658,7 @@ the source's permission bits under the umask.
 ### copy
 `( source-root source-path destination-root destination-path -- )` — Copy a
 regular file, following a final source link within its root, into an absent
-destination entry. Requires `'read-data` on the source root and `'create` on
-the destination root; the roots may differ. The copy is staged and published
+destination entry; the roots may differ. The copy is staged and published
 atomically without replacing; an existing destination of any kind is
 `'already-exists`, a non-regular source is `'not-regular` or `'is-directory`,
 and no metadata is preserved.
