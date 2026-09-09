@@ -1323,6 +1323,139 @@ fn dictSymbol(
     const found = (try dict.symbolField(allocator, dictionary, key)).?;
     return intern.get(found.symbol);
 }
+
+test "invocation effects: completion owns immediate deferred nested and failing calls" {
+    const Probe = struct {
+        fn runOk(runtime: *Session, source: []const u8) !void {
+            switch (try runtime.runUnit("invocation.ecl", source)) {
+                .ok => {},
+                .incomplete => return error.UnexpectedIncomplete,
+                .err => |failure_value| {
+                    defer runtime.release(failure_value);
+                    var rendered = try runtime.renderValue(failure_value);
+                    defer rendered.deinit();
+                    std.log.err("unexpected invocation failure: {s}", .{rendered.bytes()});
+                    return error.UnexpectedLanguageError;
+                },
+            }
+        }
+        const Driver = struct {
+            pub const ownership: heap.DriverOwnership = .fields;
+            mode: enum { output, empty, failure, chain, forever },
+            remaining: u8 = 2,
+
+            pub fn advance(evaluator: *machine.Machine, self: *@This()) machine.MachineError!machine.WorkProgress {
+                try evaluator.pollKernel();
+                if (self.remaining != 0) {
+                    self.remaining -= 1;
+                    return .yielded;
+                }
+                return switch (self.mode) {
+                    .output => .{ .output = .{ .int = 11 } },
+                    .empty => .completed,
+                    .failure => evaluator.fail(.user, "deferred failure"),
+                    .forever => .yielded,
+                    .chain => blk: {
+                        evaluator.retireDriver(self);
+                        try evaluator.startDriver(Driver{ .mode = .output });
+                        break :blk .detached;
+                    },
+                };
+            }
+        };
+        fn immediate(evaluator: *machine.Machine) machine.MachineError!void {
+            try evaluator.pushOwned(.{ .int = 11 });
+        }
+        fn empty(_: *machine.Machine) machine.MachineError!void {}
+        fn deferred(evaluator: *machine.Machine) machine.MachineError!void {
+            try evaluator.startDriver(Driver{ .mode = .output });
+        }
+        fn wrong(evaluator: *machine.Machine) machine.MachineError!void {
+            try evaluator.startDriver(Driver{ .mode = .empty });
+        }
+        fn failure(evaluator: *machine.Machine) machine.MachineError!void {
+            try evaluator.startDriver(Driver{ .mode = .failure });
+        }
+        fn chain(evaluator: *machine.Machine) machine.MachineError!void {
+            try evaluator.startDriver(Driver{ .mode = .chain });
+        }
+        fn forever(evaluator: *machine.Machine) machine.MachineError!void {
+            try evaluator.startDriver(Driver{ .mode = .forever });
+        }
+        fn nested(evaluator: *machine.Machine) machine.MachineError!void {
+            var body = try evaluator.popQuotation();
+            try evaluator.callOwned(body.take().list);
+        }
+        fn reflect(evaluator: *machine.Machine) machine.MachineError!void {
+            try evaluator.executeWord(.{ .name = try intern.intern("which"), .scope = 0 });
+        }
+    };
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var runtime = try Session.initWithHostConfig(std.testing.allocator, &.{}, .{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &output.writer,
+    }, .cooperative);
+    defer runtime.deinit();
+    // Publish through the production candidate/registration boundary. Only
+    // setup uses the owning registry; assertions observe public Session output.
+    const registry = &runtime.coreState().registry;
+    var candidate = try modules.Registry.BuiltinCandidateCursor.init(registry, &.{
+        .{ .name = "immediate", .primitive = Probe.immediate, .effect = "-- n", .doc = "Return one number." },
+        .{ .name = "empty", .primitive = Probe.empty, .effect = "-- n", .doc = "Violate the output contract immediately." },
+        .{ .name = "deferred", .primitive = Probe.deferred, .effect = "-- n", .doc = "Return one number after yielding." },
+        .{ .name = "wrong", .primitive = Probe.wrong, .effect = "-- n", .doc = "Violate the output contract after yielding." },
+        .{ .name = "failure", .primitive = Probe.failure, .effect = "-- n", .doc = "Fail after yielding." },
+        .{ .name = "chain", .primitive = Probe.chain, .effect = "-- n", .doc = "Transfer work to another driver." },
+        .{ .name = "forever", .primitive = Probe.forever, .effect = "-- n", .doc = "Wait for cancellation." },
+        .{ .name = "nested", .primitive = Probe.nested, .effect = "quotation -- n", .doc = "Invoke a quotation." },
+        .{ .name = "reflect", .primitive = Probe.reflect, .effect = "symbol --", .doc = "Reflect a word, loading its module if necessary." },
+    });
+    defer candidate.deinit();
+    var image = while (true) switch (try candidate.advance()) {
+        .pending => {},
+        .complete => |owned| break owned,
+    };
+    defer image.deinit();
+    var sealed = image.seal();
+    defer sealed.deinit();
+    _ = try modules.testing.register(registry, sealed.ref(), try intern.internModuleName("probe"));
+
+    try Probe.runOk(&runtime, "'task.pending probe.reflect 99");
+    try std.testing.expectEqual(@as(i64, 99), runtime.stackItems()[0].int);
+    try Probe.runOk(&runtime, "pop");
+
+    for ([_][]const u8{ "probe.immediate", "probe.deferred", "probe.chain", "(probe.deferred) probe.nested" }) |call| {
+        const source = try std.fmt.allocPrint(std.testing.allocator, "{s} 88 +", .{call});
+        defer std.testing.allocator.free(source);
+        try Probe.runOk(&runtime, source);
+        var display = try runtime.stackDisplay();
+        defer display.deinit();
+        try std.testing.expectEqualStrings("99", display.bytes());
+        try Probe.runOk(&runtime, "pop");
+    }
+    for ([_]struct { source: []const u8, kind: []const u8, word: []const u8 }{
+        .{ .source = "probe.empty 99", .kind = "contract", .word = "probe.empty" },
+        .{ .source = "probe.wrong 99", .kind = "contract", .word = "probe.wrong" },
+        .{ .source = "probe.failure 99", .kind = "user", .word = "probe.failure" },
+        .{ .source = "(11 12) probe.nested pop", .kind = "contract", .word = "probe.nested" },
+        .{ .source = "(probe.wrong) probe.nested", .kind = "contract", .word = "probe.wrong" },
+    }) |case| {
+        const failure = (try runtime.runUnit("invocation.ecl", case.source)).err;
+        defer runtime.release(failure);
+        try std.testing.expectEqualStrings(case.kind, try dictSymbol(std.testing.allocator, failure, "kind"));
+        try std.testing.expectEqualStrings(case.word, try dictSymbol(std.testing.allocator, failure, "word"));
+        var rendered = try runtime.renderValue(failure);
+        defer rendered.deinit();
+        try std.testing.expect(std.mem.indexOf(u8, rendered.bytes(), "\"invocation.ecl\"") != null);
+        try std.testing.expectEqual(@as(usize, 0), runtime.stackItems().len);
+    }
+    try Probe.runOk(&runtime, "[] (probe.forever) @spawn dup 0 task.await-for pop dup task.cancel task.await");
+    var cancelled = try runtime.stackDisplay();
+    defer cancelled.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, cancelled.bytes(), "'kind 'cancelled") != null);
+}
 test "session runs the soul test" {
     const allocator = std.testing.allocator;
     var session = try Session.init(allocator, &.{});

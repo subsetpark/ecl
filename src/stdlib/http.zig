@@ -27,9 +27,6 @@ const Machine = machine.Machine;
 const MachineError = machine.MachineError;
 
 pub const words = [_]env.BuiltinWord{
-    // As with `json`, the stack shape is prose rather than a declared effect:
-    // these words hand their work to a scheduler driver, and a declared effect
-    // is checked the instant the primitive returns.
     .{
         .name = "get",
         .doc = "( request -- response ) Fetch a partial or complete http.request with GET defaults, following " ++

@@ -614,7 +614,7 @@ application, scheduler, module, and error boundaries required by the language.
 `Frame` is one exhaustive tagged union. Its variants represent:
 
 - suspended evaluation;
-- source-effect completion checks;
+- invocation-effect completion checks;
 - combinator and isolated-application continuations;
 - resumption after qualified loading; and
 - transactional boundaries such as `@attempt`, module construction, and
@@ -623,6 +623,18 @@ application, scheduler, module, and error boundaries required by the language.
 Each variant owns exactly the fields meaningful in that phase. Transitions
 consume one state and construct another, giving continuation modes,
 publication phases, and teardown an exhaustive representation.
+
+Declared effects at a module boundary belong to the language invocation, not
+to an implementation callback's return. Input contracts are validated before
+execution; the frame stack owns output checking until successful completion.
+Builtin and native invocations retain a suspended caller beneath that check.
+Their current activation is tagged as an invocation rather than source
+dispatch, so it carries the calling context without authority to execute the
+caller's remaining forms. Driver replacement, parking, and nested quotations
+all complete above the same boundary. Loader replay can dispatch only the
+retried invocation before returning to it. Failure and cancellation unwind
+the boundary without checking successful outputs; native transactions own no
+separate effect-check lifecycle.
 
 Because continuations are explicit, the machine can suspend, move a Unit to
 another worker, unwind incrementally, and guarantee language tail calls without

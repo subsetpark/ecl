@@ -1151,7 +1151,19 @@ pub const ScopeBorrow = union(enum) {
 
 const Eval = struct {
     code: *Header,
-    ip: u32,
+    position: union(enum) {
+        source: u32,
+        // Carries the call site's next source index, but dispatches no caller
+        // forms. Its completion frame must run before the caller can resume.
+        invocation: u32,
+        // Loader retry dispatches just the restored invocation, not the rest
+        // of its caller's quotation.
+        replay: u32,
+        // The replayed word is being resolved. Its existing completion frame
+        // is reused when dispatch reaches that invocation again.
+        redispatch: u32,
+    },
+
     /// Released when this activation retires, alongside `code`. A child that
     /// inherits this activation's scope takes its own retain rather than
     /// sharing this one, so a tail call replacing the parent cannot leave the
@@ -1176,6 +1188,37 @@ const Eval = struct {
     /// application. If it completes or transfers tail control, its existing
     /// code-header ownership becomes the application's selected quotation.
     application_selection: ?ApplicationFrameIndex = null,
+
+    fn nextIndex(self: Eval) u32 {
+        return switch (self.position) {
+            .source, .invocation, .replay, .redispatch => |index| index,
+        };
+    }
+    fn hasInstructions(self: Eval) bool {
+        return switch (self.position) {
+            .source, .replay => |index| index < self.code.length(),
+            .invocation, .redispatch => false,
+        };
+    }
+    fn advanceInstruction(self: *Eval) u32 {
+        const index = switch (self.position) {
+            .source => |index| index,
+            .replay => |index| index,
+            .invocation, .redispatch => unreachable,
+        };
+        self.position = switch (self.position) {
+            .source => .{ .source = index + 1 },
+            .replay => .{ .redispatch = index + 1 },
+            .invocation, .redispatch => unreachable,
+        };
+        return index;
+    }
+    fn rewind(self: *Eval, index: u32) void {
+        self.position = switch (self.position) {
+            .source => .{ .source = index },
+            .invocation, .replay, .redispatch => .{ .replay = index },
+        };
+    }
 
     /// Where this body's own definitions land, and the chain it hands to any
     /// quotation it invokes on a caller's behalf.
@@ -1331,8 +1374,9 @@ const SourceEffectProvenance = struct {
 const EffectProvenance = union(enum) {
     none,
     source: SourceEffectProvenance,
+    invocation: ErrorSite,
 };
-pub const EffectCheck = struct {
+const EffectCheck = struct {
     expected_depth: u32,
     entry_depth: u32,
     inputs: u32,
@@ -1362,13 +1406,13 @@ pub const EffectCheck = struct {
         code: *Header,
     ) void {
         switch (self.provenance) {
-            .none => unreachable,
+            .none, .invocation => unreachable,
             .source => self.provenance.source.candidate.replaceBorrowed(releases, code),
         }
     }
     fn restoreActive(self: *const EffectCheck, unit: *Unit) void {
         switch (self.provenance) {
-            .none => {},
+            .none, .invocation => {},
             .source => |source| {
                 std.debug.assert(unit.effect_check_index == source.frame_index);
                 unit.effect_check_index = source.previous;
@@ -1377,13 +1421,13 @@ pub const EffectCheck = struct {
     }
     fn takeCandidate(self: *EffectCheck) ?OwnedCode {
         return switch (self.provenance) {
-            .none => null,
+            .none, .invocation => null,
             .source => .initOwned(self.provenance.source.candidate.take()),
         };
     }
     pub fn deinit(self: *EffectCheck, releases: *heap.ReleaseDomain) void {
         switch (self.provenance) {
-            .none => {},
+            .none, .invocation => {},
             .source => self.provenance.source.candidate.deinit(releases),
         }
         self.provenance = .none;
@@ -3382,7 +3426,7 @@ pub const Machine = struct {
             },
             .unregistered_module => |name| {
                 try self.pushBorrowed(.{ .symbol = requested });
-                self.unit.current.?.ip = self.unit.active_index;
+                self.unit.current.?.rewind(self.unit.active_index);
                 try self.autoLoadModule(name, .{
                     .qualified = requested,
                     .continuation = .replay,
@@ -3408,7 +3452,7 @@ pub const Machine = struct {
             return self.undefinedNameIn(requested_word, .qualified);
         }
         try self.restoreImportOperands(module_id, requested);
-        self.unit.current.?.ip = self.unit.active_index;
+        self.unit.current.?.rewind(self.unit.active_index);
         try self.autoLoadModule(module_name, .{
             .qualified = requested_word,
             .continuation = .replay,
@@ -4682,7 +4726,7 @@ pub const Machine = struct {
                             };
                             evaluator.unit.current = .{
                                 .code = root_header,
-                                .ip = 0,
+                                .position = .{ .source = 0 },
                                 .site = site,
                                 .traced_word = no_word,
                             };
@@ -5455,7 +5499,7 @@ pub const Machine = struct {
     }
     pub fn commitDirectIdiomTrace(self: *Machine) intern.TraceWord {
         const parent = self.unit.active_word;
-        if (self.unit.current.?.ip >= self.unit.current.?.code.length()) self.unit.current.?.traced_word = no_word;
+        if (self.unit.current.?.nextIndex() >= self.unit.current.?.code.length()) self.unit.current.?.traced_word = no_word;
         return parent;
     }
     pub fn setFailureTraceParent(self: *Machine, word: intern.TraceWord) void {
@@ -5656,7 +5700,7 @@ pub const Machine = struct {
         };
         self.unit.current = .{
             .code = quotation,
-            .ip = 0,
+            .position = .{ .source = 0 },
             .site = site,
             .traced_word = inherited_trace,
             .effect_tail = effect_tail,
@@ -5742,10 +5786,10 @@ pub const Machine = struct {
     /// continuation shape granted this exception.
     fn isSourceTailPosition(self: *const Machine, current: Eval) bool {
         const length = current.code.length();
-        if (current.ip == length) return true;
-        if (length - current.ip != 2) return false;
-        const count = list.atUnchecked(.{ .list = current.code }, current.ip);
-        const drop = list.atUnchecked(.{ .list = current.code }, current.ip + 1);
+        if (current.nextIndex() == length) return true;
+        if (length - current.nextIndex() != 2) return false;
+        const count = list.atUnchecked(.{ .list = current.code }, current.nextIndex());
+        const drop = list.atUnchecked(.{ .list = current.code }, current.nextIndex() + 1);
         return count == .int and count.int >= 0 and
             drop == .word and std.mem.eql(u8, intern.get(drop.word.name), "_dl") and
             @as(usize, @intCast(count.int)) <= self.unit.locals.items.len;
@@ -5863,7 +5907,7 @@ pub const Machine = struct {
         heap.incRef(application.quotation);
         self.unit.current = .{
             .code = application.quotation,
-            .ip = 0,
+            .position = .{ .source = 0 },
             .site = .resumed(
                 child orelse application.site.parent_scope,
                 application.site.home,
@@ -6029,7 +6073,7 @@ pub const Machine = struct {
         );
         self.unit.current = .{
             .code = body_header,
-            .ip = 0,
+            .position = .{ .source = 0 },
             .site = site,
             .traced_word = no_word,
         };
@@ -6362,7 +6406,7 @@ pub const Machine = struct {
         self.unit.state_application = application;
         self.unit.current = .{
             .code = quotation,
-            .ip = 0,
+            .position = .{ .source = 0 },
             .site = site,
             .traced_word = no_word,
         };
@@ -6422,7 +6466,7 @@ pub const Machine = struct {
         );
         self.unit.current = .{
             .code = body,
-            .ip = 0,
+            .position = .{ .source = 0 },
             .site = .inheriting(invoker, child),
             .traced_word = no_word,
         };
@@ -6464,16 +6508,52 @@ pub const Machine = struct {
         _ = owned.take();
         self.unit.max_frames = @max(self.unit.max_frames, self.unit.frames.items.len);
     }
+    /// Establishes completion before invoking foreign implementation code.
+    /// The saved caller owns the source lifetime for the check's diagnostic
+    /// site; the invocation activation supplies execution context but cannot
+    /// dispatch the caller's next form. Drivers, parks, and nested quotations
+    /// therefore finish before the ordinary frame resumer checks outputs.
+    /// Allocation failure leaves the caller unchanged.
+    fn beginInvocation(self: *Machine, effect: env.Effect, word: intern.TraceWord) MachineError!void {
+        if (self.unit.current.?.position == .redispatch) {
+            const index = self.unit.current.?.position.redispatch;
+            self.unit.current.?.position = .{ .invocation = index };
+            return;
+        }
+        var check = try prepareEffectCheck(self, effect, word);
+        try self.unit.frames.ensureUnusedCapacity(self.unit.allocator, 2);
+        var caller = self.unit.current.?;
+        check.provenance = .{ .invocation = .{
+            .code = caller.code,
+            .index = self.unit.active_index,
+        } };
+        var invocation = caller;
+        invocation.position = .{ .invocation = caller.nextIndex() };
+        invocation.borrowed_scope = null;
+        invocation.traced_word = no_word;
+        if (!self.isSourceTailPosition(caller)) {
+            invocation.effect_tail = null;
+            invocation.application_tail = null;
+        }
+        // Selection follows the invoked tail quotation. Resuming the caller
+        // later must not overwrite that selection with its original body.
+        caller.application_selection = null;
+        heap.incRef(invocation.code);
+        self.unit.frames.appendAssumeCapacity(.{ .eval = caller });
+        self.unit.frames.appendAssumeCapacity(.{ .effect_check = check });
+        self.unit.max_frames = @max(self.unit.max_frames, self.unit.frames.items.len);
+        self.unit.current = invocation;
+    }
     /// Suspends a non-tail continuation. An exhausted anonymous quotation
     /// inherits its named trace owner so inline control does not erase the
     /// activation that selected it.
     fn suspendCurrent(self: *Machine) error{OutOfMemory}!intern.TraceWord {
         const current = self.unit.current.?;
-        const inherited_trace = if (current.ip >= current.code.length())
+        const inherited_trace = if (!current.hasInstructions())
             current.traced_word
         else
             no_word;
-        if (current.ip < current.code.length()) {
+        if (current.hasInstructions()) {
             try self.unit.frames.append(self.unit.allocator, .{ .eval = current });
             self.unit.max_frames = @max(self.unit.max_frames, self.unit.frames.items.len);
         } else {
@@ -6616,7 +6696,7 @@ pub fn initialize(unit: *Unit, code: *Header, initial_stack: InitialStack) error
         heap.incRef(code);
         unit.current = .{
             .code = code,
-            .ip = 0,
+            .position = .{ .source = 0 },
             .site = .root(unit),
             .traced_word = no_word,
         };
@@ -6649,7 +6729,7 @@ pub fn initialize(unit: *Unit, code: *Header, initial_stack: InitialStack) error
     heap.incRef(code);
     unit.current = .{
         .code = code,
-        .ip = 0,
+        .position = .{ .source = 0 },
         .site = .root(unit),
         .traced_word = no_word,
     };
@@ -6806,7 +6886,7 @@ fn loop(self: *Machine) MachineError!RunStatus {
             }
         }
         const current = &self.unit.current.?;
-        if (current.ip >= current.code.length()) {
+        if (!current.hasInstructions()) {
             self.retireCompletedEval(current.*);
             self.unit.current = null;
             continue;
@@ -6829,9 +6909,8 @@ fn loop(self: *Machine) MachineError!RunStatus {
                 continue;
             },
         };
-        self.unit.active_index = current.ip;
-        const form = list.atUnchecked(.{ .list = current.code }, current.ip);
-        current.ip += 1;
+        self.unit.active_index = current.advanceInstruction();
+        const form = list.atUnchecked(.{ .list = current.code }, self.unit.active_index);
         if (comptime root_execution_metrics_enabled)
             self.unit.root_execution_metrics.logical_transitions += 1;
         dispatch(self, form) catch |err| switch (err) {
@@ -7245,7 +7324,7 @@ const QualifiedLoadPreparationDriver = struct {
                     .none => {},
                     .operand => |requested| {
                         try evaluator.pushBorrowed(.{ .symbol = requested });
-                        evaluator.unit.current.?.ip = evaluator.unit.active_index;
+                        evaluator.unit.current.?.rewind(evaluator.unit.active_index);
                     },
                 }
                 evaluator.retireDriver(self);
@@ -7488,21 +7567,6 @@ fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
     self.unit.active_word = resolved.trace_word;
     const cross_home = resolved.home != null and resolved.home != self.unit.current.?.home();
     const cross_home_effect = if (cross_home) resolved.lease.effect else null;
-    var check: ?EffectCheck = if (cross_home) switch (resolved.lease.binding) {
-        // A native module word always carries a declared effect, so a missing
-        // one is a malformed module rather than an omission.
-        .native => try prepareEffectCheck(self, cross_home_effect, resolved.trace_word),
-        // A builtin module word may omit its effect exactly as a source word
-        // may. One that hands its work to a scheduler driver has to: the check
-        // below reads the stack the instant the primitive returns, which is
-        // before any deferred output exists.
-        .builtin => if (cross_home_effect == null)
-            null
-        else
-            try prepareEffectCheck(self, cross_home_effect, resolved.trace_word),
-        .word => null,
-    } else null;
-    defer if (check) |*owned| owned.deinit(self.releaseDomain());
     switch (resolved.lease.binding) {
         .word => |body| {
             const body_header = env.quotationHeader(body);
@@ -7545,6 +7609,7 @@ fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
             );
         },
         .builtin => |primitive| {
+            if (cross_home_effect) |effect| try self.beginInvocation(effect, resolved.trace_word);
             primitive(self) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.Ecl => {
@@ -7556,12 +7621,14 @@ fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
             if (self.takePrimitiveFailure()) |failure_value| {
                 return self.installPrimitiveFailure(failure_value);
             }
-            if (check) |*effect_check| try finishEffectCheck(self, effect_check);
         },
         .native => |callable| {
-            const transferred = check;
-            check = null;
-            try native_call.begin(self, callable, transferred);
+            if (cross_home) {
+                const effect = cross_home_effect orelse
+                    return self.fail(.domain, "module word has no effect declaration");
+                try self.beginInvocation(effect, resolved.trace_word);
+            }
+            try native_call.begin(self, callable);
         },
     }
 }
@@ -8549,7 +8616,7 @@ fn scheduleWord(
     heap.incRef(body);
     self.unit.current = .{
         .code = body,
-        .ip = 0,
+        .position = .{ .source = 0 },
         .borrowed_scope = borrowed_cell,
         .site = .{
             .scope = scope,
@@ -8752,7 +8819,7 @@ fn resumeFrames(self: *Machine) MachineError!bool {
     };
     return false;
 }
-pub fn finishEffectCheck(self: *Machine, check: *EffectCheck) MachineError!void {
+fn finishEffectCheck(self: *Machine, check: *EffectCheck) MachineError!void {
     check.restoreActive(self.unit);
     if (check.row) return;
     const observed = self.unit.stack.items.len;
@@ -8766,6 +8833,8 @@ pub fn finishEffectCheck(self: *Machine, check: *EffectCheck) MachineError!void 
     );
     self.unit.pendingFailure().addData(.seeded, .{ .int = check.entry_depth });
     self.unit.pendingFailure().addData(.observed, .{ .int = @intCast(observed_relative) });
+    if (check.provenance == .invocation)
+        self.unit.pendingFailure().site = .{ .token = check.provenance.invocation };
     if (check.takeCandidate()) |candidate|
         self.unit.pendingFailure().site = .{ .contract_quotation = candidate };
     return failure;

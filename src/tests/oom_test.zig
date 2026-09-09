@@ -1456,6 +1456,20 @@ fn NativePortProbe(comptime source: []const u8, comptime setup: []const u8) type
     };
 }
 
+test "oom: core: invocation completion frames survive allocation failure" {
+    try requireSelectedOomTest(@src());
+    // Keep non-tail callers live so admitting the completion boundary must
+    // grow frame storage as well as survive callback/driver allocation.
+    try checkAllPostInitAllocationFailuresParallel(
+        std.heap.smp_allocator,
+        NativePortProbe(
+            "((((((((task.pending pop 1 sample.increment pop " ++
+                "0) call 0) call 0) call 0) call 0) call 0) call 0) call 0) call",
+            "task.pending pop 1 sample.increment pop",
+        ).run,
+    );
+}
+
 test "oom: standard-library and host: native port registered capability publication" {
     try requireSelectedOomTest(@src());
     try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortProbe(

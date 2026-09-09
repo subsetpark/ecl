@@ -712,6 +712,7 @@ pub fn build(b: *std.Build) void {
     const tsan_tests = b.addTest(.{
         .root_module = tsan_mod,
         .filters = &.{
+            "invocation effects:",
             "concurrency:",
             "env: concurrent cell publication is lease-safe and TSan-clean",
             "env: concurrent readers writers and retirement reclaim production snapshots",

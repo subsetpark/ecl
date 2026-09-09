@@ -276,7 +276,6 @@ const Transaction = struct {
     instance: *native_module.ModuleInstance,
     definition: *const descriptor_api.ValidatedDefinition,
     host_table: abi.HostTable,
-    effect_check: ?machine.EffectCheck,
     candidates: std.ArrayList(CandidateEntry) = .empty,
     outputs: std.ArrayList(Value) = .empty,
     builders: [abi.max_builder_slots]?*AggregateBuilder =
@@ -292,10 +291,7 @@ const Transaction = struct {
         evaluator: *machine.Machine,
         callable: env.NativeCallable,
         definition: *const descriptor_api.ValidatedDefinition,
-        effect_check: ?machine.EffectCheck,
     ) error{ OutOfMemory, NativeCallsClosed }!*Transaction {
-        var owned_check = effect_check;
-        errdefer if (owned_check) |*check| check.deinit(evaluator.releaseDomain());
         const call = try evaluator.allocator().create(Transaction);
         if (!callable.instance.retainCall()) {
             evaluator.allocator().destroy(call);
@@ -307,11 +303,8 @@ const Transaction = struct {
             .instance = callable.instance,
             .definition = definition,
             .host_table = callable.instance.mintHostTable(full_host_table),
-            .effect_check = owned_check,
         };
-        owned_check = null;
         errdefer {
-            if (call.effect_check) |*check| check.deinit(evaluator.releaseDomain());
             call.instance.releasePin();
             evaluator.allocator().destroy(call);
         }
@@ -340,8 +333,6 @@ const Transaction = struct {
         };
         self.outputs.deinit(self.allocator);
         self.candidates.deinit(self.allocator);
-        if (self.effect_check) |*check| check.deinit(self.releases);
-        self.effect_check = null;
         if (self.continuation) |state| {
             self.definition.body.call.deinit_continuation.?(state.ptr);
             self.allocator.free(state);
@@ -478,13 +469,6 @@ const Transaction = struct {
                 );
                 replacement.commitOwned(self.outputs.items);
                 self.outputs.items.len = 0;
-                if (self.effect_check) |*check| {
-                    defer {
-                        check.deinit(self.releases);
-                        self.effect_check = null;
-                    }
-                    try machine.finishEffectCheck(evaluator, check);
-                }
                 break :complete .completed;
             },
             .fail => switch (self.terminal) {
@@ -513,10 +497,7 @@ const Transaction = struct {
 pub fn begin(
     evaluator: *machine.Machine,
     callable: env.NativeCallable,
-    effect_check: ?machine.EffectCheck,
 ) machine.MachineError!void {
-    var owned_check = effect_check;
-    defer if (owned_check) |*check| check.deinit(evaluator.releaseDomain());
     const definition = callable.instance.definition(callable.definition);
     try evaluator.require(definition.effect.inputs);
     for (0..definition.effect.inputs) |index| switch (evaluator.nativeInputBorrowed(
@@ -527,9 +508,7 @@ pub fn begin(
         .module => return evaluator.fail(.type, "native words cannot observe module capabilities"),
         else => {},
     };
-    const transferred = owned_check;
-    owned_check = null;
-    const call = Transaction.create(evaluator, callable, definition, transferred) catch |err| switch (err) {
+    const call = Transaction.create(evaluator, callable, definition) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.NativeCallsClosed => return evaluator.fail(
             .cancelled,

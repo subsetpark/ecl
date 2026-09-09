@@ -5,10 +5,10 @@ library, one entry per word. Prelude and core come first; standard-library
 modules then appear by module name, with each section's words ordered by
 codepoint — the language's own string ordering (`cmp`) — so symbol-spelled
 words precede letter-spelled ones. An entry gives the word's successful stack
-effect followed by its semantics. Source and native bindings carry declared
-effects reflected by `which` and `see`; built-in words that hand work to a scheduler driver
-state the same shape in their documentation because their result appears after
-the primitive callback returns. The language rules behind those effects live in the
+effect followed by its semantics. Declared effects are reflected by `which`
+and `see`; words without a declaration state their shape in documentation.
+At module boundaries, declared output contracts are checked when the invocation
+completes, including any deferred work. The language rules behind those effects live in the
 [`language specification`](SPEC.md); this document owns the exhaustive list of
 what ships.
 Conventions:
