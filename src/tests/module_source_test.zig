@@ -18,6 +18,57 @@ const intern = @import("../intern.zig");
 const session = @import("../session.zig");
 const test_heap = @import("test_heap.zig");
 
+test "loader: private modules belong to their defining file independent of load order" {
+    for ([_]bool{ false, true }) |bar_first| {
+        var fixture = try LockFixture.init();
+        defer fixture.deinit();
+        try fixture.write("project/ecl.pkg", "{'format 1 'name \"root\" 'version \"0.1.0\" " ++
+            "'sources [\"*.ecl\"] 'exports [\"root.foo\" \"root.bar\" \"root.other\"] 'requires {}}\n");
+        try fixture.write("project/ecl.lock", "{'format 1 'root \"root\" 'packages {} 'requires {\"root\" {}}}\n");
+        try fixture.write("project/foo.ecl", "[] ((99) 'answer def) 'root.foo.hidden @defm\n" ++
+            "[] ((baz.answer) 'answer def (call) 'apply def " ++
+            "(root.foo.hidden.answer) 'own def) 'root.foo @defm\n");
+        try fixture.write("project/bar.ecl", "[] ((42) 'answer def) @module 'baz register\n" ++
+            "[] ('baz ('answer) import " ++
+            "((baz.answer)) 'quoted def " ++
+            "(root.foo.answer) 'foreign def " ++
+            "([] ((9) 'answer def) @module 'baz register) 'replace def) 'root.bar @defm\n");
+        try fixture.write("project/other.ecl", "[] ((7) 'answer def) 'baz @defm\n" ++
+            "[] ((baz.answer) 'answer def) 'root.other @defm\n");
+
+        var backing: test_heap.SessionHeap = .init;
+        defer test_heap.retire(&backing);
+        var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer output.deinit();
+        var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer diagnostics.deinit();
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{
+            .io = std.testing.io,
+            .output = &output.writer,
+            .diagnostics = &diagnostics.writer,
+            .initial_cwd = fixture.nested,
+        }), .default, .evaluate);
+        defer runtime.deinit();
+
+        if (bar_first) try expectOk(&runtime, "root.bar.answer pop");
+        try expectErrorContains(&runtime, "root.foo.answer", &.{"not exported by the active project"});
+        try expectOk(&runtime, "root.bar.answer root.other.answer root.bar.quoted root.foo.apply");
+        try std.testing.expectEqual(@as(i64, 42), runtime.stackItems()[0].int);
+        try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[1].int);
+        try std.testing.expectEqual(@as(i64, 42), runtime.stackItems()[2].int);
+        try expectErrorContains(&runtime, "root.bar.foreign", &.{"not exported by the active project"});
+        try expectErrorContains(&runtime, "baz.answer", &.{"not exported by the active project"});
+        try expectErrorContains(&runtime, "'baz ('answer) import", &.{"not exported by the active project"});
+        try expectErrorContains(&runtime, "root.foo.hidden.answer", &.{"not exported by the active project"});
+        try expectOk(&runtime, "root.foo.own 99 = {'kind 'user} assert");
+        try expectOk(&runtime, "root.bar.replace root.bar.answer root.other.answer");
+        try std.testing.expectEqual(@as(i64, 9), runtime.stackItems()[3].int);
+        try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[4].int);
+    }
+}
+
 test "loader: catalog cold-loads multiple full module names from an unrelated artifact name" {
     var fixture = try LockFixture.init();
     defer fixture.deinit();
@@ -27,6 +78,7 @@ test "loader: catalog cold-loads multiple full module names from an unrelated ar
         "1.0.0",
         hash_a,
         "unrelated.ecl",
+        "\"stats.regressions\" \"stats.distributions\"",
         "[] (({d}) 'answer def) 'stats.regressions @defm\n" ++
             "[] (({d}) 'answer def) 'stats.distributions @defm\n",
         .{ 1, 2 },
@@ -60,7 +112,7 @@ test "loader: the root package exports local source through the same catalog" {
     try fixture.write(
         "project/ecl.pkg",
         "{'format 1 'name \"root\" 'version \"0.1.0\" " ++
-            "'exports {\"root\" [\"src/**/*\"]} 'requires {}}\n",
+            "'sources [\"src/**/*\"] 'exports [\"root.local\"] 'requires {}}\n",
     );
     try fixture.write(
         "project/ecl.lock",
@@ -98,7 +150,7 @@ test "loader: a root-defined module reaches its declared direct dependency" {
     try fixture.write(
         "project/ecl.pkg",
         "{'format 1 'name \"root\" 'version \"0.1.0\" " ++
-            "'exports {\"root\" [\"src/**/*\"]} 'requires " ++
+            "'sources [\"src/**/*\"] 'exports [\"root.local\"] 'requires " ++
             "{\"dep\" {'package \"dep\" 'version \"1.0.0\" " ++
             "'url \"https://example.invalid/dep.tgz\" 'hash \"" ++ hash_a ++ "\"}}}\n",
     );
@@ -174,7 +226,7 @@ test "loader: catalog discovery holds a manifest to the whole public contract" {
         const manifest = try std.fmt.allocPrint(
             std.testing.allocator,
             "{{'format 1 'name \"root\" 'version \"0.1.0\" " ++
-                "'exports {{\"root\" [\"src/**/*\"]}} 'requires {s}}}\n",
+                "'sources [\"src/**/*\"] 'exports [\"root.local\"] 'requires {s}}}\n",
             .{case.requires},
         );
         defer std.testing.allocator.free(manifest);
@@ -320,6 +372,7 @@ test "loader: direct requires mask both cold and already-loaded transitive modul
         "1.0.0",
         hash_a,
         "implementation.ecl",
+        "\"alpha\"",
         "[] ((beta.answer) 'through def) 'alpha @defm\n",
         .{},
     );
@@ -361,6 +414,7 @@ test "loader: one quotation rechecks authorization in each package context" {
         "1.0.0",
         hash_a,
         "alpha.ecl",
+        "\"alpha\"",
         "secret.answer pop [] ((2 swap times pop pop) 'run def) 'alpha @defm\n",
         .{},
     );
@@ -369,6 +423,7 @@ test "loader: one quotation rechecks authorization in each package context" {
         "1.0.0",
         hash_b,
         "beta.ecl",
+        "\"beta\"",
         "[] ((2 swap times pop pop) 'run def) 'beta @defm\n",
         .{},
     );
@@ -413,6 +468,7 @@ test "loader: a failing multi-module artifact publishes no usable module" {
         "1.0.0",
         hash_a,
         "many.ecl",
+        "\"broken.first\" \"broken.second\"",
         "[] ((1) 'answer def) 'broken.first @defm\n" ++
             "missing-during-artifact-load\n" ++
             "[] ((2) 'answer def) 'broken.second @defm\n",
@@ -657,7 +713,7 @@ const LockFixture = struct {
         try directory.dir.createDir(std.testing.io, "path", .default_dir);
         if (marker) try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "project/ecl.pkg",
-            .data = "{'format 1 'name \"root\" 'version \"0.1.0\" 'exports {} 'requires {}}\n",
+            .data = "{'format 1 'name \"root\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires {}}\n",
         });
         const nested = try std.fs.path.join(allocator, &.{ root, "project", "nested" });
         errdefer allocator.free(nested);
@@ -768,7 +824,7 @@ const LockFixture = struct {
         defer std.testing.allocator.free(manifest_path);
         const manifest = try std.fmt.allocPrint(
             std.testing.allocator,
-            "{{'format 1 'name \"{s}\" 'version \"{s}\" 'exports {{}} 'requires {{}}}}\n",
+            "{{'format 1 'name \"{s}\" 'version \"{s}\" 'sources [] 'exports [] 'requires {{}}}}\n",
             .{ package, version },
         );
         defer std.testing.allocator.free(manifest);
@@ -792,6 +848,7 @@ const LockFixture = struct {
         version: []const u8,
         hash: []const u8,
         relative_path: []const u8,
+        exports: []const u8,
         comptime source_format: []const u8,
         args: anytype,
     ) !void {
@@ -813,8 +870,8 @@ const LockFixture = struct {
         defer std.testing.allocator.free(manifest_path);
         const manifest = try std.fmt.allocPrint(
             std.testing.allocator,
-            "{{'format 1 'name \"{s}\" 'version \"{s}\" 'exports {{\"{s}\" [\"**/*\"]}} 'requires {{}}}}\n",
-            .{ package, version, package },
+            "{{'format 1 'name \"{s}\" 'version \"{s}\" 'sources [\"**/*\"] 'exports [{s}] 'requires {{}}}}\n",
+            .{ package, version, exports },
         );
         defer std.testing.allocator.free(manifest);
         try self.write(manifest_path, manifest);
@@ -851,8 +908,8 @@ const LockFixture = struct {
         defer std.testing.allocator.free(manifest_path);
         const manifest = try std.fmt.allocPrint(
             std.testing.allocator,
-            "{{'format 1 'name \"{s}\" 'version \"{s}\" 'exports {{\"{s}\" [\"**/*\"]}} 'requires {{}}}}\n",
-            .{ package, version, package },
+            "{{'format 1 'name \"{s}\" 'version \"{s}\" 'sources [\"**/*\"] 'exports [\"{s}\"] 'requires {{}}}}\n",
+            .{ package, version, module_name },
         );
         defer std.testing.allocator.free(manifest);
         try self.write(manifest_path, manifest);

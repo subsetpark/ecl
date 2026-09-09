@@ -2755,8 +2755,9 @@ package, minimum version, URL, and hash declaration.
 `( candidate -- manifest )` — Return a manifest unchanged, or raise. A non-dict
 is `'type`; an undeclared key, unsupported format, malformed name, version,
 hash, or URL, self-requirement, ownership collision, or executable word value
-is `'domain`. Export namespaces are package-owned canonical names whose values
-are nonempty distinct lists of safe portable globs. Requirement keys are local
+is `'domain`. Sources are distinct safe portable glob strings. Exports are distinct,
+exact, package-owned module names; exporting a parent does not export its
+children. Private module names are visible only within their defining file. Requirement keys are local
 aliases and do not rewrite module names.
 
 ### read

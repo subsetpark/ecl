@@ -30,8 +30,8 @@ test "pkg store: inspect returns exact root manifest" {
     defer host.deinit();
     try host.expectStack(
         source,
-        "\"{'format 1 'name \\\"bad\\\" 'version \\\"1.0.0\\\" 'exports " ++
-            "{\\\"bad\\\" [\\\"**/*\\\"]} 'requires {}}\\n\"",
+        "\"{'format 1 'name \\\"bad\\\" 'version \\\"1.0.0\\\" 'sources [\\\"**/*\\\"] " ++
+            "'exports [\\\"bad\\\"] 'requires {}}\\n\"",
     );
 }
 
@@ -59,7 +59,7 @@ test "pkg store: rejects invalid source package layouts before publication" {
     }
 }
 
-test "pkg store: package export globs admit nested source artifacts" {
+test "pkg store: package source globs admit nested source artifacts" {
     var fixture = try HttpsFixture.start();
     defer fixture.stop();
     var host = try PackageHost.init(.{ .tls = true, .cache = true });
@@ -87,7 +87,7 @@ test "pkg store: atomically installs one valid source package" {
     );
     defer allocator.free(manifest);
     try std.testing.expectEqualStrings(
-        "{'format 1 'name \"bad\" 'version \"1.0.0\" 'exports {\"bad\" [\"**/*\"]} 'requires {}}\n",
+        "{'format 1 'name \"bad\" 'version \"1.0.0\" 'sources [\"**/*\"] 'exports [\"bad\"] 'requires {}}\n",
         manifest,
     );
     const seal = try host.scratch.directory.dir.readFileAlloc(
@@ -101,7 +101,7 @@ test "pkg store: atomically installs one valid source package" {
     defer allocator.free(expected_seal);
     try std.testing.expectEqualSlices(u8, expected_seal, seal);
     try host.expectStack("'cache \"" ++ key ++ "\" pkg.store.present? 'cache \"" ++ key ++ "\" pkg.store.manifest", "1 " ++
-        "\"{'format 1 'name \\\"bad\\\" 'version \\\"1.0.0\\\" 'exports {\\\"bad\\\" [\\\"**/*\\\"]} 'requires {}}\\n\"");
+        "\"{'format 1 'name \\\"bad\\\" 'version \\\"1.0.0\\\" 'sources [\\\"**/*\\\"] 'exports [\\\"bad\\\"] 'requires {}}\\n\"");
 }
 
 test "pkg store: ordinary Sessions have no package authority" {
@@ -409,8 +409,8 @@ test "pkg sync: explicit project root selects store mode without ambient discove
     var host = try PackageHost.init(.{ .cache = true });
     defer host.deinit();
     try host.scratch.directory.dir.createDir(std.testing.io, "ambient", .default_dir);
-    const ambient_manifest = "{'format 1 'name \"ambient\" 'version \"0.1.0\" 'exports {} 'requires {}}\n";
-    const target_manifest = "{'format 1 'name \"target\" 'version \"0.1.0\" 'exports {} 'requires {}}\n";
+    const ambient_manifest = "{'format 1 'name \"ambient\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires {}}\n";
+    const target_manifest = "{'format 1 'name \"target\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires {}}\n";
     try host.scratch.directory.dir.writeFile(std.testing.io, .{
         .sub_path = "ambient/ecl.pkg",
         .data = ambient_manifest,
@@ -962,7 +962,7 @@ test "pkg sync: prefix violation names offender without retained entry" {
         .name = "prefix violation",
         .source = source,
         .kind = "domain",
-        .message_contains = "outside export namespace `foo`",
+        .message_contains = "exports undeclared module foo",
         .data = &.{.{ .name = "package", .expected = .{ .string = "foo" } }},
     });
     try paths.expectUnchanged();

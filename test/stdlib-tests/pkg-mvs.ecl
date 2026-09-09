@@ -16,8 +16,10 @@
   {} 'format 1 put
   'name name put
   'version version put
-  'exports {} name ["**/*"] put put
-  'requires requires put) 'manifest defp
+  'sources ["**/*"] put
+  'exports name wrap put
+  'requires requires put)
+ 'manifest defp
 
  ### defp hash-a
  (-- hash : "Return the first valid fixture hash.")

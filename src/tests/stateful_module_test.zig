@@ -61,7 +61,7 @@ const ConcurrentLockFixture = struct {
         );
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "project/ecl.pkg",
-            .data = "{'format 1 'name \"root\" 'version \"0.1.0\" 'exports {} 'requires {}}\n",
+            .data = "{'format 1 'name \"root\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires {}}\n",
         });
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "project/ecl.lock",
@@ -73,7 +73,7 @@ const ConcurrentLockFixture = struct {
         });
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "cache/race-1.0.0-" ++ concurrent_hash[7..] ++ "/ecl.pkg",
-            .data = "{'format 1 'name \"race\" 'version \"1.0.0\" 'exports {\"race\" [\"**/*\"]} 'requires {}}\n",
+            .data = "{'format 1 'name \"race\" 'version \"1.0.0\" 'sources [\"**/*\"] 'exports [\"race\"] 'requires {}}\n",
         });
         const nested = try std.fs.path.join(allocator, &.{ root, "project", "nested" });
         errdefer allocator.free(nested);

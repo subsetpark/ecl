@@ -490,6 +490,7 @@ const ExecutionHome = struct {
 /// image back several independent registrations, and it keeps the value heap a
 /// DAG, because a registration retains an image and never the reverse.
 const ModuleImage = struct {
+    source: ?*const @import("pkg_lock.zig").SourceScope,
     allocator: std.mem.Allocator,
     refs: std.atomic.Value(u32) = .init(1),
     environment: env.Environment,
@@ -525,6 +526,7 @@ const ModuleImage = struct {
     fn create(
         allocator: std.mem.Allocator,
         releases: *heap.ReleaseDomain,
+        source: ?*const @import("pkg_lock.zig").SourceScope,
     ) error{OutOfMemory}!*ModuleImage {
         // No scope cell is minted here. An image needs one only if ECL source
         // is stamped against it, which `moduleOwned` arranges lazily; a registry
@@ -538,6 +540,7 @@ const ModuleImage = struct {
         };
         anchor.* = .{ .park = .{ .image = result } };
         result.allocator = allocator;
+        result.source = source;
         result.anchor = anchor;
         result.minted_cell = false;
         result.environment = env.Environment.init(allocator, releases);
@@ -655,21 +658,32 @@ const ModuleImage = struct {
 /// it publishes and owns everything the image deliberately does not: the name,
 /// the generation number, and the slot lifetime witness that keeps the durable
 /// state and arbiter reachable while old code can still name them.
-/// Nominal publication provenance. Only the embedded-module loader may pass
-/// `standard_library`; `register`, `@defm`, dynamic native loading, and
-/// explicit replacement publish `ordinary`. Cataloged package source publishes
-/// `package`, and the root project's own cataloged source publishes
-/// `root_package`; both carry the package id that `requires` masks visibility
-/// against, so a module registered from package source keeps its own package's
-/// direct lock edges wherever it later executes. Resolution exposes these
-/// distinctions without exposing a registry, image, or mutation capability, so
-/// optimizers can trust shipped module definitions without trusting a later
-/// replacement registered under the same name.
+/// Nominal publication provenance. Embedded definitions retain their trusted
+/// origin. Cataloged code carries its defining-file capability, which also
+/// identifies its package and direct dependencies. Interactive root code has
+/// package authority without access to any file's private namespace.
+/// Images preserve lexical file identity even when invoked without a
+/// registration or republished by another file.
 pub const RegistrationProvenance = union(enum) {
     ordinary,
     standard_library,
     root_package: pkg_catalog.PackageId,
-    package: pkg_catalog.PackageId,
+    package: *const @import("pkg_lock.zig").SourceScope,
+
+    pub fn packageId(self: RegistrationProvenance) ?pkg_catalog.PackageId {
+        return switch (self) {
+            .root_package => |id| id,
+            .package => |source| source.package(),
+            .ordinary, .standard_library => null,
+        };
+    }
+
+    pub fn sourceScope(self: RegistrationProvenance) ?*const @import("pkg_lock.zig").SourceScope {
+        return switch (self) {
+            .package => |source| source,
+            else => null,
+        };
+    }
 };
 
 const Registration = struct {
@@ -1322,6 +1336,7 @@ pub const ModuleHome = opaque {
         return registration.generation;
     }
     pub fn registrationProvenance(self: *const ModuleHome) RegistrationProvenance {
+        if (self.state().image.source) |source| return .{ .package = source };
         const registration = self.state().registration orelse return .ordinary;
         return registration.provenance;
     }
@@ -1411,7 +1426,7 @@ test "modules: an image's registration-less home is reachable from its own root 
     var container = try env.Env.init(&host);
     defer container.deinit();
 
-    const image = try ModuleImage.create(std.testing.allocator, releases);
+    const image = try ModuleImage.create(std.testing.allocator, releases, null);
     defer image.release();
 
     const recovered = homeForModuleRootScope(&image.scope) orelse
@@ -1449,7 +1464,7 @@ test "modules: a stamped retired image leaves one anchor and an unstamped one le
         host.cleanup().drain();
         const unstamped_base = counting.total_requested_bytes;
         for (0..rounds) |_| {
-            const image = try ModuleImage.create(allocator, releases);
+            const image = try ModuleImage.create(allocator, releases, null);
             image.release();
             host.cleanup().drain();
         }
@@ -1462,7 +1477,7 @@ test "modules: a stamped retired image leaves one anchor and an unstamped one le
         // leaves precisely that cell plus its parked anchor behind.
         const stamped_base = counting.total_requested_bytes;
         for (0..rounds) |_| {
-            const image = try ModuleImage.create(allocator, releases);
+            const image = try ModuleImage.create(allocator, releases, null);
             _ = try container.scopeIdForOwned(&image.scope, @ptrCast(image.anchor));
             image.release();
             host.cleanup().drain();
@@ -1502,7 +1517,7 @@ test "modules: a borrow holds an image's contents across a full drain" {
         const releases = host.domain();
         var container = try env.Env.init(&host);
 
-        const image = try ModuleImage.create(allocator, releases);
+        const image = try ModuleImage.create(allocator, releases, null);
         const owner: *anyopaque = @ptrCast(image.anchor);
         _ = try container.scopeIdForOwned(&image.scope, owner);
         const cell = try container.scopeCell(&image.scope, owner);
@@ -1565,7 +1580,7 @@ test "modules: the same drop with no borrow reclaims the contents" {
         const releases = host.domain();
         var container = try env.Env.init(&host);
 
-        const image = try ModuleImage.create(allocator, releases);
+        const image = try ModuleImage.create(allocator, releases, null);
         const owner: *anyopaque = @ptrCast(image.anchor);
         _ = try container.scopeIdForOwned(&image.scope, owner);
 
@@ -2673,7 +2688,11 @@ pub const Registry = enum(usize) {
     /// A fresh anonymous image. Naming it is a separate, later decision, so
     /// nothing here validates or reserves a registry name.
     pub fn createImage(self: *Registry) error{OutOfMemory}!OwnedImage {
-        return .init(try ModuleImage.create(self.allocator(), self.releaseDomain()));
+        return self.createSourceImage(null);
+    }
+
+    pub fn createSourceImage(self: *Registry, source: ?*const @import("pkg_lock.zig").SourceScope) error{OutOfMemory}!OwnedImage {
+        return .init(try ModuleImage.create(self.allocator(), self.releaseDomain(), source));
     }
 
     pub const NativeCandidateProgress = poll.Progress(OwnedImage);

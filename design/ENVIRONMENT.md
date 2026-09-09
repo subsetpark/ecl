@@ -459,8 +459,8 @@ chooses among minimum versions declared by reachable manifests.
 {'format 1
  'name "my.proj"
  'version "0.1.0"
- 'exports
- {"my.proj" ["src/**/*.ecl"]}
+ 'sources ["src/**/*.ecl"]
+ 'exports ["my.proj"]
  'requires
  {"statistics" {'package "foo"
                  'version "1.2.0"
@@ -469,8 +469,8 @@ chooses among minimum versions declared by reachable manifests.
 ```
 
 `'format` is the integer `1`. `'name` is the package's canonical name, and
-`'version` is its version. `'exports` maps owned module namespaces to portable
-source globs. `'requires` maps consumer-local aliases to requirements.
+`'version` is its version. `'sources` lists portable source-file globs, and
+`'exports` lists exact public module names. `'requires` maps consumer-local aliases to requirements.
 
 A requirement contains exactly `'package`, `'version`, `'url`, and `'hash`.
 The version is a minimum. The URL begins with `https://`. The hash has the
@@ -494,18 +494,31 @@ matches `[a-z][a-z0-9-]*`. Every package name is also a valid module name.
 Package `foo` owns module namespaces `foo` and `foo.<rest>`. The ownership
 boundary is a dot, so `foo` owns `foo.bar` and excludes `foobar`.
 
-Each exported namespace maps to a nonempty list of distinct portable globs.
-Globs use relative `/`-separated paths and support `*`, `?`, and a
-whole-segment `**`. They exclude absolute paths, backslashes, and empty, `.`,
-or `..` segments.
+The source list contains distinct portable globs. Globs use relative
+`/`-separated paths and support `*`, `?`, and a whole-segment
+`**`. They exclude absolute paths, backslashes, and empty, `.`, or `..`
+segments. Every glob matches at least one ECL source file; overlapping globs
+select a file only once. An empty source list is valid.
 
-The package catalog is derived from matching source files and their parsed
-forms. Each matched `.ecl` file declares one or more top-level modules through
-a literal module symbol followed by `@defm`. Every declaration is the export
-namespace or one of its dotted children. A source file may declare several
-modules. Every glob matches at least one file, one file belongs to one export
-namespace, and one module name maps to one source file across the selection.
-File and directory names carry no module-name meaning beyond glob matching.
+Exports are distinct, exact, package-owned module names. Exporting a module
+does not export its dotted children. Each export must have one top-level
+literal declaration in the selected source files: a module-name symbol
+followed by `@defm`. A source file may export several modules, and every
+export maps to exactly one source file. File and directory names do not
+determine module names.
+
+Other registrations in a selected file are private to that file. They may
+use unrelated names and may be constructed dynamically with `@module` and
+`register`. Modules and their tests can use their defining file's private
+registrations. Other files cannot access those registrations, including files
+in the same package. Two files may independently register the same private
+name.
+
+Calling an exported module preserves the called code's defining-file
+visibility. Loading another file does not add its private registrations to
+the caller's environment. Module-authored quotations and module handles keep
+their defining-file context when passed elsewhere; passing such a value
+explicitly is distinct from making its private module name public.
 
 ### Resolution
 
@@ -694,18 +707,19 @@ lock uses `<project-root>/vendor` and ignores cache environment variables.
 
 The catalog maps each module to an exact package entry and source path. A
 missing selected directory raises `'io` and directs the user to `ecl pkg
-sync`. An unexported module or a module outside the current package's direct
-requirements raises `'undefined-word`. Package lookup never falls through to
+sync`. A module unavailable in the defining file and public catalog, or an
+export outside the current package's direct requirements, raises `'undefined-word`. Package lookup never falls through to
 `ECL_PATH` and never performs network or package writes.
 
-Runtime package visibility is lexical. Root and package code can resolve their
+Runtime package visibility is lexical. Root and package code can resolve exports from their
 own package and packages named by their direct requirement edges. Loading a
 transitive package into the shared registry does not grant visibility to an
 unrelated caller.
 
 One source artifact is evaluated once. Its cataloged registrations and package
-provenance are verified before commit. Qualified resolution ignores
-registrations from an uncommitted artifact.
+provenance are verified before commit. Other files cannot resolve
+exports from an uncommitted artifact; the file being evaluated can use its
+own registrations as they are created.
 
 Runtime lookup uses these stable diagnostics:
 

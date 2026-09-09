@@ -605,6 +605,27 @@ Old code remains executable, but a superseded home cannot publish new durable
 state. Removal closes admission, lets outstanding turns settle, and separates
 the slot's teardown from delayed generation retirement.
 
+### Package visibility belongs to the defining source
+
+A cataloged source has one Session-owned file identity and private registry.
+The catalog separates source selection from exact public exports; the shared
+registry contains exported registrations while each file owns its private
+registrations. Private names therefore cannot collide across files or become
+visible through incidental loading.
+
+Module images retain their defining source identity independently of any
+registration name. Execution, module-value invocation, escaped quotations,
+and test bodies preserve that identity. Qualified lookup and import use one
+visibility cursor: the defining file's private registrations, followed by
+authorized public exports. Suspended loads retain the same lexical context
+through authorization and resumed dispatch.
+
+File identity, package ownership, and the private registry are carried by one
+opaque source capability. The Session keeps it alive until execution stops;
+registry teardown uses the existing host-owned retirement protocol. Frame
+storage accommodates the lexical capability retained by a suspended load,
+with a 144-byte ceiling.
+
 ### Loading feeds the same resolution tail
 
 An unresolved qualified name may suspend dispatch while the loader searches

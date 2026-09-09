@@ -4,7 +4,7 @@
 (
  ### setp manifest-keys
  # Required manifest keys.
- ['format 'name 'version 'exports 'requires]
+ ['format 'name 'version 'sources 'exports 'requires]
  'manifest-keys setp
 
  ### setp requirement-keys
@@ -34,19 +34,20 @@
   (pop 0)
   if) 'glob-valid? defp
 
- ### defp export-globs-valid?
- (candidate -- bool : "Return 1 for a nonempty list of distinct portable globs.")
+ ### defp source-globs-valid?
+ (candidate -- bool : "Return 1 for a list of distinct portable source globs.")
  (dup type 'list match?
   (|candidate|
-   candidate empty? not
-   candidate (glob-valid?) all? and
+   candidate (glob-valid?) all?
    candidate distinct len candidate len = and)
   (pop 0)
-  if) 'export-globs-valid? defp
+  if)
+ 'source-globs-valid? defp
 
  ### defp export-owned?
- (pair package -- bool : "Return 1 when one export namespace belongs to its package.")
- (|pair package| package pair first pkg.name.owns?) 'export-owned? defp
+ (name package -- bool : "Return 1 when an exported module belongs to its package.")
+ (|name package| package name pkg.name.owns?)
+ 'export-owned? defp
 
  ### def validate-requirement
  (requirement -- requirement : "Validate and return a package requirement.")
@@ -75,7 +76,8 @@
   'type error.new "a manifest is a dict" error.with-message assert
   candidate dict.pairs (pkg.data.assert-inert-entry) for
   candidate manifest-keys dict.keys-exactly?
-  'domain error.new "a manifest has exactly the keys 'format 'name 'version 'exports 'requires"
+  'domain error.new
+  "a manifest has exactly the keys 'format 'name 'version 'sources 'exports 'requires"
   error.with-message
   assert
   candidate 'format at 1 match?
@@ -83,16 +85,17 @@
   candidate 'name at pkg.name.valid?
   'domain error.new "a package name is dot-joined lowercase segments" error.with-message assert
   candidate 'version at pkg.version.validate pop
-  candidate 'exports at type 'dict match?
-  'type error.new "manifest exports are a dict from module namespace to glob list"
+  candidate 'sources at source-globs-valid?
+  'domain error.new "manifest sources are distinct portable glob strings" error.with-message assert
+  candidate 'exports at type 'list match?
+  'type error.new "manifest exports are a list of exact module names"
   error.with-message assert
-  candidate 'exports at dict.keys (pkg.name.valid?) all?
-  'domain error.new "an export namespace is a canonical module name" error.with-message assert
-  candidate 'exports at dict.pairs candidate 'name at (export-owned?) partial all?
-  'domain error.new "a package owns every namespace it exports" error.with-message assert
-  candidate 'exports at dict.vals (export-globs-valid?) all?
-  'domain error.new "manifest export values are nonempty distinct portable glob lists"
-  error.with-message assert
+  candidate 'exports at (pkg.name.valid?) all?
+  'domain error.new "an exported module has a canonical name" error.with-message assert
+  candidate 'exports at dup distinct len swap len =
+  'domain error.new "manifest exports are distinct module names" error.with-message assert
+  candidate 'exports at candidate 'name at (export-owned?) partial all?
+  'domain error.new "a package owns every module it exports" error.with-message assert
   candidate 'requires at type 'dict match?
   'type error.new "manifest requirements are a dict from local alias to requirement"
   error.with-message assert
@@ -135,14 +138,6 @@
  (dict.pairs (render-requirement-entry) each " " join wrap "{{{}}}" str.format) 'render-requirements
  defp
 
- ### defp render-export-entry
- (pair -- text : "Render one export namespace and its glob list.")
- ((first str) (1 at str) bi 2 pack "{} {}" str.format) 'render-export-entry defp
-
- ### defp render-exports
- (exports -- text : "Render exports in retained insertion order.")
- (dict.pairs (render-export-entry) each " " join wrap "{{{}}}" str.format) 'render-exports defp
-
  ### def write
  (manifest -- text :
   "Validate and render a manifest, retaining requirement insertion order and ending in newline.")
@@ -151,8 +146,10 @@
   (|manifest|
    manifest 'name at str
    manifest 'version at str
-   manifest 'exports at render-exports
+   manifest 'sources at str
+   manifest 'exports at str
    manifest 'requires at render-requirements)
   infra
-  "{{'format 1 'name {} 'version {} 'exports {} 'requires {}}}\n" str.format) 'write def
+  "{{'format 1 'name {} 'version {} 'sources {} 'exports {} 'requires {}}}\n" str.format)
+ 'write def
 ) 'pkg.manifest @defm

@@ -1,9 +1,8 @@
 //! Derived, inert package module catalogs.
 //!
 //! A catalog is built from validated package manifests and parsed ECL source;
-//! no package source is evaluated during discovery. Export globs select source
-//! artifacts, while top-level literal `@defm` declarations provide the exact
-//! canonical module names those artifacts may publish.
+//! no package source is evaluated during discovery. Source globs select files;
+//! exact exports select their public, statically declared module names.
 const std = @import("std");
 const value = @import("value.zig");
 const heap = @import("heap.zig");
@@ -84,27 +83,18 @@ pub const Catalog = struct {
 
 pub const BuildError = error{ OutOfMemory, Invalid };
 
-const Export = struct {
-    namespace: []u8,
-    globs: [][]u8,
-
-    fn deinit(self: *Export, allocator: std.mem.Allocator) void {
-        allocator.free(self.namespace);
-        for (self.globs) |glob| allocator.free(glob);
-        allocator.free(self.globs);
-        self.* = undefined;
-    }
-};
-
 const Manifest = struct {
     name: []u8,
     version: []u8,
-    exports: []Export,
+    sources: [][]u8,
+    exports: [][]u8,
 
     fn deinit(self: *Manifest, allocator: std.mem.Allocator) void {
         allocator.free(self.name);
         allocator.free(self.version);
-        for (self.exports) |*export_entry| export_entry.deinit(allocator);
+        for (self.sources) |entry| allocator.free(entry);
+        allocator.free(self.sources);
+        for (self.exports) |entry| allocator.free(entry);
         allocator.free(self.exports);
         self.* = undefined;
     }
@@ -112,7 +102,6 @@ const Manifest = struct {
 
 const Claim = struct {
     relative_path: []u8,
-    namespace: []const u8,
 };
 
 const Builder = struct {
@@ -139,7 +128,7 @@ const Builder = struct {
     }
 
     /// Read and validate one package's manifest, then open the directory walk
-    /// its export globs select over. The walk itself is resumable: a package
+    /// its source globs select over. The walk itself is resumable: a package
     /// tree holds thousands of artifacts and a scheduler step may not traverse
     /// them all at once.
     fn openPackage(self: *Builder, input: PackageInput) BuildError!Walk {
@@ -160,7 +149,7 @@ const Builder = struct {
         return .{ .manifest = manifest, .directory = directory, .walker = walker };
     }
 
-    /// Claim up to `budget` directory entries for their export namespace.
+    /// Claim up to `budget` directory entries selected by source globs.
     /// Returns false once the walk is exhausted.
     fn walkStep(self: *Builder, input: PackageInput, walk: *Walk, budget: usize) BuildError!bool {
         var remaining = budget;
@@ -175,32 +164,16 @@ const Builder = struct {
                 "package `{s}` contains an ECL artifact path longer than {d} bytes",
                 .{ input.name, max_relative_path_bytes },
             );
-            var matched_namespace: ?[]const u8 = null;
-            for (walk.manifest.exports) |export_entry| {
-                var matched = false;
-                for (export_entry.globs) |glob| {
-                    if (globMatches(glob, entry.path)) {
-                        matched = true;
-                        break;
-                    }
-                }
-                if (!matched) continue;
-                if (matched_namespace) |prior| {
-                    if (!std.mem.eql(u8, prior, export_entry.namespace)) return self.fail(
-                        "package `{s}` artifact `{s}` is claimed by export namespaces `{s}` and `{s}`",
-                        .{ input.name, entry.path, prior, export_entry.namespace },
-                    );
-                } else matched_namespace = export_entry.namespace;
-            }
-            if (matched_namespace) |namespace| {
+            for (walk.manifest.sources) |glob| {
+                if (!globMatches(glob, entry.path)) continue;
                 try walk.claims.ensureUnusedCapacity(self.allocator, 1);
                 walk.claims.appendAssumeCapacity(.{
                     .relative_path = try self.allocator.dupe(u8, entry.path),
-                    .namespace = namespace,
                 });
+                break;
             }
             if (self.artifacts.items.len + walk.claims.items.len > max_artifacts) return self.fail(
-                "package graph contains more than {d} exported ECL artifacts",
+                "package graph contains more than {d} ECL source artifacts",
                 .{max_artifacts},
             );
         }
@@ -217,26 +190,22 @@ const Builder = struct {
             }
         }.lessThan);
 
-        for (walk.manifest.exports) |export_entry| {
-            for (export_entry.globs) |glob| {
-                var matched = false;
-                for (walk.claims.items) |claim| {
-                    if (std.mem.eql(u8, claim.namespace, export_entry.namespace) and
-                        globMatches(glob, claim.relative_path))
-                    {
-                        matched = true;
-                        break;
-                    }
+        for (walk.manifest.sources) |glob| {
+            var matched = false;
+            for (walk.claims.items) |claim| {
+                if (globMatches(glob, claim.relative_path)) {
+                    matched = true;
+                    break;
                 }
-                if (!matched) return self.fail(
-                    "package `{s}` export `{s}` glob `{s}` matches no ECL source artifact",
-                    .{ input.name, export_entry.namespace, glob },
-                );
             }
+            if (!matched) return self.fail(
+                "package {s} source glob {s} matches no ECL source artifact",
+                .{ input.name, glob },
+            );
         }
     }
 
-    fn buildArtifact(self: *Builder, input: PackageInput, claim: Claim) BuildError!void {
+    fn buildArtifact(self: *Builder, input: PackageInput, claim: Claim, manifest: *const Manifest) BuildError!void {
         const absolute = std.fs.path.join(self.allocator, &.{ input.root_dir, claim.relative_path }) catch
             return error.OutOfMemory;
         errdefer self.allocator.free(absolute);
@@ -279,19 +248,19 @@ const Builder = struct {
         const forms = parsed.values();
         for (forms, 0..) |form, index| {
             if (form != .word or !std.mem.eql(u8, intern.get(form.word.name), "@defm")) continue;
-            if (index == 0 or forms[index - 1] != .symbol) return self.fail(
-                "package `{s}` artifact `{s}` has a top-level @defm without a literal module name",
-                .{ input.name, claim.relative_path },
-            );
+            // Dynamic declarations are file-private. Only exports require
+            // a literal name that discovery can identify without evaluation.
+            if (index == 0 or forms[index - 1] != .symbol) continue;
             const name = intern.moduleName(forms[index - 1].symbol) catch return self.fail(
                 "package `{s}` artifact `{s}` declares an invalid module name",
                 .{ input.name, claim.relative_path },
             );
             const name_bytes = intern.get(intern.moduleId(name));
-            if (!ownsNamespace(claim.namespace, name_bytes)) return self.fail(
-                "package `{s}` artifact `{s}` declares module `{s}` outside export namespace `{s}`",
-                .{ input.name, claim.relative_path, name_bytes, claim.namespace },
-            );
+            var exported = false;
+            for (manifest.exports) |export_name| {
+                if (std.mem.eql(u8, name_bytes, export_name)) exported = true;
+            }
+            if (!exported) continue;
             for (names.items) |prior| if (prior == name) return self.fail(
                 "package `{s}` artifact `{s}` declares module `{s}` more than once",
                 .{ input.name, claim.relative_path, name_bytes },
@@ -306,14 +275,14 @@ const Builder = struct {
                 .{max_modules},
             );
         }
-        if (names.items.len == 0) return self.fail(
-            "package `{s}` artifact `{s}` declares no top-level statically named modules",
-            .{ input.name, claim.relative_path },
-        );
-
         const artifact_id: ArtifactId = @enumFromInt(@as(u32, @intCast(self.artifacts.items.len)));
         try self.artifacts.ensureUnusedCapacity(self.allocator, 1);
         try self.modules.ensureUnusedCapacity(self.allocator, names.items.len);
+        std.mem.sort(intern.ModuleName, names.items, {}, struct {
+            fn lessThan(_: void, left: intern.ModuleName, right: intern.ModuleName) bool {
+                return @intFromEnum(left) < @intFromEnum(right);
+            }
+        }.lessThan);
         const owned_names = try names.toOwnedSlice(self.allocator);
         errdefer self.allocator.free(owned_names);
         const relative = try self.allocator.dupe(u8, claim.relative_path);
@@ -362,7 +331,7 @@ const Builder = struct {
     }
 
     fn parseManifest(self: *Builder, path: []const u8, item: Value) BuildError!Manifest {
-        const top = data.exactFields(item, &.{ "format", "name", "version", "exports", "requires" }) catch
+        const top = data.exactFields(item, &.{ "format", "name", "version", "sources", "exports", "requires" }) catch
             return self.fail("package manifest `{s}` does not have the exact format-1 fields", .{path});
         const format = data.field(top, "format") catch @panic("exact manifest lost its format field");
         if (format != .int or format.int != 1)
@@ -386,74 +355,21 @@ const Builder = struct {
         };
         errdefer self.allocator.free(version);
 
-        const exports_dict = data.asDict(
-            data.field(top, "exports") catch @panic("exact manifest lost its exports field"),
-        ) catch
-            return self.fail("package manifest `{s}` exports must be a dict", .{path});
-        var exports: std.ArrayList(Export) = .empty;
+        const sources = try self.stringList(path, top, "sources", validGlob);
         errdefer {
-            for (exports.items) |*entry| entry.deinit(self.allocator);
-            exports.deinit(self.allocator);
+            for (sources) |entry| self.allocator.free(entry);
+            self.allocator.free(sources);
         }
-        const export_count: usize = @intCast(exports_dict.length());
-        try exports.ensureTotalCapacity(self.allocator, export_count);
-        for (0..export_count) |index| {
-            const namespace = data.ownedUtf8(self.allocator, dict.keyAt(exports_dict, index)) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.Invalid => return self.fail("package manifest `{s}` has a non-string export namespace", .{path}),
-            };
-            errdefer self.allocator.free(namespace);
-            if (!validCanonicalName(namespace) or !ownsNamespace(name, namespace)) return self.fail(
-                "package `{s}` does not own export namespace `{s}`",
-                .{ name, namespace },
+        const exports = try self.stringList(path, top, "exports", validCanonicalName);
+        errdefer {
+            for (exports) |entry| self.allocator.free(entry);
+            self.allocator.free(exports);
+        }
+        for (exports) |export_name| {
+            if (!ownsNamespace(name, export_name)) return self.fail(
+                "package {s} does not own exported module {s}",
+                .{ name, export_name },
             );
-            const glob_list = switch (dict.valueAt(exports_dict, index)) {
-                .list => |list_header| list_header,
-                else => return self.fail(
-                    "package manifest `{s}` export `{s}` must be a nonempty glob list",
-                    .{ path, namespace },
-                ),
-            };
-            const glob_count: usize = @intCast(glob_list.length());
-            if (glob_count == 0) return self.fail(
-                "package manifest `{s}` export `{s}` has an empty glob list",
-                .{ path, namespace },
-            );
-            const globs = try self.allocator.alloc([]u8, glob_count);
-            var built: usize = 0;
-            errdefer {
-                for (globs[0..built]) |glob| self.allocator.free(glob);
-                self.allocator.free(globs);
-            }
-            for (0..glob_count) |glob_index| {
-                const glob = data.ownedUtf8(
-                    self.allocator,
-                    @import("list.zig").atUnchecked(.{ .list = glob_list }, glob_index),
-                ) catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    error.Invalid => return self.fail(
-                        "package manifest `{s}` export `{s}` contains a non-string glob",
-                        .{ path, namespace },
-                    ),
-                };
-                if (!validGlob(glob)) {
-                    self.allocator.free(glob);
-                    return self.fail(
-                        "package manifest `{s}` export `{s}` contains an unsafe glob",
-                        .{ path, namespace },
-                    );
-                }
-                for (globs[0..built]) |prior| if (std.mem.eql(u8, prior, glob)) {
-                    self.allocator.free(glob);
-                    return self.fail(
-                        "package manifest `{s}` export `{s}` repeats a glob",
-                        .{ path, namespace },
-                    );
-                };
-                globs[built] = glob;
-                built += 1;
-            }
-            exports.appendAssumeCapacity(.{ .namespace = namespace, .globs = globs });
         }
 
         if (!validVersion(version))
@@ -462,8 +378,35 @@ const Builder = struct {
         return .{
             .name = name,
             .version = version,
-            .exports = try exports.toOwnedSlice(self.allocator),
+            .sources = sources,
+            .exports = exports,
         };
+    }
+
+    fn stringList(self: *Builder, path: []const u8, top: *value.DictHandle, field: []const u8, validate: *const fn ([]const u8) bool) BuildError![][]u8 {
+        const item = data.field(top, field) catch @panic("exact manifest lost a validated field");
+        if (item != .list) return self.fail("package manifest {s} {s} must be a list", .{ path, field });
+        const count: usize = @intCast(item.list.length());
+        const entries = try self.allocator.alloc([]u8, count);
+        var built: usize = 0;
+        errdefer {
+            for (entries[0..built]) |entry| self.allocator.free(entry);
+            self.allocator.free(entries);
+        }
+        for (0..count) |index| {
+            const entry = data.ownedUtf8(self.allocator, @import("list.zig").atUnchecked(item, index)) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Invalid => return self.fail("package manifest {s} {s} contains a non-string", .{ path, field }),
+            };
+            entries[built] = entry;
+            built += 1;
+            if (!validate(entry)) return self.fail("package manifest {s} {s} contains an invalid entry {s}", .{ path, field, entry });
+            for (entries[0..index]) |prior| if (std.mem.eql(u8, entry, prior)) return self.fail(
+                "package manifest {s} {s} repeats an entry",
+                .{ path, field },
+            );
+        }
+        return entries;
     }
 
     /// The requirement contract `pkg.manifest.validate` states. The installer
@@ -701,12 +644,20 @@ pub const Build = struct {
             },
             .artifacts => |*artifacts| {
                 if (artifacts.index == artifacts.walk.claims.items.len) {
+                    for (artifacts.walk.manifest.exports) |export_name| {
+                        var found = false;
+                        for (self.builder.modules.items) |module| {
+                            if (self.builder.artifacts.items[@intFromEnum(module.artifact)].package == input.id and
+                                std.mem.eql(u8, intern.get(intern.moduleId(module.name)), export_name)) found = true;
+                        }
+                        if (!found) return self.builder.fail("package {s} exports undeclared module {s}", .{ input.name, export_name });
+                    }
                     artifacts.walk.deinit(self.builder.allocator, self.builder.io);
                     self.stage = .manifest;
                     self.package_index += 1;
                     return if (self.package_index == self.packageCount()) .done else .pending;
                 }
-                try self.builder.buildArtifact(input, artifacts.walk.claims.items[artifacts.index]);
+                try self.builder.buildArtifact(input, artifacts.walk.claims.items[artifacts.index], &artifacts.walk.manifest);
                 artifacts.index += 1;
                 return .pending;
             },

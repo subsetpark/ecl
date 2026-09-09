@@ -27,7 +27,7 @@
    error.with-data
    assert
    name wrap
-   (|name| 'format 1 'name name 'version "0.1.0" 'exports {} 'requires {})
+   (|name| 'format 1 'name name 'version "0.1.0" 'sources [] 'exports [] 'requires {})
    infra
    dict.from-flat
    pkg.manifest.write

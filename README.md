@@ -128,6 +128,17 @@ To add a dependency, run `ecl pkg add <name> <version> <https-url>` with the
 package's name, version, and archive URL, then run `ecl pkg sync` again.
 Commit both `ecl.pkg` and `ecl.lock`.
 
+List your source files and the modules other files may use in `ecl.pkg`:
+
+```ecl
+{'format 1 'name "my.app" 'version "0.1.0"
+ 'sources ["src/*.ecl"] 'exports ["my.app"]
+ 'requires {}}
+```
+
+Exports name exact modules declared in those files. Other modules stay private
+to their defining file, including when running tests.
+
 Use `ecl pkg tree` to inspect dependencies, `ecl pkg verify` to check them,
 and `ecl pkg vendor` to prepare the project for offline use. Run a synchronized
 project's declared tests with `ecl test`. The

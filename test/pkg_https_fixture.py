@@ -53,7 +53,7 @@ def requirement(version: str, url: str, hash_value: str) -> str:
     )
 
 
-def manifest(name: str, version: str, requires: Mapping[str, str]) -> str:
+def manifest(name: str, version: str, requires: Mapping[str, str], *, source: bool = False) -> str:
     entries = " ".join(
         f'\"{key}\" '
         + requires[key].replace("{'version", "{'package \"" + key + "\" 'version", 1)
@@ -64,16 +64,16 @@ def manifest(name: str, version: str, requires: Mapping[str, str]) -> str:
         + name
         + "\" 'version \""
         + version
-        + "\" 'exports {\""
-        + name
-        + "\" [\"**/*\"]} 'requires {"
+        + ("\" 'sources [\"**/*\"] 'exports [\"" + name + "\"]" if source
+           else "\" 'sources [] 'exports []")
+        + " 'requires {"
         + entries
         + "}}\n"
     )
 
 
 def package(name: str, version: str, requires: Mapping[str, str], modules: Mapping[str, str]) -> bytes:
-    files = {"ecl.pkg": manifest(name, version, requires).encode("utf-8")}
+    files = {"ecl.pkg": manifest(name, version, requires, source=True).encode("utf-8")}
     files.update({path: source.encode("utf-8") for path, source in modules.items()})
     return tgz(files)
 
@@ -125,7 +125,7 @@ def build_graph(port: int) -> tuple[dict[str, bytes], dict[str, str]]:
     reserved_seal_path = "/pkg/foo-1.0.0-reserved-seal.tgz"
     artifacts[reserved_seal_path] = tgz(
         {
-            "ecl.pkg": manifest("foo", "1.0.0", {}).encode("utf-8"),
+            "ecl.pkg": manifest("foo", "1.0.0", {}, source=True).encode("utf-8"),
             "foo.ecl": b"(() 'noop def) 'foo @defm\n",
             ".ecl-package.tgz": b"forged seal\n",
         }

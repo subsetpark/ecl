@@ -57,7 +57,7 @@ const package_a_key = "a-1.0.0-1f9aefdfdd91996e4f2f80b7f89f1ac3d8907616b74f1cf55
 /// The lock hash of package `a` in the sync probes; the store probe verifies
 /// the seal it just installed, so it needs the fixture's real digest.
 const package_a_hash = "sha256-1f9aefdfdd91996e4f2f80b7f89f1ac3d8907616b74f1cf55a1a48042556738a";
-const package_valid_seal_hash = "sha256-0e22c7712d6b5dc9fe01542ffcc7e6c01e641aab3c7ed0021a29fbf93004f4d8";
+const package_valid_seal_hash = "sha256-68c57ef8116b31d853d00ba9b295bacf14bf30730d61a05c5d51b00a3d223277";
 
 fn packageStoreSource(allocator: std.mem.Allocator) ![]u8 {
     var source = std.Io.Writer.Allocating.init(allocator);
@@ -74,7 +74,7 @@ fn packageStoreSource(allocator: std.mem.Allocator) ![]u8 {
 }
 
 const package_sync_source =
-    "{'format 1 'name \"r\" 'version \"0.1.0\" 'exports {} 'requires " ++
+    "{'format 1 'name \"r\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires " ++
     "{\"a\" {'package \"a\" 'version \"1.0.0\" 'url \"https://e.com/a.tgz\" " ++
     "'hash \"" ++ package_a_hash ++ "\"}}} pkg.sync.run pop";
 
@@ -93,7 +93,7 @@ const PackageScratch = struct {
         const lock_probe_hash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "ecl.pkg",
-            .data = "{'format 1 'name \"root\" 'version \"0.1.0\" 'exports {} 'requires {}}\n",
+            .data = "{'format 1 'name \"root\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires {}}\n",
         });
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "ecl.lock",
@@ -106,11 +106,12 @@ const PackageScratch = struct {
         );
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "lockprobe-1.0.0-" ++ lock_probe_hash ++ "/lockprobe.ecl",
-            .data = "[] ((42) 'answer def) 'lockprobe @defm\n",
+            .data = "[] ((42) 'answer def) @module 'helper register\n" ++
+                "[] ((helper.answer) 'answer def) 'lockprobe @defm\n",
         });
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "lockprobe-1.0.0-" ++ lock_probe_hash ++ "/ecl.pkg",
-            .data = "{'format 1 'name \"lockprobe\" 'version \"1.0.0\" 'exports {\"lockprobe\" [\"**/*\"]} 'requires {}}\n",
+            .data = "{'format 1 'name \"lockprobe\" 'version \"1.0.0\" 'sources [\"**/*\"] 'exports [\"lockprobe\"] 'requires {}}\n",
         });
         return .{ .directory = directory, .path = path };
     }
@@ -133,7 +134,7 @@ const PackageScratch = struct {
         });
         try self.directory.dir.writeFile(std.testing.io, .{
             .sub_path = key ++ "/ecl.pkg",
-            .data = "{'format 1 'name \"a\" 'version \"1.0.0\" 'exports {\"a\" [\"**/*\"]} 'requires {}}\n",
+            .data = "{'format 1 'name \"a\" 'version \"1.0.0\" 'sources [\"**/*\"] 'exports [\"a\"] 'requires {}}\n",
         });
     }
 };
