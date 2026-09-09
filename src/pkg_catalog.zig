@@ -110,14 +110,20 @@ const Manifest = struct {
     name: []u8,
     version: []u8,
     sources: [][]u8,
-    exports: [][]u8,
+    exports: []Export,
+
+    // Unique manifest positions are the package-local membership index.
+    const Export = struct {
+        name: []u8,
+        declared: bool = false,
+    };
 
     fn deinit(self: *Manifest, allocator: std.mem.Allocator) void {
         allocator.free(self.name);
         allocator.free(self.version);
         for (self.sources) |entry| allocator.free(entry);
         allocator.free(self.sources);
-        for (self.exports) |entry| allocator.free(entry);
+        for (self.exports) |entry| allocator.free(entry.name);
         allocator.free(self.exports);
         self.* = undefined;
     }
@@ -213,7 +219,7 @@ const Builder = struct {
         }.lessThan);
     }
 
-    fn buildArtifact(self: *Builder, input: PackageInput, claim: Claim, manifest: *const Manifest) BuildError!void {
+    fn buildArtifact(self: *Builder, input: PackageInput, claim: Claim, manifest: *Manifest) BuildError!void {
         if (!safePath(claim.relative_path)) return self.fail("package `{s}` has an unsafe source path", .{input.name});
         const absolute = std.fs.path.join(self.allocator, &.{ input.root_dir, claim.relative_path }) catch
             return error.OutOfMemory;
@@ -261,11 +267,9 @@ const Builder = struct {
             // a literal name that discovery can identify without evaluation.
             if (index == 0 or forms[index - 1] != .symbol) continue;
             const name_bytes = intern.get(forms[index - 1].symbol);
-            var exported = false;
-            for (manifest.exports) |export_name| {
-                if (std.mem.eql(u8, name_bytes, export_name)) exported = true;
-            }
-            if (!exported) continue;
+            const export_entry = for (manifest.exports) |*entry| {
+                if (std.mem.eql(u8, name_bytes, entry.name)) break entry;
+            } else continue;
             const name = intern.moduleName(forms[index - 1].symbol) catch return self.fail(
                 "package `{s}` artifact `{s}` declares an invalid module name",
                 .{ input.name, claim.relative_path },
@@ -279,6 +283,7 @@ const Builder = struct {
                 .{name_bytes},
             );
             try names.append(self.allocator, name);
+            export_entry.declared = true;
             if (self.modules.items.len + names.items.len > max_modules) return self.fail(
                 "package graph declares more than {d} modules",
                 .{max_modules},
@@ -383,12 +388,12 @@ const Builder = struct {
             for (sources) |entry| self.allocator.free(entry);
             self.allocator.free(sources);
         }
-        const exports = try self.stringList(path, top, "exports", validCanonicalName);
+        const export_names = try self.stringList(path, top, "exports", validCanonicalName);
+        defer self.allocator.free(export_names);
         errdefer {
-            for (exports) |entry| self.allocator.free(entry);
-            self.allocator.free(exports);
+            for (export_names) |entry| self.allocator.free(entry);
         }
-        for (exports) |export_name| {
+        for (export_names) |export_name| {
             if (!ownsNamespace(name, export_name)) return self.fail(
                 "package {s} does not own exported module {s}",
                 .{ name, export_name },
@@ -398,6 +403,8 @@ const Builder = struct {
         if (!validVersion(version))
             return self.fail("package manifest `{s}` has a non-semver version", .{path});
         try self.validateRequires(path, name, top);
+        const exports = try self.allocator.alloc(Manifest.Export, export_names.len);
+        for (exports, export_names) |*entry, export_name| entry.* = .{ .name = export_name };
         return .{
             .name = name,
             .version = version,
@@ -556,7 +563,7 @@ const Walk = struct {
 pub const Progress = enum { pending, done };
 
 /// A resumable catalog build. One `advance` reads one manifest, claims up to
-/// `budget` directory entries or export/module comparisons, or parses one
+/// `budget` directory entries or export membership checks, or parses one
 /// source artifact, so a caller inside the scheduler can traverse a package
 /// tree of any size without monopolizing its worker or deferring cancellation.
 /// `build` below is the same walk run to completion for callers that are not
@@ -581,7 +588,6 @@ pub const Build = struct {
             walk: Walk,
             index: usize = 0,
             export_index: usize = 0,
-            module_index: usize = 0,
         },
         finished,
     };
@@ -693,17 +699,11 @@ pub const Build = struct {
                 if (artifacts.index == artifacts.walk.claims.items.len) {
                     var remaining = budget;
                     while (artifacts.export_index < artifacts.walk.manifest.exports.len) {
-                        const export_name = artifacts.walk.manifest.exports[artifacts.export_index];
-                        while (artifacts.module_index < self.builder.modules.items.len) {
-                            if (remaining == 0) return .pending;
-                            remaining -= 1;
-                            const module = self.builder.modules.items[artifacts.module_index];
-                            artifacts.module_index += 1;
-                            if (self.builder.artifacts.items[@intFromEnum(module.artifact)].package == input.id and
-                                std.mem.eql(u8, intern.get(intern.moduleId(module.name)), export_name)) break;
-                        } else return self.builder.fail("package {s} exports undeclared module {s}", .{ input.name, export_name });
+                        if (remaining == 0) return .pending;
+                        remaining -= 1;
+                        const entry = artifacts.walk.manifest.exports[artifacts.export_index];
+                        if (!entry.declared) return self.builder.fail("package {s} exports undeclared module {s}", .{ input.name, entry.name });
                         artifacts.export_index += 1;
-                        artifacts.module_index = 0;
                     }
                     artifacts.walk.deinit(self.builder.allocator, self.builder.io);
                     self.stage = .manifest;

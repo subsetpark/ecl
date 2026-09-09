@@ -618,8 +618,10 @@ dynamic. Catalog validation owns path safety, namespace uniqueness, reference
 integrity, and graph limits for both imported and freshly built entries.
 Both producers order each artifact's exports by numeric module-name ID for
 bounded binary-search membership, independently of spelling or metadata order.
-Fresh catalog export verification retains export and module cursors across
-scheduler steps and charges each comparison against the caller's work budget.
+Fresh catalog construction records declaration membership in each unique
+manifest export entry, scoped to that package. Export verification retains its
+cursor across scheduler steps and charges each constant-time membership lookup
+against the caller's work budget, independently of the catalog's module count.
 
 A cataloged source has one Session-owned file identity and private registry.
 The catalog separates source selection from exact public exports; the shared

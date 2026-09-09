@@ -1873,7 +1873,7 @@ test "module: a body that reloads its own name keeps its entry generation" {
     try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[1].int);
 }
 
-test "loader: catalog export verification resumes within its comparison budget" {
+test "loader: catalog export verification resumes within its membership budget" {
     const pkg_catalog = @import("../pkg_catalog.zig");
     const allocator = std.testing.allocator;
     var directory = std.testing.tmpDir(.{});
@@ -1906,16 +1906,16 @@ test "loader: catalog export verification resumes within its comparison budget" 
         defer cursor.deinit();
         // Read the manifest, finish the small directory walk, and parse its artifact.
         for (0..3) |_| try std.testing.expectEqual(.pending, try cursor.advance(100));
-        // Reverse export order needs three, two, then one comparison. Zero
-        // budget must preserve progress both before and during verification.
-        for (0..5) |_| {
+        // Each export needs one membership check regardless of declaration
+        // order. Zero budget preserves progress before and during verification.
+        for (0..2) |_| {
             try std.testing.expectEqual(.pending, try cursor.advance(0));
             try std.testing.expectEqual(.pending, try cursor.advance(1));
             try std.testing.expect(diagnostic == null);
         }
         if (missing) {
             try std.testing.expectEqual(.pending, try cursor.advance(1));
-            for (0..2) |_| try std.testing.expectEqual(.pending, try cursor.advance(1));
+            try std.testing.expectEqual(.pending, try cursor.advance(0));
             try std.testing.expect(diagnostic == null);
             try std.testing.expectError(error.Invalid, cursor.advance(1));
             try std.testing.expectEqualStrings("package dep exports undeclared module dep.missing", diagnostic.?);
@@ -1927,6 +1927,44 @@ test "loader: catalog export verification resumes within its comparison budget" 
                 try std.testing.expect(catalog.find(name) != null);
         }
     }
+}
+
+test "loader: catalog membership is package-local and survives allocation failures" {
+    var fixture = try LockFixture.init();
+    defer fixture.deinit();
+    const manifest = "{'format 1 'name \"dep\" 'version \"1.0.0\" 'sources [\"*.ecl\"] " ++
+        "'exports [\"dep.only\"] 'requires {}}";
+    try fixture.write("project/ecl.pkg", manifest);
+    try fixture.write("project/module.ecl", "[] () 'dep.only @defm");
+    try fixture.write("path/ecl.pkg", manifest);
+    try fixture.write("path/module.ecl", "[]");
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator, directory: std.Io.Dir) !void {
+            const pkg_catalog = @import("../pkg_catalog.zig");
+            var owner = @import("../heap.zig").HostOwner.init(allocator);
+            defer owner.cleanup().drain();
+            const packages = [_]pkg_catalog.PackageInput{
+                .{ .id = @enumFromInt(0), .name = "dep", .version = "1.0.0", .root_dir = "project", .base_dir = directory },
+                .{ .id = @enumFromInt(1), .name = "dep", .version = "1.0.0", .root_dir = "path", .base_dir = directory },
+            };
+            for ([_]usize{ 1, 2 }) |count| {
+                var diagnostic: ?[]u8 = null;
+                defer if (diagnostic) |message| allocator.free(message);
+                var catalog = pkg_catalog.build(owner.cleanup(), std.testing.io, packages[0..count], &diagnostic) catch |err| switch (err) {
+                    error.OutOfMemory => return err,
+                    error.Invalid => {
+                        try std.testing.expectEqual(@as(usize, 2), count);
+                        try std.testing.expectEqualStrings("package dep exports undeclared module dep.only", diagnostic.?);
+                        continue;
+                    },
+                };
+                defer catalog.deinit();
+                try std.testing.expectEqual(@as(usize, 1), count);
+                try std.testing.expect(catalog.find("dep.only") != null);
+            }
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{fixture.directory.dir});
 }
 
 test "loader: persisted catalog assembly propagates every allocation failure" {
