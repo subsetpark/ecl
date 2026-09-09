@@ -137,7 +137,7 @@ const source_groups = [_]SourceGroup{
         "scheduler.zig",         "scheduler_core.zig", "external.zig",        "process_port.zig",    "console.zig",      "task_prims.zig",    "filesystem_port.zig", "package_authority.zig", "directory_order.zig",
         "net_port.zig",          "byte_ring.zig",      "port_transfer.zig",   "port_controller.zig", "port_message.zig", "port_failure.zig",  "port_builder.zig",    "port_bytes.zig",        "port_messages.zig",
         "port_declarations.zig", "port_resource.zig",  "module_bindings.zig", "port_endpoint.zig",   "port_result.zig",  "port_exchange.zig", "port_operation.zig",  "port_service.zig",      "port_factory.zig",
-        "process_adapter.zig",   "net_adapter.zig",
+        "process_adapter.zig",   "net_adapter.zig",    "http_service.zig",
     }, .sources = &.{
         @embedFile("../scheduler.zig"),         @embedFile("../scheduler_core.zig"),
         @embedFile("../external.zig"),          @embedFile("../process_port.zig"),
@@ -153,7 +153,7 @@ const source_groups = [_]SourceGroup{
         @embedFile("../port_exchange.zig"),     @embedFile("../port_operation.zig"),
         @embedFile("../port_declarations.zig"), @embedFile("../port_service.zig"),
         @embedFile("../port_factory.zig"),      @embedFile("../process_adapter.zig"),
-        @embedFile("../net_adapter.zig"),
+        @embedFile("../net_adapter.zig"),       @embedFile("../http_service.zig"),
     } },
     // The installed author SDK, its sized ABI records, validation, loader,
     // and transactional-call boundary form one separately rooted component.
@@ -970,7 +970,7 @@ fn auditWorkDriverOutputs(label: []const u8, source: [:0]const u8) bool {
                 tree,
                 tree.firstToken(node),
                 tree.lastToken(node) + 1,
-                &.{&.{"pushOwned"}},
+                &.{ &.{"pushOwned"}, &.{ "std", ".", "Io", ".", "concurrent" }, &.{ "std", ".", "Io", ".", "Future" } },
             ) or failed;
             break;
         }

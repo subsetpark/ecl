@@ -1417,6 +1417,32 @@ Connection cleanup readiness is distinct from send-ring drainage: returning the
 last accepted byte to the kernel does not prove the socket controller has joined.
 Common close and shutdown drivers park on cleanup readiness for every backend.
 
+HTTP exchanges share controller groups, external scope membership, terminal
+failures, and byte transport with ports, without creating language port values or
+participating in capability transfer. The Session's opaque HTTP service owns
+configuration, admission, and execution authority; inherited runtime context
+carries submission access. Each admitted request progresses from preparation to
+owned active input, joined response, and consumed response. One host controller
+exclusively owns the cancellable I/O future. Scheduler cancellation only changes
+state and signals that controller and transport; workers never await or cancel
+futures. Joined publication follows both I/O completion and controller join.
+Request admission survives all borrowers and bounded response retirement, and
+Session teardown joins scope members before destroying the service, TLS inputs,
+or reclamation root. The source audit classifies this service with controller
+infrastructure and excludes I/O future construction from work-driver steps.
+
+An HTTP invocation captures one absolute scheduler deadline before preparation.
+Runnable work and success publication recheck it. Deadline-bearing external
+waits install the same timer arbitration before registering readiness, including
+already-ready sources; progress never establishes a new deadline. Untimed
+external waits retain their existing behavior. Network execution receives owned
+bytes and immutable service inputs. Encoded bytes are counted before decompression
+and decoded bytes afterward, including redirect bodies; an accounting allocator
+bounds backend scratch separately from allocation failure. The evaluator drains
+bounded transport during execution into fixed chunks and performs one polled,
+exact-size materialization. HTTP retains its own header normalization and ordinary
+dictionary/text/byte-list construction, with no port-message node limits.
+
 Registered byte endpoints use a shared bounded transport (`port_bytes.zig`).
 An exchange owns its pipes; each attenuated endpoint retains the exchange and
 exposes only its declared direction. A sealed descriptor index resolves endpoint

@@ -802,8 +802,9 @@ fn stdlibSessionAllocationProbe(
     // resolves to the same temporary directory.
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
+    const http_vtable = HttpMemoryIo.vtable();
     var runtime = try session.Session.init(thread_safe_allocator, &.{"argument"}, runtime_inputs.inputs(.{
-        .io = std.testing.io,
+        .io = if (surface == .http) .{ .userdata = std.testing.io.userdata, .vtable = &http_vtable } else std.testing.io,
         .output = &output,
         .diagnostics = &diagnostics,
         .initial_cwd = scratch_path,
@@ -1239,10 +1240,44 @@ test "oom: standard-library and host: host: project initialization propagates ev
     );
 }
 
+/// A complete fixed HTTP exchange over the production Client and I/O future.
+/// Network callbacks own no OS handles; every other I/O operation delegates to
+/// the test runtime unchanged. A Content-Length body ends without a second read.
+const HttpMemoryIo = struct {
+    fn connect(_: ?*anyopaque, address: *const std.Io.net.IpAddress, _: std.Io.net.IpAddress.ConnectOptions) std.Io.net.IpAddress.ConnectError!std.Io.net.Socket {
+        return .{ .handle = 0, .address = address.* };
+    }
+    fn read(_: ?*anyopaque, _: std.Io.net.Socket.Handle, buffers: [][]u8) std.Io.net.Stream.Reader.Error!usize {
+        const response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\nX-Test: yes\r\n\r\nok";
+        var copied: usize = 0;
+        for (buffers) |buffer| {
+            const count = @min(buffer.len, response.len - copied);
+            @memcpy(buffer[0..count], response[copied..][0..count]);
+            copied += count;
+            if (copied == response.len) return copied;
+        }
+        return error.Unexpected;
+    }
+    fn write(_: ?*anyopaque, _: std.Io.net.Socket.Handle, header: []const u8, buffers: []const []const u8, splat: usize) std.Io.net.Stream.Writer.Error!usize {
+        var count = header.len;
+        for (buffers, 0..) |buffer, index| count += buffer.len * (if (index + 1 == buffers.len) splat else 1);
+        return count;
+    }
+    fn close(_: ?*anyopaque, _: []const std.Io.net.Socket.Handle) void {}
+    fn vtable() std.Io.VTable {
+        var result = std.testing.io.vtable.*;
+        result.netConnectIp = connect;
+        result.netRead = read;
+        result.netWrite = write;
+        result.netClose = close;
+        return result;
+    }
+};
+
 fn checkStdlibSurface(comptime surface: StdlibSurface) !void {
     // Registered network startup and operations can finish before a waiter
     // allocates its readiness storage; allocation counts depend on progress.
-    if (surface == .net or surface == .net_connection or surface == .net_give)
+    if (surface == .net or surface == .net_connection or surface == .net_give or surface == .http)
         return checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, SurfaceProbe(surface).run);
     try checkAllPostInitAllocationFailuresParallel(
         std.heap.smp_allocator,

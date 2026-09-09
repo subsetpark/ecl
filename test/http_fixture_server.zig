@@ -47,12 +47,56 @@ pub fn main(init: std.process.Init) !void {
         var writer = stream.writer(init.io, &response_buffer);
         var http_server = std.http.Server.init(&reader.interface, &writer.interface);
         var request = http_server.receiveHead() catch continue;
+        if (std.mem.startsWith(u8, request.head.target, "/stall")) {
+            if (std.mem.eql(u8, request.head.target, "/stall-body")) {
+                writer.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n") catch continue;
+                writer.interface.flush() catch continue;
+            }
+            out.interface.writeAll("stage\n") catch continue;
+            out.interface.flush() catch continue;
+            var probe: [1]u8 = undefined;
+            _ = reader.interface.readSliceShort(&probe) catch continue;
+            continue;
+        }
+        if (std.mem.eql(u8, request.head.target, "/gzip")) {
+            const compressed = "\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff\x4b\x4c\x04\x02\x00\xb9\x93\xac\xee\x05\x00\x00\x00";
+            writer.interface.print("HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{compressed.len}) catch continue;
+            writer.interface.writeAll(compressed) catch continue;
+            writer.interface.flush() catch continue;
+            continue;
+        }
+        if (std.mem.startsWith(u8, request.head.target, "/headers/")) {
+            const count = std.fmt.parseInt(usize, request.head.target[9..], 10) catch continue;
+            writer.interface.writeAll("HTTP/1.0 200 OK\r\n") catch continue;
+            for (0..count) |_| writer.interface.writeAll("x: y\r\n") catch break;
+            writer.interface.writeAll("\r\n") catch continue;
+            writer.interface.flush() catch continue;
+            continue;
+        }
+        if (std.mem.startsWith(u8, request.head.target, "/size/")) {
+            const count = std.fmt.parseInt(usize, request.head.target[6..], 10) catch continue;
+            writer.interface.print("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{count}) catch continue;
+            writer.interface.splatByteAll('a', count) catch continue;
+            writer.interface.flush() catch continue;
+            continue;
+        }
+        if (std.mem.eql(u8, request.head.target, "/chunked")) {
+            writer.interface.writeAll("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n") catch continue;
+            writer.interface.flush() catch continue;
+            continue;
+        }
         serve(&request, init.arena.allocator()) catch continue;
     }
 }
 
 fn serve(request: *std.http.Server.Request, allocator: std.mem.Allocator) !void {
     const target = request.head.target;
+    if (std.mem.eql(u8, target, "/redirect-see-other")) {
+        return request.respond("", .{ .keep_alive = false, .status = .see_other, .extra_headers = &.{.{ .name = "location", .value = "/echo" }} });
+    }
+    if (std.mem.eql(u8, target, "/redirect-body")) {
+        return request.respond("abc", .{ .keep_alive = false, .status = .temporary_redirect, .extra_headers = &.{.{ .name = "location", .value = "/hello" }} });
+    }
     if (std.mem.eql(u8, target, "/hello")) {
         return request.respond("hello, world\n", .{
             .extra_headers = &.{.{ .name = "x-fixture", .value = "hello" }},

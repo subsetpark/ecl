@@ -53,6 +53,7 @@ pub const Options = struct {
     initial_cwd: ?@FieldType(session.RuntimeInputs, "initial_cwd") = null,
     process_limits: ?@FieldType(session.RuntimeInputs, "process_limits") = null,
     filesystem: ?@FieldType(session.RuntimeInputs, "filesystem") = null,
+    http_limits: ?@FieldType(session.RuntimeInputs, "http_limits") = null,
     net_limits: ?@FieldType(session.RuntimeInputs, "net_limits") = null,
     native_port_limits: ?@FieldType(session.RuntimeInputs, "native_port_limits") = null,
     clock: ?@FieldType(session.RuntimeInputs, "clock") = null,

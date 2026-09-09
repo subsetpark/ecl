@@ -342,6 +342,13 @@ pub const StringEncoder = struct {
         self: *StringEncoder,
         budget: usize,
     ) (error{OutOfMemory} || error{InvalidCodepoint})!StringEncodeResult {
+        return self.advanceLimited(budget, std.math.maxInt(usize)) catch |err| switch (err) {
+            error.Overflow => error.OutOfMemory,
+            else => |failure| failure,
+        };
+    }
+
+    pub fn advanceLimited(self: *StringEncoder, budget: usize, limit: usize) (error{ OutOfMemory, InvalidCodepoint, Overflow })!StringEncodeResult {
         std.debug.assert(budget != 0 and self.phase != .complete);
         const count: usize = @intCast(self.string.list.length());
         var remaining = budget;
@@ -354,8 +361,10 @@ pub const StringEncoder = struct {
             ) catch
                 return error.InvalidCodepoint;
             switch (self.phase) {
-                .count => self.byte_count = std.math.add(usize, self.byte_count, encoded_len) catch
-                    return error.OutOfMemory,
+                .count => {
+                    if (encoded_len > limit - self.byte_count) return error.Overflow;
+                    self.byte_count += encoded_len;
+                },
                 .fill => {
                     @memcpy(self.output.?[self.written..][0..encoded_len], encoded[0..encoded_len]);
                     self.written += encoded_len;

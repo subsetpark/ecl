@@ -26,6 +26,7 @@ const stdlib = @import("stdlib.zig");
 const process_port = @import("process_port.zig");
 const filesystem_port = @import("filesystem_port.zig");
 const net_port = @import("net_port.zig");
+const http_service = @import("http_service.zig");
 const package_authority = @import("package_authority.zig");
 pub const Value = value.Value;
 /// Session construction distinguishes invalid runtime configuration from
@@ -107,6 +108,7 @@ pub const RuntimeInputs = struct {
     process_limits: process_port.Limits = .{},
     filesystem: filesystem_port.Config = .{},
     net_limits: net_port.Limits = .{},
+    http_limits: http_service.Limits = .{},
     /// Real clocks by default; deterministic overrides are internal test inputs.
     clock: ClockPolicy = .{},
 };
@@ -227,6 +229,7 @@ const SessionCore = struct {
     process_owner: *process_port.ProcessOwner,
     filesystem_owner: *filesystem_port.FilesystemOwner,
     net_owner: *net_port.NetOwner,
+    http_owner: *http_service.Owner,
     package_owner: ?*package_authority.PackageOwner,
     stack: std.ArrayList(Value) = .empty,
     archive_owner: spans.SpanArchiveOwner,
@@ -372,6 +375,11 @@ pub const Session = enum(usize) {
             .now = trust.now,
         } else null;
         errdefer if (owned_tls_trust) |trust| allocator.free(trust.ca_file);
+        const http_owner = http_service.Owner.init(host_owner.cleanup(), host.io, owned_tls_trust, host.http_limits) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidConfig => return error.InvalidHostConfig,
+        };
+        errdefer http_owner.deinit();
         const owned_project_lock = try pkg_lock.ProjectLock.discover(
             host_owner.cleanup(),
             host.io,
@@ -472,6 +480,7 @@ pub const Session = enum(usize) {
             .process_owner = process_owner,
             .filesystem_owner = filesystem_owner,
             .net_owner = net_owner,
+            .http_owner = http_owner,
             .package_owner = package_owner,
             .archive_owner = archive_owner,
             .archive = archive,
@@ -513,6 +522,7 @@ pub const Session = enum(usize) {
         // Every filesystem driver retired with the scheduler above, so no
         // handle, staging entry, or quota reservation can still reference
         // these owners.
+        core.http_owner.deinit();
         core.filesystem_owner.deinit();
         core.allocator().destroy(core.filesystem_owner);
         if (core.package_owner) |owner| {
@@ -613,6 +623,7 @@ pub const Session = enum(usize) {
                     .process_access = core.process_owner.access(),
                     .filesystem_access = core.filesystem_owner.access(),
                     .net_access = core.net_owner.access(),
+                    .http_access = core.http_owner.access(),
                     .wall_clock = core.wall_clock,
                     .environ = core.environ.view(),
                     .standard_input = &core.standard_input,

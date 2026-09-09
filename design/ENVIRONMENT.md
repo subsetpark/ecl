@@ -388,9 +388,15 @@ named CA file and timestamp. The default configuration uses system trust
 roots and the current time. ECL code and process environment variables cannot
 change the override.
 
-Each request occupies the calling unit's worker thread until completion. The
-worker count therefore bounds concurrent requests. Requests have no ECL-level
-deadline.
+Requests yield during network I/O, so unrelated tasks, timers, and servers in
+the same Session progress even with one worker. A Session admits at most 16 live
+requests by default and retains admission through response construction and
+cleanup. Each request has one total 30-second monotonic deadline, including
+redirects and construction; expiry raises `'timeout`. Finite transfer and backend
+scratch limits raise `'overflow` with the target URL. These internal Session
+limits are detailed in the standard-library HTTP contract. Task cancellation
+interrupts in-flight I/O, and Session teardown joins it before releasing TLS
+configuration.
 
 ## Projects and packages
 

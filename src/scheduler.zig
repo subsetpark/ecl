@@ -47,20 +47,20 @@ pub const ClockSource = enum { host, manual };
 /// `MonotonicClock.deadlineAfter` is the only constructor, and timer state
 /// holds deadlines rather than raw timestamps, so an instant the clock could
 /// never report cannot be registered and left waiting forever.
-const Deadline = struct {
-    nanoseconds: i96,
+pub const Deadline = enum(i96) {
+    _,
 
-    fn reachedBy(self: Deadline, now: std.Io.Timestamp) bool {
-        return now.nanoseconds >= self.nanoseconds;
+    pub fn reachedBy(self: Deadline, now: std.Io.Timestamp) bool {
+        return now.nanoseconds >= @intFromEnum(self);
     }
 
     fn before(self: Deadline, other: Deadline) bool {
-        return self.nanoseconds < other.nanoseconds;
+        return @intFromEnum(self) < @intFromEnum(other);
     }
 
     /// The same instant as a host wait target; meaningful under `host` only.
     fn hostInstant(self: Deadline) std.Io.Clock.Timestamp {
-        return .{ .raw = .{ .nanoseconds = self.nanoseconds }, .clock = .awake };
+        return .{ .raw = .{ .nanoseconds = @intFromEnum(self) }, .clock = .awake };
     }
 };
 
@@ -135,12 +135,12 @@ const MonotonicClock = union(enum) {
                     return error.Overflow;
                 const instant = std.math.add(i96, current.nanoseconds, step) catch
                     return error.Overflow;
-                return .{ .nanoseconds = instant };
+                return @enumFromInt(instant);
             },
             .manual => |*clock| {
                 const total = std.math.add(i64, clock.reading(), milliseconds) catch
                     return error.Overflow;
-                return .{ .nanoseconds = @as(i96, total) * std.time.ns_per_ms };
+                return @enumFromInt(@as(i96, total) * std.time.ns_per_ms);
             },
         };
     }
@@ -582,7 +582,10 @@ const WaitSet = struct {
         // neither extend the timeout nor let a later completion overtake it.
         // The factory refuses an instant the clock can never reach, so no
         // unreachable deadline enters the heap.
-        const deadline = try self.scheduler.deadlineAfter(milliseconds);
+        return self.addAbsoluteTimer(try self.scheduler.deadlineAfter(milliseconds));
+    }
+
+    fn addAbsoluteTimer(self: *WaitSet, deadline: Deadline) error{ Io, OutOfMemory }!void {
         std.Io.Threaded.mutexLock(&self.mutex);
         if (self.policy != .registering) {
             std.Io.Threaded.mutexUnlock(&self.mutex);
@@ -683,7 +686,8 @@ const WaitSet = struct {
                 .cancellation => .cancelled,
                 .io => .io,
                 .out_of_memory => .out_of_memory,
-                .task, .timeout, .overflow => unreachable,
+                .timeout => .timeout,
+                .task, .overflow => unreachable,
             } },
             .one, .any, .deadline => .{ .task_wait = switch (reason) {
                 .task => |index| outcome: {
@@ -724,7 +728,7 @@ const WaitSet = struct {
                 }
                 const request = initializing.request;
                 self.state = switch (request) {
-                    .external => .{ .registering_external = request },
+                    .external, .external_until => .{ .registering_external = request },
                     .join => |join| if (join.cancel_from) |start|
                         .{ .cancelling = .{ .join = join, .index = start } }
                     else
@@ -811,8 +815,28 @@ const WaitSet = struct {
                 budget -= 1;
             },
             .registering_external => |request| {
+                const source = switch (request) {
+                    .external => |source| source,
+                    .external_until => |timed| blk: {
+                        self.addAbsoluteTimer(timed.deadline) catch |err| {
+                            self.select(switch (err) {
+                                error.Io => .io,
+                                error.OutOfMemory => .out_of_memory,
+                            });
+                        };
+                        break :blk timed.source;
+                    },
+                    else => unreachable,
+                };
+                std.Io.Threaded.mutexLock(&self.mutex);
+                const terminal = self.policy != .registering;
+                std.Io.Threaded.mutexUnlock(&self.mutex);
+                if (terminal) {
+                    self.state = .{ .release_request = request };
+                    continue;
+                }
                 const target = external.wakeTarget(WaitSet, self);
-                const registered = request.external.register(target) catch {
+                const registered = source.register(target) catch {
                     self.select(.out_of_memory);
                     self.state = .{ .release_request = request };
                     budget -= 1;
@@ -832,7 +856,7 @@ const WaitSet = struct {
                 const milliseconds: ?u63 = switch (request) {
                     .deadline => |deadline| deadline.milliseconds,
                     .sleep => |duration| duration,
-                    .task, .any, .join, .external => null,
+                    .task, .any, .join, .external, .external_until => null,
                     .close_scope => unreachable,
                 };
                 if (milliseconds) |duration| {
@@ -1562,7 +1586,7 @@ pub const WorkerScheduler = enum(usize) {
         return self.privateState().clock.now();
     }
 
-    fn deadlineAfter(self: *const WorkerScheduler, milliseconds: u63) error{Overflow}!Deadline {
+    pub fn deadlineAfter(self: *const WorkerScheduler, milliseconds: u63) error{Overflow}!Deadline {
         return self.privateState().clock.deadlineAfter(milliseconds);
     }
 
@@ -2642,7 +2666,7 @@ fn requestKind(request: machine.ParkRequest) WaitKind {
         .any => .any,
         .deadline => .deadline,
         .sleep => .sleep,
-        .external => .external,
+        .external, .external_until => .external,
         .close_scope => unreachable,
     };
 }

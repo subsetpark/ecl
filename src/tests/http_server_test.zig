@@ -690,3 +690,18 @@ test "http server: words cold-load through the embedded manifest and are documen
     );
     try support.expectStack("'http.server ('@serve 'route) import 'http.response ('text) import 'http.request ('query) import 1", "1");
 }
+
+test "http server: HTTP client and server progress together with one worker" {
+    for ([_]session.Config{ .cooperative, .{ .worker_pool = 1 } }) |config| {
+        var runtime: Runtime = .{};
+        try runtime.open(.{}, config);
+        defer runtime.close();
+        const port = try runtime.listen("l");
+        const program = try std.fmt.allocPrint(allocator, "[] (l {{'max-in-flight 1}} (pop 200 \"same Session\" http.response.text) http.server.@serve) @spawn 'srv set " ++
+            "{{'target \"http://127.0.0.1:{d}/hello\"}} http.get 'body at " ++
+            "srv dup task.cancel task.await pop l net.close", .{port});
+        defer allocator.free(program);
+        try runtime.run(program);
+        try runtime.expectDisplay("\"same Session\"");
+    }
+}

@@ -1846,6 +1846,7 @@ pub const RuntimeContext = struct {
     process_access: *external.ProcessAccess,
     filesystem_access: *external.FilesystemAccess,
     net_access: *external.NetAccess,
+    http_access: *@import("http_service.zig").Access,
     wall_clock: WallClock,
     environ: Environ,
     standard_input: *StandardInput,
@@ -1948,6 +1949,7 @@ pub const ParkRequest = union(enum) {
         cancel_from: ?u32 = null,
     },
     external: external.ReadinessSource,
+    external_until: struct { source: external.ReadinessSource, deadline: @import("scheduler.zig").Deadline },
 
     /// The one value graph owned by every parking request that carries one.
     /// Scheduler setup, abandonment, and ordinary deinit all use this mapping.
@@ -1956,7 +1958,7 @@ pub const ParkRequest = union(enum) {
             .task, .any => |item| item,
             .deadline => |deadline| deadline.task,
             .join => |join| join.tasks,
-            .close_scope, .external, .sleep => null,
+            .close_scope, .external, .external_until, .sleep => null,
         };
     }
 
@@ -1964,7 +1966,7 @@ pub const ParkRequest = union(enum) {
         return switch (self) {
             .task, .deadline, .join => 1,
             .any => |tasks| @intCast(tasks.list.length()),
-            .close_scope, .external, .sleep => 0,
+            .close_scope, .external, .external_until, .sleep => 0,
         };
     }
 
@@ -1983,13 +1985,17 @@ pub const ParkRequest = union(enum) {
                 std.debug.assert(index == 0);
                 break :single list.atUnchecked(join.tasks, join.index);
             },
-            .close_scope, .external, .sleep => unreachable,
+            .close_scope, .external, .external_until, .sleep => unreachable,
         };
     }
 
     pub fn deinit(self: ParkRequest, releases: *heap.ReleaseDomain) void {
         if (self.ownedValue()) |item| releases.releaseValue(item);
         switch (self) {
+            .external_until => |timed| {
+                var owned = timed.source;
+                owned.deinit();
+            },
             .external => |source| {
                 var owned = source;
                 owned.deinit();
@@ -2024,6 +2030,7 @@ pub const SleepResume = enum { elapsed, cancelled, io, overflow, out_of_memory }
 
 /// How a wait on host readiness ended.
 pub const ExternalResume = union(enum) {
+    timeout,
     /// The source reported readiness or its own failure; the driver polls.
     wake: external.Wake,
     cancelled,
@@ -2051,7 +2058,7 @@ pub const ParkResume = union(enum) {
     pub fn serviceUnavailable(request: ParkRequest) ParkResume {
         return switch (request) {
             .sleep => .{ .sleep = .io },
-            .external => .{ .external = .io },
+            .external, .external_until => .{ .external = .io },
             .task, .any, .deadline, .join => .{ .task_wait = .io },
             .close_scope => unreachable,
         };
@@ -2062,7 +2069,7 @@ pub const ParkResume = union(enum) {
     pub fn cancelledFor(request: ParkRequest) ParkResume {
         return switch (request) {
             .sleep => .{ .sleep = .cancelled },
-            .external => .{ .external = .cancelled },
+            .external, .external_until => .{ .external = .cancelled },
             .task, .any, .deadline, .join => .{ .task_wait = .cancelled },
             .close_scope => unreachable,
         };
@@ -6916,6 +6923,10 @@ fn resumePark(self: *Machine) MachineError!void {
         },
         .external => |ready| switch (ready) {
             .wake => {},
+            .timeout => {
+                clearWorkDriver(self.unit);
+                return self.fail(.timeout, "host operation deadline expired");
+            },
             .cancelled => {
                 clearWorkDriver(self.unit);
                 return self.fail(.cancelled, "unit cancelled while awaiting host readiness");

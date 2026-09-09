@@ -220,7 +220,7 @@ reason before selecting the matrix.
     -v "$PWD":/work:ro ubuntu:24.04 bash -euxo pipefail -c '
       export DEBIAN_FRONTEND=noninteractive
       apt-get update
-      apt-get install -y --no-install-recommends ca-certificates curl libc6-dev xz-utils
+      apt-get install -y --no-install-recommends ca-certificates curl libc6-dev python3 xz-utils
       curl -fsSLo /tmp/zig.tar.xz https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
       echo "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00  /tmp/zig.tar.xz" | sha256sum -c -
       mkdir -p /tmp/zig
