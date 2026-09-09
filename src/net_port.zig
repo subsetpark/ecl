@@ -2147,9 +2147,9 @@ pub const DeclaredEndpoints = declarations.Endpoints(.{
     .output = declarations.Endpoint{ .doc = "Select the connection writable byte stream; finish sends EOF after admitted writes.", .transport = .bytes, .direction = .input, .owner = .resource },
 });
 pub const DeclaredOperations = declarations.Operations(enum { accept, control }, DeclaredEndpoints, .{
-    .accept = .{ .doc = "Accept an independent connection on the accept lane; request [].", .handler = OperationAdapter.execute, .lane = .accept, .endpoints = .{} },
-    .local_address = .{ .doc = "Return the recorded local address on the control lane; request [].", .handler = OperationAdapter.execute, .lane = .control, .endpoints = .{} },
-    .peer_address = .{ .doc = "Return the connection’s peer address on the control lane; request [].", .handler = OperationAdapter.execute, .lane = .control, .endpoints = .{} },
+    .accept = .{ .doc = "Accept an independent connection on the accept lane; request [].", .handler = OperationAdapter.on_accept, .lane = .accept, .endpoints = .{} },
+    .local_address = .{ .doc = "Return the recorded local address on the control lane; request [].", .handler = OperationAdapter.on_local_address, .lane = .control, .endpoints = .{} },
+    .peer_address = .{ .doc = "Return the connection’s peer address on the control lane; request [].", .handler = OperationAdapter.on_peer_address, .lane = .control, .endpoints = .{} },
 });
 pub const RegisteredOperation = DeclaredOperations.Name;
 pub const Service = @import("port_service.zig").Resource(ServiceAdapter);
@@ -2340,9 +2340,15 @@ const OperationAdapter = struct {
             if (exchange.ticket.isCancelled()) _ = running.acknowledgeCancellation();
             std.Io.Threaded.mutexUnlock(&exchange.mutex);
         }
-        self.perform(exchange, running) catch |err| {
+        inline for (comptime std.meta.tags(RegisteredOperation)) |name| {
+            if (self.operation == name) return DeclaredOperations.get(name).handler(self, exchange, running);
+        }
+        unreachable;
+    }
+    fn dispatch(self: *OperationAdapter, comptime operation: RegisteredOperation, exchange: *NetworkExchange, running: *controllers.Running) void {
+        self.perform(operation, exchange, running) catch |err| {
             std.Io.Threaded.mutexLock(&exchange.mutex);
-            self.failure = switch (err) {
+            self.failure = switch (@as(anyerror, err)) {
                 error.OutOfMemory => .out_of_memory,
                 error.Cancelled, error.ScopeClosing => PortFailure.init(.cancelled, "network operation was cancelled"),
                 error.Closed => PortFailure.init(.io, "network resource is closed"),
@@ -2352,7 +2358,16 @@ const OperationAdapter = struct {
             std.Io.Threaded.mutexUnlock(&exchange.mutex);
         };
     }
-    fn perform(self: *OperationAdapter, exchange: *NetworkExchange, running: *controllers.Running) !void {
+    fn on_accept(self: *OperationAdapter, exchange: *NetworkExchange, running: *controllers.Running) void {
+        self.dispatch(.accept, exchange, running);
+    }
+    fn on_local_address(self: *OperationAdapter, exchange: *NetworkExchange, running: *controllers.Running) void {
+        self.dispatch(.local_address, exchange, running);
+    }
+    fn on_peer_address(self: *OperationAdapter, exchange: *NetworkExchange, running: *controllers.Running) void {
+        self.dispatch(.peer_address, exchange, running);
+    }
+    fn perform(self: *OperationAdapter, comptime operation: RegisteredOperation, exchange: *NetworkExchange, running: *controllers.Running) !void {
         if (!self.valid_request) {
             std.Io.Threaded.mutexLock(&exchange.mutex);
             self.failure = PortFailure.init(.domain, "network operations require an empty request list");
@@ -2361,7 +2376,7 @@ const OperationAdapter = struct {
         }
         const builder = try port_builder.Builder.create(self.cell.adapter.owner.host, running);
         defer builder.retire();
-        if (self.operation == .accept) {
+        if (operation == .accept) {
             const listener = self.cell.adapter.backend.listener;
             const slot = try listener.beginAccept();
             defer listener.endAccept(slot);
@@ -2387,7 +2402,7 @@ const OperationAdapter = struct {
         } else {
             const address: IpAddress = switch (self.cell.adapter.backend) {
                 .listener => |backend| backend.localAddress() orelse return error.Io,
-                .connection => |backend| switch (backend.observeEndpoint(if (self.operation == .local_address) .local else .peer)) {
+                .connection => |backend| switch (backend.observeEndpoint(if (operation == .local_address) .local else .peer)) {
                     .available => |address| address,
                     .closed => return error.Io,
                 },

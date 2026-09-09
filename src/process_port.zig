@@ -1423,10 +1423,10 @@ pub const DeclaredEndpoints = declarations.Endpoints(.{
     .stderr = declarations.Endpoint{ .doc = "Select the process readable diagnostics.", .transport = .bytes, .direction = .output, .owner = .resource },
 });
 pub const DeclaredOperations = declarations.Operations(enum { wait, control }, DeclaredEndpoints, .{
-    .wait = .{ .doc = "Wait for process termination on the wait lane; request [].", .handler = OperationAdapter.execute, .lane = .wait, .endpoints = .{} },
-    .terminate = .{ .doc = "Request process-group termination on the control lane; request [].", .handler = OperationAdapter.execute, .lane = .control, .endpoints = .{} },
-    .kill = .{ .doc = "Force process-group termination on the control lane; request [].", .handler = OperationAdapter.execute, .lane = .control, .endpoints = .{} },
-    .capture_limits = .{ .doc = "Read the process capture limits on the control lane; request [].", .handler = OperationAdapter.execute, .lane = .control, .endpoints = .{} },
+    .wait = .{ .doc = "Wait for process termination on the wait lane; request [].", .handler = OperationAdapter.on_wait, .lane = .wait, .endpoints = .{} },
+    .terminate = .{ .doc = "Request process-group termination on the control lane; request [].", .handler = OperationAdapter.on_terminate, .lane = .control, .endpoints = .{} },
+    .kill = .{ .doc = "Force process-group termination on the control lane; request [].", .handler = OperationAdapter.on_kill, .lane = .control, .endpoints = .{} },
+    .capture_limits = .{ .doc = "Read the process capture limits on the control lane; request [].", .handler = OperationAdapter.on_capture_limits, .lane = .control, .endpoints = .{} },
 });
 pub const RegisteredOperation = DeclaredOperations.Name;
 pub const Service = @import("port_service.zig").Resource(ServiceAdapter);
@@ -1568,7 +1568,13 @@ const OperationAdapter = struct {
             if (exchange.ticket.isCancelled()) _ = running.acknowledgeCancellation();
             std.Io.Threaded.mutexUnlock(&exchange.mutex);
         }
-        self.perform(exchange, running) catch |err| {
+        inline for (comptime std.meta.tags(RegisteredOperation)) |name| {
+            if (self.operation == name) return DeclaredOperations.get(name).handler(self, exchange, running);
+        }
+        unreachable;
+    }
+    fn dispatch(self: *OperationAdapter, comptime operation: RegisteredOperation, exchange: *ProcessExchange, running: *controllers.Running) void {
+        self.perform(operation, exchange, running) catch |err| {
             if (err == error.Cancelled) return;
             std.Io.Threaded.mutexLock(&exchange.mutex);
             self.failure = switch (err) {
@@ -1579,7 +1585,19 @@ const OperationAdapter = struct {
             std.Io.Threaded.mutexUnlock(&exchange.mutex);
         };
     }
-    fn perform(self: *OperationAdapter, exchange: *ProcessExchange, running: *controllers.Running) @import("port_builder.zig").Error!void {
+    fn on_wait(self: *OperationAdapter, exchange: *ProcessExchange, running: *controllers.Running) void {
+        self.dispatch(.wait, exchange, running);
+    }
+    fn on_terminate(self: *OperationAdapter, exchange: *ProcessExchange, running: *controllers.Running) void {
+        self.dispatch(.terminate, exchange, running);
+    }
+    fn on_kill(self: *OperationAdapter, exchange: *ProcessExchange, running: *controllers.Running) void {
+        self.dispatch(.kill, exchange, running);
+    }
+    fn on_capture_limits(self: *OperationAdapter, exchange: *ProcessExchange, running: *controllers.Running) void {
+        self.dispatch(.capture_limits, exchange, running);
+    }
+    fn perform(self: *OperationAdapter, comptime operation: RegisteredOperation, exchange: *ProcessExchange, running: *controllers.Running) @import("port_builder.zig").Error!void {
         if (!self.valid_request) {
             std.Io.Threaded.mutexLock(&exchange.mutex);
             self.failure = Failure.init(.domain, "process operations require an empty request list");
@@ -1587,7 +1605,7 @@ const OperationAdapter = struct {
             return;
         }
         const backend = self.cell.adapter.backend.?;
-        switch (self.operation) {
+        switch (operation) {
             .terminate => backend.terminate(),
             .kill => backend.kill(),
             .wait => {
@@ -1608,10 +1626,10 @@ const OperationAdapter = struct {
         const cancelled = exchange.ticket.isCancelled();
         if (cancelled) _ = running.acknowledgeCancellation();
         std.Io.Threaded.mutexUnlock(&exchange.mutex);
-        if (cancelled or self.operation == .terminate or self.operation == .kill) return;
+        if (cancelled or operation == .terminate or operation == .kill) return;
         const builder = try @import("port_builder.zig").Builder.create(self.cell.adapter.owner.host, running);
         defer builder.retire();
-        if (self.operation == .wait) {
+        if (operation == .wait) {
             const term = backend.termination().?;
             const info: struct { kind: []const u8, field: []const u8, number: i64 } = switch (term) {
                 .exited => |code| .{ .kind = "exited", .field = "code", .number = code },

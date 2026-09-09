@@ -524,7 +524,9 @@ const PortSpec = struct {
         return .{};
     }
     pub fn open(_: *State, _: *ecl.Controller) void {}
-    pub fn run(_: *State, _: u32, _: *ecl.Controller) void {}
+    pub const endpoints = .{ .output = ecl.declarations.Endpoint{ .doc = "Counter bytes.", .transport = .bytes, .direction = .output } };
+    pub const operations = .{ .operation = .{ .doc = "Read counter bytes.", .handler = run, .lane = .operation, .endpoints = .{.output} } };
+    pub fn run(_: *State, _: *ecl.Controller) void {}
     pub fn cancel(_: *State) void {}
     pub fn deinit(_: *State) void {}
 };
@@ -575,8 +577,6 @@ test "native: registered descriptors reject undeclared kinds lanes and endpoints
     const P = ecl.Port(PortSpec);
     const Extension = ecl.module(.{ .name = "sample", .doc = "Registered port validation.", .linkage = .static, .ports = .{P}, .words = .{
         ecl.factory("factory", "Create a counter.", P),
-        ecl.operation("operation", "Read counter bytes.", P, 0, .operation, 1),
-        ecl.endpoint("output", "Counter bytes.", P, .{ .id = 0, .transport = .bytes, .direction = .output }),
     } });
     var host = heap.HostOwner.init(std.testing.allocator);
     defer host.cleanup().drain();
@@ -1763,6 +1763,14 @@ test "native: reply endpoint construction cannot widen direction or completion l
         "p wrap (portprobe.invalid-reply [] port.call) @attempt 'err at 'kind at " ++
         "p portprobe.reply-result [] port.call dup wrap (port.receive) @attempt 'err at 'kind at " ++
         "swap wrap ([] port.send) @attempt 'err at 'kind at p port.close portprobe.cleaned", "'domain 'type 'io 1");
+}
+
+test "native: resource reply senders follow their issuing resource closure" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .message_capacity = 1 }, "portprobe.factory [] port.open 'p set p portprobe.resource-reply [] port.call 'reply set " ++
+        "p portprobe.resource-messages [] port.begin 'x set reply [5] port.send " ++
+        "p portprobe.resource-receiver port.endpoint port.receive 'value at reply port.finish " ++
+        "x port.await x port.close p port.close " ++
+        "reply wrap ([] port.send) @attempt 'err at 'kind at portprobe.cleaned", "[5] 'io 1");
 }
 
 test "native: RPC cancellation discards queued reply capabilities and restores admission" {

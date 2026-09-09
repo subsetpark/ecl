@@ -6,8 +6,7 @@ comptime {
         pub fn init() State {
             return 0;
         }
-        pub fn open(_: *State, _: *ecl.Controller) void {}
-        pub fn run(_: *State, _: *ecl.Controller) void {}
+        pub fn open(_: *State) void {}
         pub fn cancel(_: *State) void {}
         pub fn deinit(_: *State) void {}
     });

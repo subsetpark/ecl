@@ -802,9 +802,13 @@ fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest
         },
         .reply_endpoint => {
             if (request.endpoint >= 64) return error.InvalidState;
-            const spec = ctx.cell.adapter.instance.validated().endpoint(ctx.cell.adapter.kind, @intCast(request.endpoint), .exchange) orelse return error.InvalidState;
+            const parent = controllerEndpointParent(ctx, request.owner) orelse return error.InvalidState;
+            const spec = ctx.cell.adapter.instance.validated().endpoint(ctx.cell.adapter.kind, @intCast(request.endpoint), switch (parent) {
+                .resource => .resource,
+                .exchange => .exchange,
+            }) orelse return error.InvalidState;
             if (spec.transport != .messages or spec.direction != .input) return error.InvalidState;
-            const reply = createEndpoint(.{ .exchange = op }, spec) catch |err| return switch (err) {
+            const reply = createEndpoint(parent, spec) catch |err| return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 error.Unsupported => error.InvalidState,
             };
@@ -906,21 +910,6 @@ fn controllerPipe(raw: *anyopaque, owner: abi.EndpointOwner, index: u32, directi
         .messages => null,
     };
 }
-fn controllerReadEndpoint(raw: *anyopaque, owner: abi.EndpointOwner, index: u32, bytes: [*]u8, length: u32) callconv(.c) u32 {
-    if (length == 0) return 0;
-    const pair = controllerPipe(raw, owner, index, .input) orelse {
-        const text = "controller selected an unsupported byte input";
-        controllerFail(raw, .domain, text.ptr, text.len);
-        return 0;
-    };
-    pair.pipe.beginRead() catch {
-        const text = "byte endpoint already has a pending reader";
-        controllerFail(raw, .contract, text.ptr, text.len);
-        return 0;
-    };
-    defer pair.pipe.endRead();
-    return @intCast(pair.controller.read(bytes[0..@min(length, 64 * 1024)], context(raw).cancellation()));
-}
 
 fn controllerResolveEndpoint(raw: *anyopaque, identity: *const anyopaque, owner: abi.EndpointOwner, index: u32, transport: abi.EndpointTransport, direction: abi.EndpointDirection) callconv(.c) bool {
     const ctx = context(raw);
@@ -994,15 +983,6 @@ fn controllerReceiveEvent(raw: *anyopaque, owner: abi.EndpointOwner, index: u32)
         .failed => |failure| return controllerTransportFailure(ctx, failure),
     }
 }
-fn controllerWriteEndpoint(raw: *anyopaque, owner: abi.EndpointOwner, index: u32, bytes: [*]const u8, length: u32) callconv(.c) u32 {
-    if (length == 0) return 0;
-    const pair = controllerPipe(raw, owner, index, .output) orelse {
-        const text = "controller selected an unsupported byte output";
-        controllerFail(raw, .domain, text.ptr, text.len);
-        return 0;
-    };
-    return @intCast(pair.controller.write(bytes[0..@min(length, 64 * 1024)], context(raw).cancellation()));
-}
 fn controllerFinishEndpoint(raw: *anyopaque, owner: abi.EndpointOwner, index: u32) callconv(.c) bool {
     if (controllerQueue(raw, owner, index, .output)) |pair| {
         pair.queue.finish();
@@ -1030,19 +1010,6 @@ fn controllerQueue(raw: *anyopaque, owner: abi.EndpointOwner, index: u32, direct
         .messages => |pair| pair,
         .bytes => null,
     };
-}
-fn controllerReceiveMessage(raw: *anyopaque, owner: abi.EndpointOwner, index: u32) callconv(.c) bool {
-    const ctx = context(raw);
-    if (ctx.received != null) return false;
-    const pair = controllerQueue(raw, owner, index, .input) orelse return false;
-    pair.queue.beginRead() catch {
-        const text = "message endpoint already has a pending receiver";
-        controllerFail(raw, .contract, text.ptr, text.len);
-        return false;
-    };
-    defer pair.queue.endRead();
-    ctx.received = pair.controller.receive(ctx.cancellation());
-    return ctx.received != null;
 }
 fn controllerReceivedMessage(raw: *anyopaque, path: [*]const u64, depth: u32, output: *abi.ValueView) callconv(.c) bool {
     const item = context(raw).received orelse return false;
@@ -1133,7 +1100,7 @@ fn storeControllerFailure(destination: *?Failure, failure: Failure) void {
     if (destination.* != null and failure != .out_of_memory) return;
     destination.* = failure;
 }
-const controller_table: abi.ControllerTable = .{ .resolve_endpoint = controllerResolveEndpoint, .read_bytes = controllerReadBytes, .write_bytes = controllerWriteBytes, .receive_event = controllerReceiveEvent, .fail_resource = controllerFailResource, .parent_state = controllerParent, .discard_message = controllerDiscardMessage, .build_message = controllerBuildMessage, .fail_allocation = controllerFailAllocation, .receive_message = controllerReceiveMessage, .received_message = controllerReceivedMessage, .forward_message = controllerForwardMessage, .result_message = controllerResultMessage, .input = controllerInput, .read_endpoint = controllerReadEndpoint, .write_endpoint = controllerWriteEndpoint, .finish_endpoint = controllerFinishEndpoint, .cancelled = controllerCancelled, .acknowledge_cancellation = controllerAcknowledge, .fail = controllerFail };
+const controller_table: abi.ControllerTable = .{ .resolve_endpoint = controllerResolveEndpoint, .read_bytes = controllerReadBytes, .write_bytes = controllerWriteBytes, .receive_event = controllerReceiveEvent, .fail_resource = controllerFailResource, .parent_state = controllerParent, .discard_message = controllerDiscardMessage, .build_message = controllerBuildMessage, .fail_allocation = controllerFailAllocation, .received_message = controllerReceivedMessage, .forward_message = controllerForwardMessage, .result_message = controllerResultMessage, .input = controllerInput, .finish_endpoint = controllerFinishEndpoint, .cancelled = controllerCancelled, .acknowledge_cancellation = controllerAcknowledge, .fail = controllerFail };
 
 pub fn fromValue(value: Value, instance: *native.ModuleInstance, kind: u32) ?*Cell {
     const handle = switch (value) {

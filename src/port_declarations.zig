@@ -9,6 +9,7 @@ pub const Cancellation = enum { close_resource, acknowledge };
 pub const ControllerError = error{ Cancelled, Failed, OutOfMemory, InvalidValue };
 
 pub const Endpoint = struct {
+    name: ?[]const u8 = null,
     doc: []const u8,
     transport: Transport,
     direction: Direction,
@@ -29,6 +30,9 @@ pub fn Endpoints(comptime entries: anytype) type {
         pub const count = fields.len;
         pub fn get(comptime name: Name) Endpoint {
             return @field(entries, @tagName(name));
+        }
+        pub fn publicName(comptime name: Name) []const u8 {
+            return get(name).name orelse @tagName(name);
         }
         pub fn id(name: Name) u6 {
             return @intCast(@intFromEnum(name));
@@ -71,6 +75,10 @@ pub fn Operations(comptime Lane: type, comptime EndpointSet: type, comptime entr
         pub const lane_count = lanes.len;
         pub fn get(comptime name: Name) @TypeOf(@field(entries, @tagName(name))) {
             return @field(entries, @tagName(name));
+        }
+        pub fn publicName(comptime name: Name) []const u8 {
+            const entry = get(name);
+            return if (@hasField(@TypeOf(entry), "name")) entry.name else @tagName(name);
         }
         pub fn lane(name: Name) Lane {
             inline for (fields) |field| {

@@ -184,12 +184,6 @@ pub const Controller = opaque {
     fn state(self: *Controller) *State {
         return @ptrCast(@alignCast(self));
     }
-    pub fn read(self: *Controller, bytes: []u8, cancelled: *const std.atomic.Value(bool)) usize {
-        return switch (self.readChunk(bytes, cancelled)) {
-            .data => |count| count,
-            .eof, .cancelled, .failed => 0,
-        };
-    }
     pub fn readChunk(self: *Controller, bytes: []u8, cancelled: *const std.atomic.Value(bool)) ControllerRead {
         const owned = self.state();
         std.Io.Threaded.mutexLock(&owned.mutex);
@@ -235,18 +229,6 @@ pub const Controller = opaque {
             }
         }
         return .complete;
-    }
-    pub fn write(self: *Controller, bytes: []const u8, cancelled: *const std.atomic.Value(bool)) usize {
-        const owned = self.state();
-        std.Io.Threaded.mutexLock(&owned.mutex);
-        defer std.Io.Threaded.mutexUnlock(&owned.mutex);
-        while (!cancelled.load(.acquire) and owned.ring.free() == 0 and owned.phase == .open)
-            owned.changed.waitUncancelable(std.Io.Threaded.global_single_threaded.io(), &owned.mutex);
-        if (cancelled.load(.acquire) or owned.phase != .open) return 0;
-        const count = @min(bytes.len, owned.ring.free(), max_chunk);
-        owned.ring.push(bytes[0..count]);
-        owned.notifyLocked();
-        return count;
     }
 };
 

@@ -1229,6 +1229,9 @@ Port operation declarations bind documentation, typed handlers, lanes, and
 supported exchange endpoints together. Built-in and extension bridges derive
 selectors from the same ABI-independent declaration types. Registered lane
 metadata is authoritative; controller invocation does not select a second lane.
+Both bridges dispatch the handlers carried by those declarations. Extension
+modules generate their selector bindings from the registered declarations;
+public names may differ from local endpoint names without coordinating IDs.
 Named endpoint references generate private masks before publication, rejecting
 resource-owned or repeated endpoints in an operation's exchange set.
 Controller endpoint borrows fix their issuing kind, owner, transport, and
@@ -1242,8 +1245,8 @@ Structured construction uses one bounded controller driver for typed backends
 and the extension bridge. Sending, returning a result, and creating a child
 complete their prerequisite validation within that driver. The ABI carries
 semantic construction requests, not interpreter or builder advancement states;
-cancellation is checked between construction quanta before publication. Construction requires opaque invocation authority minted by the controller
-lane. Each public mutation settles its bounded internal work before returning;
+cancellation is checked between construction quanta before publication.
+Construction requires opaque invocation authority minted by the controller lane. Each public mutation settles its bounded internal work before returning;
 worker code cannot construct this controller facade or obtain its advancement
 state.
 

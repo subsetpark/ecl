@@ -100,14 +100,11 @@ pub const ControllerTable = extern struct {
     parent_state: *const fn (*anyopaque, *const anyopaque) callconv(.c) ?*anyopaque,
     build_message: *const fn (*anyopaque, *const MessageBuildRequest) callconv(.c) HostStatus,
     fail_allocation: *const fn (*anyopaque) callconv(.c) void,
-    receive_message: *const fn (*anyopaque, EndpointOwner, u32) callconv(.c) bool,
     received_message: *const fn (*anyopaque, [*]const u64, u32, *ValueView) callconv(.c) bool,
     forward_message: *const fn (*anyopaque, EndpointOwner, u32) callconv(.c) bool,
     result_message: *const fn (*anyopaque) callconv(.c) bool,
     discard_message: *const fn (*anyopaque) callconv(.c) bool,
     input: *const fn (*anyopaque, [*]const u64, u32, *ValueView) callconv(.c) bool,
-    read_endpoint: *const fn (*anyopaque, EndpointOwner, u32, [*]u8, u32) callconv(.c) u32,
-    write_endpoint: *const fn (*anyopaque, EndpointOwner, u32, [*]const u8, u32) callconv(.c) u32,
     finish_endpoint: *const fn (*anyopaque, EndpointOwner, u32) callconv(.c) bool,
     cancelled: *const fn (*anyopaque) callconv(.c) bool,
     acknowledge_cancellation: *const fn (*anyopaque) callconv(.c) bool,
@@ -426,7 +423,7 @@ comptime {
     assertRecord(Descriptor, 104, 8);
     assertRecord(PortDefinition, 96, 8);
     assertRecord(MessageBuildRequest, 72, 8);
-    assertRecord(ControllerTable, 160, 8);
+    assertRecord(ControllerTable, 136, 8);
     assertRecord(ControllerRead, 8, 4);
     assertRecord(EntryResult, 32, 8);
 

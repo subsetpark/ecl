@@ -365,13 +365,6 @@ pub const Controller = opaque {
     fn state(self: *Controller) *QueueState {
         return @ptrCast(@alignCast(self));
     }
-    /// Success owns the removed message; EOF/failure returns null.
-    pub fn receive(self: *Controller, cancelled: *const std.atomic.Value(bool)) ?*Envelope {
-        return switch (self.receiveMessage(cancelled)) {
-            .message => |item| item,
-            .eof, .cancelled, .failed => null,
-        };
-    }
     pub const Received = union(enum) { message: *Envelope, eof, cancelled, failed: Failure };
     /// A message transfers ownership to the controller, including its queue
     /// reservation. Buffered messages precede terminal failure.

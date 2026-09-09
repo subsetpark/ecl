@@ -65,6 +65,12 @@ pub fn Endpoint(comptime P: type, comptime endpoint_name: P.Endpoints.Name) type
     }
     return switch (spec.direction) {
         .input => opaque {
+            /// Append a reply sender to the current builder. The capability
+            /// cannot grant output or completion authority.
+            pub fn reply(self: *@This()) ControllerError!void {
+                const controller: *Controller = @ptrCast(self);
+                try controller.builder().apply(.{ .action = .reply_endpoint, .owner = owner, .endpoint = id });
+            }
             /// Success owns one message in the controller's received slot;
             /// null is stable EOF. An unconsumed message rejects another read.
             pub fn receive(self: *@This()) ControllerError!?*const MessageView {
@@ -81,11 +87,7 @@ pub fn Endpoint(comptime P: type, comptime endpoint_name: P.Endpoints.Name) type
             pub fn send(self: *@This()) ControllerError!void {
                 const controller: *Controller = @ptrCast(self);
                 const builder = controller.builder();
-                const accepted = switch (spec.owner) {
-                    .resource => builder.sendResource(id),
-                    .exchange => builder.send(id),
-                };
-                if (!accepted) return if (controller.cancelled()) error.Cancelled else error.Failed;
+                try builder.apply(.{ .action = .send, .owner = owner, .endpoint = id });
             }
             /// Consumes the current received message only on success.
             pub fn forward(self: *@This()) ControllerError!void {
@@ -101,7 +103,7 @@ pub fn Endpoint(comptime P: type, comptime endpoint_name: P.Endpoints.Name) type
 }
 
 /// Controller-local read-only view. Borrowed text and this view last until the
-/// next input lookup or controller return. Port values expose only their kind.
+/// next view lookup or controller return. Port values expose only their kind.
 pub const MessageView = opaque {
     fn wire(self: *const MessageView) *const abi.ValueView {
         return @ptrCast(@alignCast(self));
@@ -139,34 +141,33 @@ pub const MessageBuilder = opaque {
     fn state(self: *MessageBuilder) *ControllerState {
         return @ptrCast(@alignCast(self));
     }
-    fn apply(self: *MessageBuilder, request: abi.MessageBuildRequest) bool {
+    fn apply(self: *MessageBuilder, request: abi.MessageBuildRequest) ControllerError!void {
         const owned = self.state();
-        return owned.table.build_message(owned.context, &request) == .ok;
+        switch (owned.table.build_message(owned.context, &request)) {
+            .ok => return,
+            .out_of_memory => return error.OutOfMemory,
+            else => return if (owned.table.cancelled(owned.context)) error.Cancelled else error.Failed,
+        }
     }
-    pub fn int(self: *MessageBuilder, item: i64) bool {
+    pub fn int(self: *MessageBuilder, item: i64) ControllerError!void {
         return self.apply(.{ .action = .scalar, .scalar = capability.Scalar.int(item).wire });
     }
-    pub fn float(self: *MessageBuilder, item: f64) bool {
+    pub fn float(self: *MessageBuilder, item: f64) ControllerError!void {
         return self.apply(.{ .action = .scalar, .scalar = capability.Scalar.float(item).wire });
     }
-    pub fn char(self: *MessageBuilder, item: u32) bool {
+    pub fn char(self: *MessageBuilder, item: u32) ControllerError!void {
         return self.apply(.{ .action = .scalar, .scalar = capability.Scalar.char(item).wire });
     }
-    pub fn symbol(self: *MessageBuilder, bytes: []const u8) bool {
+    pub fn symbol(self: *MessageBuilder, bytes: []const u8) ControllerError!void {
         return self.apply(.{ .action = .scalar, .scalar = capability.Scalar.symbol(bytes).wire });
     }
-    pub fn input(self: *MessageBuilder, path: []const u64) bool {
-        if (path.len > abi.max_read_path_depth) return false;
+    pub fn input(self: *MessageBuilder, path: []const u64) ControllerError!void {
+        if (path.len > abi.max_read_path_depth) return error.InvalidValue;
         return self.apply(.{ .action = .copy_input, .path = path.ptr, .depth = @intCast(path.len) });
     }
-    pub fn received(self: *MessageBuilder, path: []const u64) bool {
-        if (path.len > abi.max_read_path_depth) return false;
+    pub fn received(self: *MessageBuilder, path: []const u64) ControllerError!void {
+        if (path.len > abi.max_read_path_depth) return error.InvalidValue;
         return self.apply(.{ .action = .copy_received, .path = path.ptr, .depth = @intCast(path.len) });
-    }
-    /// Append an attenuated sender for a declared message input. ECL may use
-    /// it to reply; retaining it does not extend the exchange's scope lifetime.
-    pub fn replyEndpoint(self: *MessageBuilder, endpoint: u6) bool {
-        return self.apply(.{ .action = .reply_endpoint, .endpoint = endpoint });
     }
     /// Consume the completed configuration and replace it with a new resource.
     /// Success leaves that child provisionally owned by this exchange until
@@ -174,7 +175,7 @@ pub const MessageBuilder = opaque {
     /// the host cleans up any failed child. Dependent children close and join
     /// before their issuing parent's backend is destroyed; scope transfer
     /// never detaches that dependency.
-    pub fn child(self: *MessageBuilder, comptime P: type, dependency: enum { independent, dependent }) bool {
+    pub fn child(self: *MessageBuilder, comptime P: type, dependency: enum { independent, dependent }) ControllerError!void {
         if (!@hasDecl(P, "ecl_port_marker")) @compileError("ecl-native: child requires a declared Port type");
         return self.apply(.{
             .action = .child,
@@ -185,22 +186,16 @@ pub const MessageBuilder = opaque {
             }),
         });
     }
-    pub fn list(self: *MessageBuilder, count: u32) bool {
+    pub fn list(self: *MessageBuilder, count: u32) ControllerError!void {
         return self.apply(.{ .action = .list, .count = count });
     }
-    pub fn dictionary(self: *MessageBuilder, pairs: u32) bool {
+    pub fn dictionary(self: *MessageBuilder, pairs: u32) ControllerError!void {
         return self.apply(.{ .action = .dictionary, .count = pairs });
     }
-    pub fn send(self: *MessageBuilder, endpoint: u6) bool {
-        return self.apply(.{ .action = .send, .endpoint = endpoint });
-    }
-    pub fn sendResource(self: *MessageBuilder, endpoint: u6) bool {
-        return self.apply(.{ .action = .send, .endpoint = endpoint, .owner = .resource });
-    }
-    pub fn result(self: *MessageBuilder) bool {
+    pub fn result(self: *MessageBuilder) ControllerError!void {
         return self.apply(.{ .action = .result });
     }
-    pub fn clear(self: *MessageBuilder) bool {
+    pub fn clear(self: *MessageBuilder) ControllerError!void {
         return self.apply(.{ .action = .clear });
     }
 };
@@ -241,12 +236,6 @@ pub const Controller = opaque {
         const pointer = owned.table.parent_state(owned.context, P.kindIdentity()) orelse return null;
         return @ptrCast(@alignCast(pointer));
     }
-    /// Own the next complete message until forwarding, returning it as the
-    /// result, or controller return. Refuses to discard an unconsumed message.
-    pub fn receiveMessage(self: *Controller, endpoint_id: u6) bool {
-        const owned = self.state();
-        return owned.table.receive_message(owned.context, .exchange, endpoint_id);
-    }
     /// Borrowed view of the owned received message; the next view lookup
     /// invalidates this view. Message ownership is unchanged.
     pub fn received(self: *Controller, path: []const u64) ?*const MessageView {
@@ -255,23 +244,17 @@ pub const Controller = opaque {
         if (!owned.table.received_message(owned.context, path.ptr, @intCast(path.len), &owned.input_view)) return null;
         return @ptrCast(&owned.input_view);
     }
-    /// Success consumes the received message into the output queue. Failure
-    /// retains it for retry or automatic cleanup at controller return.
-    pub fn forwardMessage(self: *Controller, endpoint_id: u6) bool {
-        const owned = self.state();
-        return owned.table.forward_message(owned.context, .exchange, endpoint_id);
-    }
     /// Success consumes the received message into the terminal result; failure
     /// retains it. Completion is still determined by controller return.
-    pub fn resultMessage(self: *Controller) bool {
+    pub fn resultMessage(self: *Controller) ControllerError!void {
         const owned = self.state();
-        return owned.table.result_message(owned.context);
+        if (!owned.table.result_message(owned.context)) return if (self.cancelled()) error.Cancelled else error.Failed;
     }
     /// Success consumes the received message and expires its borrowed views.
-    /// False means no message was held. Builder copies retain their own values.
-    pub fn discardMessage(self: *Controller) bool {
+    /// InvalidValue means no message was held. Builder copies retain their own values.
+    pub fn discardMessage(self: *Controller) ControllerError!void {
         const owned = self.state();
-        return owned.table.discard_message(owned.context);
+        if (!owned.table.discard_message(owned.context)) return error.InvalidValue;
     }
     /// Read configuration during open, or structured parameters during run.
     /// Dictionary positions alternate key/value. Paths have at most 64 entries.
@@ -280,44 +263,6 @@ pub const Controller = opaque {
         const owned = self.state();
         if (!owned.table.input(owned.context, path.ptr, @intCast(path.len), &owned.input_view)) return null;
         return @ptrCast(&owned.input_view);
-    }
-    pub fn readResourceFrom(self: *Controller, endpoint_id: u6, bytes: []u8) usize {
-        const owned = self.state();
-        return owned.table.read_endpoint(owned.context, .resource, endpoint_id, bytes.ptr, @intCast(@min(bytes.len, 64 * 1024)));
-    }
-    pub fn writeResourceTo(self: *Controller, endpoint_id: u6, bytes: []const u8) usize {
-        const owned = self.state();
-        return owned.table.write_endpoint(owned.context, .resource, endpoint_id, bytes.ptr, @intCast(@min(bytes.len, 64 * 1024)));
-    }
-    pub fn finishResourceOutput(self: *Controller, endpoint_id: u6) bool {
-        const owned = self.state();
-        return owned.table.finish_endpoint(owned.context, .resource, endpoint_id);
-    }
-    pub fn receiveResourceMessage(self: *Controller, endpoint_id: u6) bool {
-        const owned = self.state();
-        return owned.table.receive_message(owned.context, .resource, endpoint_id);
-    }
-    pub fn forwardResourceMessage(self: *Controller, endpoint_id: u6) bool {
-        const owned = self.state();
-        return owned.table.forward_message(owned.context, .resource, endpoint_id);
-    }
-    pub fn read(self: *Controller, bytes: []u8) usize {
-        return self.readFrom(0, bytes);
-    }
-    pub fn readFrom(self: *Controller, endpoint_id: u6, bytes: []u8) usize {
-        const owned = self.state();
-        return owned.table.read_endpoint(owned.context, .exchange, endpoint_id, bytes.ptr, @intCast(@min(bytes.len, 64 * 1024)));
-    }
-    pub fn writeTo(self: *Controller, endpoint_id: u6, bytes: []const u8) usize {
-        const owned = self.state();
-        return owned.table.write_endpoint(owned.context, .exchange, endpoint_id, bytes.ptr, @intCast(@min(bytes.len, 64 * 1024)));
-    }
-    pub fn finishOutput(self: *Controller, endpoint_id: u6) bool {
-        const owned = self.state();
-        return owned.table.finish_endpoint(owned.context, .exchange, endpoint_id);
-    }
-    pub fn write(self: *Controller, bytes: []const u8) usize {
-        return self.writeTo(1, bytes);
     }
     pub fn cancelled(self: *Controller) bool {
         return self.state().table.cancelled(self.state().context);
@@ -373,7 +318,7 @@ pub fn Port(comptime Spec: type) type {
         if (@hasDecl(Spec, "shutdown") and @TypeOf(Spec.shutdown) != fn (*Spec.State, *Controller) void)
             @compileError("ecl-native: shutdown requires fn (*State, *Controller) void");
         for (.{ "State", "name", "init", "open", "cancel", "deinit" }) |name|
-            if (!@hasDecl(Spec, name)) @compileError("ecl-native: Port spec requires State, name, init, open, run, cancel, and deinit");
+            if (!@hasDecl(Spec, name)) @compileError("ecl-native: Port spec requires State, name, init, open, cancel, and deinit");
         if (@sizeOf(Spec.State) == 0 or @sizeOf(Spec.State) > abi.max_port_state_bytes or @alignOf(Spec.State) > 64)
             @compileError("ecl-native: Port State exceeds the supported size or alignment");
         if (@TypeOf(Spec.init) != fn () Spec.State or
@@ -383,20 +328,17 @@ pub fn Port(comptime Spec: type) type {
             @compileError("ecl-native: Port callbacks have invalid signatures");
     }
     const DeclaredEndpoints = declarations.Endpoints(if (@hasDecl(Spec, "endpoints")) Spec.endpoints else .{});
-    const DeclaredOperations = if (@hasDecl(Spec, "operations")) declarations.Operations(Lane, DeclaredEndpoints, Spec.operations) else void;
+    const DeclaredOperations = declarations.Operations(Lane, DeclaredEndpoints, if (@hasDecl(Spec, "operations")) Spec.operations else .{});
     comptime {
-        if (DeclaredOperations != void) {
-            for (@import("std").meta.tags(DeclaredOperations.Name)) |name| {
-                if (@TypeOf(DeclaredOperations.get(name).handler) != fn (*Spec.State, *Controller) void and
-                    @TypeOf(DeclaredOperations.get(name).handler) != fn (*Spec.State, *Controller) ControllerError!void)
-                    @compileError("port: handler must accept resource state and controller");
-            }
-        } else if (!@hasDecl(Spec, "run") or @TypeOf(Spec.run) != fn (*Spec.State, u32, *Controller) void)
-            @compileError("ecl-native: Port callbacks have invalid signatures");
+        for (@import("std").meta.tags(DeclaredOperations.Name)) |name| {
+            if (@TypeOf(DeclaredOperations.get(name).handler) != fn (*Spec.State, *Controller) void and
+                @TypeOf(DeclaredOperations.get(name).handler) != fn (*Spec.State, *Controller) ControllerError!void)
+                @compileError("port: handler must accept resource state and controller");
+        }
     }
     return opaque {
         pub const Endpoints = declarations.Endpoints(if (@hasDecl(Spec, "endpoints")) Spec.endpoints else .{});
-        pub const Operations = if (@hasDecl(Spec, "operations")) declarations.Operations(Lane, Endpoints, Spec.operations) else void;
+        pub const Operations = declarations.Operations(Lane, Endpoints, if (@hasDecl(Spec, "operations")) Spec.operations else .{});
         pub const ecl_port_marker = void;
         pub const StateType = Spec.State;
         pub const LaneType = Lane;
@@ -430,29 +372,25 @@ pub fn Port(comptime Spec: type) type {
         }
         fn execute(raw: *anyopaque, operation: u32, table: *const abi.ControllerTable, context: *anyopaque) callconv(.c) void {
             var state: ControllerState = .{ .table = table, .context = context };
-            if (Operations == void) {
-                Spec.run(@ptrCast(@alignCast(raw)), operation, @ptrCast(&state));
-            } else {
-                inline for (comptime @import("std").meta.tags(Operations.Name)) |operation_name| {
-                    if (operation == @intFromEnum(operation_name)) {
-                        const handler = Operations.get(operation_name).handler;
-                        if (@typeInfo(@TypeOf(handler)).@"fn".return_type.? == void) {
-                            handler(@ptrCast(@alignCast(raw)), @ptrCast(&state));
-                        } else handler(@ptrCast(@alignCast(raw)), @ptrCast(&state)) catch |err| {
-                            const controller: *Controller = @ptrCast(&state);
-                            switch (err) {
-                                error.Cancelled => if (!controller.cancelled()) controller.fail(.contract, "controller reported cancellation without a request"),
-                                error.OutOfMemory => controller.failOutOfMemory(),
-                                error.Failed => controller.fail(.io, "port controller transport failed"),
-                                error.InvalidValue => controller.fail(.contract, "invalid controller capability or value"),
-                            }
-                        };
-                        return;
-                    }
+            inline for (comptime @import("std").meta.tags(Operations.Name)) |operation_name| {
+                if (operation == @intFromEnum(operation_name)) {
+                    const handler = Operations.get(operation_name).handler;
+                    if (@typeInfo(@TypeOf(handler)).@"fn".return_type.? == void) {
+                        handler(@ptrCast(@alignCast(raw)), @ptrCast(&state));
+                    } else handler(@ptrCast(@alignCast(raw)), @ptrCast(&state)) catch |err| {
+                        const controller: *Controller = @ptrCast(&state);
+                        switch (err) {
+                            error.Cancelled => if (!controller.cancelled()) controller.fail(.contract, "controller reported cancellation without a request"),
+                            error.OutOfMemory => controller.failOutOfMemory(),
+                            error.Failed => controller.fail(.io, "port controller transport failed"),
+                            error.InvalidValue => controller.fail(.contract, "invalid controller capability or value"),
+                        }
+                    };
+                    return;
                 }
-                const controller: *Controller = @ptrCast(&state);
-                controller.fail(.contract, "unsupported registered operation");
             }
+            const controller: *Controller = @ptrCast(&state);
+            controller.fail(.contract, "unsupported registered operation");
         }
         fn cancelState(raw: *anyopaque) callconv(.c) void {
             Spec.cancel(@ptrCast(@alignCast(raw)));

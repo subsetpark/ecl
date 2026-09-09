@@ -30,46 +30,34 @@ pub const BuildAppendResult = capability.BuildAppendResult;
 pub const Reschedule = capability.Reschedule;
 pub const CallbackResult = error{ OutOfMemory, InvalidValue }!Outcome;
 
-/// Export an operation from the port's single declaration.
-pub fn portOperation(comptime P: type, comptime name: P.Operations.Name) type {
-    const entry = P.Operations.get(name);
-    return operation(@tagName(name), entry.doc, P, @intFromEnum(name), P.Operations.lane(name), P.Operations.endpointMask(name));
-}
-
-/// Export a declared endpoint without repeating its owner or wire selector.
-pub fn portEndpoint(comptime P: type, comptime name: P.Endpoints.Name) type {
-    const entry = P.Endpoints.get(name);
-    return endpoint(@tagName(name), entry.doc, P, .{ .id = P.Endpoints.id(name), .transport = entry.transport, .direction = entry.direction, .owner = entry.owner });
-}
-
 pub fn factory(comptime name: []const u8, comptime doc: []const u8, comptime P: type) type {
     return portBinding(name, doc, P, .{ .kind = .factory });
 }
 
-pub fn operation(comptime name: []const u8, comptime doc: []const u8, comptime P: type, comptime code: u32, comptime lane: P.LaneType, comptime endpoints: u64) type {
-    return portBinding(name, doc, P, .{ .kind = .operation, .operation = code, .lane = @intFromEnum(lane), .endpoints = endpoints });
+fn portOperation(comptime P: type, comptime name: P.Operations.Name) type {
+    const entry = P.Operations.get(name);
+    return portBinding(P.Operations.publicName(name), entry.doc, P, .{
+        .kind = .operation,
+        .operation = @intFromEnum(name),
+        .lane = @intFromEnum(P.Operations.lane(name)),
+        .endpoints = P.Operations.endpointMask(name),
+    });
 }
 
-pub const Endpoint = struct {
-    id: u6,
-    transport: declarations.Transport,
-    direction: declarations.Direction,
-    owner: declarations.Owner = .exchange,
-};
-
-pub fn endpoint(comptime name: []const u8, comptime doc: []const u8, comptime P: type, comptime spec: Endpoint) type {
-    return portBinding(name, doc, P, .{
+fn portEndpoint(comptime P: type, comptime name: P.Endpoints.Name) type {
+    const entry = P.Endpoints.get(name);
+    return portBinding(P.Endpoints.publicName(name), entry.doc, P, .{
         .kind = .endpoint,
-        .endpoint = spec.id,
-        .transport = switch (spec.transport) {
+        .endpoint = P.Endpoints.id(name),
+        .transport = switch (entry.transport) {
             .bytes => .bytes,
             .messages => .messages,
         },
-        .direction = switch (spec.direction) {
+        .direction = switch (entry.direction) {
             .input => .input,
             .output => .output,
         },
-        .owner = switch (spec.owner) {
+        .owner = switch (entry.owner) {
             .resource => .resource,
             .exchange => .exchange,
         },
@@ -452,12 +440,39 @@ fn writeAdapterFailure(
 /// not export the symbol at all, which is what lets one image carry several.
 pub const Linkage = enum { dynamic, static };
 
+fn portBindingCount(comptime Ports: anytype) usize {
+    var count: usize = 0;
+    for (Ports) |P| {
+        count += P.Operations.count;
+        count += P.Endpoints.count;
+    }
+    return count;
+}
+
+fn portBindings(comptime Ports: anytype) [portBindingCount(Ports)]type {
+    var bindings: [portBindingCount(Ports)]type = undefined;
+    var index: usize = 0;
+    for (Ports) |P| {
+        for (std.meta.tags(P.Operations.Name)) |name| {
+            bindings[index] = portOperation(P, name);
+            index += 1;
+        }
+        for (std.meta.tags(P.Endpoints.Name)) |name| {
+            bindings[index] = portEndpoint(P, name);
+            index += 1;
+        }
+    }
+    return bindings;
+}
+
 pub fn module(comptime spec: anytype) type {
-    @setEvalBranchQuota(1000 + spec.words.len * spec.words.len * 16);
+    const Ports = if (@hasField(@TypeOf(spec), "ports")) spec.ports else .{};
+    const explicit_words = if (@hasField(@TypeOf(spec), "words")) spec.words else .{};
+    @setEvalBranchQuota(1000 + (explicit_words.len + portBindingCount(Ports)) * (explicit_words.len + portBindingCount(Ports)) * 16);
     if (!identifier(spec.name)) @compileError("ecl-native: module name must be a nonempty identifier");
     if (spec.doc.len == 0) @compileError("ecl-native: module documentation must not be empty");
     const module_linkage: Linkage = if (@hasField(@TypeOf(spec), "linkage")) spec.linkage else .dynamic;
-    const words = spec.words;
+    const words = explicit_words ++ portBindings(Ports);
     const word_count = words.len;
     inline for (words, 0..) |Word, index| {
         inline for (0..index) |prior_index| {
@@ -469,7 +484,6 @@ pub fn module(comptime spec: anytype) type {
     const ModuleName = spec.name;
     const ModuleDocumentation = spec.doc;
     const Words = words;
-    const Ports = if (@hasField(@TypeOf(spec), "ports")) spec.ports else .{};
     if (Ports.len > abi.max_port_definitions) @compileError("ecl-native: too many port definitions");
     inline for (Ports, 0..) |P, index| {
         if (!identifier(P.name)) @compileError("ecl-native: port name must be an identifier");
