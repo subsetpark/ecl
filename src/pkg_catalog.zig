@@ -256,16 +256,16 @@ const Builder = struct {
             // Dynamic declarations are file-private. Only exports require
             // a literal name that discovery can identify without evaluation.
             if (index == 0 or forms[index - 1] != .symbol) continue;
-            const name = intern.moduleName(forms[index - 1].symbol) catch return self.fail(
-                "package `{s}` artifact `{s}` declares an invalid module name",
-                .{ input.name, claim.relative_path },
-            );
-            const name_bytes = intern.get(intern.moduleId(name));
+            const name_bytes = intern.get(forms[index - 1].symbol);
             var exported = false;
             for (manifest.exports) |export_name| {
                 if (std.mem.eql(u8, name_bytes, export_name)) exported = true;
             }
             if (!exported) continue;
+            const name = intern.moduleName(forms[index - 1].symbol) catch return self.fail(
+                "package `{s}` artifact `{s}` declares an invalid module name",
+                .{ input.name, claim.relative_path },
+            );
             for (names.items) |prior| if (prior == name) return self.fail(
                 "package `{s}` artifact `{s}` declares module `{s}` more than once",
                 .{ input.name, claim.relative_path, name_bytes },
@@ -556,10 +556,11 @@ const Walk = struct {
 pub const Progress = enum { pending, done };
 
 /// A resumable catalog build. One `advance` reads one manifest, claims up to
-/// `budget` directory entries, or parses one source artifact, so a caller
-/// inside the scheduler can traverse a package tree of any size without
-/// monopolizing its worker or deferring cancellation. `build` below is the
-/// same walk run to completion for callers that are not on a scheduler step.
+/// `budget` directory entries or export/module comparisons, or parses one
+/// source artifact, so a caller inside the scheduler can traverse a package
+/// tree of any size without monopolizing its worker or deferring cancellation.
+/// `build` below is the same walk run to completion for callers that are not
+/// on a scheduler step.
 pub const Build = struct {
     builder: Builder,
     packages: []const PackageInput,
@@ -576,7 +577,12 @@ pub const Build = struct {
     const Stage = union(enum) {
         manifest,
         walking: Walk,
-        artifacts: struct { walk: Walk, index: usize = 0 },
+        artifacts: struct {
+            walk: Walk,
+            index: usize = 0,
+            export_index: usize = 0,
+            module_index: usize = 0,
+        },
         finished,
     };
 
@@ -685,13 +691,19 @@ pub const Build = struct {
             },
             .artifacts => |*artifacts| {
                 if (artifacts.index == artifacts.walk.claims.items.len) {
-                    for (artifacts.walk.manifest.exports) |export_name| {
-                        var found = false;
-                        for (self.builder.modules.items) |module| {
+                    var remaining = budget;
+                    while (artifacts.export_index < artifacts.walk.manifest.exports.len) {
+                        const export_name = artifacts.walk.manifest.exports[artifacts.export_index];
+                        while (artifacts.module_index < self.builder.modules.items.len) {
+                            if (remaining == 0) return .pending;
+                            remaining -= 1;
+                            const module = self.builder.modules.items[artifacts.module_index];
+                            artifacts.module_index += 1;
                             if (self.builder.artifacts.items[@intFromEnum(module.artifact)].package == input.id and
-                                std.mem.eql(u8, intern.get(intern.moduleId(module.name)), export_name)) found = true;
-                        }
-                        if (!found) return self.builder.fail("package {s} exports undeclared module {s}", .{ input.name, export_name });
+                                std.mem.eql(u8, intern.get(intern.moduleId(module.name)), export_name)) break;
+                        } else return self.builder.fail("package {s} exports undeclared module {s}", .{ input.name, export_name });
+                        artifacts.export_index += 1;
+                        artifacts.module_index = 0;
                     }
                     artifacts.walk.deinit(self.builder.allocator, self.builder.io);
                     self.stage = .manifest;

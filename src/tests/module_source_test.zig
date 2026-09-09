@@ -1834,6 +1834,62 @@ test "module: a body that reloads its own name keeps its entry generation" {
     try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[1].int);
 }
 
+test "loader: catalog export verification resumes within its comparison budget" {
+    const pkg_catalog = @import("../pkg_catalog.zig");
+    const allocator = std.testing.allocator;
+    var directory = std.testing.tmpDir(.{});
+    defer directory.cleanup();
+    try directory.dir.writeFile(std.testing.io, .{
+        .sub_path = "modules.ecl",
+        // Discovery must ignore private declarations, even when their literal
+        // names would be invalid if evaluated as module registrations.
+        .data = "[] () '-- @defm " ++
+            "[] () 'dep.a @defm [] () 'dep.b @defm [] () 'dep.c @defm",
+    });
+    inline for ([_]bool{ false, true }) |missing| {
+        try directory.dir.writeFile(std.testing.io, .{
+            .sub_path = "ecl.pkg",
+            .data = "{'format 1 'name \"dep\" 'version \"1.0.0\" 'sources [\"*.ecl\"] " ++
+                "'requires {} 'exports [\"dep.c\" \"dep.b\" \"dep.a\"" ++
+                (if (missing) " \"dep.missing\"]}" else "]}"),
+        });
+        var owner = @import("../heap.zig").HostOwner.init(allocator);
+        defer owner.cleanup().drain();
+        var diagnostic: ?[]u8 = null;
+        defer if (diagnostic) |message| allocator.free(message);
+        var cursor = pkg_catalog.Build.init(owner.cleanup(), std.testing.io, &.{.{
+            .id = @enumFromInt(0),
+            .name = "dep",
+            .version = "1.0.0",
+            .root_dir = ".",
+            .base_dir = directory.dir,
+        }}, &diagnostic);
+        defer cursor.deinit();
+        // Read the manifest, finish the small directory walk, and parse its artifact.
+        for (0..3) |_| try std.testing.expectEqual(.pending, try cursor.advance(100));
+        // Reverse export order needs three, two, then one comparison. Zero
+        // budget must preserve progress both before and during verification.
+        for (0..5) |_| {
+            try std.testing.expectEqual(.pending, try cursor.advance(0));
+            try std.testing.expectEqual(.pending, try cursor.advance(1));
+            try std.testing.expect(diagnostic == null);
+        }
+        if (missing) {
+            try std.testing.expectEqual(.pending, try cursor.advance(1));
+            for (0..2) |_| try std.testing.expectEqual(.pending, try cursor.advance(1));
+            try std.testing.expect(diagnostic == null);
+            try std.testing.expectError(error.Invalid, cursor.advance(1));
+            try std.testing.expectEqualStrings("package dep exports undeclared module dep.missing", diagnostic.?);
+        } else {
+            try std.testing.expectEqual(.done, try cursor.advance(1));
+            var catalog = try cursor.take();
+            defer catalog.deinit();
+            for ([_][]const u8{ "dep.a", "dep.b", "dep.c" }) |name|
+                try std.testing.expect(catalog.find(name) != null);
+        }
+    }
+}
+
 test "loader: persisted catalog assembly propagates every allocation failure" {
     var fixture = try LockFixture.init();
     defer fixture.deinit();
