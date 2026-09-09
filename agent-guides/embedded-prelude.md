@@ -16,5 +16,6 @@ apply as well.
   effects.
 - Treat the annotation docstring—not the navigation comment—as the reflective
   documentation authority.
-- Enforce block layout only in the dedicated source audit, whose scanner must
+- Enforce block structure in the dedicated source audit, whose scanner must
   ignore apparent headers and definition syntax inside multiline strings.
+  Whitespace layout belongs to the formatter and its CI check.

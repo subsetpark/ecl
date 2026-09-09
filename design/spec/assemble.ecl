@@ -12,27 +12,23 @@
 
 ### def root-prefix
 (root -- prefix : "The build root with exactly one trailing separator.")
-(dup "/" str.ends? () ("/" cat) if)
-'root-prefix def
+(dup "/" str.ends? () ("/" cat) if) 'root-prefix def
 
 ### def relativize-absolute
 (root path -- path : "Strip the build root prefix from an absolute path beneath it.")
 (swap root-prefix over over str.starts?
  'domain error.new "assembly input is outside the build root" error.with-message assert
- len drop)
-'relativize-absolute def
+ len drop) 'relativize-absolute def
 
 ### def relativize
 (root path -- path :
  "Strip the build root prefix from an absolute path, keep a relative one, and normalize the result
   into the canonical grammar `fs` accepts.")
-(dup path.absolute? (relativize-absolute) (nip) if path.normalize)
-'relativize def
+(dup path.absolute? (relativize-absolute) (nip) if path.normalize) 'relativize def
 
 ### def read-input
 (root path -- text : "Read one assembly input beneath the build root.")
-(relativize 'cwd swap fs.read-text)
-'read-input def
+(relativize 'cwd swap fs.read-text) 'read-input def
 
 ### def embed-fragment
 (fragment -- fragment : "Demote Markdown headings for inclusion beneath an authored section.")
@@ -45,8 +41,7 @@
   if
   line cat)
  each
- "\n" join)
-'embed-fragment def
+ "\n" join) 'embed-fragment def
 
 ### def assemble-spec
 (root arguments -- output document :
@@ -84,8 +79,7 @@
  dup "<!-- include:" str.contains? not
  'domain error.new
  "assembled specification contains an unresolved include directive" error.with-message
- assert)
-'assemble-spec def
+ assert) 'assemble-spec def
 
 ### def check-output
 (output document root -- : "Require the checked-in output to match the assembled document.")
@@ -93,13 +87,11 @@
  document root output read-input match?
  'domain error.new
  "design/SPEC.md is stale; run `zig build spec`" error.with-message
- assert)
-'check-output def
+ assert) 'check-output def
 
 ### def write-output
 (output document -- : "Create or strictly replace the assembled output beneath the build root.")
-(swap 'cwd swap over over fs.exists? (fs.replace-text) (fs.create-text) if)
-'write-output def
+(swap 'cwd swap over over fs.exists? (fs.replace-text) (fs.create-text) if) 'write-output def
 
 args first args rest
 dup first "--check" match?

@@ -10,27 +10,23 @@
   package "-" cat
   requirement 'version at cat
   "-" cat
-  requirement 'hash at 7 drop cat)
- 'store-key def
+  requirement 'hash at 7 drop cat) 'store-key def
 
  ### def store-keys
  (lock -- keys : "Return the canonical immutable store keys selected by a lock.")
  (pkg.lock.validate 'packages at pkg.data.sorted-entries
-  (|pair| pair first pair 1 at pkg.sync.store-key) each)
- 'store-keys def
+  (|pair| pair first pair 1 at pkg.sync.store-key) each) 'store-keys def
 
  ### def store-root
  (lock -- store :
   "Return the store a validated lock selects: 'vendor for a vendored lock, otherwise 'cache.")
- (pkg.lock.validate 'store dict.has? ('vendor) ('cache) if)
- 'store-root def
+ (pkg.lock.validate 'store dict.has? ('vendor) ('cache) if) 'store-root def
 
  ### def write-project-file
  (text path -- :
   "Publish one project data file beneath 'project: create it when absent, otherwise strictly replace
    the existing regular file.")
- ('project swap over over fs.exists? (fs.replace-text) (fs.create-text) if)
- 'write-project-file def
+ ('project swap over over fs.exists? (fs.replace-text) (fs.create-text) if) 'write-project-file def
 
  ### defp success-response
  (response package url -- response : "Require a successful HTTP status with package provenance.")
@@ -44,8 +40,7 @@
   'status response 'status at put
   put
   assert
-  response)
- 'success-response defp
+  response) 'success-response defp
 
  ### defp hash-checked
  (body package declared-hash -- body : "Require the exact declared archive hash with provenance.")
@@ -63,8 +58,7 @@
    put
    assert
    body)
-  with call)
- 'hash-checked defp
+  with call) 'hash-checked defp
 
  ### defp fetch-body
  (package requirement -- body : "Fetch and hash-check one exact package archive.")
@@ -72,8 +66,7 @@
   'target requirement 'url at pair dict.from-flat http.get-bytes
   package requirement 'url at success-response
   'body at
-  package requirement 'hash at hash-checked)
- 'fetch-body defp
+  package requirement 'hash at hash-checked) 'fetch-body defp
 
  ### def requirement
  (package version url -- requirement :
@@ -87,8 +80,7 @@
   'target url pair dict.from-flat http.get-bytes package url success-response 'body at
   dup archive.sha256 "sha256-" swap cat
   package version url
-  requirement-checked)
- 'requirement def
+  requirement-checked) 'requirement def
 
  ### defp requirement-checked
  (body hash package version url -- requirement :
@@ -100,14 +92,12 @@
   (|package version url hash| 'package package 'version version 'url url 'hash hash)
   infra
   dict.from-flat
-  pkg.manifest.validate-requirement)
- 'requirement-checked defp
+  pkg.manifest.validate-requirement) 'requirement-checked defp
 
  ### defp raise-package-error
  (error package -- : "Attach package provenance to a store-policy error and re-raise it.")
  (|error package|
-  error 'data error 'data at 'package package put put raise)
- 'raise-package-error defp
+  error 'data error 'data at 'package package put put raise) 'raise-package-error defp
 
  ### defp inspect-checked
  (body package -- manifest-text : "Inspect an archive and preserve package provenance on failure.")
@@ -116,8 +106,7 @@
   dup 'ok dict.has?
   ('ok at first)
   ('err at) package (raise-package-error) partial compose
-  if)
- 'inspect-checked defp
+  if) 'inspect-checked defp
 
  ### defp matching-manifest
  (candidate package version -- manifest : "Require a manifest to match its requested identity.")
@@ -134,8 +123,7 @@
   'actual-name candidate 'name at put
   'actual-version candidate 'version at put
   put
-  assert)
- 'matching-manifest defp
+  assert) 'matching-manifest defp
 
  ### defp fetched-manifest
  (package requirement -- manifest :
@@ -145,20 +133,17 @@
   dup package inspect-checked
   pkg.manifest.read
   package requirement 'version at matching-manifest
-  nip)
- 'fetched-manifest defp
+  nip) 'fetched-manifest defp
 
  ### defp stored-manifest
  (store key package version -- manifest : "Read and identity-check a present store manifest.")
  (|store key package version|
   store key pkg.store.manifest pkg.manifest.read
-  package version matching-manifest)
- 'stored-manifest defp
+  package version matching-manifest) 'stored-manifest defp
 
  ### defp seen-node?
  (nodes node -- bool : "Return 1 when an exact package/version node has already been discovered.")
- ((match?) partial any?)
- 'seen-node? defp
+ ((match?) partial any?) 'seen-node? defp
 
  ### defp catalog-insert
  (state package version manifest -- state : "Insert one exact manifest into the discovery catalog.")
@@ -170,13 +155,11 @@
   state 'catalog at package {} at-or
   version manifest put
   put
-  put)
- 'catalog-insert defp
+  put) 'catalog-insert defp
 
  ### defp discover-edge
  (state pair -- state : "Discover one canonically ordered requirement edge.")
- (|state pair| state pair 1 at 'package at pair 1 at discover-node)
- 'discover-edge defp
+ (|state pair| state pair 1 at 'package at pair 1 at discover-node) 'discover-edge defp
 
  ### defp discover-manifest
  (state manifest -- state : "Discover every exact requirement reachable from one manifest.")
@@ -184,53 +167,45 @@
   manifest 'requires at pkg.data.sorted-entries
   state
   (discover-edge)
-  fold)
- 'discover-manifest defp
+  fold) 'discover-manifest defp
 
  ### defp finish-discovery-node
  (state node manifest -- state : "Mark one exact node seen before traversing its requirements.")
  (|state node manifest|
   state 'seen state 'seen at node append put
-  manifest discover-manifest)
- 'finish-discovery-node defp
+  manifest discover-manifest) 'finish-discovery-node defp
 
  ### defp record-discovery-node
  (state package version node manifest -- state : "Record and traverse one newly loaded manifest.")
  (|state package version node manifest|
   state package version manifest catalog-insert
-  node manifest finish-discovery-node)
- 'record-discovery-node defp
+  node manifest finish-discovery-node) 'record-discovery-node defp
 
  ### defp load-stored-discovery-node
  (state package version node key -- state : "Read and record one present immutable entry.")
  (|state package version node key|
   state package version node
   state 'store at key package version stored-manifest
-  record-discovery-node)
- 'load-stored-discovery-node defp
+  record-discovery-node) 'load-stored-discovery-node defp
 
  ### defp load-fetched-discovery-node
  (state package requirement node -- state : "Fetch and record one absent exact entry.")
  (|state package requirement node|
   state package requirement 'version at node
   package requirement fetched-manifest
-  record-discovery-node)
- 'load-fetched-discovery-node defp
+  record-discovery-node) 'load-fetched-discovery-node defp
 
  ### defp load-stored-context
  (context -- state : "Invoke stored-node discovery from one packed context.")
- ((load-stored-discovery-node) with call)
- 'load-stored-context defp
+ ((load-stored-discovery-node) with call) 'load-stored-context defp
 
  ### defp load-fetched-context
  (context -- state : "Invoke fetched-node discovery from one packed context.")
- ((load-fetched-discovery-node) with call)
- 'load-fetched-context defp
+ ((load-fetched-discovery-node) with call) 'load-fetched-context defp
 
  ### defp offline-missing-context
  (context -- : "Raise an offline missing-entry error from one packed context.")
- ((offline-missing) with call)
- 'offline-missing-context defp
+ ((offline-missing) with call) 'offline-missing-context defp
 
  ### defp load-absent-discovery-node
  (state package requirement node key -- state :
@@ -239,13 +214,11 @@
   state 'offline at
   package state 'store at key 3 pack (offline-missing-context) partial
   state package requirement node 4 pack (load-fetched-context) partial
-  if)
- 'load-absent-discovery-node defp
+  if) 'load-absent-discovery-node defp
 
  ### defp load-absent-context
  (context -- state : "Invoke absent-node handling from one packed context.")
- ((load-absent-discovery-node) with call)
- 'load-absent-context defp
+ ((load-absent-discovery-node) with call) 'load-absent-context defp
 
  ### defp load-discovery-node
  (state package requirement node key -- state :
@@ -254,8 +227,7 @@
   state 'store at key pkg.store.present?
   state package requirement 'version at node key 5 pack (load-stored-context) partial
   state package requirement node key 5 pack (load-absent-context) partial
-  if)
- 'load-discovery-node defp
+  if) 'load-discovery-node defp
 
  ### defp offline-missing
  (package store key -- : "Raise when offline synchronization needs an absent exact store entry.")
@@ -266,16 +238,14 @@
   infra
   dict.from-flat
   error.with-data
-  raise)
- 'offline-missing defp
+  raise) 'offline-missing defp
 
  ### defp discover-new-node
  (state package requirement node -- state : "Derive and load one previously unseen exact node.")
  (|state package requirement node|
   state package requirement node
   package requirement store-key
-  load-discovery-node)
- 'discover-new-node defp
+  load-discovery-node) 'discover-new-node defp
 
  ### defp discover-node
  (state package requirement -- state : "Skip a seen exact node or discover a new one.")
@@ -286,8 +256,7 @@
   state package requirement 3 pack
   (|node state package requirement| state package requirement node discover-new-node)
   with
-  if)
- 'discover-node defp
+  if) 'discover-node defp
 
  ### defp discover
  (root store offline -- catalog :
@@ -298,8 +267,7 @@
   infra
   dict.from-flat
   root discover-manifest
-  'catalog at)
- 'discover defp
+  'catalog at) 'discover defp
 
  ### defp finish-install
  (result store key -- : "Accept a racing immutable publication or re-raise its install failure.")
@@ -314,8 +282,7 @@
   and
   (pop)
   (raise)
-  if)
- 'finish-install defp
+  if) 'finish-install defp
 
  ### def install-immutable
  (bytes package store key -- :
@@ -325,8 +292,7 @@
   dup 'ok dict.has?
   (pop)
   store key 2 pack (finish-install) with
-  if)
- 'install-immutable def
+  if) 'install-immutable def
 
  ### defp install-fetched
  (key package requirement store -- : "Fetch, verify, and install one absent selection.")
@@ -334,8 +300,7 @@
   package requirement fetch-body
   dup package inspect-checked pkg.manifest.read
   package requirement 'version at matching-manifest pop
-  package store key install-immutable)
- 'install-fetched defp
+  package store key install-immutable) 'install-fetched defp
 
  ### defp install-selection
  (pair store -- : "Install one missing selected package after repeating every verification.")
@@ -347,16 +312,14 @@
    (pop)
    package requirement store 3 pack (install-fetched) with
    if)
-  with call)
- 'install-selection defp
+  with call) 'install-selection defp
 
  ### defp install-selected
  (lock store -- : "Install missing selected packages in canonical package-name order.")
  (|lock store|
   lock 'packages at pkg.data.sorted-entries
   store (install-selection) partial
-  for)
- 'install-selected defp
+  for) 'install-selected defp
 
  ### defp verify-selection
  (pair store -- : "Stream and hash-check one selected package's retained archive seal.")
@@ -364,8 +327,7 @@
   store pair first pair 1 at store-key
   pair first
   pair 1 at 'hash at
-  pkg.store.verify)
- 'verify-selection defp
+  pkg.store.verify) 'verify-selection defp
 
  ### def verify
  (lock -- count : "Verify every immutable package selected by a lock at its cache or vendor store.")
@@ -374,42 +336,36 @@
   lock 'packages at pkg.data.sorted-entries
   dup len swap
   lock store-root (verify-selection) partial
-  for)
- 'verify def
+  for) 'verify def
 
  ### def run
  (root-manifest -- lock :
   "Discover and resolve transitive packages, install selected artifacts, atomically write the
    project's ecl.lock, and return the validated lock.")
- (0 run-mode)
- 'run def
+ (0 run-mode) 'run def
 
  ### def run-offline
  (root-manifest -- lock :
   "Resolve and atomically lock using immutable store entries without opening a network request.")
- (1 run-mode)
- 'run-offline def
+ (1 run-mode) 'run-offline def
 
  ### defp lock-mode
  (lock -- mode : "Return the closed store mode of one validated project lock.")
  (dup 'store dict.has?
   ('store at)
   (pop 'cache)
-  if)
- 'lock-mode defp
+  if) 'lock-mode defp
 
  ### defp mode-result
  (result -- mode : "Return an explicit project's lock mode or cache when it can be regenerated.")
  (dup 'ok dict.has?
   ('ok at first lock-mode)
   (pop 'cache)
-  if)
- 'mode-result defp
+  if) 'mode-result defp
 
  ### defp project-mode
  (-- mode : "Read store mode only from the explicit project being synchronized.")
- ([] ('project "ecl.lock" fs.read-text pkg.lock.read) @attempt mode-result)
- 'project-mode defp
+ ([] ('project "ecl.lock" fs.read-text pkg.lock.read) @attempt mode-result) 'project-mode defp
 
  ### defp run-mode
  (root-manifest offline -- lock : "Validate explicit sync inputs and select its store.")
@@ -418,8 +374,7 @@
   project-mode
   offline 3 pack
   (|root store offline| root store offline run-validated)
-  with call)
- 'run-mode defp
+  with call) 'run-mode defp
 
  ### defp run-validated
  (root store offline -- lock : "Run synchronization after validating its inputs.")
@@ -428,6 +383,5 @@
   root swap pkg.mvs.resolve
   store 'vendor match? (pkg.lock.vendor) when
   dup store install-selected
-  dup pkg.lock.write "ecl.lock" write-project-file)
- 'run-validated defp
+  dup pkg.lock.write "ecl.lock" write-project-file) 'run-validated defp
 ) 'pkg.sync @defm

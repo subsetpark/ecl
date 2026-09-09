@@ -5,13 +5,11 @@
 
  ### defp cookie-response
  (-- response : "Return a response whose headers repeat a name under differing letter cases.")
- ({'status 200 'headers {"X" "a" "Set-Cookie" ("b" "c") "x" "d"} 'body ""})
- 'cookie-response defp
+ ({'status 200 'headers {"X" "a" "Set-Cookie" ("b" "c") "x" "d"} 'body ""}) 'cookie-response defp
 
  ### defp greeting
  (-- response : "Return the 200 text response hi.")
- (200 "hi" http.response.text)
- 'greeting defp
+ (200 "hi" http.response.text) 'greeting defp
 
  ### test validity
  (-- : "Accept every well-shaped response dict and refuse each malformed shape without raising.")

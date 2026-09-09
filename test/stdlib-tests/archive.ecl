@@ -10,8 +10,7 @@
   dup result.err? 1 equal
   'err at
   dup 'kind at kind equal
-  'data at 'index at index equal)
- 'raises-at-index defp
+  'data at 'index at index equal) 'raises-at-index defp
 
  ### test sha256
  (-- : "Match SHA-256 known-answer vectors, including high unsigned bytes.")

@@ -23,49 +23,41 @@
    'type error.new "a result must carry exactly one of 'ok or 'err" error.with-message assert
    dup 'err at error.valid?
    'type error.new "an err result must carry an error dict" error.with-message assert)
-  if)
- 'checked defp
+  if) 'checked defp
 
  ### defp checked-all
  (results -- results : "Validate and return a list of results.")
  (dup type 'list match?
   'type error.new "expected a list of results" error.with-message assert
-  dup (checked pop) for)
- 'checked-all defp
+  dup (checked pop) for) 'checked-all defp
 
  ### def ok
  (values -- result : "Build an ok result from a list of successful stack values.")
  (dup type 'list match?
   'type error.new "result.ok expects a list of success values" error.with-message assert
-  'ok swap pair dict.from-flat)
- 'ok def
+  'ok swap pair dict.from-flat) 'ok def
 
  ### def err
  (error -- result : "Tag an error dict as a failed result.")
  (dup error.valid?
   'type error.new "result.err expects an error dict" error.with-message assert
-  'err swap pair dict.from-flat)
- 'err def
+  'err swap pair dict.from-flat) 'err def
 
  ### def ok?
  (result -- bool : "Return 1 for an ok result.")
- (checked 'ok dict.has?)
- 'ok? def
+ (checked 'ok dict.has?) 'ok? def
 
  ### def err?
  (result -- bool : "Return 1 for an err result.")
- (checked 'err dict.has?)
- 'err? def
+ (checked 'err dict.has?) 'err? def
 
  ### def or-raise
  (result -- values : "Return the success list or raise the stored error.")
- (checked dup 'ok dict.has? ('ok at) ('err at raise) if)
- 'or-raise def
+ (checked dup 'ok dict.has? ('ok at) ('err at raise) if) 'or-raise def
 
  ### def or-else
  (result fallback -- value : "Return the success list or a fallback value for an err result.")
- (swap checked swap over 'ok dict.has? (pop 'ok at) (nip) if)
- 'or-else def
+ (swap checked swap over 'ok dict.has? (pop 'ok at) (nip) if) 'or-else def
 
  ### def and-then
  (result quotation -- result :
@@ -74,8 +66,7 @@
  (swap checked swap over 'ok dict.has?
   (swap 'ok at swap @attempt)
   (pop)
-  if)
- 'and-then def
+  if) 'and-then def
 
  ### def map-err
  (result quotation -- result :
@@ -90,8 +81,7 @@
     err)
    when)
   (pop)
-  if)
- 'map-err def
+  if) 'map-err def
 
  ### def recover
  (result quotation -- result :
@@ -100,8 +90,7 @@
  (swap checked swap over 'err dict.has?
   (swap 'err at wrap swap @attempt)
   (pop)
-  if)
- 'recover def
+  if) 'recover def
 
  ### def recover-kinds
  (result kinds quotation -- result :
@@ -122,8 +111,7 @@
   result 'err dict.has? and
   result handler pair (recover) with
   result literal
-  if)
- 'recover-kinds def
+  if) 'recover-kinds def
 
  ### def either
  (result on-ok on-err -- ... :
@@ -134,8 +122,7 @@
   result 'ok dict.has?
   result ('ok at) partial on-ok compose
   result ('err at) partial on-err compose
-  if)
- 'either def
+  if) 'either def
 
  ### def all
  (results -- result :
@@ -145,14 +132,12 @@
   dup len 0 >
   (first at)
   (pop ('ok at) each ok)
-  if)
- 'all def
+  if) 'all def
 
  ### def partition
  (results -- successes errors :
   "Return the success lists and error dictionaries as separate lists in input order.")
  (checked-all ('ok dict.has?) core.partition
-  (('ok at) each) dip ('err at) each)
- 'partition def
+  (('ok at) each) dip ('err at) each) 'partition def
 
 ) 'result @defm

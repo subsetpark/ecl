@@ -10,33 +10,28 @@
  (|a b|
   a b pkg.version.less?
   b a pkg.version.less? +
-  a b match? +)
- 'trichotomy defp
+  a b match? +) 'trichotomy defp
 
  ### defp row-of
  (element corpus -- pairs : "Pair one element with a corpus.")
- (|element corpus| corpus element (pair) partial each)
- 'row-of defp
+ (|element corpus| corpus element (pair) partial each) 'row-of defp
 
  ### defp pairs-of
  (corpus -- pairs : "Build the Cartesian square of a corpus.")
- (|corpus| corpus corpus (row-of) partial each raze)
- 'pairs-of defp
+ (|corpus| corpus corpus (row-of) partial each raze) 'pairs-of defp
 
  ### defp ascending-row
  (index reference -- flags : "Compare one item to every later reference item.")
  (|index reference|
   reference index 1 + drop
   reference index at
-  (swap pkg.version.less?) partial each)
- 'ascending-row defp
+  (swap pkg.version.less?) partial each) 'ascending-row defp
 
  ### defp ascending-flags
  (reference -- flags : "Compare every earlier version with every later one.")
  (|reference|
   reference len range
-  reference (ascending-row) partial each raze)
- 'ascending-flags defp
+  reference (ascending-row) partial each raze) 'ascending-flags defp
 
  ### test ordering-laws
  (-- : "Prove strict total ordering over generated and SemVer reference corpora.")

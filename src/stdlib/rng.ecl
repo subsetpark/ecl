@@ -11,23 +11,19 @@
 (
  ### def seed
  (key -- : "Set the generator key and reset its counter to zero.")
- ((pop) swap 0 pair literal compose within)
- 'seed def
+ ((pop) swap 0 pair literal compose within) 'seed def
 
  ### def int
  (bound -- result : "Return a uniform integer from 0 through bound - 1.")
- ((rand.int without) partial within)
- 'int def
+ ((rand.int without) partial within) 'int def
 
  ### def ints
  (count bound -- results : "Return count uniform integers from 0 through bound - 1.")
- (pair (rand.ints without) with within)
- 'ints def
+ (pair (rand.ints without) with within) 'ints def
 
  ### def float
  (-- result : "Return a uniform float in the half-open interval [0, 1).")
- ((rand.float without) within)
- 'float def
+ ((rand.float without) within) 'float def
 
  ### defp deal-pick
  (pool picked remaining index -- accumulated :
@@ -36,8 +32,7 @@
   pool chosen-index at
   picked swap append
   pool chosen-index pool remaining 1 - at put
-  swap pair)
- 'deal-pick defp
+  swap pair) 'deal-pick defp
 
  ### defp deal-step
  (accumulated index bound -- accumulated : "Apply one partial Fisher-Yates selection step.")
@@ -46,8 +41,7 @@
   accumulated 1 at
   bound index -
   bound index - int
-  deal-pick)
- 'deal-step defp
+  deal-pick) 'deal-step defp
 
  ### def deal
  (count bound -- results :
@@ -65,12 +59,10 @@
   bound range [] pair
   bound (deal-step) partial
   fold
-  1 at)
- 'deal def
+  1 at) 'deal def
 
  ### def shuffle
  (values -- values : "Return a uniformly selected permutation of a list.")
- (dup len dup deal at)
- 'shuffle def
+ (dup len dup deal at) 'shuffle def
 
 ) 'rng @defm

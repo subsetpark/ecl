@@ -10,13 +10,11 @@
 (
  ### defp text?
  (value -- bool : "Return 1 when every item in a list is a character.")
- ((type 'char match?) all?)
- 'text? defp
+ ((type 'char match?) all?) 'text? defp
 
  ### defp string?
  (value -- bool : "Return 1 when a value is a string and 0 for every other value.")
- (dup type 'list match? (text?) (pop 0) if)
- 'string? defp
+ (dup type 'list match? (text?) (pop 0) if) 'string? defp
 
  ### defp checked
  (candidate -- table : "Validate and return a table candidate.")
@@ -31,36 +29,31 @@
   dup dict.vals (type 'list match?) all?
   'type error.new "table columns must be lists" error.with-message assert
   dup dict.vals (len) each distinct len 2 <
-  'shape error.new "table columns must share one length" error.with-message assert)
- 'checked defp
+  'shape error.new "table columns must share one length" error.with-message assert) 'checked defp
 
  ### defp convention-miss?
  (result -- bool : "Return 0 for a table validation error and re-raise any other error.")
- (dup 'err at ['type 'shape 'domain] error.kind-in? (pop 0) ('err at raise) if)
- 'convention-miss? defp
+ (dup 'err at ['type 'shape 'domain] error.kind-in? (pop 0) ('err at raise) if) 'convention-miss?
+ defp
 
  ### def valid?
  (candidate -- bool :
   "Return 1 when a candidate is a table and 0 when it is not.
 
    Cancellation, allocation failure, and other runtime errors propagate.")
- (wrap (checked pop) @attempt dup result.ok? (pop 1) (convention-miss?) if)
- 'valid? def
+ (wrap (checked pop) @attempt dup result.ok? (pop 1) (convention-miss?) if) 'valid? def
 
  ### def names
  (table -- names : "Return the column names in column order.")
- (checked dict.keys)
- 'names def
+ (checked dict.keys) 'names def
 
  ### def height
  (table -- count : "Return the number of rows.")
- (checked dict.vals first len)
- 'height def
+ (checked dict.vals first len) 'height def
 
  ### def from-columns
  (columns -- table : "Validate a column dictionary and return it as a table.")
- (checked)
- 'from-columns def
+ (checked) 'from-columns def
 
  ### def from-rows
  (names rows -- table :
@@ -84,8 +77,7 @@
   'type error.new "table.from-rows expects every row to be a list" error.with-message assert
   rows names (len swap len =) partial all?
   'shape error.new "every row must have one cell per column name" error.with-message assert
-  names rows names len transpose dict.from-lists)
- 'from-rows def
+  names rows names len transpose dict.from-lists) 'from-rows def
 
  ### def from-header-rows
  (rows -- table : "Build a table using the first row as column names and the rest as data rows.")
@@ -93,13 +85,11 @@
   'type error.new "table.from-header-rows expects a list of rows" error.with-message assert
   dup len 0 >
   'shape error.new "table.from-header-rows needs a header row" error.with-message assert
-  dup first swap 1 drop from-rows)
- 'from-header-rows def
+  dup first swap 1 drop from-rows) 'from-header-rows def
 
  ### defp record-column
  (name records -- column : "Return one field from each record, preserving record order.")
- (|name records| records name (at) partial each)
- 'record-column defp
+ (|name records| records name (at) partial each) 'record-column defp
 
  ### def from-records
  (records -- table :
@@ -123,24 +113,20 @@
   assert
   records first dict.keys
   records first dict.keys records (record-column) partial each
-  dict.from-lists)
- 'from-records def
+  dict.from-lists) 'from-records def
 
  ### def rows
  (table -- rows : "Return the data rows in row and column order.")
- (checked dup dict.vals swap height transpose)
- 'rows def
+ (checked dup dict.vals swap height transpose) 'rows def
 
  ### def header-rows
  (table -- rows : "Return the column-name row followed by the data rows.")
- (checked dup dict.keys swap rows cons)
- 'header-rows def
+ (checked dup dict.keys swap rows cons) 'header-rows def
 
  ### def records
  (table -- records :
   "Return one record per row, with keys in column order. A zero-row table returns an empty list.")
- (checked dup dict.keys swap rows swap (swap dict.from-lists) partial each)
- 'records def
+ (checked dup dict.keys swap rows swap (swap dict.from-lists) partial each) 'records def
 
  ### def column
  (table name -- column : "Return a column by name.")
@@ -148,8 +134,7 @@
   table checked pop
   table name dict.has?
   'domain error.new "table.column requires an existing column name" error.with-message assert
-  table name at)
- 'column def
+  table name at) 'column def
 
  ### def cast
  (table spec -- table :
@@ -166,15 +151,13 @@
   'domain error.new "table.cast requires existing column names" error.with-message assert
   spec dict.vals (type 'list match?) all?
   'type error.new "table.cast expects a quotation for every named column" error.with-message assert
-  spec dict.pairs table (cast-column) fold)
- 'cast def
+  spec dict.pairs table (cast-column) fold) 'cast def
 
  ### defp cast-column
  (table pair -- table : "Apply one [name quotation] cast specification to a table.")
  (|table pair| table pair first
   table pair first at pair 1 at each
-  put)
- 'cast-column defp
+  put) 'cast-column defp
 
  ### def select
  (table names -- table : "Return the named columns in the requested order.")
@@ -190,8 +173,7 @@
   'domain error.new "table.select requires existing column names" error.with-message assert
   names
   names table (swap at) partial each
-  dict.from-lists)
- 'select def
+  dict.from-lists) 'select def
 
  ### def rename
  (table mapping -- table : "Rename columns without changing column order.")
@@ -208,8 +190,7 @@
   table dict.keys mapping (swap dup at-or) partial each
   dup distinct len over len =
   'domain error.new "table.rename would collide two columns onto one name" error.with-message assert
-  table dict.vals dict.from-lists)
- 'rename def
+  table dict.vals dict.from-lists) 'rename def
 
  ### def with-column
  (table name column -- table :
@@ -224,32 +205,27 @@
   'type error.new "table.with-column expects a list" error.with-message assert
   column len table height =
   'shape error.new "a replacement column must match the table's row count" error.with-message assert
-  table name column put)
- 'with-column def
+  table name column put) 'with-column def
 
  ### defp slice-at
  (position lists -- slice : "Return the item at one position from each list.")
- (|position lists| lists position (at) partial each)
- 'slice-at defp
+ (|position lists| lists position (at) partial each) 'slice-at defp
 
  ### defp transpose
  (lists count -- transposed :
   "Transpose a rectangular list of lists with the given output length.
 
    Cells are not traversed. This supports heterogeneous rows, including strings, and zero rows.")
- (|lists count| count range lists (slice-at) partial each)
- 'transpose defp
+ (|lists count| count range lists (slice-at) partial each) 'transpose defp
 
  ### defp name-set
  (names -- set : "Build a dictionary for whole-name membership tests.")
- (|names| names names (pop 1) each dict.from-lists)
- 'name-set defp
+ (|names| names names (pop 1) each dict.from-lists) 'name-set defp
 
  ### defp exclude
  (names excluded -- names : "Remove excluded names while preserving the order of the input names.")
  (|names excluded|
-  names excluded name-set (swap dict.has? not) partial filter)
- 'exclude defp
+  names excluded name-set (swap dict.has? not) partial filter) 'exclude defp
 
  ### def where
  (table mask -- table :
@@ -264,25 +240,21 @@
   'shape error.new "a table mask must match the table's row count" error.with-message assert
   table dict.keys
   table dict.vals mask core.where (at) partial each
-  dict.from-lists)
- 'where def
+  dict.from-lists) 'where def
 
  # --- grouping, aggregation, and joins -------------------------------------
 
  ### defp cell
  (name table index -- cell : "Return a cell by column name and row index.")
- (|name table index| table name at index at)
- 'cell defp
+ (|name table index| table name at index at) 'cell defp
 
  ### defp row-key
  (index table names -- key : "Return the named cells of one row as a composite key.")
- (|index table names| names table index (cell) partial partial each)
- 'row-key defp
+ (|index table names| names table index (cell) partial partial each) 'row-key defp
 
  ### defp composite-keys
  (table names -- keys : "Return one composite key per row.")
- (|table names| table height range table names (row-key) partial partial each)
- 'composite-keys defp
+ (|table names| table height range table names (row-key) partial partial each) 'composite-keys defp
 
  ### defp group-keys
  (table names -- keys :
@@ -290,13 +262,11 @@
    columns.")
  (|table names| names len 1 =
   table names first (at) partial partial
-  table names (composite-keys) partial partial if)
- 'group-keys defp
+  table names (composite-keys) partial partial if) 'group-keys defp
 
  ### defp global-group
  (table -- groups : "Return one group containing every row index.")
- (|table| [] wrap table height range wrap dict.from-lists)
- 'global-group defp
+ (|table| [] wrap table height range wrap dict.from-lists) 'global-group defp
 
  ### def group-by
  (table names -- groups :
@@ -317,21 +287,18 @@
   names len 0 =
   table (global-group) partial
   table names (group-keys group) partial partial
-  if)
- 'group-by def
+  if) 'group-by def
 
  ### defp apply-aggregate
  (column quotation -- value :
   "Apply an isolated ( column -- value ) quotation to one column slice.
 
    The quotation must return exactly one value.")
- (|column quotation| column wrap quotation each first)
- 'apply-aggregate defp
+ (|column quotation| column wrap quotation each first) 'apply-aggregate defp
 
  ### defp group-value
  (indices table spec -- value : "Apply one aggregate specification to one group.")
- (|indices table spec| table spec 1 at at indices at spec 2 at apply-aggregate)
- 'group-value defp
+ (|indices table spec| table spec 1 at at indices at spec 2 at apply-aggregate) 'group-value defp
 
  ### defp aggregate-column
  (spec table groups -- column : "Return one aggregate value per group.")
@@ -340,21 +307,18 @@
 
  ### defp key-component
  (position groups -- column : "Return one component from every composite group key.")
- (|position groups| groups dict.keys position (at) partial each)
- 'key-component defp
+ (|position groups| groups dict.keys position (at) partial each) 'key-component defp
 
  ### defp key-columns
  (groups names -- columns : "Return grouping-key columns in name order.")
  (|groups names| names len 1 =
   groups (dict.keys wrap) partial
   groups names (composite-key-columns) partial partial
-  if)
- 'key-columns defp
+  if) 'key-columns defp
 
  ### defp composite-key-columns
  (groups names -- columns : "Split composite group keys into one column per name.")
- (|groups names| names len range groups (key-component) partial each)
- 'composite-key-columns defp
+ (|groups names| names len range groups (key-component) partial each) 'composite-key-columns defp
 
  ### defp spec-shaped?
  (spec -- bool : "Return 1 for an [output-name input-name quotation] aggregate specification.")
@@ -364,8 +328,7 @@
    (pop 0)
    if)
   (pop 0)
-  if)
- 'spec-shaped? defp
+  if) 'spec-shaped? defp
 
  ### defp aggregate-build
  (table names specs groups -- table : "Build a result table from grouping keys and aggregates.")
@@ -374,8 +337,7 @@
   groups names key-columns
   specs table groups (aggregate-column) partial partial each
   cat
-  dict.from-lists)
- 'aggregate-build defp
+  dict.from-lists) 'aggregate-build defp
 
  ### def aggregate
  (table names specs -- table :
@@ -407,24 +369,20 @@
   names len specs len + 0 >
   'domain error.new "table.aggregate needs at least one key or aggregate output" error.with-message
   assert
-  table names specs table names group-by aggregate-build)
- 'aggregate def
+  table names specs table names group-by aggregate-build) 'aggregate def
 
  ### defp key-matches
  (index left-keys right-keys -- indices : "Return matching right-row indices in ascending order.")
  (|index left-keys right-keys|
-  right-keys left-keys index at (match?) partial each core.where)
- 'key-matches defp
+  right-keys left-keys index at (match?) partial each core.where) 'key-matches defp
 
  ### defp table-row
  (index table -- row : "Return one row in column order.")
- (|index table| table dict.vals index (at) partial each)
- 'table-row defp
+ (|index table| table dict.vals index (at) partial each) 'table-row defp
 
  ### defp named-row
  (index table names -- row : "Return selected cells from one row in name order.")
- (|index table names| names table index (cell) partial partial each)
- 'named-row defp
+ (|index table names| names table index (cell) partial partial each) 'named-row defp
 
  ### defp emit-pair
  (rows right-index context left-index -- rows : "Append one matched left/right row pair.")
@@ -433,14 +391,12 @@
   left-index context first table-row
   right-index context 1 at context 2 at named-row
   cat
-  append)
- 'emit-pair defp
+  append) 'emit-pair defp
 
  ### defp emit-matches
  (matches rows index context -- rows : "Append all right matches for one left row.")
  (|matches rows index context|
-  matches rows context index (emit-pair) partial partial fold)
- 'emit-matches defp
+  matches rows context index (emit-pair) partial partial fold) 'emit-matches defp
 
  ### defp emit-filled
  (matches rows index context -- rows : "Append a fill row for an unmatched left row.")
@@ -449,15 +405,13 @@
   index context first table-row
   context 5 at
   cat
-  append)
- 'emit-filled defp
+  append) 'emit-filled defp
 
  ### defp inner-step
  (rows index context -- rows : "Append inner-join results for one left row.")
  (|rows index context|
   index context 3 at context 4 at key-matches
-  rows index context emit-matches)
- 'inner-step defp
+  rows index context emit-matches) 'inner-step defp
 
  ### defp left-step
  (rows index context -- rows : "Append left-join results for one left row.")
@@ -466,8 +420,7 @@
   dup len 0 =
   rows index context (emit-filled) partial partial partial
   rows index context (emit-matches) partial partial partial
-  if)
- 'left-step defp
+  if) 'left-step defp
 
  ### defp pair-shaped?
  (pair -- bool : "Return 1 for a [left-name right-name] join-key pair.")
@@ -477,8 +430,7 @@
    (pop 0)
    if)
   (pop 0)
-  if)
- 'pair-shaped? defp
+  if) 'pair-shaped? defp
 
  ### defp join-plan
  (left right pairs -- extra : "Validate join keys and return the right columns to append.")
@@ -501,8 +453,7 @@
   dup left dict.keys name-set (swap dict.has?) partial any? not
   'domain error.new "a join may not collide non-key column names; rename one first"
   error.with-message
-  assert)
- 'join-plan defp
+  assert) 'join-plan defp
 
  ### defp join-context
  (left right pairs extra fill -- context :
@@ -512,8 +463,7 @@
   left height range left pairs (first) each (row-key) partial partial each
   right height range right pairs (1 at) each (row-key) partial partial each
   fill
-  6 pack)
- 'join-context defp
+  6 pack) 'join-context defp
 
  ### defp join-rows
  (left right pairs extra fill step -- table :
@@ -524,8 +474,7 @@
   []
   left right pairs extra fill join-context step partial
   fold
-  from-rows)
- 'join-rows defp
+  from-rows) 'join-rows defp
 
  ### def inner-join
  (left right pairs -- table :
@@ -540,8 +489,7 @@
   left right pairs join-plan
   []
   (inner-step)
-  join-rows)
- 'inner-join def
+  join-rows) 'inner-join def
 
  ### defp left-join-checked
  (left right pairs fill extra -- table : "Build a left join from validated fill values.")
@@ -553,8 +501,7 @@
   left right pairs extra
   extra fill (swap at) partial each
   (left-step)
-  join-rows)
- 'left-join-checked defp
+  join-rows) 'left-join-checked defp
 
  ### def left-join-with
  (left right pairs fill -- table :
@@ -568,7 +515,6 @@
   'type error.new "table.left-join-with expects a fill dict" error.with-message assert
   left right pairs fill
   left right pairs join-plan
-  left-join-checked)
- 'left-join-with def
+  left-join-checked) 'left-join-with def
 
 ) 'table @defm

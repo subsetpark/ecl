@@ -9,8 +9,7 @@
  (|string characters|
   string empty? not
   string characters (in?) partial all?
-  and)
- 'chars-in? defp
+  and) 'chars-in? defp
 
  ### setp lead-chars
  # Valid first characters for a package-name segment.
@@ -29,8 +28,7 @@
 
  ### defp segment?
  (text -- bool : "Return 1 for a valid package-name segment.")
- (dup empty? (pop 0) ((first lead-chars in?) (segment-chars chars-in?) bi and) if)
- 'segment? defp
+ (dup empty? (pop 0) ((first lead-chars in?) (segment-chars chars-in?) bi and) if) 'segment? defp
 
  ### def valid?
  (value -- bool :
@@ -39,21 +37,18 @@
  ([(str.str? not) (pop 0)
    (empty?) (pop 0)
    ("." split (segment?) all?)]
-  cond)
- 'valid? def
+  cond) 'valid? def
 
  ### def hash?
  (value -- bool : "Return 1 for sha256- followed by 64 lowercase hexadecimal digits.")
  ([(str.str? not) (pop 0)
    ("sha256-" str.starts? not) (pop 0)
    (7 drop (len 64 =) ((hex-chars in?) all?) bi and)]
-  cond)
- 'hash? def
+  cond) 'hash? def
 
  ### def url?
  (value -- bool : "Return 1 for a nonempty HTTPS URL.")
- (dup str.str? (("https://" str.starts?) (len 8 >) bi and) (pop 0) if)
- 'url? def
+ (dup str.str? (("https://" str.starts?) (len 8 >) bi and) (pop 0) if) 'url? def
 
  ### def owns?
  (package-name module-name -- bool :
@@ -70,13 +65,11 @@
   'domain error.new "a package name is dot-joined lowercase segments" error.with-message assert
   package module match?
   module package "." cat str.starts?
-  or)
- 'owns? def
+  or) 'owns? def
 
  ### defp related?
  (left right -- bool : "Return 1 when either package name owns the other as a prefix.")
- (|left right| left right (owns?) (swap owns?) bi2 or)
- 'related? defp
+ (|left right| left right (owns?) (swap owns?) bi2 or) 'related? defp
 
  ### def collides?
  (names -- bool : "Return 1 when any two package names have overlapping ownership prefixes.")
@@ -84,6 +77,5 @@
   2
   (|neighbors| neighbors first neighbors 1 at related?)
   stencil
-  (1 =) any?)
- 'collides? def
+  (1 =) any?) 'collides? def
 ) 'pkg.name @defm

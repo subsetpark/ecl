@@ -22,8 +22,7 @@
   (pop 1)
   ("**" str.contains? not)
   if
-  and)
- 'glob-segment-valid? defp
+  and) 'glob-segment-valid? defp
 
  ### defp glob-valid?
  (candidate -- bool : "Return 1 for a nonempty portable package-relative glob.")
@@ -33,8 +32,7 @@
    candidate "\\" str.contains? not and
    candidate "/" split (glob-segment-valid?) all? and)
   (pop 0)
-  if)
- 'glob-valid? defp
+  if) 'glob-valid? defp
 
  ### defp export-globs-valid?
  (candidate -- bool : "Return 1 for a nonempty list of distinct portable globs.")
@@ -44,13 +42,11 @@
    candidate (glob-valid?) all? and
    candidate distinct len candidate len = and)
   (pop 0)
-  if)
- 'export-globs-valid? defp
+  if) 'export-globs-valid? defp
 
  ### defp export-owned?
  (pair package -- bool : "Return 1 when one export namespace belongs to its package.")
- (|pair package| package pair first pkg.name.owns?)
- 'export-owned? defp
+ (|pair package| package pair first pkg.name.owns?) 'export-owned? defp
 
  ### def validate-requirement
  (requirement -- requirement : "Validate and return a package requirement.")
@@ -69,8 +65,7 @@
   requirement 'hash at pkg.name.hash?
   'domain error.new "a requirement hash is sha256- and 64 lowercase hex digits" error.with-message
   assert
-  requirement)
- 'validate-requirement def
+  requirement) 'validate-requirement def
 
  ### def validate
  (candidate -- manifest :
@@ -112,13 +107,11 @@
   pkg.name.collides? not
   'domain error.new "no package may require itself or a package whose name it owns"
   error.with-message assert
-  candidate)
- 'validate def
+  candidate) 'validate def
 
  ### def read
  (text -- manifest : "Parse and validate a manifest without evaluating it.")
- (pkg.data.read-one pkg.manifest.validate)
- 'read def
+ (pkg.data.read-one pkg.manifest.validate) 'read def
 
  ### defp render-requirement
  (requirement -- text : "Render one exact requirement in canonical field order.")
@@ -130,8 +123,7 @@
    requirement 'url at str
    requirement 'hash at str)
   infra
-  "{{'package {} 'version {} 'url {} 'hash {}}}" str.format)
- 'render-requirement defp
+  "{{'package {} 'version {} 'url {} 'hash {}}}" str.format) 'render-requirement defp
 
  ### defp render-requirement-entry
  (pair -- text : "Render one manifest requirement while retaining dictionary order.")
@@ -140,18 +132,16 @@
 
  ### defp render-requirements
  (requirements -- text : "Render manifest requirements in their retained insertion order.")
- (dict.pairs (render-requirement-entry) each " " join wrap "{{{}}}" str.format)
- 'render-requirements defp
+ (dict.pairs (render-requirement-entry) each " " join wrap "{{{}}}" str.format) 'render-requirements
+ defp
 
  ### defp render-export-entry
  (pair -- text : "Render one export namespace and its glob list.")
- ((first str) (1 at str) bi 2 pack "{} {}" str.format)
- 'render-export-entry defp
+ ((first str) (1 at str) bi 2 pack "{} {}" str.format) 'render-export-entry defp
 
  ### defp render-exports
  (exports -- text : "Render exports in retained insertion order.")
- (dict.pairs (render-export-entry) each " " join wrap "{{{}}}" str.format)
- 'render-exports defp
+ (dict.pairs (render-export-entry) each " " join wrap "{{{}}}" str.format) 'render-exports defp
 
  ### def write
  (manifest -- text :
@@ -164,6 +154,5 @@
    manifest 'exports at render-exports
    manifest 'requires at render-requirements)
   infra
-  "{{'format 1 'name {} 'version {} 'exports {} 'requires {}}}\n" str.format)
- 'write def
+  "{{'format 1 'name {} 'version {} 'exports {} 'requires {}}}\n" str.format) 'write def
 ) 'pkg.manifest @defm

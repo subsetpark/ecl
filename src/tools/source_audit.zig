@@ -453,42 +453,11 @@ fn auditPreludeLayout() bool {
     var definitions: usize = 0;
     var index: usize = 0;
     while (true) {
-        switch (stage) {
-            .header => {
-                if (definitions > 0) {
-                    if (std.mem.eql(u8, source[index..], "\n")) {
-                        index = source.len;
-                        break;
-                    }
-                    if (!std.mem.startsWith(u8, source[index..], "\n\n")) {
-                        std.log.err("prelude layout: definitions require exactly one empty line", .{});
-                        return true;
-                    }
-                    index += 2;
-                }
-            },
-            .annotation => {
-                if (index == source.len or source[index] != '\n') {
-                    std.log.err("prelude layout: header must be followed by its definition annotation", .{});
-                    return true;
-                }
-                index += 1;
-            },
-            .body, .name => {
-                if (index == source.len or source[index] != '\n') {
-                    std.log.err("prelude layout: definition block stages must occupy separate lines", .{});
-                    return true;
-                }
-                index += 1;
-            },
-            .def => {
-                if (index == source.len or source[index] != ' ') {
-                    std.log.err("prelude layout: terminal name and def require one separating space", .{});
-                    return true;
-                }
-                index += 1;
-            },
-        }
+        // Formatting belongs to check-ecl; this audit recognizes the ordered
+        // definition forms and their navigation metadata.
+        while (index < source.len and
+            (std.ascii.isWhitespace(source[index]) or source[index] == ',')) : (index += 1)
+        {}
         if (index == source.len) break;
         if (source[index] == '#') {
             const end = std.mem.indexOfScalarPos(u8, source, index, '\n') orelse source.len;

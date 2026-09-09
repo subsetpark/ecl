@@ -12,13 +12,11 @@
 
  ### defp bound-request
  (-- request : "Return a request with the route parameter id bound to 42.")
- ("GET" "/users/42" http.request.new "id" "42" http.request.with-param)
- 'bound-request defp
+ ("GET" "/users/42" http.request.new "id" "42" http.request.with-param) 'bound-request defp
 
  ### defp posted
  (-- request : "Return a POST request whose body is the UTF-8 encoding of hé.")
- ("POST" "/" http.request.new "h\u{E9}" http.request.with-body)
- 'posted defp
+ ("POST" "/" http.request.new "h\u{E9}" http.request.with-body) 'posted defp
 
  ### test construction
  (-- : "Build a request from method and target, splitting path and query at the first ?.")

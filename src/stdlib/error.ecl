@@ -8,8 +8,7 @@
 (
  ### defp text?
  (value -- bool : "Return 1 when a value is a string without loading the str module.")
- (dup type 'list match? ((type 'char match?) all?) (pop 0) if)
- 'text? defp
+ (dup type 'list match? ((type 'char match?) all?) (pop 0) if) 'text? defp
 
  ### def valid?
  (value -- bool : "Return 1 when a value satisfies the error dictionary schema.")
@@ -33,21 +32,18 @@
    and
    nip)
   (pop 0)
-  if)
- 'valid? def
+  if) 'valid? def
 
  ### defp checked
  (error -- error : "Validate and return an error dictionary.")
  (dup valid?
-  {'kind 'type 'msg "expected a valid error dict"} assert)
- 'checked defp
+  {'kind 'type 'msg "expected a valid error dict"} assert) 'checked defp
 
  ### def new
  (kind -- error : "Build an error dictionary from a kind symbol.")
  (dup type 'symbol match?
   {'kind 'type 'msg "error.new expects a kind symbol"} assert
-  'kind swap pair dict.from-flat)
- 'new def
+  'kind swap pair dict.from-flat) 'new def
 
  ### def with-message
  (error message -- error : "Return an error dictionary carrying a string message.")
@@ -55,8 +51,7 @@
   failure checked pop
   message text?
   {'kind 'type 'msg "error.with-message expects a string message"} assert
-  failure 'msg message put)
- 'with-message def
+  failure 'msg message put) 'with-message def
 
  ### def with-data
  (error data -- error : "Return an error dictionary carrying a data dictionary.")
@@ -64,8 +59,7 @@
   failure checked pop
   data type 'dict match?
   {'kind 'type 'msg "error.with-data expects a data dict"} assert
-  failure 'data data put)
- 'with-data def
+  failure 'data data put) 'with-data def
 
  ### def kind?
  (error kind -- bool : "Return 1 when an error has the given kind symbol.")
@@ -73,8 +67,7 @@
   failure checked pop
   kind type 'symbol match?
   {'kind 'type 'msg "error.kind? expects a kind symbol"} assert
-  failure 'kind at kind match?)
- 'kind? def
+  failure 'kind at kind match?) 'kind? def
 
  ### def kind-in?
  (error kinds -- bool : "Return 1 when an error kind occurs in a list of kind symbols.")
@@ -84,7 +77,6 @@
   {'kind 'type 'msg "error.kind-in? expects a list of kind symbols"} assert
   kinds (type 'symbol match?) all?
   {'kind 'type 'msg "error.kind-in? expects a list of kind symbols"} assert
-  failure 'kind at kinds in?)
- 'kind-in? def
+  failure 'kind at kinds in?) 'kind-in? def
 
 ) 'error @defm

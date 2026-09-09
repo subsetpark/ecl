@@ -8,8 +8,7 @@
  ### defp requirement
  (package version url hash -- requirement : "Construct requirement fixture data.")
  (|package version url hash|
-  {} 'package package put 'version version put 'url url put 'hash hash put)
- 'requirement defp
+  {} 'package package put 'version version put 'url url put 'hash hash put) 'requirement defp
 
  ### defp manifest
  (name version requires -- manifest : "Construct manifest fixture data.")
@@ -18,65 +17,53 @@
   'name name put
   'version version put
   'exports {} name ["**/*"] put put
-  'requires requires put)
- 'manifest defp
+  'requires requires put) 'manifest defp
 
  ### defp hash-a
  (-- hash : "Return the first valid fixture hash.")
- ("sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
- 'hash-a defp
+ ("sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef") 'hash-a defp
 
  ### defp hash-b
  (-- hash : "Return the second valid fixture hash.")
- ("sha256-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789")
- 'hash-b defp
+ ("sha256-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789") 'hash-b defp
 
  ### defp req-b
  (-- requirement : "Require b 1.0.0.")
- ("b" "1.0.0" "https://e.com/b.tgz" hash-a requirement)
- 'req-b defp
+ ("b" "1.0.0" "https://e.com/b.tgz" hash-a requirement) 'req-b defp
 
  ### defp req-c-12
  (-- requirement : "Require c 1.2.0.")
- ("c" "1.2.0" "https://e.com/c12.tgz" hash-a requirement)
- 'req-c-12 defp
+ ("c" "1.2.0" "https://e.com/c12.tgz" hash-a requirement) 'req-c-12 defp
 
  ### defp req-c-15
  (-- requirement : "Require c 1.5.0.")
- ("c" "1.5.0" "https://e.com/c15.tgz" hash-b requirement)
- 'req-c-15 defp
+ ("c" "1.5.0" "https://e.com/c15.tgz" hash-b requirement) 'req-c-15 defp
 
  ### defp manifest-b
  (-- manifest : "Return b's transitive fixture manifest.")
- ("b" "1.0.0" {} "c" req-c-15 put manifest)
- 'manifest-b defp
+ ("b" "1.0.0" {} "c" req-c-15 put manifest) 'manifest-b defp
 
  ### defp manifest-c-12
  (-- manifest : "Return c 1.2.0's fixture manifest.")
- ("c" "1.2.0" {} manifest)
- 'manifest-c-12 defp
+ ("c" "1.2.0" {} manifest) 'manifest-c-12 defp
 
  ### defp manifest-c-15
  (-- manifest : "Return c 1.5.0's fixture manifest.")
- ("c" "1.5.0" {} manifest)
- 'manifest-c-15 defp
+ ("c" "1.5.0" {} manifest) 'manifest-c-15 defp
 
  ### defp root
  (-- manifest : "Return the root MVS fixture.")
- ("app" "0.1.0" {} "b" req-b put "c" req-c-12 put manifest)
- 'root defp
+ ("app" "0.1.0" {} "b" req-b put "c" req-c-12 put manifest) 'root defp
 
  ### defp root-without-c
  (-- manifest : "Return the root fixture without its direct c requirement.")
- ("app" "0.1.0" {} "b" req-b put manifest)
- 'root-without-c defp
+ ("app" "0.1.0" {} "b" req-b put manifest) 'root-without-c defp
 
  ### defp catalog
  (-- catalog : "Return the reachable MVS fixture catalog.")
  ({}
   "b" {} "1.0.0" manifest-b put put
-  "c" {} "1.2.0" manifest-c-12 put "1.5.0" manifest-c-15 put put)
- 'catalog defp
+  "c" {} "1.2.0" manifest-c-12 put "1.5.0" manifest-c-15 put put) 'catalog defp
 
  ### test resolution
  (-- : "Select every reachable maximum and record all declared minimums.")

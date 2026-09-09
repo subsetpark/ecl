@@ -9,8 +9,7 @@
  (timestamp -- fields : "Return year month day hour minute second millisecond weekday as a list.")
  (time.to-utc
   ['year 'month 'day 'hour 'minute 'second 'millisecond 'weekday]
-  swap (swap at) partial each)
- 'utc-fields defp
+  swap (swap at) partial each) 'utc-fields defp
 
  ### test epoch-boundaries
  (-- : "Decompose and render the Unix epoch and the instants around it.")

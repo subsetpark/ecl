@@ -10,30 +10,25 @@
  ### defp crlf
  # String literals have no `\r` escape, so the line terminator is spelled out.
  (-- string : "Return the CR LF line terminator.")
- ("\u{D}\u{A}")
- 'crlf defp
+ ("\u{D}\u{A}") 'crlf defp
 
  ### defp framing-error
  (status message -- : "Raise a 'domain error whose data carries the response status.")
  (|status message|
   'domain error.new message error.with-message
-  'status status pair dict.from-flat error.with-data raise)
- 'framing-error defp
+  'status status pair dict.from-flat error.with-data raise) 'framing-error defp
 
  ### defp domain-error
  (message -- error : "Build a 'domain error with the message.")
- ('domain error.new swap error.with-message)
- 'domain-error defp
+ ('domain error.new swap error.with-message) 'domain-error defp
 
  ### defp type-error
  (message -- error : "Build a 'type error with the given message.")
- ('type error.new swap error.with-message)
- 'type-error defp
+ ('type error.new swap error.with-message) 'type-error defp
 
  ### defp checked-string
  (value message -- value : "Return a string or raise 'type with the message.")
- (|value message| value str.str? message type-error assert value)
- 'checked-string defp
+ (|value message| value str.str? message type-error assert value) 'checked-string defp
 
  ### defp split-target
  (target -- path query : "Split a request target at its first `?`; the query is empty when absent.")
@@ -41,13 +36,11 @@
   dup len 1 =
   (first "")
   (dup first swap rest "?" join)
-  if)
- 'split-target defp
+  if) 'split-target defp
 
  ### defp supported-version?
  (version -- bool : "Return 1 for the two request versions the server answers.")
- (dup "HTTP/1.1" match? swap "HTTP/1.0" match? or)
- 'supported-version? defp
+ (dup "HTTP/1.1" match? swap "HTTP/1.0" match? or) 'supported-version? defp
 
  ### def parse-request-line
  (line -- request-line :
@@ -63,13 +56,11 @@
   (|tokens| tokens 0 at tokens 1 at tokens 1 at split-target tokens 2 at) call
   (|method target path query version|
    'method method 'target target 'path path 'query query 'version version 10 pack dict.from-flat)
-  call)
- 'parse-request-line def
+  call) 'parse-request-line def
 
  ### defp blank?
  (char -- bool : "Return 1 for a space or horizontal tab.")
- (dup \space = swap \tab = or)
- 'blank? defp
+ (dup \space = swap \tab = or) 'blank? defp
 
  ### defp header-line
  (headers line -- headers :
@@ -97,23 +88,19 @@
  (dup type 'list match? "http.server.parse-headers expects a list of header lines" type-error assert
   dup (str.str?) all? "http.server.parse-headers expects every header line to be a string"
   type-error assert
-  {} (header-line) fold)
- 'parse-headers def
+  {} (header-line) fold) 'parse-headers def
 
  ### defp digit?
  (char -- bool : "Return 1 for an ASCII decimal digit.")
- (dup \0 >= swap \9 <= and)
- 'digit? defp
+ (dup \0 >= swap \9 <= and) 'digit? defp
 
  ### defp decimal?
  (text -- bool : "Return 1 for a nonempty string of ASCII digits.")
- (dup len 0 > swap (digit?) all? and)
- 'decimal? defp
+ (dup len 0 > swap (digit?) all? and) 'decimal? defp
 
  ### defp strip-zeros
  (digits -- digits : "Remove leading zeros from a digit string, keeping at least one digit.")
- (dup (\0 = not) each where dup len 0 = (pop dup len 1 - drop) (first drop) if)
- 'strip-zeros defp
+ (dup (\0 = not) each where dup len 0 = (pop dup len 1 - drop) (first drop) if) 'strip-zeros defp
 
  ### defp representable?
  (digits -- bool : "Return 1 when a zero-stripped digit string fits a signed 64-bit int.")
@@ -136,8 +123,7 @@
    strip-zeros dup representable? ()
    (413 "Content-Length exceeds the representable range" framing-error) if
    int)
-  if)
- 'content-length def
+  if) 'content-length def
 
  ### defp reason
  (status -- text : "Return the reason phrase for a known status code, or the empty string.")
@@ -160,8 +146,7 @@
    503 ("Service Unavailable")
    505 ("HTTP Version Not Supported")
    ("")]
-  case)
- 'reason defp
+  case) 'reason defp
 
  ### defp reserved-header?
  (name -- bool : "Return 1 for a header the server writes itself.")
@@ -175,25 +160,21 @@
  (dup digit?
   over dup \a >= swap \z <= and or
   over dup \A >= swap \Z <= and or
-  swap "!#$%&'*+-.^_`|~" in? or)
- 'token-char? defp
+  swap "!#$%&'*+-.^_`|~" in? or) 'token-char? defp
 
  ### defp token?
  (name -- bool : "Return 1 for a nonempty string of HTTP token characters.")
- (dup str.str? (dup len 0 > swap (token-char?) all? and) (pop 0) if)
- 'token? defp
+ (dup str.str? (dup len 0 > swap (token-char?) all? and) (pop 0) if) 'token? defp
 
  ### defp field-char?
  (char -- bool :
   "Return 1 for a character allowed in a header value: tab, or anything from space up that is not
    DEL.")
- (dup \tab = swap dup \space >= swap 127 char = not and or)
- 'field-char? defp
+ (dup \tab = swap dup \space >= swap 127 char = not and or) 'field-char? defp
 
  ### defp field-value?
  (value -- bool : "Return 1 for a string whose every character may appear in a header value.")
- (dup str.str? ((field-char?) all?) (pop 0) if)
- 'field-value? defp
+ (dup str.str? ((field-char?) all?) (pop 0) if) 'field-value? defp
 
  ### defp header-values?
  (value -- bool : "Return 1 for a header value or a list of them.")
@@ -210,18 +191,15 @@
   assert
   1 at header-values?
   "http.server response header values must be strings without CR, LF, NUL, or control characters, or lists of them"
-  domain-error assert)
- 'checked-header defp
+  domain-error assert) 'checked-header defp
 
  ### defp byte?
  (value -- bool : "Return 1 for an int in 0...255.")
- (dup type 'int match? (dup 0 >= swap 255 <= and) (pop 0) if)
- 'byte? defp
+ (dup type 'int match? (dup 0 >= swap 255 <= and) (pop 0) if) 'byte? defp
 
  ### defp body?
  (value -- bool : "Return 1 for a string or a byte list.")
- (dup str.str? (pop 1) (dup type 'list match? ((byte?) all?) (pop 0) if) if)
- 'body? defp
+ (dup str.str? (pop 1) (dup type 'list match? ((byte?) all?) (pop 0) if) if) 'body? defp
 
  ### defp checked-response
  (response -- response : "Validate a response dict in full before anything is written.")
@@ -245,13 +223,11 @@
   (dup first swap 1 at dup str.str? (wrap) () if
    swap ": " cat (swap cat) partial each)
   each
-  raze)
- 'header-lines defp
+  raze) 'header-lines defp
 
  ### defp body-bytes
  (body -- bytes : "Encode a string body as UTF-8; a byte list is returned unchanged.")
- (dup str.str? (bytes) () if)
- 'body-bytes defp
+ (dup str.str? (bytes) () if) 'body-bytes defp
 
  ### def render-response
  (response -- bytes :
@@ -277,8 +253,7 @@
    response 'status at [204 304] in? not (over len wrap "Content-Length: {}" str.format append) when
    "Connection: close" append "" append "" append
    crlf join bytes swap cat)
-  call)
- 'render-response def
+  call) 'render-response def
 
  ### defp checked-route
  (row -- : "Validate one [method pattern handler] route row.")
@@ -305,13 +280,11 @@
    each
    dict.from-pairs)
   (pop pop 0 {})
-  if)
- 'match-pattern defp
+  if) 'match-pattern defp
 
  ### defp route-matches
  (routes path -- rows : "Return the rows whose pattern matches the path.")
- ((|row path| path row 1 at match-pattern pop) partial filter)
- 'route-matches defp
+ ((|row path| path row 1 at match-pattern pop) partial filter) 'route-matches defp
 
  ### def route
  (request routes -- response :
@@ -339,8 +312,7 @@
     (|request row params| request 'params params put row 2 at call)
     call)
    if)
-  if)
- 'route def
+  if) 'route def
 
  ### defp default-config
  (-- config : "Return the serving configuration with every limit at its default.")
@@ -348,13 +320,11 @@
    'max-body-bytes 1048576
    'max-in-flight 128
    'read-timeout-ms 10000
-   'on-failure (str io.eprint)})
- 'default-config defp
+   'on-failure (str io.eprint)}) 'default-config defp
 
  ### defp config-keys
  (-- keys : "Return the recognized configuration keys.")
- (['max-header-bytes 'max-body-bytes 'max-in-flight 'read-timeout-ms 'on-failure])
- 'config-keys defp
+ (['max-header-bytes 'max-body-bytes 'max-in-flight 'read-timeout-ms 'on-failure]) 'config-keys defp
 
  ### defp config-entry-problem
  (pair -- problem :
@@ -365,8 +335,7 @@
    (1 at type 'list match? ('ok) ('wrong-type) if)
    (1 at dup type 'int match? (0 > ('ok) ('out-of-range) if) (pop 'wrong-type) if)
    if)
-  if)
- 'config-entry-problem defp
+  if) 'config-entry-problem defp
 
  ### defp checked-config
  (config -- config : "Validate a serving configuration and fill in the defaults.")
@@ -379,29 +348,24 @@
   "http.server.@serve limits must be ints and 'on-failure a quotation" type-error assert
   ('out-of-range match?) any? not
   "http.server.@serve limits must be greater than zero" domain-error assert
-  default-config swap dict.merge)
- 'checked-config defp
+  default-config swap dict.merge) 'checked-config defp
 
  ### defp peer-text
  (address -- text : "Format {'address 'port} as address:port, bracketing an IPv6 address.")
  (dup 'address at dup ":" str.contains? ("[" swap cat "]" cat) () if
-  swap 'port at pair "{}:{}" str.format)
- 'peer-text defp
+  swap 'port at pair "{}:{}" str.format) 'peer-text defp
 
  ### defp peer-gone
  (-- : "Raise the 'io error that marks a peer which sent nothing before closing.")
- ('io error.new "peer closed before sending a request" error.with-message raise)
- 'peer-gone defp
+ ('io error.new "peer closed before sending a request" error.with-message raise) 'peer-gone defp
 
  ### defp head-end
  (bytes -- index : "Return the index of the first CR LF CR LF in a byte list, or -1.")
- (4 windows ([13 10 13 10] match?) each where dup len 0 = (pop -1) (first) if)
- 'head-end defp
+ (4 windows ([13 10 13 10] match?) each where dup len 0 = (pop -1) (first) if) 'head-end defp
 
  ### defp hex-digit?
  (char -- bool : "Return 1 for an ASCII hexadecimal digit.")
- (dup digit? over dup \a >= swap \f <= and or swap dup \A >= swap \F <= and or)
- 'hex-digit? defp
+ (dup digit? over dup \a >= swap \f <= and or swap dup \A >= swap \F <= and or) 'hex-digit? defp
 
  ### defp host-char?
  (char -- bool :
@@ -409,18 +373,15 @@
  (dup digit?
   over dup \a >= swap \z <= and or
   over dup \A >= swap \Z <= and or
-  swap "-._~!$&'()*+,;=%" in? or)
- 'host-char? defp
+  swap "-._~!$&'()*+,;=%" in? or) 'host-char? defp
 
  ### defp ip-literal-char?
  (char -- bool : "Return 1 for a character allowed inside an IP-literal's brackets.")
- (dup hex-digit? swap ":." in? or)
- 'ip-literal-char? defp
+ (dup hex-digit? swap ":." in? or) 'ip-literal-char? defp
 
  ### defp port?
  (text -- bool : "Return 1 for a possibly empty string of digits.")
- ((digit?) all?)
- 'port? defp
+ ((digit?) all?) 'port? defp
 
  ### defp bracketed-host?
  (value -- bool : "Return 1 for [IP-literal] with an optional :port.")
@@ -429,8 +390,7 @@
    swap 1 at dup "" match? swap dup ":" str.starts? (1 drop port?) (pop 0) if or
    and)
   (pop 0)
-  if)
- 'bracketed-host? defp
+  if) 'bracketed-host? defp
 
  ### defp host-value?
  (value -- bool :
@@ -441,8 +401,7 @@
    (":" split dup len 2 = (dup first (host-char?) all? swap 1 at port? and) (pop 0) if)
    ((host-char?) all?)
    if)
-  if)
- 'host-value? defp
+  if) 'host-value? defp
 
  ### defp read-head-step
  (connection limit buffer -- connection limit buffer :
@@ -452,20 +411,17 @@
   connection limit 4 + buffer len - 1 max net.read
   dup len 0 = buffer len 0 = and (peer-gone) when
   dup len 0 = (400 "incomplete request head" framing-error) when
-  buffer swap cat connection limit rolldown)
- 'read-head-step defp
+  buffer swap cat connection limit rolldown) 'read-head-step defp
 
  ### defp read-head
  (connection limit -- connection buffer index :
   "Read until the head terminator appears and return its index.")
- ([] (dup head-end -1 =) (read-head-step) while nip dup head-end)
- 'read-head defp
+ ([] (dup head-end -1 =) (read-head-step) while nip dup head-end) 'read-head defp
 
  ### defp decode-head
  (bytes -- text : "Decode the head as UTF-8 text; undecodable bytes are a 400.")
  (wrap (chars) @attempt dup 'ok dict.has? ('ok at first)
-  (pop 400 "malformed request head" framing-error) if)
- 'decode-head defp
+  (pop 400 "malformed request head" framing-error) if) 'decode-head defp
 
  ### defp read-body-step
  (connection length buffer -- connection length buffer :
@@ -473,14 +429,12 @@
  (|connection length buffer|
   connection length buffer len - net.read
   dup len 0 = (400 "incomplete request body" framing-error) when
-  buffer swap cat connection length rolldown)
- 'read-body-step defp
+  buffer swap cat connection length rolldown) 'read-body-step defp
 
  ### defp read-body
  (connection leftover length -- body :
   "Complete a Content-Length body from the leftover head bytes and the connection.")
- (swap (over over len >) (read-body-step) while swap take nip)
- 'read-body defp
+ (swap (over over len >) (read-body-step) while swap take nip) 'read-body defp
 
  ### defp build-request
  (connection request-line headers body -- request :
@@ -493,8 +447,7 @@
   'headers headers
   'body body
   'peer connection net.peer-address peer-text
-  14 pack dict.from-flat)
- 'build-request defp
+  14 pack dict.from-flat) 'build-request defp
 
  ### defp read-request
  (connection config -- request :
@@ -515,25 +468,21 @@
   dup config 'max-body-bytes at > (413 "content too large" framing-error) when
   (|connection leftover request-line headers length|
    connection request-line headers connection leftover length read-body build-request)
-  call)
- 'read-request defp
+  call) 'read-request defp
 
  ### defp answer
  (connection config status -- :
   "Write the minimal text response for a status the server generates itself.")
- (dup reason http.response.text 0 swap write-response)
- 'answer defp
+ (dup reason http.response.text 0 swap write-response) 'answer defp
 
  ### defp report
  (config error -- :
   "Hand a request failure to the configured 'on-failure quotation; its own failure is discarded.")
- (wrap swap 'on-failure at @attempt pop)
- 'report defp
+ (wrap swap 'on-failure at @attempt pop) 'report defp
 
  ### defp fail-request
  (connection config error -- : "Report a request failure to 'on-failure and answer 500.")
- (|connection config error| config error report connection config 500 answer)
- 'fail-request defp
+ (|connection config error| config error report connection config 500 answer) 'fail-request defp
 
  ### defp write-response
  # The module's only write to a connection: every byte a server puts on the
@@ -547,13 +496,11 @@
   dup 'ok dict.has?
   ('ok at first swap (head-only) when nip net.write)
   ('err at nip fail-request)
-  if)
- 'write-response defp
+  if) 'write-response defp
 
  ### defp head-only
  (bytes -- bytes : "Keep a rendered response's status line and headers, dropping the body.")
- (dup head-end 4 + take)
- 'head-only defp
+ (dup head-end 4 + take) 'head-only defp
 
  ### defp handler-success
  (connection config head? values -- :
@@ -562,8 +509,7 @@
   (first write-response)
   (nip len wrap "handler left {} values instead of one response" str.format
    'contract error.new swap error.with-message fail-request)
-  if)
- 'handler-success defp
+  if) 'handler-success defp
 
  ### defp run-handler
  (connection config handler request -- :
@@ -572,8 +518,7 @@
   dup 'ok dict.has?
   ('ok at handler-success)
   ('err at nip fail-request)
-  if)
- 'run-handler defp
+  if) 'run-handler defp
 
  ### defp read-failure
  (connection config error -- :
@@ -585,8 +530,7 @@
     (pop fail-request)
     (nip answer)
     if)]
-  case)
- 'read-failure defp
+  case) 'read-failure defp
 
  ### defp dispatch-read
  (connection config handler reader result -- :
@@ -594,8 +538,7 @@
  (dup 'ok dict.has?
   (nip 'ok at first run-handler)
   ('err at swap dup task.cancel task.await pop nip read-failure)
-  if)
- 'dispatch-read defp
+  if) 'dispatch-read defp
 
  ### defp handle-connection
  (connection config handler -- :
@@ -605,8 +548,7 @@
   connection config handler
   connection config 2 pack (read-request) @spawn
   dup config 'read-timeout-ms at task.await-for
-  dispatch-read)
- 'handle-connection defp
+  dispatch-read) 'handle-connection defp
 
  ### defp serve-connection
  (connection config handler -- :
@@ -619,8 +561,7 @@
   dup 'err dict.has?
   ('err at dup 'kind at 'io match? (pop pop) (report) if)
   (pop pop)
-  if)
- 'serve-connection defp
+  if) 'serve-connection defp
 
  ### defp accept-one
  (listener config handler tasks -- listener config handler tasks :
@@ -629,15 +570,13 @@
   listener config handler
   tasks
   listener net.accept wrap config handler 2 pack (serve-connection) @give
-  append)
- 'accept-one defp
+  append) 'accept-one defp
 
  ### defp reap-one
  (tasks -- tasks :
   "Park until some child unit finishes, then drop it from the live set. Its result is discarded:
    serve-connection reports its own failures.")
- (dup task.await-any pop del)
- 'reap-one defp
+ (dup task.await-any pop del) 'reap-one defp
 
  ### defp serve-step
  (listener config handler tasks -- listener config handler tasks :
@@ -645,14 +584,12 @@
  (|listener config handler tasks|
   listener config handler
   tasks dup len config 'max-in-flight at >= (reap-one) when
-  accept-one)
- 'serve-step defp
+  accept-one) 'serve-step defp
 
  ### defp accept-loop
  (listener config handler -- :
   "Accept and serve connections forever, with at most 'max-in-flight connections in flight.")
- ([] (1) (serve-step) while)
- 'accept-loop defp
+ ([] (1) (serve-step) while) 'accept-loop defp
 
  ### def @serve
  (listener config handler -- :
@@ -698,6 +635,5 @@
  (|listener config handler|
   listener type 'port match? "http.server.@serve expects a net listener" type-error assert
   handler type 'list match? "http.server.@serve expects a handler quotation" type-error assert
-  listener config checked-config handler accept-loop)
- '@serve def
+  listener config checked-config handler accept-loop) '@serve def
 ) 'http.server @defm

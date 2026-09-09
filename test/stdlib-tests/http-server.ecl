@@ -7,8 +7,7 @@
 
  ### defp crlf
  (-- string : "Return the CR LF line terminator.")
- ("\u{D}\u{A}")
- 'crlf defp
+ ("\u{D}\u{A}") 'crlf defp
 
  ### test request-line
  (-- :

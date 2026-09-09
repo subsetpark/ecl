@@ -7,13 +7,11 @@
 (
  ### defp read-manifest
  (-- manifest : "Read and parse the discovered project's root manifest.")
- ('project "ecl.pkg" fs.read-text pkg.manifest.read)
- 'read-manifest defp
+ ('project "ecl.pkg" fs.read-text pkg.manifest.read) 'read-manifest defp
 
  ### defp read-lock
  (-- lock : "Read and parse the discovered project's lock.")
- ('project "ecl.lock" fs.read-text pkg.lock.read)
- 'read-lock defp
+ ('project "ecl.lock" fs.read-text pkg.lock.read) 'read-lock defp
 
  ### def init
  (arguments -- :
@@ -35,8 +33,7 @@
    pkg.manifest.write
    'cwd "ecl.pkg" fs.create-text
    name wrap "initialized ecl.pkg for {}" str.format io.print)
-  call)
- 'init def
+  call) 'init def
 
  ### defp record-requirement
  (manifest requirement package -- : "Rewrite one validated root requirement.")
@@ -45,8 +42,7 @@
   manifest 'requires at package requirement put
   put
   pkg.manifest.write
-  'project "ecl.pkg" fs.replace-text)
- 'record-requirement defp
+  'project "ecl.pkg" fs.replace-text) 'record-requirement defp
 
  ### def add
  (arguments -- : "Fetch, validate, and record one exact root requirement.")
@@ -59,40 +55,33 @@
    package version url pkg.sync.requirement
    package record-requirement
    package version pair "added {} {}" str.format io.print)
-  call)
- 'add def
+  call) 'add def
 
  ### defp sync-result
  (operation -- : "Run one synchronization mode and report its selected package count.")
  (read-manifest swap call
   'packages at dict.size
-  wrap "synced {} packages" str.format io.print)
- 'sync-result defp
+  wrap "synced {} packages" str.format io.print) 'sync-result defp
 
  ### def sync
  (arguments -- : "Synchronize the discovered project with network fetching enabled.")
- (pop (pkg.sync.run) sync-result)
- 'sync def
+ (pop (pkg.sync.run) sync-result) 'sync def
 
  ### def sync-offline
  (arguments -- : "Synchronize the discovered project using only immutable store entries.")
- (pop (pkg.sync.run-offline) sync-result)
- 'sync-offline def
+ (pop (pkg.sync.run-offline) sync-result) 'sync-offline def
 
  ### def tree
  (arguments -- : "Print the deterministic dependency edge projection of the project lock.")
- (pop read-lock pkg.lock.tree io.prin)
- 'tree def
+ (pop read-lock pkg.lock.tree io.prin) 'tree def
 
  ### def why
  (arguments -- : "Print one deterministic root-to-owner path for a module name.")
- (first read-lock swap pkg.lock.why io.prin)
- 'why def
+ (first read-lock swap pkg.lock.why io.prin) 'why def
 
  ### def verify
  (arguments -- : "Verify every sealed package archive selected by the project lock.")
- (pop read-lock pkg.sync.verify wrap "verified {} packages" str.format io.print)
- 'verify def
+ (pop read-lock pkg.sync.verify wrap "verified {} packages" str.format io.print) 'verify def
 
  ### defp verify-vendor-entry
  (key package requirement -- : "Verify one already-present project vendor entry.")
@@ -103,8 +92,7 @@
  (key package requirement -- : "Read, verify, and install one absent project vendor entry.")
  (|key package requirement|
   'cache key package requirement 'hash at pkg.store.read-seal
-  package 'vendor key pkg.sync.install-immutable)
- 'install-vendor-entry defp
+  package 'vendor key pkg.sync.install-immutable) 'install-vendor-entry defp
 
  ### defp vendor-selection
  (pair -- : "Copy or verify one selected immutable package in the project vendor store.")
@@ -116,8 +104,7 @@
    package requirement 2 pack (verify-vendor-entry) with
    package requirement 2 pack (install-vendor-entry) with
    if)
-  call)
- 'vendor-selection defp
+  call) 'vendor-selection defp
 
  ### def vendor
  (arguments -- : "Copy every locked package into the fixed project-local vendor store.")
@@ -128,8 +115,7 @@
    dup pkg.lock.write 'project "ecl.lock" fs.replace-text
    'packages at dict.size
    wrap "vendored {} packages" str.format io.print)
-  call)
- 'vendor def
+  call) 'vendor def
 
  ### defp lock-text-at
  (path -- text : "Read one lock file by canonical relative path beneath the working directory.")
@@ -138,13 +124,11 @@
   "ecl pkg gc expects canonical relative lock paths beneath the working directory"
   error.with-message
   assert
-  'cwd swap fs.read-text)
- 'lock-text-at defp
+  'cwd swap fs.read-text) 'lock-text-at defp
 
  ### def gc
  (lock-paths -- : "Remove shared-cache entries absent from every named lock file.")
  ((lock-text-at pkg.lock.read pkg.sync.store-keys) each raze distinct
   pkg.store.gc
-  wrap "removed {} packages" str.format io.print)
- 'gc def
+  wrap "removed {} packages" str.format io.print) 'gc def
 ) 'pkg.cli @defm

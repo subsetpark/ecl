@@ -14,8 +14,7 @@
    launch failures are 'io. The calling task scope owns the process group and joins cleanup when it
    ends; retaining the port does not detach it. Use proc.run for bounded capture, or drain both
    output streams concurrently.")
- (proc.core.process swap port.open)
- 'spawn def
+ (proc.core.process swap port.open) 'spawn def
 
  ### def write
  (resource bytes -- :
@@ -23,16 +22,14 @@
    with bytes. Calls stay contiguous in FIFO order. A non-list is 'type; invalid byte elements are
    'domain; finished or broken stdin is 'io. Acceptance does not mean all bytes have reached the
    child. Drain stdout and stderr concurrently to avoid pipe deadlock.")
- (swap proc.core.stdin port.endpoint swap port.write)
- 'write def
+ (swap proc.core.stdin port.endpoint swap port.write) 'write def
 
  ### def close-input
  (resource -- :
   "Finish stdin after accepted bytes drain, sending EOF to the child. Idempotent. Subsequent writes,
    including empty writes, fail with 'io. Output remains readable; this does not wait for process
    exit or close the process resource.")
- (proc.core.stdin port.endpoint port.finish)
- 'close-input def
+ (proc.core.stdin port.endpoint port.finish) 'close-input def
 
  ### def read-stdout
  (resource max -- bytes :
@@ -41,8 +38,7 @@
    than max. A non-integer max is 'type; max <= 0 is 'domain; overlapping stdout reads are
    'contract; pipe failure is 'io. Use chars to decode UTF-8. Drain stderr concurrently when it can
    fill, or use proc.run to capture both streams.")
- (swap proc.core.stdout port.endpoint swap port.read)
- 'read-stdout def
+ (swap proc.core.stdout port.endpoint swap port.read) 'read-stdout def
 
  ### def read-stderr
  (resource max -- bytes :
@@ -51,8 +47,7 @@
    than max. A non-integer max is 'type; max <= 0 is 'domain; overlapping stderr reads are
    'contract; pipe failure is 'io. Drain stdout concurrently when it can fill, or use proc.run to
    capture both streams.")
- (swap proc.core.stderr port.endpoint swap port.read)
- 'read-stderr def
+ (swap proc.core.stderr port.endpoint swap port.read) 'read-stderr def
 
  ### def wait
  (resource -- termination :
@@ -61,24 +56,21 @@
    nonzero exit code is ordinary result data. Repeated waiters receive the same result while the
    resource is open; pipe failures are 'io. Output pipes can fill and prevent exit, so drain both
    concurrently or use proc.run. This leaves the resource open; use port.close to join cleanup.")
- (proc.core.wait [] port.call)
- 'wait def
+ (proc.core.wait [] port.call) 'wait def
 
  ### def terminate
  (resource -- :
   "Request ordinary process-group termination without waiting for exit. Idempotent and safe after
    natural exit while the resource remains open. Cleanup escalates to force termination when needed.
    Use proc.wait to observe termination and port.close to join cleanup.")
- (proc.core.terminate [] port.call pop)
- 'terminate def
+ (proc.core.terminate [] port.call pop) 'terminate def
 
  ### def kill
  (resource -- :
   "Request force termination of the process group and arrange direct-child reap. Idempotent and safe
    after natural exit while the resource remains open. Does not wait for exit; use proc.wait to
    observe termination and port.close to join cleanup.")
- (proc.core.kill [] port.call pop)
- 'kill def
+ (proc.core.kill [] port.call pop) 'kill def
 
  ### defp nonnegative
  (value -- value : "Validate a nonnegative integer option.")
@@ -88,8 +80,7 @@
 
  ### defp byte?
  (value -- bool : "Recognize an exact byte.")
- (dup type 'int match? (dup 0 >= swap 255 <= and) (pop 0) if)
- 'byte? defp
+ (dup type 'int match? (dup 0 >= swap 255 <= and) (pop 0) if) 'byte? defp
 
  ### defp capture-step
  (reader limit chunks size chunk -- reader limit chunks size chunk :
@@ -97,22 +88,19 @@
  (|reader limit chunks size chunk|
   reader limit chunks chunk append size chunk len +
   dup limit <= 'overflow error.new "process capture limit exceeded" error.with-message assert
-  reader 4096 port.read)
- 'capture-step defp
+  reader 4096 port.read) 'capture-step defp
 
  ### defp capture
  (reader limit -- bytes : "Drain bounded chunks and reject capture overflow.")
  (|reader limit|
   reader limit [] 0 reader 4096 port.read
-  (dup len 0 >) (capture-step) while pop pop rollup pop pop raze)
- 'capture defp
+  (dup len 0 >) (capture-step) while pop pop rollup pop pop raze) 'capture defp
 
  ### defp collect
  (tasks -- result : "Observe every task, propagating the first observed failure.")
  ({} (over len 0 >)
   (over task.await-any result.or-raise first swap (dict.merge) dip rollup (swap del) dip)
-  while nip)
- 'collect defp
+  while nip) 'collect defp
 
  ### defp run-result
  (fields -- result : "Return process results in a stable field order.")
@@ -131,14 +119,12 @@
   process proc.core.stderr port.endpoint stderr-limit pair
   (capture 'stderr swap pair dict.from-flat) @spawn
   process wrap (wait 'term swap pair dict.from-flat) @spawn
-  4 pack collect run-result process port.close)
- 'run-streams defp
+  4 pack collect run-result process port.close) 'run-streams defp
 
  ### defp checked-limit
  (value maximum -- value : "Validate an optional capture bound against host policy.")
  (|value maximum| value nonnegative dup maximum <= 'domain error.new
-  "process capture limit exceeds host policy" error.with-message assert)
- 'checked-limit defp
+  "process capture limit exceeds host policy" error.with-message assert) 'checked-limit defp
 
  ### defp run-limited
  (spec process limits -- result : "Resolve capture defaults from the registered policy operation.")
@@ -146,22 +132,19 @@
   spec process
   spec 'stdout-limit limits 'stdout at at-or limits 'stdout at checked-limit
   spec 'stderr-limit limits 'stderr at at-or limits 'stderr at checked-limit
-  run-streams)
- 'run-limited defp
+  run-streams) 'run-limited defp
 
  ### defp run-body
  (spec -- result : "Own a process through concurrent transport and joined cleanup.")
  (dup ['stdin 'stdout-limit 'stderr-limit 'timeout-ms] dict.del spawn
-  dup proc.core.capture-limits [] port.call run-limited)
- 'run-body defp
+  dup proc.core.capture-limits [] port.call run-limited) 'run-body defp
 
  ### defp run-wait
  (task spec -- result : "Apply the optional task deadline and always join cancellation.")
  (dup 'timeout-ms dict.has?
   ('timeout-ms at task.await-for)
   (pop task.await)
-  if)
- 'run-wait defp
+  if) 'run-wait defp
 
  ### def run
  (spec -- result :
@@ -192,6 +175,5 @@
   (dup 'err at dup 'kind at 'timeout match?
    ("process deadline expired" error.with-message raise)
    (pop) if)
-  when result.or-raise first)
- 'run def
+  when result.or-raise first) 'run def
 ) 'proc @defm

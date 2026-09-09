@@ -7,38 +7,32 @@
 (
  ### defp checked
  (value message -- string : "Validate a string argument or raise 'type with the message.")
- (|value message| value str.str? 'type error.new message error.with-message assert value)
- 'checked defp
+ (|value message| value str.str? 'type error.new message error.with-message assert value) 'checked
+ defp
 
  ### def absolute?
  (path -- bool : "Return 1 when the path begins with a slash.")
- ("path.absolute? expects a string path" checked "/" str.starts?)
- 'absolute? def
+ ("path.absolute? expects a string path" checked "/" str.starts?) 'absolute? def
 
  ### def relative?
  (path -- bool : "Return 1 when the path does not begin with a slash.")
- ("path.relative? expects a string path" checked "/" str.starts? not)
- 'relative? def
+ ("path.relative? expects a string path" checked "/" str.starts? not) 'relative? def
 
  ### defp skip-component?
  (part -- bool : "Return 1 for an empty or `.` component, which normalization drops.")
- (dup "" match? swap "." match? or)
- 'skip-component? defp
+ (dup "" match? swap "." match? or) 'skip-component? defp
 
  ### defp poppable?
  (parts -- bool : "Return 1 when the last retained component is real rather than a leading `..`.")
- (dup len 0 > (last ".." match? not) (pop 0) if)
- 'poppable? defp
+ (dup len 0 > (last ".." match? not) (pop 0) if) 'poppable? defp
 
  ### defp pop-component
  (parts -- parts : "Drop the last retained component.")
- (dup len 1 - take)
- 'pop-component defp
+ (dup len 1 - take) 'pop-component defp
 
  ### defp append-part
  (state part -- state : "Retain one component.")
- (over 'parts at swap append 'parts swap put)
- 'append-part defp
+ (over 'parts at swap append 'parts swap put) 'append-part defp
 
  ### defp parent-step
  (state -- state :
@@ -46,13 +40,12 @@
  (dup 'parts at dup poppable?
   (pop-component 'parts swap put)
   (pop dup 'absolute at () (".." append-part) if)
-  if)
- 'parent-step defp
+  if) 'parent-step defp
 
  ### defp clean-step
  (state part -- state : "Apply one raw component to the normalized component list.")
- (dup skip-component? (pop) (dup ".." match? (pop parent-step) (append-part) if) if)
- 'clean-step defp
+ (dup skip-component? (pop) (dup ".." match? (pop parent-step) (append-part) if) if) 'clean-step
+ defp
 
  ### def normalize
  (path -- path :
@@ -66,8 +59,7 @@
   (clean-step) fold
   'parts at "/" core.join
   swap ("/" swap cat) () if
-  dup "" match? (pop ".") () if)
- 'normalize def
+  dup "" match? (pop ".") () if) 'normalize def
 
  ### def join
  (segments -- path :
@@ -77,8 +69,7 @@
   'type error.new "path.join expects a list of string segments" error.with-message assert
   dup (str.str?) all?
   'type error.new "path.join expects a list of string segments" error.with-message assert
-  ("" match? not) filter "/" core.join normalize)
- 'join def
+  ("" match? not) filter "/" core.join normalize) 'join def
 
  ### def dirname
  (path -- path :
@@ -89,13 +80,11 @@
   dup len 1 =
   (pop ".")
   (pop-component "/" core.join "/" cat normalize)
-  if)
- 'dirname def
+  if) 'dirname def
 
  ### defp strip-trailing-slashes
  (path -- path : "Remove every trailing slash.")
- (dup "/" str.ends? (pop-component strip-trailing-slashes) () if)
- 'strip-trailing-slashes defp
+ (dup "/" str.ends? (pop-component strip-trailing-slashes) () if) 'strip-trailing-slashes defp
 
  ### def basename
  (path -- name :
@@ -105,8 +94,7 @@
   dup "" match?
   (pop ".")
   (strip-trailing-slashes dup "" match? (pop "/") ("/" split last) if)
-  if)
- 'basename def
+  if) 'basename def
 
  ### def extension
  (path -- extension :
@@ -117,16 +105,14 @@
   dup len 1 =
   (pop "")
   (last "." swap cat)
-  if)
- 'extension def
+  if) 'extension def
 
  ### def components
  (path -- components :
   "Normalize the path and return its non-separator components; `.` and `/` yield an empty list and
    retained leading `..` components remain.")
  ("path.components expects a string path" checked normalize
-  dup "." match? (pop []) ("/" split ("" match? not) filter) if)
- 'components def
+  dup "." match? (pop []) ("/" split ("" match? not) filter) if) 'components def
 
  ### defp valid-component?
  (component -- bool : "Test one component of the canonical `fs` grammar.")
@@ -142,6 +128,5 @@
   dup "." match?
   (pop 1)
   (dup "" match? (pop 0) ("/" split (valid-component?) all?) if)
-  if)
- 'valid-relative? def
+  if) 'valid-relative? def
 ) 'path @defm

@@ -9,18 +9,15 @@
 (
  ### defp type-error
  (message -- error : "Build a 'type error with the message.")
- ('type error.new swap error.with-message)
- 'type-error defp
+ ('type error.new swap error.with-message) 'type-error defp
 
  ### defp domain-error
  (message -- error : "Build a 'domain error with the message.")
- ('domain error.new swap error.with-message)
- 'domain-error defp
+ ('domain error.new swap error.with-message) 'domain-error defp
 
  ### defp string-list?
  (value -- bool : "Return 1 for a list of strings.")
- (dup type 'list match? ((str.str?) all?) (pop 0) if)
- 'string-list? defp
+ (dup type 'list match? ((str.str?) all?) (pop 0) if) 'string-list? defp
 
  ### defp header-pair?
  (pair -- bool :
@@ -30,29 +27,24 @@
 
  ### defp headers?
  (value -- bool : "Return 1 for a dict from ASCII-lowercased string names to lists of strings.")
- (dup type 'dict match? (dict.pairs (header-pair?) all?) (pop 0) if)
- 'headers? defp
+ (dup type 'dict match? (dict.pairs (header-pair?) all?) (pop 0) if) 'headers? defp
 
  ### defp byte?
  (value -- bool : "Return 1 for an int in 0...255.")
- (dup type 'int match? (dup 0 >= swap 255 <= and) (pop 0) if)
- 'byte? defp
+ (dup type 'int match? (dup 0 >= swap 255 <= and) (pop 0) if) 'byte? defp
 
  ### defp bytes?
  (value -- bool : "Return 1 for a byte list.")
- (dup type 'list match? ((byte?) all?) (pop 0) if)
- 'bytes? defp
+ (dup type 'list match? ((byte?) all?) (pop 0) if) 'bytes? defp
 
  ### defp params?
  (value -- bool : "Return 1 for a dict from string names to string values.")
  (dup type 'dict match? (dup dict.keys (str.str?) all? swap dict.vals (str.str?) all? and) (pop 0)
-  if)
- 'params? defp
+  if) 'params? defp
 
  ### defp string-field?
  (name request -- bool : "Return 1 when an optional request field is absent or a string.")
- (swap over over dict.has? (at str.str?) (pop pop 1) if)
- 'string-field? defp
+ (swap over over dict.has? (at str.str?) (pop pop 1) if) 'string-field? defp
 
  ### def valid?
  (value -- bool :
@@ -70,19 +62,16 @@
    (pop 0)
    if)
   (pop 0)
-  if)
- 'valid? def
+  if) 'valid? def
 
  ### defp checked
  (request -- request : "Return a partial or complete request dict or raise 'type.")
  (dup valid? "expected a request dict with recognized, well-typed fields"
-  type-error assert)
- 'checked defp
+  type-error assert) 'checked defp
 
  ### defp checked-string
  (value message -- value : "Return a string or raise 'type with the message.")
- (|value message| value str.str? message type-error assert value)
- 'checked-string defp
+ (|value message| value str.str? message type-error assert value) 'checked-string defp
 
  ### defp split-target
  (target -- path query : "Split a request target at its first `?`; the query is empty when absent.")
@@ -90,8 +79,7 @@
   dup len 1 =
   (first "")
   (dup first swap rest "?" join)
-  if)
- 'split-target defp
+  if) 'split-target defp
 
  ### def new
  (method target -- request :
@@ -103,48 +91,41 @@
   (|method target path query|
    'method method 'target target 'path path 'query query 'headers {} 'body [] 'peer "" 14 pack
    dict.from-flat)
-  call)
- 'new def
+  call) 'new def
 
  ### def header
  (request name -- values :
   "Return the list of values of a header, matching the name regardless of letter case, or () when it
    is absent. A non-request or non-string name is 'type.")
  ("http.request.header expects a string header name" checked-string str.lower
-  swap checked 'headers {} at-or swap () at-or)
- 'header def
+  swap checked 'headers {} at-or swap () at-or) 'header def
 
  ### def header?
  (request name -- bool : "Return 1 when the request carries the header under any letter case.")
- (header len 0 >)
- 'header? def
+ (header len 0 >) 'header? def
 
  ### defp hex-digit?
  (char -- bool : "Return 1 for an ASCII hexadecimal digit.")
  (dup dup \0 >= swap \9 <= and
   over dup \a >= swap \f <= and or
-  swap dup \A >= swap \F <= and or)
- 'hex-digit? defp
+  swap dup \A >= swap \F <= and or) 'hex-digit? defp
 
  ### defp decode-escape
  (part -- bytes : "Decode the leading %XX of a split part and append the rest as UTF-8.")
  (dup len 2 >= "http.request.query found a truncated percent escape" domain-error assert
   dup 2 take dup (hex-digit?) all?
   "http.request.query found a malformed percent escape" domain-error assert
-  "0x" swap cat int wrap swap 2 drop bytes cat)
- 'decode-escape defp
+  "0x" swap cat int wrap swap 2 drop bytes cat) 'decode-escape defp
 
  ### defp percent-decode
  (text -- text :
   "Decode %XX escapes into UTF-8 text; malformed escapes and invalid UTF-8 are 'domain.")
- ("%" split dup first bytes swap rest (decode-escape) each raze cat chars)
- 'percent-decode defp
+ ("%" split dup first bytes swap rest (decode-escape) each raze cat chars) 'percent-decode defp
 
  ### defp query-pair
  (params part -- params :
   "Decode one key=value part into the params dict; later keys replace earlier.")
- ("=" split dup first percent-decode swap rest "=" join percent-decode put)
- 'query-pair defp
+ ("=" split dup first percent-decode swap rest "=" join percent-decode put) 'query-pair defp
 
  ### def query
  (request -- params :
@@ -154,8 +135,7 @@
    the result must be UTF-8, + is left as is, and a later duplicate key replaces an earlier one. An
    empty query is {}. A % not followed by two hex digits, or an escape sequence that is not UTF-8,
    is 'domain; a non-request is 'type.")
- (checked 'query "" at-or "&" split ("" match? not) filter {} (query-pair) fold)
- 'query def
+ (checked 'query "" at-or "&" split ("" match? not) filter {} (query-pair) fold) 'query def
 
  ### def param
  (request name -- value :
@@ -166,21 +146,18 @@
    request checked 'params {} at-or
    dup name dict.has? "http.request.param found no such route parameter" domain-error assert
    name at)
-  call)
- 'param def
+  call) 'param def
 
  ### def text
  (request -- string :
   "Return the body decoded as UTF-8 text. A body that is not valid UTF-8 is 'domain, as for chars.")
- (checked 'body [] at-or chars)
- 'text def
+ (checked 'body [] at-or chars) 'text def
 
  ### def json
  (request -- value :
   "Return the body parsed as JSON. A body that is not UTF-8 or not JSON fails as chars or json.parse
    does.")
- (text json.parse)
- 'json def
+ (text json.parse) 'json def
 
  ### def with-header
  (request name value -- request :
@@ -194,8 +171,7 @@
    request checked 'headers {} at-or name () at-or value cat
    request 'headers {} at-or name rolldown put
    request 'headers rolldown put)
-  call)
- 'with-header def
+  call) 'with-header def
 
  ### def with-body
  (request body -- request :
@@ -203,8 +179,7 @@
    kind is 'type.")
  (dup str.str? (bytes) () if
   dup bytes? "http.request.with-body expects a string or byte list" type-error assert
-  swap checked 'body rolldown put)
- 'with-body def
+  swap checked 'body rolldown put) 'with-body def
 
  ### def with-param
  (request name value -- request :
@@ -213,6 +188,5 @@
  ("http.request.with-param expects a string value" checked-string
   swap "http.request.with-param expects a string parameter name" checked-string swap
   (|request name value| request checked 'params {} at-or name value put request 'params rolldown put)
-  call)
- 'with-param def
+  call) 'with-param def
 ) 'http.request @defm

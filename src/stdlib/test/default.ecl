@@ -18,8 +18,7 @@
    "{}.{}" str.format
    swap first pair "FAIL {}: {}" str.format io.print
    1)
-  if)
- 'report defp
+  if) 'report defp
 
  ### def run
  (-- : "Discover and run canonical tests sequentially, exiting 1 after any failure.")
@@ -27,6 +26,5 @@
   dup 0 >
   (pop 1 exit)
   (pop)
-  if)
- 'run def
+  if) 'run def
 ) 'test.default @defm
