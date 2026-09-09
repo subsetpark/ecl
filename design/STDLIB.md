@@ -2282,15 +2282,52 @@ raises `'io`; `port.close` supplies idempotent abortive cleanup. This compositio
 also accepts other resources with registered graceful shutdown.
 
 ### listen
-`( config -- listener )` — Open `net.core.listener` with a dictionary containing
-exactly `'address` (an IPv4 or IPv6 literal string) and `'port` (an integer in
-`0...65535`). The returned socket is already listening. A non-dict or wrongly
-typed field is `'type`; missing or unknown fields, invalid literals or ports,
+`( config -- listener )` — Open `net.core.listener` with exactly these two
+symbol-keyed fields; neither has a default:
+
+| Field | Value | Examples |
+| --- | --- | --- |
+| `'address` | IPv4 or IPv6 literal string, without IPv6 brackets | `"127.0.0.1"`, `"::1"`, `"0.0.0.0"`, `"::"` |
+| `'port` | Integer in `0...65535`; `0` requests an ephemeral port | `8080`, `0` |
+
+Loopback addresses accept local connections; wildcard addresses `"0.0.0.0"`
+and `"::"` bind available interfaces of their address family, subject to host
+policy. Do not use a hostname such as `"localhost"`, a URL, or an address with
+an embedded port. Backlog and buffer capacities are host policy, not config
+fields. Inspect the assigned port with `net.local-address` after a port-zero bind.
+
+```ecl
+{'address "127.0.0.1" 'port 0} net.listen
+dup net.local-address
+swap net.close
+# Leaves {'address "127.0.0.1" 'port n}, where n is the assigned port.
+```
+
+The returned socket is already listening. A non-dict or wrongly typed field
+is `'type`; missing or unknown fields, invalid literals or ports,
 unavailable authority, denied binds, and exhausted listener capacity are
 `'domain`. Common structured-value limits also apply. Host bind and listen
 failures are `'io`. Configuration and grant refusals include the requested
 address, port, and reason where available; controller and lifecycle failures
 report the common error kind and message.
+
+A one-connection greeting server (blocks until a peer connects):
+
+```ecl
+{'address "127.0.0.1" 'port 8080} net.listen
+dup net.accept
+dup "hello\n" bytes net.write
+net.close
+net.close
+```
+
+The first close drains and closes the connection; the second closes the
+listener. This module provides listeners and accepted TCP connections, with
+no outbound-connect word. TCP is a byte stream: a read can return less than
+requested or combine data from multiple peer writes. Supply framing in the
+application, and assemble complete UTF-8 sequences before calling `chars`.
+For a write-side half-close that keeps the connection readable, use
+`dup net.core.output port.endpoint port.finish`.
 
 ### local-address
 `( resource -- address )` — Return `{'address string 'port int}` for an open
@@ -2315,7 +2352,7 @@ Abortive closure may discard buffered bytes.
 ### write
 `( connection bytes -- )` — Accept a complete byte list under bounded FIFO
 pressure. A non-list is `'type`; an element outside `0...255` is `'domain`.
-Convert strings explicitly with `bytes`. Finished input, closure, peer reset,
+Convert strings explicitly with `bytes`. Finished output, closure, peer reset,
 and other transport failures raise `'io`. Acceptance is distinct from delivery,
 output EOF, and resource cleanup.
 
@@ -2450,18 +2487,58 @@ delivers accepted bytes before closing that direction, is idempotent, and
 rejects subsequent writes, including empty writes. Endpoints share permitted
 use without owning the resource; they cannot be transferred with `@give`.
 
-A spawn specification is a dictionary with exactly these fields:
+A spawn specification is a dictionary whose keys are symbols, with only the
+following fields. The nested environment dictionary uses **string** keys.
 
-- required `'executable`: an absolute string path;
-- optional `'args`: a list of strings, default `[]`;
-- optional `'cwd`: an absolute string path, defaulting to the Session's
-  captured starting directory; and
-- optional `'env`: a string-to-string dictionary overlaid on the policy's
-  captured or empty environment base.
+| Field | Value | Required / default |
+| --- | --- | --- |
+| `'executable` | Absolute executable path string; no `PATH` lookup | Required |
+| `'args` | List of argument strings, excluding the executable name | `[]` |
+| `'cwd` | Absolute directory path string without `.` or `..` components | Host-configured starting directory (normally captured when process authority is created) |
+| `'env` | String-to-string dictionary, for example `{"LANG" "C"}` | `{}`; overlay on the host's captured or empty environment base |
 
-There is no shell-command form and no `PATH` search. Unknown fields are
-`'domain`; malformed field values are `'type` or `'domain`. The host policy is
-checked before the operating system is reached.
+Paths, arguments, and environment strings cannot contain NUL. Environment
+names must be nonempty and contain no `=`. An environment overlay replaces
+matching names and preserves other base entries; `{}` does not clear the base.
+There is no shell-command form, expansion, or `PATH` search: spaces and shell
+metacharacters in an argument are passed literally. Unknown fields and missing
+`'executable` are `'domain`; non-symbol keys and wrongly typed fields are
+`'type`; invalid field values and policy refusals are `'domain`. The host policy
+is checked before the operating system is reached.
+
+For example, on a POSIX host granting `/bin/cat`, capture a byte-exact round trip:
+
+```ecl
+{'executable "/bin/cat" 'stdin [104 101 108 108 111 10]} proc.run
+# {'term {'kind 'exited 'code 0} 'stdout [104 101 108 108 111 10] 'stderr []}
+```
+
+A fuller specification adds arguments, a working directory, and environment:
+
+```ecl
+{'executable "/bin/echo"
+ 'args ["hello world"]
+ 'cwd "/tmp"
+ 'env {"LANG" "C"}
+ 'stdout-limit 4096
+ 'stderr-limit 4096
+ 'timeout-ms 1000} proc.run
+'stdout at chars
+# "hello world\n"
+```
+
+These examples require the named executables and directory to exist, and the
+host to permit the requested paths and capture bounds. Use `bytes` to encode
+text for stdin and `chars` to decode complete UTF-8 output. Arbitrary process
+output may not be valid UTF-8.
+
+Prefer `proc.run` when the output fits a known bound. With `proc.spawn`, feed
+stdin and drain **both** output pipes concurrently when they can fill. A child
+may wait for stdin EOF before exiting, so call `proc.close-input` when feeding
+is complete. `proc.wait` does not drain output: waiting first can deadlock on a
+full pipe. Reads may split text characters or application messages across
+chunks. Close the resource with `port.close` when finished; waiting for exit
+does not close it.
 
 Bytes are ordinary integer lists whose elements are all in `0...255`. Process
 streams do not decode Unicode. A port is an opaque identity capability that
@@ -2492,11 +2569,19 @@ reap, and return
 `{'term termination 'stdout stdout-bytes 'stderr stderr-bytes}`. In addition to
 the spawn fields, `spec` accepts:
 
-- optional `'stdin`: a byte list, default `[]`;
-- optional `'stdout-limit` and `'stderr-limit`: nonnegative integer capture
-  limits no larger than the Host policy; and
-- optional `'timeout-ms`: a nonnegative integer deadline. Absence means no
-  process deadline; scheduler cancellation remains effective.
+| Field | Value | Default |
+| --- | --- | --- |
+| `'stdin` | List of integer bytes in `0...255`; strings require explicit `bytes` conversion | `[]` |
+| `'stdout-limit` | Nonnegative integer maximum total captured stdout bytes | Host stdout capture maximum |
+| `'stderr-limit` | Nonnegative integer maximum total captured stderr bytes | Host stderr capture maximum |
+| `'timeout-ms` | Nonnegative integer deadline in milliseconds, including spawn and execution | No process deadline; scheduler cancellation remains effective |
+
+Each capture limit must be no larger than its corresponding host maximum.
+Zero permits only empty output on that stream. Stdin is finished after feeding,
+including when omitted. The result always contains all three symbol keys:
+`'term` is a termination dictionary described by `proc.wait`, and `'stdout`
+and `'stderr` are byte lists, empty when nothing was captured. Nonzero exit codes are returned
+as data; inspect `'term` to decide whether the command succeeded.
 
 Capture overflow kills and cleans the process before raising `'overflow`.
 Deadline expiry does the same before raising `'timeout`; task cancellation is
