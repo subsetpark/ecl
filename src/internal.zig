@@ -49,6 +49,8 @@ pub const test_prims = @import("test_prims.zig");
 
 test {
     _ = port_message;
+    _ = @import("port_controller.zig");
+    _ = @import("port_messages.zig");
     _ = value;
     _ = poll;
     _ = heap;

@@ -1258,7 +1258,9 @@ values retain that identity independently of service cleanup. Module registratio
 binds immutable service grants inside the adapter, so module loading does not
 select a resource backend. A generic module-constant provider carries names,
 effects, documentation, and sealed values; domain adapters own their declarations
-and typed service grants. Retained issuer metadata has no backend discriminator.
+and typed service grants. Registration validates declaration-name uniqueness at
+compile time, so one provider cannot replace its own earlier binding during
+publication. Retained issuer metadata has no backend discriminator.
 Factories register through one opaque opening
 interface: bounded configuration validation precedes admission, resumable
 openings own partial work, and resource initialization precedes stack publication.

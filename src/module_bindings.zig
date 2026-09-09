@@ -14,6 +14,14 @@ pub const Registration = opaque {
         return @ptrCast(@alignCast(self));
     }
     pub fn create(comptime Adapter: type) *const Registration {
+        comptime {
+            for (Adapter.definitions, 0..) |definition, index| {
+                for (Adapter.definitions[0..index]) |previous| {
+                    if (std.mem.eql(u8, definition.name, previous.name))
+                        @compileError("duplicate module binding name: " ++ definition.name);
+                }
+            }
+        }
         const Static = struct {
             const descriptor: RegistrationState = .{ .declarations = Adapter.definitions, .bind = Adapter.bind };
         };

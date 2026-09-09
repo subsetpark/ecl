@@ -22,6 +22,9 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     try core.installBuiltins(&definitions);
 }
 
+// Effects on module builtins are checked when the primitive returns, before
+// scheduler drivers produce their results. Keep these contracts in docs until
+// effect checking can follow deferred completion (see machine.executeResolved).
 pub const words = [_]env.BuiltinWord{
     .{ .name = "await", .primitive = await, .doc = "( task -- result ) Wait for a task and return its success or error result." },
     .{ .name = "cancel", .primitive = cancel, .doc = "( task -- ) Request cancellation of a task, doing nothing if it is already complete." },
