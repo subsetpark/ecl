@@ -1,8 +1,8 @@
 //! Public behavior of the builtin archive module.
 //!
 //! Fixtures are exact hexadecimal program inputs. Extraction is confined to a
-//! Session filesystem root named `'root`, so every case grants a temporary
-//! directory through `Host.filesystem_policy`. Tests pass only source text to
+//! Session filesystem root named `'root`, so every case uses a temporary
+//! directory through `Host.filesystem`. Tests pass only source text to
 //! Sessions, so the traceless SessionHeap remains the appropriate allocator.
 const std = @import("std");
 const filesystem_port = @import("../filesystem_port.zig");
@@ -98,7 +98,7 @@ fn unpackSource(bytes: []const u8, destination: []const u8) ![]u8 {
 const Scratch = struct {
     directory: std.testing.TmpDir,
     path: [:0]u8,
-    /// Backing storage for `policy`, so the returned policy borrows this
+    /// Backing storage for `filesystem`, so the returned configuration borrows this
     /// value rather than a temporary.
     root_storage: [1]filesystem_port.Root,
 
@@ -111,7 +111,7 @@ const Scratch = struct {
         return .{
             .directory = directory,
             .path = path,
-            .root_storage = .{.{ .name = "root", .absolute_path = path, .permissions = .all }},
+            .root_storage = .{.{ .name = "root", .absolute_path = path }},
         };
     }
 
@@ -126,7 +126,7 @@ const Scratch = struct {
         return allocator.dupe(u8, name);
     }
 
-    fn policy(self: *const Scratch) filesystem_port.FilesystemPolicy {
+    fn filesystem(self: *const Scratch) filesystem_port.Config {
         return .{ .roots = &self.root_storage };
     }
 
@@ -162,7 +162,7 @@ fn expectIoStack(scratch: *Scratch, source: []const u8, expected: []const u8) !v
             .io = std.testing.io,
             .output = &output.writer,
             .diagnostics = &diagnostics.writer,
-            .filesystem_policy = scratch.policy(),
+            .filesystem = scratch.filesystem(),
         },
         .cooperative,
     );
@@ -197,7 +197,7 @@ fn expectIoError(scratch: *Scratch, source: []const u8, expected: support.ErrorC
             .io = std.testing.io,
             .output = &output.writer,
             .diagnostics = &diagnostics.writer,
-            .filesystem_policy = scratch.policy(),
+            .filesystem = scratch.filesystem(),
         },
         .cooperative,
     );
@@ -324,7 +324,7 @@ fn concurrentUnpack(result: *ConcurrentResult) void {
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
-        .filesystem_policy = .{ .roots = &.{.{ .name = "root", .absolute_path = result.root, .permissions = .all }} },
+        .filesystem = .{ .roots = &.{.{ .name = "root", .absolute_path = result.root }} },
     }, .cooperative) catch {
         result.unexpected.store(true, .release);
         return;
@@ -415,7 +415,7 @@ test "archive: cancellation and absent host IO never publish a destination" {
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
-        .filesystem_policy = scratch.policy(),
+        .filesystem = scratch.filesystem(),
     }, .cooperative);
     defer runtime.deinit();
     switch (try runtime.runUnit("<archive-warm>", "[] archive.sha256 pop")) {
@@ -445,38 +445,7 @@ test "archive: cancellation and absent host IO never publish a destination" {
     try scratch.expectAbsent("unavailable");
     try scratch.expectEntryCount(0);
 
-    // A root without the create grant, an unknown root, and a non-canonical
-    // destination are refused before any archive byte is decompressed.
-    const read_only: filesystem_port.FilesystemPolicy = .{
-        .roots = &.{.{ .name = "root", .absolute_path = scratch.path, .permissions = .{ .read_data = true } }},
-    };
-    var denied_heap: test_heap.SessionHeap = .init;
-    defer test_heap.retire(&denied_heap);
-    var denied_runtime = try session.Session.initWithHostConfig(denied_heap.allocator(), &.{}, .{
-        .io = std.testing.io,
-        .output = &output.writer,
-        .diagnostics = &diagnostics.writer,
-        .filesystem_policy = read_only,
-    }, .cooperative);
-    defer denied_runtime.deinit();
-    const denied_source = try unpackSource(bytes, "denied");
-    defer allocator.free(denied_source);
-    const denied = switch (try denied_runtime.runUnit("<archive-denied>", denied_source)) {
-        .err => |item| item,
-        .ok, .incomplete => return error.ExpectedLanguageError,
-    };
-    defer denied_runtime.release(denied);
-    try support.expectLanguageError(denied, .{
-        .name = "create denied",
-        .source = denied_source,
-        .kind = "domain",
-        .word = "archive.unpack-tgz",
-        .data = &.{
-            .{ .name = "root", .expected = .{ .symbol = "root" } },
-            .{ .name = "reason", .expected = .{ .symbol = "denied" } },
-        },
-    });
-    try scratch.expectAbsent("denied");
+    // Non-canonical destinations fail before decompression.
     for ([_]struct { destination: []const u8, reason: []const u8 }{
         .{ .destination = ".", .reason = "invalid-path" },
         .{ .destination = "a/../b", .reason = "invalid-path" },

@@ -1340,12 +1340,11 @@ and are not coerced.
 `( bytes root destination -- regular-file-paths )` — Validate and atomically
 unpack a gzip-compressed tar byte list beneath a previously absent
 `destination`, a canonical relative path under the named Session filesystem
-`root` (see [`fs`](#fs)). The root must grant `create`; the destination must
+`root` (see [`fs`](#fs)). The destination must
 name a child entry, not `.`. Return normalized regular-file paths in archive
 order. Unsafe, linked, special, duplicate, malformed, or over-limit members
 are `'domain`; invalid byte items are `'domain`; wrong container kinds are
-`'type`; a missing filesystem policy, unknown root, denied grant, or
-non-canonical destination is `'domain` carrying the `fs` failure data; an
+`'type`; unavailable filesystem I/O, an unknown root, or a non-canonical destination is `'domain` carrying the `fs` failure data; an
 exhausted operation quota is `'overflow`; filesystem and destination
 conflicts are `'io`. Failure never publishes a partial destination. See the
 environment's [`archive` contract](ENVIRONMENT.md#byte-lists-and-archives)
@@ -1619,13 +1618,10 @@ the error with `'msg` set to `message`.
 
 ## fs
 
-Capability-gated filesystem words. Every word names a `root` by symbol and a
-`path` string. A root is a directory the Session host configured by name with
-an explicit permission set; a Session constructed without a filesystem policy
-denies every word with `'domain` and reason `'unavailable`. The command line
-grants exactly one root, `'cwd`, for the startup working directory with every
-permission. Possession of a path string, console output, or any other host
-service never widens this authority.
+Filesystem words. Every word names a `root` by symbol and a `path` string.
+The command line uses `'cwd` for the startup working directory; package commands
+also provide `'project`. All filesystem operations are available on each root,
+subject to operating-system permissions and runtime limits.
 
 A path is a UTF-8 slash path in the canonical grammar: `.` names the root
 itself, and every other path is one or more nonempty components separated by
@@ -1643,27 +1639,20 @@ an absolute target, a relative target that would pop above the root, more than
 follow a final link under the same rule; every other word acts on the final
 entry itself. Containment is never a lexical prefix check.
 
-Permissions are semantic: `'read-data` authorizes `read-bytes`, `read-text`,
-and the source of `copy`; `'inspect` authorizes `stat`, `lstat`, and
-`exists?`; `'list` authorizes `list`; `'create` authorizes `create-*`,
-`mkdir`, the destination of `copy`, and `archive.unpack-tgz`; `'replace`
-authorizes `replace-*`; `'rename` authorizes `rename`; `'remove` authorizes
-`remove-file` and `remove-dir`. Internal staging never needs a public grant.
-
 Every failure carries a data dictionary with `'operation` (the word's own
 symbol), `'root` and `'path` (or `'source-root`, `'source-path`,
 `'destination-root`, and `'destination-path` for `copy`), and a closed
-`'reason` symbol: `'invalid-path`, `'unknown-root`, `'denied`, `'unavailable`,
+`'reason` symbol: `'invalid-path`, `'unknown-root`, `'unavailable`,
 `'not-found`, `'already-exists`, `'not-directory`, `'is-directory`,
 `'not-regular`, `'not-empty`, `'symlink-loop`, `'symlink-escape`,
 `'invalid-utf8`, `'limit`, `'access-denied`, `'read-only`, `'no-space`,
 `'busy`, `'cross-device`, `'unsupported`, `'changed`, or `'io`. The kind is
 `'type` for wrong value kinds or byte-list members outside `0..255`, `'domain`
-for malformed paths, unknown roots, denied grants, and an absent policy,
+for malformed paths, unknown roots, and unavailable I/O,
 `'overflow` for a configured limit, `'cancelled` for cancellation, and `'io`
 for filesystem state and host failures. Host error names never appear as data.
 
-Reads, writes, and copies are bounded by the policy's transfer limit
+Reads, writes, and copies are bounded by the transfer limit
 (1 GiB by default) and advance in 64 KiB quanta; listings are bounded by an
 entry count (100,000) and aggregate name bytes (64 MiB); a Session runs at most
 64 filesystem operations at once. Mutation stages complete contents in a
@@ -2221,21 +2210,19 @@ become floats. JSON null and booleans become the ordinary symbols `'null`,
 
 ## net
 
-TCP resources under an explicit Session listen grant. The CLI grants listening;
-embedding hosts grant none by default and may restrict exact normalized IP
-literals and ports, listener and connection counts, backlog, and byte-ring
-capacities. Port zero authorizes an ephemeral bind only. Names are never
-resolved. IPv4-mapped IPv6 literals normalize to IPv4. Binding uses address
-reuse, so a closed connection's `TIME_WAIT` does not prevent rebinding; two
-live listeners cannot hold the same address and port.
+TCP listeners and connections. Any local IP literal and port can be requested,
+subject to operating-system restrictions and runtime resource limits. Port zero
+requests an ephemeral bind. Names are never resolved. IPv4-mapped IPv6 literals
+normalize to IPv4. Binding uses address reuse, so a closed connection's
+`TIME_WAIT` does not prevent rebinding; two live listeners cannot hold the same
+address and port.
 
 The public words are ECL compositions over `net.core.listener`, the registered
 operations `net.core.accept`, `net.core.local-address`, and
 `net.core.peer-address`, and the endpoint selectors `net.core.input` and
 `net.core.output`. Each operation requires `[]`. Accept occupies its FIFO lane
 until completion or cancellation. Address operations use an independent control
-lane. Factories and selectors are opaque identity capabilities; possession
-never widens the Session's host grant.
+lane. Factories and selectors are opaque identities for their resource kinds.
 
 Listeners and connections belong to task scopes. Retaining or sending a port
 shares use; `@give` transfers ownership. A newly accepted connection remains
@@ -2291,9 +2278,8 @@ symbol-keyed fields; neither has a default:
 | `'port` | Integer in `0...65535`; `0` requests an ephemeral port | `8080`, `0` |
 
 Loopback addresses accept local connections; wildcard addresses `"0.0.0.0"`
-and `"::"` bind available interfaces of their address family, subject to host
-policy. Do not use a hostname such as `"localhost"`, a URL, or an address with
-an embedded port. Backlog and buffer capacities are host policy, not config
+and `"::"` bind available interfaces of their address family, subject to operating-system restrictions. Do not use a hostname such as `"localhost"`, a URL, or an address with
+an embedded port. Backlog and buffer capacities are runtime limits, not listener config
 fields. Inspect the assigned port with `net.local-address` after a port-zero bind.
 
 ```ecl
@@ -2305,9 +2291,9 @@ swap net.close
 
 The returned socket is already listening. A non-dict or wrongly typed field
 is `'type`; missing or unknown fields, invalid literals or ports,
-unavailable authority, denied binds, and exhausted listener capacity are
+unavailable I/O and exhausted listener capacity are
 `'domain`. Common structured-value limits also apply. Host bind and listen
-failures are `'io`. Configuration and grant refusals include the requested
+failures are `'io`. Configuration failures include the requested
 address, port, and reason where available; controller and lifecycle failures
 report the common error kind and message.
 
@@ -2453,26 +2439,25 @@ repeatable. Existing capabilities in messages share use and retain their owner.
 
 ## proc
 
-Host-backed subprocess ports. The module is present in every standard image,
-but process creation is `'domain` unless the Session host supplied process
-authority. The CLI supplies an explicit unrestricted policy; embedding hosts
-default to none and may restrict exact executable paths, working directories,
-environment inheritance, live ports, queue sizes, and run-capture sizes.
+Subprocess ports with bounded live counts, queues, and capture sizes.
+Process creation is available as an ordinary standard-library operation.
+Executable access is determined by the operating system.
+
 The public words are ECL compositions over registered process capabilities,
 common port transport, and task primitives.
 
 `proc.core.process` is the registered process factory. Applying `port.open`
 to it and a spawn specification creates a process resource subject to the
-common structured-value limits and the same host policy as `proc.spawn`.
+common structured-value and process limits as `proc.spawn`.
 The returned resource supports the process words and common lifecycle words;
-retaining the factory grants no additional host authority.
+the factory is an opaque identity for the process resource kind.
 
 The registered operations `proc.core.wait`, `proc.core.terminate`,
 `proc.core.kill`, and `proc.core.capture-limits` require an empty request list.
 Wait returns the termination dictionary described below. Terminate and kill
 request the corresponding process action and return `[]`; they do not wait
 for process exit. Capture-limits returns a dictionary with `'stdout` and
-`'stderr` byte limits from the host policy. Wait has its own FIFO lane; the
+`'stderr` capture limits. Wait has its own FIFO lane; the
 other operations share an independent control lane. Cancelling a wait leaves
 the process running and makes its lane reusable after cancellation settles.
 Each exchange result is claimable once, while completion observation is
@@ -2494,8 +2479,8 @@ following fields. The nested environment dictionary uses **string** keys.
 | --- | --- | --- |
 | `'executable` | Absolute executable path string; no `PATH` lookup | Required |
 | `'args` | List of argument strings, excluding the executable name | `[]` |
-| `'cwd` | Absolute directory path string without `.` or `..` components | Host-configured starting directory (normally captured when process authority is created) |
-| `'env` | String-to-string dictionary, for example `{"LANG" "C"}` | `{}`; overlay on the host's captured or empty environment base |
+| `'cwd` | Absolute directory path string without `.` or `..` components | Startup working directory |
+| `'env` | String-to-string dictionary, for example `{"LANG" "C"}` | `{}`; overlay on the captured process environment |
 
 Paths, arguments, and environment strings cannot contain NUL. Environment
 names must be nonempty and contain no `=`. An environment overlay replaces
@@ -2503,10 +2488,9 @@ matching names and preserves other base entries; `{}` does not clear the base.
 There is no shell-command form, expansion, or `PATH` search: spaces and shell
 metacharacters in an argument are passed literally. Unknown fields and missing
 `'executable` are `'domain`; non-symbol keys and wrongly typed fields are
-`'type`; invalid field values and policy refusals are `'domain`. The host policy
-is checked before the operating system is reached.
+`'type`; invalid field values are `'domain`. Validation precedes process creation.
 
-For example, on a POSIX host granting `/bin/cat`, capture a byte-exact round trip:
+For example, on a POSIX host with `/bin/cat`, capture a byte-exact round trip:
 
 ```ecl
 {'executable "/bin/cat" 'stdin [104 101 108 108 111 10]} proc.run

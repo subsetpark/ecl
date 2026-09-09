@@ -902,7 +902,7 @@ pub fn build(b: *std.Build) void {
             "tests.archive_test.",
             "tests.random_test.",
             "tests.hostio_test.",
-            // Capability-gated filesystem words and the pure path module. Every
+            // Filesystem words and the pure path module. Every
             // case runs against a temporary directory through the public
             // Session and finishes well inside the fast budget.
             "tests.filesystem_test.",
@@ -910,7 +910,7 @@ pub fn build(b: *std.Build) void {
             // under a manual clock the test advances, so nothing here waits
             // on host time.
             "tests.clock_test.",
-            // Capability-gated TCP listeners. Every case binds an ephemeral
+            // TCP listeners. Every case binds an ephemeral
             // loopback port through the public Session and probes it from the
             // test; no fixture process, no sleeps, well inside the fast budget.
             "tests.net_test.",
@@ -1021,7 +1021,7 @@ pub fn build(b: *std.Build) void {
     });
 
     // The assembler reads and writes through the `'cwd` filesystem root the
-    // command line grants, so it receives the build root and relativizes the
+    // command line supplies, so it receives the build root and relativizes the
     // absolute paths the build graph hands it beneath that root.
     const build_root = b.build_root.path orelse b.pathFromRoot(".");
     const assemble_spec = b.addRunArtifact(exe);

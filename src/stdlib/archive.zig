@@ -844,10 +844,8 @@ const UnpackDriver = struct {
         if (class == .root)
             return self.failReason(evaluator, .domain, .invalid_path, "destination must name a child entry, not the root");
         const root_value = self.source.borrow().unpack.root.borrow();
-        const root = fsport.findRoot(access, root_value.symbol) orelse
+        _ = fsport.findRoot(access, root_value.symbol) orelse
             return self.failReason(evaluator, .domain, .unknown_root, "unknown filesystem root");
-        if (!root.allows(.create))
-            return self.failReason(evaluator, .domain, .denied, "filesystem root denies create");
         self.slot = fsport.reserveOperation(access) orelse
             return self.failReason(evaluator, .overflow, .limit, "filesystem operation limit reached");
     }

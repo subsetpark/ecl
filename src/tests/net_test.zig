@@ -1,7 +1,7 @@
 //! Public Session coverage for the `net` listener capability.
 //!
-//! Every case runs source text through a Session whose Host either omits the
-//! network grant or names exact loopback binds, and observes effects through
+//! Every case runs source text through a Session and uses loopback sockets,
+//! observing effects through
 //! the public runtime plus a Zig-side loopback probe: a connect that succeeds
 //! while the socket is bound and is refused once it closes. Sessions run only
 //! source strings, so the traceless session heap is the right allocator (see
@@ -18,15 +18,13 @@ const test_heap = @import("test_heap.zig");
 const allocator = std.testing.allocator;
 const io = std.testing.io;
 const IpAddress = std.Io.net.IpAddress;
-const Policy = net_port.NetPolicy;
+const Limits = net_port.Limits;
 
-const loopback_ephemeral: Policy = .{ .binds = .{ .exact = &.{.{ .address = "127.0.0.1", .port = 0 }} } };
-const unrestricted: Policy = .{ .binds = .unrestricted };
 const listen_ephemeral = "{'address \"127.0.0.1\" 'port 0} net.listen";
 
-const Grants = struct {
-    net: ?Policy = null,
-    process: ?process.ProcessPolicy = null,
+const LimitsConfig = struct {
+    net: Limits = .{},
+    process: process.Limits = .{},
 };
 
 /// One Session plus the writers it borrows. Open it in place and never move
@@ -39,15 +37,15 @@ const Runtime = struct {
     diagnostics: ?std.Io.Writer.Discarding = null,
     session: session.Session = .consumed,
 
-    fn open(self: *Runtime, grants: Grants, config: session.Config) !void {
+    fn open(self: *Runtime, limits: LimitsConfig, config: session.Config) !void {
         self.output = std.Io.Writer.Discarding.init(&self.output_buffer);
         self.diagnostics = std.Io.Writer.Discarding.init(&self.diagnostics_buffer);
         self.session = try session.Session.initWithHostConfig(self.heap.allocator(), &.{}, .{
             .io = io,
             .output = &self.output.?.writer,
             .diagnostics = &self.diagnostics.?.writer,
-            .net_policy = grants.net,
-            .process_policy = grants.process,
+            .net_limits = limits.net,
+            .process_limits = limits.process,
         }, config);
     }
 
@@ -109,17 +107,17 @@ fn portsIn(text: []const u8, storage: []u16) ![]u16 {
     return storage[0..count];
 }
 
-fn expectStack(grants: Grants, program: []const u8, expected: []const u8) !void {
+fn expectStack(limits: LimitsConfig, program: []const u8, expected: []const u8) !void {
     var runtime: Runtime = .{};
-    try runtime.open(grants, .cooperative);
+    try runtime.open(limits, .cooperative);
     defer runtime.close();
     try runtime.run(program);
     try runtime.expectDisplay(expected);
 }
 
-fn expectError(grants: Grants, program: []const u8, expected: support.ErrorCase) !void {
+fn expectError(limits: LimitsConfig, program: []const u8, expected: support.ErrorCase) !void {
     var runtime: Runtime = .{};
-    try runtime.open(grants, .cooperative);
+    try runtime.open(limits, .cooperative);
     defer runtime.close();
     try runtime.runError(program, expected);
 }
@@ -156,30 +154,14 @@ fn processFixturePath() ![:0]u8 {
     return std.Io.Dir.cwd().realPathFileAlloc(io, fixture.process_exe, allocator);
 }
 
-test "net: a Session without a listen policy denies listen before the host is reached" {
-    const data = addressData("127.0.0.1", 0);
-    try expectError(.{}, listen_ephemeral, .{
-        .name = "no policy",
-        .source = listen_ephemeral,
-        .kind = "domain",
-        .word = "port.core.open",
-        .message_contains = "unavailable",
-        .data = &.{ reason("unavailable"), data[0], data[1] },
-    });
-}
-
-test "net: registered listener factories preserve identity and enforce host grants" {
+test "net: registered listener factories preserve identity" {
     try expectStack(.{}, "net.core.listener dup type swap net.core.listener match?", "'port 1");
-    try expectStack(.{}, "[] (net.core.listener {'address \"127.0.0.1\" 'port 0} port.open) @attempt 'err at " ++
-        "dup 'kind at swap 'data at 'reason at", "'domain 'unavailable");
-    try expectStack(.{ .net = loopback_ephemeral }, "[] (net.core.listener {'address \"127.0.0.1\" 'port 1} port.open) @attempt 'err at " ++
-        "dup 'kind at swap 'data at 'reason at", "'domain 'denied");
 }
 
 test "net: common factory resources retain scope ownership and joined cleanup" {
     for ([_]u32{ 1, 8 }) |workers| {
         var runtime: Runtime = .{};
-        try runtime.open(.{ .net = loopback_ephemeral }, .{ .worker_pool = workers });
+        try runtime.open(.{}, .{ .worker_pool = workers });
         defer runtime.close();
         try runtime.run("net.core.listener {'address \"127.0.0.1\" 'port 0} port.open 'l set " ++
             "l net.local-address 'port at 0 > " ++
@@ -193,93 +175,43 @@ test "net: common factory resources retain scope ownership and joined cleanup" {
 }
 
 test "net: common factories validate structured bounds before opening a resource" {
-    try expectStack(.{ .net = loopback_ephemeral }, "[] (net.core.listener (dup) port.open) @attempt 'err at 'kind at " ++
+    try expectStack(.{}, "[] (net.core.listener (dup) port.open) @attempt 'err at 'kind at " ++
         "[] (net.core.listener [0] 4097 take port.open) @attempt 'err at 'kind at " ++
         "[] (0 net.core.listener [] port.begin) @attempt 'err at 'kind at", "'type 'overflow 'type");
 }
 
 test "net: process endpoint selectors reject network resources" {
-    try expectStack(.{ .net = loopback_ephemeral }, listen_ephemeral ++ " 'l set " ++
+    try expectStack(.{}, listen_ephemeral ++ " 'l set " ++
         "l wrap (proc.core.stdout port.endpoint) @attempt 'err at 'kind at l port.close", "'type");
 }
 
-test "net: policy validation is a distinct Session construction failure" {
-    const invalid = [_]Policy{
-        .{ .binds = .{ .exact = &.{.{ .address = "localhost", .port = 0 }} } },
-        .{ .binds = .{ .exact = &.{
-            .{ .address = "127.0.0.1", .port = 0 },
-            .{ .address = "::ffff:127.0.0.1", .port = 0 },
-        } } },
-        .{ .binds = .unrestricted, .limits = .{ .max_live_listeners = 0 } },
-    };
-    for (invalid) |policy| {
-        var heap: test_heap.SessionHeap = .init;
-        defer test_heap.retire(&heap);
-        var output_buffer: [64]u8 = undefined;
-        var output = std.Io.Writer.Discarding.init(&output_buffer);
-        try std.testing.expectError(error.InvalidHostPolicy, session.Session.initWithHost(heap.allocator(), &.{}, .{
-            .io = io,
-            .output = &output.writer,
-            .diagnostics = &output.writer,
-            .net_policy = policy,
-        }));
-    }
-    // The copied policy outlives the borrowed inputs it was built from.
-    const address = try allocator.dupe(u8, "127.0.0.1");
-    const binds = try allocator.alloc(net_port.Bind, 1);
-    binds[0] = .{ .address = address, .port = 0 };
-    var runtime: Runtime = .{};
-    try runtime.open(.{ .net = .{ .binds = .{ .exact = binds } } }, .cooperative);
-    defer runtime.close();
-    allocator.free(binds);
-    allocator.free(address);
-    try runtime.run(listen_ephemeral ++ " net.local-address");
-    var storage: [1]u16 = undefined;
-    const ports = try runtime.ports(&storage);
-    try std.testing.expectEqual(@as(usize, 1), ports.len);
-    try std.testing.expect(ports[0] != 0);
-}
-
-test "net: grants are exact and port zero permits only ephemeral binds" {
-    const grants: Grants = .{ .net = loopback_ephemeral };
-    const fixed = "{'address \"127.0.0.1\" 'port 8080} net.listen";
-    const fixed_data = addressData("127.0.0.1", 8080);
-    try expectError(grants, fixed, .{
-        .name = "wrong port",
-        .source = fixed,
-        .kind = "domain",
-        .word = "port.core.open",
-        .data = &.{ reason("denied"), fixed_data[0], fixed_data[1] },
-    });
-    const other_family = "{'address \"::1\" 'port 0} net.listen";
-    try expectError(grants, other_family, .{
-        .name = "other family",
-        .source = other_family,
-        .kind = "domain",
-        .word = "port.core.open",
-        .data = &.{reason("denied")},
-    });
-    // An IPv4-mapped literal normalizes onto the IPv4 grant and binds IPv4.
-    var runtime: Runtime = .{};
-    try runtime.open(grants, .cooperative);
-    defer runtime.close();
-    try runtime.run("{'address \"::ffff:127.0.0.1\" 'port 0} net.listen net.local-address 'address at");
-    try runtime.expectDisplay("\"127.0.0.1\"");
+test "net: zero listener capacity fails Session construction" {
+    var output = std.Io.Writer.Discarding.init(&.{});
+    try std.testing.expectError(error.InvalidHostConfig, session.Session.initWithHost(allocator, &.{}, .{
+        .io = io,
+        .output = &output.writer,
+        .diagnostics = &output.writer,
+        .net_limits = .{ .max_live_listeners = 0 },
+    }));
 }
 
 test "net: listen binds an ephemeral loopback port and local-address reports it" {
-    var runtime: Runtime = .{};
-    try runtime.open(.{ .net = loopback_ephemeral }, .cooperative);
-    defer runtime.close();
-    try runtime.run(listen_ephemeral ++ " dup type swap net.local-address");
-    var display = try runtime.session.stackDisplay();
-    defer display.deinit();
-    try std.testing.expect(std.mem.startsWith(u8, display.bytes(), "'port {'address \"127.0.0.1\" 'port "));
-    var storage: [1]u16 = undefined;
-    const ports = try portsIn(display.bytes(), &storage);
-    try std.testing.expectEqual(@as(usize, 1), ports.len);
-    try std.testing.expect(ports[0] != 0);
-    try std.testing.expectEqual(Probe.accepted, try probe(ports[0]));
+    for ([_][]const u8{ "127.0.0.1", "::ffff:127.0.0.1" }) |address| {
+        var runtime: Runtime = .{};
+        try runtime.open(.{}, .cooperative);
+        defer runtime.close();
+        const program = try std.fmt.allocPrint(allocator, "{{'address \"{s}\" 'port 0}} net.listen dup type swap net.local-address", .{address});
+        defer allocator.free(program);
+        try runtime.run(program);
+        var display = try runtime.session.stackDisplay();
+        defer display.deinit();
+        try std.testing.expect(std.mem.startsWith(u8, display.bytes(), "'port {'address \"127.0.0.1\" 'port "));
+        var storage: [1]u16 = undefined;
+        const ports = try portsIn(display.bytes(), &storage);
+        try std.testing.expectEqual(@as(usize, 1), ports.len);
+        try std.testing.expect(ports[0] != 0);
+        try std.testing.expectEqual(Probe.accepted, try probe(ports[0]));
+    }
 }
 
 test "net: a bind conflict is an io initialization failure" {
@@ -289,7 +221,7 @@ test "net: a bind conflict is an io initialization failure" {
     const port = server.socket.address.getPort();
     const program = try std.fmt.allocPrint(allocator, "{{'address \"127.0.0.1\" 'port {d}}} net.listen", .{port});
     defer allocator.free(program);
-    try expectError(.{ .net = .{ .binds = .{ .exact = &.{.{ .address = "127.0.0.1", .port = port }} } } }, program, .{
+    try expectError(.{}, program, .{
         .name = "in use",
         .source = program,
         .kind = "io",
@@ -303,7 +235,7 @@ test "net: a port left in TIME_WAIT by a closed connection can be bound again at
     // without address reuse the next listen on that port fails for up to a
     // minute, which is how a restarted program finds its own port "in use".
     var runtime: Runtime = .{};
-    try runtime.open(.{ .net = unrestricted }, .cooperative);
+    try runtime.open(.{}, .cooperative);
     defer runtime.close();
     const port = try listenerPort(&runtime);
     const peer = try Peer.start(port, .read_until_eof);
@@ -320,8 +252,8 @@ test "net: a port left in TIME_WAIT by a closed connection can be bound again at
     try runtime.expectDisplay(try std.fmt.bufPrint(&expected, "{d}", .{port}));
 }
 
-test "net: config validation rejects malformed dictionaries before authority checks" {
-    // No policy: a malformed config must fail on its own terms, never as
+test "net: config validation rejects malformed dictionaries before listening" {
+    // No limits: a malformed config must fail on its own terms, never as
     // `'unavailable`.
     const cases = [_]struct { source: []const u8, kind: []const u8 }{
         .{ .source = "1 net.listen", .kind = "type" },
@@ -353,12 +285,9 @@ test "net: config validation rejects malformed dictionaries before authority che
 test "net: listeners are opaque port values distinct from process ports" {
     const fixture_path = try processFixturePath();
     defer allocator.free(fixture_path);
-    const grants: Grants = .{
-        .net = loopback_ephemeral,
-        .process = .{ .executables = .{ .exact = &.{fixture_path} } },
-    };
-    try expectStack(grants, listen_ephemeral ++ " dup type swap dup match?", "'port 1");
-    try expectError(grants, listen_ephemeral ++ " proc.wait", .{
+    const limits: LimitsConfig = .{};
+    try expectStack(limits, listen_ephemeral ++ " dup type swap dup match?", "'port 1");
+    try expectError(limits, listen_ephemeral ++ " proc.wait", .{
         .name = "proc word on a listener",
         .source = listen_ephemeral,
         .kind = "type",
@@ -373,7 +302,7 @@ test "net: listeners are opaque port values distinct from process ports" {
     for ([_][]const u8{"net.local-address"}) |word| {
         const program = try std.fmt.allocPrint(allocator, "{s} {s}", .{ spawn, word });
         defer allocator.free(program);
-        try expectError(grants, program, .{
+        try expectError(limits, program, .{
             .name = word,
             .source = program,
             .kind = "type",
@@ -384,7 +313,7 @@ test "net: listeners are opaque port values distinct from process ports" {
 
 test "net: scope closure releases the socket even while a listener value is retained" {
     var runtime: Runtime = .{};
-    try runtime.open(.{ .net = unrestricted }, .cooperative);
+    try runtime.open(.{}, .cooperative);
     defer runtime.close();
     try runtime.run("[] (" ++ listen_ephemeral ++ " dup net.local-address) @spawn task.await 'ok at");
     var storage: [1]u16 = undefined;
@@ -411,10 +340,7 @@ test "net: scope closure releases the socket even while a listener value is reta
 }
 
 test "net: the live-listener quota is released when a scope closes" {
-    const one: Policy = .{
-        .binds = .{ .exact = &.{.{ .address = "127.0.0.1", .port = 0 }} },
-        .limits = .{ .max_live_listeners = 1 },
-    };
+    const one: Limits = .{ .max_live_listeners = 1 };
     const second = listen_ephemeral ++ " 'first set " ++ listen_ephemeral;
     try expectError(.{ .net = one }, second, .{
         .name = "over quota",
@@ -432,7 +358,7 @@ test "net: the live-listener quota is released when a scope closes" {
 
 test "net: close releases the socket immediately and is idempotent" {
     var runtime: Runtime = .{};
-    try runtime.open(.{ .net = unrestricted }, .cooperative);
+    try runtime.open(.{}, .cooperative);
     defer runtime.close();
     try runtime.run(listen_ephemeral ++ " dup net.local-address swap dup net.close dup net.close");
     var storage: [1]u16 = undefined;
@@ -459,7 +385,7 @@ test "net: close releases the socket immediately and is idempotent" {
 
 test "net: concurrent listens under the worker pool close with their scopes" {
     var runtime: Runtime = .{};
-    try runtime.open(.{ .net = loopback_ephemeral }, .{ .worker_pool = 4 });
+    try runtime.open(.{}, .{ .worker_pool = 4 });
     defer runtime.close();
     const child = "[] (" ++ listen_ephemeral ++ " net.local-address) @spawn";
     try runtime.run("[] (" ++ child ++ " " ++ child ++ " task.await swap task.await) @spawn " ++ child ++ " task.await swap task.await");
@@ -620,7 +546,7 @@ fn expectPeerBytes(observed: Observed, expected: []const u8) !void {
     try std.testing.expectEqualSlices(u8, expected, observed.bytes());
 }
 
-/// Bind an ephemeral listener under `grants`, run `program` with `l` bound to
+/// Bind an ephemeral listener under `limits`, run `program` with `l` bound to
 /// it, and return the port so peers can connect.
 fn listenerPort(runtime: *Runtime) !u16 {
     try runtime.run(listen_ephemeral ++ " 'l set l net.local-address 'port at");
@@ -635,10 +561,7 @@ fn listenerPort(runtime: *Runtime) !u16 {
 test "net: common endpoints finish output while preserving input and closed identity" {
     for ([_]u32{ 1, 8 }) |workers| {
         var runtime: Runtime = .{};
-        try runtime.open(.{ .net = .{
-            .binds = .{ .exact = &.{.{ .address = "127.0.0.1", .port = 0 }} },
-            .limits = .{ .receive_capacity = 1, .send_capacity = 1 },
-        } }, .{ .worker_pool = workers });
+        try runtime.open(.{ .net = .{ .receive_capacity = 1, .send_capacity = 1 } }, .{ .worker_pool = workers });
         defer runtime.close();
         const port = try listenerPort(&runtime);
         var peer: ?*Peer = try Peer.start(port, .{ .read_eof_then_reply = "ok" });
@@ -663,7 +586,7 @@ test "net: common endpoint selectors reject foreign resources and wrong directio
     try expectStack(.{}, "net.core.input dup type swap net.core.input match? " ++
         "[] (net.core.listener net.core.input port.endpoint) @attempt 'err at 'kind at", "'port 1 'type");
     var runtime: Runtime = .{};
-    try runtime.open(.{ .net = loopback_ephemeral }, .cooperative);
+    try runtime.open(.{}, .cooperative);
     defer runtime.close();
     const port = try listenerPort(&runtime);
     var peer: ?*Peer = try Peer.start(port, .read_until_eof);
@@ -684,7 +607,7 @@ test "net: common endpoint selectors reject foreign resources and wrong directio
 
 test "net: accept parks until a peer connects and yields a connection port" {
     var runtime: Runtime = .{};
-    try runtime.open(.{ .net = loopback_ephemeral }, .cooperative);
+    try runtime.open(.{}, .cooperative);
     defer runtime.close();
     const port = try listenerPort(&runtime);
     // The peer connects before any accept is outstanding: the handshake
@@ -702,10 +625,7 @@ test "net: accept parks until a peer connects and yields a connection port" {
 
 test "net: read returns exact bytes bounded by max and the receive capacity and an empty list at EOF" {
     var runtime: Runtime = .{};
-    try runtime.open(.{ .net = .{
-        .binds = .{ .exact = &.{.{ .address = "127.0.0.1", .port = 0 }} },
-        .limits = .{ .receive_capacity = 4 },
-    } }, .cooperative);
+    try runtime.open(.{ .net = .{ .receive_capacity = 4 } }, .cooperative);
     defer runtime.close();
     const port = try listenerPort(&runtime);
     const peer = try Peer.start(port, .{ .write_then_close = &.{ 1, 2, 3, 4, 5, 6, 7, 8 } });
@@ -726,10 +646,7 @@ test "net: read returns exact bytes bounded by max and the receive capacity and 
 
 test "net: write delivers exact bytes in order under bounded send pressure" {
     var runtime: Runtime = .{};
-    try runtime.open(.{ .net = .{
-        .binds = .{ .exact = &.{.{ .address = "127.0.0.1", .port = 0 }} },
-        .limits = .{ .send_capacity = 4 },
-    } }, .cooperative);
+    try runtime.open(.{ .net = .{ .send_capacity = 4 } }, .cooperative);
     defer runtime.close();
     const port = try listenerPort(&runtime);
     const peer = try Peer.start(port, .read_until_eof);
@@ -747,7 +664,7 @@ test "net: write delivers exact bytes in order under bounded send pressure" {
 
 test "net: peer-address and local-address describe both ends of a connection" {
     var runtime: Runtime = .{};
-    try runtime.open(.{ .net = loopback_ephemeral }, .cooperative);
+    try runtime.open(.{}, .cooperative);
     defer runtime.close();
     const port = try listenerPort(&runtime);
     const peer = try Peer.start(port, .read_until_eof);
@@ -778,7 +695,7 @@ test "net: peer-address and local-address describe both ends of a connection" {
 
 test "net: a connection on a wildcard listener reports the endpoint it was reached on" {
     var runtime: Runtime = .{};
-    try runtime.open(.{ .net = .{ .binds = .{ .exact = &.{.{ .address = "0.0.0.0", .port = 0 }} } } }, .cooperative);
+    try runtime.open(.{}, .cooperative);
     defer runtime.close();
     try runtime.run("{'address \"0.0.0.0\" 'port 0} net.listen 'l set l net.local-address 'port at");
     var display = try runtime.session.stackDisplay();
@@ -792,7 +709,7 @@ test "net: a connection on a wildcard listener reports the endpoint it was reach
 
 test "net: a peer that closes at once yields a connection at EOF" {
     var runtime: Runtime = .{};
-    try runtime.open(.{ .net = loopback_ephemeral }, .cooperative);
+    try runtime.open(.{}, .cooperative);
     defer runtime.close();
     const port = try listenerPort(&runtime);
     const peer = try Peer.start(port, .connect_then_close);
@@ -803,7 +720,7 @@ test "net: a peer that closes at once yields a connection at EOF" {
 
 test "net: a connection belongs to the accepting unit's scope and closes with it" {
     var runtime: Runtime = .{};
-    try runtime.open(.{ .net = loopback_ephemeral }, .cooperative);
+    try runtime.open(.{}, .cooperative);
     defer runtime.close();
     const port = try listenerPort(&runtime);
     const peer = try Peer.start(port, .read_until_eof);
@@ -828,7 +745,7 @@ test "net: a connection belongs to the accepting unit's scope and closes with it
 
 test "net: close flushes queued bytes before the peer observes EOF and is idempotent" {
     var runtime: Runtime = .{};
-    try runtime.open(.{ .net = loopback_ephemeral }, .cooperative);
+    try runtime.open(.{}, .cooperative);
     defer runtime.close();
     const port = try listenerPort(&runtime);
     const peer = try Peer.start(port, .read_until_eof);
@@ -840,9 +757,9 @@ test "net: close flushes queued bytes before the peer observes EOF and is idempo
 test "net: common shutdown drains connections and closes listeners independently" {
     for ([_]u32{ 1, 8 }) |workers| {
         var runtime: Runtime = .{};
-        var policy = loopback_ephemeral;
-        policy.limits.send_capacity = 1;
-        try runtime.open(.{ .net = policy }, .{ .worker_pool = workers });
+        var limits: Limits = .{};
+        limits.send_capacity = 1;
+        try runtime.open(.{ .net = limits }, .{ .worker_pool = workers });
         defer runtime.close();
         const port = try listenerPort(&runtime);
         const peer = try Peer.start(port, .read_until_eof);
@@ -857,7 +774,7 @@ test "net: common shutdown drains connections and closes listeners independently
 test "net: common close interrupts a connection reader and preserves closed identity" {
     for ([_]u32{ 1, 8 }) |workers| {
         var runtime: Runtime = .{};
-        try runtime.open(.{ .net = loopback_ephemeral }, .{ .worker_pool = workers });
+        try runtime.open(.{}, .{ .worker_pool = workers });
         defer runtime.close();
         const port = try listenerPort(&runtime);
         const peer = try Peer.start(port, .read_until_eof);
@@ -870,7 +787,7 @@ test "net: common close interrupts a connection reader and preserves closed iden
 
 test "net: closing a listener cancels admitted accepts and leaves accepted connections open" {
     var runtime: Runtime = .{};
-    try runtime.open(.{ .net = loopback_ephemeral }, .cooperative);
+    try runtime.open(.{}, .cooperative);
     defer runtime.close();
     const port = try listenerPort(&runtime);
     const peer = try Peer.start(port, .{ .write_then_read_until_eof = "in" });
@@ -898,7 +815,7 @@ test "net: closing a listener cancels admitted accepts and leaves accepted conne
 
 test "net: overlapping reads on one connection are a contract failure" {
     var runtime: Runtime = .{};
-    try runtime.open(.{ .net = loopback_ephemeral }, .cooperative);
+    try runtime.open(.{}, .cooperative);
     defer runtime.close();
     const port = try listenerPort(&runtime);
     const peer = try Peer.start(port, .{ .sync_then_write = "ab" });
@@ -914,7 +831,7 @@ test "net: overlapping reads on one connection are a contract failure" {
 
 test "net: a peer reset fails reads and address operations" {
     var runtime: Runtime = .{};
-    try runtime.open(.{ .net = loopback_ephemeral }, .cooperative);
+    try runtime.open(.{}, .cooperative);
     defer runtime.close();
     const port = try listenerPort(&runtime);
     const peer = try Peer.start(port, .sync_then_reset);
@@ -945,10 +862,7 @@ test "net: a peer reset fails reads and address operations" {
 
 test "net: accept parks at the live-connection quota and proceeds when a connection closes" {
     var runtime: Runtime = .{};
-    try runtime.open(.{ .net = .{
-        .binds = .{ .exact = &.{.{ .address = "127.0.0.1", .port = 0 }} },
-        .limits = .{ .max_live_connections = 1 },
-    } }, .cooperative);
+    try runtime.open(.{ .net = .{ .max_live_connections = 1 } }, .cooperative);
     defer runtime.close();
     const port = try listenerPort(&runtime);
     const first = try Peer.start(port, .read_until_eof);
@@ -970,7 +884,7 @@ test "net: accept parks at the live-connection quota and proceeds when a connect
 
 test "net: cancelling a parked accept or read leaves the listener and connection usable" {
     var runtime: Runtime = .{};
-    try runtime.open(.{ .net = loopback_ephemeral }, .cooperative);
+    try runtime.open(.{}, .cooperative);
     defer runtime.close();
     const port = try listenerPort(&runtime);
     // The cancelled accept had the acceptor waiting in poll; the connection
@@ -993,14 +907,11 @@ test "net: cancelling a parked accept or read leaves the listener and connection
 test "net: connection words reject listeners, process ports, and non-ports with type" {
     const fixture_path = try processFixturePath();
     defer allocator.free(fixture_path);
-    const grants: Grants = .{
-        .net = loopback_ephemeral,
-        .process = .{ .executables = .{ .exact = &.{fixture_path} } },
-    };
+    const limits: LimitsConfig = .{};
     for ([_][]const u8{ "l 4 net.read", "l [1] net.write", "l net.peer-address" }) |source| {
         const program = try std.fmt.allocPrint(allocator, "{s} 'l set {s}", .{ listen_ephemeral, source });
         defer allocator.free(program);
-        try expectError(grants, program, .{ .name = source, .source = program, .kind = "type" });
+        try expectError(limits, program, .{ .name = source, .source = program, .kind = "type" });
     }
     const spawn = try std.fmt.allocPrint(
         allocator,
@@ -1011,11 +922,11 @@ test "net: connection words reject listeners, process ports, and non-ports with 
     for ([_][]const u8{ "net.accept", "net.peer-address", "4 net.read" }) |word| {
         const program = try std.fmt.allocPrint(allocator, "{s} {s}", .{ spawn, word });
         defer allocator.free(program);
-        try expectError(grants, program, .{ .name = word, .source = program, .kind = "type" });
+        try expectError(limits, program, .{ .name = word, .source = program, .kind = "type" });
     }
-    try expectError(grants, "1 net.accept", .{ .name = "int", .source = "1 net.accept", .kind = "type", .word = "port.core.begin" });
+    try expectError(limits, "1 net.accept", .{ .name = "int", .source = "1 net.accept", .kind = "type", .word = "port.core.begin" });
     var runtime: Runtime = .{};
-    try runtime.open(grants, .cooperative);
+    try runtime.open(limits, .cooperative);
     defer runtime.close();
     const port = try listenerPort(&runtime);
     const peer = try Peer.start(port, .read_until_eof);
@@ -1027,7 +938,7 @@ test "net: connection words reject listeners, process ports, and non-ports with 
 
 test "net: concurrent connections under the worker pool close with their scopes" {
     var runtime: Runtime = .{};
-    try runtime.open(.{ .net = loopback_ephemeral }, .{ .worker_pool = 4 });
+    try runtime.open(.{}, .{ .worker_pool = 4 });
     defer runtime.close();
     const port = try listenerPort(&runtime);
     var peers: [3]*Peer = undefined;
@@ -1075,7 +986,7 @@ test "net: @give moves listener ownership, so the child's end closes the socket"
     {
         // Given away: the child owns the listener, so it dies with the child.
         var runtime: Runtime = .{};
-        try runtime.open(.{ .net = loopback_ephemeral }, .cooperative);
+        try runtime.open(.{}, .cooperative);
         defer runtime.close();
         const port = try runForPort(&runtime, capture ++ "wrap [] (pop) @give task.await pop");
         try std.testing.expect(port != 0);
@@ -1084,7 +995,7 @@ test "net: @give moves listener ownership, so the child's end closes the socket"
     {
         // Merely passed: the caller still owns it, so it outlives the child.
         var runtime: Runtime = .{};
-        try runtime.open(.{ .net = loopback_ephemeral }, .cooperative);
+        try runtime.open(.{}, .cooperative);
         defer runtime.close();
         const port = try runForPort(&runtime, capture ++ "wrap (pop) @spawn task.await pop");
         try std.testing.expect(port != 0);
@@ -1094,7 +1005,7 @@ test "net: @give moves listener ownership, so the child's end closes the socket"
 
 test "net: a given listener is usable by the child and can be given onward" {
     var runtime: Runtime = .{};
-    try runtime.open(.{ .net = loopback_ephemeral }, .cooperative);
+    try runtime.open(.{}, .cooperative);
     defer runtime.close();
     try runtime.run(listen_ephemeral ++
         " wrap [] (wrap [] (net.local-address 'port at 0 >) @give task.await) @give task.await" ++
@@ -1107,7 +1018,7 @@ test "net: a given listener is usable by the child and can be given onward" {
 test "net: @give refuses a port the calling unit does not own" {
     const program = listen_ephemeral ++ " dup wrap (wrap [] (pop) @give task.await) @spawn task.await nip";
     var runtime: Runtime = .{};
-    try runtime.open(.{ .net = loopback_ephemeral }, .cooperative);
+    try runtime.open(.{}, .cooperative);
     defer runtime.close();
     try runtime.run(program ++ " 'err at 'msg at");
     var display = try runtime.session.stackDisplay();
@@ -1119,13 +1030,13 @@ test "net: @give refuses a port the calling unit does not own" {
 }
 
 test "net: @give refuses a closed port and a non-port" {
-    try expectError(.{ .net = loopback_ephemeral }, listen_ephemeral ++ " dup net.close wrap [] (pop) @give", .{
+    try expectError(.{}, listen_ephemeral ++ " dup net.close wrap [] (pop) @give", .{
         .name = "closed",
         .source = listen_ephemeral ++ " dup net.close wrap [] (pop) @give",
         .kind = "domain",
         .word = "@give",
     });
-    try expectError(.{ .net = loopback_ephemeral }, "[1] [] (pop) @give", .{
+    try expectError(.{}, "[1] [] (pop) @give", .{
         .name = "non-port",
         .source = "[1] [] (pop) @give",
         .kind = "type",
@@ -1135,7 +1046,7 @@ test "net: @give refuses a closed port and a non-port" {
 
 test "net: @give refuses the same port twice and leaves it owned by the caller" {
     var runtime: Runtime = .{};
-    try runtime.open(.{ .net = loopback_ephemeral }, .cooperative);
+    try runtime.open(.{}, .cooperative);
     defer runtime.close();
     try runtime.run(listen_ephemeral ++ " dup net.local-address 'port at swap" ++
         " wrap dup cat [] (pop pop) 3 pack (@give) @attempt 'err at 'kind at");
@@ -1152,7 +1063,7 @@ test "net: a process port is givable too, and dies with the unit it was given to
     const fixture_path = try processFixturePath();
     defer allocator.free(fixture_path);
     var runtime: Runtime = .{};
-    try runtime.open(.{ .process = .{ .executables = .{ .exact = &.{fixture_path} } } }, .cooperative);
+    try runtime.open(.{}, .cooperative);
     defer runtime.close();
     const program = try std.fmt.allocPrint(
         allocator,
@@ -1191,11 +1102,11 @@ test "net: @give bounds its port list before doing any per-port work" {
 test "net: accepted results publish once and outlive listener closure" {
     for ([_]u32{ 1, 8 }) |workers| {
         var runtime: Runtime = .{};
-        try runtime.open(.{ .net = .{ .binds = .unrestricted, .limits = .{
+        try runtime.open(.{ .net = .{
             .max_live_connections = 1,
             .receive_capacity = 1,
             .send_capacity = 1,
-        } } }, .{ .worker_pool = workers });
+        } }, .{ .worker_pool = workers });
         defer runtime.close();
         const port = try listenerPort(&runtime);
         const peer = try Peer.start(port, .{ .write_then_read_until_eof = "in" });
@@ -1218,11 +1129,11 @@ test "net: accepted results publish once and outlive listener closure" {
 test "net: giving a completed accept transfers provisional result ownership" {
     for ([_]u32{ 1, 8 }) |workers| {
         var runtime: Runtime = .{};
-        try runtime.open(.{ .net = .{ .binds = .unrestricted, .limits = .{
+        try runtime.open(.{ .net = .{
             .max_live_connections = 1,
             .receive_capacity = 1,
             .send_capacity = 1,
-        } } }, .{ .worker_pool = workers });
+        } }, .{ .worker_pool = workers });
         defer runtime.close();
         const port = try listenerPort(&runtime);
         const peer = try Peer.start(port, .read_until_eof);
@@ -1247,11 +1158,11 @@ test "net: giving a completed accept transfers provisional result ownership" {
 test "net: discarded accepted results release connection capacity" {
     for ([_]u32{ 1, 8 }) |workers| {
         var runtime: Runtime = .{};
-        try runtime.open(.{ .net = .{ .binds = .unrestricted, .limits = .{
+        try runtime.open(.{ .net = .{
             .max_live_connections = 1,
             .receive_capacity = 1,
             .send_capacity = 1,
-        } } }, .{ .worker_pool = workers });
+        } }, .{ .worker_pool = workers });
         defer runtime.close();
         const port = try listenerPort(&runtime);
         for (0..2) |_| {
@@ -1274,10 +1185,10 @@ test "net: discarded accepted results release connection capacity" {
 test "net: EOF remains stable across endpoint borrows and resource closure" {
     for ([_]u32{ 1, 8 }) |workers| {
         var runtime: Runtime = .{};
-        try runtime.open(.{ .net = .{ .binds = .unrestricted, .limits = .{
+        try runtime.open(.{ .net = .{
             .receive_capacity = 1,
             .send_capacity = 1,
-        } } }, .{ .worker_pool = workers });
+        } }, .{ .worker_pool = workers });
         defer runtime.close();
         const port = try listenerPort(&runtime);
         const peer = try Peer.start(port, .connect_then_close);

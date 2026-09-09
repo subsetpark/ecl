@@ -76,7 +76,6 @@ test "native: receiving built-in resources shares use without moving scope owner
             .diagnostics = &diagnostics.writer,
             .ecl_path = native_fixture.directory,
             .native_port_limits = .{ .message_capacity = 1 },
-            .net_policy = .{ .binds = .{ .exact = &.{.{ .address = "127.0.0.1", .port = 0 }} } },
         }, .{ .worker_pool = workers });
         defer runtime.deinit();
         try expectOk(&runtime, "portprobe.reset {'address \"127.0.0.1\" 'port 0} net.listen 'l set " ++

@@ -1,6 +1,6 @@
 //! Public Session coverage for the `http.server.@serve` server module.
 //!
-//! Every case runs source text through a Session whose Host grants exact
+//! Every case runs source text through a Session whose Host limits exact
 //! loopback binds on `127.0.0.1` port 0, and observes the other end of the
 //! wire through a Zig-side `Peer` thread: it connects to the bound port,
 //! writes its request bytes verbatim, and reads until EOF into a 4 KiB buffer,
@@ -28,9 +28,7 @@ const allocator = std.testing.allocator;
 const io = std.testing.io;
 const IpAddress = std.Io.net.IpAddress;
 const posix = std.posix;
-const Policy = net_port.NetPolicy;
-
-const loopback_ephemeral: Policy = .{ .binds = .{ .exact = &.{.{ .address = "127.0.0.1", .port = 0 }} } };
+const Limits = net_port.Limits;
 
 /// One Session plus the writers it borrows. Open it in place and never move
 /// it afterwards: the Session holds pointers into this struct.
@@ -42,14 +40,14 @@ const Runtime = struct {
     diagnostics: ?std.Io.Writer.Discarding = null,
     session: session.Session = .consumed,
 
-    fn open(self: *Runtime, policy: Policy, config: session.Config) !void {
+    fn open(self: *Runtime, limits: Limits, config: session.Config) !void {
         self.output = std.Io.Writer.Discarding.init(&self.output_buffer);
         self.diagnostics = std.Io.Writer.Discarding.init(&self.diagnostics_buffer);
         self.session = try session.Session.initWithHostConfig(self.heap.allocator(), &.{}, .{
             .io = io,
             .output = &self.output.?.writer,
             .diagnostics = &self.diagnostics.?.writer,
-            .net_policy = policy,
+            .net_limits = limits,
             .clock = .{ .monotonic = .manual },
         }, config);
     }
@@ -364,7 +362,7 @@ const Server = struct {
 
 test "http server: a request is materialized with method target path query lowercased list headers body and peer" {
     var runtime: Runtime = .{};
-    try runtime.open(loopback_ephemeral, .cooperative);
+    try runtime.open(.{}, .cooperative);
     defer runtime.close();
     const port = try runtime.listen("l");
     const server = try Server.start(&runtime, port, "", "{}",
@@ -387,7 +385,7 @@ test "http server: a request is materialized with method target path query lower
 
 test "http server: string and byte-list bodies are written with content-length and connection close" {
     var runtime: Runtime = .{};
-    try runtime.open(loopback_ephemeral, .cooperative);
+    try runtime.open(.{}, .cooperative);
     defer runtime.close();
     const port = try runtime.listen("l");
     const server = try Server.start(&runtime, port, "", "{}", "\"/s\" (pop {'status 200 'headers {} 'body \"ok\"}) " ++
@@ -406,7 +404,7 @@ test "http server: string and byte-list bodies are written with content-length a
 
 test "http server: repeated response headers are written once per value" {
     var runtime: Runtime = .{};
-    try runtime.open(loopback_ephemeral, .cooperative);
+    try runtime.open(.{}, .cooperative);
     defer runtime.close();
     const port = try runtime.listen("l");
     const server = try Server.start(&runtime, port, "", "{}", "\"/c\" (pop {'status 200 'headers {\"Set-Cookie\" (\"a=1\" \"b=2\")} 'body \"\"}) ", not_found_default);
@@ -420,7 +418,7 @@ test "http server: repeated response headers are written once per value" {
 
 test "http server: a content-length body is delivered as an exact byte list including binary octets" {
     var runtime: Runtime = .{};
-    try runtime.open(loopback_ephemeral, .cooperative);
+    try runtime.open(.{}, .cooperative);
     defer runtime.close();
     const port = try runtime.listen("l");
     const server = try Server.start(&runtime, port, "", "{}", "\"/\" ('body at str {'status 200 'headers {} 'body \"\"} 'body rolldown put) ", not_found_default);
@@ -433,7 +431,7 @@ test "http server: a content-length body is delivered as an exact byte list incl
 
 test "http server: malformed request lines and headers are answered 400 and closed" {
     var runtime: Runtime = .{};
-    try runtime.open(loopback_ephemeral, .cooperative);
+    try runtime.open(.{}, .cooperative);
     defer runtime.close();
     const port = try runtime.listen("l");
     // The default row answers 200 too, so a 400 proves the handler never ran.
@@ -463,7 +461,7 @@ test "http server: malformed request lines and headers are answered 400 and clos
 
 test "http server: chunked requests are answered 411 and unsupported versions 505 while HTTP/1.0 is answered and closed" {
     var runtime: Runtime = .{};
-    try runtime.open(loopback_ephemeral, .cooperative);
+    try runtime.open(.{}, .cooperative);
     defer runtime.close();
     const port = try runtime.listen("l");
     const server = try Server.start(&runtime, port, "", "{}", ok_row, not_found_default);
@@ -476,7 +474,7 @@ test "http server: chunked requests are answered 411 and unsupported versions 50
 
 test "http server: header and body limits are answered 431 and 413" {
     var runtime: Runtime = .{};
-    try runtime.open(loopback_ephemeral, .cooperative);
+    try runtime.open(.{}, .cooperative);
     defer runtime.close();
     const port = try runtime.listen("l");
     const server = try Server.start(&runtime, port, "", "{'max-header-bytes 64 'max-body-bytes 4}", ok_row, not_found_default);
@@ -490,7 +488,7 @@ test "http server: header and body limits are answered 431 and 413" {
 
 test "http server: the read deadline answers 408 and closes" {
     var runtime: Runtime = .{};
-    try runtime.open(loopback_ephemeral, .cooperative);
+    try runtime.open(.{}, .cooperative);
     defer runtime.close();
     const port = try runtime.listen("l");
     const server = try Server.start(&runtime, port, "", "{'read-timeout-ms 20}", ok_row, not_found_default);
@@ -516,7 +514,7 @@ test "http server: max-in-flight stops accepting until a request completes" {
     // runs only after the gate released it, so it finds the gate terminal.
     {
         var runtime: Runtime = .{};
-        try runtime.open(loopback_ephemeral, .cooperative);
+        try runtime.open(.{}, .cooperative);
         defer runtime.close();
         const port = try runtime.listen("l");
         const gate_port = try runtime.listen("l2");
@@ -540,7 +538,7 @@ test "http server: max-in-flight stops accepting until a request completes" {
     // holds the other one and the gate is still active.
     {
         var runtime: Runtime = .{};
-        try runtime.open(loopback_ephemeral, .cooperative);
+        try runtime.open(.{}, .cooperative);
         defer runtime.close();
         const port = try runtime.listen("l");
         const gate_port = try runtime.listen("l2");
@@ -562,7 +560,7 @@ test "http server: max-in-flight stops accepting until a request completes" {
 
 test "http server: handler failures extra results malformed responses and reserved headers are answered 500 while the server stays live" {
     var runtime: Runtime = .{};
-    try runtime.open(loopback_ephemeral, .cooperative);
+    try runtime.open(.{}, .cooperative);
     defer runtime.close();
     const port = try runtime.listen("l");
     // The hook itself fails on every report; the server must contain that too.
@@ -583,7 +581,7 @@ test "http server: handler failures extra results malformed responses and reserv
 
 test "http server: cancellation cancels in-flight requests and leaves the caller's listener open" {
     var runtime: Runtime = .{};
-    try runtime.open(loopback_ephemeral, .cooperative);
+    try runtime.open(.{}, .cooperative);
     defer runtime.close();
     const port = try runtime.listen("l");
     _ = try runtime.listen("l2");
@@ -604,7 +602,7 @@ test "http server: cancellation cancels in-flight requests and leaves the caller
 
 test "http server: closing the listener propagates accept cancellation or closed admission" {
     var runtime: Runtime = .{};
-    try runtime.open(loopback_ephemeral, .cooperative);
+    try runtime.open(.{}, .cooperative);
     defer runtime.close();
     const port = try runtime.listen("l");
     const server = try Server.start(&runtime, port, "", "{}", ok_row, not_found_default);
@@ -615,7 +613,7 @@ test "http server: closing the listener propagates accept cancellation or closed
 
 test "http server: a peer that connects and closes without sending is closed silently" {
     var runtime: Runtime = .{};
-    try runtime.open(loopback_ephemeral, .cooperative);
+    try runtime.open(.{}, .cooperative);
     defer runtime.close();
     const port = try runtime.listen("l");
     const server = try Server.start(&runtime, port, "", "{}", ok_row, not_found_default);
@@ -628,7 +626,7 @@ test "http server: a peer that connects and closes without sending is closed sil
 
 test "http server: configuration and listener arguments are validated before serving" {
     var runtime: Runtime = .{};
-    try runtime.open(loopback_ephemeral, .cooperative);
+    try runtime.open(.{}, .cooperative);
     defer runtime.close();
     const port = try runtime.listen("l");
     try runtime.run(
@@ -652,7 +650,7 @@ test "http server: configuration and listener arguments are validated before ser
 
 test "http server: concurrent requests under the worker pool are each answered exactly once" {
     var runtime: Runtime = .{};
-    try runtime.open(loopback_ephemeral, .{ .worker_pool = 8 });
+    try runtime.open(.{}, .{ .worker_pool = 8 });
     defer runtime.close();
     const port = try runtime.listen("l");
     const server = try Server.start(&runtime, port, "", "{}", "", "('path at {'status 200 'headers {} 'body \"\"} 'body rolldown put)");

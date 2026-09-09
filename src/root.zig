@@ -31,18 +31,12 @@ pub const EnvironmentEntry = internal.machine.Environ.Entry;
 pub const StandardInputAvailability = internal.machine.StandardInput.Availability;
 pub const MonotonicClockSource = internal.scheduler.ClockSource;
 
-pub const ProcessPolicy = internal.process_port.ProcessPolicy;
-pub const ExecutablePolicy = internal.process_port.ExecutablePolicy;
+pub const ProcessLimits = internal.process_port.Limits;
 
-pub const FilesystemPolicy = internal.filesystem_port.FilesystemPolicy;
+pub const FilesystemConfig = internal.filesystem_port.Config;
 pub const FilesystemRoot = internal.filesystem_port.Root;
-pub const FilesystemPermission = internal.filesystem_port.Permission;
-pub const FilesystemPermissions = internal.filesystem_port.Permissions;
 pub const FilesystemLimits = internal.filesystem_port.Limits;
 
-pub const NetPolicy = internal.net_port.NetPolicy;
-pub const NetBind = internal.net_port.Bind;
-pub const NetBindPolicy = internal.net_port.BindPolicy;
 pub const NetLimits = internal.net_port.Limits;
 pub const NativePortLimits = @FieldType(Host, "native_port_limits");
 
@@ -69,16 +63,10 @@ const public_declarations = [_][]const u8{
     "EnvironmentEntry",
     "StandardInputAvailability",
     "MonotonicClockSource",
-    "ProcessPolicy",
-    "ExecutablePolicy",
-    "FilesystemPolicy",
+    "ProcessLimits",
+    "FilesystemConfig",
     "FilesystemRoot",
-    "FilesystemPermission",
-    "FilesystemPermissions",
     "FilesystemLimits",
-    "NetPolicy",
-    "NetBind",
-    "NetBindPolicy",
     "NetLimits",
     "NativePortLimits",
 };

@@ -27,10 +27,10 @@ const filesystem_port = @import("filesystem_port.zig");
 const net_port = @import("net_port.zig");
 const package_authority = @import("package_authority.zig");
 pub const Value = value.Value;
-/// Session construction distinguishes an unsatisfiable host policy from
+/// Session construction distinguishes invalid runtime configuration from
 /// allocation failure: a misnamed root, a relative or missing directory, or an
 /// unsupported target is a configuration error the embedder must see.
-pub const InitError = error{ OutOfMemory, InvalidHostPolicy };
+pub const InitError = error{ OutOfMemory, InvalidHostConfig };
 pub const UnitOutcome = union(enum) {
     ok,
     incomplete: reader.Incomplete,
@@ -87,7 +87,7 @@ pub const ClockPolicy = struct {
 /// only differ by type.
 pub const Host = struct {
     /// Capacity for trusted package-defined resources; validated at creation
-    /// of the Session, independently of filesystem, process, and net policies.
+    /// of the Session, independently of filesystem, process, and network limits.
     native_port_limits: native_port.Limits = .{},
     io: std.Io,
     output: *std.Io.Writer,
@@ -101,14 +101,11 @@ pub const Host = struct {
     environ: []const machine.Environ.Entry = &.{},
     /// Whether the process has already claimed stdin as the program source.
     standard_input: machine.StandardInput.Availability = .data,
-    /// Absent by default: host I/O alone never grants executable authority.
-    process_policy: ?process_port.ProcessPolicy = null,
-    /// Absent by default: every caller-selected filesystem operation is denied
-    /// until the host names root directories and their permissions.
-    filesystem_policy: ?filesystem_port.FilesystemPolicy = null,
-    /// Absent by default: no address may be bound until the host names exact
-    /// address and port pairs or grants an unrestricted listen policy.
-    net_policy: ?net_port.NetPolicy = null,
+    /// Startup directory for child processes. Null captures the current directory.
+    initial_cwd: ?[]const u8 = null,
+    process_limits: process_port.Limits = .{},
+    filesystem: filesystem_port.Config = .{},
+    net_limits: net_port.Limits = .{},
     /// Host monotonic time and no wall clock by default.
     clock: ClockPolicy = .{},
 };
@@ -460,7 +457,7 @@ pub const Session = enum(usize) {
         errdefer if (test_authority) |*authority| authority.deinit();
         const native_owner = native_module.Owner.initWithPortLimits(host_owner.cleanup(), if (host) |services| services.native_port_limits else .{}) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
-            error.InvalidLimits => error.InvalidHostPolicy,
+            error.InvalidLimits => error.InvalidHostConfig,
         };
         errdefer native_owner.closeCalls().settle().deinit();
         // A Session builds exactly one archive on its own reclamation root, so
@@ -508,7 +505,7 @@ pub const Session = enum(usize) {
             if (host) |services| services.environ else &.{},
         );
         errdefer snapshot.deinit(allocator);
-        const process_owner = if (host) |services| if (services.process_policy) |policy| owner: {
+        const process_owner = if (host) |services| owner: {
             const entries = try allocator.alloc(process_port.EnvironmentEntry, snapshot.entries.len);
             defer allocator.free(entries);
             for (snapshot.entries, entries) |entry, *copy|
@@ -518,51 +515,52 @@ pub const Session = enum(usize) {
             owned.* = process_port.ProcessOwner.init(
                 host_owner.cleanup(),
                 services.io,
-                policy,
+                services.initial_cwd,
+                services.process_limits,
                 entries,
             ) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                error.InvalidPolicy => return error.InvalidHostPolicy,
+                error.InvalidConfig => return error.InvalidHostConfig,
             };
             break :owner owned;
-        } else null else null;
+        } else null;
         errdefer if (process_owner) |owner| {
             owner.deinit();
             allocator.destroy(owner);
         };
-        const filesystem_owner = if (host) |services| if (services.filesystem_policy) |policy| owner: {
+        const filesystem_owner = if (host) |services| owner: {
             const owned = try allocator.create(filesystem_port.FilesystemOwner);
             errdefer allocator.destroy(owned);
-            owned.* = filesystem_port.FilesystemOwner.init(allocator, services.io, policy) catch |err| switch (err) {
+            owned.* = filesystem_port.FilesystemOwner.init(allocator, services.io, services.filesystem) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                error.InvalidPolicy => return error.InvalidHostPolicy,
+                error.InvalidConfig => return error.InvalidHostConfig,
             };
             break :owner owned;
-        } else null else null;
+        } else null;
         errdefer if (filesystem_owner) |owner| {
             owner.deinit();
             allocator.destroy(owner);
         };
-        const net_owner = if (host) |services| if (services.net_policy) |policy| owner: {
+        const net_owner = if (host) |services| owner: {
             const owned = try allocator.create(net_port.NetOwner);
             errdefer allocator.destroy(owned);
-            owned.* = net_port.NetOwner.init(host_owner.cleanup(), services.io, policy) catch |err| switch (err) {
+            owned.* = net_port.NetOwner.init(host_owner.cleanup(), services.io, services.net_limits) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                error.InvalidPolicy => return error.InvalidHostPolicy,
+                error.InvalidConfig => return error.InvalidHostConfig,
             };
             break :owner owned;
-        } else null else null;
+        } else null;
         errdefer if (net_owner) |owner| {
             owner.deinit();
             allocator.destroy(owner);
         };
         const package_owner = if (package_grant) |grant| owner: {
-            const services = host orelse return error.InvalidHostPolicy;
+            const services = host orelse return error.InvalidHostConfig;
             const owned = try allocator.create(package_authority.PackageOwner);
             errdefer allocator.destroy(owned);
             owned.* = package_authority.PackageOwner.init(allocator, services.io, grant) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                error.InvalidPolicy => return error.InvalidHostPolicy,
+                error.InvalidPolicy => return error.InvalidHostConfig,
             };
             break :owner owned;
         } else null;

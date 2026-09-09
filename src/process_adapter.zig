@@ -242,7 +242,6 @@ const Parser = struct {
                 const resource = process.openPrepared(self.access, self.context.scope, prepared) catch |err| return switch (err) {
                     error.OutOfMemory => error.OutOfMemory,
                     error.Unsupported => .{ .failed = Failure.init(.domain, "process ports are unsupported on this target") },
-                    error.Denied => .{ .failed = Failure.init(.domain, "process specification denied by host policy") },
                     error.InvalidSpec => .{ .failed = Failure.init(.domain, "invalid process specification") },
                     error.LiveLimit => .{ .failed = Failure.init(.domain, "host process-port limit reached") },
                     error.ScopeClosing => .{ .failed = Failure.init(.cancelled, "process scope is closing") },

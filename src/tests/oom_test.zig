@@ -818,23 +818,14 @@ fn stdlibSessionAllocationProbe(
                 .{ .name = "ECL_CACHE", .value = scratch_path },
             },
             .standard_input = .program_source,
-            .process_policy = if (surface == .process) .{
-                .executables = .{ .exact = &.{process_path} },
+            .process_limits = .{
                 .stdin_capacity = 16,
                 .stdout_capacity = 16,
                 .stderr_capacity = 16,
-            } else null,
-            .net_policy = if (surface == .net or surface == .net_connection or
-                surface == .net_give or surface == .http_server) .{
-                .binds = .{ .exact = &.{.{ .address = "127.0.0.1", .port = 0 }} },
-            } else null,
-            .filesystem_policy = .{ .roots = &.{
-                .{ .name = "cwd", .absolute_path = scratch_path, .permissions = .all },
-                .{
-                    .name = "project",
-                    .absolute_path = scratch_path,
-                    .permissions = .{ .read_data = true, .inspect = true, .create = true, .replace = true },
-                },
+            },
+            .filesystem = .{ .roots = &.{
+                .{ .name = "cwd", .absolute_path = scratch_path },
+                .{ .name = "project", .absolute_path = scratch_path },
             } },
         },
         .cooperative,
@@ -1380,8 +1371,6 @@ fn BuiltinResourceLifecycleProbe(comptime backend: enum { process, listener }, c
                 .io = std.testing.io,
                 .output = &output,
                 .diagnostics = &diagnostics,
-                .process_policy = .{ .executables = .{ .exact = &.{process_path} } },
-                .net_policy = .{ .binds = .{ .exact = &.{.{ .address = "127.0.0.1", .port = 0 }} } },
             }, .cooperative);
             defer runtime.deinit();
             // Join the process before injection: these probes cover the
@@ -1711,7 +1700,7 @@ test "oom: standard-library and host: common network endpoint publication and tr
                 .io = std.testing.io,
                 .output = &output,
                 .diagnostics = &diagnostics,
-                .net_policy = .{ .binds = .{ .exact = &.{.{ .address = "127.0.0.1", .port = 0 }} }, .limits = .{ .receive_capacity = 1, .send_capacity = 1 } },
+                .net_limits = .{ .receive_capacity = 1, .send_capacity = 1 },
             }, .cooperative);
             defer runtime.deinit();
             try runOk(&runtime, "oom-net-endpoint-setup.ecl", "net.core.listener {'address \"127.0.0.1\" 'port 0} port.open 'l set l net.local-address 'port at");
@@ -1939,11 +1928,11 @@ fn NetAcceptResultProbe(comptime operation: []const u8) type {
                 .io = std.testing.io,
                 .output = &output,
                 .diagnostics = &diagnostics,
-                .net_policy = .{ .binds = .unrestricted, .limits = .{
+                .net_limits = .{
                     .max_live_connections = 1,
                     .receive_capacity = 1,
                     .send_capacity = 1,
-                } },
+                },
             }, .cooperative);
             defer runtime.deinit();
             try runOk(&runtime, "oom-net-result-setup.ecl", "net.core.listener {'address \"127.0.0.1\" 'port 0} port.open 'l set " ++

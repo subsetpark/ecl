@@ -1,4 +1,4 @@
-//! Capability-gated filesystem words over Session-named root directories.
+//! Filesystem words over Session-named root directories.
 //!
 //! Every word names a root by symbol and a canonical relative path; the
 //! Session's filesystem owner turns the symbol into a retained directory
@@ -90,19 +90,6 @@ const Operation = enum {
 
     fn textPayload(self: Operation) bool {
         return self == .create_text or self == .replace_text;
-    }
-
-    /// The semantic grant the primary root must carry.
-    fn permission(self: Operation) fsport.Permission {
-        return switch (self) {
-            .read_bytes, .read_text, .copy => .read_data,
-            .stat, .lstat, .exists => .inspect,
-            .list => .list,
-            .create_bytes, .create_text, .mkdir => .create,
-            .replace_bytes, .replace_text => .replace,
-            .rename => .rename,
-            .remove_file, .remove_dir => .remove,
-        };
     }
 
     fn resolveMode(self: Operation) fsport.ResolveMode {
@@ -343,7 +330,7 @@ fn reasonSymbol(reason: fsport.Reason) error{OutOfMemory}!u32 {
 
 fn errorKindFor(reason: fsport.Reason) machine.ErrorKind {
     return switch (reason) {
-        .invalid_path, .unknown_root, .denied, .unavailable => .domain,
+        .invalid_path, .unknown_root, .unavailable => .domain,
         .limit => .overflow,
         else => .io,
     };
@@ -610,7 +597,7 @@ const Driver = struct {
         }
     }
 
-    /// Grammar, root lookup, permission, and quota checks happen before any
+    /// Grammar, root lookup, and quota checks happen before any
     /// host object is opened.
     fn authorize(self: *Driver, evaluator: *Machine) MachineError!machine.WorkProgress {
         const class = fsport.classifyPath(self.path.?) catch return self.fail(evaluator, .invalid_path);
@@ -623,12 +610,10 @@ const Driver = struct {
         }
         const root = fsport.findRoot(self.access, self.inputs.root.symbol) orelse
             return self.fail(evaluator, .unknown_root);
-        if (!root.allows(self.operation.permission())) return self.fail(evaluator, .denied);
         self.root = root;
         if (self.inputs.second_root) |second_root_value| {
             const second_root = fsport.findRoot(self.access, second_root_value.symbol) orelse
                 return self.fail(evaluator, .unknown_root);
-            if (self.operation == .copy and !second_root.allows(.create)) return self.fail(evaluator, .denied);
             self.second_root = second_root;
         }
         if (self.payload) |*payload| {

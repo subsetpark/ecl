@@ -1,6 +1,6 @@
 //! Session-owned filesystem authority behind named root directory handles.
 //!
-//! A `FilesystemPolicy` names directories once, at Session construction; every
+//! A `Config` names directories once, at Session construction; every
 //! later operation is descriptor-relative to the retained handle for the root
 //! an ECL program names by symbol. The resolver walks one component per step
 //! with `O_NOFOLLOW`, splices symlink targets into its own bounded input, and
@@ -18,56 +18,6 @@ const builtin = @import("builtin");
 const external = @import("external.zig");
 const intern = @import("intern.zig");
 
-pub const Permission = enum {
-    read_data,
-    inspect,
-    list,
-    create,
-    replace,
-    rename,
-    remove,
-
-    pub fn symbol(self: Permission) []const u8 {
-        return switch (self) {
-            .read_data => "read-data",
-            else => @tagName(self),
-        };
-    }
-};
-
-pub const Permissions = packed struct {
-    read_data: bool = false,
-    inspect: bool = false,
-    list: bool = false,
-    create: bool = false,
-    replace: bool = false,
-    rename: bool = false,
-    remove: bool = false,
-
-    pub const all: Permissions = .{
-        .read_data = true,
-        .inspect = true,
-        .list = true,
-        .create = true,
-        .replace = true,
-        .rename = true,
-        .remove = true,
-    };
-    pub const none: Permissions = .{};
-
-    pub fn allows(self: Permissions, permission: Permission) bool {
-        return switch (permission) {
-            .read_data => self.read_data,
-            .inspect => self.inspect,
-            .list => self.list,
-            .create => self.create,
-            .replace => self.replace,
-            .rename => self.rename,
-            .remove => self.remove,
-        };
-    }
-};
-
 pub const Limits = struct {
     max_transfer_bytes: u64 = 1 << 30,
     max_directory_entries: usize = 100_000,
@@ -82,16 +32,15 @@ pub const Limits = struct {
 pub const Root = struct {
     name: []const u8,
     absolute_path: []const u8,
-    permissions: Permissions,
 };
 
-/// Borrowed host policy. Every slice is copied during Session construction.
-pub const FilesystemPolicy = struct {
-    roots: []const Root,
+/// Named directories and operation limits. An empty root list uses the current directory as `cwd`.
+pub const Config = struct {
+    roots: []const Root = &.{},
     limits: Limits = .{},
 };
 
-pub const PolicyError = error{ OutOfMemory, InvalidPolicy };
+pub const InitError = error{ OutOfMemory, InvalidConfig };
 
 pub fn backendSupported() bool {
     return switch (builtin.os.tag) {
@@ -110,7 +59,6 @@ pub const listing_batch_bytes: usize = 64 * 1024;
 const OwnedRoot = struct {
     name: []u8,
     symbol: u32,
-    permissions: Permissions,
     dir: std.Io.Dir,
 };
 
@@ -126,20 +74,32 @@ pub const FilesystemOwner = struct {
     pub fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
-        policy: FilesystemPolicy,
-    ) PolicyError!FilesystemOwner {
-        if (comptime !backendSupported()) return error.InvalidPolicy;
-        try validateLimits(policy.limits);
-        for (policy.roots, 0..) |root, index| {
-            if (!validRootName(root.name)) return error.InvalidPolicy;
+        config: Config,
+    ) InitError!FilesystemOwner {
+        if (comptime !backendSupported()) return error.InvalidConfig;
+        try validateLimits(config.limits);
+        const cwd = if (config.roots.len == 0)
+            std.process.currentPathAlloc(io, allocator) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.InvalidConfig,
+            }
+        else
+            null;
+        defer if (cwd) |path| allocator.free(path);
+        const configured_roots = if (cwd) |path|
+            &[_]Root{.{ .name = "cwd", .absolute_path = path }}
+        else
+            config.roots;
+        for (configured_roots, 0..) |root, index| {
+            if (!validRootName(root.name)) return error.InvalidConfig;
             if (!std.fs.path.isAbsolute(root.absolute_path) or
                 std.mem.indexOfScalar(u8, root.absolute_path, 0) != null)
-                return error.InvalidPolicy;
-            for (policy.roots[0..index]) |prior| {
-                if (std.mem.eql(u8, prior.name, root.name)) return error.InvalidPolicy;
+                return error.InvalidConfig;
+            for (configured_roots[0..index]) |prior| {
+                if (std.mem.eql(u8, prior.name, root.name)) return error.InvalidConfig;
             }
         }
-        const roots = try allocator.alloc(OwnedRoot, policy.roots.len);
+        const roots = try allocator.alloc(OwnedRoot, configured_roots.len);
         var initialized: usize = 0;
         errdefer {
             for (roots[0..initialized]) |*root| {
@@ -148,7 +108,7 @@ pub const FilesystemOwner = struct {
             }
             allocator.free(roots);
         }
-        for (policy.roots, roots) |root, *owned| {
+        for (configured_roots, roots) |root, *owned| {
             const name = try allocator.dupe(u8, root.name);
             errdefer allocator.free(name);
             const symbol = try intern.intern(root.name);
@@ -156,11 +116,10 @@ pub const FilesystemOwner = struct {
             // through host symlinks exactly once, here. Authority is the
             // retained handle from this point on.
             const dir = std.Io.Dir.cwd().openDir(io, root.absolute_path, .{ .iterate = true }) catch
-                return error.InvalidPolicy;
+                return error.InvalidConfig;
             owned.* = .{
                 .name = name,
                 .symbol = symbol,
-                .permissions = root.permissions,
                 .dir = dir,
             };
             initialized += 1;
@@ -169,7 +128,7 @@ pub const FilesystemOwner = struct {
             .allocator = allocator,
             .io = io,
             .roots = roots,
-            .limits = policy.limits,
+            .limits = config.limits,
         };
     }
 
@@ -204,12 +163,12 @@ pub const FilesystemOwner = struct {
     }
 };
 
-fn validateLimits(limits: Limits) PolicyError!void {
+fn validateLimits(limits: Limits) InitError!void {
     if (limits.max_transfer_bytes == 0 or limits.max_directory_entries == 0 or
         limits.max_directory_name_bytes == 0 or limits.max_live_operations == 0 or
         limits.max_symlink_expansions == 0 or limits.max_resolved_path_bytes == 0)
-        return error.InvalidPolicy;
-    if (limits.max_transfer_bytes > std.math.maxInt(usize)) return error.InvalidPolicy;
+        return error.InvalidConfig;
+    if (limits.max_transfer_bytes > std.math.maxInt(usize)) return error.InvalidConfig;
 }
 
 /// A root name is spelled as an ECL symbol by programs, so it must be a
@@ -235,10 +194,6 @@ pub const RootHandle = struct {
 
     pub fn dir(self: RootHandle) std.Io.Dir {
         return self.owner.roots[self.index].dir;
-    }
-
-    pub fn allows(self: RootHandle, permission: Permission) bool {
-        return self.owner.roots[self.index].permissions.allows(permission);
     }
 
     pub fn name(self: RootHandle) []const u8 {
@@ -289,7 +244,6 @@ pub fn reserveOperation(access_value: *external.FilesystemAccess) ?OperationSlot
 pub const Reason = enum {
     invalid_path,
     unknown_root,
-    denied,
     not_found,
     already_exists,
     not_directory,
@@ -335,7 +289,6 @@ pub const Reason = enum {
         return switch (self) {
             .invalid_path => "path is not a canonical relative path",
             .unknown_root => "unknown filesystem root",
-            .denied => "filesystem root denies the operation",
             .not_found => "entry does not exist",
             .already_exists => "entry already exists",
             .not_directory => "entry is not a directory",
@@ -996,26 +949,26 @@ test "resolver refuses an initial path over the byte limit before opening anythi
     resolver.deinit();
 }
 
-test "filesystem policy rejects relative roots, duplicate names, and zero limits" {
+test "filesystem config rejects relative roots, duplicate names, and zero limits" {
     var scratch = std.testing.tmpDir(.{});
     defer scratch.cleanup();
     const path = try scratch.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(path);
-    try std.testing.expectError(error.InvalidPolicy, FilesystemOwner.init(std.testing.allocator, std.testing.io, .{
-        .roots = &.{.{ .name = "cwd", .absolute_path = "relative/dir", .permissions = .all }},
+    try std.testing.expectError(error.InvalidConfig, FilesystemOwner.init(std.testing.allocator, std.testing.io, .{
+        .roots = &.{.{ .name = "cwd", .absolute_path = "relative/dir" }},
     }));
-    try std.testing.expectError(error.InvalidPolicy, FilesystemOwner.init(std.testing.allocator, std.testing.io, .{
+    try std.testing.expectError(error.InvalidConfig, FilesystemOwner.init(std.testing.allocator, std.testing.io, .{
         .roots = &.{
-            .{ .name = "cwd", .absolute_path = path, .permissions = .all },
-            .{ .name = "cwd", .absolute_path = path, .permissions = .all },
+            .{ .name = "cwd", .absolute_path = path },
+            .{ .name = "cwd", .absolute_path = path },
         },
     }));
-    try std.testing.expectError(error.InvalidPolicy, FilesystemOwner.init(std.testing.allocator, std.testing.io, .{
-        .roots = &.{.{ .name = "cwd", .absolute_path = path, .permissions = .all }},
+    try std.testing.expectError(error.InvalidConfig, FilesystemOwner.init(std.testing.allocator, std.testing.io, .{
+        .roots = &.{.{ .name = "cwd", .absolute_path = path }},
         .limits = .{ .max_live_operations = 0 },
     }));
     var owner = try FilesystemOwner.init(std.testing.allocator, std.testing.io, .{
-        .roots = &.{.{ .name = "cwd", .absolute_path = path, .permissions = .all }},
+        .roots = &.{.{ .name = "cwd", .absolute_path = path }},
     });
     defer owner.deinit();
     const symbol = try intern.intern("cwd");
@@ -1029,7 +982,7 @@ test "live-operation reservations are exhausted and released exactly" {
     const path = try scratch.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(path);
     var owner = try FilesystemOwner.init(std.testing.allocator, std.testing.io, .{
-        .roots = &.{.{ .name = "cwd", .absolute_path = path, .permissions = .all }},
+        .roots = &.{.{ .name = "cwd", .absolute_path = path }},
         .limits = .{ .max_live_operations = 2 },
     });
     defer owner.deinit();

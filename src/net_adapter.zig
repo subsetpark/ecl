@@ -241,7 +241,6 @@ pub fn open(access: ?*external.NetAccess, context: factories.Context, input: Val
     const granted = access orelse return failed(.domain, "listening is unavailable in this session", address, port, "unavailable");
     const resource = net.openPrepared(granted, context.scope, parsed) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
-        error.Denied => failed(.domain, "net.listen address and port are denied by host policy", address, port, "denied"),
         error.LiveLimit => failed(.domain, "host listener limit reached", address, port, "limit"),
         error.Unsupported => failed(.io, "host does not support listening on this address family or protocol", address, port, "unsupported"),
         error.ScopeClosing => .{ .failed = Failure.init(.cancelled, "listener scope is closing") },

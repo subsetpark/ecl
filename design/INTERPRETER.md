@@ -61,8 +61,8 @@ The main components are these:
 | Bulk execution | Pervasive scalar semantics, typed flat loops, and guarded source-phrase recognition | `kernel_*.zig`, `kernels.zig`, `idioms.zig` |
 | Scheduler | Green units, structured task scopes, task and external waits, cancellation, timers, external membership, and retirement service | `scheduler_core.zig`, `scheduler.zig`, `external.zig`, `task_prims.zig` |
 | Port controllers | Typed job submission, FIFO admission and cancellation, independent execution, joined retirement, and shared scope lifetime | `port_controller.zig`, `port_transfer.zig` |
-| Process ports | Process policy, POSIX process-group ownership, bounded pipe queues, and terminal publication | `process_port.zig`, `stdlib/proc.zig` |
-| Network listeners and connections | Listen policy, exact grant matching over normalized IP literals, scope-owned listening sockets, demand-gated accept, bounded connection queues serviced by controller threads, and idempotent close | `net_port.zig`, `stdlib/net.zig` |
+| Process ports | POSIX process-group ownership, bounded pipe queues, and terminal publication | `process_port.zig`, `stdlib/proc.zig` |
+| Network listeners and connections | Normalized IP literals, scope-owned listening sockets, demand-gated accept, bounded connection queues serviced by controller threads, and idempotent close | `net_port.zig`, `stdlib/net.zig` |
 | Boundary layers | Embedded modules, native extensions, rendering, terminal safety, the REPL, and the CLI | `prelude.zig`, `stdlib.zig`, `native_*.zig`, `print.zig`, `console.zig`, `line_editor.zig`, `main.zig` |
 
 ### Position in the design space
@@ -152,28 +152,23 @@ use immutable host configuration. It cannot reach the raw Session, allocator,
 registry, scheduler lifecycle, or reclamation root. Observation, execution,
 mutation, and teardown are distinct authorities.
 
-Process execution follows the same rule. A Host may omit it, allow an exact
-set of absolute executables, or grant an explicit unrestricted policy together
-with cwd, environment, live-count, queue, and capture limits. Session
-construction copies that policy and mints one narrow `ProcessAccess`; having
-`std.Io` or filesystem access does not imply it. Units may ask Machine to
-perform a process operation, but cannot obtain the owner, scheduler scope,
-process cell, group identifier, or PID.
+Process, filesystem, and network words use Session-owned runtime state whenever
+host I/O is present. They require no optional policy grant. Output-only Sessions
+used for pure evaluation have no operating-system I/O state.
 
-Filesystem access is the same shape. A Host may name root directories, each
-with a permission set (`read-data`, `inspect`, `list`, `create`, `replace`,
-`rename`, `remove`) and shared limits; construction validates the policy,
-opens every root once, and fails with `InvalidHostPolicy` rather than
-`OutOfMemory` when a root is relative, missing, not a directory, misnamed, or
-duplicated, or when a limit is zero. From then on authority is the retained
-directory handle, not the configured path: renaming the directory afterward
-moves nothing. The `FilesystemOwner` owns the copied policy, the handles, and
-the live-operation quota; Units receive one opaque `FilesystemAccess` and can
-only ask the owner to look a symbol up, check a grant, or reserve a slot. No
-evaluated word can mint, widen, duplicate, serialize, or inspect a root, and a
-Session without a policy denies every `fs` word before reaching the host.
-Module loading through `load` and `ECL_PATH` remains a separate host facility
-and grants no caller-selected file access.
+The process owner retains the startup directory, a copied environment snapshot,
+and live-count, queue, and capture limits. Its opaque `ProcessAccess` lets Units
+request operations without obtaining the owner, scheduler scope, process cell,
+group identifier, or PID. Executable and working-directory syntax is validated
+at the process boundary; the operating system determines access.
+
+The filesystem owner opens named roots once and owns their handles and the
+live-operation quota. Invalid roots or limits fail construction with
+`InvalidHostConfig`, distinctly from allocation failure. Authority remains the
+retained directory handle after a rename, and every root supports all filesystem
+operations subject to operating-system permissions. Units receive opaque
+`FilesystemAccess` for root lookup and operation admission. Root-relative path
+resolution enforces containment; module loading remains a separate operation.
 
 Clocks are two more authorities with different shapes. The scheduler owns
 monotonic time as one `MonotonicClock` tagged union, selected at construction
@@ -977,8 +972,7 @@ zero duration expires immediately.
 
 Every `fs` word, generic archive extraction, and package-store operation runs
 as one scheduler driver. The driver first encodes and validates its inputs
-without touching the host: the canonical path grammar, the named root, the
-semantic grant, and a live-operation slot from the owner's quota. It then
+without touching the host: the canonical path grammar, the named root, and a live-operation slot from the owner's quota. It then
 resolves the path with `filesystem_port.Resolver`, one component per step:
 each component is opened or inspected relative to the handle on top of a
 stack anchored at the root with `O_NOFOLLOW`; a symlink target is read and
@@ -1022,12 +1016,11 @@ stable symbols and never on errno names.
 
 ### Network resources use registered controllers
 
-Session construction validates and copies the host's listen policy into a
-network owner. Exact grants compare parsed, normalized IP addresses and ports;
-no alternate literal spelling widens authority. The owner derives allocation
-and retirement from the Session host and outlives retained resource identities.
-Workers receive its opaque access capability. Resource initialization, accept,
-and socket I/O execute through host-owned controllers.
+Session construction validates network resource limits and creates a network
+owner. Requested addresses are parsed and normalized before binding. The owner
+derives allocation and retirement from the Session host and outlives retained
+resource identities. Workers receive its opaque access capability. Resource
+initialization, accept, and socket I/O execute through host-owned controllers.
 
 The common resource service owns controller lanes, scope membership,
 cancellation, and joined cleanup. Its network adapter owns typed listener or
@@ -1262,15 +1255,15 @@ Construction requires opaque invocation authority minted by the controller lane.
 worker code cannot construct this controller facade or obtain its advancement
 state.
 
-Each granted Session service owns its registered library instance. A library
-loaded without a grant owns an inert instance with no host authority.
+Each Session I/O service owns its registered library instance. In an
+output-only Session, the corresponding library instance has no I/O backend.
 A module candidate publishes sealed capabilities as literal word
 bodies and pins its instance until publication or abandonment. Capability
 values retain that identity independently of service cleanup. Module registration
-binds immutable service grants inside the adapter, so module loading does not
+binds the Session I/O backend inside the adapter, so module loading does not
 select a resource backend. A generic module-constant provider carries names,
 effects, documentation, and sealed values; domain adapters own their declarations
-and typed service grants. Registration validates declaration-name uniqueness at
+and typed backend access. Registration validates declaration-name uniqueness at
 compile time, so one provider cannot replace its own earlier binding during
 publication. Retained issuer metadata has no backend discriminator.
 Factories register through one opaque opening
@@ -1862,7 +1855,7 @@ Verification assigns each architectural claim to its strongest proof surface.
 | Closed representations and phase machines | Zig types, opaque factories, `comptime` registries, exhaustive switches, and layout assertions |
 | Repository and source-shape rules | The recursive AST-aware source audit over every classified first-party Zig file, plus the prelude layout audit |
 | Language behavior | Runtime and CLI tests through `Session`, the executable, native fixtures, and checked snapshots |
-| Filesystem confinement | Public `Session` tests over temporary directories with default-deny, per-grant, symlink-escape, staging-residue, cancellation, and concurrent-winner cases, plus the resolver's own component tests |
+| Filesystem confinement | Public `Session` tests over temporary directories with named-root, symlink-escape, staging-residue, cancellation, and concurrent-winner cases, plus the resolver's own component tests |
 | Fast paths are unobservable | Differential tests comparing idiom-enabled and generic execution, and typed-leaf versus boxed-spine execution |
 | Bounded work | Safe-point counts, fault-index tests, cancellation cases, memory ceilings, and large public workloads |
 | Ownership under failure | Focused allocator-failure injection plus the initialized-Session OOM gate |

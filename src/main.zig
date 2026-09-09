@@ -1,6 +1,6 @@
 const std = @import("std");
 const ecl = @import("ecl-internal");
-const AppError = error{ OutOfMemory, Io, InvalidHostPolicy };
+const AppError = error{ OutOfMemory, Io, InvalidHostConfig };
 const help =
     \\ecl — a homoiconic concatenative array calculator
     \\
@@ -32,8 +32,8 @@ pub fn main(init: std.process.Init) void {
                 std.process.exit(1);
             break :failure 1;
         },
-        error.InvalidHostPolicy => failure: {
-            writeFile(init.io, .stderr, "ecl: host filesystem, package store, or process policy is invalid\n") catch
+        error.InvalidHostConfig => failure: {
+            writeFile(init.io, .stderr, "ecl: runtime directories, package store, or limits are invalid\n") catch
                 std.process.exit(1);
             break :failure 1;
         },
@@ -177,13 +177,8 @@ fn testCommand(init: std.process.Init, arguments: []const []const u8) AppError!u
             .project_start = ".",
             .environ = try environSnapshot(init),
             .standard_input = .data,
-            .process_policy = .{
-                .executables = .unrestricted,
-                .initial_cwd = initial_cwd,
-                .inherit_environment = true,
-            },
-            .filesystem_policy = .{ .roots = &.{cwdRoot(initial_cwd)} },
-            .net_policy = .{ .binds = .unrestricted },
+            .initial_cwd = initial_cwd,
+            .filesystem = .{ .roots = &.{cwdRoot(initial_cwd)} },
             .clock = .{ .wall = .host },
         },
         .{ .worker_pool = worker_count },
@@ -384,10 +379,9 @@ fn packageCommand(init: std.process.Init, arguments: []const []const u8) AppErro
     );
 }
 /// The one filesystem root every command-line Session receives: the startup
-/// working directory, captured once, with every v1 permission. Embedders get
-/// nothing by default; the CLI is the program that deliberately grants it.
+/// working directory, captured once.
 fn cwdRoot(initial_cwd: []const u8) ecl.filesystem_port.Root {
-    return .{ .name = "cwd", .absolute_path = initial_cwd, .permissions = .all };
+    return .{ .name = "cwd", .absolute_path = initial_cwd };
 }
 /// One immutable view of the process environment, borrowed from the arena so
 /// the Session can copy it once at init.
@@ -587,11 +581,7 @@ fn executeWith(
     var filesystem_roots: [2]ecl.filesystem_port.Root = .{ cwdRoot(initial_cwd), undefined };
     var root_count: usize = 1;
     if (project_root) |path| {
-        filesystem_roots[1] = .{
-            .name = "project",
-            .absolute_path = path,
-            .permissions = .{ .read_data = true, .inspect = true, .create = true, .replace = true },
-        };
+        filesystem_roots[1] = .{ .name = "project", .absolute_path = path };
         root_count = 2;
     }
     const host: ecl.session.Host = .{
@@ -602,13 +592,8 @@ fn executeWith(
         .project_start = ".",
         .environ = try environSnapshot(init),
         .standard_input = standard_input,
-        .process_policy = .{
-            .executables = .unrestricted,
-            .initial_cwd = initial_cwd,
-            .inherit_environment = true,
-        },
-        .filesystem_policy = .{ .roots = filesystem_roots[0..root_count] },
-        .net_policy = .{ .binds = .unrestricted },
+        .initial_cwd = initial_cwd,
+        .filesystem = .{ .roots = filesystem_roots[0..root_count] },
         .clock = .{ .wall = .host },
     };
     var session = if (package_grant) |grant|
@@ -656,13 +641,8 @@ fn repl(init: std.process.Init, worker_count: usize) AppError!u8 {
             .project_start = ".",
             .environ = try environSnapshot(init),
             .standard_input = .program_source,
-            .process_policy = .{
-                .executables = .unrestricted,
-                .initial_cwd = initial_cwd,
-                .inherit_environment = true,
-            },
-            .filesystem_policy = .{ .roots = &.{cwdRoot(initial_cwd)} },
-            .net_policy = .{ .binds = .unrestricted },
+            .initial_cwd = initial_cwd,
+            .filesystem = .{ .roots = &.{cwdRoot(initial_cwd)} },
             .clock = .{ .wall = .host },
         },
         .{ .worker_pool = worker_count },

@@ -18,10 +18,10 @@ test "public API: Session evaluates a unit" {
     try std.testing.expectEqual(@as(i64, 5), items[0].int);
 }
 
-test "public API: host policies are constructible through the facade" {
-    const process: ecl.ProcessPolicy = .{ .executables = .unrestricted };
-    const filesystem: ecl.FilesystemPolicy = .{ .roots = &.{} };
-    const net: ecl.NetPolicy = .{ .binds = .unrestricted };
+test "public API: runtime configuration is constructible through the facade" {
+    const process: ecl.ProcessLimits = .{};
+    const filesystem: ecl.FilesystemConfig = .{ .roots = &.{} };
+    const net: ecl.NetLimits = .{};
     const config: ecl.SessionConfig = .cooperative;
     const clock: ecl.ClockPolicy = .{ .monotonic = .manual, .wall = .{ .fixed = 0 } };
     const native_ports: ecl.NativePortLimits = .{ .max_live_ports = 2, .max_operations = 1, .ring_capacity = 8 };
@@ -42,7 +42,7 @@ test "public API: invalid native port limits fail Session initialization" {
         .{ .max_operations = 0 }, .{ .max_operations = 257 },
         .{ .ring_capacity = 0 },  .{ .ring_capacity = 16 * 1024 * 1024 + 1 },
     };
-    for (invalid) |limits| try std.testing.expectError(error.InvalidHostPolicy, ecl.Session.initWithHost(std.testing.allocator, &.{}, .{
+    for (invalid) |limits| try std.testing.expectError(error.InvalidHostConfig, ecl.Session.initWithHost(std.testing.allocator, &.{}, .{
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,

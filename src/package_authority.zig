@@ -41,7 +41,7 @@ pub const PackageGrant = union(enum) {
     vendor: struct { cache: ?[]const u8, project: std.Io.Dir },
 };
 
-pub const PolicyError = filesystem_port.PolicyError;
+pub const PolicyError = error{ OutOfMemory, InvalidPolicy };
 
 pub const PackageOwner = struct {
     allocator: std.mem.Allocator,

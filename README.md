@@ -285,9 +285,8 @@ and `port.*`. First-party resources and ABI v5 extensions share controller
 execution, ownership, cancellation, and cleanup. See the
 [common port examples and conformance guide](examples/PORTS.md).
 
-Subprocesses use BEAM-style opaque ports rather than PIDs. The CLI grants an
-explicit process capability; library Sessions deny it unless their Host opts
-in with a `ProcessPolicy`. `proc.spawn` accepts an absolute executable path,
+Subprocesses use BEAM-style opaque ports rather than PIDs. `proc.spawn`
+accepts an absolute executable path,
 argv/cwd/environment data, and no shell string or `PATH` lookup. Stdin,
 stdout, and stderr are exact byte lists with bounded scheduler backpressure;
 the spawning task scope owns termination and reap, so retaining a port cannot
@@ -296,26 +295,21 @@ controller. The initial backend supports POSIX hosts; other targets fail
 closed until they can provide equivalent process-tree ownership. Child side
 effects are external effects and are not rolled back when an ECL unit fails.
 
-Filesystem access is likewise a capability, not ambient power. The CLI grants
-exactly one root, `'cwd`, for the startup working directory; library Sessions
-deny every `fs` word unless their Host names roots and permissions through a
-`FilesystemPolicy`. Words take a root symbol and a canonical relative path
+Filesystem words take a root symbol and a canonical relative path
 (`'cwd "notes/todo.txt" fs.read-text`), resolve beneath the root's retained
 directory handle without following escaping symlinks, and publish writes
 atomically. `path` manipulates path strings without touching the filesystem.
 Package commands receive a separate, nonforgeable package-store authority.
 
-Inbound listening is a capability too. The CLI grants an unrestricted listen
-policy; library Sessions deny every `net.listen` unless their Host supplies a
-`NetPolicy` naming exact address and port pairs (port `0` admits only
-ephemeral binds). `{'address "127.0.0.1" 'port 0} net.listen` returns a
+`net.listen` accepts a local IP literal and a port; port `0` requests an
+ephemeral bind. `{'address "127.0.0.1" 'port 0} net.listen` returns a
 scope-owned port whose socket is already listening, `net.local-address`
 reports the bound address and kernel-assigned port, and `net.close` releases
 it early; scope closure releases it otherwise. `net.accept` parks until a peer
 connects and returns a connection owned by the accepting unit's scope;
 `net.read` and `net.write` exchange exact byte lists through bounded queues,
 `net.peer-address` names the other end, and `net.close` on a connection
-delivers queued bytes before shutting the socket down. Hosts bound live
+delivers queued bytes before shutting the socket down. The runtime bounds live
 connections and queue capacities. Protocol framing and TLS belong to the
 modules built over a connection. `http.server.@serve` is the ECL HTTP/1.1
 server over those words: it frames each request, runs the handler in a fresh

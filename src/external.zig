@@ -108,18 +108,16 @@ pub fn WaitList(comptime Cell: type) type {
     };
 }
 
-/// Nominal proof that a Session granted process creation authority. Concrete
-/// controller ownership and policy remain private to `process_port.zig`.
+/// Opaque access to Session-owned processes. Controller ownership, startup
+/// inputs, and resource limits remain private to `process_port.zig`.
 pub const ProcessAccess = opaque {};
 
-/// Nominal proof that a Session granted named filesystem roots. Root handles,
-/// permissions, limits, and the live-operation quota remain private to
-/// `filesystem_port.zig`; a Unit can neither mint nor widen one.
+/// Opaque access to named filesystem roots. Directory handles, limits, and
+/// operation accounting remain private to `filesystem_port.zig`.
 pub const FilesystemAccess = opaque {};
 
-/// Nominal proof that a Session granted inbound listen authority. The bind
-/// allowlist, limits, and live-listener quota remain private to
-/// `net_port.zig`; a Unit can neither mint nor widen one.
+/// Opaque access to Session-owned listeners and connections. Socket ownership,
+/// limits, and accounting remain private to `net_port.zig`.
 pub const NetAccess = opaque {};
 
 /// Nominal proof that a Session was constructed for a package command. It
