@@ -118,12 +118,7 @@ fn begin(evaluator: *Machine, defaults: RequestDefaults, response_mode: Response
         // silently acquiring a transport-level default.
         break :required_method .GET;
     };
-    const target = fields.target orelse return evaluator.typeError("a request with a string 'target URL");
-    if (evaluator.unit.inherited.host_io == null) {
-        const failure = evaluator.fail(.io, "network access is unavailable");
-        evaluator.addErrorPath(target);
-        return failure;
-    }
+    _ = fields.target orelse return evaluator.typeError("a request with a string 'target URL");
     try evaluator.startDriver(RequestDriver{
         .allocator = evaluator.allocator(),
         .method = method,
@@ -707,7 +702,7 @@ const RequestDriver = struct {
         evaluator: *Machine,
         exchange_data: *ExchangeData,
     ) MachineError!void {
-        const io = evaluator.unit.inherited.host_io.?;
+        const io = evaluator.unit.inherited.runtime().host_io;
         const uri = std.Uri.parse(exchange_data.request.url) catch
             return self.failIo(evaluator, exchange_data.request.url, "InvalidUrl");
         const extra = try self.allocator.alloc(std.http.Header, exchange_data.request.fields.items.len);

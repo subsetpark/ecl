@@ -6,6 +6,7 @@
 //! the public runtime and the real directory, never through implementation
 //! state. Sessions run only source text, so the traceless session heap is the
 //! right allocator (see `test_heap.zig`).
+const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const filesystem_port = @import("../filesystem_port.zig");
 const session = @import("../session.zig");
@@ -96,12 +97,14 @@ fn runCase(options: Config, config: session.Config, program: []const u8, outcome
     var output = std.Io.Writer.Discarding.init(&output_buffer);
     var diagnostics_buffer: [256]u8 = undefined;
     var diagnostics = std.Io.Writer.Discarding.init(&diagnostics_buffer);
-    var runtime = try session.Session.initWithHostConfig(heap.allocator(), &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{
         .io = io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
         .filesystem = options,
-    }, config);
+    }), config, .evaluate);
     defer runtime.deinit();
     switch (try runtime.runUnit("<fs-test>", program)) {
         .ok => switch (outcome) {
@@ -328,12 +331,14 @@ test "fs: options validation is a distinct Session construction failure" {
         defer test_heap.retire(&heap);
         var output_buffer: [64]u8 = undefined;
         var output = std.Io.Writer.Discarding.init(&output_buffer);
-        try std.testing.expectError(error.InvalidHostConfig, session.Session.initWithHost(heap.allocator(), &.{}, .{
+        var runtime_inputs1 = try runtime_fixture.Fixture.init();
+        defer runtime_inputs1.deinit();
+        try std.testing.expectError(error.InvalidHostConfig, session.Session.init(heap.allocator(), &.{}, runtime_inputs1.inputs(.{
             .io = io,
             .output = &output.writer,
             .diagnostics = &output.writer,
             .filesystem = options,
-        }));
+        }), .default, .evaluate));
     }
     // The copied options outlives the borrowed inputs it was built from.
     var heap: test_heap.SessionHeap = .init;
@@ -342,12 +347,14 @@ test "fs: options validation is a distinct Session construction failure" {
     var output = std.Io.Writer.Discarding.init(&output_buffer);
     const name = try allocator.dupe(u8, "root");
     const root_path = try allocator.dupe(u8, scratch.path);
-    var runtime = try session.Session.initWithHost(heap.allocator(), &.{}, .{
+    var runtime_inputs2 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs2.deinit();
+    var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs2.inputs(.{
         .io = io,
         .output = &output.writer,
         .diagnostics = &output.writer,
         .filesystem = .{ .roots = &.{.{ .name = name, .absolute_path = root_path }} },
-    });
+    }), .default, .evaluate);
     defer runtime.deinit();
     allocator.free(name);
     allocator.free(root_path);
@@ -368,12 +375,14 @@ test "fs: root handle authority survives renaming the configured directory" {
     defer test_heap.retire(&heap);
     var output_buffer: [64]u8 = undefined;
     var output = std.Io.Writer.Discarding.init(&output_buffer);
-    var runtime = try session.Session.initWithHost(heap.allocator(), &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{
         .io = io,
         .output = &output.writer,
         .diagnostics = &output.writer,
         .filesystem = .{ .roots = &.{.{ .name = "root", .absolute_path = original }} },
-    });
+    }), .default, .evaluate);
     defer runtime.deinit();
     try scratch.directory.dir.rename("original", scratch.directory.dir, "renamed", io);
     try scratch.directory.dir.createDir(io, "original", .default_dir);
@@ -648,12 +657,14 @@ test "fs: cancellation before commit leaves the destination unchanged" {
     defer test_heap.retire(&heap);
     var output_buffer: [64]u8 = undefined;
     var output = std.Io.Writer.Discarding.init(&output_buffer);
-    var runtime = try session.Session.initWithHostConfig(heap.allocator(), &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{
         .io = io,
         .output = &output.writer,
         .diagnostics = &output.writer,
         .filesystem = scratch.filesystem(),
-    }, .cooperative);
+    }), .cooperative, .evaluate);
     defer runtime.deinit();
     try std.testing.expect((try runtime.runUnit("<fs-warm>", "'root \"existing\" fs.exists? pop")) == .ok);
     runtime.requestCancellation();
@@ -725,12 +736,17 @@ test "fs: concurrent creates have exactly one winner and no staging residue" {
             defer test_heap.retire(&heap);
             var output_buffer: [64]u8 = undefined;
             var output = std.Io.Writer.Discarding.init(&output_buffer);
-            var runtime = session.Session.initWithHostConfig(heap.allocator(), &.{}, .{
+            var runtime_inputs = runtime_fixture.Fixture.init() catch {
+                self.unexpected.store(true, .release);
+                return;
+            };
+            defer runtime_inputs.deinit();
+            var runtime = session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{
                 .io = io,
                 .output = &output.writer,
                 .diagnostics = &output.writer,
                 .filesystem = .{ .roots = &.{.{ .name = "root", .absolute_path = self.path }} },
-            }, .{ .worker_pool = 2 }) catch {
+            }), .{ .worker_pool = 2 }, .evaluate) catch {
                 self.unexpected.store(true, .release);
                 return;
             };

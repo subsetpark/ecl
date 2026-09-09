@@ -866,7 +866,7 @@ fn prepareAccepted(fd: posix.fd_t) error{Io}!IpAddress {
     if (builtin.os.tag != .linux) try setCloexec(fd);
     try setBlockingMode(fd, .non_blocking);
     // A write to a peer that has gone away must surface as EPIPE for the
-    // controller to map, never as SIGPIPE delivered to an embedding host that
+    // controller to map, never as SIGPIPE delivered to the interpreter process that
     // kept the default disposition. Platforms without MSG_NOSIGNAL offer the
     // socket-level switch instead; `sendFlags` covers the rest.
     if (@hasDecl(posix.SO, "NOSIGPIPE")) {

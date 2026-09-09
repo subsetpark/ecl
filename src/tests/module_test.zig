@@ -10,6 +10,7 @@
 //! `module_source_test.zig`, on the traceless session heap. Keeping the two
 //! apart is what stops a tracing allocator from being charged to assertions
 //! that never read a stack trace.
+const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const value = @import("../value.zig");
 const dict = @import("../dict.zig");
@@ -93,9 +94,13 @@ fn errorField(allocator: std.mem.Allocator, error_value: value.Value, name: []co
 
 test "session: transferred quotation provenance is absent from another archive" {
     const allocator = std.testing.allocator;
-    var source_session = try session.Session.init(allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var source_session = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer source_session.deinit();
-    var destination_session = try session.Session.init(allocator, &.{});
+    var runtime_inputs1 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs1.deinit();
+    var destination_session = try session.Session.init(allocator, &.{}, runtime_inputs1.inputs(.{}), .default, .evaluate);
     defer destination_session.deinit();
 
     try expectOk(&source_session, "(1)");
@@ -238,7 +243,9 @@ test "module: an unknown long module prefix remains cancellable while it is inte
         "1 pack (execute) @spawn dup 'target set " ++
         "1 pack (task.cancel) @spawn task.await pop target task.await";
 
-    var runtime = try session.Session.initWithConfig(allocator, &.{}, .cooperative);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime, "task.pending pop");
     try runtime.pushOwned(.{ .word = .{ .name = qualified } });
@@ -303,7 +310,9 @@ test "module: long definition names stay within the cancellation bound" {
     defer allocator.free(name_bytes);
     @memset(name_bytes, 's');
     const long_name = try intern.internNamespace(name_bytes);
-    var name_runtime = try session.Session.init(allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var name_runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer name_runtime.deinit();
     try name_runtime.pushOwned(try list.fromValuesGeneric(allocator, &.{}));
     try name_runtime.pushOwned(try list.fromValuesGeneric(allocator, &.{}));
@@ -318,16 +327,14 @@ test "reflection: words is sorted unique and private-safe" {
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
-    var runtime = try session.Session.initWithHost(
-        std.testing.allocator,
-        &.{},
-        .{
-            .io = std.testing.io,
-            .output = &output.writer,
-            .diagnostics = &diagnostics.writer,
-            .ecl_path = null,
-        },
-    );
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .ecl_path = null,
+    }), .default, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime, "[] (1 'hidden setp 2 'zebra set 3 'alpha set) 'm @defm " ++
         "'m ('alpha 'zebra) import 4 'zebra set words");
@@ -363,7 +370,9 @@ test "reflection remains cancellable across sorting and identifier output" {
 
     var discard_buffer: [256]u8 = undefined;
     var discarding = std.Io.Writer.Discarding.init(&discard_buffer);
-    var words_runtime = try session.Session.initWithOutput(allocator, &.{}, &discarding.writer);
+    var runtime_inputs5 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs5.deinit();
+    var words_runtime = try session.Session.init(allocator, &.{}, runtime_inputs5.inputs(.{ .output = &discarding.writer }), .default, .evaluate);
     defer words_runtime.deinit();
     const binding = try TestBinding.init(allocator);
     defer words_runtime.release(binding.body);
@@ -379,7 +388,9 @@ test "reflection remains cancellable across sorting and identifier output" {
 
     var which_output = std.Io.Writer.Allocating.init(allocator);
     defer which_output.deinit();
-    var which_runtime = try session.Session.initWithOutput(allocator, &.{}, &which_output.writer);
+    var runtime_inputs6 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs6.deinit();
+    var which_runtime = try session.Session.init(allocator, &.{}, runtime_inputs6.inputs(.{ .output = &which_output.writer }), .default, .evaluate);
     defer which_runtime.deinit();
     try which_runtime.define(first, binding.top());
     try which_runtime.pushOwned(.{ .symbol = intern.namespaceId(first) });
@@ -399,7 +410,9 @@ test "reflection remains cancellable across sorting and identifier output" {
     const qualified = try intern.intern(qualified_bytes);
     var qualified_output = std.Io.Writer.Allocating.init(allocator);
     defer qualified_output.deinit();
-    var qualified_runtime = try session.Session.initWithOutput(allocator, &.{}, &qualified_output.writer);
+    var runtime_inputs7 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs7.deinit();
+    var qualified_runtime = try session.Session.init(allocator, &.{}, runtime_inputs7.inputs(.{ .output = &qualified_output.writer }), .default, .evaluate);
     defer qualified_runtime.deinit();
     const module_source = try std.fmt.allocPrint(
         allocator,
@@ -420,10 +433,12 @@ test "reflection remains cancellable across sorting and identifier output" {
 }
 
 test "reflection failures are total" {
-    var no_output = try session.Session.init(std.testing.allocator, &.{});
-    defer no_output.deinit();
-    try expectErrorContains(&no_output, "words", &.{"'kind 'io"});
-    try expectErrorContains(&no_output, "'missing which", &.{"'kind 'undefined-word"});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    try expectErrorContains(&runtime, "5 which", &.{"'kind 'type"});
+    try expectErrorContains(&runtime, "'missing which", &.{"'kind 'undefined-word"});
 }
 
 const EnvThreadContext = struct {
@@ -812,7 +827,9 @@ test "session: public definition mutation settles retirement every turn" {
     var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
     const allocator = counting.allocator();
     {
-        var runtime = try session.Session.initWithConfig(allocator, &.{}, .cooperative);
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
         defer runtime.deinit();
         const name = try intern.internNamespace("public-mutation-retirement");
         const binding = try TestBinding.init(allocator);
@@ -830,7 +847,9 @@ test "acceptance: definition and module re-registration soak keeps live memory b
     var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
     const allocator = counting.allocator();
     {
-        var runtime = try session.Session.initWithConfig(allocator, &.{}, .cooperative);
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
         defer runtime.deinit();
         const soak = try std.Io.Dir.cwd().readFileAlloc(
             std.testing.io,
@@ -868,7 +887,9 @@ test "session: mutation settlement is independent of a busy sole worker" {
     var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
     const allocator = counting.allocator();
     {
-        var runtime = try session.Session.initWithConfig(allocator, &.{}, .{ .worker_pool = 1 });
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
         defer runtime.deinit();
         try expectOk(&runtime, "[] ((1) () while) @spawn");
         const name = try intern.internNamespace("busy-worker-retirement");
@@ -1096,16 +1117,14 @@ test "loader: failures and cycles are total" {
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
-    var runtime = try session.Session.initWithHost(
-        std.testing.allocator,
-        &.{},
-        .{
-            .io = std.testing.io,
-            .output = &output.writer,
-            .diagnostics = &diagnostics.writer,
-            .ecl_path = "test/acceptance/modules",
-        },
-    );
+    var runtime_inputs12 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs12.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs12.inputs(.{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .ecl_path = "test/acceptance/modules",
+    }), .default, .evaluate);
     defer runtime.deinit();
     try expectErrorContains(&runtime, "'missing-module ('x) import", &.{ "'kind 'undefined-word", "'name 'missing-module.x" });
     try expectErrorContains(&runtime, "'cycle ('x) import", &.{ "'kind 'domain", "recursive auto-load" });
@@ -1128,10 +1147,6 @@ test "loader: failures and cycles are total" {
         defer std.testing.allocator.free(source);
         try expectErrorContains(&runtime, source, &.{ "'kind 'parse", path });
     }
-
-    var no_host = try session.Session.init(std.testing.allocator, &.{});
-    defer no_host.deinit();
-    try expectErrorContains(&no_host, "\"test/acceptance/load-stack.ecl\" load", &.{"'kind 'io"});
 }
 
 fn environmentAllocationProbe(allocator: std.mem.Allocator) !void {

@@ -5,6 +5,7 @@
 //! instant it was due", never "the host happened to be slow enough". Cases
 //! pass only source strings to their Session and run on the traceless session
 //! heap (see `test_heap.zig`); the shutdown cases count allocations instead.
+const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const session = @import("../session.zig");
 const support = @import("kernel_test_support.zig");
@@ -20,6 +21,7 @@ const Options = struct {
 /// for exactly as long as that phase exists; there is no state in which a
 /// writer exists without the Session that reads it.
 const Fixture = struct {
+    inputs: ?runtime_fixture.Fixture = null,
     heap: test_heap.SessionHeap = .init,
     output_buffer: [64]u8 = @splat(0),
     diagnostics_buffer: [64]u8 = @splat(0),
@@ -47,12 +49,17 @@ const Fixture = struct {
         } };
         errdefer self.phase = .closed;
         const active = &self.phase.open;
-        active.runtime = try session.Session.initWithHostConfig(allocator, &.{}, .{
+        self.inputs = try runtime_fixture.Fixture.init();
+        errdefer {
+            self.inputs.?.deinit();
+            self.inputs = null;
+        }
+        active.runtime = try session.Session.init(allocator, &.{}, self.inputs.?.inputs(.{
             .io = std.testing.io,
             .output = &active.output.writer,
             .diagnostics = &active.diagnostics.writer,
             .clock = options.clock,
-        }, options.config);
+        }), options.config, .evaluate);
         return &active.runtime;
     }
 
@@ -63,6 +70,8 @@ const Fixture = struct {
             .open => |*active| active.runtime.deinit(),
         }
         self.phase = .closed;
+        if (self.inputs) |*inputs| inputs.deinit();
+        self.inputs = null;
     }
 
     fn close(self: *Fixture) void {
@@ -197,20 +206,12 @@ test "clock: a host clock refuses manual advancement and counts from Session sta
     try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerEntryCount());
 }
 
-test "clock: the wall clock is absent by default and refused with a reason" {
-    var heap: test_heap.SessionHeap = .init;
-    defer test_heap.retire(&heap);
-    var runtime = try session.Session.init(heap.allocator(), &.{});
-    defer runtime.deinit();
-    try expectError(&runtime, "clock.unix", .{
-        .name = "absent wall clock",
-        .source = "clock.unix",
-        .kind = "domain",
-        .word = "clock.unix",
-        .data = &.{.{ .name = "reason", .expected = .{ .symbol = "unavailable" } }},
-    });
-    // Monotonic time is always present; only the wall clock is a grant.
-    try expectDisplay(&runtime, "clock.now 'monotonic at type", "'int");
+test "clock: wall time is inherited by spawned tasks and loaded modules" {
+    var fixture: Fixture = .{};
+    defer fixture.close();
+    const runtime = try fixture.open(.{ .clock = .{ .monotonic = .manual, .wall = .{ .fixed = 42 } } });
+    try expectDisplay(runtime, "[] (clock.unix) @spawn task.await", "{'ok ({'unix 42})}");
+    try expectDisplay(runtime, "[] ((clock.unix) 'read def) 'wall @defm wall.read", "{'unix 42}");
 }
 
 test "clock: a fixed wall clock returns the configured timestamp on every read" {
@@ -233,15 +234,6 @@ test "clock: an anchored wall clock advances with the manual monotonic clock" {
     try expectDisplay(runtime, "clock.unix time.format", "\"2023-11-14T22:13:22.500Z\"");
     // The two domains stay distinct even when both are driven by one clock.
     try expectDisplay(runtime, "clock.now clock.unix match?", "0");
-}
-
-test "clock: a host wall clock reads a tagged integer through host io" {
-    var fixture: Fixture = .{};
-    defer fixture.close();
-    const runtime = try fixture.open(.{ .clock = .{ .monotonic = .host, .wall = .host } });
-    // The value is the ambient clock's and is not asserted; the shape is.
-    try expectDisplay(runtime, "clock.unix 'unix at type", "'int");
-    try expectDisplay(runtime, "clock.unix dict.keys", "['unix]");
 }
 
 test "clock: sleep completes exactly when the manual clock reaches its deadline" {

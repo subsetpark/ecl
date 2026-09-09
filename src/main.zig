@@ -40,25 +40,38 @@ pub fn main(init: std.process.Init) void {
     };
     if (status != 0) std.process.exit(status);
 }
-fn entry(init: std.process.Init) AppError!u8 {
-    const arguments = init.minimal.args.toSlice(init.arena.allocator()) catch
+const Startup = struct {
+    process: std.process.Init,
+    cwd: []const u8,
+    environ: []const ecl.machine.Environ.Entry,
+};
+
+fn entry(process: std.process.Init) AppError!u8 {
+    const cwd = std.Io.Dir.cwd().realPathFileAlloc(process.io, ".", process.gpa) catch return error.Io;
+    defer process.gpa.free(cwd);
+    const init: Startup = .{ .process = process, .cwd = cwd, .environ = try environSnapshot(process) };
+    return dispatch(init);
+}
+
+fn dispatch(init: Startup) AppError!u8 {
+    const arguments = init.process.minimal.args.toSlice(init.process.arena.allocator()) catch
         return error.OutOfMemory;
     const cli = arguments[1..];
     if (cli.len == 0) {
         const worker_count = try configuredWorkers(init) orelse return 2;
-        const tty = std.Io.File.stdin().isTty(init.io) catch return error.Io;
+        const tty = std.Io.File.stdin().isTty(init.process.io) catch return error.Io;
         return if (tty) repl(init, worker_count) else runStdin(init, &.{}, worker_count);
     }
     const first = cli[0];
     if (std.mem.eql(u8, first, "-h") or std.mem.eql(u8, first, "--help")) {
-        try writeFile(init.io, .stdout, help);
+        try writeFile(init.process.io, .stdout, help);
         return 0;
     }
     if (std.mem.eql(u8, first, "-V") or std.mem.eql(u8, first, "--version")) {
         var buffer: [64]u8 = undefined;
         const version = std.fmt.bufPrint(&buffer, "ecl {s}\n", .{ecl.version}) catch
             @panic("version string exceeds its fixed output buffer");
-        try writeFile(init.io, .stdout, version);
+        try writeFile(init.process.io, .stdout, version);
         return 0;
     }
     if (std.mem.eql(u8, first, "fmt")) return formatCommand(init, cli[1..]);
@@ -76,7 +89,7 @@ fn entry(init: std.process.Init) AppError!u8 {
     }
     if (std.mem.eql(u8, first, "-")) return runStdin(init, cli[1..], worker_count);
     const is_file: bool = file: {
-        std.Io.Dir.cwd().access(init.io, first, .{ .read = true }) catch |err| switch (err) {
+        std.Io.Dir.cwd().access(init.process.io, first, .{ .read = true }) catch |err| switch (err) {
             error.FileNotFound, error.NameTooLong, error.BadPathName => break :file false,
             else => return emitIoError(init, "cannot access script", err),
         };
@@ -84,12 +97,12 @@ fn entry(init: std.process.Init) AppError!u8 {
     };
     if (is_file) {
         const source = std.Io.Dir.cwd().readFileAlloc(
-            init.io,
+            init.process.io,
             first,
-            init.gpa,
+            init.process.gpa,
             .unlimited,
         ) catch |err| return emitIoError(init, "cannot read script", err);
-        defer init.gpa.free(source);
+        defer init.process.gpa.free(source);
         return executeSource(init, first, source, cli[1..], false, .data, worker_count);
     }
     if (std.mem.endsWith(u8, first, ".ecl")) {
@@ -113,8 +126,8 @@ const test_help =
     \\
 ;
 
-fn testUsage(init: std.process.Init) AppError!u8 {
-    try writeFile(init.io, .stderr, test_help);
+fn testUsage(init: Startup) AppError!u8 {
+    try writeFile(init.process.io, .stderr, test_help);
     return 1;
 }
 
@@ -132,7 +145,7 @@ fn validateRunner(name: []const u8) AppError!bool {
     return true;
 }
 
-fn testCommand(init: std.process.Init, arguments: []const []const u8) AppError!u8 {
+fn testCommand(init: Startup, arguments: []const []const u8) AppError!u8 {
     var runner: []const u8 = "test.default.run";
     var trailing: []const []const u8 = &.{};
     var index: usize = 0;
@@ -160,31 +173,29 @@ fn testCommand(init: std.process.Init, arguments: []const []const u8) AppError!u
 
     const worker_count = try configuredWorkers(init) orelse return 2;
     var output_buffer: [4096]u8 = undefined;
-    var output_writer = std.Io.File.stdout().writerStreaming(init.io, &output_buffer);
+    var output_writer = std.Io.File.stdout().writerStreaming(init.process.io, &output_buffer);
     var diagnostic_buffer: [4096]u8 = undefined;
-    var diagnostic_writer = std.Io.File.stderr().writerStreaming(init.io, &diagnostic_buffer);
-    const initial_cwd = std.Io.Dir.cwd().realPathFileAlloc(init.io, ".", init.gpa) catch |err|
-        return emitIoError(init, "cannot resolve process working directory", err);
-    defer init.gpa.free(initial_cwd);
-    var runtime = try ecl.session.Session.initTestWithHostConfig(
-        init.gpa,
+    var diagnostic_writer = std.Io.File.stderr().writerStreaming(init.process.io, &diagnostic_buffer);
+    const initial_cwd = init.cwd;
+    var runtime = try ecl.session.Session.init(
+        init.process.gpa,
         trailing,
         .{
-            .io = init.io,
+            .io = init.process.io,
             .output = &output_writer.interface,
             .diagnostics = &diagnostic_writer.interface,
-            .ecl_path = init.environ_map.get("ECL_PATH"),
-            .project_start = ".",
-            .environ = try environSnapshot(init),
+            .ecl_path = init.process.environ_map.get("ECL_PATH"),
+            .environ = init.environ,
             .standard_input = .data,
             .initial_cwd = initial_cwd,
             .filesystem = .{ .roots = &.{cwdRoot(initial_cwd)} },
             .clock = .{ .wall = .host },
         },
         .{ .worker_pool = worker_count },
+        .language_tests,
     );
     defer runtime.deinit();
-    runtime.setNativeDiagnostics(init.environ_map.get("ECL_NATIVE_DIAGNOSTICS") != null);
+    runtime.setNativeDiagnostics(init.process.environ_map.get("ECL_NATIVE_DIAGNOSTICS") != null);
 
     while (true) switch (try runtime.advanceRootPreload()) {
         .pending => {},
@@ -240,8 +251,8 @@ const package_help =
     \\
 ;
 
-fn packageUsage(init: std.process.Init) AppError!u8 {
-    try writeFile(init.io, .stderr, package_help);
+fn packageUsage(init: Startup) AppError!u8 {
+    try writeFile(init.process.io, .stderr, package_help);
     return 1;
 }
 
@@ -249,35 +260,35 @@ fn packageUsage(init: std.process.Init) AppError!u8 {
 /// no environment variable names one. A relative selection keeps its
 /// established meaning by resolving once against the captured startup
 /// directory; evaluated package code never derives or sees this path.
-fn cacheRootFromEnviron(init: std.process.Init, startup_directory: []const u8) AppError!?[]u8 {
-    const selected = try ecl.pkg_lock.cacheRoot(init.gpa, .{
-        .ecl_cache = init.environ_map.get("ECL_CACHE"),
-        .xdg_cache_home = init.environ_map.get("XDG_CACHE_HOME"),
-        .home = init.environ_map.get("HOME"),
+fn cacheRootFromEnviron(init: Startup, startup_directory: []const u8) AppError!?[]u8 {
+    const selected = try ecl.pkg_lock.cacheRoot(init.process.gpa, .{
+        .ecl_cache = init.process.environ_map.get("ECL_CACHE"),
+        .xdg_cache_home = init.process.environ_map.get("XDG_CACHE_HOME"),
+        .home = init.process.environ_map.get("HOME"),
     }) orelse return null;
     if (std.fs.path.isAbsolute(selected)) return selected;
-    defer init.gpa.free(selected);
-    return std.fs.path.join(init.gpa, &.{ startup_directory, selected }) catch return error.OutOfMemory;
+    defer init.process.gpa.free(selected);
+    return std.fs.path.join(init.process.gpa, &.{ startup_directory, selected }) catch return error.OutOfMemory;
 }
 
 /// The sentinel slice `realPathFileAlloc` hands back must be freed as one.
-fn startupDirectory(init: std.process.Init) AppError![:0]u8 {
-    return std.Io.Dir.cwd().realPathFileAlloc(init.io, ".", init.gpa) catch |err| switch (err) {
+fn startupDirectory(init: Startup) AppError![:0]u8 {
+    return std.Io.Dir.cwd().realPathFileAlloc(init.process.io, ".", init.process.gpa) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         else => error.Io,
     };
 }
 
-fn packageCommand(init: std.process.Init, arguments: []const []const u8) AppError!u8 {
+fn packageCommand(init: Startup, arguments: []const []const u8) AppError!u8 {
     if (arguments.len == 0) return packageUsage(init);
     const command = arguments[0];
     const worker_count = try configuredWorkers(init) orelse return 2;
 
     if (std.mem.eql(u8, command, "init")) {
         if (arguments.len != 1 and arguments.len != 2) return packageUsage(init);
-        const cwd = std.Io.Dir.cwd().realPathFileAlloc(init.io, ".", init.gpa) catch |err|
+        const cwd = std.Io.Dir.cwd().realPathFileAlloc(init.process.io, ".", init.process.gpa) catch |err|
             return emitIoError(init, "cannot resolve package project directory", err);
-        defer init.gpa.free(cwd);
+        defer init.process.gpa.free(cwd);
         const name = if (arguments.len == 2) arguments[1] else std.fs.path.basename(cwd);
         return executeSource(
             init,
@@ -291,11 +302,11 @@ fn packageCommand(init: std.process.Init, arguments: []const []const u8) AppErro
     }
 
     const startup = try startupDirectory(init);
-    defer init.gpa.free(startup);
+    defer init.process.gpa.free(startup);
     if (std.mem.eql(u8, command, "gc")) {
         if (arguments.len < 2) return packageUsage(init);
         const cache = try cacheRootFromEnviron(init, startup);
-        defer if (cache) |root| init.gpa.free(root);
+        defer if (cache) |root| init.process.gpa.free(root);
         return executePackageSource(
             init,
             "<pkg:gc>",
@@ -322,7 +333,7 @@ fn packageCommand(init: std.process.Init, arguments: []const []const u8) AppErro
         false;
     if (!valid_shape) return packageUsage(init);
 
-    const discovery = try ecl.project.Root.discover(init.gpa, init.io, ".");
+    const discovery = try ecl.project.Root.discover(init.process.gpa, init.process.io, ".");
     const project_root = switch (discovery) {
         .absent => return emitSyntheticError(
             init,
@@ -338,13 +349,13 @@ fn packageCommand(init: std.process.Init, arguments: []const []const u8) AppErro
     };
     defer project_root.deinit();
     const cache = try cacheRootFromEnviron(init, startup);
-    defer if (cache) |root| init.gpa.free(root);
+    defer if (cache) |root| init.process.gpa.free(root);
     // The discovered project is trusted host input resolved once, here. The
     // package authority reaches the vendor store only as the fixed child of
     // this retained handle, so no path names it.
-    var project_handle = std.Io.Dir.cwd().openDir(init.io, project_root.path(), .{}) catch |err|
+    var project_handle = std.Io.Dir.cwd().openDir(init.process.io, project_root.path(), .{}) catch |err|
         return emitIoError(init, "cannot open project root", err);
-    defer project_handle.close(init.io);
+    defer project_handle.close(init.process.io);
     // Each command names exactly the stores it may touch. Mutating commands
     // may create an absent cache; read-only commands leave absence visible.
     const grant: ecl.package_authority.PackageGrant = if (std.mem.eql(u8, command, "add") or
@@ -394,62 +405,62 @@ fn environSnapshot(init: std.process.Init) AppError![]const ecl.machine.Environ.
         variable.* = .{ .name = name, .value = value };
     return entries;
 }
-fn configuredWorkers(init: std.process.Init) AppError!?usize {
-    const raw = init.environ_map.get("ECL_WORKERS") orelse
+fn configuredWorkers(init: Startup) AppError!?usize {
+    const raw = init.process.environ_map.get("ECL_WORKERS") orelse
         return @max(@as(usize, 1), std.Thread.getCpuCount() catch 1);
     if (raw.len == 0) {
-        try writeFile(init.io, .stderr, "ecl: ECL_WORKERS must be a positive base-10 integer\n");
+        try writeFile(init.process.io, .stderr, "ecl: ECL_WORKERS must be a positive base-10 integer\n");
         return null;
     }
     for (raw) |byte| if (!std.ascii.isDigit(byte)) {
-        try writeFile(init.io, .stderr, "ecl: ECL_WORKERS must be a positive base-10 integer\n");
+        try writeFile(init.process.io, .stderr, "ecl: ECL_WORKERS must be a positive base-10 integer\n");
         return null;
     };
     const count = std.fmt.parseInt(usize, raw, 10) catch {
-        try writeFile(init.io, .stderr, "ecl: ECL_WORKERS must be a positive base-10 integer\n");
+        try writeFile(init.process.io, .stderr, "ecl: ECL_WORKERS must be a positive base-10 integer\n");
         return null;
     };
     if (count == 0) {
-        try writeFile(init.io, .stderr, "ecl: ECL_WORKERS must be a positive base-10 integer\n");
+        try writeFile(init.process.io, .stderr, "ecl: ECL_WORKERS must be a positive base-10 integer\n");
         return null;
     }
     return count;
 }
-fn runStdin(init: std.process.Init, arguments: []const []const u8, worker_count: usize) AppError!u8 {
+fn runStdin(init: Startup, arguments: []const []const u8, worker_count: usize) AppError!u8 {
     var buffer: [8192]u8 = undefined;
-    var file_reader = std.Io.File.stdin().reader(init.io, &buffer);
-    const source = file_reader.interface.allocRemaining(init.gpa, .unlimited) catch |err| switch (err) {
+    var file_reader = std.Io.File.stdin().reader(init.process.io, &buffer);
+    const source = file_reader.interface.allocRemaining(init.process.gpa, .unlimited) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return emitIoError(init, "cannot read stdin", err),
     };
-    defer init.gpa.free(source);
+    defer init.process.gpa.free(source);
     return executeSource(init, "<stdin>", source, arguments, true, .program_source, worker_count);
 }
 
-fn readFormatStdin(init: std.process.Init) AppError![]u8 {
+fn readFormatStdin(init: Startup) AppError![]u8 {
     var buffer: [8192]u8 = undefined;
-    var file_reader = std.Io.File.stdin().reader(init.io, &buffer);
-    return file_reader.interface.allocRemaining(init.gpa, .unlimited) catch |err| switch (err) {
+    var file_reader = std.Io.File.stdin().reader(init.process.io, &buffer);
+    return file_reader.interface.allocRemaining(init.process.gpa, .unlimited) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.Io,
     };
 }
 
-fn formatCommand(init: std.process.Init, arguments: []const []const u8) AppError!u8 {
+fn formatCommand(init: Startup, arguments: []const []const u8) AppError!u8 {
     const write_in_place = arguments.len > 0 and std.mem.eql(u8, arguments[0], "-w");
     if ((write_in_place and arguments.len != 2) or (!write_in_place and arguments.len != 1)) {
-        try writeFile(init.io, .stderr, "ecl fmt: usage: ecl fmt [-w] <FILE|->\n");
+        try writeFile(init.process.io, .stderr, "ecl fmt: usage: ecl fmt [-w] <FILE|->\n");
         return 1;
     }
     const source_path = arguments[@intFromBool(write_in_place)];
     if (write_in_place and std.mem.eql(u8, source_path, "-")) {
-        try writeFile(init.io, .stderr, "ecl fmt: -w requires a file path\n");
+        try writeFile(init.process.io, .stderr, "ecl fmt: -w requires a file path\n");
         return 1;
     }
     var permissions: std.Io.File.Permissions = .default_file;
     if (write_in_place) {
         const info = std.Io.Dir.cwd().statFile(
-            init.io,
+            init.process.io,
             source_path,
             .{ .follow_symlinks = false },
         ) catch |err| return emitIoError(init, "cannot inspect format input", err);
@@ -459,81 +470,81 @@ fn formatCommand(init: std.process.Init, arguments: []const []const u8) AppError
     const source = if (std.mem.eql(u8, source_path, "-"))
         try readFormatStdin(init)
     else
-        std.Io.Dir.cwd().readFileAlloc(init.io, source_path, init.gpa, .unlimited) catch |err|
+        std.Io.Dir.cwd().readFileAlloc(init.process.io, source_path, init.process.gpa, .unlimited) catch |err|
             return emitIoError(init, "cannot read format input", err);
-    defer init.gpa.free(source);
-    const formatted = ecl.formatter.format(init.gpa, source) catch |err| switch (err) {
+    defer init.process.gpa.free(source);
+    const formatted = ecl.formatter.format(init.process.gpa, source) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.InvalidUtf8 => {
-            try writeFile(init.io, .stderr, "ecl fmt: source is not valid UTF-8\n");
+            try writeFile(init.process.io, .stderr, "ecl fmt: source is not valid UTF-8\n");
             return 1;
         },
         error.InvalidSource => {
-            try writeFile(init.io, .stderr, "ecl fmt: source does not parse\n");
+            try writeFile(init.process.io, .stderr, "ecl fmt: source does not parse\n");
             return 1;
         },
     };
-    defer init.gpa.free(formatted);
+    defer init.process.gpa.free(formatted);
     if (write_in_place) {
         if (std.mem.eql(u8, source, formatted)) return 0;
         return writeFormattedFile(init, source_path, permissions, formatted);
     }
-    try writeFile(init.io, .stdout, formatted);
+    try writeFile(init.process.io, .stdout, formatted);
     return 0;
 }
 
-fn formatTargetNotRegular(init: std.process.Init, path: []const u8) AppError!u8 {
+fn formatTargetNotRegular(init: Startup, path: []const u8) AppError!u8 {
     var buffer: [512]u8 = undefined;
     const message = std.fmt.bufPrint(
         &buffer,
         "ecl fmt: -w target `{s}` is not a regular file\n",
         .{path},
     ) catch "ecl fmt: -w target is not a regular file\n";
-    try writeFile(init.io, .stderr, message);
+    try writeFile(init.process.io, .stderr, message);
     return 1;
 }
 
 fn writeFormattedFile(
-    init: std.process.Init,
+    init: Startup,
     path: []const u8,
     permissions: std.Io.File.Permissions,
     formatted: []const u8,
 ) AppError!u8 {
     const parent_path = std.fs.path.dirname(path) orelse ".";
     var parent = std.Io.Dir.cwd().openDir(
-        init.io,
+        init.process.io,
         parent_path,
         .{ .follow_symlinks = false },
     ) catch |err| return emitIoError(init, "cannot open format output directory", err);
-    defer parent.close(init.io);
+    defer parent.close(init.process.io);
     const basename = std.fs.path.basename(path);
-    var atomic = parent.createFileAtomic(init.io, basename, .{
+    var atomic = parent.createFileAtomic(init.process.io, basename, .{
         .permissions = permissions,
         .replace = true,
     }) catch |err| return emitIoError(init, "cannot create format output", err);
-    defer atomic.deinit(init.io);
+    defer atomic.deinit(init.process.io);
 
     var output_buffer: [4096]u8 = undefined;
-    var writer = atomic.file.writer(init.io, &output_buffer);
+    var writer = atomic.file.writer(init.process.io, &output_buffer);
     writer.interface.writeAll(formatted) catch |err|
         return emitIoError(init, "cannot write format output", err);
     writer.interface.flush() catch |err|
         return emitIoError(init, "cannot write format output", err);
-    atomic.file.sync(init.io) catch |err|
+    atomic.file.sync(init.process.io) catch |err|
         return emitIoError(init, "cannot synchronize format output", err);
 
     const current = parent.statFile(
-        init.io,
+        init.process.io,
         basename,
         .{ .follow_symlinks = false },
     ) catch |err| return emitIoError(init, "cannot recheck format input", err);
     if (current.kind != .file) return formatTargetNotRegular(init, path);
-    atomic.replace(init.io) catch |err|
+    atomic.replace(init.process.io) catch |err|
         return emitIoError(init, "cannot publish format output", err);
     return 0;
 }
 fn executeSource(
-    init: std.process.Init,
+    init: Startup,
     source_name: []const u8,
     source: []const u8,
     arguments: []const []const u8,
@@ -547,7 +558,7 @@ fn executeSource(
 /// A package command: the ordinary command-line Session plus the `'project`
 /// filesystem root and the opaque package-store authority.
 fn executePackageSource(
-    init: std.process.Init,
+    init: Startup,
     source_name: []const u8,
     source: []const u8,
     arguments: []const []const u8,
@@ -559,7 +570,7 @@ fn executePackageSource(
 }
 
 fn executeWith(
-    init: std.process.Init,
+    init: Startup,
     source_name: []const u8,
     source: []const u8,
     arguments: []const []const u8,
@@ -570,12 +581,10 @@ fn executeWith(
     package_grant: ?ecl.package_authority.PackageGrant,
 ) AppError!u8 {
     var output_buffer: [4096]u8 = undefined;
-    var output_writer = std.Io.File.stdout().writerStreaming(init.io, &output_buffer);
+    var output_writer = std.Io.File.stdout().writerStreaming(init.process.io, &output_buffer);
     var diagnostic_buffer: [4096]u8 = undefined;
-    var diagnostic_writer = std.Io.File.stderr().writerStreaming(init.io, &diagnostic_buffer);
-    const initial_cwd = std.Io.Dir.cwd().realPathFileAlloc(init.io, ".", init.gpa) catch |err|
-        return emitIoError(init, "cannot resolve process working directory", err);
-    defer init.gpa.free(initial_cwd);
+    var diagnostic_writer = std.Io.File.stderr().writerStreaming(init.process.io, &diagnostic_buffer);
+    const initial_cwd = init.cwd;
     // SAFETY: the second slot is read only through `filesystem_roots[0..root_count]`,
     // and `root_count` becomes 2 only after that slot is assigned below.
     var filesystem_roots: [2]ecl.filesystem_port.Root = .{ cwdRoot(initial_cwd), undefined };
@@ -584,24 +593,20 @@ fn executeWith(
         filesystem_roots[1] = .{ .name = "project", .absolute_path = path };
         root_count = 2;
     }
-    const host: ecl.session.Host = .{
-        .io = init.io,
+    const host: ecl.session.RuntimeInputs = .{
+        .io = init.process.io,
         .output = &output_writer.interface,
         .diagnostics = &diagnostic_writer.interface,
-        .ecl_path = init.environ_map.get("ECL_PATH"),
-        .project_start = ".",
-        .environ = try environSnapshot(init),
+        .ecl_path = init.process.environ_map.get("ECL_PATH"),
+        .environ = init.environ,
         .standard_input = standard_input,
         .initial_cwd = initial_cwd,
         .filesystem = .{ .roots = filesystem_roots[0..root_count] },
         .clock = .{ .wall = .host },
     };
-    var session = if (package_grant) |grant|
-        try ecl.session.Session.initPackageCommand(init.gpa, arguments, host, .{ .worker_pool = worker_count }, grant)
-    else
-        try ecl.session.Session.initWithHostConfig(init.gpa, arguments, host, .{ .worker_pool = worker_count });
+    var session = try ecl.session.Session.init(init.process.gpa, arguments, host, .{ .worker_pool = worker_count }, if (package_grant) |grant| .{ .package = grant } else .evaluate);
     defer session.deinit();
-    session.setNativeDiagnostics(init.environ_map.get("ECL_NATIVE_DIAGNOSTICS") != null);
+    session.setNativeDiagnostics(init.process.environ_map.get("ECL_NATIVE_DIAGNOSTICS") != null);
     const outcome = try session.runUnit(source_name, source);
     if (session.requestedExit()) |status| return status;
     switch (outcome) {
@@ -622,42 +627,40 @@ fn executeWith(
         },
     }
 }
-fn repl(init: std.process.Init, worker_count: usize) AppError!u8 {
+fn repl(init: Startup, worker_count: usize) AppError!u8 {
     var output_buffer: [4096]u8 = undefined;
-    var output_writer = std.Io.File.stdout().writerStreaming(init.io, &output_buffer);
+    var output_writer = std.Io.File.stdout().writerStreaming(init.process.io, &output_buffer);
     var diagnostic_buffer: [4096]u8 = undefined;
-    var diagnostic_writer = std.Io.File.stderr().writerStreaming(init.io, &diagnostic_buffer);
-    const initial_cwd = std.Io.Dir.cwd().realPathFileAlloc(init.io, ".", init.gpa) catch |err|
-        return emitIoError(init, "cannot resolve process working directory", err);
-    defer init.gpa.free(initial_cwd);
-    var session = try ecl.session.Session.initWithHostConfig(
-        init.gpa,
+    var diagnostic_writer = std.Io.File.stderr().writerStreaming(init.process.io, &diagnostic_buffer);
+    const initial_cwd = init.cwd;
+    var session = try ecl.session.Session.init(
+        init.process.gpa,
         &.{},
         .{
-            .io = init.io,
+            .io = init.process.io,
             .output = &output_writer.interface,
             .diagnostics = &diagnostic_writer.interface,
-            .ecl_path = init.environ_map.get("ECL_PATH"),
-            .project_start = ".",
-            .environ = try environSnapshot(init),
+            .ecl_path = init.process.environ_map.get("ECL_PATH"),
+            .environ = init.environ,
             .standard_input = .program_source,
             .initial_cwd = initial_cwd,
             .filesystem = .{ .roots = &.{cwdRoot(initial_cwd)} },
             .clock = .{ .wall = .host },
         },
         .{ .worker_pool = worker_count },
+        .evaluate,
     );
     defer session.deinit();
-    session.setNativeDiagnostics(init.environ_map.get("ECL_NATIVE_DIAGNOSTICS") != null);
-    const history_path = if (init.environ_map.get("HOME")) |home|
-        std.Io.Dir.path.join(init.gpa, &.{ home, ".ecl_history" }) catch
+    session.setNativeDiagnostics(init.process.environ_map.get("ECL_NATIVE_DIAGNOSTICS") != null);
+    const history_path = if (init.process.environ_map.get("HOME")) |home|
+        std.Io.Dir.path.join(init.process.gpa, &.{ home, ".ecl_history" }) catch
             return error.OutOfMemory
     else
         null;
-    defer if (history_path) |path| init.gpa.free(path);
-    var editor = try ecl.line_editor.Editor.init(init.gpa, init.io, history_path);
+    defer if (history_path) |path| init.process.gpa.free(path);
+    var editor = try ecl.line_editor.Editor.init(init.process.gpa, init.process.io, history_path);
     defer editor.deinit();
-    var pending = try ecl.reader.PendingUnit.init(init.gpa);
+    var pending = try ecl.reader.PendingUnit.init(init.process.gpa);
     defer pending.deinit();
     while (true) {
         const result = editor.readLine(
@@ -704,7 +707,7 @@ fn repl(init: std.process.Init, worker_count: usize) AppError!u8 {
     }
 }
 fn emitIncompleteAtEof(
-    init: std.process.Init,
+    init: Startup,
     session: *ecl.session.Session,
     pending: []const u8,
 ) AppError!u8 {
@@ -731,18 +734,18 @@ fn printStack(session: *ecl.session.Session) AppError!void {
     session.writeOutputLine(display.bytes()) catch return error.Io;
 }
 fn emitSyntheticError(
-    init: std.process.Init,
+    init: Startup,
     kind: ecl.machine.ErrorKind,
     message: []const u8,
     location: ?ecl.spans.LocatedSpan,
 ) AppError!u8 {
-    var host = ecl.heap.HostOwner.init(init.gpa);
+    var host = ecl.heap.HostOwner.init(init.process.gpa);
     const releases = host.domain();
     defer host.cleanup().drain();
     var language_error = ecl.machine.EclErr.init(kind, message);
     defer language_error.retire(releases);
     const error_value = try ecl.machine.errorValue(
-        init.gpa,
+        init.process.gpa,
         releases,
         &language_error,
         .{},
@@ -753,7 +756,7 @@ fn emitSyntheticError(
     return 1;
 }
 fn emitIoError(
-    init: std.process.Init,
+    init: Startup,
     context: []const u8,
     host_error: anyerror,
 ) AppError!u8 {
@@ -765,19 +768,19 @@ fn emitIoError(
     ) catch context;
     return emitSyntheticError(init, .io, message, null);
 }
-fn printError(init: std.process.Init, error_value: ecl.value.Value) AppError!void {
-    const rendered = try ecl.print.toOwnedString(init.gpa, error_value);
-    defer init.gpa.free(rendered);
-    try writeFile(init.io, .stderr, rendered);
-    try writeFile(init.io, .stderr, "\n");
+fn printError(init: Startup, error_value: ecl.value.Value) AppError!void {
+    const rendered = try ecl.print.toOwnedString(init.process.gpa, error_value);
+    defer init.process.gpa.free(rendered);
+    try writeFile(init.process.io, .stderr, rendered);
+    try writeFile(init.process.io, .stderr, "\n");
 }
 fn printSessionError(
-    init: std.process.Init,
+    init: Startup,
     session: *ecl.session.Session,
     error_value: ecl.value.Value,
 ) AppError!void {
-    const rendered = try ecl.print.toOwnedString(init.gpa, error_value);
-    defer init.gpa.free(rendered);
+    const rendered = try ecl.print.toOwnedString(init.process.gpa, error_value);
+    defer init.process.gpa.free(rendered);
     session.writeDiagnosticsLine(rendered) catch return error.Io;
 }
 const Output = enum { stdout, stderr };

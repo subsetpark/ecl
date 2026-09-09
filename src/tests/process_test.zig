@@ -1,4 +1,5 @@
 //! Public Session coverage for the process-port capability.
+const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const fixture = @import("process_fixture_options");
 const process = @import("../process_port.zig");
@@ -23,17 +24,14 @@ fn expectStackWithWorkers(program: []const u8, limits: process.Limits, expected:
     var output = std.Io.Writer.Discarding.init(&output_buffer);
     var diagnostics_buffer: [256]u8 = undefined;
     var diagnostics = std.Io.Writer.Discarding.init(&diagnostics_buffer);
-    var runtime = try session.Session.initWithHostConfig(
-        heap.allocator(),
-        &.{},
-        .{
-            .io = std.testing.io,
-            .output = &output.writer,
-            .diagnostics = &diagnostics.writer,
-            .process_limits = limits,
-        },
-        .{ .worker_pool = workers },
-    );
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .process_limits = limits,
+    }), .{ .worker_pool = workers }, .evaluate);
     defer runtime.deinit();
     switch (try runtime.runUnit("<process-test>", program)) {
         .ok => {},
@@ -58,17 +56,14 @@ fn expectError(program: []const u8, limits: process.Limits, expected: support.Er
     var output = std.Io.Writer.Discarding.init(&output_buffer);
     var diagnostics_buffer: [256]u8 = undefined;
     var diagnostics = std.Io.Writer.Discarding.init(&diagnostics_buffer);
-    var runtime = try session.Session.initWithHostConfig(
-        heap.allocator(),
-        &.{},
-        .{
-            .io = std.testing.io,
-            .output = &output.writer,
-            .diagnostics = &diagnostics.writer,
-            .process_limits = limits,
-        },
-        .cooperative,
-    );
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .process_limits = limits,
+    }), .cooperative, .evaluate);
     defer runtime.deinit();
     const failure = switch (try runtime.runUnit("<process-test>", program)) {
         .ok, .incomplete => return error.ExpectedLanguageError,

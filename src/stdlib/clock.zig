@@ -3,13 +3,11 @@
 //! `now`, `elapsed`, and `sleep` read the one monotonic clock the scheduler
 //! owns, so a program's instants, its sleeps, and every `task.await-for` deadline
 //! agree on what time it is — including under a host-driven manual clock.
-//! `unix` is the separate wall-clock grant: absent unless the Session host
-//! supplied one, and never implied by host I/O or TLS verification time.
+//! `unix` reads realtime; fixed and anchored clocks are internal test inputs.
 //! Instants are `{'monotonic ms}` and wall timestamps are `{'unix ms}`; the
 //! pure conversions over the latter live in `time`.
 const std = @import("std");
 const env = @import("../env.zig");
-const intern = @import("../intern.zig");
 const machine = @import("../machine.zig");
 const scheduler_api = @import("../scheduler.zig");
 const time = @import("time.zig");
@@ -21,7 +19,7 @@ pub const words = [_]env.BuiltinWord{
     .{ .name = "elapsed", .doc = "( instant -- milliseconds ) Return the monotonic milliseconds since an instant from `now`.", .primitive = elapsed },
     .{ .name = "now", .doc = "( -- instant ) Read the monotonic clock as {'monotonic milliseconds} since the Session started.", .primitive = now },
     .{ .name = "sleep", .doc = "( milliseconds -- ) Park the calling unit for a nonnegative duration without holding a worker; cancellable.", .primitive = sleep },
-    .{ .name = "unix", .doc = "( -- timestamp ) Read the host-granted wall clock as {'unix milliseconds}.", .primitive = unix },
+    .{ .name = "unix", .doc = "( -- timestamp ) Read the realtime wall clock as {'unix milliseconds}.", .primitive = unix },
 };
 
 fn scheduler(evaluator: *Machine) *const scheduler_api.WorkerScheduler {
@@ -45,13 +43,7 @@ fn elapsed(evaluator: *Machine) MachineError!void {
 }
 
 fn unix(evaluator: *Machine) MachineError!void {
-    const milliseconds: i64 = switch (evaluator.unit.inherited.wall_clock) {
-        .absent => {
-            const reason = try intern.intern("unavailable");
-            const failure = evaluator.fail(.domain, "clock.unix has no wall-clock authority in this session");
-            evaluator.addErrorReason(.{ .symbol = reason });
-            return failure;
-        },
+    const milliseconds: i64 = switch (evaluator.unit.inherited.runtime().wall_clock) {
         .host => |io| std.math.cast(i64, @divFloor(std.Io.Clock.real.now(io).nanoseconds, std.time.ns_per_ms)) orelse
             return evaluator.fail(.overflow, "clock.unix left the millisecond range"),
         .fixed => |timestamp| timestamp,

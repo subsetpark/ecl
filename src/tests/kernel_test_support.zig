@@ -8,6 +8,7 @@
 //! allocators; put such a test in `definition_test` or `module_test`, which
 //! stay on `std.testing.allocator`. See `test_heap.zig` for the full policy
 //! and for which suite each kind of memory assertion belongs in.
+const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const value = @import("../value.zig");
 const session = @import("../session.zig");
@@ -106,7 +107,9 @@ pub fn expectLanguageError(failure: value.Value, expected: ErrorCase) !void {
 fn expectStackCase(case: StackCase) !void {
     var heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&heap);
-    var runtime = try session.Session.init(heap.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     switch (try runtime.runUnit("<kernel-test>", case.source)) {
         .ok => {},
@@ -127,7 +130,9 @@ fn expectStackCase(case: StackCase) !void {
 fn expectErrorCase(case: ErrorCase) !void {
     var heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&heap);
-    var runtime = try session.Session.init(heap.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     const failure = switch (try runtime.runUnit("<kernel-test>", case.source)) {
         .ok, .incomplete => return error.TestUnexpectedResult,

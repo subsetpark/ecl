@@ -271,8 +271,7 @@ fn begin(evaluator: *Machine, operation: Operation) MachineError!void {
     }
     errdefer inputs.deinit(evaluator.releaseDomain());
     const symbols = try Symbols.init(operation);
-    const access = evaluator.unit.inherited.filesystem_access orelse
-        return failInputs(evaluator, .domain, .unavailable, operation, symbols, &inputs);
+    const access = evaluator.unit.inherited.runtime().filesystem_access;
     const driver = try evaluator.allocator().create(Driver);
     errdefer evaluator.allocator().destroy(driver);
     const path_cursor = kernel_storage.StringEncoder.init(evaluator.allocator(), inputs.path);
@@ -330,7 +329,7 @@ fn reasonSymbol(reason: fsport.Reason) error{OutOfMemory}!u32 {
 
 fn errorKindFor(reason: fsport.Reason) machine.ErrorKind {
     return switch (reason) {
-        .invalid_path, .unknown_root, .unavailable => .domain,
+        .invalid_path, .unknown_root => .domain,
         .limit => .overflow,
         else => .io,
     };

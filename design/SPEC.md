@@ -8,7 +8,9 @@ This document defines the syntax and semantics of the ECL language. The
 language is defined independently of any implementation representation,
 interpreter architecture, host interface, or distribution. This document
 defines the language; the shipped ECL interpreter is its reference
-implementation.
+implementation. The shipped interpreter is a CLI with a Zig extension SDK:
+ECL calls registered Zig extensions, while embedding the interpreter in Zig
+applications is outside the supported distribution interface.
 
 ECL has three distinct fields of conformance:
 

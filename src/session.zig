@@ -1,4 +1,5 @@
 //! Persistent calculator session with transactional stack units.
+const runtime_fixture = @import("tests/runtime_fixture.zig");
 const std = @import("std");
 const value = @import("value.zig");
 const heap = @import("heap.zig");
@@ -29,7 +30,7 @@ const package_authority = @import("package_authority.zig");
 pub const Value = value.Value;
 /// Session construction distinguishes invalid runtime configuration from
 /// allocation failure: a misnamed root, a relative or missing directory, or an
-/// unsupported target is a configuration error the embedder must see.
+/// unsupported target is a configuration error the caller must see.
 pub const InitError = error{ OutOfMemory, InvalidHostConfig };
 pub const UnitOutcome = union(enum) {
     ok,
@@ -49,6 +50,12 @@ pub const Config = union(enum) {
         };
     }
 };
+pub const CommandMode = union(enum) {
+    evaluate,
+    language_tests,
+    package: package_authority.PackageGrant,
+};
+
 pub const default_worker_count: usize = session_options.default_worker_count;
 
 /// Deterministic HTTPS verification inputs. `ca_file` is borrowed on input;
@@ -58,12 +65,9 @@ pub const TlsTrustOverride = struct {
     now: std.Io.Timestamp,
 };
 
-/// The host's wall-clock grant. Monotonic time is not configured here: the
-/// scheduler always has one, selected by `ClockPolicy.monotonic`.
+/// Internal wall-clock inputs for ordinary execution and deterministic tests.
 pub const WallClockPolicy = union(enum) {
-    /// `clock.unix` is refused. The default, like every other host authority.
-    absent,
-    /// Read the process realtime clock through the Host's I/O.
+    /// Read the process realtime clock through runtime I/O.
     host,
     /// Every read returns this Unix millisecond timestamp.
     fixed: i64,
@@ -78,14 +82,14 @@ pub const ClockPolicy = struct {
     /// `host` reads the process's awake clock; `manual` starts at zero and
     /// moves only through `Session.advanceManualClock`.
     monotonic: scheduler_api.ClockSource = .host,
-    wall: WallClockPolicy = .absent,
+    wall: WallClockPolicy = .host,
 };
 
 /// The host services a Session inherits from its process. Grouping them
 /// nominally keeps adding one — an environment snapshot, a standard-input
 /// mode — from turning `init` into a positional checklist whose arguments
 /// only differ by type.
-pub const Host = struct {
+pub const RuntimeInputs = struct {
     /// Capacity for trusted package-defined resources; validated at creation
     /// of the Session, independently of filesystem, process, and network limits.
     native_port_limits: native_port.Limits = .{},
@@ -94,19 +98,16 @@ pub const Host = struct {
     diagnostics: *std.Io.Writer,
     tls_trust: ?TlsTrustOverride = null,
     ecl_path: ?[]const u8 = null,
-    /// Borrowed directory from which project discovery begins. Null disables
-    /// ambient project metadata reads for library Sessions.
-    project_start: ?[]const u8 = null,
     /// Borrowed name/value pairs; the Session owns its own copy.
-    environ: []const machine.Environ.Entry = &.{},
+    environ: []const machine.Environ.Entry,
     /// Whether the process has already claimed stdin as the program source.
     standard_input: machine.StandardInput.Availability = .data,
-    /// Startup directory for child processes. Null captures the current directory.
-    initial_cwd: ?[]const u8 = null,
+    /// Absolute startup directory for process execution and project discovery.
+    initial_cwd: []const u8,
     process_limits: process_port.Limits = .{},
     filesystem: filesystem_port.Config = .{},
     net_limits: net_port.Limits = .{},
-    /// Host monotonic time and no wall clock by default.
+    /// Real clocks by default; deterministic overrides are internal test inputs.
     clock: ClockPolicy = .{},
 };
 
@@ -262,16 +263,14 @@ const SessionCore = struct {
     registry: modules.Registry,
     test_authority: ?modules.TestAuthority,
     native_owner: *native_module.Owner,
-    process_owner: ?*process_port.ProcessOwner,
-    filesystem_owner: ?*filesystem_port.FilesystemOwner,
-    net_owner: ?*net_port.NetOwner,
+    process_owner: *process_port.ProcessOwner,
+    filesystem_owner: *filesystem_port.FilesystemOwner,
+    net_owner: *net_port.NetOwner,
     package_owner: ?*package_authority.PackageOwner,
     stack: std.ArrayList(Value) = .empty,
     archive_owner: spans.SpanArchiveOwner,
     archive: spans.SpanArchive,
-    output: ?*std.Io.Writer,
-    diagnostics: ?*std.Io.Writer,
-    host_io: ?std.Io,
+    host_io: std.Io,
     tls_trust: ?machine.TlsTrust,
     wall_clock: machine.WallClock,
     ecl_path: ?[]u8,
@@ -353,88 +352,21 @@ pub const Session = enum(usize) {
         const erased: *OpaqueSessionCore = @ptrFromInt(@intFromEnum(self.*));
         return @ptrCast(@alignCast(erased));
     }
+    /// Inputs outlive teardown; borrowed configuration strings and environment
+    /// entries are copied before construction succeeds. Failure retains inputs.
     pub fn init(
         allocator: std.mem.Allocator,
         arguments: []const []const u8,
-    ) InitError!Session {
-        return initFull(allocator, arguments, null, null, .default, .application, null);
-    }
-    pub fn initWithConfig(
-        allocator: std.mem.Allocator,
-        arguments: []const []const u8,
+        host: RuntimeInputs,
         config: Config,
+        mode: CommandMode,
     ) InitError!Session {
-        return initFull(allocator, arguments, null, null, config, .application, null);
-    }
-    /// The output writer must outlive the session.
-    pub fn initWithOutput(
-        allocator: std.mem.Allocator,
-        arguments: []const []const u8,
-        output: *std.Io.Writer,
-    ) InitError!Session {
-        return initFull(allocator, arguments, output, null, .default, .application, null);
-    }
-    /// Every writer and slice in `host` must outlive the session; the
-    /// environment snapshot is copied.
-    pub fn initWithHost(
-        allocator: std.mem.Allocator,
-        arguments: []const []const u8,
-        host: Host,
-    ) InitError!Session {
-        return initFull(allocator, arguments, host.output, host, .default, .application, null);
-    }
-    pub fn initWithHostConfig(
-        allocator: std.mem.Allocator,
-        arguments: []const []const u8,
-        host: Host,
-        config: Config,
-    ) InitError!Session {
-        return initFull(allocator, arguments, host.output, host, config, .application, null);
-    }
-
-    /// Create a package-command Session. Beyond the ordinary host services it
-    /// mints the opaque package authority over the host-selected stores, so
-    /// `pkg.store` words can act without any absolute path entering evaluated
-    /// code. Library embeddings have no reason to call this; ordinary
-    /// constructors never mint it.
-    pub fn initPackageCommand(
-        allocator: std.mem.Allocator,
-        arguments: []const []const u8,
-        host: Host,
-        config: Config,
-        grant: package_authority.PackageGrant,
-    ) InitError!Session {
-        return initFull(allocator, arguments, host.output, host, config, .application, grant);
-    }
-
-    /// Create the closed execution domain used by `ecl test` and trusted host
-    /// test harnesses. Ordinary constructors never mint test capabilities.
-    pub fn initTestWithHostConfig(
-        allocator: std.mem.Allocator,
-        arguments: []const []const u8,
-        host: Host,
-        config: Config,
-    ) InitError!Session {
-        return initFull(allocator, arguments, host.output, host, config, .testing, null);
-    }
-
-    pub fn initTest(
-        allocator: std.mem.Allocator,
-        arguments: []const []const u8,
-    ) InitError!Session {
-        return initFull(allocator, arguments, null, null, .default, .testing, null);
-    }
-
-    const ExecutionDomain = enum { application, testing };
-    fn initFull(
-        allocator: std.mem.Allocator,
-        arguments: []const []const u8,
-        output: ?*std.Io.Writer,
-        host: ?Host,
-        config: Config,
-        domain: ExecutionDomain,
-        package_grant: ?package_authority.PackageGrant,
-    ) InitError!Session {
+        const package_grant: ?package_authority.PackageGrant = switch (mode) {
+            .evaluate, .language_tests => null,
+            .package => |grant| grant,
+        };
+        if (!std.fs.path.isAbsolute(host.initial_cwd) or std.mem.indexOfScalar(u8, host.initial_cwd, 0) != null)
+            return error.InvalidHostConfig;
         const scheduler_config = config.schedulerConfig();
         scheduler_config.validate() catch return error.OutOfMemory;
         const host_owner = try allocator.create(heap.HostOwner);
@@ -450,12 +382,12 @@ pub const Session = enum(usize) {
         try prims.install(&building);
         var registry = try modules.Registry.init(host_owner.cleanup());
         errdefer registry.deinit();
-        var test_authority = if (domain == .testing)
+        var test_authority = if (mode == .language_tests)
             @as(?modules.TestAuthority, try registry.createTestAuthority())
         else
             null;
         errdefer if (test_authority) |*authority| authority.deinit();
-        const native_owner = native_module.Owner.initWithPortLimits(host_owner.cleanup(), if (host) |services| services.native_port_limits else .{}) catch |err| return switch (err) {
+        const native_owner = native_module.Owner.initWithPortLimits(host_owner.cleanup(), host.native_port_limits) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.InvalidLimits => error.InvalidHostConfig,
         };
@@ -473,39 +405,30 @@ pub const Session = enum(usize) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidPrelude => @panic("embedded prelude is invalid"),
         };
-        const owned_ecl_path = if (host) |services|
-            if (services.ecl_path) |path| try allocator.dupe(u8, path) else null
-        else
-            null;
+        const owned_ecl_path = if (host.ecl_path) |path| try allocator.dupe(u8, path) else null;
         errdefer if (owned_ecl_path) |path| allocator.free(path);
-        const owned_tls_trust: ?machine.TlsTrust = if (host) |services|
-            if (services.tls_trust) |trust| .{
-                .ca_file = try allocator.dupe(u8, trust.ca_file),
-                .now = trust.now,
-            } else null
-        else
-            null;
+        const owned_tls_trust: ?machine.TlsTrust = if (host.tls_trust) |trust| .{
+            .ca_file = try allocator.dupe(u8, trust.ca_file),
+            .now = trust.now,
+        } else null;
         errdefer if (owned_tls_trust) |trust| allocator.free(trust.ca_file);
-        const owned_project_lock = if (host) |services|
-            if (services.project_start) |start| try pkg_lock.ProjectLock.discover(
-                host_owner.cleanup(),
-                services.io,
-                start,
-                .{
-                    .ecl_cache = environValue(services.environ, "ECL_CACHE"),
-                    .xdg_cache_home = environValue(services.environ, "XDG_CACHE_HOME"),
-                    .home = environValue(services.environ, "HOME"),
-                },
-            ) else null
-        else
-            null;
+        const owned_project_lock = try pkg_lock.ProjectLock.discover(
+            host_owner.cleanup(),
+            host.io,
+            host.initial_cwd,
+            .{
+                .ecl_cache = environValue(host.environ, "ECL_CACHE"),
+                .xdg_cache_home = environValue(host.environ, "XDG_CACHE_HOME"),
+                .home = environValue(host.environ, "HOME"),
+            },
+        );
         errdefer if (owned_project_lock) |project_lock| project_lock.deinit();
         var snapshot = try EnvironSnapshot.capture(
             allocator,
-            if (host) |services| services.environ else &.{},
+            host.environ,
         );
         errdefer snapshot.deinit(allocator);
-        const process_owner = if (host) |services| owner: {
+        const process_owner = owner: {
             const entries = try allocator.alloc(process_port.EnvironmentEntry, snapshot.entries.len);
             defer allocator.free(entries);
             for (snapshot.entries, entries) |entry, *copy|
@@ -514,51 +437,50 @@ pub const Session = enum(usize) {
             errdefer allocator.destroy(owned);
             owned.* = process_port.ProcessOwner.init(
                 host_owner.cleanup(),
-                services.io,
-                services.initial_cwd,
-                services.process_limits,
+                host.io,
+                host.initial_cwd,
+                host.process_limits,
                 entries,
             ) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.InvalidConfig => return error.InvalidHostConfig,
             };
             break :owner owned;
-        } else null;
-        errdefer if (process_owner) |owner| {
-            owner.deinit();
-            allocator.destroy(owner);
         };
-        const filesystem_owner = if (host) |services| owner: {
+        errdefer {
+            process_owner.deinit();
+            allocator.destroy(process_owner);
+        }
+        const filesystem_owner = owner: {
             const owned = try allocator.create(filesystem_port.FilesystemOwner);
             errdefer allocator.destroy(owned);
-            owned.* = filesystem_port.FilesystemOwner.init(allocator, services.io, services.filesystem) catch |err| switch (err) {
+            owned.* = filesystem_port.FilesystemOwner.init(allocator, host.io, host.filesystem) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.InvalidConfig => return error.InvalidHostConfig,
             };
             break :owner owned;
-        } else null;
-        errdefer if (filesystem_owner) |owner| {
-            owner.deinit();
-            allocator.destroy(owner);
         };
-        const net_owner = if (host) |services| owner: {
+        errdefer {
+            filesystem_owner.deinit();
+            allocator.destroy(filesystem_owner);
+        }
+        const net_owner = owner: {
             const owned = try allocator.create(net_port.NetOwner);
             errdefer allocator.destroy(owned);
-            owned.* = net_port.NetOwner.init(host_owner.cleanup(), services.io, services.net_limits) catch |err| switch (err) {
+            owned.* = net_port.NetOwner.init(host_owner.cleanup(), host.io, host.net_limits) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.InvalidConfig => return error.InvalidHostConfig,
             };
             break :owner owned;
-        } else null;
-        errdefer if (net_owner) |owner| {
-            owner.deinit();
-            allocator.destroy(owner);
         };
+        errdefer {
+            net_owner.deinit();
+            allocator.destroy(net_owner);
+        }
         const package_owner = if (package_grant) |grant| owner: {
-            const services = host orelse return error.InvalidHostConfig;
             const owned = try allocator.create(package_authority.PackageOwner);
             errdefer allocator.destroy(owned);
-            owned.* = package_authority.PackageOwner.init(allocator, services.io, grant) catch |err| switch (err) {
+            owned.* = package_authority.PackageOwner.init(allocator, host.io, grant) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.InvalidPolicy => return error.InvalidHostConfig,
             };
@@ -575,7 +497,7 @@ pub const Session = enum(usize) {
         errdefer argv.deinit();
         const core = try allocator.create(SessionCore);
         errdefer allocator.destroy(core);
-        const clock_policy: ClockPolicy = if (host) |services| services.clock else .{};
+        const clock_policy = host.clock;
         const scheduler = try scheduler_api.Scheduler.init(
             host_owner.cleanup(),
             scheduler_config,
@@ -594,15 +516,10 @@ pub const Session = enum(usize) {
             .package_owner = package_owner,
             .archive_owner = archive_owner,
             .archive = archive,
-            .output = output,
-            .diagnostics = if (host) |services| services.diagnostics else null,
-            .host_io = if (host) |services| services.io else null,
+            .host_io = host.io,
             .tls_trust = owned_tls_trust,
             .wall_clock = switch (clock_policy.wall) {
-                .absent => .absent,
-                // A wall policy arrives only inside a Host, which always
-                // carries the I/O it reads through.
-                .host => .{ .host = host.?.io },
+                .host => .{ .host = host.io },
                 .fixed => |timestamp| .{ .fixed = timestamp },
                 .anchored => |base| .{ .anchored = base },
             },
@@ -611,12 +528,12 @@ pub const Session = enum(usize) {
             .environ = .{ .entries = snapshot.entries },
             .environ_bytes = snapshot.bytes,
             .standard_input = .init(
-                if (host) |services| services.standard_input else .program_source,
+                host.standard_input,
             ),
             .arguments = argv.take(),
             .console = console_api.Console.init(
-                output,
-                if (host) |services| services.diagnostics else null,
+                host.output,
+                host.diagnostics,
             ),
             .scheduler = scheduler,
             .root_tasks = root_tasks,
@@ -638,10 +555,8 @@ pub const Session = enum(usize) {
         // Every filesystem driver retired with the scheduler above, so no
         // handle, staging entry, or quota reservation can still reference
         // these owners.
-        if (core.filesystem_owner) |owner| {
-            owner.deinit();
-            core.allocator().destroy(owner);
-        }
+        core.filesystem_owner.deinit();
+        core.allocator().destroy(core.filesystem_owner);
         if (core.package_owner) |owner| {
             owner.deinit();
             core.allocator().destroy(owner);
@@ -667,14 +582,10 @@ pub const Session = enum(usize) {
         // them while the issuing Owner is still alive, then let that host-only
         // authority tear down descriptors/images and drain their ECL values.
         host.drain();
-        if (core.net_owner) |owner| {
-            owner.deinit();
-            core.allocator().destroy(owner);
-        }
-        if (core.process_owner) |owner| {
-            owner.deinit();
-            core.allocator().destroy(owner);
-        }
+        core.net_owner.deinit();
+        core.allocator().destroy(core.net_owner);
+        core.process_owner.deinit();
+        core.allocator().destroy(core.process_owner);
         const settled_native_owner = closing_native_owner.settle();
         host.drain();
         settled_native_owner.deinit();
@@ -730,32 +641,32 @@ pub const Session = enum(usize) {
             core.stack,
             &core.environment,
             &core.archive,
-            core.output,
+            .{
+                .registry = &core.registry,
+                .test_observation = if (core.test_authority) |authority| authority.observation() else null,
+                .test_execution = if (core.test_authority) |authority| authority.execution() else null,
+                .native_loader = core.native_owner.loader(),
+                .native_diagnostics = core.native_diagnostics,
+                .tls_trust = core.tls_trust,
+                .ecl_path = core.ecl_path,
+                .project_lock = core.project_lock,
+                .idiom_mode = core.idiom_mode,
+                .phrase_recognizer = idioms.tryApply,
+                .package_access = if (core.package_owner) |owner| owner.access() else null,
+                .phase = .{ .runtime = .{
+                    .console = &core.console,
+                    .host_io = core.host_io,
+                    .process_access = core.process_owner.access(),
+                    .filesystem_access = core.filesystem_owner.access(),
+                    .net_access = core.net_owner.access(),
+                    .wall_clock = core.wall_clock,
+                    .environ = &core.environ,
+                    .standard_input = &core.standard_input,
+                } },
+            },
             core.arguments,
             &core.cancelled,
         );
-        unit.inherited = .{
-            .registry = &core.registry,
-            .test_observation = if (core.test_authority) |authority| authority.observation() else null,
-            .test_execution = if (core.test_authority) |authority| authority.execution() else null,
-            .native_loader = core.native_owner.loader(),
-            .native_diagnostics = core.native_diagnostics,
-            .diagnostics = core.diagnostics,
-            .console = &core.console,
-            .host_io = core.host_io,
-            .tls_trust = core.tls_trust,
-            .ecl_path = core.ecl_path,
-            .project_lock = core.project_lock,
-            .environ = &core.environ,
-            .standard_input = &core.standard_input,
-            .idiom_mode = core.idiom_mode,
-            .phrase_recognizer = idioms.tryApply,
-            .process_access = if (core.process_owner) |owner| owner.access() else null,
-            .filesystem_access = if (core.filesystem_owner) |owner| owner.access() else null,
-            .net_access = if (core.net_owner) |owner| owner.access() else null,
-            .package_access = if (core.package_owner) |owner| owner.access() else null,
-            .wall_clock = core.wall_clock,
-        };
         unit.scheduler = core.scheduler.worker();
         unit.task_scope = &core.root_tasks;
         unit.is_root_unit = true;
@@ -1051,9 +962,6 @@ pub const Session = enum(usize) {
     }
     pub fn writeOutputLine(self: *Session, bytes: []const u8) error{WriteFailed}!void {
         return self.coreState().console.writeOutput(bytes, true);
-    }
-    pub fn writeDiagnostics(self: *Session, bytes: []const u8) error{WriteFailed}!void {
-        return self.coreState().console.writeDiagnostics(bytes, false);
     }
     pub fn writeDiagnosticsLine(self: *Session, bytes: []const u8) error{WriteFailed}!void {
         return self.coreState().console.writeDiagnostics(bytes, true);
@@ -1390,11 +1298,13 @@ test "invocation effects: completion owns immediate deferred nested and failing 
     };
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
-    var runtime = try Session.initWithHostConfig(std.testing.allocator, &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &output.writer,
-    }, .cooperative);
+    }), .cooperative, .evaluate);
     defer runtime.deinit();
     // Publish through the production candidate/registration boundary. Only
     // setup uses the owning registry; assertions observe public Session output.
@@ -1456,7 +1366,9 @@ test "invocation effects: completion owns immediate deferred nested and failing 
 }
 test "session runs the soul test" {
     const allocator = std.testing.allocator;
-    var session = try Session.init(allocator, &.{});
+    var runtime_inputs1 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs1.deinit();
+    var session = try Session.init(allocator, &.{}, runtime_inputs1.inputs(.{}), .default, .evaluate);
     defer session.deinit();
     try std.testing.expect((try session.runUnit("<test>", "3 4 +")) == .ok);
     var display = try session.stackDisplay();
@@ -1465,7 +1377,9 @@ test "session runs the soul test" {
 }
 test "failed units roll back stack while definitions survive" {
     const allocator = std.testing.allocator;
-    var session = try Session.init(allocator, &.{});
+    var runtime_inputs2 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs2.deinit();
+    var session = try Session.init(allocator, &.{}, runtime_inputs2.inputs(.{}), .default, .evaluate);
     defer session.deinit();
     try std.testing.expect((try session.runUnit("<test>", "10")) == .ok);
     const failed = (try session.runUnit("<test>", "(2 *) 'double def 20 + missing")).err;
@@ -1481,7 +1395,9 @@ test "failed units roll back stack while definitions survive" {
 }
 test "parse diagnostics become parse error dicts" {
     const allocator = std.testing.allocator;
-    var session = try Session.init(allocator, &.{});
+    var runtime_inputs3 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs3.deinit();
+    var session = try Session.init(allocator, &.{}, runtime_inputs3.inputs(.{}), .default, .evaluate);
     defer session.deinit();
     const error_value = (try session.runUnit("broken.ecl", "1 ]")).err;
     defer session.release(error_value);
@@ -1489,7 +1405,9 @@ test "parse diagnostics become parse error dicts" {
 }
 test "parse diagnostics preserve source names beyond the inline error budget" {
     const allocator = std.testing.allocator;
-    var session = try Session.init(allocator, &.{});
+    var runtime_inputs4 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs4.deinit();
+    var session = try Session.init(allocator, &.{}, runtime_inputs4.inputs(.{}), .default, .evaluate);
     defer session.deinit();
     const source_name = [_]u8{'p'} ** 512;
     const error_value = switch (try session.runUnit(&source_name, "1 ]")) {
@@ -1514,7 +1432,9 @@ test "parse diagnostics preserve source names beyond the inline error budget" {
 }
 test "source-defined failures retain provenance after their unit" {
     const allocator = std.testing.allocator;
-    var session = try Session.init(allocator, &.{});
+    var runtime_inputs5 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs5.deinit();
+    var session = try Session.init(allocator, &.{}, runtime_inputs5.inputs(.{}), .default, .evaluate);
     defer session.deinit();
     try std.testing.expect((try session.runUnit("defs.ecl", "(1 0 /) 'boom def")) == .ok);
     const error_value = (try session.runUnit("call.ecl", "boom")).err;
@@ -1532,4 +1452,15 @@ test "source-defined failures retain provenance after their unit" {
     const runtime_rendered = try printer.toOwnedString(allocator, runtime_error);
     defer allocator.free(runtime_rendered);
     try std.testing.expect(std.mem.indexOf(u8, runtime_rendered, "'source") == null);
+}
+
+test "session: invalid native port limits fail initialization" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    const invalid = [_]native_port.Limits{
+        .{ .max_live_ports = 0 }, .{ .max_live_ports = 4097 },
+        .{ .max_operations = 0 }, .{ .max_operations = 257 },
+        .{ .ring_capacity = 0 },  .{ .ring_capacity = 16 * 1024 * 1024 + 1 },
+    };
+    for (invalid) |limits| try std.testing.expectError(error.InvalidHostConfig, Session.init(std.testing.allocator, &.{}, inputs.inputs(.{ .native_port_limits = limits }), .cooperative, .evaluate));
 }

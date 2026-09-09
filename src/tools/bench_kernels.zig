@@ -160,7 +160,19 @@ fn measure(io: std.Io, case: Case) !Measurement {
     var backing: std.heap.DebugAllocator(.{ .stack_trace_frames = 0 }) = .init;
     defer _ = backing.deinit();
     var counting = CountingAllocator{ .backing = backing.allocator() };
-    var runtime = try ecl.session.Session.init(counting.allocator(), &.{});
+    var output = std.Io.Writer.Discarding.init(&.{});
+    const cwd = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", std.heap.smp_allocator);
+    defer std.heap.smp_allocator.free(cwd);
+    const inputs: ecl.session.RuntimeInputs = .{
+        .io = io,
+        .output = &output.writer,
+        .diagnostics = &output.writer,
+        .initial_cwd = cwd,
+        .environ = &.{},
+        .standard_input = .program_source,
+        .clock = .{ .wall = .{ .fixed = 0 } },
+    };
+    var runtime = try ecl.session.Session.init(counting.allocator(), &.{}, inputs, .default, .evaluate);
     defer runtime.deinit();
 
     switch (try runtime.runUnit("<bench-setup>", case.setup)) {

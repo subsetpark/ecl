@@ -3,6 +3,7 @@
 //! Cross-file Zig declarations are public where the implementation graph needs
 //! them, but this module is created privately by build.zig and is not the
 //! package-facing API.
+pub const runtime_fixture = @import("tests/runtime_fixture.zig");
 pub const version = "0.1.0";
 pub const value = @import("value.zig");
 pub const poll = @import("poll.zig");

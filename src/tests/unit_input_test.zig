@@ -7,6 +7,7 @@
 //!
 //! Every test here goes through the ordinary `Session` interface. Nothing
 //! inspects interpreter representation.
+const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const session = @import("../session.zig");
 
@@ -58,7 +59,9 @@ fn expectErrorContains(
 }
 
 test "unit inputs: every constructor requires separate seed and body lists" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
     try expectErrorContains(&runtime, "(1) @attempt", &.{"'underflow"});
@@ -71,7 +74,9 @@ test "unit inputs: every constructor requires separate seed and body lists" {
 }
 
 test "unit inputs: seeds reach every unit constructor in list order" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
     try expectStack(&runtime, "[10 3] (-) @attempt", "{'ok [7]}");
@@ -86,7 +91,9 @@ test "unit inputs: seeds reach every unit constructor in list order" {
 }
 
 test "unit inputs: isolation underflow names only the explicit values operand" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
     try expectStack(
@@ -99,7 +106,9 @@ test "unit inputs: isolation underflow names only the explicit values operand" {
 }
 
 test "unit inputs: every constructor diagnoses its own values operand" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
     try expectErrorContains(&runtime, "9 [] (1 +) @module", &.{
@@ -125,7 +134,9 @@ test "unit inputs: every constructor diagnoses its own values operand" {
 }
 
 test "unit inputs: large seeds and bodies preserve order and postconditions" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
     // 512 seeds arrive in list order, so folding pairwise from the top still
@@ -150,7 +161,9 @@ test "unit inputs: large seeds and bodies preserve order and postconditions" {
 }
 
 test "unit inputs: a construction body the reader wrote names its image" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
     // Top level, and through every container the reader built.
@@ -173,7 +186,9 @@ test "unit inputs: a construction body the reader wrote names its image" {
 }
 
 test "unit inputs: seeds are never traversed or stamped" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
     // A caller-authored behavior is a seed and keeps the caller's scope.
@@ -199,7 +214,9 @@ test "unit inputs: seeds are never traversed or stamped" {
 }
 
 test "unit inputs: a runtime-built body acquires no attribution" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs7 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs7.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs7.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
     // cat, compose, and raze all produce runtime-built values, and a reader
@@ -229,11 +246,9 @@ test "unit inputs: a runtime-built body acquires no attribution" {
     // times the settled memory.
     var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
     {
-        var measured = try session.Session.initWithConfig(
-            counting.allocator(),
-            &.{},
-            .cooperative,
-        );
+        var runtime_inputs8 = try runtime_fixture.Fixture.init();
+        defer runtime_inputs8.deinit();
+        var measured = try session.Session.init(counting.allocator(), &.{}, runtime_inputs8.inputs(.{}), .cooperative, .evaluate);
         defer measured.deinit();
         const cycle = "[] ((1) 'x def) () cat @module " ++
             "dup 'runtime-built register " ++
@@ -255,7 +270,9 @@ test "unit inputs: a runtime-built body acquires no attribution" {
 }
 
 test "unit inputs: one reader body serves two images independently" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
     try expectOk(
@@ -272,7 +289,9 @@ test "unit inputs: one reader body serves two images independently" {
 }
 
 test "unit inputs: a nested construction inside a stamped body still names its own image" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
     // The inner `@defm` is handed the outer stamp's copy of its body. A

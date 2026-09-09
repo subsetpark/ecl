@@ -1344,7 +1344,7 @@ unpack a gzip-compressed tar byte list beneath a previously absent
 name a child entry, not `.`. Return normalized regular-file paths in archive
 order. Unsafe, linked, special, duplicate, malformed, or over-limit members
 are `'domain`; invalid byte items are `'domain`; wrong container kinds are
-`'type`; unavailable filesystem I/O, an unknown root, or a non-canonical destination is `'domain` carrying the `fs` failure data; an
+`'type`; an unknown root or a non-canonical destination is `'domain` carrying the `fs` failure data; an
 exhausted operation quota is `'overflow`; filesystem and destination
 conflicts are `'io`. Failure never publishes a partial destination. See the
 environment's [`archive` contract](ENVIRONMENT.md#byte-lists-and-archives)
@@ -1354,12 +1354,8 @@ for the complete format, limit, containment, and publication contract.
 
 Scheduler-backed time. `now`, `elapsed`, and `sleep` read the one monotonic
 clock the Session's scheduler owns, so a program's instants, its sleeps, and
-every `task.await-for` deadline agree on the current time. `unix` is a separate
-wall-clock grant: the Session host may withhold it, fix it, anchor it to the
-monotonic clock, or pass the process clock through. The command line grants
-the process clock; embedded Sessions grant none by default. Possession of host
-I/O, filesystem or process authority, or a TLS verification timestamp never
-implies a wall clock.
+every `task.await-for` deadline agree on the current time. `unix` reads the
+process realtime clock, which is always available to CLI programs.
 
 Every quantity is a whole number of milliseconds. A monotonic instant is the
 one-key dictionary `{'monotonic ms}` counting from Session construction; a wall
@@ -1368,10 +1364,6 @@ clock domain: an instant handed to a `time` word, or a timestamp handed to
 `elapsed`, is `'type`. Monotonic instants are not portable across Sessions and
 carry no date; wall time may jump and is not suitable for scheduling.
 
-A Session may run under a manual monotonic clock that starts at zero and moves
-only when the host advances it. Under that clock `now` is exact, `sleep` and
-`task.await-for` complete on the advance that reaches their deadline, and no word
-waits on host time. `ENVIRONMENT.md` describes the host policy.
 
 ### elapsed
 `( instant -- milliseconds )` — Monotonic milliseconds from an instant produced
@@ -1380,7 +1372,7 @@ by `now` to the present. Anything but `{'monotonic int}` is `'type`.
 ### now
 `( -- instant )` — Read the monotonic clock as `{'monotonic ms}`. Successive
 reads never decrease. The first read of a fresh Session is close to
-`{'monotonic 0}`, and exactly that under a manual clock.
+`{'monotonic 0}`.
 
 ### sleep
 `( milliseconds -- )` — Park the calling unit until the monotonic clock has
@@ -1403,11 +1395,9 @@ clock.now 'start set 250 clock.sleep start clock.elapsed 250 >=
 ```
 
 ### unix
-`( -- timestamp )` — Read the wall clock as `{'unix ms}`. Without a wall-clock
-grant this is `'domain` with `'reason 'unavailable`. Under a fixed grant every
-read returns the configured value; under an anchored grant it returns the
-configured base plus the monotonic milliseconds since Session construction.
-Convert with the `time` module.
+`( -- timestamp )` — Read the process realtime clock as `{'unix ms}`.
+Convert with the `time` module. Wall time can jump and must not be used for
+scheduling deadlines.
 
 ## csv
 
@@ -1642,13 +1632,13 @@ entry itself. Containment is never a lexical prefix check.
 Every failure carries a data dictionary with `'operation` (the word's own
 symbol), `'root` and `'path` (or `'source-root`, `'source-path`,
 `'destination-root`, and `'destination-path` for `copy`), and a closed
-`'reason` symbol: `'invalid-path`, `'unknown-root`, `'unavailable`,
+`'reason` symbol: `'invalid-path`, `'unknown-root`,
 `'not-found`, `'already-exists`, `'not-directory`, `'is-directory`,
 `'not-regular`, `'not-empty`, `'symlink-loop`, `'symlink-escape`,
 `'invalid-utf8`, `'limit`, `'access-denied`, `'read-only`, `'no-space`,
 `'busy`, `'cross-device`, `'unsupported`, `'changed`, or `'io`. The kind is
 `'type` for wrong value kinds or byte-list members outside `0..255`, `'domain`
-for malformed paths, unknown roots, and unavailable I/O,
+for malformed paths and unknown roots,
 `'overflow` for a configured limit, `'cancelled` for cancellation, and `'io`
 for filesystem state and host failures. Host error names never appear as data.
 
@@ -2291,7 +2281,7 @@ swap net.close
 
 The returned socket is already listening. A non-dict or wrongly typed field
 is `'type`; missing or unknown fields, invalid literals or ports,
-unavailable I/O and exhausted listener capacity are
+exhausted listener capacity is
 `'domain`. Common structured-value limits also apply. Host bind and listen
 failures are `'io`. Configuration failures include the requested
 address, port, and reason where available; controller and lifecycle failures
@@ -2805,7 +2795,7 @@ authority. A package-command Session (the `ecl pkg` subcommands) retains
 handles for the shared cache store and the project vendor store; words name
 one with the symbol `'cache` or `'vendor` and address an entry by its
 canonical `<name>-<version>-<hex>` key. No absolute path, host handle, generic
-rename, or recursive deletion reaches ECL. An ordinary or embedded Session has
+rename, or recursive deletion reaches ECL. An ordinary evaluation Session has
 no package authority and every store word is `'domain`; a package Session
 whose host selected no cache reports `'io` naming `ECL_CACHE`,
 `XDG_CACHE_HOME`, and `HOME`; a non-canonical key or unknown store symbol is

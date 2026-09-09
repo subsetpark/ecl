@@ -20,9 +20,9 @@ pub const registration = bindings.Registration.create(Binding);
 
 const Binding = struct {
     instance: *bindings.Identity,
-    access: ?*external.ProcessAccess,
+    access: *external.ProcessAccess,
     pub const definitions: []const bindings.Definition = &.{
-        .{ .name = "process", .doc = "Create a process using the Session's executable grant.", .effect = "-- factory" },
+        .{ .name = "process", .doc = "Create a process using the Session runtime.", .effect = "-- factory" },
         .{ .name = "stdin", .doc = process.DeclaredEndpoints.get(.stdin).doc, .effect = "-- selector" },
         .{ .name = "stdout", .doc = process.DeclaredEndpoints.get(.stdout).doc, .effect = "-- selector" },
         .{ .name = "stderr", .doc = process.DeclaredEndpoints.get(.stderr).doc, .effect = "-- selector" },
@@ -32,12 +32,13 @@ const Binding = struct {
         .{ .name = "capture-limits", .doc = process.DeclaredOperations.get(.capture_limits).doc, .effect = "-- operation" },
     };
     pub fn bind(memory: std.mem.Allocator, inherited: *const @import("machine.zig").InheritedContext) error{OutOfMemory}!*bindings.Publication {
-        const instance = if (inherited.process_access) |access| process.registeredInstance(access) else try bindings.Identity.create(memory);
-        if (inherited.process_access != null) instance.retain();
+        _ = memory;
+        const instance = process.registeredInstance(inherited.runtime().process_access);
+        instance.retain();
         errdefer instance.release();
         const owned = try instance.allocator().create(Binding);
         errdefer instance.allocator().destroy(owned);
-        owned.* = .{ .instance = instance, .access = inherited.process_access };
+        owned.* = .{ .instance = instance, .access = inherited.runtime().process_access };
         return bindings.Publication.create(Binding, owned);
     }
     pub fn allocator(self: *Binding) std.mem.Allocator {
@@ -75,7 +76,7 @@ const Binding = struct {
 const EndpointKind = process.DeclaredEndpoints.Name;
 const RegisteredCapability = struct {
     issuer: *bindings.Identity,
-    body: union(enum) { factory: ?*external.ProcessAccess, endpoint: EndpointKind, operation: process.RegisteredOperation },
+    body: union(enum) { factory: *external.ProcessAccess, endpoint: EndpointKind, operation: process.RegisteredOperation },
     pub fn instance(self: *RegisteredCapability) *bindings.Identity {
         return self.issuer;
     }
@@ -104,9 +105,9 @@ const RegisteredCapability = struct {
     }
 };
 
-pub fn open(allocator: std.mem.Allocator, access: ?*external.ProcessAccess, context: factories.Context, config: *const message.Validated) error{OutOfMemory}!factories.Start {
+pub fn open(allocator: std.mem.Allocator, access: *external.ProcessAccess, context: factories.Context, config: *const message.Validated) error{OutOfMemory}!factories.Start {
     if (config.value() != .dict) return .{ .failed = Failure.init(.type, "expected a process specification dict") };
-    const granted = access orelse return .{ .failed = Failure.init(.domain, "process creation is unavailable") };
+    const granted = access;
     const owned = try allocator.create(Parser);
     errdefer allocator.destroy(owned);
     const blob = try allocator.alloc(u8, config.footprint().bytes);

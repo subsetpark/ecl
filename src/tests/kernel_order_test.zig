@@ -1,4 +1,5 @@
 //! Executable proofs for stable ordering, distinct, and group.
+const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const list = @import("../list.zig");
 const heap = @import("../heap.zig");
@@ -160,7 +161,9 @@ test "order: distinct charges nested structural hash and equality work" {
     const allocator = std.testing.allocator;
     var cleanup = heap.testing.Cleanup.init(allocator);
     defer cleanup.deinit();
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
     const integers = try allocator.alloc(i64, 70_000);

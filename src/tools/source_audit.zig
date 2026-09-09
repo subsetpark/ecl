@@ -41,12 +41,12 @@ const source_groups = [_]SourceGroup{
     // The native-continuation union carries park, join, cleanup, and work
     // combinations as exhaustive variants rather than five side-band fields.
     .{ .production = true, .files = &.{
-        "machine.zig", "task_join_core.zig", "resolution_core.zig", "spans.zig", "prims.zig", "test_prims.zig", "root.zig", "internal.zig",
+        "machine.zig", "task_join_core.zig", "resolution_core.zig", "spans.zig", "prims.zig", "test_prims.zig", "internal.zig",
     }, .sources = &.{
         @embedFile("../machine.zig"),         @embedFile("../task_join_core.zig"),
         @embedFile("../resolution_core.zig"), @embedFile("../spans.zig"),
         @embedFile("../prims.zig"),           @embedFile("../test_prims.zig"),
-        @embedFile("../root.zig"),            @embedFile("../internal.zig"),
+        @embedFile("../internal.zig"),
     } },
     // Snapshot-safe lookup, publication, and reflection now expose explicit
     // cursor state so scheduler suspension is represented instead of hidden
@@ -192,6 +192,7 @@ const test_files = [_][]const u8{
     "tests/fuzz_test.zig",
     "fuzz_root.zig",
     "tests/test_heap.zig",
+    "tests/runtime_fixture.zig",
     "oom_root.zig",
     "tests/stateful_module_test.zig",
     "tests/stdlib_test.zig",
@@ -243,7 +244,6 @@ const repository_verification_files = [_][]const u8{
     "test/http_fixture_server.zig",
     "test/pkg_lock_fixture.zig",
     "test/process_fixture.zig",
-    "test/public_api.zig",
 };
 pub fn main(init: std.process.Init) !void {
     var failed = false;

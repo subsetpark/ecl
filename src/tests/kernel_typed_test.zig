@@ -11,6 +11,7 @@
 //! source. Typed-versus-generic parity reaches the generic reference through
 //! `list.fromValuesGeneric`, which builds a real generic-representation input
 //! and so exercises production semantics rather than a second kernel.
+const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const kernels = @import("../kernels.zig");
 const flat = @import("../kernel_flat.zig");
@@ -241,7 +242,9 @@ test "typed differential: numeric logical and bitwise pervasion parity across si
     // share one allocator or the release domain frees across heaps. That is the
     // policy in `test_heap.zig`, and the reason this file does not use the
     // traceless session heap the source-only kernel suites use.
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
     const small = [_]i64{ 7, -3, 2, 0, 5 };
@@ -377,7 +380,9 @@ test "typed differential: numeric logical and bitwise pervasion parity across si
 // boxed route as well, and these cases are what will catch a later migration
 // that changes an answer.
 test "typed differential: sequence order text and random operation parity across sizes and representations" {
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
     // Length zero is covered separately below: an empty leaf and an empty spine
@@ -567,7 +572,9 @@ test "typed kernels: a flat operation of length n needs at most ceil(n over budg
         try std.testing.expectEqual((length + per_advance - 1) / per_advance, advances);
     }
 
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     const quantum = kernels.support.poll_quantum;
     const length = quantum * 3;
@@ -604,7 +611,9 @@ test "typed kernels: a flat operation of length n needs at most ceil(n over budg
 // pinning the index itself so a route that reported a block-local position
 // would fail here rather than merely differ.
 test "typed kernels: fault blocks report the first logical index and validate aliased blocks before stores" {
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
     const length = flat.block_size * 3 + 5;
@@ -644,7 +653,9 @@ test "typed kernels: fault blocks report the first logical index and validate al
 }
 
 test "typed kernels: explicit vector cores preserve lanes tails broadcasts aliases and first faults" {
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
     const length = flat.block_size * 2 + 3;
@@ -729,7 +740,9 @@ test "typed kernels: temporary bytes are bounded by output plus one kernel chunk
     defer if (limited.deinit() == .leak) std.debug.panic("memory-bound case leaked", .{});
     const limited_allocator = limited.allocator();
 
-    var runtime = try session.Session.init(limited_allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(limited_allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
     const length: usize = 200_000;

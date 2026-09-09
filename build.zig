@@ -19,11 +19,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const mod = b.addModule("ecl", .{
-        .root_source_file = b.path("src/root.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
     const runtime_options = b.addOptions();
     runtime_options.addOption(usize, "default_worker_count", 1);
     runtime_options.addOption(bool, "instrument_root_execution", false);
@@ -41,7 +36,6 @@ pub fn build(b: *std.Build) void {
     });
     native_sdk.addImport("ecl-native-abi", native_abi);
     native_sdk.addImport("port-declarations", port_declarations);
-    configureRuntime(mod, native_abi, native_sdk, runtime_options);
     const internal_mod = b.createModule(.{
         .root_source_file = b.path("src/internal.zig"),
         .target = target,
@@ -294,7 +288,7 @@ pub fn build(b: *std.Build) void {
     };
 
     const test_mod = b.createModule(.{
-        .root_source_file = b.path("src/root.zig"),
+        .root_source_file = b.path("src/internal.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -313,16 +307,6 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run the ecl test suite");
     test_step.dependOn(&run_tests.step);
     test_step.dependOn(native_negative_step);
-    const public_api_mod = b.createModule(.{
-        .root_source_file = b.path("test/public_api.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    public_api_mod.addImport("ecl", mod);
-    const public_api_tests = b.addTest(.{ .root_module = public_api_mod });
-    public_api_tests.linkage = runtime_linkage;
-    const run_public_api_tests = b.addRunArtifact(public_api_tests);
-    test_step.dependOn(&run_public_api_tests.step);
     const run_ecl_tests = b.addRunArtifact(exe);
     run_ecl_tests.addArg("test");
     run_ecl_tests.setCwd(b.path("test/stdlib-tests"));
@@ -676,7 +660,7 @@ pub fn build(b: *std.Build) void {
     );
     for ([_]usize{ 1, 8 }) |worker_count| {
         const worker_test_mod = b.createModule(.{
-            .root_source_file = b.path("src/root.zig"),
+            .root_source_file = b.path("src/internal.zig"),
             .target = target,
             .optimize = optimize,
         });
@@ -702,7 +686,7 @@ pub fn build(b: *std.Build) void {
     // test without increasing its race coverage.
     const tsan_supported = target.result.os.tag == .linux or target.result.os.tag == .macos;
     const tsan_mod = b.createModule(.{
-        .root_source_file = b.path("src/root.zig"),
+        .root_source_file = b.path("src/internal.zig"),
         .target = target,
         .optimize = optimize,
         .sanitize_thread = tsan_supported,
@@ -826,7 +810,6 @@ pub fn build(b: *std.Build) void {
         reference_mod,
         oom_mod,
         scheduler_shell_mod,
-        public_api_mod,
     };
     const analysis_step = b.step(
         "check",
@@ -947,7 +930,6 @@ pub fn build(b: *std.Build) void {
         "Run the fast core test tier (the test half of `precommit`)",
     );
     precommit_test_step.dependOn(&run_precommit_tests.step);
-    precommit_test_step.dependOn(&run_public_api_tests.step);
 
     // Zig sources are canonically formatted; so is every checked-in ECL source,
     // and every standard module still ends in `@defm`. All of it is cheap
@@ -1149,7 +1131,6 @@ pub fn build(b: *std.Build) void {
     precommit_step.dependOn(analysis_step);
     precommit_step.dependOn(native_negative_step);
     precommit_step.dependOn(&run_precommit_tests.step);
-    precommit_step.dependOn(&run_public_api_tests.step);
 }
 
 fn addCapturedTestRun(

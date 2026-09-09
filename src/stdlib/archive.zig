@@ -109,11 +109,7 @@ fn unpackTgz(evaluator: *Machine) MachineError!void {
     var bytes_value = try evaluator.popValue();
     errdefer bytes_value.deinit();
     if (bytes_value.borrow() != .list) return evaluator.typeError("an integer byte list");
-    const access = evaluator.unit.inherited.filesystem_access orelse {
-        const failure = evaluator.fail(.domain, "archive extraction is unavailable");
-        evaluator.addErrorPath(destination.borrow());
-        return failure;
-    };
+    const access = evaluator.unit.inherited.runtime().filesystem_access;
     const byte_encoder = storage.ByteVectorEncoder.init(evaluator.allocator(), bytes_value.borrow());
     const path_encoder = storage.StringEncoder.init(evaluator.allocator(), destination.borrow());
     const entries = poll.ChunkList(Entry).init(evaluator.allocator());

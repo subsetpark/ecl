@@ -33,12 +33,15 @@ test "every idiom entry hits across values empties spines floats and failures" {
 }
 
 const Execution = struct {
+    inputs: *ecl.runtime_fixture.Fixture,
     runtime: ecl.session.Session,
     failure: ?ecl.value.Value,
 
     fn deinit(self: *Execution) void {
         if (self.failure) |failure| self.runtime.release(failure);
         self.runtime.deinit();
+        self.inputs.deinit();
+        std.testing.allocator.destroy(self.inputs);
     }
 };
 
@@ -47,7 +50,11 @@ fn execute(
     mode: ecl.machine.IdiomMode,
     session_allocator: std.mem.Allocator,
 ) !Execution {
-    var runtime = try ecl.session.Session.init(session_allocator, &.{});
+    const inputs = try std.testing.allocator.create(ecl.runtime_fixture.Fixture);
+    errdefer std.testing.allocator.destroy(inputs);
+    inputs.* = try .init();
+    errdefer inputs.deinit();
+    var runtime = try ecl.session.Session.init(session_allocator, &.{}, inputs.inputs(.{}), .default, .evaluate);
     errdefer runtime.deinit();
     runtime.setIdiomMode(mode);
     const warmup: ?[]const u8 = if (std.mem.indexOf(u8, source, "str.format") != null)
@@ -69,7 +76,7 @@ fn execute(
         .incomplete => return error.TestUnexpectedResult,
         .err => |item| item,
     };
-    return .{ .runtime = runtime, .failure = failure };
+    return .{ .inputs = inputs, .runtime = runtime, .failure = failure };
 }
 
 fn compareExecutions(source: []const u8) !void {

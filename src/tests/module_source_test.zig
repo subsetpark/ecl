@@ -12,6 +12,7 @@
 //! load-bearing: the ones that build a value on the host and publish it into a
 //! session, where value and session must agree, and the ones that own a
 //! counting allocator to state a memory bound.
+const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const intern = @import("../intern.zig");
 const session = @import("../session.zig");
@@ -38,13 +39,15 @@ test "loader: catalog cold-loads multiple full module names from an unrelated ar
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
     const environ = [_]sessionHostEntry{.{ .name = "ECL_CACHE", .value = fixture.cache }};
-    var runtime = try session.Session.initWithHost(backing.allocator(), &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
-        .project_start = fixture.nested,
+        .initial_cwd = fixture.nested,
         .environ = &environ,
-    });
+    }), .default, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime, "stats.regressions.answer stats.distributions.answer");
     try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
@@ -75,12 +78,14 @@ test "loader: the root package exports local source through the same catalog" {
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
-    var runtime = try session.Session.initWithHost(backing.allocator(), &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
-        .project_start = fixture.nested,
-    });
+        .initial_cwd = fixture.nested,
+    }), .default, .evaluate);
     defer runtime.deinit();
 
     try expectOk(&runtime, "root.local.answer");
@@ -112,13 +117,15 @@ test "loader: a root-defined module reaches its declared direct dependency" {
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
     const environ = [_]sessionHostEntry{.{ .name = "ECL_CACHE", .value = fixture.cache }};
-    var runtime = try session.Session.initWithHost(backing.allocator(), &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
-        .project_start = fixture.nested,
+        .initial_cwd = fixture.nested,
         .environ = &environ,
-    });
+    }), .default, .evaluate);
     defer runtime.deinit();
 
     try expectOk(&runtime, "root.local.answer");
@@ -185,12 +192,14 @@ test "loader: catalog discovery holds a manifest to the whole public contract" {
         defer output.deinit();
         var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
         defer diagnostics.deinit();
-        var runtime = try session.Session.initWithHost(backing.allocator(), &.{}, .{
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{
             .io = std.testing.io,
             .output = &output.writer,
             .diagnostics = &diagnostics.writer,
-            .project_start = fixture.nested,
-        });
+            .initial_cwd = fixture.nested,
+        }), .default, .evaluate);
         defer runtime.deinit();
 
         try expectErrorContains(
@@ -223,13 +232,15 @@ test "loader: a lock may omit a requirer entry for a package that requires nothi
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
     const environ = [_]sessionHostEntry{.{ .name = "ECL_CACHE", .value = fixture.cache }};
-    var runtime = try session.Session.initWithHost(backing.allocator(), &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
-        .project_start = fixture.nested,
+        .initial_cwd = fixture.nested,
         .environ = &environ,
-    });
+    }), .default, .evaluate);
     defer runtime.deinit();
 
     try expectOk(&runtime, "dep.answer");
@@ -252,16 +263,18 @@ test "loader: embedded modules precede lock and a manifested project is hermetic
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
     const environ = [_]sessionHostEntry{.{ .name = "ECL_CACHE", .value = fixture.cache }};
-    var runtime = try session.Session.initWithHost(backing.allocator(), &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
-        .project_start = fixture.nested,
+        .initial_cwd = fixture.nested,
         // Make the project-start directory an explicit path candidate too:
         // the lock must still own foo.bar while an unmatched local name loads.
         .ecl_path = fixture.nested,
         .environ = &environ,
-    });
+    }), .default, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime, "[1] result.ok foo.bar");
     try std.testing.expect(runtime.stackItems()[0] == .dict);
@@ -284,13 +297,15 @@ test "loader: absent marker or lock preserves ECL PATH behavior" {
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
-    var runtime = try session.Session.initWithHost(backing.allocator(), &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
-        .project_start = fixture.nested,
+        .initial_cwd = fixture.nested,
         .ecl_path = fixture.search,
-    });
+    }), .default, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime, "legacy.answer");
     try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[0].int);
@@ -317,13 +332,15 @@ test "loader: direct requires mask both cold and already-loaded transitive modul
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
     const environ = [_]sessionHostEntry{.{ .name = "ECL_CACHE", .value = fixture.cache }};
-    var runtime = try session.Session.initWithHost(backing.allocator(), &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
-        .project_start = fixture.nested,
+        .initial_cwd = fixture.nested,
         .environ = &environ,
-    });
+    }), .default, .evaluate);
     defer runtime.deinit();
 
     try expectOk(&runtime, "alpha.through");
@@ -364,13 +381,15 @@ test "loader: one quotation rechecks authorization in each package context" {
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
     const environ = [_]sessionHostEntry{.{ .name = "ECL_CACHE", .value = fixture.cache }};
-    var runtime = try session.Session.initWithHost(backing.allocator(), &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
-        .project_start = fixture.nested,
+        .initial_cwd = fixture.nested,
         .environ = &environ,
-    });
+    }), .default, .evaluate);
     defer runtime.deinit();
 
     try expectOk(
@@ -407,13 +426,15 @@ test "loader: a failing multi-module artifact publishes no usable module" {
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
     const environ = [_]sessionHostEntry{.{ .name = "ECL_CACHE", .value = fixture.cache }};
-    var runtime = try session.Session.initWithHost(backing.allocator(), &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
-        .project_start = fixture.nested,
+        .initial_cwd = fixture.nested,
         .environ = &environ,
-    });
+    }), .default, .evaluate);
     defer runtime.deinit();
 
     try expectErrorContains(&runtime, "broken.first.answer", &.{"missing-during-artifact-load"});
@@ -437,13 +458,15 @@ test "loader: project discovery walks upward and snapshots one sibling lock" {
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
     const environ = [_]sessionHostEntry{.{ .name = "ECL_CACHE", .value = fixture.cache }};
-    var runtime = try session.Session.initWithHost(backing.allocator(), &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
-        .project_start = fixture.nested,
+        .initial_cwd = fixture.nested,
         .environ = &environ,
-    });
+    }), .default, .evaluate);
     defer runtime.deinit();
     try fixture.writeOnePackageLock("snap", "2.0.0", hash_b);
     try expectOk(&runtime, "snap.answer");
@@ -462,13 +485,15 @@ test "loader: malformed lock is authoritative after embedded resolution" {
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
-    var runtime = try session.Session.initWithHost(backing.allocator(), &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
-        .project_start = fixture.nested,
+        .initial_cwd = fixture.nested,
         .ecl_path = fixture.search,
-    });
+    }), .default, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime, "[1] result.ok pop");
     try expectErrorContains(&runtime, "local.answer", &.{ "'kind 'io", "invalid project lock" });
@@ -491,13 +516,15 @@ test "loader: invalid project marker is reported as invalid project lock discove
         &.{ fixture.root, "project", "ecl.lock" },
     );
     defer std.testing.allocator.free(lock_path);
-    var runtime = try session.Session.initWithHost(backing.allocator(), &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
-        .project_start = fixture.nested,
+        .initial_cwd = fixture.nested,
         .ecl_path = fixture.search,
-    });
+    }), .default, .evaluate);
     defer runtime.deinit();
     try expectErrorContains(&runtime, "local.answer", &.{
         "'kind 'io",
@@ -519,14 +546,16 @@ test "loader: a cache lock without cache environment gives actionable store sele
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
-    var runtime = try session.Session.initWithHost(backing.allocator(), &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
-        .project_start = fixture.nested,
+        .initial_cwd = fixture.nested,
         .ecl_path = fixture.search,
         .environ = &.{},
-    });
+    }), .default, .evaluate);
     defer runtime.deinit();
     try expectErrorContains(&runtime, "missing.answer", &.{
         "'kind 'io",
@@ -550,14 +579,16 @@ test "loader: missing locked store entry names package and pkg sync without path
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
     const environ = [_]sessionHostEntry{.{ .name = "ECL_CACHE", .value = fixture.cache }};
-    var runtime = try session.Session.initWithHost(backing.allocator(), &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
-        .project_start = fixture.nested,
+        .initial_cwd = fixture.nested,
         .ecl_path = fixture.search,
         .environ = &environ,
-    });
+    }), .default, .evaluate);
     defer runtime.deinit();
     try expectErrorContains(&runtime, "missing.answer", &.{ "'kind 'io", "missing", "ecl pkg sync" });
 }
@@ -576,14 +607,16 @@ test "loader: matched package never falls through for a missing module" {
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
     const environ = [_]sessionHostEntry{.{ .name = "ECL_CACHE", .value = fixture.cache }};
-    var runtime = try session.Session.initWithHost(backing.allocator(), &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
-        .project_start = fixture.nested,
+        .initial_cwd = fixture.nested,
         .ecl_path = fixture.search,
         .environ = &environ,
-    });
+    }), .default, .evaluate);
     defer runtime.deinit();
     try expectErrorContains(
         &runtime,
@@ -928,7 +961,9 @@ fn expectErrorContains(
 test "binding: set installs and replaces values while let is absent" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime, "1 'x set x 2 'x set x");
     try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
@@ -940,7 +975,9 @@ test "binding: set installs and replaces values while let is absent" {
 test "scope: isolated @attempt and child import do not leak" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try expectErrorContains(&runtime, "[] (1 'k set) @attempt pop k", &.{ "'kind 'undefined-word", "'word 'k" });
     try expectErrorContains(&runtime, "[] ([] (1 'k set missing) @attempt pop) @attempt pop k", &.{ "'kind 'undefined-word", "'word 'k" });
@@ -951,7 +988,9 @@ test "scope: isolated @attempt and child import do not leak" {
 test "module: privacy module-body contract top-level private and qualified trace" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime, "[] (40 's setp ( -- n ) (s 2 +) 'f def) 'm @defm m.f");
     try std.testing.expectEqual(@as(i64, 42), runtime.stackItems()[0].int);
@@ -975,7 +1014,9 @@ test "module: privacy module-body contract top-level private and qualified trace
 test "modules: removal strips aliases and leaves no half-removed entry" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime, "[] ((1) 'x def) 'a @defm [] ((2) 'x def) 'b @defm " ++
         "'short 'a alias 'a ('x) import short.x a.x x");
@@ -995,7 +1036,9 @@ test "modules: removal strips aliases and leaves no half-removed entry" {
 test "module: qualified import replacement and alias collisions" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime, "[] (1 'x set) 'a @defm [] (2 'x set) 'b @defm " ++
         "'a ('x) import 'b ('x) import x 'a ('x) import x 'short 'a alias short.x");
@@ -1012,7 +1055,9 @@ test "module: qualified import replacement and alias collisions" {
 test "module: qualified call sites heal generations and bypass aliases" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
     try expectOk(
@@ -1033,11 +1078,9 @@ test "module: qualified call sites heal generations and bypass aliases" {
 test "module: provisional tasks keep rollback generations alive until quiescence" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.initWithConfig(
-        backing.allocator(),
-        &.{},
-        .{ .worker_pool = 1 },
-    );
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime, "[] ([] ([] ((1) () while) @spawn pop missing) 'bad @defm) @attempt pop");
 }
@@ -1045,7 +1088,9 @@ test "module: provisional tasks keep rollback generations alive until quiescence
 test "module: hot reload commit failure and whole-body pinning" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime, "[] (1 'x setp " ++
         "( -- n ) ([] (2 'x setp ( -- n ) (x) 'get def) 'm @defm x) 'probe def " ++
@@ -1068,7 +1113,9 @@ test "module: hot reload commit failure and whole-body pinning" {
 test "module: effect shape cross-home contract and same-home TCO" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     // A module word may omit its annotation entirely; only a malformed
     // recognized annotation is 'domain.
@@ -1094,16 +1141,14 @@ test "module: import explicitly replaces requested bindings and preserves metada
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
-    var runtime = try session.Session.initWithHost(
-        backing.allocator(),
-        &.{},
-        .{
-            .io = std.testing.io,
-            .output = &output.writer,
-            .diagnostics = &diagnostics.writer,
-            .ecl_path = null,
-        },
-    );
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .ecl_path = null,
+    }), .default, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime, "[] (3 'mean set ( -- n : \"Count.\") (4) 'count def 5 'other set) 'stats @defm " ++
         "1 'mean set 'stats ('mean 'count) import mean count " ++
@@ -1126,7 +1171,9 @@ test "module: import explicitly replaces requested bindings and preserves metada
 test "module: import validates requested public attributes before publishing" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
     try expectOk(&runtime, "[] (1 'one set 2 'two set 3 'hidden setp 4 'fresh set) 'batch @defm " ++
@@ -1149,7 +1196,9 @@ test "module: import validates requested public attributes before publishing" {
 test "module: import inside a module body binds module-locally" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     // `import` used to reach for top-level publication unconditionally, so a
     // module root aborted the process on an `unreachable` inside the scope's
@@ -1163,7 +1212,9 @@ test "module: import inside a module body binds module-locally" {
 test "scope: a binding resolves in the scope it was defined in, child scopes included" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     // Both definitions land in the `@attempt` child, so the second resolves
     // the first. Reading the unit root instead left siblings invisible to each
@@ -1177,7 +1228,9 @@ test "scope: a binding resolves in the scope it was defined in, child scopes inc
 test "scope: an undefined word names the chain it searched" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try expectErrorContains(&runtime, "nope", &.{"'scope 'session"});
     // A module cannot see the session, and says so rather than leaving the
@@ -1196,7 +1249,9 @@ test "scope: an undefined word names the chain it searched" {
 test "module: a construction sees only its parameters its own definitions and core" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     // A module body's chain is its own definitions then core. A session name
     // is not in it, however recently it was defined.
@@ -1220,7 +1275,9 @@ test "module: a construction sees only its parameters its own definitions and co
 test "module: a parameterized behavior dependency is a quotation the caller wrote" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     // Behavior arrives as a quotation the caller writes, which is the functor
     // discipline: the caller writes the structure it hands in. There is no way
@@ -1250,16 +1307,14 @@ test "reflection: which and see expose metadata while see omits the definition w
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
-    var runtime = try session.Session.initWithHost(
-        backing.allocator(),
-        &.{},
-        .{
-            .io = std.testing.io,
-            .output = &output.writer,
-            .diagnostics = &diagnostics.writer,
-            .ecl_path = null,
-        },
-    );
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .ecl_path = null,
+    }), .default, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime, "[] (40 's setp ( -- n ) (s 2 +) 'f def) 'm @defm 'm ('f) import " ++
         "'m.f see 9 'f set 'f which 'f see words");
@@ -1277,7 +1332,9 @@ test "reflection: which and see expose metadata while see omits the definition w
 test "session completion: core names are available before the first unit" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     var candidates = try runtime.completionCandidates("sq");
     defer candidates.deinit();
@@ -1291,7 +1348,9 @@ test "session completion: live and registered names are sorted unique" {
     defer test_heap.retire(&backing);
     const missing_prefix = "completion-prefix-that-must-not-be-interned-47f19";
     try expectInternMissing(missing_prefix);
-    var runtime = try session.Session.init(backing.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     try expectOk(
         &runtime,
         "[] (1 'hidden setp 2 'public set) 'completion-module @defm " ++
@@ -1322,7 +1381,9 @@ test "session completion: live and registered names are sorted unique" {
 test "session completion: dotted aliases expose only public exports" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try expectOk(
         &runtime,
@@ -1353,16 +1414,14 @@ test "loader: load is one unit and preserves file provenance" {
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
-    var runtime = try session.Session.initWithHost(
-        backing.allocator(),
-        &.{},
-        .{
-            .io = std.testing.io,
-            .output = &output.writer,
-            .diagnostics = &diagnostics.writer,
-            .ecl_path = null,
-        },
-    );
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .ecl_path = null,
+    }), .default, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime, "10");
     try expectErrorContains(&runtime, "\"test/acceptance/load-rollback.ecl\" load", &.{ "'kind 'undefined-word", "'word 'missing" });
@@ -1394,16 +1453,14 @@ test "loader: ECL_PATH loads first candidate and retries import" {
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
-    var runtime = try session.Session.initWithHost(
-        backing.allocator(),
-        &.{},
-        .{
-            .io = std.testing.io,
-            .output = &output.writer,
-            .diagnostics = &diagnostics.writer,
-            .ecl_path = search,
-        },
-    );
+    var runtime_inputs37 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs37.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs37.inputs(.{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .ecl_path = search,
+    }), .default, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime, "[] ('attempted ('answer) import answer) @attempt pop attempted.answer");
     try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[0].int);
@@ -1411,16 +1468,14 @@ test "loader: ECL_PATH loads first candidate and retries import" {
     try expectOk(&runtime, "'stats ('answer) import answer");
     try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[1].int);
 
-    var no_path = try session.Session.initWithHost(
-        backing.allocator(),
-        &.{},
-        .{
-            .io = std.testing.io,
-            .output = &output.writer,
-            .diagnostics = &diagnostics.writer,
-            .ecl_path = "",
-        },
-    );
+    var runtime_inputs38 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs38.deinit();
+    var no_path = try session.Session.init(backing.allocator(), &.{}, runtime_inputs38.inputs(.{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .ecl_path = "",
+    }), .default, .evaluate);
     defer no_path.deinit();
     try expectErrorContains(&no_path, "'stats ('answer) import", &.{ "'kind 'undefined-word", "'name 'stats.answer" });
 }
@@ -1430,7 +1485,9 @@ test "modules: module set and setp publish unannotated constants" {
     defer test_heap.retire(&backing);
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
-    var runtime = try session.Session.initWithOutput(backing.allocator(), &.{}, &output.writer);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{ .output = &output.writer }), .default, .evaluate);
     defer runtime.deinit();
     // Registration succeeding is itself the proof that a module definition
     // may carry no effect at all: `set` publishes the bare literal capture,
@@ -1451,7 +1508,9 @@ test "modules: module set and setp publish unannotated constants" {
 test "modules: cross-home constant references cross unchecked while declared effects still bind" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     // A constant reached across a home boundary declares no effect, so no
     // check frame is installed at all: qualified access, imported access, and
@@ -1476,7 +1535,9 @@ test "modules: cross-home constant references cross unchecked while declared eff
 test "module: a module literal reaches its own private through a combinator" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     // `(pop secret)` is written inside the module body, so it resolves in the
     // image whichever activation hands it to `each`.
@@ -1490,7 +1551,9 @@ test "module: a module literal reaches its own private through a combinator" {
 test "module: a module word runs a caller's quotation in the caller's chain" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     // The caller wrote `(bump)`, so `bump` resolves in the caller even though
     // the activation applying it belongs to the module.
@@ -1504,7 +1567,9 @@ test "module: a module word runs a caller's quotation in the caller's chain" {
 test "module: a quotation parameter carries the caller's scope" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     // The caller wrote `(k *)`, so its own references are the caller's and the
     // module needs no parameter for them. `def`-ing it makes the binding
@@ -1517,7 +1582,9 @@ test "module: a quotation parameter carries the caller's scope" {
 test "module: every container the reader built inside a body is the module's text" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     // Three spellings of one thing. A quotation the reader built inside the
     // body names the image whatever container holds it, so all three reach the
@@ -1541,7 +1608,9 @@ test "module: every container the reader built inside a body is the module's tex
 test "module: an undefined word names the chain its own scope searched" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     // The reported chain comes from the word's own scope independently of the
     // running activation. A caller's quotation applied by a module word searched the
@@ -1557,7 +1626,9 @@ test "module: an undefined word names the chain its own scope searched" {
 test "module: a session quotation still resolves in the session" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     // Unchanged by the label rule: the session wrote these, so the session is
     // where they resolve.
@@ -1570,7 +1641,9 @@ test "module: a session quotation still resolves in the session" {
 test "module: a body that reloads its own name keeps its entry generation" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     // `probe` re-registers its own name and then reads its private `x`. Code on
     // the activation stack is never re-pointed under itself, so the read lands

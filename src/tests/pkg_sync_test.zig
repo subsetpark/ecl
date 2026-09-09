@@ -633,14 +633,17 @@ const PackageHost = struct {
     }
 
     fn openSessionWithConfig(self: *const PackageHost, heap_allocator: std.mem.Allocator, config: session.Config) !session.Session {
-        return session.Session.initPackageCommand(heap_allocator, &.{}, .{
+        return session.Session.init(heap_allocator, &.{}, .{
             .io = std.testing.io,
             .output = self.output.writer(),
             .diagnostics = self.output.writer(),
             .tls_trust = if (self.options.tls) .{ .ca_file = pkg_fixture.ca_file, .now = valid_cert_time } else null,
-            .project_start = self.project_start,
+            .initial_cwd = self.project_start orelse self.project,
+            .environ = &.{},
+            .standard_input = .program_source,
+            .clock = .{ .wall = .{ .fixed = 0 } },
             .filesystem = .{ .roots = &.{.{ .name = "project", .absolute_path = self.project }} },
-        }, config, self.grant());
+        }, config, .{ .package = self.grant() });
     }
 
     /// The command shape the options describe: the vendor command when

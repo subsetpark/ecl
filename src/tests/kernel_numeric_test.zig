@@ -1,4 +1,5 @@
 //! Executable proofs for numeric dispatch, pervasion, faults, and ownership.
+const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const session = @import("../session.zig");
 const heap = @import("../heap.zig");
@@ -75,7 +76,9 @@ test "numeric: ragged broadcast dict alignment and representation parity" {
 
 test "numeric: fault blocks report first index before aliased stores" {
     const allocator = std.testing.allocator;
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try std.testing.expect((try runtime.runUnit("<test>", "9223372036854775806")) == .ok);
     const failure = (try runtime.runUnit("<test>", "[1 2] +")).err;
@@ -135,7 +138,9 @@ test "numeric: conform and depth diagnostics are bounded" {
 
 test "numeric: long leaves poll at bounded chunks" {
     const allocator = std.testing.allocator;
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try std.testing.expect((try runtime.runUnit("<test>", "70000 range 1 + len")) == .ok);
     try std.testing.expect(runtime.lastPolls() >= 2);
@@ -152,7 +157,9 @@ test "numeric: result materialization remains cancellable" {
     const input = try list.fromI64Slice(allocator, integers);
     defer cleanup.releaseValue(input);
 
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try runtime.pushBorrowed(input);
     try std.testing.expect((try runtime.runUnit("<test>", "1 + pop")) == .ok);
@@ -163,7 +170,9 @@ test "numeric: result materialization remains cancellable" {
 
 test "numeric: short kernel loops share the unit poll budget" {
     const allocator = std.testing.allocator;
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try std.testing.expect((try runtime.runUnit(
         "<test>",

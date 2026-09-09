@@ -93,7 +93,7 @@ fn startSealDriver(evaluator: *Machine, mode: SealMode) MachineError!void {
     try evaluator.startDriver(VerifyDriver{
         .mode = mode,
         .allocator = evaluator.allocator(),
-        .io = evaluator.unit.inherited.host_io.?,
+        .io = evaluator.unit.inherited.runtime().host_io,
         .store = store,
         .key_value = .init(key_value.take()),
         .package_value = .init(package_value.take()),
@@ -506,7 +506,7 @@ fn present(evaluator: *Machine) MachineError!void {
     const encoder = storage.StringEncoder.init(evaluator.allocator(), popped.key.borrow());
     try evaluator.startDriver(PresentDriver{
         .allocator = evaluator.allocator(),
-        .io = evaluator.unit.inherited.host_io.?,
+        .io = evaluator.unit.inherited.runtime().host_io,
         .store = popped.store,
         .key_value = .init(popped.key.take()),
         .encoder = .init(encoder),
@@ -576,7 +576,7 @@ fn manifest(evaluator: *Machine) MachineError!void {
     const encoder = storage.StringEncoder.init(evaluator.allocator(), popped.key.borrow());
     try evaluator.startDriver(ManifestDriver{
         .allocator = evaluator.allocator(),
-        .io = evaluator.unit.inherited.host_io.?,
+        .io = evaluator.unit.inherited.runtime().host_io,
         .store = popped.store,
         .key_value = .init(popped.key.take()),
         .state = .{ .encode = encoder },

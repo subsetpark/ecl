@@ -1,3 +1,4 @@
+const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const value = @import("../value.zig");
 const heap = @import("../heap.zig");
@@ -93,7 +94,9 @@ test "every primitive exposes meaningful reflective documentation" {
 
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
-    var runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &output.writer);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{ .output = &output.writer }), .default, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime, source.written());
     var display = try runtime.stackDisplay();
@@ -110,7 +113,9 @@ test "every primitive exposes meaningful reflective documentation" {
 test "which reports effect metadata without expanding documentation" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
-    var runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &output.writer);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{ .output = &output.writer }), .default, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime, "(x -- y : \"Not part of concise which output.\") (dup *) 'square def 'square which");
     try std.testing.expectEqualStrings("square -> square def public (x -- y)\n", output.written());
@@ -119,7 +124,9 @@ test "which reports effect metadata without expanding documentation" {
 test "invocation effects: which reports public task word contracts" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
-    var runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &output.writer);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{ .output = &output.writer }), .default, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime, "'task.await which 'task.cancel which 'task.pending which 'task.await-any which 'task.await-for which");
     try std.testing.expectEqualStrings(
@@ -150,7 +157,9 @@ test "invocation effects: task completion precedes caller continuation" {
 }
 
 test "module annotations retain contracts documentation qualification and shadowing" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime, "[] (" ++
         "(-- n : \"Public module word.\") (1) 'public def " ++
@@ -176,7 +185,9 @@ test "module annotations retain contracts documentation qualification and shadow
 test "multiline documentation is normalized and see prints annotation and canonical body" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
-    var runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &output.writer);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{ .output = &output.writer }), .default, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime, "(x -- y : \"Square a numeric value.\") (dup *) 'square def " ++
         "(: \"Only docs.\") (42) 'answer def " ++
@@ -197,7 +208,9 @@ test "multiline documentation is normalized and see prints annotation and canoni
 test "see retains source binders while execution uses their lowered body" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
-    var runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &output.writer);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{ .output = &output.writer }), .default, .evaluate);
     defer runtime.deinit();
 
     // Define and reflect in separate units: the binding, rather than the
@@ -211,7 +224,9 @@ test "see retains source binders while execution uses their lowered body" {
 }
 
 test "redefinition and set replace behavior and clear metadata" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime, "(-- n : \"Old metadata.\") (1) 'lease-target def");
     try expectOk(&runtime, "(2) 'lease-target def");
@@ -224,7 +239,9 @@ test "redefinition and set replace behavior and clear metadata" {
 }
 
 test "unset and undef equivalently remove only the current scope binding" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
     try expectOk(&runtime, "1 'removed-by-unset set 'removed-by-unset unset");
@@ -313,7 +330,9 @@ test "long annotation traversal and reflection observe cancellation" {
     const allocator = std.testing.allocator;
     var cleanup = heap.testing.Cleanup.init(allocator);
     defer cleanup.deinit();
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs8 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs8.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs8.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     const marker = try intern.intern("--");
     const name = try intern.intern("value");
@@ -331,7 +350,9 @@ test "long annotation traversal and reflection observe cancellation" {
     runtime.clearCancellation();
     try expectErrorContains(&runtime, "cancelled-definition", "'kind 'undefined-word");
 
-    var doc_runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs9 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs9.deinit();
+    var doc_runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs9.inputs(.{}), .default, .evaluate);
     defer doc_runtime.deinit();
     const doc_codepoints = try allocator.alloc(u32, 70_000);
     defer allocator.free(doc_codepoints);
@@ -353,7 +374,9 @@ test "long annotation traversal and reflection observe cancellation" {
 
     var output_buffer: [256]u8 = undefined;
     var output = std.Io.Writer.Discarding.init(&output_buffer);
-    var reflection_runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &output.writer);
+    var runtime_inputs10 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs10.deinit();
+    var reflection_runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs10.inputs(.{ .output = &output.writer }), .default, .evaluate);
     defer reflection_runtime.deinit();
     const long_body = try list.fromValuesGeneric(allocator, &.{.{ .int = 1 }});
     defer cleanup.releaseValue(long_body);
@@ -374,7 +397,9 @@ test "long annotation traversal and reflection observe cancellation" {
     try expectErrorContains(&reflection_runtime, "'long-doc see", "unit cancelled");
     try std.testing.expect(reflection_runtime.lastPolls() >= 1);
 
-    var name_runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs11 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs11.deinit();
+    var name_runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs11.inputs(.{}), .default, .evaluate);
     defer name_runtime.deinit();
     const name_bytes = try allocator.alloc(u8, 70_000);
     defer allocator.free(name_bytes);
@@ -414,7 +439,9 @@ test "definitions: set publishes a literal-capture word with no synthesized meta
 test "definitions: which reports a def while see prints the set capture body" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
-    var runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &output.writer);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{ .output = &output.writer }), .default, .evaluate);
     defer runtime.deinit();
     // Reflection reports what is stored: one kind, and no metadata, because
     // the sugar supplies none. `which` reports the public def while `see`
@@ -520,7 +547,9 @@ test "definitions: body is not a word and one binding kind needs no extraction" 
     // body is the literal capture, and a definition visibly is not.
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
-    var runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &output.writer);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{ .output = &output.writer }), .default, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime, "3 'x set 'x see (dup *) 'sq def 'sq see");
     try std.testing.expectEqualStrings(

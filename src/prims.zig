@@ -813,8 +813,6 @@ const RaiseDriver = struct {
 pub fn ioPp(evaluator: *Machine) MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
-    if (evaluator.unit.inherited.console == null and evaluator.unit.output == null)
-        return evaluator.fail(.io, "standard output is unavailable");
     const render = try printer.OwnedStringCursor.initDisplay(evaluator.allocator(), item.borrow());
     try evaluator.startDriver(PpDriver{
         .item = .init(item.take()),
@@ -833,18 +831,8 @@ const PpDriver = struct {
             .pending => .yielded,
             .complete => |rendered| completed: {
                 defer evaluator.allocator().free(rendered);
-                if (evaluator.unit.inherited.console) |console| {
-                    console.writeOutput(rendered, true) catch
-                        return evaluator.fail(.io, "standard output write failed");
-                    break :completed .completed;
-                }
-                const output = evaluator.unit.output.?;
-                output.writeAll(rendered) catch
+                evaluator.unit.inherited.runtime().console.writeOutput(rendered, true) catch
                     return evaluator.fail(.io, "standard output write failed");
-                output.writeByte('\n') catch
-                    return evaluator.fail(.io, "standard output write failed");
-                output.flush() catch
-                    return evaluator.fail(.io, "standard output flush failed");
                 break :completed .completed;
             },
         };
@@ -852,8 +840,6 @@ const PpDriver = struct {
 };
 
 pub fn ioStack(evaluator: *Machine) MachineError!void {
-    if (evaluator.unit.inherited.console == null and evaluator.unit.output == null)
-        return evaluator.fail(.io, "standard output is unavailable");
     if (evaluator.available() == 0) return;
     try evaluator.startDriver(StackDisplayDriver{
         .snapshot = .init(try .init(evaluator)),
@@ -931,28 +917,13 @@ fn writeStackDisplayChunk(
     bytes: []const u8,
     newline: bool,
 ) MachineError!void {
-    if (evaluator.unit.inherited.console) |console| {
-        console.writeOutput(bytes, newline) catch
-            return evaluator.fail(.io, "standard output write failed");
-        return;
-    }
-    const output = evaluator.unit.output.?;
-    if (bytes.len != 0)
-        output.writeAll(bytes) catch
-            return evaluator.fail(.io, "standard output write failed");
-    if (newline) {
-        output.writeByte('\n') catch
-            return evaluator.fail(.io, "standard output write failed");
-        output.flush() catch
-            return evaluator.fail(.io, "standard output flush failed");
-    }
+    evaluator.unit.inherited.runtime().console.writeOutput(bytes, newline) catch
+        return evaluator.fail(.io, "standard output write failed");
 }
 
 pub fn ioPrin(evaluator: *Machine) MachineError!void {
     var item = try evaluator.popString();
     defer item.deinit();
-    if (evaluator.unit.inherited.console == null and evaluator.unit.output == null)
-        return evaluator.fail(.io, "standard output is unavailable");
     const string = item.borrow();
     try evaluator.startDriver(PrinDriver{
         .item = .init(item.take()),
@@ -977,16 +948,8 @@ const PrinDriver = struct {
             .pending => .yielded,
             .complete => |encoded| completed: {
                 defer evaluator.allocator().free(encoded);
-                if (evaluator.unit.inherited.console) |console| {
-                    console.writeOutput(encoded, false) catch
-                        return evaluator.fail(.io, "standard output write failed");
-                    break :completed .completed;
-                }
-                const output = evaluator.unit.output.?;
-                output.writeAll(encoded) catch
+                evaluator.unit.inherited.runtime().console.writeOutput(encoded, false) catch
                     return evaluator.fail(.io, "standard output write failed");
-                output.flush() catch
-                    return evaluator.fail(.io, "standard output flush failed");
                 break :completed .completed;
             },
         };

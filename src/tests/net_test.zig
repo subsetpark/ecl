@@ -7,6 +7,7 @@
 //! source strings, so the traceless session heap is the right allocator (see
 //! `test_heap.zig`). No wall-clock sleeps, no ambient network; the one fixture
 //! is the process executable, used only to produce a foreign port value.
+const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const fixture = @import("process_fixture_options");
 const net_port = @import("../net_port.zig");
@@ -30,6 +31,7 @@ const LimitsConfig = struct {
 /// One Session plus the writers it borrows. Open it in place and never move
 /// it afterwards: the Session holds pointers into this struct.
 const Runtime = struct {
+    inputs: ?runtime_fixture.Fixture = null,
     heap: test_heap.SessionHeap = .init,
     output_buffer: [256]u8 = @splat(0),
     diagnostics_buffer: [256]u8 = @splat(0),
@@ -40,18 +42,25 @@ const Runtime = struct {
     fn open(self: *Runtime, limits: LimitsConfig, config: session.Config) !void {
         self.output = std.Io.Writer.Discarding.init(&self.output_buffer);
         self.diagnostics = std.Io.Writer.Discarding.init(&self.diagnostics_buffer);
-        self.session = try session.Session.initWithHostConfig(self.heap.allocator(), &.{}, .{
+        self.inputs = try runtime_fixture.Fixture.init();
+        errdefer {
+            self.inputs.?.deinit();
+            self.inputs = null;
+        }
+        self.session = try session.Session.init(self.heap.allocator(), &.{}, self.inputs.?.inputs(.{
             .io = io,
             .output = &self.output.?.writer,
             .diagnostics = &self.diagnostics.?.writer,
             .net_limits = limits.net,
             .process_limits = limits.process,
-        }, config);
+        }), config, .evaluate);
     }
 
     fn close(self: *Runtime) void {
         if (self.session == .consumed) return;
         self.session.deinit();
+        self.inputs.?.deinit();
+        self.inputs = null;
         test_heap.retire(&self.heap);
     }
 
@@ -187,12 +196,14 @@ test "net: process endpoint selectors reject network resources" {
 
 test "net: zero listener capacity fails Session construction" {
     var output = std.Io.Writer.Discarding.init(&.{});
-    try std.testing.expectError(error.InvalidHostConfig, session.Session.initWithHost(allocator, &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    try std.testing.expectError(error.InvalidHostConfig, session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{
         .io = io,
         .output = &output.writer,
         .diagnostics = &output.writer,
         .net_limits = .{ .max_live_listeners = 0 },
-    }));
+    }), .default, .evaluate));
 }
 
 test "net: listen binds an ephemeral loopback port and local-address reports it" {

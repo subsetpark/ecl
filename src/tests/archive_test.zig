@@ -4,6 +4,7 @@
 //! Session filesystem root named `'root`, so every case uses a temporary
 //! directory through `Host.filesystem`. Tests pass only source text to
 //! Sessions, so the traceless SessionHeap remains the appropriate allocator.
+const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const filesystem_port = @import("../filesystem_port.zig");
 const session = @import("../session.zig");
@@ -155,17 +156,14 @@ fn expectIoStack(scratch: *Scratch, source: []const u8, expected: []const u8) !v
     var output = std.Io.Writer.Discarding.init(&output_buffer);
     var diagnostics_buffer: [256]u8 = undefined;
     var diagnostics = std.Io.Writer.Discarding.init(&diagnostics_buffer);
-    var runtime = try session.Session.initWithHostConfig(
-        heap.allocator(),
-        &.{},
-        .{
-            .io = std.testing.io,
-            .output = &output.writer,
-            .diagnostics = &diagnostics.writer,
-            .filesystem = scratch.filesystem(),
-        },
-        .cooperative,
-    );
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .filesystem = scratch.filesystem(),
+    }), .cooperative, .evaluate);
     defer runtime.deinit();
     switch (try runtime.runUnit("<archive-test>", source)) {
         .ok => {},
@@ -190,17 +188,14 @@ fn expectIoError(scratch: *Scratch, source: []const u8, expected: support.ErrorC
     var output = std.Io.Writer.Discarding.init(&output_buffer);
     var diagnostics_buffer: [256]u8 = undefined;
     var diagnostics = std.Io.Writer.Discarding.init(&diagnostics_buffer);
-    var runtime = try session.Session.initWithHostConfig(
-        heap.allocator(),
-        &.{},
-        .{
-            .io = std.testing.io,
-            .output = &output.writer,
-            .diagnostics = &diagnostics.writer,
-            .filesystem = scratch.filesystem(),
-        },
-        .cooperative,
-    );
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .filesystem = scratch.filesystem(),
+    }), .cooperative, .evaluate);
     defer runtime.deinit();
     const failure = switch (try runtime.runUnit("<archive-test>", source)) {
         .ok, .incomplete => return error.ExpectedLanguageError,
@@ -320,12 +315,17 @@ fn concurrentUnpack(result: *ConcurrentResult) void {
     var output = std.Io.Writer.Discarding.init(&output_buffer);
     var diagnostics_buffer: [256]u8 = undefined;
     var diagnostics = std.Io.Writer.Discarding.init(&diagnostics_buffer);
-    var runtime = session.Session.initWithHostConfig(heap.allocator(), &.{}, .{
+    var runtime_inputs = runtime_fixture.Fixture.init() catch {
+        result.unexpected.store(true, .release);
+        return;
+    };
+    defer runtime_inputs.deinit();
+    var runtime = session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
         .filesystem = .{ .roots = &.{.{ .name = "root", .absolute_path = result.root }} },
-    }, .cooperative) catch {
+    }), .cooperative, .evaluate) catch {
         result.unexpected.store(true, .release);
         return;
     };
@@ -395,7 +395,7 @@ test "archive: unpack-tgz preserves existing destinations and has one concurrent
     try scratch.expectEntryCount(2);
 }
 
-test "archive: cancellation and absent host IO never publish a destination" {
+test "archive: cancellation never publishes a destination" {
     var scratch = try Scratch.init();
     defer scratch.deinit();
     const bytes = try decodeHex(.valid);
@@ -411,12 +411,14 @@ test "archive: cancellation and absent host IO never publish a destination" {
     var output = std.Io.Writer.Discarding.init(&output_buffer);
     var diagnostics_buffer: [256]u8 = undefined;
     var diagnostics = std.Io.Writer.Discarding.init(&diagnostics_buffer);
-    var runtime = try session.Session.initWithHostConfig(heap.allocator(), &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
         .filesystem = scratch.filesystem(),
-    }, .cooperative);
+    }), .cooperative, .evaluate);
     defer runtime.deinit();
     switch (try runtime.runUnit("<archive-warm>", "[] archive.sha256 pop")) {
         .ok => {},
@@ -431,18 +433,6 @@ test "archive: cancellation and absent host IO never publish a destination" {
     try support.expectLanguageError(failure, .{ .name = "cancelled extraction", .source = cancelled_source, .kind = "cancelled" });
     try scratch.expectAbsent("cancelled");
 
-    const unavailable_destination = try scratch.destination("unavailable");
-    defer allocator.free(unavailable_destination);
-    const unavailable_source = try unpackSource(bytes, unavailable_destination);
-    defer allocator.free(unavailable_source);
-    try support.expectError(.{
-        .name = "filesystem authority absent",
-        .source = unavailable_source,
-        .kind = "domain",
-        .word = "archive.unpack-tgz",
-        .message = "archive extraction is unavailable",
-    });
-    try scratch.expectAbsent("unavailable");
     try scratch.expectEntryCount(0);
 
     // Non-canonical destinations fail before decompression.

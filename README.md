@@ -27,6 +27,10 @@ while being more suited to writing standard and maintainble user-land programs
 ECL is pre-1.0 software. Version `0.1.0` is usable, but language and native
 extension compatibility may change between prereleases.
 
+ECL ships as a CLI interpreter with a supported Zig extension SDK. ECL calls
+Zig extensions through `ecl-native`; embedding the interpreter in Zig
+applications is not supported.
+
 ## Build
 
 Building requires Zig 0.16.0, as pinned by `build.zig.zon` and CI.
@@ -406,8 +410,8 @@ a callback starts; check it before external work. Join backend work before
 returning. Host transport waits already respond to cancellation.
 
 Sessions default to 64 live native ports, 16 admitted operations per port, and
-64 KiB per request and response ring. Hosts can set validated limits through
-`Host.native_port_limits`. Full operation queues wait for capacity;
+64 KiB per request and response ring. The runtime validates these limits at
+Session construction. Full operation queues wait for capacity;
 exceeding the live-port limit raises `'domain`. Cancelling queued work removes
 that operation. By default cancelling active work closes the port and cancels
 its queues. To permit recovery, declare `cancellation = ecl.PortCancellation.acknowledge`

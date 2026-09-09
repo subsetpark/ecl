@@ -3,6 +3,7 @@
 //! runs whole source strings through a public Session and compares the
 //! printed stack or the printed error, so nothing here depends on how a
 //! string or byte list happens to be stored.
+const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const session = @import("../session.zig");
 const printer = @import("../print.zig");
@@ -64,7 +65,9 @@ fn clearStack(runtime: *session.Session) !void {
 }
 
 test "conversion: chars yields text content for every documented source kind" {
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try expectStack(&runtime, "\"hi\" chars", "\"hi\"");
     try expectStack(&runtime, "\"\" chars", "\"\"");
@@ -80,7 +83,9 @@ test "conversion: chars yields text content for every documented source kind" {
 }
 
 test "conversion: chars rejects non-UTF-8 bytes with a reason and other kinds by type" {
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try expectError(&runtime, "[255] chars", &.{ "'kind 'domain", "'reason 'invalid-utf8" });
     try expectError(&runtime, "[195] chars", &.{ "'kind 'domain", "'reason 'invalid-utf8" });
@@ -94,7 +99,9 @@ test "conversion: chars rejects non-UTF-8 bytes with a reason and other kinds by
 }
 
 test "conversion: bytes encodes strings and passes byte lists through" {
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try expectStack(&runtime, "\"hé\" bytes", "[104 195 169]");
     try expectStack(&runtime, "\"\" bytes len", "0");
@@ -108,7 +115,9 @@ test "conversion: bytes encodes strings and passes byte lists through" {
 }
 
 test "conversion: symbol is lookup-only and intern is the one word that creates" {
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try expectStack(&runtime, "'x symbol", "'x");
     try expectStack(&runtime, "(dup) first symbol", "'dup");
@@ -132,7 +141,9 @@ test "conversion: symbol is lookup-only and intern is the one word that creates"
 }
 
 test "conversion: data-facing words never intern their input" {
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     // `symbol` is the oracle: a spelling is interned exactly when lookup
     // succeeds. Feeding a spelling through JSON, CSV, and string words must
@@ -148,7 +159,9 @@ test "conversion: data-facing words never intern their input" {
 }
 
 test "conversion: int accepts ints, chars, and integer literals only" {
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try expectStack(&runtime, "7 int", "7");
     try expectStack(&runtime, "\\a int", "97");
@@ -168,7 +181,9 @@ test "conversion: int accepts ints, chars, and integer literals only" {
 }
 
 test "conversion: float accepts floats, ints, and numeric literals only" {
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try expectStack(&runtime, "2.5 float", "2.5");
     try expectStack(&runtime, "3 float", "3.0");
@@ -180,7 +195,9 @@ test "conversion: float accepts floats, ints, and numeric literals only" {
 }
 
 test "conversion: char accepts chars, scalar ints, and one-char strings only" {
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try expectStack(&runtime, "\\a char", "\\a");
     try expectStack(&runtime, "97 char 955 char 0 char int", "\\a \\λ 0");
@@ -198,7 +215,9 @@ test "conversion: char accepts chars, scalar ints, and one-char strings only" {
 }
 
 test "conversion: every conversion word reports its own name and underflows cleanly" {
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     const words = [_][]const u8{ "chars", "bytes", "symbol", "intern", "int", "float", "char" };
     for (words) |word| {

@@ -1,3 +1,4 @@
+const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const session = @import("../session.zig");
 const native_fixture = @import("native_fixture_options");
@@ -18,7 +19,9 @@ fn display(runtime: *session.Session) !session.RenderedText {
 }
 
 test "concurrency: cold sessions start no threads and @spawn starts the fixed pool" {
-    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
     defer runtime.deinit();
     try std.testing.expectEqual(@as(usize, 0), runtime.schedulerWorkerThreadCount());
     try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerThreadCount());
@@ -33,7 +36,9 @@ test "concurrency: cold sessions start no threads and @spawn starts the fixed po
 }
 
 test "concurrency: cooperative sessions preserve public task behavior without worker threads" {
-    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .cooperative);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
     defer runtime.deinit();
     try runOk(&runtime, "[] (1 2 +) @spawn task.await");
     try std.testing.expectEqual(@as(usize, 0), runtime.schedulerWorkerThreadCount());
@@ -50,17 +55,14 @@ test "concurrency: native shutdown releases delayed continuations and image pins
         var diagnostic_buffer: [64]u8 = undefined;
         var output = std.Io.Writer.Discarding.init(&output_buffer);
         var diagnostics = std.Io.Writer.Discarding.init(&diagnostic_buffer);
-        var runtime = try session.Session.initWithHostConfig(
-            allocator,
-            &.{},
-            .{
-                .io = std.testing.io,
-                .output = &output.writer,
-                .diagnostics = &diagnostics.writer,
-                .ecl_path = native_fixture.directory,
-            },
-            .{ .worker_pool = 1 },
-        );
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{
+            .io = std.testing.io,
+            .output = &output.writer,
+            .diagnostics = &diagnostics.writer,
+            .ecl_path = native_fixture.directory,
+        }), .{ .worker_pool = 1 }, .evaluate);
         try runOk(&runtime, "[] (9 sample.yield-forever) @spawn pop");
         runtime.deinit();
     }
@@ -71,7 +73,9 @@ test "concurrency: cooperative ready work cannot starve bounded retirement" {
     var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
     const allocator = counting.allocator();
     {
-        var runtime = try session.Session.initWithConfig(allocator, &.{}, .cooperative);
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
         defer runtime.deinit();
         counting.requested_memory_limit = counting.total_requested_bytes + 512 * 1024;
         try runOk(
@@ -85,18 +89,18 @@ test "concurrency: cooperative ready work cannot starve bounded retirement" {
 }
 
 test "concurrency: default sessions use the build-configured worker count" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try runOk(&runtime, "[] (1) @spawn task.await pop");
     try std.testing.expectEqual(session.default_worker_count, runtime.schedulerWorkerThreadCount());
 }
 
 test "concurrency: relocating a session handle preserves live runtime links" {
-    var original = try session.Session.initWithConfig(
-        std.testing.allocator,
-        &.{},
-        .{ .worker_pool = 1 },
-    );
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var original = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
     try runOk(&original, "[] ((1) () while) @spawn 'relocated-task set");
 
     // Session is deliberately a movable handle. The live task, root scope, and
@@ -112,7 +116,9 @@ test "concurrency: relocating a session handle preserves live runtime links" {
 }
 
 test "concurrency: task identity rendering dict keys and cached await are observable" {
-    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 2 });
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 2 }, .evaluate);
     defer runtime.deinit();
     try runOk(&runtime, "[] (7) @spawn dup str");
     {
@@ -140,7 +146,9 @@ test "concurrency: task identity rendering dict keys and cached await are observ
 }
 
 test "concurrency: two parked waiters share one cached result with one worker" {
-    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
     defer runtime.deinit();
     try runOk(
         &runtime,
@@ -153,7 +161,9 @@ test "concurrency: two parked waiters share one cached result with one worker" {
 }
 
 test "concurrency: runtime task markers cannot be parsed bare or nested" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     const bare = (try runtime.runUnit("marker.ecl", "\"<task:4>\" parse")).err;
     runtime.release(bare);
@@ -163,7 +173,9 @@ test "concurrency: runtime task markers cannot be parsed bare or nested" {
 }
 
 test "concurrency: cancellation timeout and later await remain distinct" {
-    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
     defer runtime.deinit();
     try runOk(&runtime, "[] ((1) () while) @spawn dup 1 task.await-for swap task.cancel");
     try std.testing.expectEqual(@as(usize, 1), runtime.schedulerTimerThreadCount());
@@ -178,7 +190,9 @@ test "concurrency: cancellation timeout and later await remain distinct" {
 }
 
 test "concurrency: task module cancellation reaches a runnable child" {
-    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
     defer runtime.deinit();
     // Module resolution can yield before cancellation is requested. Keep the
     // child active so this proves cancellation independently of dispatch order.
@@ -190,14 +204,18 @@ test "concurrency: task module cancellation reaches a runnable child" {
 }
 
 test "concurrency: terminal deadline waits do not start the timer thread" {
-    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
     defer runtime.deinit();
     try runOk(&runtime, "[] (1) @spawn dup task.await pop 1000000 task.await-for pop");
     try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerThreadCount());
 }
 
 test "concurrency: an already-expired pending deadline resolves without a timer thread" {
-    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .cooperative);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
     defer runtime.deinit();
     try runOk(&runtime, "[] ((1) () while) @spawn dup 0 task.await-for");
     try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerThreadCount());
@@ -208,7 +226,9 @@ test "concurrency: an already-expired pending deadline resolves without a timer 
 }
 
 test "concurrency: cancelling a deadline waiter unlinks its far-future timer" {
-    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
     defer runtime.deinit();
     try runOk(
         &runtime,
@@ -220,7 +240,9 @@ test "concurrency: cancelling a deadline waiter unlinks its far-future timer" {
 }
 
 test "concurrency: timer heap spans fixed chunks and drains every entry" {
-    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
     defer runtime.deinit();
     try runOk(
         &runtime,
@@ -232,7 +254,9 @@ test "concurrency: timer heap spans fixed chunks and drains every entry" {
 }
 
 test "concurrency: tasks persist across units and structured close reaches quiescence" {
-    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
     defer runtime.deinit();
     try runOk(&runtime, "[] ((1) () while) @spawn");
     try runOk(&runtime, "task.pending first task.cancel task.await");
@@ -242,7 +266,9 @@ test "concurrency: tasks persist across units and structured close reaches quies
 }
 
 test "concurrency: tasks snapshots include pending descendants in @spawn preorder" {
-    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
     defer runtime.deinit();
     try runOk(
         &runtime,
@@ -258,7 +284,9 @@ test "concurrency: tasks snapshots include pending descendants in @spawn preorde
 }
 
 test "concurrency: one-worker kernel safe points let another unit progress" {
-    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
     defer runtime.deinit();
     try runOk(
         &runtime,
@@ -272,7 +300,9 @@ test "concurrency: one-worker kernel safe points let another unit progress" {
 }
 
 test "concurrency: a large seeded construction cannot starve a peer task" {
-    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
     defer runtime.deinit();
     // One worker, so the short task can only win if the long one yields. Both
     // user-sized halves of opening a unit are in the long task: 70,000 seeds
@@ -292,7 +322,9 @@ test "concurrency: a large seeded construction cannot starve a peer task" {
 }
 
 test "concurrency: a failing sibling cancels peers mid-construction" {
-    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
     defer runtime.deinit();
     // The leftmost child fails at once; its siblings are each part-way through
     // materializing a large seed list. Cancellation has to reach them between slices, so a
@@ -309,7 +341,9 @@ test "concurrency: a failing sibling cancels peers mid-construction" {
 }
 
 test "concurrency: large task results materialize across scheduler slices" {
-    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
     defer runtime.deinit();
     try runOk(&runtime, "[] ([1] 70000 take call) @spawn task.await 'ok at len");
     var actual = try display(&runtime);
@@ -318,7 +352,9 @@ test "concurrency: large task results materialize across scheduler slices" {
 }
 
 test "concurrency: @each failure cancellation reaches sibling descendants" {
-    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
     defer runtime.deinit();
     try runOk(
         &runtime,
@@ -329,7 +365,9 @@ test "concurrency: @each failure cancellation reaches sibling descendants" {
 }
 
 test "concurrency: await-any ties and @each preserve program order" {
-    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 8 });
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 8 }, .evaluate);
     defer runtime.deinit();
     try runOk(&runtime, "[] (10) @spawn dup task.await pop dup pair task.await-any pop");
     var actual = try display(&runtime);
@@ -342,7 +380,9 @@ test "concurrency: await-any ties and @each preserve program order" {
 }
 
 test "concurrency: @each seeds children without resolving capture helpers" {
-    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
     defer runtime.deinit();
     try runOk(&runtime, "(x -- y) (pop 99) 'first def [1 2 3] [] () @each");
     var actual = try display(&runtime);
@@ -352,11 +392,9 @@ test "concurrency: @each seeds children without resolving capture helpers" {
 
 test "concurrency: task results compose with each in input order" {
     for ([_]usize{ 1, 8 }) |worker_count| {
-        var runtime = try session.Session.initWithConfig(
-            std.testing.allocator,
-            &.{},
-            .{ .worker_pool = worker_count },
-        );
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = worker_count }, .evaluate);
         defer runtime.deinit();
         try runOk(&runtime, "[(10) (20 21) ()] ([] swap @spawn) each (task.await) each");
         var actual = try display(&runtime);
@@ -372,7 +410,9 @@ test "concurrency: task results compose with each in input order" {
 test "concurrency: complete console calls do not interleave bytes" {
     var bytes: [128]u8 = undefined;
     var writer = std.Io.Writer.fixed(&bytes);
-    var runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &writer);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{ .output = &writer }), .default, .evaluate);
     defer runtime.deinit();
     try runOk(&runtime, "[(\"aaaa\" io.prin 0) (\"bbbb\" io.prin 0)] [] (call) @each pop");
     const written = writer.buffered();
@@ -383,7 +423,9 @@ test "concurrency: complete console calls do not interleave bytes" {
 test "concurrency: primitive @each is reflective and task-join is absent" {
     var output_bytes: [4096]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_bytes);
-    var runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &output);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{ .output = &output }), .default, .evaluate);
     defer runtime.deinit();
     const direct = try runtime.runUnit("concurrency.ecl", "task-join");
     switch (direct) {
@@ -419,7 +461,9 @@ test "concurrency: primitive @each is reflective and task-join is absent" {
 }
 
 test "concurrency: terminal @each child errors settle join cleanup" {
-    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
     defer runtime.deinit();
     for ([_][]const u8{ "[1] [] (dup) @each", "[1] [] (missing) @each" }) |source| {
         switch (try runtime.runUnit("concurrency.ecl", source)) {
@@ -435,7 +479,9 @@ test "concurrency: terminal @each child errors settle join cleanup" {
 }
 
 test "concurrency: exit is root-owned outside @attempt" {
-    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
     defer runtime.deinit();
     try runOk(&runtime, "[] (7 exit) @attempt [] (7 exit) @spawn task.await");
     try std.testing.expectEqual(@as(?u8, null), runtime.requestedExit());

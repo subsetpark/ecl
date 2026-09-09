@@ -1815,37 +1815,47 @@ pub const InheritedContext = struct {
     test_execution: ?*const modules.TestExecutionAccess = null,
     native_loader: ?*native_module.Loader = null,
     native_diagnostics: bool = false,
-    diagnostics: ?*std.Io.Writer = null,
-    console: ?*console_api.Console = null,
-    host_io: ?std.Io = null,
     tls_trust: ?TlsTrust = null,
     ecl_path: ?[]const u8 = null,
     project_lock: ?*const pkg_lock.ProjectLock = null,
-    environ: ?*const Environ = null,
-    standard_input: ?*StandardInput = null,
     idiom_mode: IdiomMode = .automatic,
     phrase_recognizer: ?PhraseRecognizer = null,
-    process_access: ?*external.ProcessAccess = null,
-    filesystem_access: ?*external.FilesystemAccess = null,
-    net_access: ?*external.NetAccess = null,
     package_access: ?*external.PackageAccess = null,
-    wall_clock: WallClock = .absent,
+    phase: union(enum) { bootstrap, runtime: RuntimeContext },
+
+    pub fn console(self: *const InheritedContext) ?*console_api.Console {
+        return switch (self.phase) {
+            .bootstrap => null,
+            .runtime => |context| context.console,
+        };
+    }
+
+    pub fn runtime(self: *const InheritedContext) *const RuntimeContext {
+        return switch (self.phase) {
+            .runtime => |*context| context,
+            .bootstrap => @panic("runtime service requested during prelude construction"),
+        };
+    }
 };
 
-/// The Session's wall-clock authority. Monotonic time always exists because
-/// the scheduler owns it; wall time is a separate grant, absent by default, so
-/// possession of host I/O or of a TLS verification timestamp never implies it.
-/// Values are Unix milliseconds.
+/// Complete runtime services, borrowed from the Session that encloses every
+/// Unit and descendant. Bootstrap evaluation has no runtime services.
+pub const RuntimeContext = struct {
+    console: *console_api.Console,
+    host_io: std.Io,
+    process_access: *external.ProcessAccess,
+    filesystem_access: *external.FilesystemAccess,
+    net_access: *external.NetAccess,
+    wall_clock: WallClock,
+    environ: *const Environ,
+    standard_input: *StandardInput,
+};
+
+/// Wall time is always available at runtime. Overrides are deterministic
+/// testing inputs, independent of permissions. Values are Unix milliseconds.
 pub const WallClock = union(enum) {
-    /// `clock.unix` raises `'domain` with reason `'unavailable`.
-    absent,
-    /// Read the realtime clock through this host I/O on every call.
     host: std.Io,
-    /// Every read returns this timestamp.
     fixed: i64,
-    /// Every read returns this base plus the scheduler's monotonic
-    /// milliseconds since the Session started, so a manual scheduler clock
-    /// drives a deterministic advancing wall clock.
     anchored: i64,
 };
 
@@ -2526,10 +2536,9 @@ pub const Unit = struct {
     frames: std.ArrayList(Frame) = .empty,
     stack: std.ArrayList(Value),
     environment: *env.Env,
-    inherited: InheritedContext = .{},
+    inherited: InheritedContext,
     lifetime: LifetimeGuard,
     archive: *spans.SpanArchive,
-    output: ?*std.Io.Writer,
     arguments: Value,
     cancelled: *const std.atomic.Value(bool),
     fuel: u32 = fuel_quantum,
@@ -2601,7 +2610,7 @@ pub const Unit = struct {
         stack: std.ArrayList(Value),
         environment: *env.Env,
         archive: *spans.SpanArchive,
-        output: ?*std.Io.Writer,
+        inherited: InheritedContext,
         arguments: Value,
         cancelled: *const std.atomic.Value(bool),
     ) Unit {
@@ -2613,7 +2622,7 @@ pub const Unit = struct {
             .environment = environment,
             .lifetime = .init(allocator, environment),
             .archive = archive,
-            .output = output,
+            .inherited = inherited,
             .arguments = arguments,
             .cancelled = cancelled,
             .entry_base = stack.items.len,
@@ -3154,7 +3163,7 @@ pub const Machine = struct {
     }
     pub fn beginNativeTiming(self: *const Machine) ?i128 {
         if (!self.unit.inherited.native_diagnostics) return null;
-        const io = self.unit.inherited.host_io orelse return null;
+        const io = self.unit.inherited.runtime().host_io;
         return std.Io.Clock.awake.now(io).nanoseconds;
     }
 
@@ -3173,7 +3182,7 @@ pub const Machine = struct {
         started: ?i128,
     ) void {
         const start = started orelse return;
-        const io = self.unit.inherited.host_io orelse return;
+        const io = self.unit.inherited.runtime().host_io;
         const end = std.Io.Clock.awake.now(io).nanoseconds;
         const elapsed: u64 = @intCast(@max(end - start, 0));
         if (!instance.recordDuration(elapsed)) return;
@@ -3183,11 +3192,8 @@ pub const Machine = struct {
             "native module `{s}` returned after an over-quantum slice ({d} ns)\n",
             .{ intern.get(intern.moduleId(instance.name())), elapsed },
         ) catch return;
-        if (self.unit.inherited.console) |console| {
+        if (self.unit.inherited.console()) |console| {
             settleAdvisoryDiagnostic(console.writeDiagnostics(line, false));
-        } else if (self.unit.inherited.diagnostics) |diagnostics| {
-            settleAdvisoryDiagnostic(diagnostics.writeAll(line));
-            settleAdvisoryDiagnostic(diagnostics.flush());
         }
     }
     pub fn currentEnv(self: *const Machine) *env.Env {
@@ -3819,7 +3825,7 @@ pub const Machine = struct {
                             return self.finishWithoutLoading(evaluator, &loading);
                         }
                         // The embedded manifest is consulted before the
-                        // search path: a stdlib name resolves with no host IO
+                        // search path: a stdlib name resolves without filesystem lookup
                         // and no ECL_PATH, and no path module can shadow one.
                         if (stdlib.find(intern.get(intern.moduleId(self.name)))) |entry| {
                             try self.beginEmbedded(evaluator, &loading, entry);
@@ -3835,7 +3841,7 @@ pub const Machine = struct {
                             } };
                             continue;
                         }
-                        if (evaluator.unit.inherited.host_io == null or evaluator.unit.inherited.ecl_path == null)
+                        if (evaluator.unit.inherited.ecl_path == null)
                             return self.notFound(evaluator);
                         const filename = try self.makeFilename(
                             evaluator,
@@ -3978,8 +3984,7 @@ pub const Machine = struct {
                     },
                 },
                 .locked_store => |*locked| {
-                    const io = evaluator.unit.inherited.host_io orelse
-                        return evaluator.fail(.io, "filesystem access is unavailable");
+                    const io = evaluator.unit.inherited.runtime().host_io;
                     const info = std.Io.Dir.cwd().statFile(
                         io,
                         locked.target.store,
@@ -4133,7 +4138,7 @@ pub const Machine = struct {
                         .native => .native,
                     };
                     std.Io.Dir.cwd().access(
-                        evaluator.unit.inherited.host_io.?,
+                        evaluator.unit.inherited.runtime().host_io,
                         access.candidate.borrow(),
                         .{ .read = true },
                     ) catch |err| switch (err) {
@@ -4780,18 +4785,6 @@ pub const Machine = struct {
         path_value: ?Value,
         transfer: FileTransfer,
     ) MachineError!void {
-        if (self.unit.inherited.host_io == null) {
-            const failure = self.fail(.io, "filesystem access is unavailable");
-            if (path_value) |item|
-                self.unit.pendingFailure().addData(.path, item)
-            else if (transfer.diagnosticPath()) |item|
-                self.unit.pendingFailure().addData(.path, item);
-            self.unit.allocator.free(path);
-            if (path_value) |item| self.releaseDomain().releaseValue(item);
-            var transfer_cleanup = transfer;
-            transfer_cleanup.deinit(self.releaseDomain());
-            return failure;
-        }
         try self.startDriver(FileSourceDriver{
             .allocator = self.unit.allocator,
             .state = .init(.{ .open = .{
@@ -4909,7 +4902,7 @@ pub const Machine = struct {
         }
         pub fn advance(evaluator: *Machine, self: *FileSourceDriver) MachineError!WorkProgress {
             try evaluator.pollKernel();
-            const io = evaluator.unit.inherited.host_io.?;
+            const io = evaluator.unit.inherited.runtime().host_io;
             switch (self.state.borrowMut().*) {
                 .open => |*context| {
                     const file = std.Io.Dir.cwd().openFile(io, context.path.borrow(), .{}) catch |err| {
@@ -4998,10 +4991,7 @@ pub const Machine = struct {
     };
     /// Consumes nothing: the whole stream is read into one owned string.
     pub fn readStandardInputOwned(self: *Machine) MachineError!void {
-        const stream = self.unit.inherited.standard_input orelse
-            return self.fail(.io, "standard input is unavailable");
-        if (self.unit.inherited.host_io == null)
-            return self.fail(.io, "standard input is unavailable");
+        const stream = self.unit.inherited.runtime().standard_input;
         switch (stream.claim()) {
             .granted => {},
             .program_source => return self.fail(.io, "stdin is the program source"),
@@ -5042,7 +5032,7 @@ pub const Machine = struct {
             switch (self.state) {
                 .open => {
                     self.state = .{ .read = std.Io.File.stdin().reader(
-                        evaluator.unit.inherited.host_io.?,
+                        evaluator.unit.inherited.runtime().host_io,
                         &.{},
                     ) };
                     return .yielded;
@@ -5156,7 +5146,7 @@ pub const Machine = struct {
     /// Resolves one environment variable against the session snapshot.
     pub fn environLookup(self: *Machine, name: []const u8) Environ.LookupCursor {
         const entries: []const Environ.Entry =
-            if (self.unit.inherited.environ) |environ| environ.entries else &.{};
+            self.unit.inherited.runtime().environ.entries;
         return .{ .entries = entries, .name = name };
     }
     pub fn undefinedModule(self: *Machine, name: u32) MachineError {

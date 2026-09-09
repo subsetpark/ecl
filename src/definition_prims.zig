@@ -781,13 +781,7 @@ const WhichDriver = struct {
                 },
             },
             .write => |*write| {
-                if (evaluator.unit.inherited.console) |console| {
-                    console.writeOutput(write.rendered.borrow(), false) catch return writeFailure(evaluator);
-                    return .completed;
-                }
-                const output = try outputWriter(evaluator);
-                output.writeAll(write.rendered.borrow()) catch return writeFailure(evaluator);
-                output.flush() catch return evaluator.fail(.io, "standard output flush failed");
+                evaluator.unit.inherited.runtime().console.writeOutput(write.rendered.borrow(), false) catch return writeFailure(evaluator);
                 return .completed;
             },
         };
@@ -996,23 +990,13 @@ const SeeDriver = struct {
                 } };
             },
             .write => |*write| {
-                if (evaluator.unit.inherited.console) |console| {
-                    console.writeOutput(write.rendered.borrow(), false) catch return writeFailure(evaluator);
-                    return .completed;
-                }
-                const output = try outputWriter(evaluator);
-                output.writeAll(write.rendered.borrow()) catch return writeFailure(evaluator);
-                output.flush() catch return evaluator.fail(.io, "standard output flush failed");
+                evaluator.unit.inherited.runtime().console.writeOutput(write.rendered.borrow(), false) catch return writeFailure(evaluator);
                 return .completed;
             },
         };
         return .yielded;
     }
 };
-
-fn outputWriter(evaluator: *Machine) MachineError!*std.Io.Writer {
-    return evaluator.unit.output orelse return evaluator.fail(.io, "standard output is unavailable");
-}
 
 fn writeFailure(evaluator: *Machine) MachineError {
     return evaluator.fail(.io, "standard output write failed");

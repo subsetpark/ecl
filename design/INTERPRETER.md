@@ -90,13 +90,13 @@ recorded in `PERFORMANCE.md`.
 
 ## 1. The Session is the runtime boundary
 
-`Session` is the public interpreter object and the root of every runtime
+`Session` is the internal interpreter boundary and the root of every runtime
 lifetime. It is an opaque, movable handle to heap-stable `SessionCore` state.
-The package root is a closed façade over that Session-facing API. First-party
-executables and verification tools use a separate build-private aggregation,
-so a declaration made public for cross-file implementation use cannot become
-an embedding API accidentally; compile-time validation closes the façade over
-its explicit declaration set.
+The CLI, repository tests, and tools use one build-private runtime aggregation.
+There is no supported interface for Zig applications to construct or drive ECL.
+The separate `ecl-native` SDK supports the other direction: ECL calls trusted
+Zig extensions through semantic facades and the native ABI.
+
 That state owns:
 
 - the host allocator and `ReleaseDomain`;
@@ -107,8 +107,8 @@ That state owns:
 - the scheduler and root task scope; and
 - immutable or explicitly synchronized views of host services such as
   arguments, environment variables, standard input, output, diagnostics, TLS
-  trust, project configuration, module search paths, and optional process,
-  filesystem, and package-store authority.
+  trust, project configuration, module search paths, process, filesystem, and
+  network owners, and optional package-store authority.
 
 Grouping these objects under one owner correlates every dependent lifetime.
 Values, module pins, source cursors, task cells, and deferred destruction all
@@ -143,8 +143,9 @@ capabilities as core constructors; loading the module grants no additional autho
 
 A Session captures the host environment once, records whether standard input
 remains available as data, and owns any TLS or path overrides needed by its
-Units. This gives one Session a coherent view even when the embedding process
-changes around it.
+Units. The CLI captures its startup directory and environment snapshot once
+and shares those inputs across every execution entrypoint. Project discovery
+begins at that startup directory.
 
 Host operations are exposed to executing code through narrow facades. A Unit
 may enqueue work, write through the console, load through the module loader, or
@@ -152,9 +153,24 @@ use immutable host configuration. It cannot reach the raw Session, allocator,
 registry, scheduler lifecycle, or reclamation root. Observation, execution,
 mutation, and teardown are distinct authorities.
 
-Process, filesystem, and network words use Session-owned runtime state whenever
-host I/O is present. They require no optional policy grant. Output-only Sessions
-used for pure evaluation have no operating-system I/O state.
+Every initialized Session has the same complete runtime shape. Its constructor
+requires I/O, output and diagnostic writers, a startup directory, an environment
+snapshot, scheduler configuration, and an explicit command mode. Evaluation,
+language tests, and package commands differ only in the additional authorities
+their modes mint. Process, filesystem, and network owners are unconditional.
+
+Inherited context distinguishes prelude bootstrap from runtime execution.
+The bootstrap phase builds the core before a Session is published; it is not a
+reduced Session. Runtime context carries complete service access and is copied
+into descendants without changing module-loading order. All access borrows
+Session-owned state, which survives until tasks, modules, and retirement work
+have settled. Shared test fixtures keep isolated directories, streams, and
+explicit environment inputs alive through Session teardown.
+
+Monotonic and wall clocks always exist at runtime. The CLI uses real clocks;
+manual monotonic and fixed or anchored wall clocks, cooperative scheduling, and
+TLS verification overrides are internal deterministic-testing inputs. They
+confer no permissions and introduce no command-line modes.
 
 The process owner retains the startup directory, a copied environment snapshot,
 and live-count, queue, and capture limits. Its opaque `ProcessAccess` lets Units
@@ -170,9 +186,9 @@ operations subject to operating-system permissions. Units receive opaque
 `FilesystemAccess` for root lookup and operation admission. Root-relative path
 resolution enforces containment; module loading remains a separate operation.
 
-Clocks are two more authorities with different shapes. The scheduler owns
+Clocks are two runtime inputs with different shapes. The scheduler owns
 monotonic time as one `MonotonicClock` tagged union, selected at construction
-from the Host's `ClockPolicy`: the `host` variant carries the Session's origin
+from internal clock configuration: the `host` variant carries the Session's origin
 instant and reads the process awake clock; the `manual` variant is an opaque
 `ManualClock` whose reading is whole milliseconds and whose only mutation is a
 compare-exchange advance with checked addition, refusing a step that would
@@ -181,13 +197,11 @@ leave the range without touching the stored value. It moves through
 `WorkerScheduler` facade does not expose, so no evaluated word can move time.
 Every deadline capture, arbitration check, timer wake, and `clock.now` sample
 reads `WorkerScheduler.now`, so the whole Session agrees on one "now". The wall clock is a separate
-`machine.WallClock` union on the inherited context — `absent`, `host` with the
-I/O it reads through, `fixed`, or `anchored` to the monotonic clock — converted
-from the Host policy at construction. Neither host I/O nor the TLS verification
-timestamp is consulted for it, and the default is `absent`.
+`machine.WallClock` union on the runtime context: realtime I/O, a fixed value,
+or a base anchored to the monotonic clock. CLI construction selects realtime;
+the other variants support deterministic tests independently of TLS time.
 
-Package commands add a third authority. `initPackageCommand` is the only
-constructor that mints a `PackageOwner`, and it takes one tagged
+Package command mode alone mints a `PackageOwner`, and carries one tagged
 `PackageGrant` naming exactly the stores a command shape may touch (`inspect`,
 `collect`, `verify`, `synchronize`, `vendor`). The shared cache is an
 absolute host path the command line resolved once at startup, a relative
@@ -195,9 +209,9 @@ absolute host path the command line resolved once at startup, a relative
 fixed child `vendor` of the retained project handle, opened without following
 a final symlink, so a repository-controlled link cannot become a store.
 `pkg.store` words receive the opaque `PackageAccess`, name a store by symbol,
-and address entries only by validated canonical store keys. Ordinary and
-embedded Sessions never construct it, so their package-store words fail
-closed, and no absolute store path is ever passed through evaluated code.
+and address entries only by validated canonical store keys. Ordinary evaluation
+Sessions never construct it, so their package-store words fail closed, and no
+absolute store path is ever passed through evaluated code.
 Cache selection from `ECL_CACHE`, `XDG_CACHE_HOME`, and `HOME` is host
 startup work shared with runtime module loading.
 
@@ -850,7 +864,7 @@ measured cost justifies fusion.
 A `Unit` is a green execution context. The scheduler may run Units
 cooperatively on the calling thread or on a fixed worker pool; both modes use
 the same machine, queues, wait protocol, task tree, and retirement domain.
-Cooperative mode gives deterministic embeddings and allocation-failure testing
+Cooperative mode gives deterministic tests and allocation-failure testing
 the same semantics as worker execution.
 
 ### The policy is a functional core with an imperative shell
@@ -1255,8 +1269,8 @@ Construction requires opaque invocation authority minted by the controller lane.
 worker code cannot construct this controller facade or obtain its advancement
 state.
 
-Each Session I/O service owns its registered library instance. In an
-output-only Session, the corresponding library instance has no I/O backend.
+Each Session I/O service owns its registered library instance and a complete
+I/O backend.
 A module candidate publishes sealed capabilities as literal word
 bodies and pins its instance until publication or abandonment. Capability
 values retain that identity independently of service cleanup. Module registration

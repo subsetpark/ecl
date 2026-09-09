@@ -260,7 +260,6 @@ pub const Reason = enum {
     busy,
     cross_device,
     unsupported,
-    unavailable,
     changed,
     io,
 
@@ -305,7 +304,6 @@ pub const Reason = enum {
             .busy => "entry is busy",
             .cross_device => "operation crosses devices",
             .unsupported => "operation is unsupported by the host",
-            .unavailable => "filesystem access is unavailable",
             .changed => "entry changed during the operation",
             .io => "host filesystem operation failed",
         };

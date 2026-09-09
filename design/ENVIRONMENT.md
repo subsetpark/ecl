@@ -8,6 +8,10 @@ contracts, projects and packages, the `ecl` command, and source formatting.
 shipped word and its stack effect. This document covers behavior that depends
 on files, processes, networks, package data, or distribution policy.
 
+ECL is distributed as a CLI interpreter with a supported Zig extension SDK.
+ECL can call Zig extensions through `ecl-native`; embedding ECL in a Zig
+application is not a supported interface.
+
 ## Modules and host integration
 
 ### Embedded standard library
@@ -161,8 +165,8 @@ ports remain opaque identities. Tasks and modules are unsupported native inputs.
 
 The default Session limits are 64 live native ports, 16 admitted operations per
 port (including the active one), and 64 KiB for each request and response ring.
-The embedding host may configure `NativePortLimits` through
-`Host.native_port_limits`: live capacity is 1–4096, operation capacity is 1–256,
+The runtime validates native port limits at construction:
+live capacity is 1–4096, operation capacity is 1–256,
 and ring capacity is 1 byte–16 MiB. Invalid limits reject Session initialization.
 Creation beyond live capacity raises `'domain`; operations wait for admission
 when their lane is full. The operation budget is partitioned across lanes,
@@ -262,11 +266,11 @@ the protocol modules built over a connection.
 
 The `clock` and `time` modules documented in `STDLIB.md` split effectful time
 from pure conversion. `time` is pure and available everywhere. `clock` reads
-two distinct authorities that a Session's host configures separately.
+the scheduler's monotonic clock and the process realtime clock.
 
-Monotonic time belongs to the scheduler and always exists. The host selects
-its source once, at Session construction: the process's awake clock, or a
-manual clock that starts at zero and moves only when the embedder advances it
+Monotonic time belongs to the scheduler and always exists. Ordinary execution
+uses the process's awake clock. Internal tests can select a
+manual clock that starts at zero and moves only when the test advances it
 through the Session by whole milliseconds. An advance that would carry the
 reading past the int range is refused and leaves the reading unchanged, so
 the manual clock never wraps or runs backwards. Every deadline —
@@ -274,19 +278,16 @@ the manual clock never wraps or runs backwards. Every deadline —
 instant on that one clock before registering any timer state; an instant the
 clock could never report is refused with `'overflow` instead of being
 registered, and the timer thread reconsiders its heap on every advance. Under a manual clock no wait, wake, or `clock.now` sample
-touches host time, so an embedding can drive sleeping programs to exact
+touches host time, so a test can drive sleeping programs to exact
 instants; a sleeping unit is never woken early, and one is never woken at all
 unless the clock reaches its deadline or it is cancelled. Evaluated code
 cannot advance a clock or discover which source it runs on beyond observing
 the readings.
 
-Wall-clock time is a grant, absent by default. A host may withhold it (`clock.unix` raises `'domain` with reason
-`'unavailable`), fix it at one Unix millisecond value, anchor a base value to
-the monotonic clock so a manual clock yields a deterministic advancing wall
-time, or pass the process realtime clock through. The `ecl` command grants the
-process clock. Host I/O, a TLS verification timestamp, and every other
-capability confer no wall clock; nothing in the environment or ECL source can
-widen the grant.
+Wall-clock time always exists. `clock.unix` reads the process realtime clock.
+Internal tests may fix it at one Unix millisecond value or anchor a base value
+to the monotonic clock. These are deterministic inputs, independent of TLS
+verification time or permissions; they have no CLI options.
 
 Time zones, locale-sensitive formatting, leap-second tables, timers that run
 callbacks, and periodic scheduling are outside this contract. Process
@@ -381,7 +382,7 @@ method is `'domain`.
 Connection refusal, TLS failure, invalid URLs, and protocol errors raise
 `'io` with the URL in `'path`. Every HTTP status is returned as response data.
 
-An embedder may supply a TLS trust override containing an absolute CA-file
+Internal tests may supply a TLS trust override containing an absolute CA-file
 path and a fixed verification timestamp. That configuration uses only the
 named CA file and timestamp. The default configuration uses system trust
 roots and the current time. ECL code and process environment variables cannot
@@ -407,13 +408,12 @@ working directory. The first directory containing `ecl.pkg` is the project
 root. Discovery stops at the filesystem root. `ecl.lock` is read only from
 the project root.
 
-An embedded session opts into discovery by supplying `Host.project_start`.
-The default embedded session has no project start path and reads no ambient
-project files.
+The CLI captures its absolute startup directory once and uses it for project
+discovery across scripts, expressions, stdin evaluation, the REPL, and `ecl test`.
 
 Discovery runs once per session. The resulting project, lock, and catalog
 state remains fixed for the lifetime of the session and all its units. A
-missing manifest, missing lock, or unavailable host filesystem produces an
+missing manifest or missing lock produces an
 absent project tier. An unreadable or invalid sibling lock is retained as a
 session error and is reported by the first non-embedded module lookup.
 

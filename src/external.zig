@@ -122,7 +122,7 @@ pub const NetAccess = opaque {};
 
 /// Nominal proof that a Session was constructed for a package command. It
 /// carries the package store handles that `pkg.store` needs and nothing an
-/// ordinary embedding Session ever mints; see `package_authority.zig`.
+/// ordinary evaluation Session ever mints; see `package_authority.zig`.
 pub const PackageAccess = opaque {};
 
 pub const Wake = enum {

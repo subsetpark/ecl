@@ -3,6 +3,7 @@
 //! Validation and refused-connection cases run everywhere. Server-backed cases
 //! spawn the loopback fixture and skip — never silently pass — if the build did
 //! not provide it.
+const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const http_fixture = @import("http_fixture_options");
 const pkg_fixture = @import("pkg_fixture_options");
@@ -102,12 +103,14 @@ fn expectTlsStack(
     var diagnostics = std.Io.Writer.Allocating.init(allocator);
     defer diagnostics.deinit();
     const borrowed_path = try allocator.dupe(u8, pkg_fixture.ca_file);
-    var runtime = try session.Session.initWithHost(heap.allocator(), &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
         .tls_trust = .{ .ca_file = borrowed_path, .now = now },
-    });
+    }), .default, .evaluate);
     allocator.free(borrowed_path);
     defer runtime.deinit();
     switch (try runtime.runUnit("<http-tls-test>", source)) {
@@ -133,12 +136,14 @@ fn expectTlsIoError(source: []const u8, now: std.Io.Timestamp) !void {
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(allocator);
     defer diagnostics.deinit();
-    var runtime = try session.Session.initWithHost(heap.allocator(), &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
         .tls_trust = .{ .ca_file = pkg_fixture.ca_file, .now = now },
-    });
+    }), .default, .evaluate);
     defer runtime.deinit();
     const failure = switch (try runtime.runUnit("<http-tls-test>", source)) {
         .ok, .incomplete => return error.ExpectedLanguageError,
@@ -191,11 +196,13 @@ fn expectStack(port: u16, comptime template: []const u8, expected: []const u8) !
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(allocator);
     defer diagnostics.deinit();
-    var runtime = try session.Session.initWithHost(heap.allocator(), &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
-    });
+    }), .default, .evaluate);
     defer runtime.deinit();
     switch (try runtime.runUnit("<http-test>", source)) {
         .ok => {},
@@ -315,11 +322,13 @@ fn expectHostError(source: []const u8, expected: support.ErrorCase) !void {
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(allocator);
     defer diagnostics.deinit();
-    var runtime = try session.Session.initWithHost(heap.allocator(), &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
-    });
+    }), .default, .evaluate);
     defer runtime.deinit();
     const failure = switch (try runtime.runUnit("<http-test>", source)) {
         .ok, .incomplete => return error.ExpectedLanguageError,
@@ -450,13 +459,4 @@ test "http: refused connection is an io error" {
         std.log.err("http case `{s}` failed", .{case.name});
         return err;
     };
-    // A session with no host Io has no network at all, phrased exactly as the
-    // filesystem gate is.
-    try support.expectErrors(&.{.{
-        .name = "absent host IO",
-        .source = "{'target \"http://127.0.0.1:1/x\"} http.get",
-        .kind = "io",
-        .word = "http.get",
-        .message = "network access is unavailable",
-    }});
 }

@@ -18,9 +18,9 @@ pub const registration = bindings.Registration.create(Binding);
 
 const Binding = struct {
     instance: *bindings.Identity,
-    access: ?*external.NetAccess,
+    access: *external.NetAccess,
     pub const definitions: []const bindings.Definition = &.{
-        .{ .name = "listener", .doc = "Create a TCP listener using the Session's listen grant.", .effect = "-- factory" },
+        .{ .name = "listener", .doc = "Create a TCP listener using the Session runtime.", .effect = "-- factory" },
         .{ .name = "input", .doc = net.DeclaredEndpoints.get(.input).doc, .effect = "-- selector" },
         .{ .name = "output", .doc = net.DeclaredEndpoints.get(.output).doc, .effect = "-- selector" },
         .{ .name = "accept", .doc = net.DeclaredOperations.get(.accept).doc, .effect = "-- operation" },
@@ -28,12 +28,13 @@ const Binding = struct {
         .{ .name = "peer-address", .doc = net.DeclaredOperations.get(.peer_address).doc, .effect = "-- operation" },
     };
     pub fn bind(memory: std.mem.Allocator, inherited: *const @import("machine.zig").InheritedContext) error{OutOfMemory}!*bindings.Publication {
-        const instance = if (inherited.net_access) |access| net.registeredInstance(access) else try bindings.Identity.create(memory);
-        if (inherited.net_access != null) instance.retain();
+        _ = memory;
+        const instance = net.registeredInstance(inherited.runtime().net_access);
+        instance.retain();
         errdefer instance.release();
         const owned = try instance.allocator().create(Binding);
         errdefer instance.allocator().destroy(owned);
-        owned.* = .{ .instance = instance, .access = inherited.net_access };
+        owned.* = .{ .instance = instance, .access = inherited.runtime().net_access };
         return bindings.Publication.create(Binding, owned);
     }
     pub fn allocator(self: *Binding) std.mem.Allocator {
@@ -181,7 +182,7 @@ fn transportFailure(failure: net.Failure) bytes.Failure {
 
 const Factory = struct {
     instance: *bindings.Identity,
-    access: ?*external.NetAccess,
+    access: *external.NetAccess,
     pub fn allocator(self: *Factory) std.mem.Allocator {
         return self.instance.allocator();
     }
@@ -205,7 +206,7 @@ fn failed(kind: @import("machine.zig").ErrorKind, text: []const u8, address: Val
     return .{ .failed = failure };
 }
 
-pub fn open(access: ?*external.NetAccess, context: factories.Context, input: Value) error{OutOfMemory}!factories.Start {
+pub fn open(access: *external.NetAccess, context: factories.Context, input: Value) error{OutOfMemory}!factories.Start {
     if (input != .dict) return .{ .failed = Failure.init(.type, "expected a listen configuration dict") };
     if (input.dict.length() != 2) return .{ .failed = Failure.init(.domain, "net.listen configuration needs exactly 'address and 'port") };
     const address_key = try intern.intern("address");
@@ -238,7 +239,7 @@ pub fn open(access: ?*external.NetAccess, context: factories.Context, input: Val
     }
     const parsed = net.parseLiteral(buffer[0..used], @intCast(port.int)) catch
         return failed(.domain, "net.listen 'address is not an IP literal", address, port, "invalid");
-    const granted = access orelse return failed(.domain, "listening is unavailable in this session", address, port, "unavailable");
+    const granted = access;
     const resource = net.openPrepared(granted, context.scope, parsed) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.LiveLimit => failed(.domain, "host listener limit reached", address, port, "limit"),

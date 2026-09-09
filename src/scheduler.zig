@@ -39,7 +39,7 @@ fn scopeDecision(before: core.Scope, event: core.ScopeEvent) core.ScopeDecision 
 
 /// Where the scheduler reads monotonic time. `host` samples the process's
 /// awake clock. `manual` starts at zero and moves only through
-/// `Scheduler.advanceManualClock`, so a deterministic embedding drives every
+/// `Scheduler.advanceManualClock`, so a deterministic test drives every
 /// deadline, sleep, and `clock.now` sample without a real wait anywhere.
 pub const ClockSource = enum { host, manual };
 
@@ -1675,7 +1675,7 @@ pub const WorkerScheduler = enum(usize) {
             .empty,
             request.parent_unit.environment,
             request.parent_unit.archive,
-            request.parent_unit.output,
+            request.parent_unit.inherited,
             request.parent_unit.arguments,
             &cell.cancelled,
         ) };
@@ -1686,7 +1686,6 @@ pub const WorkerScheduler = enum(usize) {
             .module => |home| home.scope(request.parent_unit.module_access),
         };
         unit.replaceRootScope(env.Scope.lazy(self.allocator(), parent_scope));
-        unit.inherited = request.parent_unit.inherited;
         unit.scheduler = self;
         unit.task_scope = &cell.scope;
         unit.is_root_unit = false;

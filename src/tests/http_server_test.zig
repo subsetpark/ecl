@@ -18,6 +18,7 @@
 //! only source strings, so the traceless session heap is the right allocator
 //! (see `test_heap.zig`). No wall-clock sleeps, no ambient network, no fixture
 //! process.
+const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const net_port = @import("../net_port.zig");
 const session = @import("../session.zig");
@@ -33,6 +34,7 @@ const Limits = net_port.Limits;
 /// One Session plus the writers it borrows. Open it in place and never move
 /// it afterwards: the Session holds pointers into this struct.
 const Runtime = struct {
+    inputs: ?runtime_fixture.Fixture = null,
     heap: test_heap.SessionHeap = .init,
     output_buffer: [256]u8 = @splat(0),
     diagnostics_buffer: [256]u8 = @splat(0),
@@ -43,17 +45,24 @@ const Runtime = struct {
     fn open(self: *Runtime, limits: Limits, config: session.Config) !void {
         self.output = std.Io.Writer.Discarding.init(&self.output_buffer);
         self.diagnostics = std.Io.Writer.Discarding.init(&self.diagnostics_buffer);
-        self.session = try session.Session.initWithHostConfig(self.heap.allocator(), &.{}, .{
+        self.inputs = try runtime_fixture.Fixture.init();
+        errdefer {
+            self.inputs.?.deinit();
+            self.inputs = null;
+        }
+        self.session = try session.Session.init(self.heap.allocator(), &.{}, self.inputs.?.inputs(.{
             .io = io,
             .output = &self.output.?.writer,
             .diagnostics = &self.diagnostics.?.writer,
             .net_limits = limits,
             .clock = .{ .monotonic = .manual },
-        }, config);
+        }), config, .evaluate);
     }
 
     fn close(self: *Runtime) void {
         self.session.deinit();
+        self.inputs.?.deinit();
+        self.inputs = null;
         test_heap.retire(&self.heap);
     }
 
