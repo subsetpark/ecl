@@ -7,6 +7,7 @@
 //! through the ordinary `Session` interface — no accessor exposes
 //! `ModuleImage`, `RegistrationHome`, `ModuleSlot`, `Environment`, or any
 //! registry internal.
+const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const formatter = @import("../formatter.zig");
 const session = @import("../session.zig");
@@ -83,7 +84,9 @@ fn renderFailure(
 }
 
 test "module values: @module constructs an anonymous value without registering a name" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
     // One value, opaque, of type 'module.
@@ -103,7 +106,9 @@ test "module values: @module constructs an anonymous value without registering a
 }
 
 test "module values: type display identity and capability boundaries are opaque" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
     // Image identity determines matching independently of content: one construction duplicated
@@ -136,7 +141,9 @@ test "module values: type display identity and capability boundaries are opaque"
 }
 
 test "module registration: one image registered twice owns independent durable state" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
     try expectOk(
@@ -159,7 +166,9 @@ test "module registration: one image registered twice owns independent durable s
 }
 
 test "module registration: reload preserves slot state and discards the image template" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
     try expectOk(&runtime, "[] (0 ((1 + dup without) within) 'bump def) 'counter @defm");
@@ -177,7 +186,9 @@ test "module registration: reload preserves slot state and discards the image te
 }
 
 test "module registration: @defm is construction followed by registration" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     var left: std.ArrayList(u8) = .empty;
     defer left.deinit(std.testing.allocator);
@@ -261,7 +272,9 @@ test "module registration: @defm is construction followed by registration" {
 test "module registration: invocation context comes from the registration" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
-    var runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &output.writer);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{ .output = &output.writer }), .default, .evaluate);
     defer runtime.deinit();
 
     try expectOk(&runtime, "[] (" ++
@@ -297,7 +310,9 @@ test "module registration: invocation context comes from the registration" {
 }
 
 test "module registration: a diagnostic spells the same word its failure reports" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
     // A module-local word has no interned qualified spelling, so a message
@@ -323,7 +338,9 @@ test "module registration: a diagnostic spells the same word its failure reports
 }
 
 test "module registration: failures leave prior registrations atomic and ownership total" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
     // A failing construction body publishes neither a value nor a name.
@@ -359,7 +376,9 @@ test "module registration: failures leave prior registrations atomic and ownersh
 }
 
 test "module values: invoke calls a public export of a nameless image" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     // An image reached as a value supports exactly one operation, because it
     // has no name for anything else to key on.
@@ -384,7 +403,9 @@ test "module values: invoke calls a public export of a nameless image" {
 }
 
 test "module values: a nameless image is stateless and traces its bare local" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     // No registration means no slot, so `within` is refused exactly as it is
     // for a construction root. State belongs to a registration.
@@ -405,7 +426,9 @@ test "module values: a nameless image is stateless and traces its bare local" {
 }
 
 test "module values: a construction can be parameterized by another module" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     // The dependency crosses the boundary as an ordinary seeded value and is
     // called through its handle, so which implementation is used is the
@@ -430,12 +453,14 @@ test "module loader: observation and dispatch require the requested registration
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
-    var runtime = try session.Session.initWithHost(std.testing.allocator, &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
         .ecl_path = "test/acceptance/modules",
-    });
+    }), .default, .evaluate);
     defer runtime.deinit();
 
     // Literal and dynamically qualified dispatch both auto-load with no prior
@@ -476,7 +501,9 @@ test "module registration: reuse reload removal and delayed calls reclaim bounde
     var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
     const allocator = counting.allocator();
     {
-        var runtime = try session.Session.initWithConfig(allocator, &.{}, .cooperative);
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
         defer runtime.deinit();
 
         // One construction, two registrations, a reload of the shared image
@@ -545,7 +572,9 @@ test "module sources: formatter and standard modules use @defm" {
     // ships. A module whose source ended in a bare `@module` would construct an
     // image the loader discards, and `import` would report that it registered
     // nothing under the requested name.
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     const exports = [_][]const u8{
         "port.await",
@@ -614,7 +643,9 @@ test "module sources: formatter and standard modules use @defm" {
 }
 
 test "module values: a pushed quotation resolves in the image it was written in" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     // `(k)` is written inside the module, so it resolves in that image's chain
     // rather than wherever the caller applies it. The session has no `k` at
@@ -624,7 +655,9 @@ test "module values: a pushed quotation resolves in the image it was written in"
 }
 
 test "module values: an escaped quotation names the image it was written in" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     // A word written in a module body names that image. A quotation that
     // escaped it goes on meaning what it meant, for as long as anything still
@@ -651,7 +684,9 @@ test "module values: an escaped quotation names the image it was written in" {
 }
 
 test "module values: local call sites do not grant an escaped quotation the caller home" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
     try expectStack(

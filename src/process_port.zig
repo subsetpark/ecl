@@ -20,32 +20,16 @@ fn blockingIo() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
 }
 
-pub const EnvironmentEntry = struct {
-    name: []const u8,
-    value: []const u8,
-};
+const startup_environment = @import("startup_environment.zig");
+pub const EnvironmentEntry = startup_environment.EnvironmentEntry;
 
-pub const ExecutablePolicy = union(enum) {
-    exact: []const []const u8,
-    unrestricted,
-};
-
-/// Borrowed host policy. `ProcessOwner.init` validates and copies every slice.
-pub const ProcessPolicy = struct {
-    executables: ExecutablePolicy,
-    initial_cwd: ?[]const u8 = null,
-    cwd_root: ?[]const u8 = null,
-    inherit_environment: bool = false,
+pub const Limits = struct {
     max_live_ports: usize = 32,
     stdin_capacity: usize = 64 * 1024,
     stdout_capacity: usize = 64 * 1024,
     stderr_capacity: usize = 64 * 1024,
     max_stdout_capture: usize = 8 * 1024 * 1024,
     max_stderr_capture: usize = 8 * 1024 * 1024,
-
-    pub fn unrestricted() ProcessPolicy {
-        return .{ .executables = .unrestricted };
-    }
 };
 
 pub const ProcessSpec = struct {
@@ -80,182 +64,48 @@ pub const WriteProgress = union(enum) {
 pub const SpawnError = error{
     OutOfMemory,
     Unsupported,
-    Denied,
     InvalidSpec,
     LiveLimit,
     ScopeClosing,
     Io,
 };
-pub const PolicyError = error{ OutOfMemory, InvalidPolicy };
-
-const OwnedPolicy = struct {
-    executables: union(enum) {
-        exact: [][]u8,
-        unrestricted,
-    },
-    cwd_root: ?[]u8,
-    initial_cwd: ?[]u8,
-    max_live_ports: usize,
-    stdin_capacity: usize,
-    stdout_capacity: usize,
-    stderr_capacity: usize,
-    max_stdout_capture: usize,
-    max_stderr_capture: usize,
-
-    fn init(allocator: std.mem.Allocator, policy: ProcessPolicy) PolicyError!OwnedPolicy {
-        if (policy.max_live_ports == 0 or policy.stdin_capacity == 0 or
-            policy.stdout_capacity == 0 or policy.stderr_capacity == 0 or
-            policy.max_stdout_capture == 0 or policy.max_stderr_capture == 0)
-            return error.InvalidPolicy;
-        if (policy.cwd_root) |root| if (!cleanAbsolutePath(root)) return error.InvalidPolicy;
-        if (policy.initial_cwd) |cwd| if (!cleanAbsolutePath(cwd)) return error.InvalidPolicy;
-        if (policy.cwd_root) |root| if (policy.initial_cwd) |cwd|
-            if (!pathWithin(root, cwd)) return error.InvalidPolicy;
-        switch (policy.executables) {
-            .exact => |paths| for (paths) |path| {
-                if (!cleanAbsolutePath(path)) return error.InvalidPolicy;
-            },
-            .unrestricted => {},
-        }
-        var result: OwnedPolicy = .{
-            .executables = .unrestricted,
-            .cwd_root = null,
-            .initial_cwd = null,
-            .max_live_ports = policy.max_live_ports,
-            .stdin_capacity = policy.stdin_capacity,
-            .stdout_capacity = policy.stdout_capacity,
-            .stderr_capacity = policy.stderr_capacity,
-            .max_stdout_capture = policy.max_stdout_capture,
-            .max_stderr_capture = policy.max_stderr_capture,
-        };
-        errdefer result.deinit(allocator);
-        result.executables = switch (policy.executables) {
-            .unrestricted => .unrestricted,
-            .exact => |paths| exact: {
-                const copies = try allocator.alloc([]u8, paths.len);
-                var initialized: usize = 0;
-                errdefer {
-                    for (copies[0..initialized]) |path| allocator.free(path);
-                    allocator.free(copies);
-                }
-                for (paths, copies) |path, *copy| {
-                    copy.* = try allocator.dupe(u8, path);
-                    initialized += 1;
-                }
-                break :exact .{ .exact = copies };
-            },
-        };
-        if (policy.cwd_root) |root| result.cwd_root = try allocator.dupe(u8, root);
-        if (policy.initial_cwd) |cwd| result.initial_cwd = try allocator.dupe(u8, cwd);
-        return result;
-    }
-
-    fn deinit(self: *OwnedPolicy, allocator: std.mem.Allocator) void {
-        switch (self.executables) {
-            .exact => |paths| {
-                for (paths) |path| allocator.free(path);
-                allocator.free(paths);
-            },
-            .unrestricted => {},
-        }
-        if (self.cwd_root) |root| allocator.free(root);
-        if (self.initial_cwd) |cwd| allocator.free(cwd);
-        self.* = undefined;
-    }
-
-    fn allowsExecutable(self: *const OwnedPolicy, executable: []const u8) bool {
-        return switch (self.executables) {
-            .unrestricted => true,
-            .exact => |paths| for (paths) |allowed| {
-                if (std.mem.eql(u8, executable, allowed)) break true;
-            } else false,
-        };
-    }
-};
-
-const OwnedEnvironment = struct {
-    entries: []EnvironmentEntry,
-
-    fn init(
-        allocator: std.mem.Allocator,
-        inherit: bool,
-        source: []const EnvironmentEntry,
-    ) PolicyError!OwnedEnvironment {
-        if (!inherit or source.len == 0) return .{ .entries = &.{} };
-        for (source) |entry| if (!std.process.Environ.Map.validateKeyForPut(entry.name) or
-            std.mem.indexOfScalar(u8, entry.value, 0) != null)
-            return error.InvalidPolicy;
-        const entries = try allocator.alloc(EnvironmentEntry, source.len);
-        var initialized: usize = 0;
-        errdefer {
-            for (entries[0..initialized]) |entry| {
-                allocator.free(entry.name);
-                allocator.free(entry.value);
-            }
-            allocator.free(entries);
-        }
-        for (source, entries) |entry, *copy| {
-            const name = try allocator.dupe(u8, entry.name);
-            errdefer allocator.free(name);
-            const entry_value = try allocator.dupe(u8, entry.value);
-            copy.* = .{ .name = name, .value = entry_value };
-            initialized += 1;
-        }
-        return .{ .entries = entries };
-    }
-
-    fn deinit(self: *OwnedEnvironment, allocator: std.mem.Allocator) void {
-        for (self.entries) |entry| {
-            allocator.free(entry.name);
-            allocator.free(entry.value);
-        }
-        if (self.entries.len != 0) allocator.free(self.entries);
-        self.* = undefined;
-    }
-};
+pub const InitError = error{ OutOfMemory, InvalidConfig };
 
 /// Session-owned authority and immutable ambient inputs. Units never receive
-/// this owner directly; Patch 4 installs a narrow opaque access facade.
+/// this owner directly; operations use a narrow opaque access facade.
 pub const ProcessOwner = struct {
     host: *const heap.HostCleanup,
     service_live: std.atomic.Value(usize) = .init(0),
     instance: *@import("module_bindings.zig").Identity,
     allocator: std.mem.Allocator,
     io: std.Io,
-    policy: OwnedPolicy,
-    environment: OwnedEnvironment,
+    initial_cwd: [:0]u8,
+    limits: Limits,
+    environment: startup_environment.View,
     executor: *controllers.Owner,
     live: std.atomic.Value(usize) = .init(0),
     next_identity: std.atomic.Value(u64) = .init(1),
 
+    /// Borrows the validated environment through deinit; copies the directory.
+    /// Failure retains both inputs and releases all provisional owned storage.
     pub fn init(
         host: *const heap.HostCleanup,
         io: std.Io,
-        policy: ProcessPolicy,
-        environment: []const EnvironmentEntry,
-    ) PolicyError!ProcessOwner {
+        initial_cwd: []const u8,
+        limits: Limits,
+        environment: startup_environment.View,
+    ) InitError!ProcessOwner {
         const allocator = host.allocator();
         // Backend jobs plus the shared wait, control, and shutdown lanes.
-        const jobs = std.math.mul(usize, policy.max_live_ports, 9) catch return error.InvalidPolicy;
-        const capacity = std.math.add(usize, jobs, 1) catch return error.InvalidPolicy;
-        var effective_policy = policy;
-        const captured_cwd = if (policy.initial_cwd == null)
-            std.process.currentPathAlloc(io, allocator) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return error.InvalidPolicy,
-            }
-        else
-            null;
-        defer if (captured_cwd) |cwd| allocator.free(cwd);
-        if (captured_cwd) |cwd| effective_policy.initial_cwd = cwd;
-        var owned_policy = try OwnedPolicy.init(allocator, effective_policy);
-        errdefer owned_policy.deinit(allocator);
-        var owned_environment = try OwnedEnvironment.init(
-            allocator,
-            policy.inherit_environment,
-            environment,
-        );
-        errdefer owned_environment.deinit(allocator);
+        const jobs = std.math.mul(usize, limits.max_live_ports, 9) catch return error.InvalidConfig;
+        const capacity = std.math.add(usize, jobs, 1) catch return error.InvalidConfig;
+        if (limits.max_live_ports == 0 or limits.stdin_capacity == 0 or
+            limits.stdout_capacity == 0 or limits.stderr_capacity == 0 or
+            limits.max_stdout_capture == 0 or limits.max_stderr_capture == 0)
+            return error.InvalidConfig;
+        if (!cleanAbsolutePath(initial_cwd)) return error.InvalidConfig;
+        const owned_cwd = try allocator.dupeZ(u8, initial_cwd);
+        errdefer allocator.free(owned_cwd);
         const instance = try @import("module_bindings.zig").Identity.create(allocator);
         errdefer instance.release();
         return .{
@@ -264,8 +114,9 @@ pub const ProcessOwner = struct {
             .allocator = allocator,
             .io = io,
             .executor = try controllers.Owner.init(allocator, capacity),
-            .policy = owned_policy,
-            .environment = owned_environment,
+            .initial_cwd = owned_cwd,
+            .limits = limits,
+            .environment = environment,
         };
     }
 
@@ -273,13 +124,12 @@ pub const ProcessOwner = struct {
         self.executor.deinit();
         self.instance.release();
         std.debug.assert(self.live.load(.acquire) == 0);
-        self.environment.deinit(self.allocator);
-        self.policy.deinit(self.allocator);
+        self.allocator.free(self.initial_cwd);
         self.* = undefined;
     }
 
     pub fn stdoutCaptureLimit(self: *const ProcessOwner) usize {
-        return self.policy.max_stdout_capture;
+        return self.limits.max_stdout_capture;
     }
 
     pub fn access(self: *ProcessOwner) *external.ProcessAccess {
@@ -287,7 +137,7 @@ pub const ProcessOwner = struct {
     }
 
     pub fn stderrCaptureLimit(self: *const ProcessOwner) usize {
-        return self.policy.max_stderr_capture;
+        return self.limits.max_stderr_capture;
     }
 
     fn resourceAllocator(self: *ProcessOwner) std.mem.Allocator {
@@ -295,7 +145,7 @@ pub const ProcessOwner = struct {
     }
     fn reserveService(self: *ProcessOwner) error{LiveLimit}!void {
         var observed = self.service_live.load(.acquire);
-        while (observed < self.policy.max_live_ports) {
+        while (observed < self.limits.max_live_ports) {
             if (self.service_live.cmpxchgWeak(observed, observed + 1, .acq_rel, .acquire)) |actual| observed = actual else return;
         }
         return error.LiveLimit;
@@ -308,7 +158,7 @@ pub const ProcessOwner = struct {
     }
     fn reserveLive(self: *ProcessOwner) bool {
         var observed = self.live.load(.acquire);
-        while (observed < self.policy.max_live_ports) {
+        while (observed < self.limits.max_live_ports) {
             if (self.live.cmpxchgWeak(observed, observed + 1, .acq_rel, .acquire)) |actual|
                 observed = actual
             else
@@ -349,11 +199,10 @@ pub const ProcessOwner = struct {
         return port;
     }
 
-    fn validateSpec(self: *const ProcessOwner, spec: ProcessSpec) SpawnError!void {
+    fn validateSpec(_: *const ProcessOwner, spec: ProcessSpec) SpawnError!void {
         if (spec.executable.len == 0 or !std.fs.path.isAbsolute(spec.executable) or
             std.mem.indexOfScalar(u8, spec.executable, 0) != null)
             return error.InvalidSpec;
-        if (!self.policy.allowsExecutable(spec.executable)) return error.Denied;
         for (spec.args) |arg| if (std.mem.indexOfScalar(u8, arg, 0) != null)
             return error.InvalidSpec;
         for (spec.environment) |entry| {
@@ -364,7 +213,6 @@ pub const ProcessOwner = struct {
         if (spec.cwd) |cwd| {
             if (!cleanAbsolutePath(cwd))
                 return error.InvalidSpec;
-            if (self.policy.cwd_root) |root| if (!pathWithin(root, cwd)) return error.Denied;
         }
     }
 };
@@ -380,13 +228,6 @@ fn ownerFromAccess(access_value: *external.ProcessAccess) *ProcessOwner {
 /// Borrow the library identity already owned by the Session's process service.
 pub fn registeredInstance(access_value: *external.ProcessAccess) *@import("module_bindings.zig").Identity {
     return ownerFromAccess(access_value).instance;
-}
-
-fn pathWithin(root: []const u8, candidate: []const u8) bool {
-    if (!std.mem.startsWith(u8, candidate, root)) return false;
-    if (candidate.len == root.len) return true;
-    if (root.len != 0 and std.fs.path.isSep(root[root.len - 1])) return true;
-    return std.fs.path.isSep(candidate[root.len]);
 }
 
 fn cleanAbsolutePath(path: []const u8) bool {
@@ -574,7 +415,7 @@ pub const ProcessCell = struct {
         @memcpy(argv[1..], spec.args);
         var child = std.process.spawn(owner.io, .{
             .argv = argv,
-            .cwd = if (spec.cwd orelse owner.policy.initial_cwd) |cwd| .{ .path = cwd } else .inherit,
+            .cwd = .{ .path = spec.cwd orelse owner.initial_cwd },
             .environ_map = &environment,
             .stdin = .pipe,
             .stdout = .pipe,
@@ -585,11 +426,11 @@ pub const ProcessCell = struct {
         const group = try owner.allocator.create(OwnedGroup);
         errdefer owner.allocator.destroy(group);
         group.* = .{ .child = child, .pgid = child.id.? };
-        const stdin = try owner.allocator.alloc(u8, owner.policy.stdin_capacity);
+        const stdin = try owner.allocator.alloc(u8, owner.limits.stdin_capacity);
         errdefer owner.allocator.free(stdin);
-        const stdout = try owner.allocator.alloc(u8, owner.policy.stdout_capacity);
+        const stdout = try owner.allocator.alloc(u8, owner.limits.stdout_capacity);
         errdefer owner.allocator.free(stdout);
-        const stderr = try owner.allocator.alloc(u8, owner.policy.stderr_capacity);
+        const stderr = try owner.allocator.alloc(u8, owner.limits.stderr_capacity);
         errdefer owner.allocator.free(stderr);
         const execution_group = try ControllerGroup.init(owner.allocator, owner.executor.access(), cell);
         cell.* = .{
@@ -1212,14 +1053,14 @@ pub fn fromValue(port: Value) ?*ProcessCell {
     return @import("port_resource.zig").Resource.project(ProcessCell, port);
 }
 
-test "process policy rejects ambient and relative executable selection before spawn" {
-    const denied = ProcessPolicy{ .executables = .{ .exact = &.{"/allowed/program"} } };
+test "process specification rejects relative executable selection before spawn" {
     var host = heap.HostOwner.init(std.testing.allocator);
     defer host.cleanup().drain();
-    var owner = try ProcessOwner.init(host.cleanup(), std.testing.io, denied, &.{});
+    var snapshot = try startup_environment.Snapshot.capture(std.testing.allocator, &.{});
+    defer snapshot.deinit();
+    var owner = try ProcessOwner.init(host.cleanup(), std.testing.io, "/", .{}, snapshot.view());
     defer owner.deinit();
     try std.testing.expectError(error.InvalidSpec, owner.validateSpec(.{ .executable = "program" }));
-    try std.testing.expectError(error.Denied, owner.validateSpec(.{ .executable = "/other/program" }));
     try owner.validateSpec(.{ .executable = "/allowed/program" });
 }
 
@@ -1232,10 +1073,11 @@ test "process: provisional rollback retains capacity until cancellation setup re
     defer std.testing.allocator.free(fixture_path);
     var host = heap.HostOwner.init(std.testing.allocator);
     defer host.cleanup().drain();
-    var owner = try ProcessOwner.init(host.cleanup(), std.testing.io, .{
-        .executables = .unrestricted,
+    var snapshot = try startup_environment.Snapshot.capture(std.testing.allocator, &.{});
+    defer snapshot.deinit();
+    var owner = try ProcessOwner.init(host.cleanup(), std.testing.io, "/", .{
         .max_live_ports = 1,
-    }, &.{});
+    }, snapshot.view());
     defer owner.deinit();
     var runtime_scheduler = try scheduler_api.Scheduler.init(host.cleanup(), .cooperative, .host);
     runtime_scheduler.attachRetirement();
@@ -1305,17 +1147,20 @@ test "dormant controller reaps a direct child before scope detachment" {
 
     var host = heap.HostOwner.init(std.testing.allocator);
     defer host.cleanup().drain();
+    var snapshot = try startup_environment.Snapshot.capture(std.testing.allocator, &.{});
+    defer snapshot.deinit();
+    var owner = try ProcessOwner.init(
+        host.cleanup(),
+        std.testing.io,
+        "/",
+        .{},
+        snapshot.view(),
+    );
+    defer owner.deinit();
     var runtime_scheduler = try scheduler_api.Scheduler.init(host.cleanup(), .cooperative, .host);
     runtime_scheduler.attachRetirement();
     var root_scope = scheduler_api.TaskScope.init(runtime_scheduler.worker());
     defer runtime_scheduler.deinit(&root_scope);
-    var owner = try ProcessOwner.init(
-        host.cleanup(),
-        std.testing.io,
-        .unrestricted(),
-        &.{},
-    );
-    defer owner.deinit();
 
     const port = try owner.spawn(
         runtime_scheduler.worker(),
@@ -1356,11 +1201,14 @@ test "scope shutdown cancels a blocked controller independently of port referenc
     var runtime_scheduler = try scheduler_api.Scheduler.init(host.cleanup(), .cooperative, .host);
     runtime_scheduler.attachRetirement();
     var root_scope = scheduler_api.TaskScope.init(runtime_scheduler.worker());
+    var snapshot = try startup_environment.Snapshot.capture(std.testing.allocator, &.{});
+    defer snapshot.deinit();
     var owner = try ProcessOwner.init(
         host.cleanup(),
         std.testing.io,
-        .unrestricted(),
-        &.{},
+        "/",
+        .{},
+        snapshot.view(),
     );
 
     const port = try owner.spawn(
@@ -1467,7 +1315,7 @@ const ServiceAdapter = struct {
     pub fn initializeBackend(self: *ServiceAdapter, cell: *Service) void {
         self.startBackend(cell) catch |err| cell.failInitialization(switch (err) {
             error.OutOfMemory => .out_of_memory,
-            error.Denied, error.InvalidSpec => Failure.init(.domain, "process specification denied or invalid"),
+            error.InvalidSpec => Failure.init(.domain, "process specification is invalid"),
             error.LiveLimit => Failure.init(.domain, "host process-port limit reached"),
             error.ScopeClosing => Failure.init(.cancelled, "process scope is closing"),
             error.Unsupported => Failure.init(.domain, "process ports are unsupported on this target"),

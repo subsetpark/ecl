@@ -3,7 +3,8 @@
 //!
 //! These cases pass only source strings to a Session, so they run on the
 //! traceless session heap (see `test_heap.zig`). The point of most of them is
-//! what the Session is *not* given: no host IO and no search path.
+//! that embedded modules resolve with an isolated runtime and no search path.
+const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const session = @import("../session.zig");
 const stdlib = @import("../stdlib.zig");
@@ -34,8 +35,8 @@ fn expectDisplay(runtime: *session.Session, source: []const u8, expected: []cons
 }
 
 test "stdlib: embedded module resolves via import with no ECL_PATH" {
-    // A bare Session has no host IO and no search path at all, so nothing
-    // here could reach a file even if one existed.
+    // No search path is configured; embedded modules resolve independently
+    // of the isolated filesystem inputs.
     const exports = [_][]const u8{
         "port.await",
         "port.core.await",
@@ -77,7 +78,9 @@ test "stdlib: embedded module resolves via import with no ECL_PATH" {
     for (stdlib.names(), exports) |name, qualified| {
         var heap: test_heap.SessionHeap = .init;
         defer test_heap.retire(&heap);
-        var runtime = try session.Session.init(heap.allocator(), &.{});
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
         defer runtime.deinit();
         try std.testing.expect(std.mem.startsWith(u8, qualified, name));
         const source = try std.fmt.allocPrint(
@@ -148,7 +151,9 @@ test "stdlib: qualified reflection auto-loads every module transport" {
     defer output.deinit();
     var heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&heap);
-    var runtime = try session.Session.initWithOutput(heap.allocator(), &.{}, &output.writer);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{ .output = &output.writer }), .default, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime, "'csv.parse which 'result.ok see");
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "csv.parse") != null);
@@ -188,22 +193,26 @@ test "stdlib: embedded resolution precedence against ECL_PATH follows the ruling
         defer imported_output.deinit();
         var imported_diagnostics = std.Io.Writer.Allocating.init(allocator);
         defer imported_diagnostics.deinit();
-        var imported = try session.Session.initWithHost(heap.allocator(), &.{}, .{
+        var runtime_inputs2 = try runtime_fixture.Fixture.init();
+        defer runtime_inputs2.deinit();
+        var imported = try session.Session.init(heap.allocator(), &.{}, runtime_inputs2.inputs(.{
             .io = std.testing.io,
             .output = &imported_output.writer,
             .diagnostics = &imported_diagnostics.writer,
             .ecl_path = search,
-        });
+        }), .default, .evaluate);
         defer imported.deinit();
         try expectDisplay(&imported, "'result ('ok) import [3] ok", "{'ok [3]}");
     }
 
-    var runtime = try session.Session.initWithHost(heap.allocator(), &.{}, .{
+    var runtime_inputs3 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs3.deinit();
+    var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs3.inputs(.{
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
         .ecl_path = search,
-    });
+    }), .default, .evaluate);
     defer runtime.deinit();
 
     // The embedded module also wins for a cold literal qualified reference.
@@ -226,11 +235,9 @@ test "stdlib: concurrent first references converge on one published module" {
     for ([_]usize{ 1, 8 }) |workers| {
         var heap: test_heap.SessionHeap = .init;
         defer test_heap.retire(&heap);
-        var runtime = try session.Session.initWithConfig(
-            heap.allocator(),
-            &.{},
-            .{ .worker_pool = workers },
-        );
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = workers }, .evaluate);
         defer runtime.deinit();
         try expectDisplay(
             &runtime,
@@ -244,7 +251,9 @@ test "stdlib: concurrent first references converge on one published module" {
 }
 
 test "stdlib: embedded module names complete before anything has loaded them" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     // The bug this pins: the registry knows only published modules, so a
     // stdlib name used to appear as a completion only after an import or a
@@ -277,7 +286,9 @@ test "stdlib: embedded module names complete before anything has loaded them" {
 test "stdlib: qualified exports complete before execution for every transport" {
     var heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&heap);
-    var runtime = try session.Session.init(heap.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
     var all = try runtime.completionCandidates("json.");

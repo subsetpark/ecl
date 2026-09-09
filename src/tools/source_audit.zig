@@ -13,15 +13,15 @@ const source_groups = [_]SourceGroup{
     // Exact, non-rehashing map construction and resumable interning keep
     // user-sized storage work outside scheduler-native stacks.
     .{ .production = true, .files = &.{
-        "value.zig",       "heap.zig", "intern.zig", "list.zig",
-        "equal.zig",       "dict.zig", "print.zig",  "poll.zig",
-        "text_buffer.zig",
+        "value.zig",       "heap.zig",                "intern.zig", "list.zig",
+        "equal.zig",       "dict.zig",                "print.zig",  "poll.zig",
+        "text_buffer.zig", "startup_environment.zig",
     }, .sources = &.{
         @embedFile("../value.zig"),       @embedFile("../heap.zig"),
         @embedFile("../intern.zig"),      @embedFile("../list.zig"),
         @embedFile("../equal.zig"),       @embedFile("../dict.zig"),
         @embedFile("../print.zig"),       @embedFile("../poll.zig"),
-        @embedFile("../text_buffer.zig"),
+        @embedFile("../text_buffer.zig"), @embedFile("../startup_environment.zig"),
     } },
     // Tokenization, parsing, binder lowering, exact materialization, and
     // provenance publication all carry nominal resumable state. The larger
@@ -41,12 +41,12 @@ const source_groups = [_]SourceGroup{
     // The native-continuation union carries park, join, cleanup, and work
     // combinations as exhaustive variants rather than five side-band fields.
     .{ .production = true, .files = &.{
-        "machine.zig", "task_join_core.zig", "resolution_core.zig", "spans.zig", "prims.zig", "test_prims.zig", "root.zig", "internal.zig",
+        "machine.zig", "task_join_core.zig", "resolution_core.zig", "spans.zig", "prims.zig", "test_prims.zig", "internal.zig",
     }, .sources = &.{
         @embedFile("../machine.zig"),         @embedFile("../task_join_core.zig"),
         @embedFile("../resolution_core.zig"), @embedFile("../spans.zig"),
         @embedFile("../prims.zig"),           @embedFile("../test_prims.zig"),
-        @embedFile("../root.zig"),            @embedFile("../internal.zig"),
+        @embedFile("../internal.zig"),
     } },
     // Snapshot-safe lookup, publication, and reflection now expose explicit
     // cursor state so scheduler suspension is represented instead of hidden
@@ -137,7 +137,7 @@ const source_groups = [_]SourceGroup{
         "scheduler.zig",         "scheduler_core.zig", "external.zig",        "process_port.zig",    "console.zig",      "task_prims.zig",    "filesystem_port.zig", "package_authority.zig", "directory_order.zig",
         "net_port.zig",          "byte_ring.zig",      "port_transfer.zig",   "port_controller.zig", "port_message.zig", "port_failure.zig",  "port_builder.zig",    "port_bytes.zig",        "port_messages.zig",
         "port_declarations.zig", "port_resource.zig",  "module_bindings.zig", "port_endpoint.zig",   "port_result.zig",  "port_exchange.zig", "port_operation.zig",  "port_service.zig",      "port_factory.zig",
-        "process_adapter.zig",   "net_adapter.zig",
+        "process_adapter.zig",   "net_adapter.zig",    "http_service.zig",
     }, .sources = &.{
         @embedFile("../scheduler.zig"),         @embedFile("../scheduler_core.zig"),
         @embedFile("../external.zig"),          @embedFile("../process_port.zig"),
@@ -153,7 +153,7 @@ const source_groups = [_]SourceGroup{
         @embedFile("../port_exchange.zig"),     @embedFile("../port_operation.zig"),
         @embedFile("../port_declarations.zig"), @embedFile("../port_service.zig"),
         @embedFile("../port_factory.zig"),      @embedFile("../process_adapter.zig"),
-        @embedFile("../net_adapter.zig"),
+        @embedFile("../net_adapter.zig"),       @embedFile("../http_service.zig"),
     } },
     // The installed author SDK, its sized ABI records, validation, loader,
     // and transactional-call boundary form one separately rooted component.
@@ -192,6 +192,7 @@ const test_files = [_][]const u8{
     "tests/fuzz_test.zig",
     "fuzz_root.zig",
     "tests/test_heap.zig",
+    "tests/runtime_fixture.zig",
     "oom_root.zig",
     "tests/stateful_module_test.zig",
     "tests/stdlib_test.zig",
@@ -243,7 +244,6 @@ const repository_verification_files = [_][]const u8{
     "test/http_fixture_server.zig",
     "test/pkg_lock_fixture.zig",
     "test/process_fixture.zig",
-    "test/public_api.zig",
 };
 pub fn main(init: std.process.Init) !void {
     var failed = false;
@@ -970,7 +970,7 @@ fn auditWorkDriverOutputs(label: []const u8, source: [:0]const u8) bool {
                 tree,
                 tree.firstToken(node),
                 tree.lastToken(node) + 1,
-                &.{&.{"pushOwned"}},
+                &.{ &.{"pushOwned"}, &.{ "std", ".", "Io", ".", "concurrent" }, &.{ "std", ".", "Io", ".", "Future" } },
             ) or failed;
             break;
         }

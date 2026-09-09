@@ -1,3 +1,4 @@
+const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const session = @import("../session.zig");
 const test_heap = @import("test_heap.zig");
@@ -25,7 +26,9 @@ fn expectCancelledAfterSetup(
 ) !void {
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     switch (try runtime.runUnit("<combinator-setup>", setup)) {
         .ok => {},
@@ -376,11 +379,13 @@ test "linrec: predicate IO effects survive checkpoint restoration" {
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
-    var runtime = try session.Session.initWithHost(runtime_heap.allocator(), &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
-    });
+    }), .default, .evaluate);
     defer runtime.deinit();
     try expectStack(
         &runtime,
@@ -427,7 +432,9 @@ test "linrec: quotations keep source scope module home and within authority" {
 test "linrec: cross-module descent preserves the enclosing effect boundary and trace" {
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     switch (try runtime.runUnit(
         "linrec-source.ecl",
@@ -486,7 +493,9 @@ test "linrec: cross-module descent preserves the enclosing effect boundary and t
 test "linrec: failures in every quotation roll back the enclosing unit" {
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try expectStack(&runtime, "77", "77");
 
@@ -512,7 +521,9 @@ test "linrec: failures in every quotation roll back the enclosing unit" {
 test "linrec: empty post retains explicit depth frames and cancellation reaches guard restore" {
     var depth_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&depth_heap);
-    var depth_runtime = try session.Session.init(depth_heap.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var depth_runtime = try session.Session.init(depth_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer depth_runtime.deinit();
     try expectStack(
         &depth_runtime,
@@ -549,7 +560,9 @@ test "nested in-place applications finish in one unwind" {
 test "empty inline iterations remain cancellable and bounded-frame" {
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     runtime.requestCancellation();
     const failure = switch (try runtime.runUnit("<combinator-cancel>", "70000 () times")) {
@@ -585,14 +598,18 @@ test "combinators: loops guards reductions and result materialization stay cance
 test "idioms: automatic hits and forced generic preserves behavior" {
     var automatic_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&automatic_heap);
-    var automatic = try session.Session.init(automatic_heap.allocator(), &.{});
+    var runtime_inputs6 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs6.deinit();
+    var automatic = try session.Session.init(automatic_heap.allocator(), &.{}, runtime_inputs6.inputs(.{}), .default, .evaluate);
     defer automatic.deinit();
     try expectStack(&automatic, "[1 2 3] (neg) each", "[-1 -2 -3]");
     try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
 
     var generic_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&generic_heap);
-    var generic = try session.Session.init(generic_heap.allocator(), &.{});
+    var runtime_inputs7 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs7.deinit();
+    var generic = try session.Session.init(generic_heap.allocator(), &.{}, runtime_inputs7.inputs(.{}), .default, .evaluate);
     defer generic.deinit();
     generic.setIdiomMode(.generic_only);
     try expectStack(&generic, "[1 2 3] (neg) each", "[-1 -2 -3]");
@@ -663,7 +680,9 @@ test "idioms: automatic hits and forced generic preserves behavior" {
 
     var fallback_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&fallback_heap);
-    var fallback = try session.Session.init(fallback_heap.allocator(), &.{});
+    var runtime_inputs8 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs8.deinit();
+    var fallback = try session.Session.init(fallback_heap.allocator(), &.{}, runtime_inputs8.inputs(.{}), .default, .evaluate);
     defer fallback.deinit();
     const failure = switch (try fallback.runUnit("<idiom-fallback>", "1 (neg) each")) {
         .err => |item| item,
@@ -674,7 +693,9 @@ test "idioms: automatic hits and forced generic preserves behavior" {
 
     var executable_form_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&executable_form_heap);
-    var executable_form = try session.Session.init(executable_form_heap.allocator(), &.{});
+    var runtime_inputs9 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs9.deinit();
+    var executable_form = try session.Session.init(executable_form_heap.allocator(), &.{}, runtime_inputs9.inputs(.{}), .default, .evaluate);
     defer executable_form.deinit();
     try expectStack(&executable_form, "[1 2 3] (dup *) each", "[1 4 9]");
     try std.testing.expectEqual(@as(u64, 0), executable_form.lastIdiomHits());
@@ -697,7 +718,9 @@ test "idioms: automatic hits and forced generic preserves behavior" {
 test "idioms: a foreign stamp keeps recognition off" {
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    var runtime_inputs10 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs10.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs10.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
     // A module shadows `+` and hands out a quotation over it. Applied under
@@ -716,7 +739,9 @@ test "idioms: a foreign stamp keeps recognition off" {
     // the gate is not simply switching recognition off for module code.
     var native_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&native_heap);
-    var native = try session.Session.init(native_heap.allocator(), &.{});
+    var runtime_inputs11 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs11.deinit();
+    var native = try session.Session.init(native_heap.allocator(), &.{}, runtime_inputs11.inputs(.{}), .default, .evaluate);
     defer native.deinit();
     try expectStack(&native, "[1 2 3] 0 (+) fold", "6");
     try std.testing.expect(native.lastIdiomHits() > 0);
@@ -725,7 +750,9 @@ test "idioms: a foreign stamp keeps recognition off" {
     // the chain it was written in independently of the surrounding shadow.
     var across_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&across_heap);
-    var across = try session.Session.init(across_heap.allocator(), &.{});
+    var runtime_inputs12 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs12.deinit();
+    var across = try session.Session.init(across_heap.allocator(), &.{}, runtime_inputs12.inputs(.{}), .default, .evaluate);
     defer across.deinit();
     try expectStack(
         &across,
@@ -739,21 +766,27 @@ test "idioms: a foreign stamp keeps recognition off" {
 test "idioms: a rebound name keeps recognition off" {
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    var runtime_inputs13 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs13.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs13.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try expectStack(&runtime, "(pop pop 42) '+ def [1 2 3] 0 (+) fold", "42");
     try std.testing.expectEqual(@as(u64, 0), runtime.lastIdiomHits());
 
     var rebound_source_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&rebound_source_heap);
-    var rebound_source = try session.Session.init(rebound_source_heap.allocator(), &.{});
+    var runtime_inputs14 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs14.deinit();
+    var rebound_source = try session.Session.init(rebound_source_heap.allocator(), &.{}, runtime_inputs14.inputs(.{}), .default, .evaluate);
     defer rebound_source.deinit();
     try expectStack(&rebound_source, "(pop 42) 'neg def [1 2] (neg) each", "[42 42]");
     try std.testing.expectEqual(@as(u64, 0), rebound_source.lastIdiomHits());
 
     var rebound_match_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&rebound_match_heap);
-    var rebound_match = try session.Session.init(rebound_match_heap.allocator(), &.{});
+    var runtime_inputs15 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs15.deinit();
+    var rebound_match = try session.Session.init(rebound_match_heap.allocator(), &.{}, runtime_inputs15.inputs(.{}), .default, .evaluate);
     defer rebound_match.deinit();
     try expectStack(
         &rebound_match,
@@ -768,7 +801,9 @@ test "idioms: a rebound name keeps recognition off" {
     // the recognizer must fall back and preserve that definition's result.
     var rebound_quoted_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&rebound_quoted_heap);
-    var rebound_quoted = try session.Session.init(rebound_quoted_heap.allocator(), &.{});
+    var runtime_inputs16 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs16.deinit();
+    var rebound_quoted = try session.Session.init(rebound_quoted_heap.allocator(), &.{}, runtime_inputs16.inputs(.{}), .default, .evaluate);
     defer rebound_quoted.deinit();
     try expectStack(
         &rebound_quoted,
@@ -779,7 +814,9 @@ test "idioms: a rebound name keeps recognition off" {
 
     var rebound_dependency_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&rebound_dependency_heap);
-    var rebound_dependency = try session.Session.init(rebound_dependency_heap.allocator(), &.{});
+    var runtime_inputs17 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs17.deinit();
+    var rebound_dependency = try session.Session.init(rebound_dependency_heap.allocator(), &.{}, runtime_inputs17.inputs(.{}), .default, .evaluate);
     defer rebound_dependency.deinit();
     // `neg` is `(-1 *)` in the prelude, so its `*` retains core resolution.
     try expectStack(&rebound_dependency, "(pop pop 42) '* def 2 neg", "-2");
@@ -787,7 +824,9 @@ test "idioms: a rebound name keeps recognition off" {
 
     var direct_sort_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&direct_sort_heap);
-    var direct_sort = try session.Session.init(direct_sort_heap.allocator(), &.{});
+    var runtime_inputs18 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs18.deinit();
+    var direct_sort = try session.Session.init(direct_sort_heap.allocator(), &.{}, runtime_inputs18.inputs(.{}), .default, .evaluate);
     defer direct_sort.deinit();
     // Likewise `sort` reaches the prelude `grade`, session or module alike.
     try expectStack(&direct_sort, "(pop [0]) 'grade def [3 1 2] sort", "[1 2 3]");
@@ -795,7 +834,9 @@ test "idioms: a rebound name keeps recognition off" {
 
     var used_sort_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&used_sort_heap);
-    var used_sort = try session.Session.init(used_sort_heap.allocator(), &.{});
+    var runtime_inputs19 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs19.deinit();
+    var used_sort = try session.Session.init(used_sort_heap.allocator(), &.{}, runtime_inputs19.inputs(.{}), .default, .evaluate);
     defer used_sort.deinit();
     try expectStack(
         &used_sort,
@@ -806,7 +847,9 @@ test "idioms: a rebound name keeps recognition off" {
 
     var between_applications_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&between_applications_heap);
-    var between_applications = try session.Session.init(between_applications_heap.allocator(), &.{});
+    var runtime_inputs20 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs20.deinit();
+    var between_applications = try session.Session.init(between_applications_heap.allocator(), &.{}, runtime_inputs20.inputs(.{}), .default, .evaluate);
     defer between_applications.deinit();
     try expectStack(
         &between_applications,

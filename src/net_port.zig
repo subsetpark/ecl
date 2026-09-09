@@ -21,18 +21,6 @@ fn blockingIo() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
 }
 
-/// One borrowed grant entry: an IP literal and a port. Port 0 admits only
-/// ephemeral requests.
-pub const Bind = struct {
-    address: []const u8,
-    port: u16,
-};
-
-pub const BindPolicy = union(enum) {
-    exact: []const Bind,
-    unrestricted,
-};
-
 pub const Limits = struct {
     max_live_listeners: usize = 16,
     kernel_backlog: u31 = 128,
@@ -41,14 +29,7 @@ pub const Limits = struct {
     send_capacity: usize = 64 * 1024,
 };
 
-/// Borrowed host policy. Every entry is parsed and copied during Session
-/// construction; the strings are never consulted again.
-pub const NetPolicy = struct {
-    binds: BindPolicy,
-    limits: Limits = .{},
-};
-
-pub const PolicyError = error{ OutOfMemory, InvalidPolicy };
+pub const InitError = error{ OutOfMemory, InvalidConfig };
 
 /// Every way `listen` can fail, already mapped from the host error set at this
 /// boundary so the module above branches on closed names.
@@ -57,7 +38,6 @@ pub const PolicyError = error{ OutOfMemory, InvalidPolicy };
 /// is rejected earlier, by `NetOwner.init`, so no owner exists there.
 pub const ListenError = error{
     OutOfMemory,
-    Denied,
     LiveLimit,
     ScopeClosing,
     Unsupported,
@@ -103,7 +83,7 @@ pub fn backendSupported() bool {
 }
 
 /// Fold an IPv4-mapped IPv6 address into its IPv4 form so `::ffff:127.0.0.1`
-/// and `127.0.0.1` are one grant.
+/// and `127.0.0.1` use the same address family.
 pub fn normalize(address: IpAddress) IpAddress {
     return switch (address) {
         .ip4 => address,
@@ -116,55 +96,6 @@ pub fn parseLiteral(text: []const u8, port: u16) error{InvalidAddress}!IpAddress
     const parsed = IpAddress.parse(text, port) catch return error.InvalidAddress;
     return normalize(parsed);
 }
-
-const OwnedPolicy = struct {
-    binds: union(enum) {
-        exact: []IpAddress,
-        unrestricted,
-    },
-    limits: Limits,
-
-    fn init(allocator: std.mem.Allocator, policy: NetPolicy) PolicyError!OwnedPolicy {
-        if (comptime !backendSupported()) return error.InvalidPolicy;
-        if (policy.limits.max_live_listeners == 0 or policy.limits.kernel_backlog == 0 or
-            policy.limits.max_live_connections == 0 or policy.limits.receive_capacity == 0 or
-            policy.limits.send_capacity == 0)
-            return error.InvalidPolicy;
-        switch (policy.binds) {
-            .unrestricted => return .{ .binds = .unrestricted, .limits = policy.limits },
-            .exact => |binds| {
-                const entries = try allocator.alloc(IpAddress, binds.len);
-                errdefer allocator.free(entries);
-                for (binds, entries, 0..) |bind, *entry, index| {
-                    entry.* = parseLiteral(bind.address, bind.port) catch return error.InvalidPolicy;
-                    for (entries[0..index]) |prior| {
-                        if (prior.eql(entry)) return error.InvalidPolicy;
-                    }
-                }
-                return .{ .binds = .{ .exact = entries }, .limits = policy.limits };
-            },
-        }
-    }
-
-    fn deinit(self: *OwnedPolicy, allocator: std.mem.Allocator) void {
-        switch (self.binds) {
-            .exact => |entries| allocator.free(entries),
-            .unrestricted => {},
-        }
-        self.* = undefined;
-    }
-
-    /// Exact match on normalized family, bytes, and port: a port-0 entry
-    /// admits only a port-0 request.
-    fn allows(self: *const OwnedPolicy, address: IpAddress) bool {
-        return switch (self.binds) {
-            .unrestricted => true,
-            .exact => |entries| for (entries) |entry| {
-                if (entry.eql(&address)) break true;
-            } else false,
-        };
-    }
-};
 
 /// Session-owned authority. Units never receive this owner; they receive the
 /// opaque `external.NetAccess`.
@@ -181,7 +112,7 @@ pub const NetOwner = struct {
     instance: *@import("module_bindings.zig").Identity,
     allocator: std.mem.Allocator,
     io: std.Io,
-    policy: OwnedPolicy,
+    limits: Limits,
     executor: *controllers.Owner,
     live: std.atomic.Value(usize) = .init(0),
     live_connections: std.atomic.Value(usize) = .init(0),
@@ -192,13 +123,15 @@ pub const NetOwner = struct {
     acceptors_mutex: std.Io.Mutex = .init,
     acceptors_first: ?*ListenerCell.Acceptor = null,
 
-    pub fn init(host: *const heap.HostCleanup, io: std.Io, policy: NetPolicy) PolicyError!NetOwner {
+    pub fn init(host: *const heap.HostCleanup, io: std.Io, limits: Limits) InitError!NetOwner {
         const allocator = host.allocator();
-        const jobs = std.math.add(usize, policy.limits.max_live_listeners, policy.limits.max_live_connections) catch return error.InvalidPolicy;
-        const service_jobs = std.math.mul(usize, jobs, 5) catch return error.InvalidPolicy;
-        const capacity = std.math.add(usize, service_jobs, 1) catch return error.InvalidPolicy;
-        var owned_policy = try OwnedPolicy.init(allocator, policy);
-        errdefer owned_policy.deinit(allocator);
+        const jobs = std.math.add(usize, limits.max_live_listeners, limits.max_live_connections) catch return error.InvalidConfig;
+        const service_jobs = std.math.mul(usize, jobs, 5) catch return error.InvalidConfig;
+        const capacity = std.math.add(usize, service_jobs, 1) catch return error.InvalidConfig;
+        if (comptime !backendSupported()) return error.InvalidConfig;
+        if (limits.max_live_listeners == 0 or limits.kernel_backlog == 0 or
+            limits.max_live_connections == 0 or limits.receive_capacity == 0 or
+            limits.send_capacity == 0) return error.InvalidConfig;
         const instance = try @import("module_bindings.zig").Identity.create(allocator);
         errdefer instance.release();
         return .{
@@ -206,7 +139,7 @@ pub const NetOwner = struct {
             .instance = instance,
             .allocator = allocator,
             .io = io,
-            .policy = owned_policy,
+            .limits = limits,
             .executor = try controllers.Owner.init(allocator, capacity),
         };
     }
@@ -217,7 +150,6 @@ pub const NetOwner = struct {
         std.debug.assert(self.live.load(.acquire) == 0);
         std.debug.assert(self.live_connections.load(.acquire) == 0);
         std.debug.assert(self.acceptors_first == null);
-        self.policy.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -251,7 +183,7 @@ pub const NetOwner = struct {
         if (!self.reserveConnection()) return error.LiveLimit;
     }
     fn reserveLive(self: *NetOwner) bool {
-        return reserveCounter(&self.live, self.policy.limits.max_live_listeners);
+        return reserveCounter(&self.live, self.limits.max_live_listeners);
     }
 
     fn releaseLive(self: *NetOwner) void {
@@ -259,7 +191,7 @@ pub const NetOwner = struct {
     }
 
     fn reserveConnection(self: *NetOwner) bool {
-        return reserveCounter(&self.live_connections, self.policy.limits.max_live_connections);
+        return reserveCounter(&self.live_connections, self.limits.max_live_connections);
     }
 
     /// Free one live-connection slot and wake every running acceptor so one
@@ -296,7 +228,7 @@ pub const NetOwner = struct {
     }
 
     fn reserveService(self: *NetOwner) error{LiveLimit}!void {
-        const limit = self.policy.limits.max_live_listeners + self.policy.limits.max_live_connections;
+        const limit = self.limits.max_live_listeners + self.limits.max_live_connections;
         var count = self.service_live.load(.acquire);
         while (count < limit) {
             count = self.service_live.cmpxchgWeak(count, count + 1, .acq_rel, .acquire) orelse return;
@@ -314,7 +246,6 @@ pub const NetOwner = struct {
         address: IpAddress,
     ) ListenError!Value {
         const normalized = normalize(address);
-        if (!self.policy.allows(normalized)) return error.Denied;
         const cell = try ListenerResource.create(self, .{normalized}, ListenerCell.initializeAllocation);
         // From here the cell owns the socket and the reservation; every
         // failure path closes through the one transition and drops the
@@ -564,7 +495,7 @@ pub const ListenerCell = struct {
     const Waits = WaitList(ListenerCell);
 
     fn initializeAllocation(cell: *ListenerCell, owner: *NetOwner, address: IpAddress) ListenError!void {
-        var server = try bindListening(address, owner.policy.limits.kernel_backlog);
+        var server = try bindListening(address, owner.limits.kernel_backlog);
         errdefer server.deinit(owner.io);
         cell.* = .{
             .allocator = owner.allocator,
@@ -935,7 +866,7 @@ fn prepareAccepted(fd: posix.fd_t) error{Io}!IpAddress {
     if (builtin.os.tag != .linux) try setCloexec(fd);
     try setBlockingMode(fd, .non_blocking);
     // A write to a peer that has gone away must surface as EPIPE for the
-    // controller to map, never as SIGPIPE delivered to an embedding host that
+    // controller to map, never as SIGPIPE delivered to the interpreter process that
     // kept the default disposition. Platforms without MSG_NOSIGNAL offer the
     // socket-level switch instead; `sendFlags` covers the rest.
     if (@hasDecl(posix.SO, "NOSIGPIPE")) {
@@ -1129,9 +1060,9 @@ pub const ConnectionCell = struct {
         errdefer accepted.deinit();
         const cell = try owner.allocator.create(ConnectionCell);
         errdefer owner.allocator.destroy(cell);
-        const receive = try owner.allocator.alloc(u8, owner.policy.limits.receive_capacity);
+        const receive = try owner.allocator.alloc(u8, owner.limits.receive_capacity);
         errdefer owner.allocator.free(receive);
-        const send = try owner.allocator.alloc(u8, owner.policy.limits.send_capacity);
+        const send = try owner.allocator.alloc(u8, owner.limits.send_capacity);
         errdefer owner.allocator.free(send);
         const wake = std.Io.Threaded.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true }) catch return error.Resources;
         errdefer {
@@ -1595,46 +1526,21 @@ fn ownerFromAccess(access_value: *external.NetAccess) *NetOwner {
     return @ptrCast(@alignCast(access_value));
 }
 
-test "net policy rejects unparseable, duplicate, and zero-limit grants" {
+test "net limits reject zero capacities" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
-    const invalid = [_]NetPolicy{
-        .{ .binds = .{ .exact = &.{.{ .address = "localhost", .port = 0 }} } },
-        .{ .binds = .{ .exact = &.{.{ .address = "fe80::1%lo0", .port = 0 }} } },
-        .{ .binds = .{ .exact = &.{
-            .{ .address = "127.0.0.1", .port = 0 },
-            .{ .address = "::ffff:127.0.0.1", .port = 0 },
-        } } },
-        .{ .binds = .unrestricted, .limits = .{ .max_live_listeners = 0 } },
-        .{ .binds = .unrestricted, .limits = .{ .kernel_backlog = 0 } },
-        .{ .binds = .unrestricted, .limits = .{ .max_live_connections = 0 } },
-        .{ .binds = .unrestricted, .limits = .{ .receive_capacity = 0 } },
-        .{ .binds = .unrestricted, .limits = .{ .send_capacity = 0 } },
+    const invalid = [_]Limits{
+        .{ .max_live_listeners = 0 },
+        .{ .kernel_backlog = 0 },
+        .{ .max_live_connections = 0 },
+        .{ .receive_capacity = 0 },
+        .{ .send_capacity = 0 },
     };
     var host = heap.HostOwner.init(allocator);
     defer host.cleanup().drain();
-    for (invalid) |policy| {
-        try std.testing.expectError(error.InvalidPolicy, NetOwner.init(host.cleanup(), io, policy));
+    for (invalid) |limits| {
+        try std.testing.expectError(error.InvalidConfig, NetOwner.init(host.cleanup(), io, limits));
     }
-}
-
-test "net policy admits exact normalized binds and treats port zero as ephemeral only" {
-    var host = heap.HostOwner.init(std.testing.allocator);
-    defer host.cleanup().drain();
-    var owner = try NetOwner.init(host.cleanup(), std.testing.io, .{ .binds = .{ .exact = &.{
-        .{ .address = "127.0.0.1", .port = 0 },
-        .{ .address = "::1", .port = 4000 },
-    } } });
-    defer owner.deinit();
-    try std.testing.expect(owner.policy.allows(try parseLiteral("127.0.0.1", 0)));
-    try std.testing.expect(owner.policy.allows(try parseLiteral("::ffff:127.0.0.1", 0)));
-    try std.testing.expect(!owner.policy.allows(try parseLiteral("127.0.0.1", 8080)));
-    try std.testing.expect(!owner.policy.allows(try parseLiteral("::1", 0)));
-    try std.testing.expect(owner.policy.allows(try parseLiteral("::1", 4000)));
-    try std.testing.expect(!owner.policy.allows(try parseLiteral("127.0.0.2", 0)));
-    var unrestricted = try NetOwner.init(host.cleanup(), std.testing.io, .{ .binds = .unrestricted });
-    defer unrestricted.deinit();
-    try std.testing.expect(unrestricted.policy.allows(try parseLiteral("10.0.0.1", 1)));
 }
 
 /// A wake target for the unit tests: one event set on wake.
@@ -1680,7 +1586,7 @@ const LoopbackHarness = struct {
         self.runtime_scheduler.attachRetirement();
         self.root_scope = scheduler_api.TaskScope.init(self.runtime_scheduler.worker());
         errdefer self.runtime_scheduler.deinit(&self.root_scope);
-        self.owner = try NetOwner.init(self.host.cleanup(), std.testing.io, .{ .binds = .unrestricted, .limits = limits });
+        self.owner = try NetOwner.init(self.host.cleanup(), std.testing.io, limits);
     }
 
     fn deinit(self: *LoopbackHarness) void {
@@ -2459,7 +2365,6 @@ const OperationAdapter = struct {
 pub fn openPrepared(access_value: *external.NetAccess, scope: *scheduler_api.TaskScope, address: IpAddress) ListenError!Value {
     const owner = ownerFromAccess(access_value);
     const normalized = normalize(address);
-    if (!owner.policy.allows(normalized)) return error.Denied;
     const cell = try ServiceStorage.create(owner, .{ Backend{ .listener_configuration = normalized }, scope.scheduler }, ServiceAdapter.initializeAllocation);
     const resource = port_resource.Resource.create(Service, .staged, owner.instance.next(), cell) catch |err| {
         cell.releasePort();

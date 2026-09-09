@@ -109,11 +109,7 @@ fn unpackTgz(evaluator: *Machine) MachineError!void {
     var bytes_value = try evaluator.popValue();
     errdefer bytes_value.deinit();
     if (bytes_value.borrow() != .list) return evaluator.typeError("an integer byte list");
-    const access = evaluator.unit.inherited.filesystem_access orelse {
-        const failure = evaluator.fail(.domain, "archive extraction is unavailable");
-        evaluator.addErrorPath(destination.borrow());
-        return failure;
-    };
+    const access = evaluator.unit.inherited.runtime().filesystem_access;
     const byte_encoder = storage.ByteVectorEncoder.init(evaluator.allocator(), bytes_value.borrow());
     const path_encoder = storage.StringEncoder.init(evaluator.allocator(), destination.borrow());
     const entries = poll.ChunkList(Entry).init(evaluator.allocator());
@@ -844,10 +840,8 @@ const UnpackDriver = struct {
         if (class == .root)
             return self.failReason(evaluator, .domain, .invalid_path, "destination must name a child entry, not the root");
         const root_value = self.source.borrow().unpack.root.borrow();
-        const root = fsport.findRoot(access, root_value.symbol) orelse
+        _ = fsport.findRoot(access, root_value.symbol) orelse
             return self.failReason(evaluator, .domain, .unknown_root, "unknown filesystem root");
-        if (!root.allows(.create))
-            return self.failReason(evaluator, .domain, .denied, "filesystem root denies create");
         self.slot = fsport.reserveOperation(access) orelse
             return self.failReason(evaluator, .overflow, .limit, "filesystem operation limit reached");
     }

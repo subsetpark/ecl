@@ -7,6 +7,7 @@
 //! `unmodule` removal typestate. Tests carrying the `concurrency: ` prefix
 //! enter `test-workers` (1 and 8) and `test-tsan` through build-file name
 //! routing; the rest run in the ordinary suite.
+const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const session = @import("../session.zig");
 const machine = @import("../machine.zig");
@@ -19,18 +20,15 @@ test "concurrency: lock-tier auto-loads converge through one loading lease" {
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
     const environ = [_]machine.Environ.Entry{.{ .name = "ECL_CACHE", .value = fixture.cache }};
-    var runtime = try session.Session.initWithHostConfig(
-        std.testing.allocator,
-        &.{},
-        .{
-            .io = std.testing.io,
-            .output = &output.writer,
-            .diagnostics = &diagnostics.writer,
-            .project_start = fixture.nested,
-            .environ = &environ,
-        },
-        .{ .worker_pool = 8 },
-    );
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .initial_cwd = fixture.nested,
+        .environ = &environ,
+    }), .{ .worker_pool = 8 }, .evaluate);
     defer runtime.deinit();
     try expectStack(
         &runtime,
@@ -138,7 +136,9 @@ fn expectStack(runtime: *session.Session, source: []const u8, expected: []const 
 test "definitions: module def and defp accept all four annotation forms" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
-    var runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &output.writer);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{ .output = &output.writer }), .default, .evaluate);
     defer runtime.deinit();
     // All four forms register, publicly and privately, and each word runs.
     try expectOk(&runtime, "[] (" ++
@@ -186,7 +186,9 @@ test "definitions: module def and defp accept all four annotation forms" {
 test "definitions: set and setp publish exact literal captures without synthesized metadata" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
-    var runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &output.writer);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{ .output = &output.writer }), .default, .evaluate);
     defer runtime.deinit();
     // The equivalence is exact in the body and in the absent metadata: both
     // spellings expose the same literal-capture body.
@@ -216,7 +218,9 @@ test "modules: a nonempty construction stack becomes the durable initial stack o
     var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
     const allocator = counting.allocator();
     {
-        var runtime = try session.Session.init(allocator, &.{});
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
         defer runtime.deinit();
         // The residual construction window is captured rather than rejected,
         // and it leaves the caller's stack: the values moved into the slot.
@@ -234,7 +238,9 @@ test "modules: a nonempty construction stack becomes the durable initial stack o
 }
 
 test "modules: *module* reports the active canonical registration" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
     // Identity belongs to the execution home independently of the image: the same image
@@ -271,7 +277,9 @@ test "modules: *module* reports the active canonical registration" {
 }
 
 test "modules: explicit seeds initialize the @defm construction stack in order" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     // The explicit seed list initializes the isolated body in list order, so the body observes
     // the list's first element deepest. Consuming them proves the order without
@@ -291,7 +299,9 @@ test "modules: explicit seeds initialize the @defm construction stack in order" 
 }
 
 test "modules: dotted names qualify dynamically and split executable words at the final dot" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime, "[] ((1) 'utils def) 'base @defm");
     try expectOk(&runtime, "[] ((41) 'f def (42) 'g def) 'base.utils @defm");
@@ -312,7 +322,9 @@ test "modules: dotted names qualify dynamically and split executable words at th
 }
 
 test "modules: core qualifier reaches shadowed core words and is never a registration" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try expectStack(&runtime, "1 core.dup", "1 1");
     try expectOk(&runtime, "(2 *) 'dup def");
@@ -341,7 +353,9 @@ test "modules: core qualifier reaches shadowed core words and is never a registr
 }
 
 test "modules: execute preserves ordinary dispatch home contracts and errors" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime, "[] ((3) 'secret defp (secret 4 +) 'f def) 'private.home @defm");
     try expectStack(&runtime, "'private.home 'f qualify execute", "7");
@@ -362,7 +376,9 @@ test "modules: execute preserves ordinary dispatch home contracts and errors" {
 }
 
 test "modules: removed identity builtin has no reservation and names validate by category" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     for ([_][]const u8{ "[] () '.bad @defm", "[] () 'bad. @defm", "[] () 'bad..path @defm" }) |source|
         try expectErrorContains(&runtime, source, &.{"'kind 'parse"});
@@ -386,11 +402,9 @@ const counter_module = "[0] (" ++
 
 test "concurrency: within applications serialize and publish exactly the successful updates" {
     for ([_]usize{ 1, 8 }) |workers| {
-        var runtime = try session.Session.initWithConfig(
-            std.testing.allocator,
-            &.{},
-            .{ .worker_pool = workers },
-        );
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = workers }, .evaluate);
         defer runtime.deinit();
         try expectStack(&runtime, counter_module, "");
         // Every application observes its predecessor's published state, so
@@ -433,11 +447,9 @@ test "concurrency: within applications serialize and publish exactly the success
 
 test "concurrency: one image registered twice arbitrates two independent slots" {
     for ([_]usize{ 1, 8 }) |workers| {
-        var runtime = try session.Session.initWithConfig(
-            std.testing.allocator,
-            &.{},
-            .{ .worker_pool = workers },
-        );
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = workers }, .evaluate);
         defer runtime.deinit();
         // One immutable image, two registrations. Each slot owns its own
         // arbiter and durable stack, so concurrent applications through the
@@ -473,7 +485,9 @@ test "concurrency: one image registered twice arbitrates two independent slots" 
 }
 
 test "concurrency: failed within applications publish neither draft nor pending outputs" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try expectStack(&runtime, counter_module, "");
     try expectStack(&runtime, "c.tick c.peek", "1");
@@ -503,7 +517,9 @@ test "concurrency: failed within applications publish neither draft nor pending 
 }
 
 test "concurrency: within rejects parking nesting and cross-module drafts as domain" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try expectStack(&runtime, counter_module, "");
     // Every prohibited shape fails before it can wait, and none of them
@@ -553,11 +569,9 @@ const reload_counter = "[0] (" ++
 
 test "concurrency: hot reload retains the durable stack and quiesces old generations" {
     for ([_]usize{ 1, 8 }) |workers| {
-        var runtime = try session.Session.initWithConfig(
-            std.testing.allocator,
-            &.{},
-            .{ .worker_pool = workers },
-        );
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = workers }, .evaluate);
         defer runtime.deinit();
         try expectStack(&runtime, reload_counter, "");
         // With no reload in flight every application publishes, so the
@@ -612,11 +626,9 @@ test "concurrency: hot reload retains the durable stack and quiesces old generat
 
 test "concurrency: superseded code may finish but cannot acquire new state authority" {
     for ([_]usize{ 1, 8 }) |workers| {
-        var runtime = try session.Session.initWithConfig(
-            std.testing.allocator,
-            &.{},
-            .{ .worker_pool = workers },
-        );
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = workers }, .evaluate);
         defer runtime.deinit();
         // `reload-me` continues in the superseded generation after replacing
         // its own code, while the replacement owns the unchanged durable state.
@@ -629,11 +641,9 @@ test "concurrency: superseded code may finish but cannot acquire new state autho
 
 test "concurrency: delayed old code cannot reach a recycled replacement slot" {
     for ([_]usize{ 1, 8 }) |workers| {
-        var runtime = try session.Session.initWithConfig(
-            std.testing.allocator,
-            &.{},
-            .{ .worker_pool = workers },
-        );
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = workers }, .evaluate);
         defer runtime.deinit();
         // Every probe resolves old code before or during removal. Its two
         // state operation is caught so the invocation stays alive across the
@@ -661,11 +671,9 @@ const removable_module = "[0] (" ++
 
 test "concurrency: unmodule closes quiesces and retires slots names and aliases" {
     for ([_]usize{ 1, 8 }) |workers| {
-        var runtime = try session.Session.initWithConfig(
-            std.testing.allocator,
-            &.{},
-            .{ .worker_pool = workers },
-        );
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = workers }, .evaluate);
         defer runtime.deinit();
         try expectStack(&runtime, removable_module, "");
         try expectOk(&runtime, "'short 'c alias");
@@ -719,11 +727,9 @@ test "concurrency: a cancelled unmodule leaves nothing stranded" {
     var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
     const allocator = counting.allocator();
     {
-        var runtime = try session.Session.initWithConfig(
-            allocator,
-            &.{},
-            .{ .worker_pool = 2 },
-        );
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 2 }, .evaluate);
         defer runtime.deinit();
         // The observer detects the published close through ordinary name
         // resolution. The removal task deliberately remains cancellable
@@ -773,7 +779,9 @@ test "concurrency: repeated construct remove cycles keep settled memory bounded"
     var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
     const allocator = counting.allocator();
     {
-        var runtime = try session.Session.init(allocator, &.{});
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
         defer runtime.deinit();
         // Both batches run as one unit each and differ by a single source
         // character, so their fixed per-unit costs are the same and the only
@@ -819,7 +827,9 @@ test "concurrency: repeated construct remove cycles keep settled memory bounded"
 }
 
 test "concurrency: applying an escaped quotation races reload and removal" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     // A quotation that escaped `racer` names the image it was written in, and
     // an application from a spawned task has no home, so nothing pins that
@@ -850,11 +860,9 @@ test "concurrency: a resolver racing an image's last release never dereferences 
     var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
     const allocator = counting.allocator();
     {
-        var runtime = try session.Session.initWithConfig(
-            allocator,
-            &.{},
-            .{ .worker_pool = 4 },
-        );
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 4 }, .evaluate);
         defer runtime.deinit();
         // The quotation escapes its module, so its words are stamped against an
         // image nothing holds. Tasks apply it while `unmodule` drives that image
@@ -884,11 +892,9 @@ test "concurrency: a resolver racing environment teardown resolves without a der
     var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
     const allocator = counting.allocator();
     {
-        var runtime = try session.Session.initWithConfig(
-            allocator,
-            &.{},
-            .{ .worker_pool = 4 },
-        );
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 4 }, .evaluate);
         defer runtime.deinit();
         // Reload rather than removal, so the *old* image's environment tears
         // down through the release domain while tasks are still applying a
@@ -912,11 +918,9 @@ test "concurrency: a resolver racing environment teardown resolves without a der
 }
 
 test "concurrency: within through a foreign word is domain and writes no slot" {
-    var runtime = try session.Session.initWithConfig(
-        std.testing.allocator,
-        &.{},
-        .{ .worker_pool = 2 },
-    );
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 2 }, .evaluate);
     defer runtime.deinit();
 
     // A module hands out a quotation over a private that uses `within`. Reached

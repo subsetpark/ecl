@@ -3,6 +3,7 @@
 //! Validation and refused-connection cases run everywhere. Server-backed cases
 //! spawn the loopback fixture and skip — never silently pass — if the build did
 //! not provide it.
+const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const http_fixture = @import("http_fixture_options");
 const pkg_fixture = @import("pkg_fixture_options");
@@ -102,12 +103,14 @@ fn expectTlsStack(
     var diagnostics = std.Io.Writer.Allocating.init(allocator);
     defer diagnostics.deinit();
     const borrowed_path = try allocator.dupe(u8, pkg_fixture.ca_file);
-    var runtime = try session.Session.initWithHost(heap.allocator(), &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
         .tls_trust = .{ .ca_file = borrowed_path, .now = now },
-    });
+    }), .default, .evaluate);
     allocator.free(borrowed_path);
     defer runtime.deinit();
     switch (try runtime.runUnit("<http-tls-test>", source)) {
@@ -133,12 +136,14 @@ fn expectTlsIoError(source: []const u8, now: std.Io.Timestamp) !void {
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(allocator);
     defer diagnostics.deinit();
-    var runtime = try session.Session.initWithHost(heap.allocator(), &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
         .tls_trust = .{ .ca_file = pkg_fixture.ca_file, .now = now },
-    });
+    }), .default, .evaluate);
     defer runtime.deinit();
     const failure = switch (try runtime.runUnit("<http-tls-test>", source)) {
         .ok, .incomplete => return error.ExpectedLanguageError,
@@ -191,11 +196,13 @@ fn expectStack(port: u16, comptime template: []const u8, expected: []const u8) !
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(allocator);
     defer diagnostics.deinit();
-    var runtime = try session.Session.initWithHost(heap.allocator(), &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
-    });
+    }), .default, .evaluate);
     defer runtime.deinit();
     switch (try runtime.runUnit("<http-test>", source)) {
         .ok => {},
@@ -315,11 +322,13 @@ fn expectHostError(source: []const u8, expected: support.ErrorCase) !void {
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(allocator);
     defer diagnostics.deinit();
-    var runtime = try session.Session.initWithHost(heap.allocator(), &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
-    });
+    }), .default, .evaluate);
     defer runtime.deinit();
     const failure = switch (try runtime.runUnit("<http-test>", source)) {
         .ok, .incomplete => return error.ExpectedLanguageError,
@@ -332,8 +341,7 @@ fn expectHostError(source: []const u8, expected: support.ErrorCase) !void {
 test "http: refused connection is an io error" {
     for ([_]support.ErrorCase{
         .{
-            // Port 1 is privileged and unbound, so this fails fast rather
-            // than waiting on a deadline the v1 client does not have.
+            // Port 1 is privileged and unbound, so refusal fails immediately.
             .name = "a refused connection",
             .source = "{'target \"http://127.0.0.1:1/nope\"} http.get",
             .kind = "io",
@@ -450,13 +458,343 @@ test "http: refused connection is an io error" {
         std.log.err("http case `{s}` failed", .{case.name});
         return err;
     };
-    // A session with no host Io has no network at all, phrased exactly as the
-    // filesystem gate is.
-    try support.expectErrors(&.{.{
-        .name = "absent host IO",
-        .source = "{'target \"http://127.0.0.1:1/x\"} http.get",
-        .kind = "io",
-        .word = "http.get",
-        .message = "network access is unavailable",
-    }});
+}
+
+fn runHttp(runtime: *session.Session, source: []const u8, expected: []const u8) !void {
+    switch (try runtime.runUnit("<http-bounds>", source)) {
+        .ok => {},
+        .incomplete => return error.UnexpectedIncomplete,
+        .err => |failure| {
+            defer runtime.release(failure);
+            var rendered = try runtime.renderValue(failure);
+            defer rendered.deinit();
+            std.log.err("HTTP test failed: {s}", .{rendered.bytes()});
+            return error.UnexpectedLanguageError;
+        },
+    }
+    var display = try runtime.stackDisplay();
+    defer display.deinit();
+    try std.testing.expectEqualStrings(expected, display.bytes());
+    switch (try runtime.runUnit("<clear>", "stack len (pop) times")) {
+        .ok => {},
+        .incomplete => return error.UnexpectedIncomplete,
+        .err => |failure| {
+            runtime.release(failure);
+            return error.UnexpectedLanguageError;
+        },
+    }
+}
+
+test "http: transfer limits reject complete and chunked bodies without partial responses" {
+    var server = Fixture.start(39550) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+    defer server.stop();
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, inputs.inputs(.{
+        .http_limits = .{ .decoded_bytes = 5, .encoded_bytes = 5, .live_requests = 1 },
+    }), .cooperative, .evaluate);
+    defer runtime.deinit();
+    const success = try std.fmt.allocPrint(allocator, "{{'target \"http://127.0.0.1:{d}/size/5\"}} http.get 'body at", .{server.port});
+    defer allocator.free(success);
+    const failure = try std.fmt.allocPrint(allocator, "[] ({{'target \"http://127.0.0.1:{d}/size/6\"}} http.get) @attempt 'err at 'kind at", .{server.port});
+    defer allocator.free(failure);
+    const chunked = try std.fmt.allocPrint(allocator, "{{'target \"http://127.0.0.1:{d}/chunked\"}} http.get 'body at", .{server.port});
+    defer allocator.free(chunked);
+    for (0..3) |_| {
+        try runHttp(&runtime, success, "\"aaaaa\"");
+        try runHttp(&runtime, failure, "'overflow");
+        try runHttp(&runtime, chunked, "\"hello\"");
+    }
+}
+
+test "http: preparation limits count UTF-8 bytes and repeated header occurrences" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, inputs.inputs(.{
+        .http_limits = .{ .target_bytes = 3, .outbound_bytes = 2, .header_fields = 2 },
+    }), .cooperative, .evaluate);
+    defer runtime.deinit();
+    // Invalid URLs at the byte limit reach transport and fail as io; a fourth
+    // UTF-8 byte is rejected by the counting pass before an exchange starts.
+    try runHttp(&runtime, "[] ({'target \"éa\"} http.get) @attempt 'err at 'kind at", "'io");
+    try runHttp(&runtime, "[] ({'target \"éé\"} http.get) @attempt 'err at 'kind at", "'overflow");
+    try runHttp(&runtime, "[] ({'target \"x\" 'body [1 2]} http.post) @attempt 'err at 'kind at", "'io");
+    try runHttp(&runtime, "[] ({'target \"x\" 'body [1 2 3]} http.post) @attempt 'err at 'kind at", "'overflow");
+    try runHttp(&runtime, "[] ({'target \"x\" 'headers {\"a\" (\"1\" \"2\")}} http.get) @attempt 'err at 'kind at", "'io");
+    try runHttp(&runtime, "[] ({'target \"x\" 'headers {\"a\" (\"1\" \"2\" \"3\")}} http.get) @attempt 'err at 'kind at", "'overflow");
+}
+
+test "http: redirect bodies share the cumulative transfer budget" {
+    var server = Fixture.start(39560) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+    defer server.stop();
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, inputs.inputs(.{
+        .http_limits = .{ .encoded_bytes = 15, .decoded_bytes = 15 },
+    }), .cooperative, .evaluate);
+    defer runtime.deinit();
+    const source = try std.fmt.allocPrint(allocator, "[] ({{'target \"http://127.0.0.1:{d}/redirect-body\"}} http.get) @attempt 'err at 'kind at", .{server.port});
+    defer allocator.free(source);
+    try runHttp(&runtime, source, "'overflow");
+}
+
+const HttpRunner = struct {
+    runtime: *session.Session,
+    source: []const u8,
+    expected: []const u8,
+    failure: ?anyerror = null,
+    fn run(self: *@This()) void {
+        runHttp(self.runtime, self.source, self.expected) catch |err| {
+            self.failure = err;
+        };
+    }
+};
+
+test "http: manual deadlines and task cancellation interrupt blocked response sockets" {
+    for ([_]session.Config{ .cooperative, .{ .worker_pool = 1 } }) |config| {
+        for ([_][]const u8{ "/stall-head", "/stall-body" }) |path| {
+            inline for ([_]bool{ false, true }) |cancel| {
+                var server = Fixture.start(39570) catch |err| switch (err) {
+                    error.FileNotFound => return error.SkipZigTest,
+                    else => return err,
+                };
+                defer server.stop();
+                var inputs = try runtime_fixture.Fixture.init();
+                defer inputs.deinit();
+                var runtime = try session.Session.init(allocator, &.{}, inputs.inputs(.{
+                    .clock = .{ .monotonic = .manual },
+                    .http_limits = .{ .live_requests = 1 },
+                }), config, .evaluate);
+                defer runtime.deinit();
+                const template = if (cancel)
+                    "[] ({{'target \"http://127.0.0.1:{d}{s}\"}} http.get) @spawn 'request set " ++
+                        "1 clock.sleep request dup task.cancel task.await 'err at 'kind at"
+                else
+                    "[] ({{'target \"http://127.0.0.1:{d}{s}\"}} http.get) @attempt 'err at 'kind at";
+                const source = try std.fmt.allocPrint(allocator, template, .{ server.port, path });
+                defer allocator.free(source);
+                var runner: HttpRunner = .{ .runtime = &runtime, .source = source, .expected = if (cancel) "'cancelled" else "'timeout" };
+                const thread = try std.Thread.spawn(.{}, HttpRunner.run, .{&runner});
+                // A wire-stage handshake proves cancellation reaches a real
+                // blocked socket, rather than cancelling before startup.
+                var buffer: [64]u8 = undefined;
+                var reader = server.child.stdout.?.reader(std.testing.io, &buffer);
+                const stage = try reader.interface.takeDelimiterExclusive('\n');
+                try std.testing.expectEqualStrings("stage", stage);
+                waitForHttpTimers(&runtime, if (cancel) 2 else 1);
+                try runtime.advanceManualClock(if (cancel) 1 else 30_000);
+                thread.join();
+                if (runner.failure) |failure| return failure;
+                const recovery = try std.fmt.allocPrint(allocator, "{{'target \"http://127.0.0.1:{d}/hello\"}} http.get 'status at", .{server.port});
+                defer allocator.free(recovery);
+                try runHttp(&runtime, recovery, "200");
+            }
+        }
+    }
+}
+
+test "http: compressed and repeated response header limits are enforced before normalization" {
+    var server = Fixture.start(39590) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+    defer server.stop();
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    const Case = struct { path: []const u8, limits: @import("../http_service.zig").Limits, expected: []const u8 };
+    const cases = [_]Case{
+        .{ .path = "/gzip", .limits = .{ .encoded_bytes = 23, .decoded_bytes = 5 }, .expected = "'ok" },
+        .{ .path = "/gzip", .limits = .{ .encoded_bytes = 22 }, .expected = "'overflow" },
+        .{ .path = "/gzip", .limits = .{ .decoded_bytes = 4 }, .expected = "'overflow" },
+        .{ .path = "/headers/2", .limits = .{ .header_fields = 2, .header_bytes = 12 }, .expected = "'ok" },
+        .{ .path = "/headers/3", .limits = .{ .header_fields = 2 }, .expected = "'overflow" },
+        .{ .path = "/headers/2", .limits = .{ .header_bytes = 11 }, .expected = "'overflow" },
+        .{ .path = "/gzip", .limits = .{ .scratch_bytes = 1 }, .expected = "'overflow" },
+    };
+    for (cases) |case| {
+        var runtime = try session.Session.init(allocator, &.{}, inputs.inputs(.{ .http_limits = case.limits }), .cooperative, .evaluate);
+        defer runtime.deinit();
+        const source = try std.fmt.allocPrint(allocator, "[] ({{'target \"http://127.0.0.1:{d}{s}\"}} http.get) @attempt dup 'err dict.has? ( 'err at 'kind at ) (pop 'ok) if", .{ server.port, case.path });
+        defer allocator.free(source);
+        try runHttp(&runtime, source, case.expected);
+    }
+}
+
+test "http: Session shutdown joins a request blocked in response headers" {
+    var server = Fixture.start(39600) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+    defer server.stop();
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
+    defer runtime.deinit();
+    const source = try std.fmt.allocPrint(allocator, "[] ({{'target \"http://127.0.0.1:{d}/stall-head\"}} http.get) @spawn pop", .{server.port});
+    defer allocator.free(source);
+    try runHttp(&runtime, source, "");
+    var buffer: [64]u8 = undefined;
+    var reader = server.child.stdout.?.reader(std.testing.io, &buffer);
+    try std.testing.expectEqualStrings("stage", try reader.interface.takeDelimiterExclusive('\n'));
+    // The Session's deferred destructor must cancel the socket and join its
+    // scope-owned controller before the fixture or allocator is destroyed.
+}
+
+test "http: cancellation interrupts a completely full response transport" {
+    const service = @import("../http_service.zig");
+    const heap_api = @import("../heap.zig");
+    const sched = @import("../scheduler.zig");
+    const external = @import("../external.zig");
+    const Ready = struct {
+        event: std.Io.Event = .unset,
+        pub fn retainExternalWake(_: *@This()) void {}
+        pub fn releaseExternalWake(_: *@This()) void {}
+        pub fn wakeExternal(self: *@This(), _: external.Wake) void {
+            self.event.set(std.testing.io);
+        }
+    };
+    var server = Fixture.start(39610) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+    defer server.stop();
+    var cleanup = heap_api.testing.Cleanup.init(allocator);
+    defer cleanup.deinit();
+    const owner = try service.Owner.init(cleanup.capability(), std.testing.io, null, .{ .transport_bytes = 1 });
+    defer owner.deinit();
+    var scheduler = try sched.Scheduler.init(cleanup.capability(), .cooperative, .manual);
+    var scope = sched.TaskScope.init(scheduler.worker());
+    defer scheduler.deinit(&scope);
+    const request = try owner.access().admit();
+    defer while (!request.retire()) {
+        std.Thread.yield() catch {};
+    };
+    var source = request.pipe().readSource();
+    defer source.deinit();
+    var ready: Ready = .{};
+    var registration = switch (try source.register(external.wakeTarget(Ready, &ready))) {
+        .ready => return error.UnexpectedReady,
+        .registered => |registration| registration,
+    };
+    defer registration.cancel();
+    const url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/size/131072", .{server.port});
+    try request.start(.{ .url = url }, .GET, false, &scope);
+    ready.event.waitUncancelable(std.testing.io);
+    // One accepted byte fills this pipe. The producer cannot finish until the
+    // evaluator reads or cancellation interrupts its transport wait.
+    request.cancel();
+}
+
+test "http: a 303 redirect changes a bodyless method override to GET" {
+    var server = Fixture.start(39620) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+    defer server.stop();
+    try expectStack(server.port, "{{'target \"http://127.0.0.1:{d}/redirect-see-other\" 'method \"DELETE\"}} http.get 'body at", "\"GET|0||\"");
+}
+
+/// A real cancellable I/O executor with controlled network stage boundaries.
+/// The synthetic socket is used only by these overridden network callbacks.
+const StageIo = struct {
+    const Stage = enum { resolution, connection, tls, upload };
+    threaded: std.Io.Threaded,
+    table: std.Io.VTable,
+    reached: std.Io.Event = .unset,
+    blocked: std.Io.Event = .unset,
+    stage: Stage,
+    fn init(stage: Stage) StageIo {
+        var threaded = std.Io.Threaded.init(allocator, .{});
+        var table = threaded.io().vtable.*;
+        table.netLookup = lookup;
+        table.netConnectIp = connect;
+        table.netRead = read;
+        table.netWrite = write;
+        table.netClose = close;
+        return .{ .threaded = threaded, .table = table, .stage = stage };
+    }
+    fn io(self: *StageIo) std.Io {
+        return .{ .userdata = self.threaded.io().userdata, .vtable = &self.table };
+    }
+    fn from(raw: ?*anyopaque) *StageIo {
+        const threaded: *std.Io.Threaded = @ptrCast(@alignCast(raw));
+        return @fieldParentPtr("threaded", threaded);
+    }
+    fn block(self: *StageIo) error{Canceled}!void {
+        self.reached.set(std.testing.io);
+        try self.blocked.wait(self.threaded.io());
+    }
+    fn lookup(raw: ?*anyopaque, _: std.Io.net.HostName, queue: *std.Io.Queue(std.Io.net.HostName.LookupResult), _: std.Io.net.HostName.LookupOptions) std.Io.net.HostName.LookupError!void {
+        const self = from(raw);
+        defer queue.close(self.threaded.io());
+        try self.block();
+    }
+    fn connect(raw: ?*anyopaque, address: *const std.Io.net.IpAddress, _: std.Io.net.IpAddress.ConnectOptions) std.Io.net.IpAddress.ConnectError!std.Io.net.Socket {
+        const self = from(raw);
+        if (self.stage == .connection) try self.block();
+        return .{ .handle = 0, .address = address.* };
+    }
+    fn read(raw: ?*anyopaque, _: std.Io.net.Socket.Handle, _: [][]u8) std.Io.net.Stream.Reader.Error!usize {
+        const self = from(raw);
+        if (self.stage != .tls) return error.Unexpected;
+        try self.block();
+        return 0;
+    }
+    fn write(raw: ?*anyopaque, _: std.Io.net.Socket.Handle, header: []const u8, buffers: []const []const u8, splat: usize) std.Io.net.Stream.Writer.Error!usize {
+        const self = from(raw);
+        var count = header.len;
+        var has_payload = std.mem.indexOf(u8, header, "PING") != null;
+        for (buffers, 0..) |buffer, index| {
+            count += buffer.len * (if (index + 1 == buffers.len) splat else 1);
+            has_payload = has_payload or std.mem.indexOf(u8, buffer, "PING") != null;
+        }
+        if (self.stage == .upload and has_payload) try self.block();
+        return count;
+    }
+    fn close(_: ?*anyopaque, _: []const std.Io.net.Socket.Handle) void {}
+};
+
+test "http: cancellation reaches resolution connection TLS and upload I/O tasks" {
+    for ([_]StageIo.Stage{ .resolution, .connection, .tls, .upload }) |stage| {
+        var controlled = StageIo.init(stage);
+        defer controlled.threaded.deinit();
+        var inputs = try runtime_fixture.Fixture.init();
+        defer inputs.deinit();
+        var runtime = try session.Session.init(allocator, &.{}, inputs.inputs(.{
+            .io = controlled.io(),
+            .clock = .{ .monotonic = .manual },
+            .tls_trust = .{ .ca_file = pkg_fixture.ca_file, .now = valid_cert_time },
+        }), .{ .worker_pool = 1 }, .evaluate);
+        defer runtime.deinit();
+        const target = switch (stage) {
+            .resolution => "http://controlled.invalid/",
+            .tls => "https://127.0.0.1/",
+            .connection, .upload => "http://127.0.0.1/",
+        };
+        const body = if (stage == .upload) "'method \"POST\" 'body [80 73 78 71]" else "";
+        const source = try std.fmt.allocPrint(allocator, "[] ({{'target \"{s}\" {s}}} http.get) @spawn 'request set " ++
+            "1 clock.sleep request dup task.cancel task.await 'err at 'kind at", .{ target, body });
+        defer allocator.free(source);
+        var runner: HttpRunner = .{ .runtime = &runtime, .source = source, .expected = "'cancelled" };
+        const thread = try std.Thread.spawn(.{}, HttpRunner.run, .{&runner});
+        controlled.reached.waitUncancelable(std.testing.io);
+        waitForHttpTimers(&runtime, 2);
+        try runtime.advanceManualClock(1);
+        thread.join();
+        if (runner.failure) |failure| return failure;
+    }
+}
+
+fn waitForHttpTimers(runtime: *session.Session, count: usize) void {
+    for (0..1_000_000) |_| {
+        if (runtime.schedulerTimerEntryCount() == count) return;
+        std.Thread.yield() catch @panic("HTTP timer setup yield failed");
+    }
+    @panic("HTTP wait timers did not register");
 }

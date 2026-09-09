@@ -106,25 +106,10 @@ const EprintDriver = struct {
     }
 };
 
-/// The Session console is preferred because it serializes diagnostics
-/// against the advisory writes made from other threads. A console without a
-/// diagnostics writer reports every write as failed, which for this word is
-/// "nothing to write to", not a failure; only a writer that exists and
-/// refuses the bytes is `'io`.
+/// Diagnostics share the Session console's serialization with advisory output.
 fn writeDiagnosticsLine(evaluator: *Machine, bytes: []const u8) MachineError!void {
-    const inherited = evaluator.unit.inherited;
-    if (inherited.console) |console| {
-        if (console.diagnostics == null) return;
-        return console.writeDiagnostics(bytes, true) catch
-            evaluator.fail(.io, "diagnostics stream is unavailable");
-    }
-    const diagnostics = inherited.diagnostics orelse return;
-    diagnostics.writeAll(bytes) catch
-        return evaluator.fail(.io, "diagnostics stream is unavailable");
-    diagnostics.writeByte('\n') catch
-        return evaluator.fail(.io, "diagnostics stream is unavailable");
-    diagnostics.flush() catch
-        return evaluator.fail(.io, "diagnostics stream is unavailable");
+    evaluator.unit.inherited.runtime().console.writeDiagnostics(bytes, true) catch
+        return evaluator.fail(.io, "diagnostics stream write failed");
 }
 
 fn inspect(evaluator: *Machine) MachineError!void {

@@ -1,11 +1,12 @@
-//! Public behavior of the pure `path` module and the capability-gated `fs`
+//! Public behavior of the pure `path` module and the `fs`
 //! module.
 //!
 //! Every filesystem case runs against a fresh temporary directory named as a
-//! Session root through `Host.filesystem_policy`; effects are observed through
+//! Session root through `Host.filesystem`; effects are observed through
 //! the public runtime and the real directory, never through implementation
 //! state. Sessions run only source text, so the traceless session heap is the
 //! right allocator (see `test_heap.zig`).
+const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const filesystem_port = @import("../filesystem_port.zig");
 const session = @import("../session.zig");
@@ -15,14 +16,13 @@ const test_heap = @import("test_heap.zig");
 const allocator = std.testing.allocator;
 const io = std.testing.io;
 
-const Policy = filesystem_port.FilesystemPolicy;
-const Permissions = filesystem_port.Permissions;
+const Config = filesystem_port.Config;
 
 /// A temporary directory plus the absolute path that names it as a root.
 const Scratch = struct {
     directory: std.testing.TmpDir,
     path: [:0]u8,
-    /// Backing storage for `allPolicy`, so the returned policy borrows this
+    /// Backing storage for `filesystem`, so the returned configuration borrows this
     /// value rather than a temporary.
     root_storage: [1]filesystem_port.Root,
 
@@ -35,7 +35,7 @@ const Scratch = struct {
         return .{
             .directory = directory,
             .path = path,
-            .root_storage = .{.{ .name = "root", .absolute_path = path, .permissions = .all }},
+            .root_storage = .{.{ .name = "root", .absolute_path = path }},
         };
     }
 
@@ -80,7 +80,7 @@ const Scratch = struct {
         }
     }
 
-    fn allPolicy(self: *const Scratch) Policy {
+    fn filesystem(self: *const Scratch) Config {
         return .{ .roots = &self.root_storage };
     }
 };
@@ -90,19 +90,21 @@ const Outcome = union(enum) {
     failure: support.ErrorCase,
 };
 
-fn runCase(policy: ?Policy, config: session.Config, program: []const u8, outcome: Outcome) !void {
+fn runCase(options: Config, config: session.Config, program: []const u8, outcome: Outcome) !void {
     var heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&heap);
     var output_buffer: [256]u8 = undefined;
     var output = std.Io.Writer.Discarding.init(&output_buffer);
     var diagnostics_buffer: [256]u8 = undefined;
     var diagnostics = std.Io.Writer.Discarding.init(&diagnostics_buffer);
-    var runtime = try session.Session.initWithHostConfig(heap.allocator(), &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{
         .io = io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
-        .filesystem_policy = policy,
-    }, config);
+        .filesystem = options,
+    }), config, .evaluate);
     defer runtime.deinit();
     switch (try runtime.runUnit("<fs-test>", program)) {
         .ok => switch (outcome) {
@@ -132,18 +134,18 @@ fn runCase(policy: ?Policy, config: session.Config, program: []const u8, outcome
     }
 }
 
-fn expectStack(policy: ?Policy, program: []const u8, expected: []const u8) !void {
-    return runCase(policy, .cooperative, program, .{ .stack = expected });
+fn expectStack(options: Config, program: []const u8, expected: []const u8) !void {
+    return runCase(options, .cooperative, program, .{ .stack = expected });
 }
 
-fn expectFailure(policy: ?Policy, program: []const u8, expected: support.ErrorCase) !void {
-    return runCase(policy, .cooperative, program, .{ .failure = expected });
+fn expectFailure(options: Config, program: []const u8, expected: support.ErrorCase) !void {
+    return runCase(options, .cooperative, program, .{ .failure = expected });
 }
 
 /// Runs `program` and requires the structured failure every `fs` word raises:
 /// kind, operation, root, and reason.
 fn expectFsFailure(
-    policy: ?Policy,
+    options: Config,
     program: []const u8,
     kind: []const u8,
     word: []const u8,
@@ -156,7 +158,7 @@ fn expectFsFailure(
         .{ .name = root_field, .expected = .{ .symbol = "root" } },
         .{ .name = "reason", .expected = .{ .symbol = reason } },
     };
-    return runCase(policy, .cooperative, program, .{ .failure = .{
+    return runCase(options, .cooperative, program, .{ .failure = .{
         .name = program,
         .source = program,
         .kind = kind,
@@ -246,7 +248,7 @@ test "path: words reject non-string arguments" {
 test "path: valid-relative? agrees with fs path acceptance" {
     var scratch = try Scratch.init();
     defer scratch.deinit();
-    const policy = scratch.allPolicy();
+    const options = scratch.filesystem();
     // A parent must exist for `exists?` to report a definite absence; a
     // missing intermediate is a traversal failure, not `0`.
     try scratch.directory.dir.createDir(io, "a", .default_dir);
@@ -256,58 +258,27 @@ test "path: valid-relative? agrees with fs path acceptance" {
         const program = try std.fmt.allocPrint(allocator, "\"{s}\" path.valid-relative? 'root \"{s}\" fs.exists?", .{ path, path });
         defer allocator.free(program);
         const expected = if (std.mem.eql(u8, path, ".") or std.mem.eql(u8, path, "a")) "1 1" else "1 0";
-        try expectStack(policy, program, expected);
+        try expectStack(options, program, expected);
     }
     for (rejected) |path| {
         const predicate = try std.fmt.allocPrint(allocator, "\"{s}\" path.valid-relative?", .{path});
         defer allocator.free(predicate);
-        try expectStack(policy, predicate, "0");
+        try expectStack(options, predicate, "0");
         const program = try std.fmt.allocPrint(allocator, "'root \"{s}\" fs.exists?", .{path});
         defer allocator.free(program);
-        try expectFsFailure(policy, program, "domain", "fs.exists?", "invalid-path");
+        try expectFsFailure(options, program, "domain", "fs.exists?", "invalid-path");
     }
 }
 
 // -- fs authority -------------------------------------------------------------
 
-test "fs: a Session without a filesystem policy denies every word" {
-    const programs = [_]struct { source: []const u8, word: []const u8 }{
-        .{ .source = "'root \"a\" fs.read-text", .word = "fs.read-text" },
-        .{ .source = "'root \"a\" fs.read-bytes", .word = "fs.read-bytes" },
-        .{ .source = "\"x\" 'root \"a\" fs.create-text", .word = "fs.create-text" },
-        .{ .source = "[1] 'root \"a\" fs.create-bytes", .word = "fs.create-bytes" },
-        .{ .source = "\"x\" 'root \"a\" fs.replace-text", .word = "fs.replace-text" },
-        .{ .source = "[1] 'root \"a\" fs.replace-bytes", .word = "fs.replace-bytes" },
-        .{ .source = "'root \"a\" fs.stat", .word = "fs.stat" },
-        .{ .source = "'root \"a\" fs.lstat", .word = "fs.lstat" },
-        .{ .source = "'root \"a\" fs.exists?", .word = "fs.exists?" },
-        .{ .source = "'root \".\" fs.list", .word = "fs.list" },
-        .{ .source = "'root \"a\" fs.mkdir", .word = "fs.mkdir" },
-        .{ .source = "'root \"a\" 'root \"b\" fs.copy", .word = "fs.copy" },
-        .{ .source = "'root \"a\" \"b\" fs.rename", .word = "fs.rename" },
-        .{ .source = "'root \"a\" fs.remove-file", .word = "fs.remove-file" },
-        .{ .source = "'root \"a\" fs.remove-dir", .word = "fs.remove-dir" },
-    };
-    for (programs) |case| {
-        try expectFailure(null, case.source, .{
-            .name = case.word,
-            .source = case.source,
-            .kind = "domain",
-            .word = case.word,
-            .data = &.{.{ .name = "reason", .expected = .{ .symbol = "unavailable" } }},
-        });
-    }
-    // The same denial through the bare library constructor.
-    try support.expectError(.{ .name = "bare session", .source = "'root \"a\" fs.exists?", .kind = "domain", .word = "fs.exists?" });
-}
-
-test "fs: unknown roots and each permission are enforced before the host is reached" {
+test "fs: unknown roots and malformed operands fail before filesystem work" {
     var scratch = try Scratch.init();
     defer scratch.deinit();
     try scratch.write("f.txt", "data");
     try scratch.write("g.txt", "data");
     try scratch.directory.dir.createDir(io, "d", .default_dir);
-    const all = scratch.allPolicy();
+    const all = scratch.filesystem();
     try expectFailure(all, "'other \"f.txt\" fs.read-text", .{
         .name = "unknown root",
         .source = "'other \"f.txt\" fs.read-text",
@@ -325,65 +296,18 @@ test "fs: unknown roots and each permission are enforced before the host is reac
     try expectFailure(all, "[300] 'root \"n\" fs.create-bytes", .{ .name = "invalid byte member", .source = "[300] 'root \"n\" fs.create-bytes", .kind = "type", .word = "fs.create-bytes" });
     try scratch.expectAbsent("n");
 
-    // Every grant independently: the allowed word succeeds and every other
-    // family is denied without touching the directory.
-    const grants = [_]struct {
-        permissions: Permissions,
-        allowed: []const u8,
-        allowed_stack: []const u8,
-        denied: []const u8,
-        denied_word: []const u8,
-    }{
-        .{ .permissions = .{ .read_data = true }, .allowed = "'root \"f.txt\" fs.read-text", .allowed_stack = "\"data\"", .denied = "'root \"f.txt\" fs.stat", .denied_word = "fs.stat" },
-        .{ .permissions = .{ .inspect = true }, .allowed = "'root \"f.txt\" fs.exists?", .allowed_stack = "1", .denied = "'root \".\" fs.list", .denied_word = "fs.list" },
-        .{ .permissions = .{ .list = true }, .allowed = "'root \"d\" fs.list", .allowed_stack = "()", .denied = "'root \"f.txt\" fs.read-bytes", .denied_word = "fs.read-bytes" },
-        .{ .permissions = .{ .create = true }, .allowed = "'root \"made\" fs.mkdir", .allowed_stack = "", .denied = "\"x\" 'root \"f.txt\" fs.replace-text", .denied_word = "fs.replace-text" },
-        .{ .permissions = .{ .replace = true }, .allowed = "\"new\" 'root \"f.txt\" fs.replace-text", .allowed_stack = "", .denied = "'root \"f.txt\" \"moved\" fs.rename", .denied_word = "fs.rename" },
-        .{ .permissions = .{ .rename = true }, .allowed = "'root \"g.txt\" \"h.txt\" fs.rename", .allowed_stack = "", .denied = "'root \"h.txt\" fs.remove-file", .denied_word = "fs.remove-file" },
-        .{ .permissions = .{ .remove = true }, .allowed = "'root \"h.txt\" fs.remove-file", .allowed_stack = "", .denied = "\"x\" 'root \"again\" fs.create-text", .denied_word = "fs.create-text" },
-    };
-    for (grants) |grant| {
-        const policy: Policy = .{ .roots = &.{.{ .name = "root", .absolute_path = scratch.path, .permissions = grant.permissions }} };
-        try expectStack(policy, grant.allowed, grant.allowed_stack);
-        try expectFsFailure(policy, grant.denied, "domain", grant.denied_word, "denied");
-    }
-    try scratch.expectAbsent("moved");
-    try scratch.expectAbsent("again");
-    const replaced = try scratch.read("f.txt");
-    defer allocator.free(replaced);
-    try std.testing.expectEqualStrings("new", replaced);
-
-    // Copy composes read-data on the source with create on the destination.
-    const two_roots: Policy = .{ .roots = &.{
-        .{ .name = "root", .absolute_path = scratch.path, .permissions = .{ .read_data = true } },
-        .{ .name = "sink", .absolute_path = scratch.path, .permissions = .{ .create = true } },
+    // Root names select directories; copies may cross named roots.
+    const two_roots: Config = .{ .roots = &.{
+        .{ .name = "root", .absolute_path = scratch.path },
+        .{ .name = "sink", .absolute_path = scratch.path },
     } };
     try expectStack(two_roots, "'root \"f.txt\" 'sink \"copied.txt\" fs.copy", "");
     const copied = try scratch.read("copied.txt");
     defer allocator.free(copied);
-    try std.testing.expectEqualStrings("new", copied);
-    try expectFailure(two_roots, "'sink \"copied.txt\" 'sink \"again.txt\" fs.copy", .{
-        .name = "copy source denied",
-        .source = "'sink \"copied.txt\" 'sink \"again.txt\" fs.copy",
-        .kind = "domain",
-        .word = "fs.copy",
-        .data = &.{
-            .{ .name = "source-root", .expected = .{ .symbol = "sink" } },
-            .{ .name = "destination-root", .expected = .{ .symbol = "sink" } },
-            .{ .name = "reason", .expected = .{ .symbol = "denied" } },
-        },
-    });
-    try expectFailure(two_roots, "'root \"f.txt\" 'root \"again.txt\" fs.copy", .{
-        .name = "copy destination denied",
-        .source = "'root \"f.txt\" 'root \"again.txt\" fs.copy",
-        .kind = "domain",
-        .word = "fs.copy",
-        .data = &.{.{ .name = "reason", .expected = .{ .symbol = "denied" } }},
-    });
-    try scratch.expectAbsent("again.txt");
+    try std.testing.expectEqualStrings("data", copied);
 }
 
-test "fs: policy validation is a distinct Session construction failure" {
+test "fs: options validation is a distinct Session construction failure" {
     var scratch = try Scratch.init();
     defer scratch.deinit();
     try scratch.write("file", "x");
@@ -391,42 +315,46 @@ test "fs: policy validation is a distinct Session construction failure" {
     defer allocator.free(file_path);
     const missing_path = try std.fmt.allocPrint(allocator, "{s}/missing", .{scratch.path});
     defer allocator.free(missing_path);
-    const invalid = [_]Policy{
-        .{ .roots = &.{.{ .name = "root", .absolute_path = "relative", .permissions = .all }} },
-        .{ .roots = &.{.{ .name = "root", .absolute_path = file_path, .permissions = .all }} },
-        .{ .roots = &.{.{ .name = "root", .absolute_path = missing_path, .permissions = .all }} },
-        .{ .roots = &.{.{ .name = "bad name", .absolute_path = scratch.path, .permissions = .all }} },
+    const invalid = [_]Config{
+        .{ .roots = &.{.{ .name = "root", .absolute_path = "relative" }} },
+        .{ .roots = &.{.{ .name = "root", .absolute_path = file_path }} },
+        .{ .roots = &.{.{ .name = "root", .absolute_path = missing_path }} },
+        .{ .roots = &.{.{ .name = "bad name", .absolute_path = scratch.path }} },
         .{ .roots = &.{
-            .{ .name = "root", .absolute_path = scratch.path, .permissions = .all },
-            .{ .name = "root", .absolute_path = scratch.path, .permissions = .all },
+            .{ .name = "root", .absolute_path = scratch.path },
+            .{ .name = "root", .absolute_path = scratch.path },
         } },
-        .{ .roots = &.{.{ .name = "root", .absolute_path = scratch.path, .permissions = .all }}, .limits = .{ .max_transfer_bytes = 0 } },
+        .{ .roots = &.{.{ .name = "root", .absolute_path = scratch.path }}, .limits = .{ .max_transfer_bytes = 0 } },
     };
-    for (invalid) |policy| {
+    for (invalid) |options| {
         var heap: test_heap.SessionHeap = .init;
         defer test_heap.retire(&heap);
         var output_buffer: [64]u8 = undefined;
         var output = std.Io.Writer.Discarding.init(&output_buffer);
-        try std.testing.expectError(error.InvalidHostPolicy, session.Session.initWithHost(heap.allocator(), &.{}, .{
+        var runtime_inputs1 = try runtime_fixture.Fixture.init();
+        defer runtime_inputs1.deinit();
+        try std.testing.expectError(error.InvalidHostConfig, session.Session.init(heap.allocator(), &.{}, runtime_inputs1.inputs(.{
             .io = io,
             .output = &output.writer,
             .diagnostics = &output.writer,
-            .filesystem_policy = policy,
-        }));
+            .filesystem = options,
+        }), .default, .evaluate));
     }
-    // The copied policy outlives the borrowed inputs it was built from.
+    // The copied options outlives the borrowed inputs it was built from.
     var heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&heap);
     var output_buffer: [64]u8 = undefined;
     var output = std.Io.Writer.Discarding.init(&output_buffer);
     const name = try allocator.dupe(u8, "root");
     const root_path = try allocator.dupe(u8, scratch.path);
-    var runtime = try session.Session.initWithHost(heap.allocator(), &.{}, .{
+    var runtime_inputs2 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs2.deinit();
+    var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs2.inputs(.{
         .io = io,
         .output = &output.writer,
         .diagnostics = &output.writer,
-        .filesystem_policy = .{ .roots = &.{.{ .name = name, .absolute_path = root_path, .permissions = .all }} },
-    });
+        .filesystem = .{ .roots = &.{.{ .name = name, .absolute_path = root_path }} },
+    }), .default, .evaluate);
     defer runtime.deinit();
     allocator.free(name);
     allocator.free(root_path);
@@ -447,12 +375,14 @@ test "fs: root handle authority survives renaming the configured directory" {
     defer test_heap.retire(&heap);
     var output_buffer: [64]u8 = undefined;
     var output = std.Io.Writer.Discarding.init(&output_buffer);
-    var runtime = try session.Session.initWithHost(heap.allocator(), &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{
         .io = io,
         .output = &output.writer,
         .diagnostics = &output.writer,
-        .filesystem_policy = .{ .roots = &.{.{ .name = "root", .absolute_path = original, .permissions = .all }} },
-    });
+        .filesystem = .{ .roots = &.{.{ .name = "root", .absolute_path = original }} },
+    }), .default, .evaluate);
     defer runtime.deinit();
     try scratch.directory.dir.rename("original", scratch.directory.dir, "renamed", io);
     try scratch.directory.dir.createDir(io, "original", .default_dir);
@@ -468,7 +398,7 @@ test "fs: root handle authority survives renaming the configured directory" {
 test "fs: text and byte reads round trip exactly across chunk boundaries" {
     var scratch = try Scratch.init();
     defer scratch.deinit();
-    const policy = scratch.allPolicy();
+    const options = scratch.filesystem();
     try scratch.write("empty", "");
     try scratch.write("text", "héllo\nworld\n");
     try scratch.write("raw.bin", "\xff\x00\x7f");
@@ -477,21 +407,21 @@ test "fs: text and byte reads round trip exactly across chunk boundaries" {
     for (big, 0..) |*byte, index| byte.* = @intCast(index % 251);
     try scratch.write("big", big);
 
-    try expectStack(policy, "'root \"empty\" fs.read-text 'root \"empty\" fs.read-bytes", "\"\" []");
-    try expectStack(policy, "'root \"text\" fs.read-text dup len swap", "12 \"héllo\\nworld\\n\"");
-    try expectStack(policy, "'root \"raw.bin\" fs.read-bytes", "[255 0 127]");
-    try expectStack(policy, "'root \"big\" fs.read-bytes dup len swap 65536 at", "196625 25");
-    try expectStack(policy, "'root \"big\" fs.read-bytes 'root \"big2\" fs.create-bytes 'root \"big2\" fs.read-bytes 'root \"big\" fs.read-bytes match?", "1");
-    try expectFsFailure(policy, "'root \"raw.bin\" fs.read-text", "io", "fs.read-text", "invalid-utf8");
-    try expectFsFailure(policy, "'root \"absent\" fs.read-text", "io", "fs.read-text", "not-found");
-    try expectFsFailure(policy, "'root \".\" fs.read-text", "io", "fs.read-text", "is-directory");
+    try expectStack(options, "'root \"empty\" fs.read-text 'root \"empty\" fs.read-bytes", "\"\" []");
+    try expectStack(options, "'root \"text\" fs.read-text dup len swap", "12 \"héllo\\nworld\\n\"");
+    try expectStack(options, "'root \"raw.bin\" fs.read-bytes", "[255 0 127]");
+    try expectStack(options, "'root \"big\" fs.read-bytes dup len swap 65536 at", "196625 25");
+    try expectStack(options, "'root \"big\" fs.read-bytes 'root \"big2\" fs.create-bytes 'root \"big2\" fs.read-bytes 'root \"big\" fs.read-bytes match?", "1");
+    try expectFsFailure(options, "'root \"raw.bin\" fs.read-text", "io", "fs.read-text", "invalid-utf8");
+    try expectFsFailure(options, "'root \"absent\" fs.read-text", "io", "fs.read-text", "not-found");
+    try expectFsFailure(options, "'root \".\" fs.read-text", "io", "fs.read-text", "is-directory");
     try scratch.directory.dir.createDir(io, "dir", .default_dir);
-    try expectFsFailure(policy, "'root \"dir\" fs.read-bytes", "io", "fs.read-bytes", "is-directory");
-    try expectFsFailure(policy, "'root \"text/child\" fs.read-text", "io", "fs.read-text", "not-directory");
+    try expectFsFailure(options, "'root \"dir\" fs.read-bytes", "io", "fs.read-bytes", "is-directory");
+    try expectFsFailure(options, "'root \"text/child\" fs.read-text", "io", "fs.read-text", "not-directory");
 
     // The transfer limit is enforced from the observed size.
-    const limited: Policy = .{
-        .roots = &.{.{ .name = "root", .absolute_path = scratch.path, .permissions = .all }},
+    const limited: Config = .{
+        .roots = &.{.{ .name = "root", .absolute_path = scratch.path }},
         .limits = .{ .max_transfer_bytes = 8 },
     };
     try expectFsFailure(limited, "'root \"big\" fs.read-bytes", "overflow", "fs.read-bytes", "limit");
@@ -503,7 +433,7 @@ test "fs: text and byte reads round trip exactly across chunk boundaries" {
 test "fs: stat lstat exists and list describe entries exactly" {
     var scratch = try Scratch.init();
     defer scratch.deinit();
-    const policy = scratch.allPolicy();
+    const options = scratch.filesystem();
     try scratch.write("file", "12345");
     try scratch.directory.dir.createDir(io, "dir", .default_dir);
     try scratch.directory.dir.symLink(io, "file", "link", .{});
@@ -514,35 +444,35 @@ test "fs: stat lstat exists and list describe entries exactly" {
     try scratch.directory.dir.createDir(io, "dir/sub", .default_dir);
     try scratch.directory.dir.symLink(io, "a", "dir/l", .{});
 
-    try expectStack(policy, "'root \"file\" fs.stat", "{'kind 'file 'size 5}");
-    try expectStack(policy, "'root \"dir\" fs.stat", "{'kind 'directory}");
-    try expectStack(policy, "'root \".\" fs.stat", "{'kind 'directory}");
-    try expectStack(policy, "'root \"link\" fs.stat", "{'kind 'file 'size 5}");
-    try expectStack(policy, "'root \"link\" fs.lstat", "{'kind 'symlink}");
-    try expectStack(policy, "'root \"dangling\" fs.lstat", "{'kind 'symlink}");
-    try expectFsFailure(policy, "'root \"dangling\" fs.stat", "io", "fs.stat", "not-found");
-    try expectFsFailure(policy, "'root \"absent\" fs.stat", "io", "fs.stat", "not-found");
-    try expectFsFailure(policy, "'root \"absent\" fs.lstat", "io", "fs.lstat", "not-found");
-    try expectStack(policy, "'root \"file\" fs.exists? 'root \"dangling\" fs.exists? 'root \"absent\" fs.exists? 'root \".\" fs.exists?", "1 1 0 1");
-    try expectFsFailure(policy, "'root \"file/x\" fs.exists?", "io", "fs.exists?", "not-directory");
+    try expectStack(options, "'root \"file\" fs.stat", "{'kind 'file 'size 5}");
+    try expectStack(options, "'root \"dir\" fs.stat", "{'kind 'directory}");
+    try expectStack(options, "'root \".\" fs.stat", "{'kind 'directory}");
+    try expectStack(options, "'root \"link\" fs.stat", "{'kind 'file 'size 5}");
+    try expectStack(options, "'root \"link\" fs.lstat", "{'kind 'symlink}");
+    try expectStack(options, "'root \"dangling\" fs.lstat", "{'kind 'symlink}");
+    try expectFsFailure(options, "'root \"dangling\" fs.stat", "io", "fs.stat", "not-found");
+    try expectFsFailure(options, "'root \"absent\" fs.stat", "io", "fs.stat", "not-found");
+    try expectFsFailure(options, "'root \"absent\" fs.lstat", "io", "fs.lstat", "not-found");
+    try expectStack(options, "'root \"file\" fs.exists? 'root \"dangling\" fs.exists? 'root \"absent\" fs.exists? 'root \".\" fs.exists?", "1 1 0 1");
+    try expectFsFailure(options, "'root \"file/x\" fs.exists?", "io", "fs.exists?", "not-directory");
     // Listing is sorted by Unicode scalar order, classifies without
     // following, and excludes dot entries.
     try expectStack(
-        policy,
+        options,
         "'root \"dir\" fs.list",
         "({'name \"a\" 'kind 'file} {'name \"l\" 'kind 'symlink} {'name \"sub\" 'kind 'directory} {'name \"z\" 'kind 'file} {'name \"ä\" 'kind 'file})",
     );
-    try expectStack(policy, "'root \"dir/sub\" fs.list", "()");
-    try expectStack(policy, "'root \".\" fs.list len", "4");
-    try expectFsFailure(policy, "'root \"file\" fs.list", "io", "fs.list", "not-directory");
-    try expectFsFailure(policy, "'root \"absent\" fs.list", "io", "fs.list", "not-found");
-    const limited: Policy = .{
-        .roots = &.{.{ .name = "root", .absolute_path = scratch.path, .permissions = .all }},
+    try expectStack(options, "'root \"dir/sub\" fs.list", "()");
+    try expectStack(options, "'root \".\" fs.list len", "4");
+    try expectFsFailure(options, "'root \"file\" fs.list", "io", "fs.list", "not-directory");
+    try expectFsFailure(options, "'root \"absent\" fs.list", "io", "fs.list", "not-found");
+    const limited: Config = .{
+        .roots = &.{.{ .name = "root", .absolute_path = scratch.path }},
         .limits = .{ .max_directory_entries = 3 },
     };
     try expectFsFailure(limited, "'root \"dir\" fs.list", "overflow", "fs.list", "limit");
-    const byte_limited: Policy = .{
-        .roots = &.{.{ .name = "root", .absolute_path = scratch.path, .permissions = .all }},
+    const byte_limited: Config = .{
+        .roots = &.{.{ .name = "root", .absolute_path = scratch.path }},
         .limits = .{ .max_directory_name_bytes = 4 },
     };
     try expectFsFailure(byte_limited, "'root \"dir\" fs.list", "overflow", "fs.list", "limit");
@@ -553,31 +483,31 @@ test "fs: stat lstat exists and list describe entries exactly" {
 test "fs: create is exclusive and replace is strict" {
     var scratch = try Scratch.init();
     defer scratch.deinit();
-    const policy = scratch.allPolicy();
+    const options = scratch.filesystem();
     try scratch.directory.dir.createDir(io, "dir", .default_dir);
     try scratch.directory.dir.symLink(io, "nowhere", "dangling", .{});
     try scratch.write("existing", "old");
 
-    try expectStack(policy, "\"héllo\" 'root \"new.txt\" fs.create-text 'root \"new.txt\" fs.read-text", "\"héllo\"");
-    try expectStack(policy, "[0 255] 'root \"new.bin\" fs.create-bytes 'root \"new.bin\" fs.read-bytes", "[0 255]");
-    try expectStack(policy, "\"\" 'root \"empty\" fs.create-text 'root \"empty\" fs.stat", "{'kind 'file 'size 0}");
+    try expectStack(options, "\"héllo\" 'root \"new.txt\" fs.create-text 'root \"new.txt\" fs.read-text", "\"héllo\"");
+    try expectStack(options, "[0 255] 'root \"new.bin\" fs.create-bytes 'root \"new.bin\" fs.read-bytes", "[0 255]");
+    try expectStack(options, "\"\" 'root \"empty\" fs.create-text 'root \"empty\" fs.stat", "{'kind 'file 'size 0}");
     for ([_][]const u8{ "existing", "dir", "dangling", "new.txt" }) |collision| {
         const program = try std.fmt.allocPrint(allocator, "\"x\" 'root \"{s}\" fs.create-text", .{collision});
         defer allocator.free(program);
-        try expectFsFailure(policy, program, "io", "fs.create-text", "already-exists");
+        try expectFsFailure(options, program, "io", "fs.create-text", "already-exists");
     }
     const kept = try scratch.read("existing");
     defer allocator.free(kept);
     try std.testing.expectEqualStrings("old", kept);
-    try expectFsFailure(policy, "\"x\" 'root \"missing-dir/f\" fs.create-text", "io", "fs.create-text", "not-found");
-    try expectFsFailure(policy, "\"x\" 'root \".\" fs.create-text", "domain", "fs.create-text", "invalid-path");
+    try expectFsFailure(options, "\"x\" 'root \"missing-dir/f\" fs.create-text", "io", "fs.create-text", "not-found");
+    try expectFsFailure(options, "\"x\" 'root \".\" fs.create-text", "domain", "fs.create-text", "invalid-path");
 
-    try expectStack(policy, "\"newer\" 'root \"existing\" fs.replace-text 'root \"existing\" fs.read-text", "\"newer\"");
-    try expectStack(policy, "[7] 'root \"existing\" fs.replace-bytes 'root \"existing\" fs.read-bytes", "[7]");
-    try expectFsFailure(policy, "\"x\" 'root \"absent\" fs.replace-text", "io", "fs.replace-text", "not-found");
-    try expectFsFailure(policy, "\"x\" 'root \"dir\" fs.replace-text", "io", "fs.replace-text", "not-regular");
+    try expectStack(options, "\"newer\" 'root \"existing\" fs.replace-text 'root \"existing\" fs.read-text", "\"newer\"");
+    try expectStack(options, "[7] 'root \"existing\" fs.replace-bytes 'root \"existing\" fs.read-bytes", "[7]");
+    try expectFsFailure(options, "\"x\" 'root \"absent\" fs.replace-text", "io", "fs.replace-text", "not-found");
+    try expectFsFailure(options, "\"x\" 'root \"dir\" fs.replace-text", "io", "fs.replace-text", "not-regular");
     try scratch.directory.dir.symLink(io, "existing", "link", .{});
-    try expectFsFailure(policy, "\"x\" 'root \"link\" fs.replace-text", "io", "fs.replace-text", "not-regular");
+    try expectFsFailure(options, "\"x\" 'root \"link\" fs.replace-text", "io", "fs.replace-text", "not-regular");
     try scratch.expectAbsent("absent");
     const through_link = try scratch.read("existing");
     defer allocator.free(through_link);
@@ -588,7 +518,7 @@ test "fs: create is exclusive and replace is strict" {
     const script = try scratch.directory.dir.createFile(io, "script", .{ .permissions = .executable_file });
     script.close(io);
     const before = try scratch.directory.dir.statFile(io, "script", .{ .follow_symlinks = false });
-    try expectStack(policy, "\"#!\" 'root \"script\" fs.replace-text 'root \"script\" fs.read-text", "\"#!\"");
+    try expectStack(options, "\"#!\" 'root \"script\" fs.replace-text 'root \"script\" fs.read-text", "\"#!\"");
     const after = try scratch.directory.dir.statFile(io, "script", .{ .follow_symlinks = false });
     try std.testing.expectEqual(before.permissions, after.permissions);
     const plain = try scratch.directory.dir.statFile(io, "existing", .{ .follow_symlinks = false });
@@ -599,51 +529,51 @@ test "fs: create is exclusive and replace is strict" {
 test "fs: mkdir copy rename and removal act on final entries without following" {
     var scratch = try Scratch.init();
     defer scratch.deinit();
-    const policy = scratch.allPolicy();
+    const options = scratch.filesystem();
     try scratch.write("file", "payload");
     try scratch.directory.dir.symLink(io, "file", "link", .{});
     try scratch.directory.dir.symLink(io, "nowhere", "dangling", .{});
 
-    try expectStack(policy, "'root \"made\" fs.mkdir 'root \"made\" fs.stat", "{'kind 'directory}");
-    try expectFsFailure(policy, "'root \"made\" fs.mkdir", "io", "fs.mkdir", "already-exists");
-    try expectFsFailure(policy, "'root \"file\" fs.mkdir", "io", "fs.mkdir", "already-exists");
-    try expectFsFailure(policy, "'root \"nope/made\" fs.mkdir", "io", "fs.mkdir", "not-found");
-    try expectFsFailure(policy, "'root \"file/made\" fs.mkdir", "io", "fs.mkdir", "not-directory");
+    try expectStack(options, "'root \"made\" fs.mkdir 'root \"made\" fs.stat", "{'kind 'directory}");
+    try expectFsFailure(options, "'root \"made\" fs.mkdir", "io", "fs.mkdir", "already-exists");
+    try expectFsFailure(options, "'root \"file\" fs.mkdir", "io", "fs.mkdir", "already-exists");
+    try expectFsFailure(options, "'root \"nope/made\" fs.mkdir", "io", "fs.mkdir", "not-found");
+    try expectFsFailure(options, "'root \"file/made\" fs.mkdir", "io", "fs.mkdir", "not-directory");
 
-    try expectStack(policy, "'root \"file\" 'root \"made/copy\" fs.copy 'root \"made/copy\" fs.read-text", "\"payload\"");
-    try expectStack(policy, "'root \"link\" 'root \"made/via-link\" fs.copy 'root \"made/via-link\" fs.read-text", "\"payload\"");
-    try expectFsFailure(policy, "'root \"file\" 'root \"made/copy\" fs.copy", "io", "fs.copy", "already-exists");
-    try expectFsFailure(policy, "'root \"made\" 'root \"made/again\" fs.copy", "io", "fs.copy", "is-directory");
-    try expectFsFailure(policy, "'root \"absent\" 'root \"made/again\" fs.copy", "io", "fs.copy", "not-found");
-    try expectFsFailure(policy, "'root \"file\" 'root \".\" fs.copy", "domain", "fs.copy", "invalid-path");
+    try expectStack(options, "'root \"file\" 'root \"made/copy\" fs.copy 'root \"made/copy\" fs.read-text", "\"payload\"");
+    try expectStack(options, "'root \"link\" 'root \"made/via-link\" fs.copy 'root \"made/via-link\" fs.read-text", "\"payload\"");
+    try expectFsFailure(options, "'root \"file\" 'root \"made/copy\" fs.copy", "io", "fs.copy", "already-exists");
+    try expectFsFailure(options, "'root \"made\" 'root \"made/again\" fs.copy", "io", "fs.copy", "is-directory");
+    try expectFsFailure(options, "'root \"absent\" 'root \"made/again\" fs.copy", "io", "fs.copy", "not-found");
+    try expectFsFailure(options, "'root \"file\" 'root \".\" fs.copy", "domain", "fs.copy", "invalid-path");
     try scratch.expectAbsent("made/again");
     // A copy carries the source permissions, as `cp` does.
     const script = try scratch.directory.dir.createFile(io, "script", .{ .permissions = .executable_file });
     script.close(io);
-    try expectStack(policy, "'root \"script\" 'root \"script-copy\" fs.copy 'root \"script-copy\" fs.exists?", "1");
+    try expectStack(options, "'root \"script\" 'root \"script-copy\" fs.copy 'root \"script-copy\" fs.exists?", "1");
     const source_info = try scratch.directory.dir.statFile(io, "script", .{ .follow_symlinks = false });
     const copy_info = try scratch.directory.dir.statFile(io, "script-copy", .{ .follow_symlinks = false });
     try std.testing.expectEqual(source_info.permissions, copy_info.permissions);
 
-    try expectStack(policy, "'root \"made/copy\" \"renamed\" fs.rename 'root \"renamed\" fs.exists? 'root \"made/copy\" fs.exists?", "1 0");
-    try expectStack(policy, "'root \"made\" \"moved-dir\" fs.rename 'root \"moved-dir/via-link\" fs.exists?", "1");
-    try expectStack(policy, "'root \"link\" \"moved-link\" fs.rename 'root \"moved-link\" fs.lstat", "{'kind 'symlink}");
-    try expectFsFailure(policy, "'root \"renamed\" \"file\" fs.rename", "io", "fs.rename", "already-exists");
-    try expectFsFailure(policy, "'root \"absent\" \"x\" fs.rename", "io", "fs.rename", "not-found");
-    try expectFsFailure(policy, "'root \".\" \"x\" fs.rename", "domain", "fs.rename", "invalid-path");
+    try expectStack(options, "'root \"made/copy\" \"renamed\" fs.rename 'root \"renamed\" fs.exists? 'root \"made/copy\" fs.exists?", "1 0");
+    try expectStack(options, "'root \"made\" \"moved-dir\" fs.rename 'root \"moved-dir/via-link\" fs.exists?", "1");
+    try expectStack(options, "'root \"link\" \"moved-link\" fs.rename 'root \"moved-link\" fs.lstat", "{'kind 'symlink}");
+    try expectFsFailure(options, "'root \"renamed\" \"file\" fs.rename", "io", "fs.rename", "already-exists");
+    try expectFsFailure(options, "'root \"absent\" \"x\" fs.rename", "io", "fs.rename", "not-found");
+    try expectFsFailure(options, "'root \".\" \"x\" fs.rename", "domain", "fs.rename", "invalid-path");
     const untouched = try scratch.read("file");
     defer allocator.free(untouched);
     try std.testing.expectEqualStrings("payload", untouched);
 
-    try expectStack(policy, "'root \"moved-link\" fs.remove-file 'root \"moved-link\" fs.exists? 'root \"file\" fs.exists?", "0 1");
-    try expectStack(policy, "'root \"dangling\" fs.remove-file 'root \"dangling\" fs.exists?", "0");
-    try expectFsFailure(policy, "'root \"moved-dir\" fs.remove-file", "io", "fs.remove-file", "is-directory");
-    try expectFsFailure(policy, "'root \"absent\" fs.remove-file", "io", "fs.remove-file", "not-found");
-    try expectFsFailure(policy, "'root \"moved-dir\" fs.remove-dir", "io", "fs.remove-dir", "not-empty");
-    try expectFsFailure(policy, "'root \"file\" fs.remove-dir", "io", "fs.remove-dir", "not-directory");
+    try expectStack(options, "'root \"moved-link\" fs.remove-file 'root \"moved-link\" fs.exists? 'root \"file\" fs.exists?", "0 1");
+    try expectStack(options, "'root \"dangling\" fs.remove-file 'root \"dangling\" fs.exists?", "0");
+    try expectFsFailure(options, "'root \"moved-dir\" fs.remove-file", "io", "fs.remove-file", "is-directory");
+    try expectFsFailure(options, "'root \"absent\" fs.remove-file", "io", "fs.remove-file", "not-found");
+    try expectFsFailure(options, "'root \"moved-dir\" fs.remove-dir", "io", "fs.remove-dir", "not-empty");
+    try expectFsFailure(options, "'root \"file\" fs.remove-dir", "io", "fs.remove-dir", "not-directory");
     try scratch.directory.dir.symLink(io, "moved-dir", "dir-link", .{});
-    try expectFsFailure(policy, "'root \"dir-link\" fs.remove-dir", "io", "fs.remove-dir", "not-directory");
-    try expectStack(policy, "'root \"moved-dir/via-link\" fs.remove-file 'root \"moved-dir\" fs.remove-dir 'root \"moved-dir\" fs.exists?", "0");
+    try expectFsFailure(options, "'root \"dir-link\" fs.remove-dir", "io", "fs.remove-dir", "not-directory");
+    try expectStack(options, "'root \"moved-dir/via-link\" fs.remove-file 'root \"moved-dir\" fs.remove-dir 'root \"moved-dir\" fs.exists?", "0");
     try scratch.expectNoStaging(".");
 }
 
@@ -673,41 +603,41 @@ test "fs: symlink resolution is confined to the root" {
     try scratch.directory.dir.symLink(io, "a/b/file", "root/to-file", .{});
     const root_path = try std.fmt.allocPrint(allocator, "{s}/root", .{scratch.path});
     defer allocator.free(root_path);
-    const policy: Policy = .{ .roots = &.{.{ .name = "root", .absolute_path = root_path, .permissions = .all }} };
+    const options: Config = .{ .roots = &.{.{ .name = "root", .absolute_path = root_path }} };
 
-    try expectStack(policy, "'root \"inside/file\" fs.read-text", "\"inside\"");
-    try expectStack(policy, "'root \"a/safe-parent/file\" fs.read-text", "\"inside\"");
-    try expectStack(policy, "'root \"to-file\" fs.read-text", "\"inside\"");
-    try expectStack(policy, "'root \"inside\" fs.stat 'root \"inside\" fs.lstat", "{'kind 'directory} {'kind 'symlink}");
-    try expectStack(policy, "'root \"escape\" fs.exists? 'root \"escape\" fs.lstat", "1 {'kind 'symlink}");
+    try expectStack(options, "'root \"inside/file\" fs.read-text", "\"inside\"");
+    try expectStack(options, "'root \"a/safe-parent/file\" fs.read-text", "\"inside\"");
+    try expectStack(options, "'root \"to-file\" fs.read-text", "\"inside\"");
+    try expectStack(options, "'root \"inside\" fs.stat 'root \"inside\" fs.lstat", "{'kind 'directory} {'kind 'symlink}");
+    try expectStack(options, "'root \"escape\" fs.exists? 'root \"escape\" fs.lstat", "1 {'kind 'symlink}");
     for ([_][]const u8{ "escape", "a/deep-escape", "sibling", "absolute" }) |name| {
         const read = try std.fmt.allocPrint(allocator, "'root \"{s}\" fs.read-text", .{name});
         defer allocator.free(read);
-        try expectFsFailure(policy, read, "io", "fs.read-text", "symlink-escape");
+        try expectFsFailure(options, read, "io", "fs.read-text", "symlink-escape");
         const stat = try std.fmt.allocPrint(allocator, "'root \"{s}\" fs.stat", .{name});
         defer allocator.free(stat);
-        try expectFsFailure(policy, stat, "io", "fs.stat", "symlink-escape");
+        try expectFsFailure(options, stat, "io", "fs.stat", "symlink-escape");
         const through = try std.fmt.allocPrint(allocator, "'root \"{s}/child\" fs.exists?", .{name});
         defer allocator.free(through);
-        try expectFsFailure(policy, through, "io", "fs.exists?", "symlink-escape");
+        try expectFsFailure(options, through, "io", "fs.exists?", "symlink-escape");
     }
-    try expectFsFailure(policy, "'root \"loop\" fs.read-text", "io", "fs.read-text", "symlink-loop");
-    try expectFsFailure(policy, "'root \"ping\" fs.stat", "io", "fs.stat", "symlink-loop");
-    try expectFsFailure(policy, "'root \"to-file/x\" fs.exists?", "io", "fs.exists?", "not-directory");
+    try expectFsFailure(options, "'root \"loop\" fs.read-text", "io", "fs.read-text", "symlink-loop");
+    try expectFsFailure(options, "'root \"ping\" fs.stat", "io", "fs.stat", "symlink-loop");
+    try expectFsFailure(options, "'root \"to-file/x\" fs.exists?", "io", "fs.exists?", "not-directory");
     // A link is a collision for create and mkdir, rejected by replace, and
     // removed as itself.
-    try expectFsFailure(policy, "\"x\" 'root \"escape\" fs.create-text", "io", "fs.create-text", "already-exists");
-    try expectFsFailure(policy, "'root \"escape\" fs.mkdir", "io", "fs.mkdir", "already-exists");
-    try expectFsFailure(policy, "\"x\" 'root \"to-file\" fs.replace-text", "io", "fs.replace-text", "not-regular");
-    try expectStack(policy, "'root \"escape\" fs.remove-file 'root \"escape\" fs.exists?", "0");
+    try expectFsFailure(options, "\"x\" 'root \"escape\" fs.create-text", "io", "fs.create-text", "already-exists");
+    try expectFsFailure(options, "'root \"escape\" fs.mkdir", "io", "fs.mkdir", "already-exists");
+    try expectFsFailure(options, "\"x\" 'root \"to-file\" fs.replace-text", "io", "fs.replace-text", "not-regular");
+    try expectStack(options, "'root \"escape\" fs.remove-file 'root \"escape\" fs.exists?", "0");
     const outside = try scratch.read("outside");
     defer allocator.free(outside);
     try std.testing.expectEqualStrings("outside", outside);
     const secret = try scratch.read("root-escape/secret");
     defer allocator.free(secret);
     try std.testing.expectEqualStrings("outside", secret);
-    const expansion_limited: Policy = .{
-        .roots = &.{.{ .name = "root", .absolute_path = root_path, .permissions = .all }},
+    const expansion_limited: Config = .{
+        .roots = &.{.{ .name = "root", .absolute_path = root_path }},
         .limits = .{ .max_resolved_path_bytes = 12 },
     };
     try expectFsFailure(expansion_limited, "'root \"inside/file\" fs.read-text", "overflow", "fs.read-text", "limit");
@@ -727,12 +657,14 @@ test "fs: cancellation before commit leaves the destination unchanged" {
     defer test_heap.retire(&heap);
     var output_buffer: [64]u8 = undefined;
     var output = std.Io.Writer.Discarding.init(&output_buffer);
-    var runtime = try session.Session.initWithHostConfig(heap.allocator(), &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{
         .io = io,
         .output = &output.writer,
         .diagnostics = &output.writer,
-        .filesystem_policy = scratch.allPolicy(),
-    }, .cooperative);
+        .filesystem = scratch.filesystem(),
+    }), .cooperative, .evaluate);
     defer runtime.deinit();
     try std.testing.expect((try runtime.runUnit("<fs-warm>", "'root \"existing\" fs.exists? pop")) == .ok);
     runtime.requestCancellation();
@@ -767,12 +699,12 @@ test "fs: the live-operation quota is released after each operation" {
     var scratch = try Scratch.init();
     defer scratch.deinit();
     try scratch.write("file", "x");
-    const policy: Policy = .{
-        .roots = &.{.{ .name = "root", .absolute_path = scratch.path, .permissions = .all }},
+    const options: Config = .{
+        .roots = &.{.{ .name = "root", .absolute_path = scratch.path }},
         .limits = .{ .max_live_operations = 1 },
     };
     // Sequential operations each take and release the single slot.
-    try expectStack(policy, "'root \"file\" fs.read-text 'root \"file\" fs.read-text 'root \"file\" fs.exists?", "\"x\" \"x\" 1");
+    try expectStack(options, "'root \"file\" fs.read-text 'root \"file\" fs.read-text 'root \"file\" fs.exists?", "\"x\" \"x\" 1");
     // Concurrent tasks contend for one slot. Whether they overlap is a
     // scheduling fact, so the assertion is the invariant: every outcome is
     // success or the limit reason, at least one succeeds, and the slot is
@@ -782,7 +714,7 @@ test "fs: the live-operation quota is released after each operation" {
     defer allocator.free(big);
     @memset(big, 'y');
     try scratch.write("big", big);
-    try runCase(policy, .{ .worker_pool = 2 },
+    try runCase(options, .{ .worker_pool = 2 },
         \\[] ('root "big" fs.read-bytes len) @spawn [] ('root "big" fs.read-bytes len) @spawn
         \\pair (task.await) each (dup 'ok dict.has? (pop 'ok) ('err at 'data at 'reason at) if) each
         \\dup ('ok match?) filter len 1 >= swap (dup 'ok match? swap 'limit match? or) all? and
@@ -804,12 +736,17 @@ test "fs: concurrent creates have exactly one winner and no staging residue" {
             defer test_heap.retire(&heap);
             var output_buffer: [64]u8 = undefined;
             var output = std.Io.Writer.Discarding.init(&output_buffer);
-            var runtime = session.Session.initWithHostConfig(heap.allocator(), &.{}, .{
+            var runtime_inputs = runtime_fixture.Fixture.init() catch {
+                self.unexpected.store(true, .release);
+                return;
+            };
+            defer runtime_inputs.deinit();
+            var runtime = session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{
                 .io = io,
                 .output = &output.writer,
                 .diagnostics = &output.writer,
-                .filesystem_policy = .{ .roots = &.{.{ .name = "root", .absolute_path = self.path, .permissions = .all }} },
-            }, .{ .worker_pool = 2 }) catch {
+                .filesystem = .{ .roots = &.{.{ .name = "root", .absolute_path = self.path }} },
+            }), .{ .worker_pool = 2 }, .evaluate) catch {
                 self.unexpected.store(true, .release);
                 return;
             };

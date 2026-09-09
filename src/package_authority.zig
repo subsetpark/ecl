@@ -8,7 +8,7 @@
 //! ever passed through evaluated ECL. The vendor store is never named by a
 //! path: it is always the fixed child `vendor` of the retained project handle,
 //! opened without following a final symlink, so a repository cannot point it
-//! elsewhere. Ordinary and embedded Sessions never construct this owner, so
+//! elsewhere. Ordinary evaluation Sessions never construct this owner, so
 //! their `pkg.store` words fail closed.
 
 const std = @import("std");
@@ -41,7 +41,7 @@ pub const PackageGrant = union(enum) {
     vendor: struct { cache: ?[]const u8, project: std.Io.Dir },
 };
 
-pub const PolicyError = filesystem_port.PolicyError;
+pub const PolicyError = error{ OutOfMemory, InvalidPolicy };
 
 pub const PackageOwner = struct {
     allocator: std.mem.Allocator,

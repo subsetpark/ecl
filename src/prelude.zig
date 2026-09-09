@@ -83,12 +83,11 @@ pub fn installSource(
         .empty,
         environment,
         &archive,
-        null,
+        .{ .registry = registry, .phase = .bootstrap },
         arguments.borrow(),
         cancelled,
     );
     defer unit.deinit();
-    unit.inherited.registry = registry;
     unit.replaceRootScope(building.rootScope(allocator));
     machine.run(&unit, root_header) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,

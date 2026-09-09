@@ -8,6 +8,10 @@ contracts, projects and packages, the `ecl` command, and source formatting.
 shipped word and its stack effect. This document covers behavior that depends
 on files, processes, networks, package data, or distribution policy.
 
+ECL is distributed as a CLI interpreter with a supported Zig extension SDK.
+ECL can call Zig extensions through `ecl-native`; embedding ECL in a Zig
+application is not a supported interface.
+
 ## Modules and host integration
 
 ### Embedded standard library
@@ -23,11 +27,11 @@ ordinary module images and participates in registration, aliases, imports,
 reflection, and shadowing through the same language operations.
 
 `net.core.listener` and `proc.core.process` export the built-in factories used
-by `port.open`. Their modules load without host grants; opening a resource
-still requires the Session's corresponding network or process authority.
+by `port.open`. They are ordinary standard-library words; opening a resource uses the
+Session's runtime I/O state.
 The public `net` and `proc` modules are ECL compositions over these registered
 capabilities and `port.*`. Their operation and endpoint selectors expose only
-the granted resources and streams. First-party adapters use typed backend calls;
+their corresponding resources and streams. First-party adapters use typed backend calls;
 the extension adapter translates ABI v5 calls into the same runtime interfaces
 for controller execution, transport, cancellation, ownership, and cleanup.
 
@@ -161,8 +165,8 @@ ports remain opaque identities. Tasks and modules are unsupported native inputs.
 
 The default Session limits are 64 live native ports, 16 admitted operations per
 port (including the active one), and 64 KiB for each request and response ring.
-The embedding host may configure `NativePortLimits` through
-`Host.native_port_limits`: live capacity is 1–4096, operation capacity is 1–256,
+The runtime validates native port limits at construction:
+live capacity is 1–4096, operation capacity is 1–256,
 and ring capacity is 1 byte–16 MiB. Invalid limits reject Session initialization.
 Creation beyond live capacity raises `'domain`; operations wait for admission
 when their lane is full. The operation budget is partitioned across lanes,
@@ -183,22 +187,18 @@ boundary.
 
 ## Filesystem access
 
-Caller-selected filesystem work goes through the `fs` module and the `path`
-module documented in `STDLIB.md`. `path` is pure string manipulation over
-`/`-separated Unicode paths and applies no host convention. `fs` is a
-capability: the Session host names root directories once, each with an
-explicit permission set and shared limits, and every word names one root by
-symbol and one canonical relative path beneath it. Roots are authority names,
-not paths or transferable values; the boundary is Host versus evaluated ECL,
-and modules within one Session are not isolated from each other.
+Filesystem work goes through the `fs` module and the `path` module documented
+in `STDLIB.md`. `path` is pure string manipulation over `/`-separated Unicode
+paths and applies no host convention. Every `fs` word names one root by symbol
+and one canonical relative path beneath it. All filesystem operations are
+available on every named root, subject to operating-system permissions and
+runtime limits. Modules within one Session share its roots.
 
-The `ecl` command grants exactly one root, `'cwd`, for the working directory
-captured once at startup, with every permission. Package commands add the
-`'project` root described below. Embedded Sessions are default-deny: without a
-`FilesystemPolicy` every `fs` word raises `'domain` with reason `'unavailable`,
-and an unsatisfiable policy (a relative, missing, or non-directory root, a
-duplicate or malformed name, a zero limit, or an unsupported target) is a
-Session construction error distinct from allocation failure.
+The `ecl` command uses one root, `'cwd`, for the working directory captured
+once at startup. Package commands add the `'project` root described below.
+Session construction opens the roots once; a relative, missing, non-directory,
+duplicate, or malformed root, a zero limit, or an unsupported target is a
+construction error distinct from allocation failure.
 
 Supported targets are Linux and macOS. Paths are UTF-8 slash paths; a host
 filename that is not valid UTF-8 cannot be listed and fails the whole listing.
@@ -223,25 +223,16 @@ outside this contract.
 ## Network listeners
 
 Inbound TCP listening goes through the `net` module documented in
-`STDLIB.md`. It is a capability: the Session host names, once, either an
-unrestricted grant or an exact allowlist of address and port pairs, together
-with a maximum number of live listeners, the kernel accept backlog, a maximum
-number of live connections (default 64), and the receive and send queue
-capacities of each connection (default 64 KiB each). A
-program requests one address and one port; a grant entry whose port is `0`
-admits only requests for an ephemeral port. Addresses are IPv4 or IPv6
-literals compared after normalization, so `::ffff:127.0.0.1` matches a grant
-for `127.0.0.1`; no name is resolved and no interface scope id is accepted.
-Listen authority is separate from outbound HTTP, filesystem, and process
-authority, and none of those implies it.
+`STDLIB.md`. A program requests a local address and port; port `0` requests
+an ephemeral port. Addresses are IPv4 or IPv6 literals normalized before
+binding, so `::ffff:127.0.0.1` uses IPv4. No name is resolved and no interface
+scope id is accepted. Any local address and port may be requested, subject to
+operating-system restrictions.
 
-The `ecl` command grants an unrestricted listen policy: any local address, any
-port. Embedded Sessions are default-deny: without a `NetPolicy` every `net`
-word that needs authority raises `'domain` with reason `'unavailable`, a
-request outside the grant raises `'domain` with reason `'denied`, and an
-unsatisfiable policy (a literal that does not parse, a duplicate entry, a zero
-limit, or an unsupported target) is a Session construction error distinct from
-allocation failure.
+The runtime bounds live listeners, the kernel accept backlog, live connections
+(default 64), and each connection's receive and send queues (default 64 KiB
+each). Zero limits and unsupported targets fail Session construction distinctly
+from allocation failure.
 
 Supported targets are Linux and macOS. A listener is an opaque port owned by
 the task scope that created it; the socket closes when that scope closes or
@@ -267,8 +258,7 @@ The live-connection maximum bounds descriptors and backend controllers per
 Session: at the maximum `net.accept` waits, leaving
 the peer in the kernel backlog, and proceeds when a connection closes; a
 waiting accept holds no slot. The listener maximum is refused as `'domain`.
-Controller failures use the common port error contract; pre-admission grant
-refusals retain their policy reason. Zero for any limit is a Session construction
+Controller failures use the common port error contract. Zero for any limit is a Session construction
 error. TLS and protocol framing remain outside this contract; they belong to
 the protocol modules built over a connection.
 
@@ -276,11 +266,11 @@ the protocol modules built over a connection.
 
 The `clock` and `time` modules documented in `STDLIB.md` split effectful time
 from pure conversion. `time` is pure and available everywhere. `clock` reads
-two distinct authorities that a Session's host configures separately.
+the scheduler's monotonic clock and the process realtime clock.
 
-Monotonic time belongs to the scheduler and always exists. The host selects
-its source once, at Session construction: the process's awake clock, or a
-manual clock that starts at zero and moves only when the embedder advances it
+Monotonic time belongs to the scheduler and always exists. Ordinary execution
+uses the process's awake clock. Internal tests can select a
+manual clock that starts at zero and moves only when the test advances it
 through the Session by whole milliseconds. An advance that would carry the
 reading past the int range is refused and leaves the reading unchanged, so
 the manual clock never wraps or runs backwards. Every deadline —
@@ -288,20 +278,16 @@ the manual clock never wraps or runs backwards. Every deadline —
 instant on that one clock before registering any timer state; an instant the
 clock could never report is refused with `'overflow` instead of being
 registered, and the timer thread reconsiders its heap on every advance. Under a manual clock no wait, wake, or `clock.now` sample
-touches host time, so an embedding can drive sleeping programs to exact
+touches host time, so a test can drive sleeping programs to exact
 instants; a sleeping unit is never woken early, and one is never woken at all
 unless the clock reaches its deadline or it is cancelled. Evaluated code
 cannot advance a clock or discover which source it runs on beyond observing
 the readings.
 
-Wall-clock time is a grant, absent by default like process and filesystem
-authority. A host may withhold it (`clock.unix` raises `'domain` with reason
-`'unavailable`), fix it at one Unix millisecond value, anchor a base value to
-the monotonic clock so a manual clock yields a deterministic advancing wall
-time, or pass the process realtime clock through. The `ecl` command grants the
-process clock. Host I/O, a TLS verification timestamp, and every other
-capability confer no wall clock; nothing in the environment or ECL source can
-widen the grant.
+Wall-clock time always exists. `clock.unix` reads the process realtime clock.
+Internal tests may fix it at one Unix millisecond value or anchor a base value
+to the monotonic clock. These are deterministic inputs, independent of TLS
+verification time or permissions; they have no CLI options.
 
 Time zones, locale-sensitive formatting, leap-second tables, timers that run
 callbacks, and periodic scheduling are outside this contract. Process
@@ -321,7 +307,7 @@ hexadecimal characters.
 
 `archive.unpack-tgz` validates a gzip-compressed tar byte list and extracts it
 beneath a previously absent destination, a canonical relative path under a
-named `fs` root that grants `create`. It accepts ustar regular files and
+named `fs` root. It accepts ustar regular files and
 directories, per-entry PAX `path` and `size` records, and GNU long-name
 records. Other PAX fields may not alter a member's path, size, or kind. The
 result contains normalized regular-file paths in archive order and omits
@@ -347,8 +333,7 @@ receive an `'io` destination-exists error.
 
 A non-list byte container, non-symbol root, or non-string destination raises
 `'type`. A byte outside `0..255` raises `'domain` with its zero-based
-`'index`. A missing filesystem policy, unknown root, denied `create` grant, or
-non-canonical destination raises `'domain` with the `fs` failure data. Host or
+`'index`. An unknown root or non-canonical destination raises `'domain` with the `fs` failure data. Host or
 filesystem failures raise `'io` with the relevant `'path`. Failure exposes no
 partial destination and opens no member outside the staging root.
 
@@ -397,15 +382,21 @@ method is `'domain`.
 Connection refusal, TLS failure, invalid URLs, and protocol errors raise
 `'io` with the URL in `'path`. Every HTTP status is returned as response data.
 
-An embedder may supply a TLS trust override containing an absolute CA-file
+Internal tests may supply a TLS trust override containing an absolute CA-file
 path and a fixed verification timestamp. That configuration uses only the
 named CA file and timestamp. The default configuration uses system trust
 roots and the current time. ECL code and process environment variables cannot
 change the override.
 
-Each request occupies the calling unit's worker thread until completion. The
-worker count therefore bounds concurrent requests. Requests have no ECL-level
-deadline.
+Requests yield during network I/O, so unrelated tasks, timers, and servers in
+the same Session progress even with one worker. A Session admits at most 16 live
+requests by default and retains admission through response construction and
+cleanup. Each request has one total 30-second monotonic deadline, including
+redirects and construction; expiry raises `'timeout`. Finite transfer and backend
+scratch limits raise `'overflow` with the target URL. These internal Session
+limits are detailed in the standard-library HTTP contract. Task cancellation
+interrupts in-flight I/O, and Session teardown joins it before releasing TLS
+configuration.
 
 ## Projects and packages
 
@@ -423,13 +414,12 @@ working directory. The first directory containing `ecl.pkg` is the project
 root. Discovery stops at the filesystem root. `ecl.lock` is read only from
 the project root.
 
-An embedded session opts into discovery by supplying `Host.project_start`.
-The default embedded session has no project start path and reads no ambient
-project files.
+The CLI captures its absolute startup directory once and uses it for project
+discovery across scripts, expressions, stdin evaluation, the REPL, and `ecl test`.
 
 Discovery runs once per session. The resulting project, lock, and catalog
 state remains fixed for the lifetime of the session and all its units. A
-missing manifest, missing lock, or unavailable host filesystem produces an
+missing manifest or missing lock produces an
 absent project tier. An unreadable or invalid sibling lock is retained as a
 session error and is reported by the first non-embedded module lookup.
 
@@ -809,9 +799,9 @@ Process status is `0` on success, the status supplied to `exit`, `1` for a
 failed unit or command usage error, and `2` for out-of-memory.
 
 Every Session the command starts receives the working directory, resolved
-once at startup, as the `'cwd` filesystem root with every permission, and an
-unrestricted process policy anchored at the same directory. The two policies
-are independent grants.
+once at startup, as the `'cwd` filesystem root and the default child-process
+working directory. Filesystem, process, and network words are available
+without separate grants.
 
 The command reads these environment variables at startup:
 

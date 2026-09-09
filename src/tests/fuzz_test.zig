@@ -1,3 +1,4 @@
+const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const formatter = @import("../formatter.zig");
 const print = @import("../print.zig");
@@ -448,7 +449,8 @@ fn expectRedraw(
     const rendered = try std.testing.allocator.alloc(u8, expected.items.len + 1);
     defer std.testing.allocator.free(rendered);
     var writer = std.Io.Writer.fixed(rendered);
-    var sink = console.Console.init(&writer, null);
+    var diagnostics = std.Io.Writer.Discarding.init(&.{});
+    var sink = console.Console.init(&writer, &diagnostics.writer);
     try sink.redraw(@enumFromInt(columns), prompt, view);
     try std.testing.expectEqualSlices(u8, expected.items, writer.buffered());
 
@@ -708,7 +710,9 @@ fn expectCompletionInvariant(prefix: []const u8, items: []const []const u8) !voi
 }
 
 fn fuzzCompletionMutation(_: void, smith: *std.testing.Smith) !void {
-    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .cooperative);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
     defer runtime.deinit();
 
     var first_prefix_storage: [32]u8 = undefined;
@@ -862,7 +866,9 @@ fn fuzzSchedulerRuntime(_: void, smith: *std.testing.Smith) !void {
         "[] ((1) () while) @spawn dup task.cancel task.await pop",
         "[] (7) @spawn 'fuzz-task set fuzz-task task.await pop",
     };
-    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .cooperative);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
     defer runtime.deinit();
     var steps: usize = 0;
     while (steps < max_session_steps and !smith.eosWeightedSimple(7, 1)) : (steps += 1)

@@ -5,15 +5,11 @@
 //! external module gets no allocator, no network, and no state that outlives a
 //! yield. It is not exposed as an SDK capability.
 //!
-//! **The request blocks the calling unit's worker thread.** That is the one
-//! documented first-party v1 exception to the cooperative-scheduling rule: a
-//! `@each` over N urls at N workers runs at most N concurrent requests, and
-//! at one worker it serializes. There is also no request deadline in v1, so an
-//! unresponsive server occupies its worker until the host gives up. Both go
-//! away with the future `Offload` capability without changing the value-level
-//! API, which is why the response shape is fixed now: `{'status int,
-//! 'headers dict, 'body value}` leaks no backend detail.
+//! Exchanges run under Session-owned controller execution while this driver
+//! prepares and materializes values in bounded scheduler steps.
 const std = @import("std");
+const service = @import("../http_service.zig");
+const scheduler = @import("../scheduler.zig");
 const value = @import("../value.zig");
 const heap = @import("../heap.zig");
 const dict = @import("../dict.zig");
@@ -41,7 +37,8 @@ pub const words = [_]env.BuiltinWord{
             "sent to its value, keeping the last value of a repeated header, and 'body is the decoded text. A " ++
             "non-2xx status is an ordinary response, not an error.\n\n" ++
             "A transport or protocol failure, and a Session without network access, is 'io carrying the url in " ++
-            "'path. The request occupies the calling unit's worker until it completes; there is no deadline.",
+            "'path. Requests yield to other tasks and have a total 30-second deadline ('timeout). " ++
+            "Finite Session transfer and admission limits fail with 'overflow; no partial response is returned.",
         .primitive = get,
     },
     .{
@@ -71,9 +68,6 @@ pub const words = [_]env.BuiltinWord{
         .primitive = send,
     },
 };
-
-/// Response bodies are bounded by ordinary allocation in v1.
-const redirect_buffer_bytes: usize = 8 * 1024;
 
 fn get(evaluator: *Machine) MachineError!void {
     return begin(evaluator, .{ .method = .GET, .follow_redirects = true }, .text);
@@ -107,9 +101,14 @@ const RequestFields = struct {
 };
 
 fn begin(evaluator: *Machine, defaults: RequestDefaults, response_mode: ResponseMode) MachineError!void {
+    const access = evaluator.unit.inherited.runtime().http_access;
+    const deadline = worker(evaluator).deadlineAfter(access.limits().deadline_ms) catch
+        return evaluator.fail(.overflow, "HTTP deadline lies beyond the clock's range");
     var request = try evaluator.popValue();
     errdefer request.deinit();
     const fields = try requestFields(evaluator, request.borrow());
+    if (fields.method) |requested_method| if (requested_method.list.length() > 7)
+        return evaluator.fail(.domain, "unsupported HTTP request method");
     const method = defaults.method orelse required_method: {
         if (fields.method == null)
             return evaluator.typeError("a request with a string 'method");
@@ -118,18 +117,24 @@ fn begin(evaluator: *Machine, defaults: RequestDefaults, response_mode: Response
         // silently acquiring a transport-level default.
         break :required_method .GET;
     };
-    const target = fields.target orelse return evaluator.typeError("a request with a string 'target URL");
-    if (evaluator.unit.inherited.host_io == null) {
-        const failure = evaluator.fail(.io, "network access is unavailable");
-        evaluator.addErrorPath(target);
-        return failure;
-    }
+    _ = fields.target orelse return evaluator.typeError("a request with a string 'target URL");
+    const admitted = access.admit() catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Overflow => {
+            const failure = evaluator.fail(.overflow, "HTTP request capacity exhausted");
+            evaluator.addErrorPath(fields.target.?);
+            return failure;
+        },
+    };
+    errdefer _ = admitted.retire();
     try evaluator.startDriver(RequestDriver{
+        .admitted = admitted,
+        .limits = access.limits(),
+        .deadline = deadline,
         .allocator = evaluator.allocator(),
         .method = method,
         .follow_redirects = defaults.follow_redirects,
         .response_mode = response_mode,
-        .tls_trust = evaluator.unit.inherited.tls_trust,
         .request_value = .init(request.take()),
         .fields = fields,
         .state = .start,
@@ -171,12 +176,6 @@ fn requestFields(evaluator: *Machine, request: Value) MachineError!RequestFields
     return fields;
 }
 
-/// One owned name/value pair of bytes, on either side of the exchange.
-const Field = struct {
-    name: []u8,
-    value: []u8,
-};
-
 const RequestDriver = struct {
     pub const ownership: heap.DriverOwnership = .bounded_retirement;
     retirement: heap.ReleaseDomain.Retirement = .{},
@@ -184,22 +183,17 @@ const RequestDriver = struct {
     method: std.http.Method,
     follow_redirects: bool,
     response_mode: ResponseMode,
-    tls_trust: ?machine.TlsTrust,
+    admitted: *service.Request,
+    limits: service.Limits,
+    deadline: scheduler.Deadline,
+    request_header_bytes: usize = 0,
+    chunks: Chunks = .{},
     request_value: heap.Owned(Value),
     fields: RequestFields,
     state: State,
 
-    const RequestData = struct {
-        url: []u8,
-        body: ?kernel_storage.ByteVector = null,
-        fields: std.ArrayList(Field) = .empty,
-    };
-    const ExchangeData = struct {
-        request: RequestData,
-        status: u16 = 0,
-        fields: std.ArrayList(Field) = .empty,
-        body: std.ArrayList(u8) = .empty,
-    };
+    const RequestData = service.Input;
+    const ExchangeData = service.Response;
     const HeaderBuild = struct {
         exchange: ExchangeData,
         pairs: std.ArrayList(dict.Pair) = .empty,
@@ -209,11 +203,6 @@ const RequestDriver = struct {
         exchange: ExchangeData,
         headers: Value,
         body: Value,
-    };
-    const FinishKeys = struct {
-        status: u32,
-        headers: u32,
-        body: u32,
     };
     const State = union(enum) {
         start,
@@ -243,9 +232,12 @@ const RequestDriver = struct {
         },
         request_body: struct {
             request: RequestData,
-            encoder: kernel_storage.ByteVectorEncoder,
+            index: usize = 0,
         },
         exchange: ExchangeData,
+        running,
+        body_allocate: ExchangeData,
+        body_flatten: struct { exchange: ExchangeData, offset: usize = 0 },
         response_headers: HeaderBuild,
         response_header_name: struct {
             build: HeaderBuild,
@@ -277,17 +269,9 @@ const RequestDriver = struct {
             headers: Value,
             bytes: list.ByteListMaterializer,
         },
-        finish_status: Results,
-        finish_headers: struct { results: Results, status_key: u32 },
-        finish_body: struct { results: Results, status_key: u32, headers_key: u32 },
-        finish_allocate: struct { results: Results, keys: FinishKeys },
-        finish_dictionary_prepare: struct {
-            results: Results,
-            slots: []dict.Pair,
-        },
+        finish_response: Results,
         finish_dictionary: struct {
             results: Results,
-            slots: []dict.Pair,
             dictionary: dict.Materializer,
         },
         output: Results,
@@ -303,6 +287,12 @@ const RequestDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *RequestDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
+        if (self.deadline.reachedBy(worker(evaluator).now())) {
+            self.admitted.cancel();
+            const failure = evaluator.fail(.timeout, "HTTP request deadline expired");
+            evaluator.addErrorPath(self.fields.target.?);
+            return failure;
+        }
         switch (self.state) {
             .start => if (self.fields.params != null) {
                 self.state = .{ .params = 0 };
@@ -319,7 +309,7 @@ const RequestDriver = struct {
                     index.* += 1;
                 }
             },
-            .method => |*encoder| switch (try advanceEncoder(evaluator, encoder)) {
+            .method => |*encoder| switch (try self.advanceEncoder(evaluator, encoder)) {
                 .pending => {},
                 .complete => |bytes| {
                     encoder.deinit();
@@ -331,7 +321,7 @@ const RequestDriver = struct {
                     self.beginUrl();
                 },
             },
-            .url => |*encoder| switch (try advanceEncoder(evaluator, encoder)) {
+            .url => |*encoder| switch (try self.advanceEncoder(evaluator, encoder)) {
                 .pending => {},
                 .complete => |bytes| {
                     encoder.deinit();
@@ -341,16 +331,18 @@ const RequestDriver = struct {
                 },
             },
             .request_headers => |*headers| {
+                if (headers.request.fields.capacity == 0)
+                    try headers.request.fields.ensureTotalCapacityPrecise(self.allocator, self.limits.header_fields);
                 const header_value = self.fields.headers orelse {
                     const request = headers.request;
-                    self.beginBody(request);
+                    try self.beginBody(evaluator, request);
                     return .yielded;
                 };
                 const header_dict = header_value.dict;
                 const count: usize = @intCast(dict.keysOf(header_dict).list.length());
                 if (headers.index == count) {
                     const request = headers.request;
-                    self.beginBody(request);
+                    try self.beginBody(evaluator, request);
                 } else {
                     const key = dict.keyAt(header_dict, headers.index);
                     if (!key.isString())
@@ -362,6 +354,8 @@ const RequestDriver = struct {
                         headers.index += 1;
                         return .yielded;
                     }
+                    if (@as(usize, @intCast(values.list.length())) > self.limits.header_fields - headers.request.fields.items.len)
+                        return self.overflow(evaluator);
                     const request = headers.request;
                     const index = headers.index;
                     self.state = .{ .request_header_name = .{
@@ -372,7 +366,7 @@ const RequestDriver = struct {
                     } };
                 }
             },
-            .request_header_name => |*header| switch (try advanceEncoder(evaluator, &header.encoder)) {
+            .request_header_name => |*header| switch (try self.advanceEncoder(evaluator, &header.encoder)) {
                 .pending => {},
                 .complete => |name| {
                     for (name) |char| if (std.ascii.isUpper(char)) {
@@ -398,7 +392,7 @@ const RequestDriver = struct {
                     } };
                 },
             },
-            .request_header_value => |*header| switch (try advanceEncoder(evaluator, &header.encoder)) {
+            .request_header_value => |*header| switch (try self.advanceEncoder(evaluator, &header.encoder)) {
                 .pending => {},
                 .complete => |value_bytes| {
                     header.encoder.deinit();
@@ -416,7 +410,10 @@ const RequestDriver = struct {
                 },
             },
             .request_header_append => |*header| {
-                try header.request.fields.append(self.allocator, .{
+                const count = header.name.len + header.value.len + 4;
+                if (count > self.limits.header_bytes - self.request_header_bytes) return self.overflow(evaluator);
+                self.request_header_bytes += count;
+                header.request.fields.appendAssumeCapacity(.{
                     .name = header.name,
                     .value = header.value,
                 });
@@ -438,30 +435,85 @@ const RequestDriver = struct {
                     } };
                 }
             },
-            .request_body => |*body| switch (body.encoder.advance(machine.kernel_poll_quantum) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.InvalidByte => return evaluator.typeError(
-                    "request 'body values to be integers from 0 through 255",
-                ),
-            }) {
-                .pending => {},
-                .complete => |bytes| {
-                    body.encoder.deinit();
-                    var request = body.request;
-                    request.body = bytes;
+            .request_body => |*body| {
+                const output = body.request.body.?;
+                const end = @min(output.len, body.index + machine.kernel_poll_quantum);
+                while (body.index < end) : (body.index += 1) {
+                    const item = list.atUnchecked(self.fields.body.?, body.index);
+                    if (item != .int or item.int < 0 or item.int > 255)
+                        return evaluator.typeError("request 'body values to be integers from 0 through 255");
+                    output[body.index] = @intCast(item.int);
+                }
+                if (body.index == output.len) {
+                    const request = body.request;
                     self.state = .{ .exchange = .{ .request = request } };
-                },
+                }
             },
             .exchange => |*exchange_state| {
-                try self.exchange(evaluator, exchange_state);
-                const exchange_data = exchange_state.*;
-                self.state = .{ .response_headers = .{ .exchange = exchange_data } };
+                const input = exchange_state.request;
+                self.state = .running;
+                self.admitted.start(input, self.method, self.follow_redirects, @ptrCast(@alignCast(evaluator.unit.task_scope.?))) catch |err| return switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    error.ScopeClosing => evaluator.fail(.cancelled, "HTTP scope is closing"),
+                    else => self.failIo(evaluator, input.url, @errorName(err)),
+                };
+            },
+            .running => {
+                // Drain before waiting for completion: a full pipe is host
+                // backpressure, never a reason to wait for the producer to join.
+                const chunk = try self.chunks.writable(self.allocator);
+                switch (self.admitted.pipe().read(chunk.bytes[chunk.len..])) {
+                    .data => |count| {
+                        chunk.len += count;
+                        self.chunks.len += count;
+                    },
+                    .failed => |failure| return self.failResult(evaluator, failure),
+                    .pending => try evaluator.park(.{ .external_until = .{
+                        .source = self.admitted.pipe().readSource(),
+                        .deadline = self.deadline,
+                    } }),
+                    .eof => switch (self.admitted.result()) {
+                        .pending => try evaluator.park(.{ .external_until = .{ .source = self.admitted.source(), .deadline = self.deadline } }),
+                        .failed => |failure| return self.failResult(evaluator, failure),
+                        .complete => {
+                            const response = self.admitted.take();
+                            self.state = .{ .body_allocate = response };
+                        },
+                    },
+                }
+            },
+            .body_allocate => |*exchange_data| {
+                const bytes = try self.allocator.alloc(u8, self.chunks.len);
+                exchange_data.body = .{ .items = bytes, .capacity = bytes.len };
+                const exchange = exchange_data.*;
+                self.state = .{ .body_flatten = .{ .exchange = exchange } };
+            },
+            .body_flatten => |*flatten| {
+                if (self.chunks.first) |chunk| {
+                    @memcpy(flatten.exchange.body.items[flatten.offset..][0..chunk.len], chunk.bytes[0..chunk.len]);
+                    flatten.offset += chunk.len;
+                    self.chunks.pop(self.allocator);
+                } else {
+                    const exchange = flatten.exchange;
+                    self.state = .{ .response_headers = .{ .exchange = exchange } };
+                }
             },
             .response_headers => |*headers| {
+                if (headers.pairs.capacity == 0)
+                    try headers.pairs.ensureTotalCapacityPrecise(self.allocator, headers.exchange.fields.items.len);
                 if (headers.index == headers.exchange.fields.items.len) {
                     const moved = headers.*;
                     self.state = .{ .headers_dictionary_prepare = moved };
                 } else {
+                    const fields = headers.exchange.fields.items;
+                    // The total encoded header budget bounds this comparison
+                    // pass even when every occurrence repeats the same name.
+                    for (fields[headers.index + 1 ..]) |later| {
+                        if (std.ascii.eqlIgnoreCase(fields[headers.index].name, later.name)) {
+                            headers.index += 1;
+                            return .yielded;
+                        }
+                    }
                     const moved = headers.*;
                     self.state = .{ .response_header_name = .{
                         .build = moved,
@@ -495,7 +547,7 @@ const RequestDriver = struct {
                 },
             },
             .response_header_append => |*header| {
-                try header.build.pairs.append(self.allocator, .{ header.key, header.value });
+                header.build.pairs.appendAssumeCapacity(.{ header.key, header.value });
                 var build = header.build;
                 build.index += 1;
                 self.state = .{ .response_headers = build };
@@ -552,7 +604,7 @@ const RequestDriver = struct {
                     body.text.deinit();
                     const exchange_data = body.exchange;
                     const headers = body.headers;
-                    self.state = .{ .finish_status = .{
+                    self.state = .{ .finish_response = .{
                         .exchange = exchange_data,
                         .headers = headers,
                         .body = built,
@@ -565,65 +617,26 @@ const RequestDriver = struct {
                     body.bytes.deinit();
                     const exchange_data = body.exchange;
                     const headers = body.headers;
-                    self.state = .{ .finish_status = .{
+                    self.state = .{ .finish_response = .{
                         .exchange = exchange_data,
                         .headers = headers,
                         .body = built,
                     } };
                 },
             },
-            .finish_status => |*results| {
+            .finish_response => |*results| {
                 const status_key = try intern.intern("status");
-                const moved = results.*;
-                self.state = .{ .finish_headers = .{ .results = moved, .status_key = status_key } };
-            },
-            .finish_headers => |*finish| {
                 const headers_key = try intern.intern("headers");
-                const results = finish.results;
-                const status_key = finish.status_key;
-                self.state = .{ .finish_body = .{
-                    .results = results,
-                    .status_key = status_key,
-                    .headers_key = headers_key,
-                } };
-            },
-            .finish_body => |*finish| {
                 const body_key = try intern.intern("body");
-                const results = finish.results;
-                self.state = .{ .finish_allocate = .{
-                    .results = results,
-                    .keys = .{
-                        .status = finish.status_key,
-                        .headers = finish.headers_key,
-                        .body = body_key,
-                    },
-                } };
-            },
-            .finish_allocate => |*finish| {
-                const slots = try self.allocator.alloc(dict.Pair, 3);
-                slots[0] = .{
-                    .{ .symbol = finish.keys.status },
-                    .{ .int = @intCast(finish.results.exchange.status) },
+                const slots = [_]dict.Pair{
+                    .{ .{ .symbol = status_key }, .{ .int = @intCast(results.exchange.status) } },
+                    .{ .{ .symbol = headers_key }, results.headers },
+                    .{ .{ .symbol = body_key }, results.body },
                 };
-                slots[1] = .{ .{ .symbol = finish.keys.headers }, finish.results.headers };
-                slots[2] = .{ .{ .symbol = finish.keys.body }, finish.results.body };
-                const results = finish.results;
-                self.state = .{ .finish_dictionary_prepare = .{
-                    .results = results,
-                    .slots = slots,
-                } };
-            },
-            .finish_dictionary_prepare => |*finish| {
-                const dictionary = try dict.Materializer.init(
-                    self.allocator,
-                    finish.slots,
-                    true,
-                );
-                const results = finish.results;
-                const slots = finish.slots;
+                const dictionary = try dict.Materializer.init(self.allocator, &slots, true);
+                const moved = results.*;
                 self.state = .{ .finish_dictionary = .{
-                    .results = results,
-                    .slots = slots,
+                    .results = moved,
                     .dictionary = dictionary,
                 } };
             },
@@ -632,9 +645,12 @@ const RequestDriver = struct {
                 .duplicate_key => return evaluator.fail(.domain, "http response keys collided"),
                 .complete => |built| {
                     finish.dictionary.deinit();
-                    self.allocator.free(finish.slots);
                     const results = finish.results;
                     self.state = .{ .output = results };
+                    if (self.deadline.reachedBy(worker(evaluator).now())) {
+                        evaluator.releaseDomain().releaseValue(built);
+                        return evaluator.fail(.timeout, "HTTP request deadline expired");
+                    }
                     return .{ .output = built };
                 },
             },
@@ -662,20 +678,48 @@ const RequestDriver = struct {
         self.state = .{ .url = .init(self.allocator, self.fields.target.?) };
     }
 
-    fn beginBody(self: *RequestDriver, request: RequestData) void {
+    fn beginBody(self: *RequestDriver, evaluator: *Machine, input: RequestData) MachineError!void {
+        var request = input;
         if (self.fields.body) |body| {
-            self.state = .{ .request_body = .{
-                .request = request,
-                .encoder = .init(self.allocator, body),
-            } };
+            const count: usize = @intCast(body.list.length());
+            if (count > self.limits.outbound_bytes) return self.overflow(evaluator);
+            if (count != 0 and !self.method.requestHasBody())
+                return evaluator.fail(.domain, "HTTP request method does not admit a body");
+            request.body = try self.allocator.alloc(u8, count);
+            self.state = .{ .request_body = .{ .request = request } };
         } else self.state = .{ .exchange = .{ .request = request } };
     }
 
+    fn overflow(self: *RequestDriver, evaluator: *Machine) MachineError {
+        const failure = evaluator.fail(.overflow, "HTTP transfer limit exceeded");
+        evaluator.addErrorPath(self.fields.target.?);
+        return failure;
+    }
+
+    fn failResult(self: *RequestDriver, evaluator: *Machine, failure: service.Failure) MachineError {
+        return switch (failure) {
+            .out_of_memory => error.OutOfMemory,
+            .report => |report| blk: {
+                if (report.kind == .io) break :blk self.failIo(evaluator, self.admitted.target(), report.message[0..report.len]);
+                const result = evaluator.fail(report.kind, report.message[0..report.len]);
+                evaluator.addErrorPath(self.fields.target.?);
+                break :blk result;
+            },
+        };
+    }
+
     fn advanceEncoder(
+        self: *RequestDriver,
         evaluator: *Machine,
         encoder: *kernel_storage.StringEncoder,
     ) MachineError!kernel_storage.StringEncodeResult {
-        return encoder.advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+        const limit = switch (self.state) {
+            .method => 28,
+            .url => self.limits.target_bytes,
+            else => self.limits.header_bytes - self.request_header_bytes,
+        };
+        return encoder.advanceLimited(machine.kernel_poll_quantum, limit) catch |err| switch (err) {
+            error.Overflow => return self.overflow(evaluator),
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return evaluator.fail(
                 .domain,
@@ -697,119 +741,6 @@ const RequestDriver = struct {
         );
         evaluator.addErrorPath(self.fields.target.?);
         return failure;
-    }
-
-    /// The whole exchange in one scheduler step: this is the documented
-    /// blocking exception. Response headers are copied before the body stream
-    /// is initialized, because that invalidates them.
-    fn exchange(
-        self: *RequestDriver,
-        evaluator: *Machine,
-        exchange_data: *ExchangeData,
-    ) MachineError!void {
-        const io = evaluator.unit.inherited.host_io.?;
-        const uri = std.Uri.parse(exchange_data.request.url) catch
-            return self.failIo(evaluator, exchange_data.request.url, "InvalidUrl");
-        const extra = try self.allocator.alloc(std.http.Header, exchange_data.request.fields.items.len);
-        defer self.allocator.free(extra);
-        for (exchange_data.request.fields.items, extra) |field, *header|
-            header.* = .{ .name = field.name, .value = field.value };
-
-        var client: std.http.Client = .{ .allocator = self.allocator, .io = io };
-        defer client.deinit();
-        if (self.tls_trust) |trust| {
-            client.now = trust.now;
-            client.ca_bundle.addCertsFromFilePathAbsolute(
-                self.allocator,
-                io,
-                trust.now,
-                trust.ca_file,
-            ) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return self.failIo(evaluator, exchange_data.request.url, @errorName(err)),
-            };
-        }
-        const sends_body = self.method.requestHasBody();
-        if (!sends_body) if (exchange_data.request.body) |*body| {
-            if (body.bytes().len != 0)
-                return evaluator.fail(.domain, "HTTP request method does not admit a body");
-        };
-        var request = client.request(self.method, uri, .{
-            .redirect_behavior = if (self.follow_redirects and !sends_body) @enumFromInt(3) else .unhandled,
-            .extra_headers = extra,
-        }) catch |err| return self.failIo(evaluator, exchange_data.request.url, @errorName(err));
-        defer request.deinit();
-
-        if (sends_body) {
-            const payload = if (exchange_data.request.body) |*body| body.bytes() else &.{};
-            request.transfer_encoding = .{ .content_length = payload.len };
-            var body = request.sendBodyUnflushed(&.{}) catch |err|
-                return self.failIo(evaluator, exchange_data.request.url, @errorName(err));
-            body.writer.writeAll(payload) catch |err|
-                return self.failIo(evaluator, exchange_data.request.url, @errorName(err));
-            body.end() catch |err| return self.failIo(evaluator, exchange_data.request.url, @errorName(err));
-            request.connection.?.flush() catch |err|
-                return self.failIo(evaluator, exchange_data.request.url, @errorName(err));
-        } else request.sendBodiless() catch |err|
-            return self.failIo(evaluator, exchange_data.request.url, @errorName(err));
-
-        const redirect_buffer = try self.allocator.alloc(u8, redirect_buffer_bytes);
-        defer self.allocator.free(redirect_buffer);
-        var response = request.receiveHead(redirect_buffer) catch |err|
-            return self.failIo(evaluator, exchange_data.request.url, @errorName(err));
-        exchange_data.status = @intFromEnum(response.head.status);
-
-        var iterator = response.head.iterateHeaders();
-        while (iterator.next()) |header| {
-            const name = try self.allocator.dupe(u8, header.name);
-            errdefer self.allocator.free(name);
-            const item = try self.allocator.dupe(u8, header.value);
-            errdefer self.allocator.free(item);
-            // HTTP field names are case-insensitive and repeated fields are
-            // legal. The value-level API exposes a dict, so retain the last
-            // occurrence under its spelling instead of asking the dict
-            // materializer to reject a duplicate.
-            for (exchange_data.fields.items) |*field| {
-                if (std.ascii.eqlIgnoreCase(field.name, name)) {
-                    self.allocator.free(field.name);
-                    self.allocator.free(field.value);
-                    field.* = .{ .name = name, .value = item };
-                    break;
-                }
-            } else try exchange_data.fields.append(
-                self.allocator,
-                .{ .name = name, .value = item },
-            );
-        }
-
-        const decompress_bytes: usize = switch (response.head.content_encoding) {
-            .identity => 0,
-            .zstd => std.compress.zstd.default_window_len,
-            .deflate, .gzip => std.compress.flate.max_window_len,
-            .compress => return self.failIo(
-                evaluator,
-                exchange_data.request.url,
-                "UnsupportedCompressionMethod",
-            ),
-        };
-        const decompress_buffer = try self.allocator.alloc(u8, decompress_bytes);
-        defer self.allocator.free(decompress_buffer);
-        // SAFETY: the decompressor writes this scratch before any read of it.
-        var transfer_buffer: [64]u8 = undefined;
-        // SAFETY: initialized by readerDecompressing before any use.
-        var decompress: std.http.Decompress = undefined;
-        const reader = response.readerDecompressing(
-            &transfer_buffer,
-            &decompress,
-            decompress_buffer,
-        );
-        var collected = std.Io.Writer.Allocating.init(self.allocator);
-        defer collected.deinit();
-        _ = reader.streamRemaining(&collected.writer) catch
-            return self.failIo(evaluator, exchange_data.request.url, "ReadFailed");
-        exchange_data.body.deinit(self.allocator);
-        exchange_data.body = .empty;
-        try exchange_data.body.appendSlice(self.allocator, collected.written());
     }
 
     fn beginRetirement(self: *RequestDriver, releases: *heap.ReleaseDomain) void {
@@ -845,11 +776,15 @@ const RequestDriver = struct {
                 self.state = .{ .cleanup_request = request };
             },
             .request_body => |*body| {
-                body.encoder.deinit();
                 const request = body.request;
                 self.state = .{ .cleanup_request = request };
             },
-            .exchange => |*exchange_data| {
+            .running => self.state = .cleanup_request_value,
+            .body_flatten => |*flatten| {
+                const exchange = flatten.exchange;
+                self.state = .{ .cleanup_exchange = exchange };
+            },
+            .exchange, .body_allocate => |*exchange_data| {
                 const moved = exchange_data.*;
                 self.state = .{ .cleanup_exchange = moved };
             },
@@ -895,17 +830,9 @@ const RequestDriver = struct {
                     .headers = headers,
                 } };
             },
-            .finish_status => |*results| self.beginResultsCleanup(results),
-            .finish_headers => |*finish| self.beginResultsCleanup(&finish.results),
-            .finish_body => |*finish| self.beginResultsCleanup(&finish.results),
-            .finish_allocate => |*finish| self.beginResultsCleanup(&finish.results),
-            .finish_dictionary_prepare => |*finish| {
-                self.allocator.free(finish.slots);
-                self.beginResultsCleanup(&finish.results);
-            },
+            .finish_response => |*results| self.beginResultsCleanup(results),
             .finish_dictionary => |*finish| {
                 finish.dictionary.retire(releases);
-                self.allocator.free(finish.slots);
                 self.beginResultsCleanup(&finish.results);
             },
             .output => |*results| self.beginResultsCleanup(results),
@@ -936,6 +863,7 @@ const RequestDriver = struct {
         storage_allocator: std.mem.Allocator,
         self: *RequestDriver,
     ) bool {
+        self.admitted.cancel();
         return switch (self.state) {
             .start,
             .params,
@@ -947,6 +875,9 @@ const RequestDriver = struct {
             .request_header_append,
             .request_body,
             .exchange,
+            .running,
+            .body_allocate,
+            .body_flatten,
             .response_headers,
             .response_header_name,
             .response_header_value,
@@ -956,11 +887,7 @@ const RequestDriver = struct {
             .release_header_pairs,
             .response_body_text,
             .response_body_bytes,
-            .finish_status,
-            .finish_headers,
-            .finish_body,
-            .finish_allocate,
-            .finish_dictionary_prepare,
+            .finish_response,
             .finish_dictionary,
             .output,
             => result: {
@@ -1001,26 +928,12 @@ const RequestDriver = struct {
                 break :result false;
             },
             .cleanup_exchange => |*cleanup| result: {
-                if (cleanup.fields.pop()) |field| {
-                    self.allocator.free(field.name);
-                    self.allocator.free(field.value);
-                    break :result false;
-                }
-                cleanup.fields.deinit(self.allocator);
-                cleanup.body.deinit(self.allocator);
-                const request = cleanup.request;
-                self.state = .{ .cleanup_request = request };
+                if (!cleanup.retire(self.allocator)) break :result false;
+                self.state = .cleanup_request_value;
                 break :result false;
             },
             .cleanup_request => |*cleanup| result: {
-                if (cleanup.fields.pop()) |field| {
-                    self.allocator.free(field.name);
-                    self.allocator.free(field.value);
-                    break :result false;
-                }
-                cleanup.fields.deinit(self.allocator);
-                if (cleanup.body) |*body| body.retire(releases, self.allocator);
-                self.allocator.free(cleanup.url);
+                if (!cleanup.retire(self.allocator)) break :result false;
                 self.state = .cleanup_request_value;
                 break :result false;
             },
@@ -1030,9 +943,42 @@ const RequestDriver = struct {
                 break :result false;
             },
             .cleanup_destroy => {
+                if (self.chunks.first != null) {
+                    self.chunks.pop(self.allocator);
+                    return false;
+                }
+                if (!self.admitted.retire()) return false;
                 storage_allocator.destroy(self);
                 return true;
             },
         };
     }
 };
+
+/// Unknown-length bodies retain fixed chunks until one exact-size, polled
+/// materialization. Each removal is one bounded retirement step.
+const Chunks = struct {
+    const Chunk = struct { next: ?*Chunk = null, len: usize = 0, bytes: [16 * 1024]u8 };
+    first: ?*Chunk = null,
+    last: ?*Chunk = null,
+    len: usize = 0,
+    fn writable(self: *Chunks, allocator: std.mem.Allocator) !*Chunk {
+        if (self.last) |last| if (last.len < last.bytes.len) return last;
+        const chunk = try allocator.create(Chunk);
+        // SAFETY: readers see only bytes below len, initialized by pipe.read.
+        chunk.* = .{ .bytes = undefined };
+        if (self.last) |last| last.next = chunk else self.first = chunk;
+        self.last = chunk;
+        return chunk;
+    }
+    fn pop(self: *Chunks, allocator: std.mem.Allocator) void {
+        const chunk = self.first.?;
+        self.first = chunk.next;
+        if (self.first == null) self.last = null;
+        allocator.destroy(chunk);
+    }
+};
+
+fn worker(evaluator: *Machine) *const scheduler.WorkerScheduler {
+    return @ptrCast(@alignCast(evaluator.unit.scheduler.?));
+}

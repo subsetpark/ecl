@@ -1,4 +1,5 @@
 //! Public Session coverage for the process-port capability.
+const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const fixture = @import("process_fixture_options");
 const process = @import("../process_port.zig");
@@ -12,28 +13,25 @@ fn source(comptime template: []const u8, arguments: anytype) ![]u8 {
     return std.fmt.allocPrint(allocator, template, arguments);
 }
 
-fn expectStack(program: []const u8, policy: ?process.ProcessPolicy, expected: []const u8) !void {
-    return expectStackWithWorkers(program, policy, expected, 2);
+fn expectStack(program: []const u8, limits: process.Limits, expected: []const u8) !void {
+    return expectStackWithWorkers(program, limits, expected, 2);
 }
 
-fn expectStackWithWorkers(program: []const u8, policy: ?process.ProcessPolicy, expected: []const u8, workers: u32) !void {
+fn expectStackWithWorkers(program: []const u8, limits: process.Limits, expected: []const u8, workers: u32) !void {
     var heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&heap);
     var output_buffer: [256]u8 = undefined;
     var output = std.Io.Writer.Discarding.init(&output_buffer);
     var diagnostics_buffer: [256]u8 = undefined;
     var diagnostics = std.Io.Writer.Discarding.init(&diagnostics_buffer);
-    var runtime = try session.Session.initWithHostConfig(
-        heap.allocator(),
-        &.{},
-        .{
-            .io = std.testing.io,
-            .output = &output.writer,
-            .diagnostics = &diagnostics.writer,
-            .process_policy = policy,
-        },
-        .{ .worker_pool = workers },
-    );
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .process_limits = limits,
+    }), .{ .worker_pool = workers }, .evaluate);
     defer runtime.deinit();
     switch (try runtime.runUnit("<process-test>", program)) {
         .ok => {},
@@ -51,24 +49,21 @@ fn expectStackWithWorkers(program: []const u8, policy: ?process.ProcessPolicy, e
     try std.testing.expectEqualStrings(expected, display.bytes());
 }
 
-fn expectError(program: []const u8, policy: ?process.ProcessPolicy, expected: support.ErrorCase) !void {
+fn expectError(program: []const u8, limits: process.Limits, expected: support.ErrorCase) !void {
     var heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&heap);
     var output_buffer: [256]u8 = undefined;
     var output = std.Io.Writer.Discarding.init(&output_buffer);
     var diagnostics_buffer: [256]u8 = undefined;
     var diagnostics = std.Io.Writer.Discarding.init(&diagnostics_buffer);
-    var runtime = try session.Session.initWithHostConfig(
-        heap.allocator(),
-        &.{},
-        .{
-            .io = std.testing.io,
-            .output = &output.writer,
-            .diagnostics = &diagnostics.writer,
-            .process_policy = policy,
-        },
-        .cooperative,
-    );
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .process_limits = limits,
+    }), .cooperative, .evaluate);
     defer runtime.deinit();
     const failure = switch (try runtime.runUnit("<process-test>", program)) {
         .ok, .incomplete => return error.ExpectedLanguageError,
@@ -76,30 +71,6 @@ fn expectError(program: []const u8, policy: ?process.ProcessPolicy, expected: su
     };
     defer runtime.release(failure);
     try support.expectLanguageError(failure, expected);
-}
-
-test "process: authority is explicit and policy validation precedes spawn" {
-    const fixture_path = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, fixture.process_exe, allocator);
-    defer allocator.free(fixture_path);
-    const program = try source(
-        "'proc ('spawn) import {{'executable \"{s}\" 'args (\"exit\" \"0\")}} spawn",
-        .{fixture_path},
-    );
-    defer allocator.free(program);
-    try expectError(program, null, .{
-        .name = "missing process authority",
-        .source = program,
-        .kind = "domain",
-        .word = "port.core.open",
-        .message_contains = "unavailable",
-    });
-    try expectError(program, .{ .executables = .{ .exact = &.{"/definitely/not/the/fixture"} } }, .{
-        .name = "denied executable",
-        .source = program,
-        .kind = "domain",
-        .word = "port.core.open",
-        .message_contains = "denied",
-    });
 }
 
 test "process: port values are opaque identity capabilities" {
@@ -113,16 +84,16 @@ test "process: port values are opaque identity capabilities" {
     defer allocator.free(program);
     try expectStack(
         program,
-        .{ .executables = .{ .exact = &.{fixture_path} } },
+        .{},
         "'port 1 {'kind 'exited 'code 0}",
     );
 }
 
-test "process: registered factories preserve identity and reject unavailable authority" {
-    try expectStack("proc.core.process dup type swap proc.core.process match?", null, "'port 1");
+test "process: registered factories preserve identity and validate input" {
+    try expectStack("proc.core.process dup type swap proc.core.process match?", .{}, "'port 1");
     try expectStack("[] (proc.core.process {} port.open) @attempt 'err at 'kind at " ++
         "[] (proc.core.process (dup) port.open) @attempt 'err at 'kind at " ++
-        "[] (proc.core.process [0] 4097 take port.open) @attempt 'err at 'kind at", null, "'domain 'type 'overflow");
+        "[] (proc.core.process [0] 4097 take port.open) @attempt 'err at 'kind at", .{}, "'domain 'type 'overflow");
 }
 
 test "process: common factories preserve byte streams and repeatable termination" {
@@ -137,7 +108,6 @@ test "process: common factories preserve byte streams and repeatable termination
     );
     defer allocator.free(program);
     for ([_]u32{ 1, 8 }) |workers| try expectStackWithWorkers(program, .{
-        .executables = .{ .exact = &.{fixture_path} },
         .stdin_capacity = 1,
         .stdout_capacity = 1,
     }, "[0] [1] [255] 0 0 'port", workers);
@@ -155,7 +125,6 @@ test "process: common factories preserve unicode arguments environment and worki
     );
     defer allocator.free(program);
     for ([_]u32{ 1, 8 }) |workers| try expectStackWithWorkers(program, .{
-        .executables = .{ .exact = &.{fixture_path} },
         .stdout_capacity = 1,
     }, "1 [] 0", workers);
 }
@@ -171,7 +140,7 @@ test "process: common factories reject malformed fields before publishing a reso
         .{ fixture_path, fixture_path, fixture_path, fixture_path },
     );
     defer allocator.free(program);
-    try expectStack(program, .{ .executables = .{ .exact = &.{fixture_path} }, .max_live_ports = 1 }, "'type 'type 'domain 0");
+    try expectStack(program, .{ .max_live_ports = 1 }, "'type 'type 'domain 0");
 }
 
 test "process: common factories transfer owners and clean resources returned by closed scopes" {
@@ -186,7 +155,6 @@ test "process: common factories transfer owners and clean resources returned by 
     );
     defer allocator.free(program);
     for ([_]u32{ 1, 8 }) |workers| try expectStackWithWorkers(program, .{
-        .executables = .{ .exact = &.{fixture_path} },
         .max_live_ports = 1,
     }, "0 'io 'port 'io", workers);
 }
@@ -205,7 +173,6 @@ test "process: common endpoints stream concurrently through one-byte buffers" {
     );
     defer allocator.free(program);
     for ([_]u32{ 1, 8 }) |workers| try expectStackWithWorkers(program, .{
-        .executables = .{ .exact = &.{fixture_path} },
         .stdin_capacity = 1,
         .stdout_capacity = 1,
         .stderr_capacity = 1,
@@ -224,7 +191,6 @@ test "process: common selectors borrow process resources and separate output fro
     );
     defer allocator.free(program);
     for ([_]u32{ 1, 8 }) |workers| try expectStackWithWorkers(program, .{
-        .executables = .{ .exact = &.{fixture_path} },
         .stdout_capacity = 1,
         .stderr_capacity = 1,
     }, "\"abcd\" \"wxyz\" 0", workers);
@@ -247,9 +213,7 @@ test "process: common and domain readers share exclusion and cancellation restor
         .{fixture_path},
     );
     defer allocator.free(program);
-    for ([_]u32{ 1, 8 }) |workers| try expectStackWithWorkers(program, .{
-        .executables = .{ .exact = &.{fixture_path} },
-    }, "'contract [9] 'type 'type 'type 'domain 0 'port", workers);
+    for ([_]u32{ 1, 8 }) |workers| try expectStackWithWorkers(program, .{}, "'contract [9] 'type 'type 'type 'domain 0 'port", workers);
 }
 
 test "process: endpoint selectors reject wrong capability variants" {
@@ -257,7 +221,7 @@ test "process: endpoint selectors reject wrong capability variants" {
         "[] (proc.core.process proc.core.stdout port.endpoint) @attempt 'err at 'kind at " ++
         "[] (net.core.listener proc.core.stdin port.endpoint) @attempt 'err at 'kind at " ++
         "[] (0 proc.core.process port.endpoint) @attempt 'err at 'kind at " ++
-        "[] (proc.core.stdin {} port.open) @attempt 'err at 'kind at", null, "1 'type 'type 'type 'type");
+        "[] (proc.core.stdin {} port.open) @attempt 'err at 'kind at", .{}, "1 'type 'type 'type 'type");
 }
 
 test "process: shared port operations linearize and converge" {
@@ -273,7 +237,7 @@ test "process: shared port operations linearize and converge" {
     defer allocator.free(program);
     try expectStack(
         program,
-        .{ .executables = .{ .exact = &.{fixture_path} } },
+        .{},
         "[0 1 255 2 3] {'kind 'exited 'code 0}",
     );
 }
@@ -292,7 +256,6 @@ test "process: stream reads bound storage by the selected pipe capacity" {
     try expectStack(
         program,
         .{
-            .executables = .{ .exact = &.{fixture_path} },
             .stdout_capacity = 4,
             .stderr_capacity = 4,
         },
@@ -313,7 +276,6 @@ test "process: common shutdown and close join cleanup and reject new operations"
             );
             defer allocator.free(program);
             try expectStackWithWorkers(program, .{
-                .executables = .{ .exact = &.{fixture_path} },
                 .stdin_capacity = 1,
                 .stdout_capacity = 1,
                 .stderr_capacity = 1,
@@ -332,7 +294,6 @@ test "process: common close joins a producer with full output rings" {
     );
     defer allocator.free(program);
     for ([_]u32{ 1, 8 }) |workers| try expectStackWithWorkers(program, .{
-        .executables = .{ .exact = &.{fixture_path} },
         .stdout_capacity = 1,
         .stderr_capacity = 1,
     }, "'port 'io", workers);
@@ -356,7 +317,6 @@ test "process: registered operations recover the wait lane and preserve result c
     );
     defer allocator.free(program);
     for ([_]u32{ 1, 8 }) |workers| try expectStackWithWorkers(program, .{
-        .executables = .{ .exact = &.{fixture_path} },
         .stdout_capacity = 1,
         .stderr_capacity = 1,
         .max_stdout_capture = 4,
@@ -376,7 +336,7 @@ test "process: registered operations reject requests before affecting the proces
         .{fixture_path},
     );
     defer allocator.free(program);
-    try expectStack(program, .{ .executables = .{ .exact = &.{fixture_path} }, .stdout_capacity = 1 }, "'domain [97] 0 'io");
+    try expectStack(program, .{ .stdout_capacity = 1 }, "'domain [97] 0 'io");
 }
 
 test "process: run composes concurrent bounded capture and deadlines" {
@@ -392,7 +352,6 @@ test "process: run composes concurrent bounded capture and deadlines" {
     );
     defer allocator.free(program);
     for ([_]u32{ 1, 8 }) |workers| try expectStackWithWorkers(program, .{
-        .executables = .{ .exact = &.{fixture_path} },
         .stdin_capacity = 1,
         .stdout_capacity = 1,
         .stderr_capacity = 1,
@@ -412,9 +371,54 @@ test "process: wait observes broken input after the final accepted write" {
     );
     defer allocator.free(program);
     for ([_]u32{ 1, 8 }) |workers| try expectStackWithWorkers(program, .{
-        .executables = .{ .exact = &.{fixture_path} },
         .stdin_capacity = 1,
         .stdout_capacity = 1,
         .stderr_capacity = 1,
     }, "[33] 'io", workers);
+}
+
+test "process: Sessions share captured values with children and isolate overrides" {
+    const fixture_path = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, fixture.process_exe, allocator);
+    defer allocator.free(fixture_path);
+    var heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&heap);
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    var captured = "first".*;
+    const entries = [_]@import("../startup_environment.zig").EnvironmentEntry{
+        .{ .name = "ECL_PROCESS_PROBE", .value = &captured },
+    };
+    var first = try session.Session.init(heap.allocator(), &.{}, inputs.inputs(.{ .environ = &entries }), .{ .worker_pool = 2 }, .evaluate);
+    defer first.deinit();
+    @memcpy(&captured, "later");
+    var second = try session.Session.init(heap.allocator(), &.{}, inputs.inputs(.{ .environ = &entries }), .{ .worker_pool = 2 }, .evaluate);
+    defer second.deinit();
+    @memcpy(&captured, "other");
+    const program = try source(
+        "\"ECL_PROCESS_PROBE\" getenv " ++
+            "[] (\"ECL_PROCESS_PROBE\" getenv) @spawn task.await 'ok at first " ++
+            "{{'executable \"{s}\" 'args (\"inspect\") 'cwd \"/\"}} proc.run 'stdout at chars " ++
+            "{{'executable \"{s}\" 'args (\"inspect\") 'cwd \"/\" 'env {{\"ECL_PROCESS_PROBE\" \"child\"}}}} proc.run 'stdout at chars " ++
+            "\"ECL_PROCESS_PROBE\" getenv",
+        .{ fixture_path, fixture_path },
+    );
+    defer allocator.free(program);
+    for ([_]*session.Session{ &first, &second }, [_][]const u8{ "first", "later" }) |runtime, expected| {
+        switch (try runtime.runUnit("<captured-environment>", program)) {
+            .ok => {},
+            .incomplete => return error.UnexpectedIncomplete,
+            .err => |failure| {
+                defer runtime.release(failure);
+                var rendered = try runtime.renderValue(failure);
+                defer rendered.deinit();
+                std.log.err("unexpected process error: {s}", .{rendered.bytes()});
+                return error.UnexpectedLanguageError;
+            },
+        }
+        var display = try runtime.stackDisplay();
+        defer display.deinit();
+        const wanted = try std.fmt.allocPrint(allocator, "\"{s}\" \"{s}\" \"cwd=/\\nprobe={s}\\n\" \"cwd=/\\nprobe=child\\n\" \"{s}\"", .{ expected, expected, expected, expected });
+        defer allocator.free(wanted);
+        try std.testing.expectEqualStrings(wanted, display.bytes());
+    }
 }

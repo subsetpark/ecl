@@ -17,6 +17,7 @@
 //! A budget sets a ceiling; it does not record historical usage. Lowering one belongs to the change that
 //! earns it, and raising one is a decision to spend memory that needs saying
 //! out loud in a diff rather than being absorbed silently.
+const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const session = @import("../session.zig");
 
@@ -129,7 +130,9 @@ fn measure(
 
 fn measureIndependent(allocator: std.mem.Allocator, case: Case, count: usize) !usize {
     var counting = CountingAllocator{ .backing = allocator };
-    var runtime = try session.Session.init(counting.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(counting.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     return measure(&runtime, &counting, allocator, case, count);
 }

@@ -1,4 +1,5 @@
 //! Public Session-level behavior for first-class module tests.
+const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const session = @import("../session.zig");
 const test_heap = @import("test_heap.zig");
@@ -44,7 +45,9 @@ fn expectErrContains(runtime: *session.Session, source: []const u8, needle: []co
 test "testing: declaration is legal only at a module construction root" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
     try expectErr(&runtime, "(1) 'outside test");
@@ -55,7 +58,9 @@ test "testing: declaration is legal only at a module construction root" {
 test "testing: test names are absent from application resolution and module invocation" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
     try expectOk(
@@ -71,7 +76,9 @@ test "testing: test names are absent from application resolution and module invo
 test "testing: test mode discovers canonical registrations without aliases" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.initTest(backing.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .language_tests);
     defer runtime.deinit();
 
     try expectOk(
@@ -88,7 +95,9 @@ test "testing: test mode discovers canonical registrations without aliases" {
 test "testing: application sessions reject test discovery and execution" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
     try expectErr(&runtime, "tests");
@@ -98,7 +107,9 @@ test "testing: application sessions reject test discovery and execution" {
 test "testing: application sessions validate and discard test declarations" {
     var application_backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&application_backing);
-    var application = try session.Session.init(application_backing.allocator(), &.{});
+    var runtime_inputs4 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs4.deinit();
+    var application = try session.Session.init(application_backing.allocator(), &.{}, runtime_inputs4.inputs(.{}), .default, .evaluate);
     defer application.deinit();
 
     // Application construction still validates declaration placement and
@@ -112,7 +123,9 @@ test "testing: application sessions validate and discard test declarations" {
 
     var test_backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&test_backing);
-    var testing = try session.Session.initTest(test_backing.allocator(), &.{});
+    var runtime_inputs5 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs5.deinit();
+    var testing = try session.Session.init(test_backing.allocator(), &.{}, runtime_inputs5.inputs(.{}), .default, .language_tests);
     defer testing.deinit();
     try expectErr(&testing, "[] ((1) 'same test (2) 'same test) 'duplicate @defm");
 }
@@ -120,7 +133,9 @@ test "testing: application sessions validate and discard test declarations" {
 test "testing: test execution reaches private definitions and reifies its isolated stack" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.initTest(backing.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .language_tests);
     defer runtime.deinit();
 
     try expectOk(
@@ -136,7 +151,9 @@ test "testing: test execution reaches private definitions and reifies its isolat
 test "testing: test executions share durable module state" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.initTest(backing.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .language_tests);
     defer runtime.deinit();
 
     try expectOk(
@@ -151,7 +168,9 @@ test "testing: test executions share durable module state" {
 test "testing: reload and removal replace the discoverable test catalog coherently" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.initTest(backing.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .language_tests);
     defer runtime.deinit();
 
     try expectOk(
@@ -169,7 +188,9 @@ test "testing: reload and removal replace the discoverable test catalog coherent
 test "testing: test discovery exposes metadata but not executable bodies" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.initTest(backing.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .language_tests);
     defer runtime.deinit();
 
     try expectOk(
@@ -188,7 +209,9 @@ test "testing: test discovery exposes metadata but not executable bodies" {
 test "testing: large test catalogs remain cancellable" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.initTest(backing.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .language_tests);
     defer runtime.deinit();
 
     var source: std.ArrayList(u8) = .empty;

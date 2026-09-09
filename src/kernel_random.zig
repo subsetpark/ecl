@@ -196,12 +196,9 @@ const DrawDriver = struct {
     }
 };
 
-/// The one impure word. Gated exactly like the filesystem: without the host
-/// capability there is no entropy to read, which is also what keeps in-process
-/// test sessions deterministic.
+/// The one impure word reads the process CSPRNG through runtime I/O.
 fn entropy(evaluator: *Machine) MachineError!void {
-    const io = evaluator.unit.inherited.host_io orelse
-        return evaluator.fail(.io, "entropy is unavailable");
+    const io = evaluator.unit.inherited.runtime().host_io;
     var bytes: [8]u8 = undefined;
     std.Io.randomSecure(io, &bytes) catch
         return evaluator.fail(.io, "entropy is unavailable");

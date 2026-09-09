@@ -1,5 +1,6 @@
 //! Cross-layer frame-machine proofs owned by M3's final patch.
 
+const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const session = @import("../session.zig");
 const test_heap = @import("test_heap.zig");
@@ -74,7 +75,9 @@ fn expectNoLocation(allocator: std.mem.Allocator, data: Value) !void {
 test "twenty-thousand-deep named recursion remains flat" {
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     const source =
         "(dup 0 > (1 - countdown) (pop) if) 'countdown def " ++
@@ -88,7 +91,9 @@ test "machine: boundary truncation is exact through nested attempts" {
     const allocator = std.testing.allocator;
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     const source = "7 [] (8 [] (pop) @attempt pop pop missing) @attempt";
     try std.testing.expect((try runtime.runUnit("boundaries.ecl", source)) == .ok);
@@ -107,7 +112,9 @@ test "errors: contract depths are relative to the isolated substack" {
     const allocator = std.testing.allocator;
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     const source = "7 8 [] ([0] (pop 1 2) each) @attempt";
     try std.testing.expect((try runtime.runUnit("contract.ecl", source)) == .ok);
@@ -128,7 +135,9 @@ test "errors: lazy trace is innermost-first and retains recursive activations" {
     const allocator = std.testing.allocator;
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     const source =
         "(dup 0 > (1 - f pop) (pop missing) if) 'f def 1 f";
@@ -145,7 +154,9 @@ test "errors: tail-position application continuations retain their enclosing wor
     const allocator = std.testing.allocator;
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     const failure = (try runtime.runUnit(
         "application-trace.ecl",
@@ -182,7 +193,9 @@ test "errors: source effect contract identifies the deepest tail-selected quotat
     const allocator = std.testing.allocator;
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     const source =
         \\[] (
@@ -207,7 +220,9 @@ test "errors: source effect contract locates an empty selected quotation" {
     const allocator = std.testing.allocator;
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     const source =
         \\[] (
@@ -232,7 +247,9 @@ test "errors: nested effect checks restore outer tail provenance" {
     const allocator = std.testing.allocator;
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     const source =
         \\[] (
@@ -263,7 +280,9 @@ test "errors: source effect contract preserves absence for runtime-built code" {
     const allocator = std.testing.allocator;
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     const source =
         \\[] (
@@ -283,7 +302,9 @@ test "errors: iterative applications do not replace source effect provenance" {
     const allocator = std.testing.allocator;
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     const source =
         \\[] (
@@ -334,7 +355,9 @@ test "errors: guard restoration preserves the enclosing application selection" {
     const allocator = std.testing.allocator;
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     const cases = [_]struct {
         source_name: []const u8,
@@ -390,7 +413,9 @@ test "errors: archived contract locations remain attached after later sources" {
     const allocator = std.testing.allocator;
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     const source =
         \\[] (
@@ -415,7 +440,9 @@ test "errors: archived contract locations remain attached after later sources" {
 test "machine_test: late binding redefinition heals existing callers" {
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try std.testing.expect((try runtime.runUnit(
         "<test>",
@@ -442,7 +469,9 @@ test "machine_test: late binding redefinition heals existing callers" {
 test "early prelude installs source-defined wrap and pair" {
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try std.testing.expect((try runtime.runUnit(
         "<test>",
@@ -457,7 +486,9 @@ test "dynamic context: *file* follows authored source provenance" {
     const allocator = std.testing.allocator;
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
     try std.testing.expect((try runtime.runUnit("direct.ecl", "*file*")) == .ok);
@@ -507,7 +538,9 @@ test "provisional scalar primitives enforce the non-finite regime" {
     const allocator = std.testing.allocator;
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
     const overflow = (try execute(&runtime, "9223372036854775806 2 +")).?;
@@ -523,7 +556,9 @@ test "provisional scalar primitives enforce the non-finite regime" {
 test "division and comparison remain exact across 2^53" {
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try std.testing.expect((try execute(&runtime, "1 2 /")) == null);
     try std.testing.expectEqual(@as(f64, 0.5), runtime.stackItems()[0].float);
@@ -535,7 +570,9 @@ test "attempt reifies failure and def rejects scalar bodies" {
     const allocator = std.testing.allocator;
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try std.testing.expect((try execute(&runtime, "7 [] (1 0 /) @attempt")) == null);
     try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[0].int);
@@ -570,7 +607,9 @@ test "raise preserves valid user dicts and validates optional fields" {
     const allocator = std.testing.allocator;
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     const raised = (try execute(&runtime, "{'kind 'custom 'msg \"hello\"} raise")).?;
     defer runtime.release(raised);
@@ -632,7 +671,9 @@ test "raise preserves valid user dicts and validates optional fields" {
 test "over compose and at have exact stack effects" {
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
     try std.testing.expect((try execute(&runtime, "1 2 over")) == null);
@@ -675,7 +716,9 @@ test "io.pp and io.prin write through and writer failures become io errors" {
     defer captured.deinit();
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
-    var runtime = try session.Session.initWithOutput(runtime_heap.allocator(), &.{}, &captured.writer);
+    var runtime_inputs20 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs20.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs20.inputs(.{ .output = &captured.writer }), .default, .evaluate);
     defer runtime.deinit();
     try std.testing.expect((try execute(&runtime, "\"hi\" io.prin 'visible io.pp")) == null);
     try std.testing.expectEqualStrings("hi'visible\n", captured.written());
@@ -683,7 +726,9 @@ test "io.pp and io.prin write through and writer failures become io errors" {
     var failing: std.Io.Writer = .failing;
     var broken_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&broken_heap);
-    var broken = try session.Session.initWithOutput(broken_heap.allocator(), &.{}, &failing);
+    var runtime_inputs21 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs21.deinit();
+    var broken = try session.Session.init(broken_heap.allocator(), &.{}, runtime_inputs21.inputs(.{ .output = &failing }), .default, .evaluate);
     defer broken.deinit();
     const failure = (try execute(&broken, "'broken io.pp")).?;
     defer broken.release(failure);
@@ -694,7 +739,9 @@ test "inline control and reader-lowered binders execute" {
     const allocator = std.testing.allocator;
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try std.testing.expect((try execute(&runtime, "1 (2 +) call")) == null);
     try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[0].int);
@@ -714,7 +761,9 @@ test "public parse reifies forms without execution and retains provenance" {
     const allocator = std.testing.allocator;
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try std.testing.expect((try execute(&runtime, "\"42 missing\" parse")) == null);
     var display = try runtime.stackDisplay();
@@ -807,7 +856,9 @@ test "public parse cancellation reaches UTF-8 materialization" {
 
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try std.testing.expect((try runtime.runUnit("<parse-encoding-setup>", source)) == .ok);
     try std.testing.expectEqual(@as(usize, 1), runtime.stackItems().len);
@@ -838,7 +889,9 @@ test "public parse cancellation reaches ignored-source scanning" {
     @memcpy(command[2 + comment_len ..], suffix);
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     runtime.requestCancellation();
     const failure = switch (try runtime.runUnit("<parse-cancel-test>", command)) {

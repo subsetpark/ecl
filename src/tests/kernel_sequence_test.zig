@@ -1,11 +1,14 @@
 //! Executable proofs for sequence, search, and shape kernels.
+const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const helper = @import("kernel_test_support.zig");
 const session = @import("../session.zig");
 
 fn expectDisplay(source: []const u8, expected: []const u8) !void {
     const allocator = std.testing.allocator;
-    var original = try session.Session.init(allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var original = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer original.deinit();
     try runDisplaySource(&original, "<display-source>", source);
     var rendered = try original.stackDisplay();
@@ -20,14 +23,18 @@ fn expectDisplay(source: []const u8, expected: []const u8) !void {
 /// round-trip guarantee, so only single-value cases belong here.
 fn expectRoundTripDisplay(source: []const u8, expected: []const u8) !void {
     const allocator = std.testing.allocator;
-    var original = try session.Session.init(allocator, &.{});
+    var runtime_inputs1 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs1.deinit();
+    var original = try session.Session.init(allocator, &.{}, runtime_inputs1.inputs(.{}), .default, .evaluate);
     defer original.deinit();
     try runDisplaySource(&original, "<display-source>", source);
     var rendered = try original.stackDisplay();
     defer rendered.deinit();
     try std.testing.expectEqualStrings(expected, rendered.bytes());
 
-    var reread = try session.Session.init(allocator, &.{});
+    var runtime_inputs2 = try runtime_fixture.Fixture.init();
+    defer runtime_inputs2.deinit();
+    var reread = try session.Session.init(allocator, &.{}, runtime_inputs2.inputs(.{}), .default, .evaluate);
     defer reread.deinit();
     try runDisplaySource(&reread, "<display-output>", rendered.bytes());
     var repeated = try reread.stackDisplay();

@@ -1,4 +1,5 @@
 //! Executable proofs for immutable dict and Unicode text kernels.
+const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const session = @import("../session.zig");
 const heap = @import("../heap.zig");
@@ -223,7 +224,9 @@ test "dict-text: large updates yield through the public runtime" {
     const allocator = std.testing.allocator;
     var cleanup = heap.testing.Cleanup.init(allocator);
     defer cleanup.deinit();
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
     const integers = try allocator.alloc(i64, 70_000);

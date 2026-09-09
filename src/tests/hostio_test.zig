@@ -4,8 +4,9 @@
 //! Every case drives a whole Session over source strings only, so the
 //! traceless session heap is the right allocator (see `test_heap.zig`). The
 //! host services these words need — an `std.Io`, an environment snapshot, a
-//! standard-input mode—arrive through `session.Host`. No test-only accessor
+//! standard-input mode—arrive through `session.RuntimeInputs`. No test-only accessor
 //! bypasses that boundary.
+const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const machine = @import("../machine.zig");
 const session = @import("../session.zig");
@@ -44,13 +45,15 @@ fn expectStackWithStreams(
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(allocator);
     defer diagnostics.deinit();
-    var runtime = try session.Session.initWithHost(heap.allocator(), &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
         .environ = case.environ,
         .standard_input = case.standard_input,
-    });
+    }), .default, .evaluate);
     defer runtime.deinit();
     switch (try runtime.runUnit("<hostio-test>", case.source)) {
         .ok => {},
@@ -81,13 +84,15 @@ fn expectError(case: Case, expected: support.ErrorCase) !void {
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(allocator);
     defer diagnostics.deinit();
-    var runtime = try session.Session.initWithHost(heap.allocator(), &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
         .environ = case.environ,
         .standard_input = case.standard_input,
-    });
+    }), .default, .evaluate);
     defer runtime.deinit();
     const failure = switch (try runtime.runUnit("<hostio-test>", case.source)) {
         .ok, .incomplete => return error.ExpectedLanguageError,
@@ -165,14 +170,14 @@ test "hostio: eprint writes to the diagnostics stream and not to output" {
         .kind = "type",
         .word = "io.eprint",
     });
-    // `Host.diagnostics` is mandatory, so the Session with no diagnostics
-    // writer is the hostless one: an output writer alone. The line is
-    // dropped, the word succeeds, and output still receives nothing.
+    // A fixture can explicitly discard diagnostics while capturing output.
     var heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&heap);
     var output = std.Io.Writer.Allocating.init(allocator);
     defer output.deinit();
-    var runtime = try session.Session.initWithOutput(heap.allocator(), &.{}, &output.writer);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{ .output = &output.writer }), .default, .evaluate);
     defer runtime.deinit();
     switch (try runtime.runUnit("<hostio-test>", "\"x\" io.eprint 1")) {
         .ok => {},
@@ -213,4 +218,23 @@ test "hostio: stack prints the visible operand window without changing it" {
         "13",
         "[0] 10\n[1] 3\n",
     );
+}
+
+test "hostio: Session rejects invalid startup environment entries" {
+    var heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&heap);
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    for ([_]machine.Environ.Entry{
+        .{ .name = "", .value = "value" },
+        .{ .name = "A=B", .value = "value" },
+        .{ .name = "A\x00B", .value = "value" },
+        .{ .name = "A", .value = "val\x00ue" },
+    }) |entry| try std.testing.expectError(error.InvalidHostConfig, session.Session.init(
+        heap.allocator(),
+        &.{},
+        inputs.inputs(.{ .environ = &.{entry} }),
+        .cooperative,
+        .evaluate,
+    ));
 }

@@ -165,12 +165,12 @@ test "pkg store: a project-controlled vendor symlink is refused at Session const
     try host.scratch.directory.dir.symLink(std.testing.io, "../elsewhere", "project/vendor", .{});
     var heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&heap);
-    try std.testing.expectError(error.InvalidHostPolicy, host.openSession(heap.allocator()));
+    try std.testing.expectError(error.InvalidHostConfig, host.openSession(heap.allocator()));
     // The synchronize and verify shapes open a present vendor store too, and
     // refuse the link the same way; nothing was created behind it.
     var sync_host = try PackageHost.initAt(host.scratch, .{ .cache = true });
     defer sync_host.deinit();
-    try std.testing.expectError(error.InvalidHostPolicy, sync_host.openSession(heap.allocator()));
+    try std.testing.expectError(error.InvalidHostConfig, sync_host.openSession(heap.allocator()));
     var listing = try host.scratch.directory.dir.openDir(std.testing.io, "elsewhere", .{ .iterate = true });
     defer listing.close(std.testing.io);
     var iterator = listing.iterate();
@@ -633,18 +633,17 @@ const PackageHost = struct {
     }
 
     fn openSessionWithConfig(self: *const PackageHost, heap_allocator: std.mem.Allocator, config: session.Config) !session.Session {
-        return session.Session.initPackageCommand(heap_allocator, &.{}, .{
+        return session.Session.init(heap_allocator, &.{}, .{
             .io = std.testing.io,
             .output = self.output.writer(),
             .diagnostics = self.output.writer(),
             .tls_trust = if (self.options.tls) .{ .ca_file = pkg_fixture.ca_file, .now = valid_cert_time } else null,
-            .project_start = self.project_start,
-            .filesystem_policy = .{ .roots = &.{.{
-                .name = "project",
-                .absolute_path = self.project,
-                .permissions = .{ .read_data = true, .inspect = true, .create = true, .replace = true },
-            }} },
-        }, config, self.grant());
+            .initial_cwd = self.project_start orelse self.project,
+            .environ = &.{},
+            .standard_input = .program_source,
+            .clock = .{ .wall = .{ .fixed = 0 } },
+            .filesystem = .{ .roots = &.{.{ .name = "project", .absolute_path = self.project }} },
+        }, config, .{ .package = self.grant() });
     }
 
     /// The command shape the options describe: the vendor command when

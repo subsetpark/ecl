@@ -248,7 +248,7 @@ test "e2e: proc scope cancellation kills and reaps the process group" {
     try expectProcessGone(processes.descendant, processes.leader);
 }
 
-test "e2e: net listen under the CLI grant binds an ephemeral port and reports it" {
+test "e2e: CLI net listen binds an ephemeral port and reports it" {
     var result = try cli.runOptions(.{
         .argv = &.{ build_options.ecl_exe, "{'address \"127.0.0.1\" 'port 0} net.listen net.local-address io.pp" },
         .timeout = .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(5) } },
@@ -265,7 +265,7 @@ test "e2e: net listen under the CLI grant binds an ephemeral port and reports it
     try std.testing.expect(try std.fmt.parseInt(u16, result.stdout[start..end], 10) != 0);
 }
 
-test "e2e: net accept, read, write, and close round-trip over loopback under the CLI grant" {
+test "e2e: CLI net accept, read, write, and close round-trip over loopback" {
     // The binary announces its listener on stdout, so stdout is piped and read
     // line by line while the process runs; `cli.runOptions` collects output
     // only after exit and cannot drive a live peer.
@@ -338,7 +338,7 @@ test "e2e: net accept, read, write, and close round-trip over loopback under the
 // `Content-Length: 2`, `Connection: close`, the body `ok`, then EOF. The server
 // never stops on its own, so the test kills the child afterwards under the
 // `NetWatchdog` bound.
-test "e2e: http server answers a loopback GET under the CLI grant" {
+test "e2e: CLI http server answers a loopback GET" {
     // The binary announces its listener on stdout and then serves forever, so
     // stdout is piped and read line by line while the process runs, and the
     // child is killed once the round trip has been observed.
@@ -2089,7 +2089,7 @@ test "e2e: embedded prelude is independent of cwd and ECL_PATH" {
         .stderr = "",
     });
 
-    // The command line grants exactly one filesystem root, the startup
+    // The command line supplies its filesystem root, the startup
     // working directory as `'cwd`; the same empty environment proves the
     // capability words are ordinary vocabulary rather than ECL_PATH-dependent.
     var round_trip = try cli.runOptions(.{

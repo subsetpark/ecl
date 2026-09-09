@@ -130,10 +130,24 @@ fn runSample(io: std.Io, workers: usize, case: Case) !Sample {
         counting.allocator()
     else
         std.heap.smp_allocator;
-    var runtime = try ecl.session.Session.initWithConfig(
+    var output = std.Io.Writer.Discarding.init(&.{});
+    const cwd = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", std.heap.smp_allocator);
+    defer std.heap.smp_allocator.free(cwd);
+    const inputs: ecl.session.RuntimeInputs = .{
+        .io = io,
+        .output = &output.writer,
+        .diagnostics = &output.writer,
+        .initial_cwd = cwd,
+        .environ = &.{},
+        .standard_input = .program_source,
+        .clock = .{ .wall = .{ .fixed = 0 } },
+    };
+    var runtime = try ecl.session.Session.init(
         session_allocator,
         &.{},
+        inputs,
         .{ .worker_pool = workers },
+        .evaluate,
     );
     defer runtime.deinit();
 

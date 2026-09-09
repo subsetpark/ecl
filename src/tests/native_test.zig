@@ -1,3 +1,4 @@
+const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const abi = @import("native-abi");
 const descriptor_api = @import("../native_descriptor.zig");
@@ -25,13 +26,15 @@ fn expectPortProgramWithLimits(workers: u32, limits: @import("../native_port.zig
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
-    var runtime = try session.Session.initWithHostConfig(std.testing.allocator, &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
         .ecl_path = native_fixture.directory,
         .native_port_limits = limits,
-    }, .{ .worker_pool = workers });
+    }), .{ .worker_pool = workers }, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime, "'task ('await 'cancel) import portprobe.reset");
     try expectOk(&runtime, source);
@@ -70,14 +73,15 @@ test "native: receiving built-in resources shares use without moving scope owner
         defer output.deinit();
         var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
         defer diagnostics.deinit();
-        var runtime = try session.Session.initWithHostConfig(std.testing.allocator, &.{}, .{
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{
             .io = std.testing.io,
             .output = &output.writer,
             .diagnostics = &diagnostics.writer,
             .ecl_path = native_fixture.directory,
             .native_port_limits = .{ .message_capacity = 1 },
-            .net_policy = .{ .binds = .{ .exact = &.{.{ .address = "127.0.0.1", .port = 0 }} } },
-        }, .{ .worker_pool = workers });
+        }), .{ .worker_pool = workers }, .evaluate);
         defer runtime.deinit();
         try expectOk(&runtime, "portprobe.reset {'address \"127.0.0.1\" 'port 0} net.listen 'l set " ++
             "portprobe.factory [] port.open 'p set p portprobe.message-result [] port.begin 'x set " ++
@@ -383,13 +387,15 @@ test "native: live capacity is reserved before initialization and released by cl
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
-    var runtime = try session.Session.initWithHostConfig(std.testing.allocator, &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
         .ecl_path = native_fixture.directory,
         .native_port_limits = .{ .max_live_ports = 1 },
-    }, .{ .worker_pool = 1 });
+    }), .{ .worker_pool = 1 }, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime, "portprobe.reset portprobe.counter [] port.open 'p set");
     try expectErrorContains(&runtime, "portprobe.counter [] port.open", &.{ "'kind 'domain", "capacity" });
@@ -414,16 +420,20 @@ test "native: Session shutdown joins active controllers before releasing images"
         defer output.deinit();
         var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
         defer diagnostics.deinit();
-        var observer = try initRuntime(&output.writer, &diagnostics.writer, native_fixture.directory);
+        var native_inputs0 = try runtime_fixture.Fixture.init();
+        defer native_inputs0.deinit();
+        var observer = try initRuntime(&native_inputs0, &output.writer, &diagnostics.writer, native_fixture.directory);
         defer observer.deinit();
         try expectOk(&observer, "portprobe.reset");
         {
-            var runtime = try session.Session.initWithHostConfig(std.testing.allocator, &.{}, .{
+            var runtime_inputs3 = try runtime_fixture.Fixture.init();
+            defer runtime_inputs3.deinit();
+            var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs3.inputs(.{
                 .io = std.testing.io,
                 .output = &output.writer,
                 .diagnostics = &diagnostics.writer,
                 .ecl_path = native_fixture.directory,
-            }, .{ .worker_pool = workers });
+            }), .{ .worker_pool = workers }, .evaluate);
             defer runtime.deinit();
             try expectOk(&runtime, "portprobe.counter [] port.open wrap (portprobe.counter-block 1 port.call) @spawn pop 1 portprobe.await-blocked");
         }
@@ -444,13 +454,15 @@ test "native: package ports stream beyond capacity and retain ordered state" {
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
-    var runtime = try session.Session.initWithHostConfig(std.testing.allocator, &.{}, .{
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{
         .io = std.testing.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
         .ecl_path = native_fixture.directory,
         .native_port_limits = .{ .ring_capacity = 8 },
-    }, .{ .worker_pool = 1 });
+    }), .{ .worker_pool = 1 }, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime, "portprobe.counter [] port.open 'p set p 10000 " ++ streamCounter ++
         "p portprobe.counter-step 2 port.call p portprobe.counter-step 3 port.call p port.close p port.close");
@@ -464,7 +476,9 @@ test "native: package port kinds, operation failure, forwarding and terminal ide
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
-    var runtime = try initRuntime(&output.writer, &diagnostics.writer, native_fixture.directory);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try initRuntime(&runtime_inputs, &output.writer, &diagnostics.writer, native_fixture.directory);
     defer runtime.deinit();
     try expectOk(&runtime, "portprobe.counter [] port.open 'p set");
     try expectOk(&runtime, "portprobe.other [] port.open 'q set q portprobe.other-step 0 port.call pop");
@@ -483,7 +497,9 @@ test "native: package port scope transfer and rollback" {
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
-    var runtime = try initRuntime(&output.writer, &diagnostics.writer, native_fixture.directory);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try initRuntime(&runtime_inputs, &output.writer, &diagnostics.writer, native_fixture.directory);
     defer runtime.deinit();
     try expectOk(&runtime, "portprobe.counter [] port.open 'p set p wrap dup cat [] (pop pop) 3 pack (@give) @attempt pop p portprobe.counter-step 2 port.call");
     try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[0].int);
@@ -497,7 +513,9 @@ test "native: streaming crosses the default ring capacity" {
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
-    var runtime = try initRuntime(&output.writer, &diagnostics.writer, native_fixture.directory);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try initRuntime(&runtime_inputs, &output.writer, &diagnostics.writer, native_fixture.directory);
     defer runtime.deinit();
     try expectOk(&runtime, "portprobe.counter [] port.open 'p set p 131073 " ++ streamCounter ++ "p port.close");
     try std.testing.expectEqual(@as(i64, 131073), runtime.stackItems()[0].int);
@@ -508,7 +526,9 @@ test "native: bounded controller errors preserve UTF-8 and the backend error kin
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
-    var runtime = try initRuntime(&output.writer, &diagnostics.writer, native_fixture.directory);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try initRuntime(&runtime_inputs, &output.writer, &diagnostics.writer, native_fixture.directory);
     defer runtime.deinit();
     try expectOk(&runtime, "portprobe.counter [] port.open 'p set");
     try expectErrorContains(&runtime, "p portprobe.counter-long-failure [] port.call", &.{"'kind 'io"});
@@ -646,16 +666,20 @@ fn expectErrorContains(
 }
 
 fn initRuntime(
+    inputs: *runtime_fixture.Fixture,
     output: *std.Io.Writer,
     diagnostics: *std.Io.Writer,
     search: []const u8,
 ) !session.Session {
-    return session.Session.initWithHost(std.testing.allocator, &.{}, .{
+    return session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
         .io = std.testing.io,
         .output = output,
         .diagnostics = diagnostics,
         .ecl_path = search,
-    });
+        .environ = &.{},
+        .standard_input = .program_source,
+        .clock = .{ .wall = .{ .fixed = 0 } },
+    }), .default, .evaluate);
 }
 
 const Fixture = struct {
@@ -729,7 +753,9 @@ test "native: opaque ports survive forwarding and nested aggregate builders" {
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
     {
-        var runtime = try initRuntime(&output.writer, &diagnostics.writer, native_fixture.directory);
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try initRuntime(&runtime_inputs, &output.writer, &diagnostics.writer, native_fixture.directory);
         defer runtime.deinit();
         try runtime.pushOwned(try heap.createOwnedPort(Port, .resource, std.testing.allocator, 917, &port));
         try expectErrorContains(&runtime, "sample.draft-fail", &.{ "'kind 'user", "draft candidates retired" });
@@ -760,7 +786,9 @@ test "native: borrowed port roles forward identities but cannot be given" {
         var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
         defer diagnostics.deinit();
         {
-            var runtime = try initRuntime(&output.writer, &diagnostics.writer, native_fixture.directory);
+            var runtime_inputs = try runtime_fixture.Fixture.init();
+            defer runtime_inputs.deinit();
+            var runtime = try initRuntime(&runtime_inputs, &output.writer, &diagnostics.writer, native_fixture.directory);
             defer runtime.deinit();
             try runtime.pushOwned(try heap.createBorrowedPort(Capability, variant, std.testing.allocator, 918, &capability));
             try expectOk(&runtime, "'cap set cap type 'port match? cap sample.forward cap match? " ++
@@ -945,7 +973,9 @@ test "native: a discovered artifact publishes its complete table atomically" {
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
-    var runtime = try initRuntime(&output.writer, &diagnostics.writer, native_fixture.directory);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try initRuntime(&runtime_inputs, &output.writer, &diagnostics.writer, native_fixture.directory);
     defer runtime.deinit();
 
     try expectOk(
@@ -1004,7 +1034,9 @@ test "native: source candidates win inside a root and path-root order wins acros
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
-    var source_first = try initRuntime(&output.writer, &diagnostics.writer, same_root_path);
+    var native_inputs8 = try runtime_fixture.Fixture.init();
+    defer native_inputs8.deinit();
+    var source_first = try initRuntime(&native_inputs8, &output.writer, &diagnostics.writer, same_root_path);
     defer source_first.deinit();
     try expectOk(&source_first, "sample.increment");
     try std.testing.expectEqual(@as(i64, 100), source_first.stackItems()[0].int);
@@ -1043,7 +1075,9 @@ test "native: source candidates win inside a root and path-root order wins acros
         .{ native_root_path, std.fs.path.delimiter, later_source_path },
     );
     defer std.testing.allocator.free(search);
-    var path_first = try initRuntime(&output.writer, &diagnostics.writer, search);
+    var native_inputs9 = try runtime_fixture.Fixture.init();
+    defer native_inputs9.deinit();
+    var path_first = try initRuntime(&native_inputs9, &output.writer, &diagnostics.writer, search);
     defer path_first.deinit();
     try expectOk(&path_first, "41 sample.increment");
     try std.testing.expectEqual(@as(i64, 42), path_first.stackItems()[0].int);
@@ -1076,7 +1110,9 @@ test "native: a rejected artifact publishes nothing and never selects a later ca
         defer output.deinit();
         var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
         defer diagnostics.deinit();
-        var runtime = try initRuntime(&output.writer, &diagnostics.writer, search);
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try initRuntime(&runtime_inputs, &output.writer, &diagnostics.writer, search);
         defer runtime.deinit();
         try expectErrorContains(&runtime, "'sample ('increment) import", &.{ "'kind 'io", case.message, broken });
         var completion = try runtime.completionCandidates("sample.");
@@ -1094,7 +1130,9 @@ test "native: reflection exposes native origin effects documentation and capabil
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
-    var runtime = try initRuntime(&output.writer, &diagnostics.writer, native_fixture.directory);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try initRuntime(&runtime_inputs, &output.writer, &diagnostics.writer, native_fixture.directory);
     defer runtime.deinit();
     try expectOk(
         &runtime,
@@ -1123,7 +1161,9 @@ test "native: only exact completion mutates the operand stack" {
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
-    var runtime = try initRuntime(&output.writer, &diagnostics.writer, native_fixture.directory);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try initRuntime(&runtime_inputs, &output.writer, &diagnostics.writer, native_fixture.directory);
     defer runtime.deinit();
     try expectOk(&runtime, "7");
     try expectErrorContains(
@@ -1228,17 +1268,14 @@ test "native: cooperative slices let another unit progress at one worker" {
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
-    var runtime = try session.Session.initWithHostConfig(
-        std.testing.allocator,
-        &.{},
-        .{
-            .io = std.testing.io,
-            .output = &output.writer,
-            .diagnostics = &diagnostics.writer,
-            .ecl_path = native_fixture.directory,
-        },
-        .{ .worker_pool = 1 },
-    );
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .ecl_path = native_fixture.directory,
+    }), .{ .worker_pool = 1 }, .evaluate);
     defer runtime.deinit();
     // Measure interleaved execution after module loading; a cold await-any
     // lookup can otherwise let the native task finish before observing it.
@@ -1258,7 +1295,9 @@ test "native: aggregate cursors and builders charge the scheduler budget" {
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
-    var runtime = try initRuntime(&output.writer, &diagnostics.writer, native_fixture.directory);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try initRuntime(&runtime_inputs, &output.writer, &diagnostics.writer, native_fixture.directory);
     defer runtime.deinit();
     try expectOk(&runtime, "200000 range");
     try expectOk(&runtime, "sample.sum-list");
@@ -1281,17 +1320,14 @@ test "native: cancellation after a yield preserves the pre-call operand stack" {
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
-    var runtime = try session.Session.initWithHostConfig(
-        std.testing.allocator,
-        &.{},
-        .{
-            .io = std.testing.io,
-            .output = &output.writer,
-            .diagnostics = &diagnostics.writer,
-            .ecl_path = native_fixture.directory,
-        },
-        .{ .worker_pool = 1 },
-    );
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .ecl_path = native_fixture.directory,
+    }), .{ .worker_pool = 1 }, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime, "5");
     try expectOk(
@@ -1359,12 +1395,14 @@ test "native: allocation failure survives controller and endpoint boundaries" {
         defer output.deinit();
         var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
         defer diagnostics.deinit();
-        var runtime = try session.Session.initWithHostConfig(std.testing.allocator, &.{}, .{
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{
             .io = std.testing.io,
             .output = &output.writer,
             .diagnostics = &diagnostics.writer,
             .ecl_path = native_fixture.directory,
-        }, .{ .worker_pool = workers });
+        }), .{ .worker_pool = workers }, .evaluate);
         defer runtime.deinit();
         for ([_][]const u8{
             "port.await",                                    "port.result", "portprobe.output port.endpoint 1 port.read",
@@ -1508,12 +1546,14 @@ test "native: resource failure preserves allocation exhaustion and retirement in
         defer output.deinit();
         var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
         defer diagnostics.deinit();
-        var runtime = try session.Session.initWithHostConfig(std.testing.allocator, &.{}, .{
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{
             .io = std.testing.io,
             .output = &output.writer,
             .diagnostics = &diagnostics.writer,
             .ecl_path = native_fixture.directory,
-        }, .{ .worker_pool = workers });
+        }), .{ .worker_pool = workers }, .evaluate);
         defer runtime.deinit();
         for ([_][]const u8{ "0", "1" }) |order| for ([_][]const u8{ "port.await", "port.result" }) |observe| {
             try expectOk(&runtime, "portprobe.reset portprobe.multiplex [] port.open 'p set");

@@ -8,7 +8,9 @@ This document defines the syntax and semantics of the ECL language. The
 language is defined independently of any implementation representation,
 interpreter architecture, host interface, or distribution. This document
 defines the language; the shipped ECL interpreter is its reference
-implementation.
+implementation. The shipped interpreter is a CLI with a Zig extension SDK:
+ECL calls registered Zig extensions, while embedding the interpreter in Zig
+applications is outside the supported distribution interface.
 
 ECL has three distinct fields of conformance:
 
@@ -2417,19 +2419,15 @@ participates in the same cancellation and deadline arbitration as task waits,
 and resumes a bounded continuation. Input and output queues are bounded, so a
 producer waits under pressure rather than causing unbounded allocation.
 
-Filesystem access is likewise a host capability. A Session names directory
-roots and their permissions when it is constructed, or names none and denies
-every filesystem word; evaluated code selects a root by symbol and a canonical
-relative path beneath it, and neither a path string nor possession of console
-or module-loading services confers any wider authority. Path manipulation is
-pure string computation and proves nothing about containment; containment is
-enforced at the root's retained directory handle. Filesystem operations are
-bounded drivers whose staged mutations either publish atomically or leave the
-destination unchanged.
+Filesystem words select a named directory root and a canonical relative path
+beneath it. The command line provides its startup working directory as `'cwd`.
+All operations are available on named roots, subject to operating-system
+permissions. Path manipulation is pure string computation and proves nothing
+about containment; containment is enforced at the root's retained directory
+handle. Filesystem operations are bounded drivers whose staged mutations either
+publish atomically or leave the destination unchanged.
 
-The shipped `proc` module is a host capability, not ambient language power. A
-Session without process authority rejects process creation before reaching the
-operating system. A process specification names one absolute executable path,
+The shipped `proc` module provides subprocess words. A process specification names one absolute executable path,
 an argument vector, an optional absolute working directory, and an explicit
 environment overlay. It never denotes a shell command and never searches
 `PATH`. Process streams are byte lists; text encoding, stream merging, and
@@ -2439,7 +2437,7 @@ A process port has stdin, stdout, stderr, and one immutable terminal result.
 The output streams remain independent and return an empty byte list only after
 stable EOF. Termination is tagged as exited-with-code, signaled, stopped, or an
 unknown host status. A nonzero exit code is result data, not an ECL error;
-spawn, pipe, policy, timeout, cancellation, allocation, and cleanup failures
+spawn, pipe, timeout, cancellation, allocation, and cleanup failures
 remain errors of their corresponding ordinary kinds.
 
 The reference distribution initially provides process ports on POSIX hosts.
@@ -2447,19 +2445,13 @@ Each child starts in a dedicated process group; scope cancellation signals the
 group and reaps the direct child before completing. Descendants that inherit
 that group are covered, while a hostile child that creates a new session is
 outside this portable process-group guarantee. A host without an equivalent
-tree-owning backend rejects process authority rather than silently weakening
+tree-owning backend rejects process creation rather than silently weakening
 cleanup to one PID.
 
-Inbound network listening is a fourth host capability with the same shape. A
-Session names, when it is constructed, either an exact allowlist of address
-and port pairs or an unrestricted grant, or names none and denies every
-listen; evaluated code requests one address and port, and possession of host
-I/O, filesystem, process, or outbound HTTP authority confers no listen
-authority. Addresses are IP literals compared after normalization; they are
-never resolved through a name service, so a grant cannot be widened by
-resolution. A grant whose port is zero admits only a request for an ephemeral
-port. A request the grant does not admit, or made without a grant, is
-`'domain` and never reaches the operating system.
+Inbound network listening requests one local IP literal and port, subject to
+operating-system restrictions and runtime limits. Addresses are normalized
+before binding and never resolved through a name service. Port zero requests
+an ephemeral port.
 
 A listener is a port. Binding and listening complete before the value is
 returned, the value belongs to the creating unit's task scope, and accepting a

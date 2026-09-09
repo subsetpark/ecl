@@ -61,8 +61,8 @@ The main components are these:
 | Bulk execution | Pervasive scalar semantics, typed flat loops, and guarded source-phrase recognition | `kernel_*.zig`, `kernels.zig`, `idioms.zig` |
 | Scheduler | Green units, structured task scopes, task and external waits, cancellation, timers, external membership, and retirement service | `scheduler_core.zig`, `scheduler.zig`, `external.zig`, `task_prims.zig` |
 | Port controllers | Typed job submission, FIFO admission and cancellation, independent execution, joined retirement, and shared scope lifetime | `port_controller.zig`, `port_transfer.zig` |
-| Process ports | Process policy, POSIX process-group ownership, bounded pipe queues, and terminal publication | `process_port.zig`, `stdlib/proc.zig` |
-| Network listeners and connections | Listen policy, exact grant matching over normalized IP literals, scope-owned listening sockets, demand-gated accept, bounded connection queues serviced by controller threads, and idempotent close | `net_port.zig`, `stdlib/net.zig` |
+| Process ports | POSIX process-group ownership, bounded pipe queues, and terminal publication | `process_port.zig`, `stdlib/proc.zig` |
+| Network listeners and connections | Normalized IP literals, scope-owned listening sockets, demand-gated accept, bounded connection queues serviced by controller threads, and idempotent close | `net_port.zig`, `stdlib/net.zig` |
 | Boundary layers | Embedded modules, native extensions, rendering, terminal safety, the REPL, and the CLI | `prelude.zig`, `stdlib.zig`, `native_*.zig`, `print.zig`, `console.zig`, `line_editor.zig`, `main.zig` |
 
 ### Position in the design space
@@ -90,13 +90,13 @@ recorded in `PERFORMANCE.md`.
 
 ## 1. The Session is the runtime boundary
 
-`Session` is the public interpreter object and the root of every runtime
+`Session` is the internal interpreter boundary and the root of every runtime
 lifetime. It is an opaque, movable handle to heap-stable `SessionCore` state.
-The package root is a closed façade over that Session-facing API. First-party
-executables and verification tools use a separate build-private aggregation,
-so a declaration made public for cross-file implementation use cannot become
-an embedding API accidentally; compile-time validation closes the façade over
-its explicit declaration set.
+The CLI, repository tests, and tools use one build-private runtime aggregation.
+There is no supported interface for Zig applications to construct or drive ECL.
+The separate `ecl-native` SDK supports the other direction: ECL calls trusted
+Zig extensions through semantic facades and the native ABI.
+
 That state owns:
 
 - the host allocator and `ReleaseDomain`;
@@ -107,8 +107,8 @@ That state owns:
 - the scheduler and root task scope; and
 - immutable or explicitly synchronized views of host services such as
   arguments, environment variables, standard input, output, diagnostics, TLS
-  trust, project configuration, module search paths, and optional process,
-  filesystem, and package-store authority.
+  trust, project configuration, module search paths, process, filesystem, and
+  network owners, and optional package-store authority.
 
 Grouping these objects under one owner correlates every dependent lifetime.
 Values, module pins, source cursors, task cells, and deferred destruction all
@@ -143,8 +143,12 @@ capabilities as core constructors; loading the module grants no additional autho
 
 A Session captures the host environment once, records whether standard input
 remains available as data, and owns any TLS or path overrides needed by its
-Units. This gives one Session a coherent view even when the embedding process
-changes around it.
+Units. The CLI captures its startup directory and environment snapshot once
+and shares those inputs across every execution entrypoint. One private CLI
+runtime owns writer buffers, writers, named-root storage, and its Session. It
+is initialized at its final address and remains there until Session teardown
+releases every borrow. Failed construction retains no live Session. Project
+discovery begins at that startup directory.
 
 Host operations are exposed to executing code through narrow facades. A Unit
 may enqueue work, write through the console, load through the module loader, or
@@ -152,32 +156,51 @@ use immutable host configuration. It cannot reach the raw Session, allocator,
 registry, scheduler lifecycle, or reclamation root. Observation, execution,
 mutation, and teardown are distinct authorities.
 
-Process execution follows the same rule. A Host may omit it, allow an exact
-set of absolute executables, or grant an explicit unrestricted policy together
-with cwd, environment, live-count, queue, and capture limits. Session
-construction copies that policy and mints one narrow `ProcessAccess`; having
-`std.Io` or filesystem access does not imply it. Units may ask Machine to
-perform a process operation, but cannot obtain the owner, scheduler scope,
-process cell, group identifier, or PID.
+Every initialized Session has the same complete runtime shape. Its constructor
+requires I/O, output and diagnostic writers, a startup directory, an environment
+snapshot, scheduler configuration, and an explicit command mode. Evaluation,
+language tests, and package commands differ only in the additional authorities
+their modes mint. Process, filesystem, and network owners are unconditional.
 
-Filesystem access is the same shape. A Host may name root directories, each
-with a permission set (`read-data`, `inspect`, `list`, `create`, `replace`,
-`rename`, `remove`) and shared limits; construction validates the policy,
-opens every root once, and fails with `InvalidHostPolicy` rather than
-`OutOfMemory` when a root is relative, missing, not a directory, misnamed, or
-duplicated, or when a limit is zero. From then on authority is the retained
-directory handle, not the configured path: renaming the directory afterward
-moves nothing. The `FilesystemOwner` owns the copied policy, the handles, and
-the live-operation quota; Units receive one opaque `FilesystemAccess` and can
-only ask the owner to look a symbol up, check a grant, or reserve a slot. No
-evaluated word can mint, widen, duplicate, serialize, or inspect a root, and a
-Session without a policy denies every `fs` word before reaching the host.
-Module loading through `load` and `ECL_PATH` remains a separate host facility
-and grants no caller-selected file access.
+Inherited context distinguishes prelude bootstrap from runtime execution.
+Both phases require a module registry. The bootstrap phase builds the core
+before a Session is published; it is not a reduced Session. Runtime context
+requires the native loader and complete service access, including a Console
+with output and diagnostic writers. Context is copied into descendants without changing module-loading order. All access borrows
+Session-owned state, which survives until tasks, modules, and retirement work
+have settled. Shared test fixtures keep isolated directories, streams, and
+explicit environment inputs alive through Session teardown.
 
-Clocks are two more authorities with different shapes. The scheduler owns
+Monotonic and wall clocks always exist at runtime. The CLI uses real clocks;
+manual monotonic and fixed or anchored wall clocks, cooperative scheduling, and
+TLS verification overrides are internal deterministic-testing inputs. They
+confer no permissions and introduce no command-line modes.
+
+The dependency-neutral `startup_environment.zig` owns validated environment
+entries and backing bytes together with their allocator. Session owns this one
+snapshot; evaluation and the process owner borrow immutable views. Shutdown and
+initialization rollback release the snapshot only after its dependent owners;
+normal teardown first joins the scheduler and destroys the process owner. Child
+environment maps retain their independent overrides.
+
+The process owner requires an explicit startup directory and retains its owned
+sentinel-terminated copy, together with live-count, queue, and capture limits.
+Its opaque `ProcessAccess` lets Units
+request operations without obtaining the owner, scheduler scope, process cell,
+group identifier, or PID. Executable and working-directory syntax is validated
+at the process boundary; the operating system determines access.
+
+The filesystem owner opens named roots once and owns their handles and the
+live-operation quota. Invalid roots or limits fail construction with
+`InvalidHostConfig`, distinctly from allocation failure. Authority remains the
+retained directory handle after a rename, and every root supports all filesystem
+operations subject to operating-system permissions. Units receive opaque
+`FilesystemAccess` for root lookup and operation admission. Root-relative path
+resolution enforces containment; module loading remains a separate operation.
+
+Clocks are two runtime inputs with different shapes. The scheduler owns
 monotonic time as one `MonotonicClock` tagged union, selected at construction
-from the Host's `ClockPolicy`: the `host` variant carries the Session's origin
+from internal clock configuration: the `host` variant carries the Session's origin
 instant and reads the process awake clock; the `manual` variant is an opaque
 `ManualClock` whose reading is whole milliseconds and whose only mutation is a
 compare-exchange advance with checked addition, refusing a step that would
@@ -186,13 +209,11 @@ leave the range without touching the stored value. It moves through
 `WorkerScheduler` facade does not expose, so no evaluated word can move time.
 Every deadline capture, arbitration check, timer wake, and `clock.now` sample
 reads `WorkerScheduler.now`, so the whole Session agrees on one "now". The wall clock is a separate
-`machine.WallClock` union on the inherited context — `absent`, `host` with the
-I/O it reads through, `fixed`, or `anchored` to the monotonic clock — converted
-from the Host policy at construction. Neither host I/O nor the TLS verification
-timestamp is consulted for it, and the default is `absent`.
+`machine.WallClock` union on the runtime context: realtime I/O, a fixed value,
+or a base anchored to the monotonic clock. CLI construction selects realtime;
+the other variants support deterministic tests independently of TLS time.
 
-Package commands add a third authority. `initPackageCommand` is the only
-constructor that mints a `PackageOwner`, and it takes one tagged
+Package command mode alone mints a `PackageOwner`, and carries one tagged
 `PackageGrant` naming exactly the stores a command shape may touch (`inspect`,
 `collect`, `verify`, `synchronize`, `vendor`). The shared cache is an
 absolute host path the command line resolved once at startup, a relative
@@ -200,9 +221,9 @@ absolute host path the command line resolved once at startup, a relative
 fixed child `vendor` of the retained project handle, opened without following
 a final symlink, so a repository-controlled link cannot become a store.
 `pkg.store` words receive the opaque `PackageAccess`, name a store by symbol,
-and address entries only by validated canonical store keys. Ordinary and
-embedded Sessions never construct it, so their package-store words fail
-closed, and no absolute store path is ever passed through evaluated code.
+and address entries only by validated canonical store keys. Ordinary evaluation
+Sessions never construct it, so their package-store words fail closed, and no
+absolute store path is ever passed through evaluated code.
 Cache selection from `ECL_CACHE`, `XDG_CACHE_HOME`, and `HOME` is host
 startup work shared with runtime module loading.
 
@@ -855,7 +876,7 @@ measured cost justifies fusion.
 A `Unit` is a green execution context. The scheduler may run Units
 cooperatively on the calling thread or on a fixed worker pool; both modes use
 the same machine, queues, wait protocol, task tree, and retirement domain.
-Cooperative mode gives deterministic embeddings and allocation-failure testing
+Cooperative mode gives deterministic tests and allocation-failure testing
 the same semantics as worker execution.
 
 ### The policy is a functional core with an imperative shell
@@ -977,8 +998,7 @@ zero duration expires immediately.
 
 Every `fs` word, generic archive extraction, and package-store operation runs
 as one scheduler driver. The driver first encodes and validates its inputs
-without touching the host: the canonical path grammar, the named root, the
-semantic grant, and a live-operation slot from the owner's quota. It then
+without touching the host: the canonical path grammar, the named root, and a live-operation slot from the owner's quota. It then
 resolves the path with `filesystem_port.Resolver`, one component per step:
 each component is opened or inspected relative to the handle on top of a
 stack anchored at the root with `O_NOFOLLOW`; a symlink target is read and
@@ -1022,12 +1042,11 @@ stable symbols and never on errno names.
 
 ### Network resources use registered controllers
 
-Session construction validates and copies the host's listen policy into a
-network owner. Exact grants compare parsed, normalized IP addresses and ports;
-no alternate literal spelling widens authority. The owner derives allocation
-and retirement from the Session host and outlives retained resource identities.
-Workers receive its opaque access capability. Resource initialization, accept,
-and socket I/O execute through host-owned controllers.
+Session construction validates network resource limits and creates a network
+owner. Requested addresses are parsed and normalized before binding. The owner
+derives allocation and retirement from the Session host and outlives retained
+resource identities. Workers receive its opaque access capability. Resource
+initialization, accept, and socket I/O execute through host-owned controllers.
 
 The common resource service owns controller lanes, scope membership,
 cancellation, and joined cleanup. Its network adapter owns typed listener or
@@ -1262,15 +1281,15 @@ Construction requires opaque invocation authority minted by the controller lane.
 worker code cannot construct this controller facade or obtain its advancement
 state.
 
-Each granted Session service owns its registered library instance. A library
-loaded without a grant owns an inert instance with no host authority.
+Each Session I/O service owns its registered library instance and a complete
+I/O backend.
 A module candidate publishes sealed capabilities as literal word
 bodies and pins its instance until publication or abandonment. Capability
 values retain that identity independently of service cleanup. Module registration
-binds immutable service grants inside the adapter, so module loading does not
+binds the Session I/O backend inside the adapter, so module loading does not
 select a resource backend. A generic module-constant provider carries names,
 effects, documentation, and sealed values; domain adapters own their declarations
-and typed service grants. Registration validates declaration-name uniqueness at
+and typed backend access. Registration validates declaration-name uniqueness at
 compile time, so one provider cannot replace its own earlier binding during
 publication. Retained issuer metadata has no backend discriminator.
 Factories register through one opaque opening
@@ -1397,6 +1416,34 @@ common controller service.
 Connection cleanup readiness is distinct from send-ring drainage: returning the
 last accepted byte to the kernel does not prove the socket controller has joined.
 Common close and shutdown drivers park on cleanup readiness for every backend.
+
+HTTP exchanges share controller groups, external scope membership, terminal
+failures, and byte transport with ports, without creating language port values or
+participating in capability transfer. The Session's opaque HTTP service owns
+configuration, admission, and execution authority; inherited runtime context
+carries submission access. Each admitted request progresses from preparation to
+owned active input, joined response, and consumed response. Execution and evaluator
+materialization transfer one response representation whose bounded retirement
+also owns request storage; failure and success use the same cleanup contract. One host controller
+exclusively owns the cancellable I/O future. Scheduler cancellation only changes
+state and signals that controller and transport; workers never await or cancel
+futures. Joined publication follows both I/O completion and controller join.
+Request admission survives all borrowers and bounded response retirement, and
+Session teardown joins scope members before destroying the service, TLS inputs,
+or reclamation root. The source audit classifies this service with controller
+infrastructure and excludes I/O future construction from work-driver steps.
+
+An HTTP invocation captures one absolute scheduler deadline before preparation.
+Runnable work and success publication recheck it. Deadline-bearing external
+waits install the same timer arbitration before registering readiness, including
+already-ready sources; progress never establishes a new deadline. Untimed
+external waits retain their existing behavior. Network execution receives owned
+bytes and immutable service inputs. Encoded bytes are counted before decompression
+and decoded bytes afterward, including redirect bodies; an accounting allocator
+bounds backend scratch separately from allocation failure. The evaluator drains
+bounded transport during execution into fixed chunks and performs one polled,
+exact-size materialization. HTTP retains its own header normalization and ordinary
+dictionary/text/byte-list construction, with no port-message node limits.
 
 Registered byte endpoints use a shared bounded transport (`port_bytes.zig`).
 An exchange owns its pipes; each attenuated endpoint retains the exchange and
@@ -1862,7 +1909,7 @@ Verification assigns each architectural claim to its strongest proof surface.
 | Closed representations and phase machines | Zig types, opaque factories, `comptime` registries, exhaustive switches, and layout assertions |
 | Repository and source-shape rules | The recursive AST-aware source audit over every classified first-party Zig file, plus the prelude layout audit |
 | Language behavior | Runtime and CLI tests through `Session`, the executable, native fixtures, and checked snapshots |
-| Filesystem confinement | Public `Session` tests over temporary directories with default-deny, per-grant, symlink-escape, staging-residue, cancellation, and concurrent-winner cases, plus the resolver's own component tests |
+| Filesystem confinement | Public `Session` tests over temporary directories with named-root, symlink-escape, staging-residue, cancellation, and concurrent-winner cases, plus the resolver's own component tests |
 | Fast paths are unobservable | Differential tests comparing idiom-enabled and generic execution, and typed-leaf versus boxed-spine execution |
 | Bounded work | Safe-point counts, fault-index tests, cancellation cases, memory ceilings, and large public workloads |
 | Ownership under failure | Focused allocator-failure injection plus the initialized-Session OOM gate |

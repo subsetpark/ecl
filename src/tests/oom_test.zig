@@ -28,6 +28,7 @@
 //! initialization instead of repeating those same ordinals. Each probe
 //! partitions its ordinals between four workers, matching the release-candidate
 //! runner while preserving exhaustive failure injection.
+const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const session = @import("../session.zig");
 const heap = @import("../heap.zig");
@@ -502,21 +503,18 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         .{ std.fs.path.delimiter, native_fixture.directory },
     );
     defer thread_safe_allocator.free(search);
-    var runtime = try session.Session.initWithHostConfig(
-        thread_safe_allocator,
-        &.{"argument"},
-        .{
-            .io = std.testing.io,
-            .output = &output,
-            .diagnostics = &diagnostics,
-            .ecl_path = search,
-            .environ = &.{.{ .name = "ECL_OOM_PROBE", .value = "probe" }},
-            // The sweep must never block on the test runner's own stdin;
-            // the refusal path is what has allocation ordinals here.
-            .standard_input = .program_source,
-        },
-        .cooperative,
-    );
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(thread_safe_allocator, &.{"argument"}, runtime_inputs.inputs(.{
+        .io = std.testing.io,
+        .output = &output,
+        .diagnostics = &diagnostics,
+        .ecl_path = search,
+        .environ = &.{.{ .name = "ECL_OOM_PROBE", .value = "probe" }},
+        // The sweep must never block on the test runner's own stdin;
+        // the refusal path is what has allocation ordinals here.
+        .standard_input = .program_source,
+    }), .cooperative, .evaluate);
     defer runtime.deinit();
 
     // Cold dotted completion reaches the embedded builtin manifest before
@@ -728,22 +726,19 @@ fn projectSessionInitializationProbe(allocator: std.mem.Allocator) !void {
     var output = std.Io.Writer.fixed(&output_buffer);
     var diagnostics_buffer: [1024]u8 = undefined;
     var diagnostics = std.Io.Writer.fixed(&diagnostics_buffer);
-    var runtime = try session.Session.initWithHostConfig(
-        thread_safe_allocator,
-        &.{"argument"},
-        .{
-            .io = std.testing.io,
-            .output = &output,
-            .diagnostics = &diagnostics,
-            .project_start = scratch.path,
-            .environ = &.{
-                .{ .name = "ECL_OOM_PROBE", .value = "probe" },
-                .{ .name = "ECL_CACHE", .value = scratch.path },
-            },
-            .standard_input = .program_source,
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(thread_safe_allocator, &.{"argument"}, runtime_inputs.inputs(.{
+        .io = std.testing.io,
+        .output = &output,
+        .diagnostics = &diagnostics,
+        .initial_cwd = scratch.path,
+        .environ = &.{
+            .{ .name = "ECL_OOM_PROBE", .value = "probe" },
+            .{ .name = "ECL_CACHE", .value = scratch.path },
         },
-        .cooperative,
-    );
+        .standard_input = .program_source,
+    }), .cooperative, .evaluate);
     runtime.deinit();
 }
 
@@ -805,41 +800,29 @@ fn stdlibSessionAllocationProbe(
     // The scratch directory is the working-directory root, the project root,
     // and the shared cache store at once: every host surface a snippet names
     // resolves to the same temporary directory.
-    var runtime = try session.Session.initPackageCommand(
-        thread_safe_allocator,
-        &.{"argument"},
-        .{
-            .io = std.testing.io,
-            .output = &output,
-            .diagnostics = &diagnostics,
-            .project_start = scratch_path,
-            .environ = &.{
-                .{ .name = "ECL_OOM_PROBE", .value = "probe" },
-                .{ .name = "ECL_CACHE", .value = scratch_path },
-            },
-            .standard_input = .program_source,
-            .process_policy = if (surface == .process) .{
-                .executables = .{ .exact = &.{process_path} },
-                .stdin_capacity = 16,
-                .stdout_capacity = 16,
-                .stderr_capacity = 16,
-            } else null,
-            .net_policy = if (surface == .net or surface == .net_connection or
-                surface == .net_give or surface == .http_server) .{
-                .binds = .{ .exact = &.{.{ .address = "127.0.0.1", .port = 0 }} },
-            } else null,
-            .filesystem_policy = .{ .roots = &.{
-                .{ .name = "cwd", .absolute_path = scratch_path, .permissions = .all },
-                .{
-                    .name = "project",
-                    .absolute_path = scratch_path,
-                    .permissions = .{ .read_data = true, .inspect = true, .create = true, .replace = true },
-                },
-            } },
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    const http_vtable = HttpMemoryIo.vtable();
+    var runtime = try session.Session.init(thread_safe_allocator, &.{"argument"}, runtime_inputs.inputs(.{
+        .io = if (surface == .http) .{ .userdata = std.testing.io.userdata, .vtable = &http_vtable } else std.testing.io,
+        .output = &output,
+        .diagnostics = &diagnostics,
+        .initial_cwd = scratch_path,
+        .environ = &.{
+            .{ .name = "ECL_OOM_PROBE", .value = "probe" },
+            .{ .name = "ECL_CACHE", .value = scratch_path },
         },
-        .cooperative,
-        .{ .synchronize = .{ .cache = scratch_path, .project = scratch.directory.dir } },
-    );
+        .standard_input = .program_source,
+        .process_limits = .{
+            .stdin_capacity = 16,
+            .stdout_capacity = 16,
+            .stderr_capacity = 16,
+        },
+        .filesystem = .{ .roots = &.{
+            .{ .name = "cwd", .absolute_path = scratch_path },
+            .{ .name = "project", .absolute_path = scratch_path },
+        } },
+    }), .cooperative, .{ .package = .{ .synchronize = .{ .cache = scratch_path, .project = scratch.directory.dir } } });
     defer runtime.deinit();
 
     // Loading these large embedded modules has its own failure window. Their
@@ -1106,17 +1089,14 @@ fn testSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     var output = std.Io.Writer.fixed(&output_buffer);
     var diagnostics_buffer: [1024]u8 = undefined;
     var diagnostics = std.Io.Writer.fixed(&diagnostics_buffer);
-    var runtime = try session.Session.initTestWithHostConfig(
-        thread_safe_allocator,
-        &.{},
-        .{
-            .io = std.testing.io,
-            .output = &output,
-            .diagnostics = &diagnostics,
-            .standard_input = .program_source,
-        },
-        .cooperative,
-    );
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(thread_safe_allocator, &.{}, runtime_inputs.inputs(.{
+        .io = std.testing.io,
+        .output = &output,
+        .diagnostics = &diagnostics,
+        .standard_input = .program_source,
+    }), .cooperative, .language_tests);
     defer runtime.deinit();
     try runOk(
         &runtime,
@@ -1129,11 +1109,9 @@ const structured_find_source = "[[1]] [1] find pop";
 
 fn structuredFindAllocationCount() !usize {
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    var runtime = try session.Session.initWithConfig(
-        failing.allocator(),
-        &.{},
-        .cooperative,
-    );
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(failing.allocator(), &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
     defer runtime.deinit();
 
     const before = failing.alloc_index;
@@ -1153,11 +1131,9 @@ test "oom: core: recognized structured find propagates every allocation failure"
     // operation that reaches the recognized driver's structural match cursor.
     for (0..allocation_count) |offset| {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        var runtime = try session.Session.initWithConfig(
-            failing.allocator(),
-            &.{},
-            .cooperative,
-        );
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try session.Session.init(failing.allocator(), &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
         defer runtime.deinit();
 
         failing.fail_index = failing.alloc_index + offset;
@@ -1183,11 +1159,9 @@ const admitted_construction_source = "[] () 'oom-driver @defm";
 
 fn admittedConstructionAllocationCount() !usize {
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    var runtime = try session.Session.initWithConfig(
-        failing.allocator(),
-        &.{},
-        .cooperative,
-    );
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(failing.allocator(), &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
     defer runtime.deinit();
 
     const before = failing.alloc_index;
@@ -1210,11 +1184,9 @@ test "oom: core: admitted construction driver allocation failure transfers its c
     // second local owner to destroy the same source header again.
     for (0..allocation_count) |offset| {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        var runtime = try session.Session.initWithConfig(
-            failing.allocator(),
-            &.{},
-            .cooperative,
-        );
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try session.Session.init(failing.allocator(), &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
         defer runtime.deinit();
 
         failing.fail_index = failing.alloc_index + offset;
@@ -1229,11 +1201,9 @@ const batch_import_source = "'oom-import ('a 'b) import";
 
 fn batchImportAllocationCount() !usize {
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    var runtime = try session.Session.initWithConfig(
-        failing.allocator(),
-        &.{},
-        .cooperative,
-    );
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(failing.allocator(), &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
     defer runtime.deinit();
     try runOk(&runtime, "oom-import-setup.ecl", batch_import_setup);
 
@@ -1249,11 +1219,9 @@ test "oom: core: batch import propagates every allocation failure" {
 
     for (0..allocation_count) |offset| {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        var runtime = try session.Session.initWithConfig(
-            failing.allocator(),
-            &.{},
-            .cooperative,
-        );
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try session.Session.init(failing.allocator(), &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
         defer runtime.deinit();
         try runOk(&runtime, "oom-import-setup.ecl", batch_import_setup);
 
@@ -1272,10 +1240,44 @@ test "oom: standard-library and host: host: project initialization propagates ev
     );
 }
 
+/// A complete fixed HTTP exchange over the production Client and I/O future.
+/// Network callbacks own no OS handles; every other I/O operation delegates to
+/// the test runtime unchanged. A Content-Length body ends without a second read.
+const HttpMemoryIo = struct {
+    fn connect(_: ?*anyopaque, address: *const std.Io.net.IpAddress, _: std.Io.net.IpAddress.ConnectOptions) std.Io.net.IpAddress.ConnectError!std.Io.net.Socket {
+        return .{ .handle = 0, .address = address.* };
+    }
+    fn read(_: ?*anyopaque, _: std.Io.net.Socket.Handle, buffers: [][]u8) std.Io.net.Stream.Reader.Error!usize {
+        const response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\nX-Test: yes\r\n\r\nok";
+        var copied: usize = 0;
+        for (buffers) |buffer| {
+            const count = @min(buffer.len, response.len - copied);
+            @memcpy(buffer[0..count], response[copied..][0..count]);
+            copied += count;
+            if (copied == response.len) return copied;
+        }
+        return error.Unexpected;
+    }
+    fn write(_: ?*anyopaque, _: std.Io.net.Socket.Handle, header: []const u8, buffers: []const []const u8, splat: usize) std.Io.net.Stream.Writer.Error!usize {
+        var count = header.len;
+        for (buffers, 0..) |buffer, index| count += buffer.len * (if (index + 1 == buffers.len) splat else 1);
+        return count;
+    }
+    fn close(_: ?*anyopaque, _: []const std.Io.net.Socket.Handle) void {}
+    fn vtable() std.Io.VTable {
+        var result = std.testing.io.vtable.*;
+        result.netConnectIp = connect;
+        result.netRead = read;
+        result.netWrite = write;
+        result.netClose = close;
+        return result;
+    }
+};
+
 fn checkStdlibSurface(comptime surface: StdlibSurface) !void {
     // Registered network startup and operations can finish before a waiter
     // allocates its readiness storage; allocation counts depend on progress.
-    if (surface == .net or surface == .net_connection or surface == .net_give)
+    if (surface == .net or surface == .net_connection or surface == .net_give or surface == .http)
         return checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, SurfaceProbe(surface).run);
     try checkAllPostInitAllocationFailuresParallel(
         std.heap.smp_allocator,
@@ -1323,13 +1325,15 @@ fn portForwardingProbe(
         var output = std.Io.Writer.fixed(&output_buffer);
         var diagnostics_buffer: [1024]u8 = undefined;
         var diagnostics = std.Io.Writer.fixed(&diagnostics_buffer);
-        var runtime = try session.Session.initWithHostConfig(allocator, &.{}, .{
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{
             .io = std.testing.io,
             .output = &output,
             .diagnostics = &diagnostics,
             .ecl_path = native_fixture.directory,
             .standard_input = .program_source,
-        }, .cooperative);
+        }), .cooperative, .evaluate);
         defer runtime.deinit();
         try runOk(&runtime, "oom-native-setup.ecl", "0 sample.forward pop");
         const input = if (borrowed)
@@ -1376,13 +1380,13 @@ fn BuiltinResourceLifecycleProbe(comptime backend: enum { process, listener }, c
             var output = std.Io.Writer.fixed(&output_buffer);
             var diagnostics_buffer: [256]u8 = undefined;
             var diagnostics = std.Io.Writer.fixed(&diagnostics_buffer);
-            var runtime = try session.Session.initWithHostConfig(allocator, &.{}, .{
+            var runtime_inputs = try runtime_fixture.Fixture.init();
+            defer runtime_inputs.deinit();
+            var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{
                 .io = std.testing.io,
                 .output = &output,
                 .diagnostics = &diagnostics,
-                .process_policy = .{ .executables = .{ .exact = &.{process_path} } },
-                .net_policy = .{ .binds = .{ .exact = &.{.{ .address = "127.0.0.1", .port = 0 }} } },
-            }, .cooperative);
+            }), .cooperative, .evaluate);
             defer runtime.deinit();
             // Join the process before injection: these probes cover the
             // common driver and retained identities, with deterministic
@@ -1439,13 +1443,15 @@ fn NativePortProbe(comptime source: []const u8, comptime setup: []const u8) type
             var output = std.Io.Writer.fixed(&output_buffer);
             var diagnostics_buffer: [256]u8 = undefined;
             var diagnostics = std.Io.Writer.fixed(&diagnostics_buffer);
-            var runtime = try session.Session.initWithHostConfig(allocator, &.{}, .{
+            var runtime_inputs = try runtime_fixture.Fixture.init();
+            defer runtime_inputs.deinit();
+            var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{
                 .io = std.testing.io,
                 .output = &output,
                 .diagnostics = &diagnostics,
                 .ecl_path = native_fixture.directory,
                 .native_port_limits = .{ .ring_capacity = 8 },
-            }, .cooperative);
+            }), .cooperative, .evaluate);
             defer runtime.deinit();
             try runOk(&runtime, "oom-port-setup.ecl", setup);
             const first_failure_index = failing.alloc_index;
@@ -1707,12 +1713,14 @@ test "oom: standard-library and host: common network endpoint publication and tr
             var output = std.Io.Writer.fixed(&output_buffer);
             var diagnostics_buffer: [256]u8 = undefined;
             var diagnostics = std.Io.Writer.fixed(&diagnostics_buffer);
-            var runtime = try session.Session.initWithHostConfig(locked.allocator(), &.{}, .{
+            var runtime_inputs = try runtime_fixture.Fixture.init();
+            defer runtime_inputs.deinit();
+            var runtime = try session.Session.init(locked.allocator(), &.{}, runtime_inputs.inputs(.{
                 .io = std.testing.io,
                 .output = &output,
                 .diagnostics = &diagnostics,
-                .net_policy = .{ .binds = .{ .exact = &.{.{ .address = "127.0.0.1", .port = 0 }} }, .limits = .{ .receive_capacity = 1, .send_capacity = 1 } },
-            }, .cooperative);
+                .net_limits = .{ .receive_capacity = 1, .send_capacity = 1 },
+            }), .cooperative, .evaluate);
             defer runtime.deinit();
             try runOk(&runtime, "oom-net-endpoint-setup.ecl", "net.core.listener {'address \"127.0.0.1\" 'port 0} port.open 'l set l net.local-address 'port at");
             const port = port: {
@@ -1935,16 +1943,18 @@ fn NetAcceptResultProbe(comptime operation: []const u8) type {
             var output = std.Io.Writer.fixed(&output_buffer);
             var diagnostics_buffer: [256]u8 = undefined;
             var diagnostics = std.Io.Writer.fixed(&diagnostics_buffer);
-            var runtime = try session.Session.initWithHostConfig(locked_allocator.allocator(), &.{}, .{
+            var runtime_inputs = try runtime_fixture.Fixture.init();
+            defer runtime_inputs.deinit();
+            var runtime = try session.Session.init(locked_allocator.allocator(), &.{}, runtime_inputs.inputs(.{
                 .io = std.testing.io,
                 .output = &output,
                 .diagnostics = &diagnostics,
-                .net_policy = .{ .binds = .unrestricted, .limits = .{
+                .net_limits = .{
                     .max_live_connections = 1,
                     .receive_capacity = 1,
                     .send_capacity = 1,
-                } },
-            }, .cooperative);
+                },
+            }), .cooperative, .evaluate);
             defer runtime.deinit();
             try runOk(&runtime, "oom-net-result-setup.ecl", "net.core.listener {'address \"127.0.0.1\" 'port 0} port.open 'l set " ++
                 "l net.core.local-address [] port.call 'port at");
@@ -1972,4 +1982,18 @@ test "oom: standard-library and host: accepted connection result publication" {
 test "oom: standard-library and host: accepted connection result discard" {
     try requireSelectedOomTest(@src());
     try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NetAcceptResultProbe("port.begin dup port.await port.close").run);
+}
+
+fn startupSessionAllocationProbe(allocator: std.mem.Allocator) !void {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{"argument"}, runtime_inputs.inputs(.{
+        .environ = &.{.{ .name = "ECL_OOM_PROBE", .value = "probe" }},
+    }), .cooperative, .evaluate);
+    defer runtime.deinit();
+}
+
+test "oom: standard-library and host: host: startup snapshot and Session initialization" {
+    try requireSelectedOomTest(@src());
+    try checkAllAllocationFailuresParallel(std.heap.smp_allocator, startupSessionAllocationProbe);
 }
