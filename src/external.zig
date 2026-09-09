@@ -272,18 +272,20 @@ pub fn readinessSource(comptime Payload: type, payload: *Payload, key: u64) Read
 
 /// One scheduler-owned reference to an external resource attached to a task
 /// scope. Cancellation is idempotent; release consumes the retained reference.
+pub const ScopeIdentity = opaque {};
+
 pub const ScopeMember = struct {
     context: ?*anyopaque,
     retain_fn: *const fn (*anyopaque) void,
     release_fn: *const fn (*anyopaque) void,
-    cancel_fn: *const fn (*anyopaque) void,
+    cancel_fn: *const fn (*anyopaque, *ScopeIdentity) void,
 
     pub fn retain(self: *const ScopeMember) void {
         self.retain_fn(self.context.?);
     }
 
-    pub fn cancel(self: *const ScopeMember) void {
-        self.cancel_fn(self.context.?);
+    pub fn cancel(self: *const ScopeMember, scope: *ScopeIdentity) void {
+        self.cancel_fn(self.context.?, scope);
     }
 
     pub fn deinit(self: *ScopeMember) void {
@@ -309,8 +311,8 @@ fn ScopeMemberAdapters(comptime Payload: type) type {
             Payload.releaseExternalMember(@ptrCast(@alignCast(raw)));
         }
 
-        fn cancel(raw: *anyopaque) void {
-            Payload.cancelExternalMember(@ptrCast(@alignCast(raw)));
+        fn cancel(raw: *anyopaque, scope: *ScopeIdentity) void {
+            Payload.cancelExternalMember(@ptrCast(@alignCast(raw)), scope);
         }
     };
 }
@@ -349,6 +351,9 @@ pub const ScopeMembership = struct {
         const context = self.context orelse return null;
         return self.scope_fn(context);
     }
+    pub fn authorizesCancellation(self: ScopeMembership, scope: *ScopeIdentity) bool {
+        return self.owningScope() == @as(*anyopaque, @ptrCast(scope));
+    }
 };
 
 /// Which task scope owns one external resource. A live resource is a member
@@ -357,9 +362,23 @@ pub const ScopeMembership = struct {
 /// origin has not yet let go. States such as closed-with-a-pending-move or
 /// live-with-no-owner are not representable.
 pub const Ownership = union(enum) {
+    /// Initial attachment is still outstanding. Release remembers cancellation
+    /// by transitioning to none, so a late membership cannot resurrect ownership.
+    provisional,
     none,
     owned: ScopeMembership,
     transferring: struct { origin: ScopeMembership, destination: ScopeMembership },
+
+    /// Check while holding the resource's lifetime lock. Detached source nodes
+    /// can still be retained by a cancellation cursor, but no longer authorize
+    /// cancellation after ownership commits to another scope.
+    pub fn authorizesCancellation(self: Ownership, scope: *ScopeIdentity) bool {
+        return switch (self) {
+            .provisional, .none => false,
+            .owned => |member| member.authorizesCancellation(scope),
+            .transferring => |both| both.origin.authorizesCancellation(scope) or both.destination.authorizesCancellation(scope),
+        };
+    }
 
     /// Memberships a caller must detach after leaving its lock.
     pub const Detached = struct {
@@ -380,18 +399,34 @@ pub const Ownership = union(enum) {
         }
     };
 
+    /// Consumes the initial membership under the resource lock. A release that
+    /// won the attachment race returns it for detachment outside that lock.
+    pub fn publish(self: *Ownership, membership: ScopeMembership) Detached {
+        switch (self.*) {
+            .provisional => {
+                self.* = .{ .owned = membership };
+                return .{};
+            },
+            .none => return .{ .first = membership },
+            .owned, .transferring => @panic("external resource already published"),
+        }
+    }
+
     /// The scope that owns the resource now, or null when none does. During a
     /// transfer this is still the origin: the move is not yet authoritative.
     pub fn owningScope(self: Ownership) ?*anyopaque {
         return switch (self) {
-            .none => null,
+            .none, .provisional => null,
             .owned => |current| current.owningScope(),
             .transferring => |both| both.origin.owningScope(),
         };
     }
 
     pub fn live(self: Ownership) bool {
-        return self != .none;
+        return switch (self) {
+            .owned, .transferring => true,
+            .none, .provisional => false,
+        };
     }
 
     /// Give up every membership. A resource closing mid-transfer detaches the
@@ -399,7 +434,7 @@ pub const Ownership = union(enum) {
     pub fn release(self: *Ownership) Detached {
         defer self.* = .none;
         return switch (self.*) {
-            .none => .{},
+            .none, .provisional => .{},
             .owned => |current| .{ .first = current },
             .transferring => |both| .{ .first = both.origin, .second = both.destination },
         };
@@ -477,7 +512,7 @@ test "external capabilities have consuming release surfaces" {
         fn releaseExternalMember(self: *@This()) void {
             self.refs -= 1;
         }
-        fn cancelExternalMember(self: *@This()) void {
+        fn cancelExternalMember(self: *@This(), _: *ScopeIdentity) void {
             self.cancellations += 1;
         }
         fn detachExternalMembership(self: *@This()) void {
@@ -490,7 +525,7 @@ test "external capabilities have consuming release surfaces" {
     var probe: Probe = .{};
     var member = scopeMember(Probe, &probe);
     try std.testing.expectEqual(@as(usize, 1), probe.refs);
-    member.cancel();
+    member.cancel(@ptrCast(&probe));
     member.deinit();
     member.deinit();
     try std.testing.expectEqual(@as(usize, 1), probe.cancellations);

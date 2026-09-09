@@ -195,7 +195,7 @@ const DictBuild = struct {
                 const appended = building.appended;
                 const keys = building.keys;
                 const values = building.values;
-                const materializer = try dict.Materializer.initSlices(
+                const materializer = try dict.Materializer.initBorrowedSlices(
                     call.allocator,
                     keys.items()[0..appended],
                     values.items()[0..appended],
@@ -276,7 +276,6 @@ const Transaction = struct {
     instance: *native_module.ModuleInstance,
     definition: *const descriptor_api.ValidatedDefinition,
     host_table: abi.HostTable,
-    effect_check: ?machine.EffectCheck,
     candidates: std.ArrayList(CandidateEntry) = .empty,
     outputs: std.ArrayList(Value) = .empty,
     builders: [abi.max_builder_slots]?*AggregateBuilder =
@@ -292,10 +291,7 @@ const Transaction = struct {
         evaluator: *machine.Machine,
         callable: env.NativeCallable,
         definition: *const descriptor_api.ValidatedDefinition,
-        effect_check: ?machine.EffectCheck,
     ) error{ OutOfMemory, NativeCallsClosed }!*Transaction {
-        var owned_check = effect_check;
-        errdefer if (owned_check) |*check| check.deinit(evaluator.releaseDomain());
         const call = try evaluator.allocator().create(Transaction);
         if (!callable.instance.retainCall()) {
             evaluator.allocator().destroy(call);
@@ -307,21 +303,18 @@ const Transaction = struct {
             .instance = callable.instance,
             .definition = definition,
             .host_table = callable.instance.mintHostTable(full_host_table),
-            .effect_check = owned_check,
         };
-        owned_check = null;
         errdefer {
-            if (call.effect_check) |*check| check.deinit(evaluator.releaseDomain());
             call.instance.releasePin();
             evaluator.allocator().destroy(call);
         }
-        if (definition.continuation_size != 0) {
+        if (definition.body.call.continuation_size != 0) {
             call.continuation = try evaluator.allocator().alignedAlloc(
                 u8,
                 .@"64",
-                definition.continuation_size,
+                definition.body.call.continuation_size,
             );
-            definition.init_continuation.?(call.continuation.?.ptr);
+            definition.body.call.init_continuation.?(call.continuation.?.ptr);
         }
         return call;
     }
@@ -340,10 +333,8 @@ const Transaction = struct {
         };
         self.outputs.deinit(self.allocator);
         self.candidates.deinit(self.allocator);
-        if (self.effect_check) |*check| check.deinit(self.releases);
-        self.effect_check = null;
         if (self.continuation) |state| {
-            self.definition.deinit_continuation.?(state.ptr);
+            self.definition.body.call.deinit_continuation.?(state.ptr);
             self.allocator.free(state);
         }
         self.instance.releasePin();
@@ -459,7 +450,7 @@ const Transaction = struct {
         const timing = evaluator.beginNativeTiming();
         defer evaluator.finishNativeTiming(self.instance, timing);
         var result = abi.InvokeResult{ .tag = .fail, .adapter_status = 2 };
-        self.instance.invoke()(&self.host_table, self, self.definition.callback_index, &result);
+        self.instance.invoke()(&self.host_table, self, self.definition.body.call.callback_index, &result);
         if (result.size != @sizeOf(abi.InvokeResult))
             return evaluator.fail(.contract, "native callback returned an invalid result record size");
         if (result.adapter_status == 1) return error.OutOfMemory;
@@ -478,13 +469,6 @@ const Transaction = struct {
                 );
                 replacement.commitOwned(self.outputs.items);
                 self.outputs.items.len = 0;
-                if (self.effect_check) |*check| {
-                    defer {
-                        check.deinit(self.releases);
-                        self.effect_check = null;
-                    }
-                    try machine.finishEffectCheck(evaluator, check);
-                }
                 break :complete .completed;
             },
             .fail => switch (self.terminal) {
@@ -513,10 +497,7 @@ const Transaction = struct {
 pub fn begin(
     evaluator: *machine.Machine,
     callable: env.NativeCallable,
-    effect_check: ?machine.EffectCheck,
 ) machine.MachineError!void {
-    var owned_check = effect_check;
-    defer if (owned_check) |*check| check.deinit(evaluator.releaseDomain());
     const definition = callable.instance.definition(callable.definition);
     try evaluator.require(definition.effect.inputs);
     for (0..definition.effect.inputs) |index| switch (evaluator.nativeInputBorrowed(
@@ -525,12 +506,9 @@ pub fn begin(
     )) {
         .task => return evaluator.fail(.type, "native words cannot observe task capabilities"),
         .module => return evaluator.fail(.type, "native words cannot observe module capabilities"),
-        .port => return evaluator.fail(.type, "native words cannot observe port capabilities"),
         else => {},
     };
-    const transferred = owned_check;
-    owned_check = null;
-    const call = Transaction.create(evaluator, callable, definition, transferred) catch |err| switch (err) {
+    const call = Transaction.create(evaluator, callable, definition) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.NativeCallsClosed => return evaluator.fail(
             .cancelled,
@@ -556,6 +534,7 @@ const full_host_table = abi.HostTable{
     .build_list_finish = hostBuildListFinish,
     .build_dict_append = hostBuildDictAppend,
     .build_dict_finish = hostBuildDictFinish,
+    .forward_path = hostForwardPath,
 };
 
 fn transactionFrom(context: *anyopaque) *Transaction {
@@ -581,7 +560,7 @@ fn writeView(call: *Transaction, item: Value, output: *abi.ValueView) abi.HostSt
         .dict => |header| .{ .kind = .dict, .aggregate_len = header.length() },
         .task => return call.rejectCapability("native words cannot observe task capabilities"),
         .module => return call.rejectCapability("native words cannot observe module capabilities"),
-        .port => return call.rejectCapability("native words cannot observe port capabilities"),
+        .port => .{ .kind = .port },
     };
     return .ok;
 }
@@ -642,31 +621,66 @@ fn hostReadPath(
     output: *abi.ValueView,
 ) callconv(.c) abi.HostStatus {
     const call = transactionFrom(context);
+    return switch (readPath(call, input_index, path_ptr, path_len)) {
+        .value => |item| writeView(call, item, output),
+        .status => |status| status,
+    };
+}
+
+fn hostForwardPath(
+    context: *anyopaque,
+    input_index: u32,
+    path_ptr: [*]const u64,
+    path_len: u32,
+    output: *abi.Candidate,
+) callconv(.c) abi.HostStatus {
+    const call = transactionFrom(context);
+    const item = switch (readPath(call, input_index, path_ptr, path_len)) {
+        .value => |item| item,
+        .status => |status| return status,
+    };
+    var view: abi.ValueView = .{ .kind = .int };
+    const observed = writeView(call, item, &view);
+    if (observed != .ok) return observed;
+    heap.retainValue(item);
+    const status = call.appendCandidate(item, null);
+    if (status == .ok) output.* = call.candidateWire();
+    return status;
+}
+
+const PathRead = union(enum) { value: Value, status: abi.HostStatus };
+
+fn readPath(
+    call: *Transaction,
+    input_index: u32,
+    path_ptr: [*]const u64,
+    path_len: u32,
+) PathRead {
     if (call.terminal != .idle or call.continuation == null or
         input_index >= call.definition.effect.inputs)
-        return .invalid;
-    if (path_len > abi.max_read_path_depth) return .invalid;
-    if (charge(call, @max(path_len, 1)) != .ok) return .yield_required;
+        return .{ .status = .invalid };
+    if (path_len > abi.max_read_path_depth) return .{ .status = .invalid };
+    if (charge(call, @max(path_len, 1)) != .ok) return .{ .status = .yield_required };
     var current = call.activeEvaluator().nativeInputBorrowed(
         call.definition.effect.inputs,
         input_index,
     );
     for (path_ptr[0..path_len]) |step| switch (current) {
         .list => |header| {
-            if (step >= header.length()) return .invalid;
+            if (step >= header.length()) return .{ .status = .invalid };
             current = list.atUnchecked(current, @intCast(step));
         },
         .dict => |header| {
             const entry = step / 2;
-            if (entry >= dict.keysOf(header).list.length()) return .invalid;
+            if (entry >= dict.keysOf(header).list.length()) return .{ .status = .invalid };
             current = if (step % 2 == 0)
                 dict.keyAt(header, @intCast(entry))
             else
                 dict.valueAt(header, @intCast(entry));
         },
-        .int, .float, .char, .symbol, .word, .task, .module, .port => return .invalid,
+        .int, .float, .char, .symbol, .word, .task, .module, .port => return .{ .status = .invalid },
     };
-    return writeView(call, current, output);
+    return .{ .value = current };
 }
 
 fn hostDictAt(
@@ -718,7 +732,7 @@ fn hostScalar(
     const units: u32 = switch (scalar.kind) {
         .symbol, .word => @max(1, std.math.cast(u32, scalar.bytes_len) orelse return .invalid),
         .int, .float, .char => 0,
-        .list, .dict => return .invalid,
+        .list, .dict, .port => return .invalid,
         _ => return .invalid,
     };
     if (units > abi.max_guest_scalar_bytes) return .invalid;
@@ -739,7 +753,7 @@ fn hostScalar(
             const id = intern.intern(bytes) catch return .out_of_memory;
             break :item if (scalar.kind == .symbol) .{ .symbol = id } else .{ .word = .{ .name = id } };
         },
-        .list, .dict => return .invalid,
+        .list, .dict, .port => return .invalid,
         _ => return .invalid,
     };
     const status = call.appendCandidate(item, null);

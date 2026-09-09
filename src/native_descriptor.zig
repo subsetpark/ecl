@@ -32,6 +32,7 @@ pub const ValidateError = error{
     InvalidEffect,
     DuplicateDefinition,
     InvalidContinuation,
+    InvalidPortDefinition,
     ModuleNameMismatch,
     MissingInvoke,
 };
@@ -40,12 +41,69 @@ pub const ValidatedDefinition = struct {
     name: intern.BindingName,
     doc: *env.DocumentationString,
     effect: env.ValidatedEffect,
+    body: union(enum) { call: CallDefinition, port: PortCapability },
+};
+
+pub const CallDefinition = struct {
     callback_index: u32,
     continuation_size: u32,
     continuation_alignment: u32,
     init_continuation: ?abi.StateInitFn,
     deinit_continuation: ?abi.StateDeinitFn,
 };
+
+pub const PortCapability = union(enum) {
+    factory: u32,
+    operation: struct { resource: u32, code: u32, lane: u32, endpoints: u64 },
+    endpoint: EndpointDefinition,
+
+    pub fn resource(self: PortCapability) u32 {
+        return switch (self) {
+            .factory => |kind| kind,
+            .operation => |operation| operation.resource,
+            .endpoint => |endpoint| endpoint.resource,
+        };
+    }
+};
+
+pub const EndpointDefinition = struct {
+    resource: u32,
+    id: u6,
+    transport: enum { bytes, messages },
+    direction: enum { input, output },
+    owner: enum { resource, exchange },
+};
+const EndpointSlot = struct { resource: ?EndpointDefinition = null, exchange: ?EndpointDefinition = null };
+
+const PortDefinitions = [abi.max_port_definitions]?abi.PortDefinition;
+
+fn portCapability(binding: abi.PortBinding) PortCapability {
+    return switch (binding.kind) {
+        .factory => .{ .factory = binding.resource },
+        .operation => .{ .operation = .{ .resource = binding.resource, .code = binding.operation, .lane = binding.lane, .endpoints = binding.endpoints } },
+        .endpoint => .{ .endpoint = .{
+            .resource = binding.resource,
+            .id = @intCast(binding.endpoint),
+            .transport = switch (binding.transport) {
+                .bytes => .bytes,
+                .messages => .messages,
+                _ => unreachable,
+            },
+            .direction = switch (binding.direction) {
+                .input => .input,
+                .output => .output,
+                _ => unreachable,
+            },
+            .owner = switch (binding.owner) {
+                .resource => .resource,
+                .exchange => .exchange,
+                _ => unreachable,
+            },
+        } },
+        .call => unreachable,
+        _ => unreachable,
+    };
+}
 
 const DescriptorState = struct {
     host: *const heap.HostCleanup,
@@ -55,6 +113,8 @@ const DescriptorState = struct {
     requirements: []abi.CapabilityRequirement,
     invoke: abi.Invoke,
     callback_count: u32,
+    ports: PortDefinitions,
+    endpoints: []EndpointSlot,
 
     fn deinit(self: *DescriptorState) void {
         const allocator = self.host.allocator();
@@ -66,6 +126,7 @@ const DescriptorState = struct {
         }
         allocator.free(self.definitions);
         allocator.free(self.requirements);
+        allocator.free(self.endpoints);
         allocator.destroy(self);
     }
 };
@@ -100,6 +161,21 @@ pub const ValidatedDescriptor = opaque {
 
     pub fn invoke(self: *const ValidatedDescriptor) abi.Invoke {
         return self.state().invoke;
+    }
+
+    pub fn port(self: *const ValidatedDescriptor, index: u32) ?abi.PortDefinition {
+        if (index >= self.state().ports.len) return null;
+        return self.state().ports[index];
+    }
+
+    pub fn endpoint(self: *const ValidatedDescriptor, kind: u32, id: u6, owner: enum { resource, exchange }) ?EndpointDefinition {
+        const index = @as(usize, kind) * 64 + id;
+        if (index >= self.state().endpoints.len) return null;
+        const slot = self.state().endpoints[index];
+        return switch (owner) {
+            .resource => slot.resource,
+            .exchange => slot.exchange,
+        };
     }
 
     pub fn callbackCount(self: *const ValidatedDescriptor) u32 {
@@ -340,17 +416,24 @@ pub const ValidateCursor = struct {
 
     const Allocated = struct {
         descriptor: abi.Descriptor,
+        ports: PortDefinitions,
         requirements: []abi.CapabilityRequirement,
         definitions: []ValidatedDefinition,
+        endpoints: []EndpointSlot,
     };
     const ModuleArtifacts = struct {
         descriptor: abi.Descriptor,
+        ports: PortDefinitions,
         name: intern.ModuleName,
         doc: *env.DocumentationString,
         requirements: []abi.CapabilityRequirement,
         capability_index: usize = 0,
         definitions: []ValidatedDefinition,
+        endpoints: []EndpointSlot,
         definition_index: usize = 0,
+        endpoint_masks: [abi.max_port_definitions]u64 = .{0} ** abi.max_port_definitions,
+        resource_endpoint_masks: [abi.max_port_definitions]u64 = .{0} ** abi.max_port_definitions,
+        binding_index: usize = 0,
     };
     const DefinitionBuild = struct {
         module: ModuleArtifacts,
@@ -359,6 +442,7 @@ pub const ValidateCursor = struct {
     };
     const State = union(enum) {
         header,
+        endpoint_storage: struct { allocated: Allocated, next: usize = 0 },
         module_name: Allocated,
         module_doc: struct {
             allocated: Allocated,
@@ -407,6 +491,15 @@ pub const ValidateCursor = struct {
         var remaining = budget;
         while (remaining != 0) : (remaining -= 1) switch (self.state) {
             .header => self.validateHeader() catch |err| return self.reject(err, null),
+            .endpoint_storage => |*storage_state| {
+                if (storage_state.next == storage_state.allocated.endpoints.len) {
+                    const allocated = storage_state.allocated;
+                    self.state = .{ .module_name = allocated };
+                } else {
+                    storage_state.allocated.endpoints[storage_state.next] = .{};
+                    storage_state.next += 1;
+                }
+            },
             .module_name => |allocated| self.validateModuleName(allocated) catch |err|
                 return self.reject(err, null),
             .module_doc => |*module_doc| {
@@ -419,10 +512,12 @@ pub const ValidateCursor = struct {
                 module_doc.builder.deinit();
                 self.state = .{ .capabilities = .{
                     .descriptor = allocated.descriptor,
+                    .ports = allocated.ports,
                     .name = name,
                     .doc = document,
                     .requirements = allocated.requirements,
                     .definitions = allocated.definitions,
+                    .endpoints = allocated.endpoints,
                 } };
             },
             .capabilities => |*module| self.validateCapability(module) catch |err|
@@ -466,11 +561,13 @@ pub const ValidateCursor = struct {
                     .name = name,
                     .doc = document,
                     .effect = effect,
-                    .callback_index = definition.callback_index,
-                    .continuation_size = definition.continuation_size,
-                    .continuation_alignment = definition.continuation_alignment,
-                    .init_continuation = definition.init_continuation,
-                    .deinit_continuation = definition.deinit_continuation,
+                    .body = if (definition.binding.kind == .call) .{ .call = .{
+                        .callback_index = definition.callback_index,
+                        .continuation_size = definition.continuation_size,
+                        .continuation_alignment = definition.continuation_alignment,
+                        .init_continuation = definition.init_continuation,
+                        .deinit_continuation = definition.deinit_continuation,
+                    } } else .{ .port = portCapability(definition.binding) },
                 };
                 module.definition_index += 1;
                 self.state = .{ .definition = module };
@@ -499,8 +596,44 @@ pub const ValidateCursor = struct {
             descriptor.capability_count,
             descriptor.capability_record_size,
         );
-        if (descriptor.callback_count != 0 and descriptor.invoke == null)
+        if (descriptor.invoke == null)
             return error.MissingInvoke;
+        if (descriptor.port_count > abi.max_port_definitions) return error.CountOverflow;
+        try validateRecordSize(descriptor.port_record_size, @sizeOf(abi.PortDefinition));
+        var ports: PortDefinitions = .{null} ** abi.max_port_definitions;
+        if (descriptor.port_count != 0) {
+            const records = try RecordArray(abi.PortDefinition).init(
+                descriptor.ports_ptr orelse return error.InvalidPortDefinition,
+                descriptor.port_count,
+                descriptor.port_record_size,
+            );
+            for (0..descriptor.port_count) |index| {
+                var port = try records.read(index);
+                if (port.state_size == 0 or port.state_size > abi.max_port_state_bytes or
+                    port.state_alignment == 0 or port.state_alignment > 64 or
+                    !std.math.isPowerOfTwo(port.state_alignment) or
+                    port.identity == null or port.init_state == null or port.initialize == null or port.execute == null or
+                    port.cancel == null or port.cleanup == null or
+                    port.lane_count == 0 or port.lane_count > abi.max_port_lanes) return error.InvalidPortDefinition;
+                switch (port.cancellation) {
+                    .close_resource => if (port.cancel_operation != null) return error.InvalidPortDefinition,
+                    .acknowledge => if (port.cancel_operation == null) return error.InvalidPortDefinition,
+                    _ => return error.InvalidPortDefinition,
+                }
+                const name = try guestUtf8(port.name_ptr, port.name_len, max_word_name_bytes);
+                const symbol = intern.internNamespace(name) catch |err| return switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    error.InvalidName => error.InvalidName,
+                };
+                const owned_name = intern.get(intern.namespaceId(symbol));
+                for (ports[0..index]) |prior| {
+                    if (prior.?.identity == port.identity) return error.InvalidPortDefinition;
+                    if (std.mem.eql(u8, prior.?.name_ptr[0..prior.?.name_len], owned_name)) return error.DuplicateDefinition;
+                }
+                port.name_ptr = owned_name.ptr;
+                ports[index] = port;
+            }
+        }
         const requirements = try self.host.allocator().alloc(
             abi.CapabilityRequirement,
             descriptor.capability_count,
@@ -510,11 +643,15 @@ pub const ValidateCursor = struct {
             ValidatedDefinition,
             descriptor.definition_count,
         );
-        self.state = .{ .module_name = .{
+        errdefer self.host.allocator().free(definitions);
+        const endpoints = try self.host.allocator().alloc(EndpointSlot, @as(usize, descriptor.port_count) * 64);
+        self.state = .{ .endpoint_storage = .{ .allocated = .{
             .descriptor = descriptor,
+            .ports = ports,
             .requirements = requirements,
             .definitions = definitions,
-        } };
+            .endpoints = endpoints,
+        } } };
     }
 
     fn validateModuleName(self: *ValidateCursor, allocated: Allocated) ValidateError!void {
@@ -542,6 +679,7 @@ pub const ValidateCursor = struct {
 
     fn validateCapability(self: *ValidateCursor, module: *ModuleArtifacts) ValidateError!void {
         if (module.capability_index == module.descriptor.capability_count) {
+            if (module.descriptor.port_count != 0 and !hasCapability(module, .ports)) return error.InvalidPortDefinition;
             const moved = module.*;
             self.state = .{ .definition = moved };
             return;
@@ -554,7 +692,7 @@ pub const ValidateCursor = struct {
         const requirement = try records.read(module.capability_index);
         try validateRecordSize(requirement.size, @sizeOf(abi.CapabilityRequirement));
         switch (@as(abi.CapabilityId, @enumFromInt(requirement.id))) {
-            .call, .build_values, .reschedule => {},
+            .call, .build_values, .reschedule, .ports => {},
             _ => return error.UnsupportedCapabilityId,
         }
         module.requirements[module.capability_index] = requirement;
@@ -563,6 +701,18 @@ pub const ValidateCursor = struct {
 
     fn prepareDefinition(self: *ValidateCursor, module: *ModuleArtifacts) ValidateError!void {
         if (module.definition_index == module.descriptor.definition_count) {
+            if (module.binding_index < module.definitions.len) {
+                switch (module.definitions[module.binding_index].body) {
+                    .call => {},
+                    .port => |binding| switch (binding) {
+                        .operation => |operation| if (operation.endpoints & ~module.endpoint_masks[operation.resource] != 0)
+                            return error.InvalidPortDefinition,
+                        .factory, .endpoint => {},
+                    },
+                }
+                module.binding_index += 1;
+                return;
+            }
             const moved = module.*;
             self.state = .{ .finish = moved };
             return;
@@ -574,8 +724,9 @@ pub const ValidateCursor = struct {
         );
         const definition = try records.read(module.definition_index);
         try validateRecordSize(definition.size, @sizeOf(abi.Definition));
-        if (definition.callback_index >= module.descriptor.callback_count)
+        if (definition.binding.kind == .call and definition.callback_index >= module.descriptor.callback_count)
             return error.CallbackIndexOutOfRange;
+        try validatePortBinding(module, definition);
         const has_continuation = definition.continuation_size != 0 or
             definition.continuation_alignment != 0 or
             definition.init_continuation != null or definition.deinit_continuation != null;
@@ -620,6 +771,52 @@ pub const ValidateCursor = struct {
         return false;
     }
 
+    fn validatePortBinding(module: *ModuleArtifacts, definition: abi.Definition) ValidateError!void {
+        const binding = definition.binding;
+        switch (binding.kind) {
+            .call => return,
+            .factory, .operation, .endpoint => {},
+            _ => return error.InvalidPortDefinition,
+        }
+        if (!hasCapability(module, .ports) or binding.resource >= module.descriptor.port_count or
+            definition.input_count != 0 or definition.output_count != 1 or
+            definition.continuation_size != 0 or definition.continuation_alignment != 0 or
+            definition.init_continuation != null or definition.deinit_continuation != null)
+            return error.InvalidPortDefinition;
+        switch (binding.kind) {
+            .factory => {},
+            .operation => if (binding.lane >= module.ports[binding.resource].?.lane_count)
+                return error.InvalidPortDefinition,
+            .endpoint => {
+                if (binding.endpoint >= 64) return error.InvalidPortDefinition;
+                switch (binding.transport) {
+                    .bytes, .messages => {},
+                    _ => return error.InvalidPortDefinition,
+                }
+                switch (binding.direction) {
+                    .input, .output => {},
+                    _ => return error.InvalidPortDefinition,
+                }
+                const mask = switch (binding.owner) {
+                    .resource => &module.resource_endpoint_masks[binding.resource],
+                    .exchange => &module.endpoint_masks[binding.resource],
+                    _ => return error.InvalidPortDefinition,
+                };
+                const bit = @as(u64, 1) << @as(u6, @intCast(binding.endpoint));
+                if (mask.* & bit != 0) return error.DuplicateDefinition;
+                mask.* |= bit;
+                const endpoint_value = portCapability(binding).endpoint;
+                const slot = &module.endpoints[@as(usize, binding.resource) * 64 + binding.endpoint];
+                switch (endpoint_value.owner) {
+                    .resource => slot.resource = endpoint_value,
+                    .exchange => slot.exchange = endpoint_value,
+                }
+            },
+            .call => unreachable,
+            _ => unreachable,
+        }
+    }
+
     fn finish(self: *ValidateCursor) ValidateError!Progress {
         const module = self.state.finish;
         const invoke = module.descriptor.invoke orelse return error.MissingInvoke;
@@ -632,6 +829,8 @@ pub const ValidateCursor = struct {
             .requirements = module.requirements,
             .invoke = invoke,
             .callback_count = module.descriptor.callback_count,
+            .ports = module.ports,
+            .endpoints = module.endpoints,
         };
         self.state = .complete;
         return .{ .complete = @ptrCast(state) };
@@ -648,6 +847,7 @@ pub const ValidateCursor = struct {
         const releases = heap.hostDomain(self.host);
         switch (self.state) {
             .header, .complete, .failed => {},
+            .endpoint_storage => |*initializing| self.cleanupAllocated(&initializing.allocated),
             .module_name => |*allocated| self.cleanupAllocated(allocated),
             .module_doc => |*module_doc| {
                 module_doc.builder.deinit();
@@ -673,6 +873,7 @@ pub const ValidateCursor = struct {
     }
 
     fn cleanupAllocated(self: *ValidateCursor, allocated: *Allocated) void {
+        self.host.allocator().free(allocated.endpoints);
         self.host.allocator().free(allocated.definitions);
         self.host.allocator().free(allocated.requirements);
     }
@@ -683,6 +884,7 @@ pub const ValidateCursor = struct {
         releases: *heap.ReleaseDomain,
     ) void {
         releases.releaseHeader(env.documentationHeader(module.doc));
+        self.host.allocator().free(module.endpoints);
         for (module.definitions[0..module.definition_index]) |definition| {
             releases.releaseHeader(env.documentationHeader(definition.doc));
             definition.effect.retire(releases);
@@ -750,6 +952,7 @@ pub fn mapErrorKind(kind: abi.ErrorKindWire) ?machine.ErrorKind {
         .shape => .shape,
         .conform => .conform,
         .overflow => .overflow,
+        .contract => .contract,
         .domain => .domain,
         .parse => .parse,
         .io => .io,

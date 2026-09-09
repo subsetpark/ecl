@@ -41,12 +41,16 @@ pub const external = @import("external.zig");
 pub const process_port = @import("process_port.zig");
 pub const filesystem_port = @import("filesystem_port.zig");
 pub const net_port = @import("net_port.zig");
+pub const port_message = @import("port_message.zig");
 pub const package_authority = @import("package_authority.zig");
 pub const directory_order = @import("directory_order.zig");
 pub const task_prims = @import("task_prims.zig");
 pub const test_prims = @import("test_prims.zig");
 
 test {
+    _ = port_message;
+    _ = @import("port_controller.zig");
+    _ = @import("port_messages.zig");
     _ = value;
     _ = poll;
     _ = heap;

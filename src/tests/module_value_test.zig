@@ -548,6 +548,8 @@ test "module sources: formatter and standard modules use @defm" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
     const exports = [_][]const u8{
+        "port.await",
+        "port.core.await",
         "task.pending",
         "dict.from-pairs",
         "error.new",
@@ -562,8 +564,10 @@ test "module sources: formatter and standard modules use @defm" {
         "http.request.new",
         "http.response.new",
         "proc.wait",
+        "proc.core.process",
         "fs.read-text",
         "net.listen",
+        "net.core.listener",
         "path.normalize",
         "archive.sha256",
         "clock.now",

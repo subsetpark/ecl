@@ -30,6 +30,7 @@
 //! runner while preserving exhaustive failure injection.
 const std = @import("std");
 const session = @import("../session.zig");
+const heap = @import("../heap.zig");
 const native_fixture = @import("native_fixture_options");
 const archive_fixtures = @import("archive_fixture_options");
 const process_fixture = @import("process_fixture_options");
@@ -258,6 +259,7 @@ fn runExpectedLanguageError(runtime: *session.Session, name: []const u8, source:
 }
 
 const allocation_failure_shard_count = 4;
+const AllocationShape = enum { deterministic, concurrent };
 
 fn checkAllocationFailureShard(
     backing_allocator: std.mem.Allocator,
@@ -353,6 +355,7 @@ fn checkPostInitAllocationFailureShard(
     ordinal_shard_index: usize,
     ordinal_shard_count: usize,
     worker_index: usize,
+    comptime shape: AllocationShape,
 ) !void {
     var failure_offset = ordinal_shard_index + worker_index * ordinal_shard_count;
     const stride = allocation_failure_shard_count * ordinal_shard_count;
@@ -363,7 +366,10 @@ fn checkPostInitAllocationFailureShard(
             if (failing.has_induced_failure) {
                 return error.SwallowedOutOfMemoryError;
             }
-            return error.NondeterministicMemoryUsage;
+            if (shape == .deterministic) return error.NondeterministicMemoryUsage;
+            // A controller may complete before a readiness registration is
+            // needed. No allocation failed in this shorter execution.
+            if (failing.allocated_bytes != failing.freed_bytes) return error.MemoryLeakDetected;
         } else |err| switch (err) {
             error.OutOfMemory => {
                 if (!failing.has_induced_failure) return error.UnexpectedOutOfMemory;
@@ -404,7 +410,15 @@ fn checkAllPostInitAllocationFailuresParallel(
         probe,
         0,
         1,
+        .deterministic,
     );
+}
+
+/// Concurrent controllers can elide wait allocations. Sweep the observed
+/// allocation high-water mark, requiring propagation and complete reclamation
+/// for every induced failure; shorter executions must also reclaim everything.
+fn checkConcurrentPostInitAllocationFailures(backing_allocator: std.mem.Allocator, comptime probe: anytype) !void {
+    return checkPostInitAllocationFailureOrdinalShard(backing_allocator, probe, 0, 1, .concurrent);
 }
 
 /// Exhausts one residue class of a probe's post-init allocation ordinals.
@@ -418,17 +432,21 @@ fn checkPostInitAllocationFailureOrdinalShard(
     comptime probe: anytype,
     comptime ordinal_shard_index: usize,
     comptime ordinal_shard_count: usize,
+    comptime shape: AllocationShape,
 ) !void {
     comptime {
         if (ordinal_shard_count == 0) @compileError("an OOM ordinal shard count must be nonzero");
         if (ordinal_shard_index >= ordinal_shard_count) @compileError("an OOM ordinal shard index must be in range");
     }
     var warm = std.testing.FailingAllocator.init(backing_allocator, .{});
-    _ = try probe(&warm, null);
+    const warm_start = try probe(&warm, null);
 
     var baseline = std.testing.FailingAllocator.init(backing_allocator, .{});
     const first_failure_index = try probe(&baseline, null);
-    const needed_alloc_count = baseline.alloc_index - first_failure_index;
+    const needed_alloc_count = if (shape == .concurrent)
+        @max(warm.alloc_index - warm_start, baseline.alloc_index - first_failure_index)
+    else
+        baseline.alloc_index - first_failure_index;
     if (needed_alloc_count == 0) return error.MissingAllocationCoverage;
 
     const Context = struct {
@@ -445,6 +463,7 @@ fn checkPostInitAllocationFailureOrdinalShard(
                 ordinal_shard_index,
                 ordinal_shard_count,
                 context.worker_index,
+                shape,
             ) catch |err| {
                 context.result = err;
             };
@@ -963,7 +982,7 @@ fn stdlibSessionAllocationProbe(
             "oom-net.ecl",
             // One granted bind read back and closed twice, one denied port,
             // and one listener released by its child scope.
-            "{'address \"127.0.0.1\" 'port 0} net.listen dup net.local-address pop " ++
+            "net.core.listener {'address \"127.0.0.1\" 'port 0} port.open dup net.local-address pop " ++
                 "dup net.close net.close " ++
                 "[] ({'address \"127.0.0.1\" 'port 1} net.listen) @attempt pop " ++
                 "[] ({'address \"127.0.0.1\" 'port 0} net.listen net.local-address) @spawn task.await pop",
@@ -1035,20 +1054,20 @@ fn stdlibSessionAllocationProbe(
                 "[] (\"GET\" \"http://127.0.0.1:1/x\" http.request.new http.send) @attempt pop",
         ),
         .process => {
-            // A successful live capture has scheduling-dependent readiness
-            // cardinality and therefore cannot be an oracle for allocation
-            // ordinals. Exercise controller construction and scope teardown
-            // with one allowed spawn, then drive every run-only parser and
-            // launch allocation deterministically up to policy rejection.
+            // Cover controller construction, a minimal successful concurrent
+            // feed/capture, and run-option validation through policy rejection.
             const process_source = try std.fmt.allocPrint(
                 scaffold_allocator,
                 "'proc ('spawn 'run) import " ++
-                    "{{'executable \"{s}\" 'args (\"block\")}} spawn pop " ++
+                    "proc.core.process {{'executable \"{s}\" 'args (\"block\" \"λ\") 'cwd \"/\" 'env {{\"ECL_OOM_PROCESS\" \"é🌍\"}}}} port.open " ++
+                    "dup proc.core.stdin port.endpoint dup [0] port.write port.finish " ++
+                    "dup proc.core.stdout port.endpoint pop dup proc.core.stderr port.endpoint pop pop " ++
+                    "{{'executable \"{s}\" 'args (\"echo\") 'stdin [0 1]}} proc.run pop " ++
                     "{{'executable \"/definitely/not/allowed\" " ++
                     "'args (\"one\" \"two\") 'cwd \"/\" " ++
                     "'env {{\"ECL_OOM_PROCESS\" \"probe\"}} 'stdin [0 1 255 2] " ++
                     "'stdout-limit 8 'stderr-limit 8 'timeout-ms 1}} run",
-                .{process_path},
+                .{ process_path, process_path },
             );
             defer scaffold_allocator.free(process_source);
             try runExpectedLanguageError(&runtime, "oom-process.ecl", process_source);
@@ -1254,10 +1273,315 @@ test "oom: standard-library and host: host: project initialization propagates ev
 }
 
 fn checkStdlibSurface(comptime surface: StdlibSurface) !void {
+    // Registered network startup and operations can finish before a waiter
+    // allocates its readiness storage; allocation counts depend on progress.
+    if (surface == .net or surface == .net_connection or surface == .net_give)
+        return checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, SurfaceProbe(surface).run);
     try checkAllPostInitAllocationFailuresParallel(
         std.heap.smp_allocator,
         SurfaceProbe(surface).run,
     );
+}
+
+fn nativePortForwardingProbe(
+    failing: *std.testing.FailingAllocator,
+    failure_offset: ?usize,
+) !usize {
+    return portForwardingProbe(failing, failure_offset, false);
+}
+
+fn borrowedPortForwardingProbe(
+    failing: *std.testing.FailingAllocator,
+    failure_offset: ?usize,
+) !usize {
+    return portForwardingProbe(failing, failure_offset, true);
+}
+
+fn portForwardingProbe(
+    failing: *std.testing.FailingAllocator,
+    failure_offset: ?usize,
+    comptime borrowed: bool,
+) !usize {
+    const Port = struct {
+        releases: usize = 0,
+
+        pub fn releasePort(self: *@This()) void {
+            self.releases += 1;
+        }
+        pub fn prepareScopeTransfer(_: *@This(), _: *anyopaque, _: *anyopaque) heap.PortTransferError!void {
+            return error.Closed;
+        }
+        pub fn commitScopeTransfer(_: *@This()) void {}
+        pub fn abortScopeTransfer(_: *@This()) void {}
+    };
+    var port: Port = .{};
+    var locked_allocator = LockedAllocator{ .child = failing.allocator() };
+    const allocator = locked_allocator.allocator();
+    var first_failure_index: usize = 0;
+    const result = operation: {
+        var output_buffer: [1024]u8 = undefined;
+        var output = std.Io.Writer.fixed(&output_buffer);
+        var diagnostics_buffer: [1024]u8 = undefined;
+        var diagnostics = std.Io.Writer.fixed(&diagnostics_buffer);
+        var runtime = try session.Session.initWithHostConfig(allocator, &.{}, .{
+            .io = std.testing.io,
+            .output = &output,
+            .diagnostics = &diagnostics,
+            .ecl_path = native_fixture.directory,
+            .standard_input = .program_source,
+        }, .cooperative);
+        defer runtime.deinit();
+        try runOk(&runtime, "oom-native-setup.ecl", "0 sample.forward pop");
+        const input = if (borrowed)
+            try heap.createBorrowedPort(Port, .endpoint, allocator, 31, &port)
+        else
+            try heap.createOwnedPort(Port, .resource, allocator, 31, &port);
+        try runtime.pushOwned(input);
+        first_failure_index = failing.alloc_index;
+        if (failure_offset) |offset| failing.fail_index = first_failure_index + offset;
+        break :operation runOk(
+            &runtime,
+            "oom-native-port.ecl",
+            "sample.singleton sample.nested-port 'key swap sample.pair-dict sample.nested-port pop",
+        );
+    };
+    try std.testing.expectEqual(@as(usize, 1), port.releases);
+    try result;
+    return first_failure_index;
+}
+
+test "oom: standard-library and host: native port forwarding" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, nativePortForwardingProbe);
+}
+
+test "oom: standard-library and host: native port forwarding borrowed endpoint" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, borrowedPortForwardingProbe);
+}
+
+fn NativePortLifecycleProbe(comptime source: []const u8) type {
+    return NativePortProbe(source, "portprobe.cleaned pop");
+}
+
+fn BuiltinResourceLifecycleProbe(comptime backend: enum { process, listener }, comptime closing: []const u8) type {
+    return struct {
+        fn run(failing: *std.testing.FailingAllocator, failure_offset: ?usize) !usize {
+            var locked_allocator = LockedAllocator{ .child = failing.allocator() };
+            const allocator = locked_allocator.allocator();
+            const scaffold = std.testing.allocator;
+            const process_path = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, process_fixture.process_exe, scaffold);
+            defer scaffold.free(process_path);
+            var output_buffer: [256]u8 = undefined;
+            var output = std.Io.Writer.fixed(&output_buffer);
+            var diagnostics_buffer: [256]u8 = undefined;
+            var diagnostics = std.Io.Writer.fixed(&diagnostics_buffer);
+            var runtime = try session.Session.initWithHostConfig(allocator, &.{}, .{
+                .io = std.testing.io,
+                .output = &output,
+                .diagnostics = &diagnostics,
+                .process_policy = .{ .executables = .{ .exact = &.{process_path} } },
+                .net_policy = .{ .binds = .{ .exact = &.{.{ .address = "127.0.0.1", .port = 0 }} } },
+            }, .cooperative);
+            defer runtime.deinit();
+            // Join the process before injection: these probes cover the
+            // common driver and retained identities, with deterministic
+            // allocation ordinals independent of pipe-thread startup.
+            const setup = try std.fmt.allocPrint(scaffold, switch (backend) {
+                .process => "proc.core.process {{'executable \"{s}\" 'args (\"exit\" \"0\")}} port.open 'p set p proc.wait pop",
+                .listener => "\"{s}\" pop {{'address \"127.0.0.1\" 'port 0}} net.listen 'p set",
+            }, .{process_path});
+            defer scaffold.free(setup);
+            try runOk(&runtime, "oom-resource-setup.ecl", setup);
+            try runOk(&runtime, "oom-port-load.ecl", "[] (0 port.close) @attempt pop");
+            const first_failure_index = failing.alloc_index;
+            if (failure_offset) |offset| failing.fail_index = first_failure_index + offset;
+            try runOk(&runtime, "oom-resource-close.ecl", "p " ++ closing ++ " p port.close");
+            return first_failure_index;
+        }
+    };
+}
+
+test "oom: standard-library and host: common resource process close" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, BuiltinResourceLifecycleProbe(.process, "port.close").run);
+}
+
+test "oom: standard-library and host: common resource process shutdown" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, BuiltinResourceLifecycleProbe(.process, "port.shutdown").run);
+}
+
+test "oom: standard-library and host: registered process operation results" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, BuiltinResourceLifecycleProbe(
+        .process,
+        "proc.core.wait [] port.call pop p proc.core.capture-limits [] port.call pop p port.close",
+    ).run);
+}
+
+test "oom: standard-library and host: common resource listener close" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, BuiltinResourceLifecycleProbe(.listener, "port.close").run);
+}
+
+test "oom: standard-library and host: common resource listener shutdown" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, BuiltinResourceLifecycleProbe(.listener, "port.shutdown").run);
+}
+
+fn NativePortProbe(comptime source: []const u8, comptime setup: []const u8) type {
+    return struct {
+        fn run(failing: *std.testing.FailingAllocator, failure_offset: ?usize) !usize {
+            var locked_allocator = LockedAllocator{ .child = failing.allocator() };
+            const allocator = locked_allocator.allocator();
+            var output_buffer: [256]u8 = undefined;
+            var output = std.Io.Writer.fixed(&output_buffer);
+            var diagnostics_buffer: [256]u8 = undefined;
+            var diagnostics = std.Io.Writer.fixed(&diagnostics_buffer);
+            var runtime = try session.Session.initWithHostConfig(allocator, &.{}, .{
+                .io = std.testing.io,
+                .output = &output,
+                .diagnostics = &diagnostics,
+                .ecl_path = native_fixture.directory,
+                .native_port_limits = .{ .ring_capacity = 8 },
+            }, .cooperative);
+            defer runtime.deinit();
+            try runOk(&runtime, "oom-port-setup.ecl", setup);
+            const first_failure_index = failing.alloc_index;
+            if (failure_offset) |offset| failing.fail_index = first_failure_index + offset;
+            try runOk(&runtime, "oom-port-lifecycle.ecl", source);
+            return first_failure_index;
+        }
+    };
+}
+
+test "oom: core: invocation completion frames survive allocation failure" {
+    try requireSelectedOomTest(@src());
+    // Keep non-tail callers live so admitting the completion boundary must
+    // grow frame storage as well as survive callback/driver allocation.
+    try checkAllPostInitAllocationFailuresParallel(
+        std.heap.smp_allocator,
+        NativePortProbe(
+            "((((((((task.pending pop 1 sample.increment pop " ++
+                "0) call 0) call 0) call 0) call 0) call 0) call 0) call 0) call",
+            "task.pending pop 1 sample.increment pop",
+        ).run,
+    );
+}
+
+test "oom: standard-library and host: native port registered capability publication" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortProbe(
+        "portprobe.factory type pop",
+        "",
+    ).run);
+}
+
+test "oom: standard-library and host: native port registered vocabulary publication" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortProbe(
+        "'port.core ('open) import 'port ('call) import",
+        "",
+    ).run);
+}
+
+test "oom: standard-library and host: native port registered concurrent allocation accounting" {
+    try requireSelectedOomTest(@src());
+    const Probe = struct {
+        fn run(failing: *std.testing.FailingAllocator, failure_offset: ?usize) !usize {
+            const start = failing.alloc_index;
+            if (failure_offset) |offset| failing.fail_index = start + offset;
+            // Deliberately swallow allocation failure to prove that allowing
+            // an omitted asynchronous wait does not allow a lost OOM error.
+            const storage = failing.allocator().alloc(u8, 1) catch return start;
+            failing.allocator().free(storage);
+            return start;
+        }
+    };
+    try std.testing.expectError(error.SwallowedOutOfMemoryError, checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, Probe.run));
+}
+
+test "oom: standard-library and host: native port registered open and begin" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.factory [] port.open dup portprobe.noop [] port.begin " ++
+            "dup port.result pop port.close port.close",
+    ).run);
+}
+
+test "oom: standard-library and host: native port registered byte input" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.factory [] port.open dup portprobe.echo [] port.begin " ++
+            "dup portprobe.input port.endpoint [1] port.write " ++
+            "dup portprobe.input port.endpoint port.finish port.close port.close",
+    ).run);
+}
+
+test "oom: standard-library and host: native port registered call composition" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.factory [] port.open dup portprobe.noop [] port.call pop port.close",
+    ).run);
+}
+
+test "oom: standard-library and host: native port registered byte output" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortProbe(
+        "dup portprobe.output port.endpoint 1 port.read pop port.close port.close",
+        "portprobe.factory [] port.open dup portprobe.echo [] port.begin " ++
+            "dup portprobe.input port.endpoint [1] port.write " ++
+            "dup portprobe.input port.endpoint port.finish dup port.await",
+    ).run);
+}
+
+test "oom: standard-library and host: native port registered message input and result" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.factory [] port.open dup portprobe.message-result [] port.begin " ++
+            "dup portprobe.sender port.endpoint [1] port.send dup port.result pop port.close port.close",
+    ).run);
+}
+
+test "oom: standard-library and host: native port registered message event publication" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortProbe(
+        "dup portprobe.receiver port.endpoint port.receive pop port.close port.close",
+        "portprobe.factory [] port.open dup portprobe.messages [] port.begin " ++
+            "dup portprobe.sender port.endpoint dup [1] port.send port.finish dup port.await",
+    ).run);
+}
+
+test "oom: standard-library and host: native port lifecycle creation and admission" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.counter [] port.open portprobe.counter-step 2 port.call pop",
+    ).run);
+}
+
+test "oom: standard-library and host: native port lifecycle independent lanes" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.factory [] port.open dup portprobe.receive-step 2 port.call pop " ++
+            "wrap [] (portprobe.step 2 port.call) @give task.await pop",
+    ).run);
+}
+
+test "oom: standard-library and host: native port lifecycle registered exchange" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.factory [] port.open dup portprobe.noop [] port.begin dup port.await dup port.result pop " ++
+            "wrap [] (port.close) @give task.await pop port.close",
+    ).run);
+}
+
+test "oom: standard-library and host: native port lifecycle transfer and rollback" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.counter [] port.open dup wrap dup cat [] (pop pop) 3 pack (@give) @attempt pop " ++
+            "wrap [] (portprobe.counter-step 2 port.call) @give task.await pop",
+    ).run);
 }
 
 fn checkStdlibSurfaceOrdinalShard(
@@ -1270,6 +1594,7 @@ fn checkStdlibSurfaceOrdinalShard(
         SurfaceProbe(surface).run,
         ordinal_shard_index,
         ordinal_shard_count,
+        .deterministic,
     );
 }
 
@@ -1373,6 +1698,46 @@ test "oom: standard-library and host: host: network connections propagate every 
     try checkStdlibSurface(.net_connection);
 }
 
+test "oom: standard-library and host: common network endpoint publication and transport" {
+    try requireSelectedOomTest(@src());
+    const Probe = struct {
+        fn run(failing: *std.testing.FailingAllocator, failure_offset: ?usize) !usize {
+            var locked = LockedAllocator{ .child = failing.allocator() };
+            var output_buffer: [256]u8 = undefined;
+            var output = std.Io.Writer.fixed(&output_buffer);
+            var diagnostics_buffer: [256]u8 = undefined;
+            var diagnostics = std.Io.Writer.fixed(&diagnostics_buffer);
+            var runtime = try session.Session.initWithHostConfig(locked.allocator(), &.{}, .{
+                .io = std.testing.io,
+                .output = &output,
+                .diagnostics = &diagnostics,
+                .net_policy = .{ .binds = .{ .exact = &.{.{ .address = "127.0.0.1", .port = 0 }} }, .limits = .{ .receive_capacity = 1, .send_capacity = 1 } },
+            }, .cooperative);
+            defer runtime.deinit();
+            try runOk(&runtime, "oom-net-endpoint-setup.ecl", "net.core.listener {'address \"127.0.0.1\" 'port 0} port.open 'l set l net.local-address 'port at");
+            const port = port: {
+                var rendered = try runtime.stackDisplay();
+                defer rendered.deinit();
+                break :port try std.fmt.parseInt(u16, std.mem.trim(u8, rendered.bytes(), " \n"), 10);
+            };
+            const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(port) };
+            const peer = try address.connect(std.testing.io, .{ .mode = .stream });
+            defer peer.close(std.testing.io);
+            var writer = peer.writer(std.testing.io, &.{});
+            try writer.interface.writeAll("ok");
+            try writer.interface.flush();
+            if (std.posix.system.shutdown(peer.socket.handle, std.posix.SHUT.WR) != 0) return error.ShutdownFailed;
+            try runOk(&runtime, "oom-net-endpoint-accept.ecl", "pop l net.accept 'c set");
+            const first_failure_index = failing.alloc_index;
+            if (failure_offset) |offset| failing.fail_index = first_failure_index + offset;
+            try runOk(&runtime, "oom-net-endpoint.ecl", "c net.core.input port.endpoint 'r set c net.core.output port.endpoint 'w set " ++
+                "w [0 255] port.write w port.finish r 1 port.read pop r 1 port.read pop r 1 port.read pop c port.close");
+            return first_failure_index;
+        }
+    };
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, Probe.run);
+}
+
 test "oom: standard-library and host: host: HTTP propagates every allocation failure" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.http);
@@ -1419,5 +1784,192 @@ test "oom: standard-library and host: package: CLI operation propagates every al
 }
 test "oom: standard-library and host: process port lifecycle" {
     try requireSelectedOomTest(@src());
-    try checkStdlibSurface(.process);
+    // Concurrent readers and controller results may avoid wait allocations.
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, SurfaceProbe(.process).run);
+}
+
+test "oom: standard-library and host: native port multiplexed channel publication" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.multiplex [] port.open dup portprobe.channel 1 port.call port.close port.close",
+    ).run);
+}
+
+test "oom: standard-library and host: native port multiplexed failure" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.multiplex [] port.open dup portprobe.channel 1 port.call pop " ++
+            "dup portprobe.disconnect [] port.begin dup wrap (port.await) @attempt pop port.close port.close",
+    ).run);
+}
+
+test "oom: standard-library and host: native port buffer publication" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.device [] port.open dup portprobe.buffer 1 port.call port.close port.close",
+    ).run);
+}
+
+test "oom: standard-library and host: native port buffer deferred work" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.device [] port.open dup portprobe.buffer 1 port.call " ++
+            "dup portprobe.complete-work [] port.call pop dup portprobe.compute [] port.call pop port.close port.close",
+    ).run);
+}
+
+test "oom: standard-library and host: native port broker delivery publication" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.broker [] port.open 'p set p portprobe.deliver [] port.begin 'x set " ++
+            "x portprobe.deliveries port.endpoint port.receive 'value at 'delivery at port.close x port.close p port.close",
+    ).run);
+}
+
+test "oom: standard-library and host: native port storage transaction publication" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.storage [] port.open dup portprobe.transaction [] port.call port.close port.close",
+    ).run);
+}
+
+test "oom: standard-library and host: native port storage cursor publication" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.storage [] port.open dup portprobe.query [0 1] port.call port.close port.close",
+    ).run);
+}
+
+test "oom: standard-library and host: native port registered graceful shutdown" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.factory [] port.open dup port.shutdown port.close",
+    ).run);
+}
+
+test "oom: standard-library and host: native port registered builder result" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.factory [] port.open dup portprobe.build-result over wrap port.call pop port.close",
+    ).run);
+}
+
+test "oom: standard-library and host: native port directional writer" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.declared [] port.open dup portprobe.declared-stream [] port.begin " ++
+            "dup portprobe.declared-output port.endpoint 8 port.read pop " ++
+            "dup port.await port.close port.close",
+    ).run);
+}
+
+test "oom: standard-library and host: native port registered builder messages" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.factory [] port.open dup portprobe.build-received [] port.begin " ++
+            "dup portprobe.sender port.endpoint [1] port.send " ++
+            "dup portprobe.receiver port.endpoint port.receive pop " ++
+            "dup portprobe.receiver port.endpoint port.receive pop " ++
+            "dup port.result pop port.close port.close",
+    ).run);
+}
+
+test "oom: standard-library and host: native port registered resource endpoint" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.factory [] port.open dup portprobe.resource-notify [] port.call pop " ++
+            "dup portprobe.resource-receiver port.endpoint port.receive pop port.close",
+    ).run);
+}
+
+test "oom: standard-library and host: native port registered reply endpoint" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.factory [] port.open dup portprobe.reply-result [] port.call pop port.close",
+    ).run);
+}
+
+test "oom: standard-library and host: native port registered message consumption" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.factory [] port.open 'p set p portprobe.transform-message [] port.begin 'x set " ++
+            "x portprobe.sender port.endpoint 42 port.send x portprobe.receiver port.endpoint port.receive pop " ++
+            "x port.close p port.close",
+    ).run);
+}
+
+test "oom: standard-library and host: native port child result publication" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.factory [] port.open dup portprobe.child [] port.call port.close port.close",
+    ).run);
+}
+
+test "oom: standard-library and host: native port child message publication" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.factory [] port.open dup portprobe.child-event [] port.begin dup portprobe.receiver port.endpoint " ++
+            "port.receive 'value at port.close port.close port.close",
+    ).run);
+}
+
+test "oom: standard-library and host: native port child dependency publication" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.factory [] port.open dup portprobe.dependent-child [] port.call pop port.close",
+    ).run);
+}
+
+test "oom: standard-library and host: native port child batch publication" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.factory [] port.open dup portprobe.child-pair [] port.call (dup port.close) each pop port.close",
+    ).run);
+}
+
+fn NetAcceptResultProbe(comptime operation: []const u8) type {
+    return struct {
+        fn run(failing: *std.testing.FailingAllocator, failure_offset: ?usize) !usize {
+            var locked_allocator = LockedAllocator{ .child = failing.allocator() };
+            var output_buffer: [256]u8 = undefined;
+            var output = std.Io.Writer.fixed(&output_buffer);
+            var diagnostics_buffer: [256]u8 = undefined;
+            var diagnostics = std.Io.Writer.fixed(&diagnostics_buffer);
+            var runtime = try session.Session.initWithHostConfig(locked_allocator.allocator(), &.{}, .{
+                .io = std.testing.io,
+                .output = &output,
+                .diagnostics = &diagnostics,
+                .net_policy = .{ .binds = .unrestricted, .limits = .{
+                    .max_live_connections = 1,
+                    .receive_capacity = 1,
+                    .send_capacity = 1,
+                } },
+            }, .cooperative);
+            defer runtime.deinit();
+            try runOk(&runtime, "oom-net-result-setup.ecl", "net.core.listener {'address \"127.0.0.1\" 'port 0} port.open 'l set " ++
+                "l net.core.local-address [] port.call 'port at");
+            const port = port: {
+                var rendered = try runtime.stackDisplay();
+                defer rendered.deinit();
+                break :port try std.fmt.parseInt(u16, std.mem.trim(u8, rendered.bytes(), " \n"), 10);
+            };
+            const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(port) };
+            const peer = try address.connect(std.testing.io, .{ .mode = .stream });
+            defer peer.close(std.testing.io);
+            const first_failure_index = failing.alloc_index;
+            if (failure_offset) |offset| failing.fail_index = first_failure_index + offset;
+            try runOk(&runtime, "oom-net-result.ecl", "pop l net.core.accept [] " ++ operation);
+            return first_failure_index;
+        }
+    };
+}
+
+test "oom: standard-library and host: accepted connection result publication" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NetAcceptResultProbe("port.call port.close").run);
+}
+
+test "oom: standard-library and host: accepted connection result discard" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NetAcceptResultProbe("port.begin dup port.await port.close").run);
 }

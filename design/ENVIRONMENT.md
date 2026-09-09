@@ -16,10 +16,20 @@ Every module listed in `STDLIB.md` ships inside the `ecl` binary. Embedded
 modules load lazily at the first qualified reference or import. Loading needs
 no filesystem access and works with no `ECL_PATH`.
 
-Embedded modules use ECL source, linked native descriptors, or builtin word
-tables. The transport is an implementation property. All three publish
-ordinary module images and participate in registration, aliases, imports,
+Embedded modules use ECL source, linked native descriptors, builtin word
+tables, or registered built-in capabilities. The transport is an implementation
+property. Each publishes
+ordinary module images and participates in registration, aliases, imports,
 reflection, and shadowing through the same language operations.
+
+`net.core.listener` and `proc.core.process` export the built-in factories used
+by `port.open`. Their modules load without host grants; opening a resource
+still requires the Session's corresponding network or process authority.
+The public `net` and `proc` modules are ECL compositions over these registered
+capabilities and `port.*`. Their operation and endpoint selectors expose only
+the granted resources and streams. First-party adapters use typed backend calls;
+the extension adapter translates ABI v5 calls into the same runtime interfaces
+for controller execution, transport, cancellation, ownership, and cleanup.
 
 Embedded names have precedence over filesystem modules. A file on `ECL_PATH`
 cannot replace an embedded module during automatic loading. A program may
@@ -46,14 +56,126 @@ module. Its descriptor declares the same canonical name requested by the
 loader. The complete word table validates before publication, and publication
 is atomic.
 
+The current pre-release native ABI is version 5, with entry symbol
+`ecl_module_abi_v5`. Native modules built for earlier versions must be rebuilt;
+the loader provides no legacy adapter.
+
 Each native word has a declared effect and nonempty documentation. Native
 words support qualified calls, imports, `doc`, `which`, and `see`. A failing
 native call restores its operand stack. Native code may raise `'type`,
-`'shape`, `'conform`, `'overflow`, `'domain`, `'parse`, `'io`, or `'user`;
+`'shape`, `'conform`, `'overflow`, `'domain`, `'parse`, `'io`, `'user`, or `'contract`;
 other error kinds remain reserved to the runtime.
 
 A loaded native module remains loaded for the session. Repeated resolution
 uses its existing registration.
+
+Native modules may declare typed port kinds with persistent private state.
+The SDK's `Port` spec declares named endpoints and operations. Each operation
+carries its handler, documentation, lane, and enabled exchange endpoints.
+Adding a kind to `module.ports` exports its declared selector bindings; factories
+are exported explicitly with `ecl.factory`. A declaration's optional `name`
+overrides its public spelling. Bindings are ordinary opaque ECL values with
+module-instance identity. Their complete registration validates before the
+module is visible.
+Resource operations belong to host-owned exchanges. Ordinary native callbacks
+can forward their opaque identities; controller execution and cleanup continue
+independently of callback return. Suspension of an ordinary word uses its
+separate `Reschedule` capability.
+`port.open` and `port.begin` accept structured configuration and parameters;
+controllers read them through bounded `Controller.input` paths. Each request
+allows at most 64 KiB of scalar/text data, 4,096 aggregate nodes, and 16 port
+attachments. Executable words, tasks, and modules are rejected recursively.
+Registered endpoints are selected by opaque ECL capabilities. Controllers acquire
+borrowed capabilities with `controller.endpoint(Port, .name)`. Their types expose
+only the declared byte or message direction. Selectors declare resource or
+exchange ownership; resource endpoints remain available across operations,
+and shutdown joins all users before releasing their transport.
+Each enabled byte endpoint has a bounded ring using the host's configured byte
+capacity. Reads return positive chunk lengths, or `null` at stable EOF. Writes
+accept a complete slice with one FIFO admission; an error may leave an accepted
+prefix, so automatic retries are unsafe. Cancellation and closure interrupt
+blocked transport. Output and diagnostics require concurrent consumption when
+both may fill. Finishing one output is distinct from controller completion.
+Message endpoints default to 16 queued messages each and a shared 1 MiB budget
+per resource; hosts may reduce either limit for pressure testing. Messages held
+by a controller retain their budget reservation until forwarding or release.
+A receiver's `receive` returns a borrowed message view or `null` at stable EOF.
+The controller owns that message until consuming it through a sender's
+`forward`, `resultMessage`, or `discardMessage`. Bounded `received` paths inspect
+nested data. A second receive while a message is held is rejected. Failed
+consuming calls retain ownership; controller return cleans up an unconsumed
+message. `discardMessage` releases its budget reservation and reports
+`InvalidValue` if no message is held. Builder copies remain valid, while borrowed
+received-message views expire on consumption or the next view lookup.
+The controller-local `MessageBuilder` constructs scalars, nested lists and
+dictionaries, and copies permitted input capabilities without exposing ECL
+storage. Builder methods settle construction and validation in bounded host
+steps before returning; authors use ordinary `try` expressions.
+A sender's `send` and the builder's `result` consume the completed message on
+success. Failure retains it for cleanup or an explicit library decision.
+Construction errors invalidate the partial message, and `clear` explicitly
+starts another. Controller return discards unfinished work.
+`child(Port, dependency)` replaces the builder's top configuration with a newly
+initialized resource of a kind registered by the same module instance. Earlier
+builder values remain available for aggregate construction. The host retains
+provisional ownership until ECL receives or claims the containing value; failed
+creation retains the configuration and cleans up partial startup. The dependency
+argument is explicit: dependent children retire before the parent backend,
+while independent children can survive it. Cancellation interrupts blocked child
+startup. No child handle grants native code ECL storage or interpreter access.
+`Controller.parent(Port)` borrows the issuing parent's native state only for a
+dependent child of that registered kind in the same module instance. Roots,
+independent children, and wrong kinds return null. The borrow remains valid
+through child cleanup, including parent closure and scope transfers. Native
+libraries synchronize shared state across controllers; this access grants no
+ECL heap, allocator, or interpreter authority.
+A message receiver's `reply` appends an opaque sender to the current builder.
+A controller can send it with a request and receive ECL's response through that
+input. The sender follows the input's resource or exchange lifetime; retaining
+it does not extend scope ownership. Output endpoints and inputs excluded by the
+operation cannot grant reply authority. Native controllers never synchronously
+invoke ECL; notification, correlation, and reply ordering are library protocols.
+Controllers report allocation exhaustion with `failOutOfMemory`; observation
+through results, endpoints, opening, or shutdown preserves the runtime OOM
+outcome and still performs normal cleanup.
+Their words can forward opaque ports through aggregates, stream operations,
+and explicitly close them. Operations execute in FIFO order within a declared
+lane. A port defaults to one lane; multiple lanes and different ports can
+progress independently. An ordinary operation error leaves the port usable.
+`Controller.failResource` reports a terminal error that also makes the resource
+unusable after the controller returns. Accepted output on that exchange remains
+readable before its error; other operations and dependent children are
+interrupted. `port.close` joins the resulting cleanup. Native backend workers
+must be joined before their controller returns, including when it reports a
+resource failure.
+Cancelling queued work removes only that operation. Active cancellation closes
+the resource by default. A kind may instead support recovery: its interrupted
+controller must acknowledge reusable state and finish before the lane executes
+more work. Missing acknowledgement closes the resource and cancels all lanes. Explicit close is
+idempotent and waits for cleanup. Scope closure also waits for cleanup, and
+`@give` transfers ownership atomically without interrupting active work.
+
+Kinds belong to a loaded module instance, not to a textual name. A mismatched
+kind raises `'type`; operations on closed ports raise `'io`. Retained closed
+ports remain opaque identities. Tasks and modules are unsupported native inputs.
+
+The default Session limits are 64 live native ports, 16 admitted operations per
+port (including the active one), and 64 KiB for each request and response ring.
+The embedding host may configure `NativePortLimits` through
+`Host.native_port_limits`: live capacity is 1–4096, operation capacity is 1–256,
+and ring capacity is 1 byte–16 MiB. Invalid limits reject Session initialization.
+Creation beyond live capacity raises `'domain`; operations wait for admission
+when their lane is full. The operation budget is partitioned across lanes,
+reserving at least one slot for each; creation fails with `'domain` when the
+budget cannot cover the declared lanes. Idle capacity is not borrowed across
+lanes. Forced close interrupts all lanes and waits for terminal cleanup.
+A kind may register an optional `shutdown` callback. `port.shutdown` invokes it
+once on an independent control lane and waits for all callbacks and cleanup.
+It may overlap operation callbacks; `cancel` must interrupt its backend waits.
+Failure remains observable on repeated shutdown calls. Unsupported shutdown
+raises `'domain`, and abortive `port.close` remains available. Cancellation
+never promises to reverse external effects or accepted stream bytes.
+These resource limits do not sandbox native code.
 
 Opening a shared library executes machine code before ECL validates its
 descriptor. Every directory used for native loading is a trusted-code
@@ -135,11 +257,18 @@ free. `net.read` and `net.write` exchange exact byte lists through bounded
 queues of the host capacities, parking on readiness without holding a worker;
 `net.peer-address` and `net.local-address` report both ends. `net.close` on a
 connection delivers queued bytes and then shuts the socket down, while scope
-closure aborts it. The live-connection maximum bounds descriptors and
-controller threads per Session: at the maximum `net.accept` waits, leaving
+closure aborts it. Registered TCP factories and operations use the common
+resource controller service, with 16 admitted operations per resource. Accepts
+occupy one FIFO lane; address operations have an independent lane. An accepted
+connection remains provisionally owned by its exchange until result publication
+and is independent of the listener after acceptance.
+
+The live-connection maximum bounds descriptors and backend controllers per
+Session: at the maximum `net.accept` waits, leaving
 the peer in the kernel backlog, and proceeds when a connection closes; a
-waiting accept holds no slot. Only the listener maximum is refused, as
-`'domain` with reason `'limit`. Zero for any limit is a Session construction
+waiting accept holds no slot. The listener maximum is refused as `'domain`.
+Controller failures use the common port error contract; pre-admission grant
+refusals retain their policy reason. Zero for any limit is a Session construction
 error. TLS and protocol framing remain outside this contract; they belong to
 the protocol modules built over a connection.
 
@@ -176,7 +305,7 @@ widen the grant.
 
 Time zones, locale-sensitive formatting, leap-second tables, timers that run
 callbacks, and periodic scheduling are outside this contract. Process
-deadlines (`'timeout-ms`) continue to run on a per-process host timer.
+deadlines (`'timeout-ms`) use the same scheduler clock through `task.await-for`.
 
 ## Host-backed data contracts
 

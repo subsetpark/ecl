@@ -37,6 +37,8 @@ test "stdlib: embedded module resolves via import with no ECL_PATH" {
     // A bare Session has no host IO and no search path at all, so nothing
     // here could reach a file even if one existed.
     const exports = [_][]const u8{
+        "port.await",
+        "port.core.await",
         "task.pending",
         "dict.from-pairs",
         "error.new",
@@ -51,8 +53,10 @@ test "stdlib: embedded module resolves via import with no ECL_PATH" {
         "http.request.new",
         "http.response.new",
         "proc.wait",
+        "proc.core.process",
         "fs.read-text",
         "net.listen",
+        "net.core.listener",
         "path.normalize",
         "archive.sha256",
         "clock.now",

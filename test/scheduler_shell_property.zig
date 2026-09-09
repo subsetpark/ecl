@@ -285,6 +285,18 @@ fn runShellScenario(encoded: u16) !void {
     });
 }
 
+test "scheduler shell property: cancellation progresses while children replenish retirement" {
+    // Repeated public CLI runs retain the tracing DebugAllocator coverage.
+    // The root must reach task.cancel while allocating child loops keep the
+    // reclamation queue nonempty, then join the entire tree before exit.
+    const operation_count: u16 = @typeInfo(Operation).@"enum".fields.len;
+    for (0..4) |_| {
+        for ([_]u16{ 0, 3 }) |worker_index| {
+            try runShellScenario(@intFromEnum(Operation.cancel_tree) + worker_index * operation_count * 12);
+        }
+    }
+}
+
 test "scheduler shell property: generated public waits always quiesce" {
     try runShellScenario(@intFromEnum(Operation.kernel_fairness));
     try runShellScenario(@intFromEnum(Operation.result_fairness));

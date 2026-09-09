@@ -11,6 +11,7 @@
 const std = @import("std");
 const abi = @import("native-abi");
 const env = @import("env.zig");
+const module_bindings = @import("module_bindings.zig");
 const Csv = @import("stdlib/csv.zig").Extension;
 const json_module = @import("stdlib/json.zig");
 const http_module = @import("stdlib/http.zig");
@@ -19,9 +20,7 @@ const pkg_store_module = @import("stdlib/pkg_store.zig");
 const io_module = @import("stdlib/io.zig");
 const dict_module = @import("stdlib/dict.zig");
 const rand_module = @import("stdlib/rand.zig");
-const proc_module = @import("stdlib/proc.zig");
 const fs_module = @import("stdlib/fs.zig");
-const net_module = @import("stdlib/net.zig");
 const clock_module = @import("stdlib/clock.zig");
 const time_module = @import("stdlib/time.zig");
 
@@ -39,6 +38,8 @@ pub const Entry = union(enum) {
     /// the SDK deliberately withholds — an allocator, sockets, TLS — which no
     /// external module may hold and no ECL program can express.
     builtin: []const env.BuiltinWord,
+    /// Typed backend capabilities, published as ordinary module constants.
+    bindings: *const module_bindings.Registration,
 };
 
 /// Embedded ECL source plus the provenance name errors raised inside it
@@ -54,6 +55,11 @@ const Module = struct {
 };
 
 const modules = [_]Module{
+    .{ .name = "port", .entry = .{ .source = .{
+        .name = "<stdlib:port>",
+        .text = @embedFile("stdlib/port.ecl"),
+    } } },
+    .{ .name = "port.core", .entry = .{ .builtin = &@import("stdlib/port.zig").words } },
     .{ .name = "task", .entry = .{ .builtin = &@import("task_prims.zig").words } },
     .{ .name = "dict", .entry = .{ .builtin = &dict_module.words } },
     .{ .name = "error", .entry = .{ .source = .{
@@ -88,9 +94,17 @@ const modules = [_]Module{
         .name = "<stdlib:http.response>",
         .text = @embedFile("stdlib/http/response.ecl"),
     } } },
-    .{ .name = "proc", .entry = .{ .builtin = &proc_module.words } },
+    .{ .name = "proc", .entry = .{ .source = .{
+        .name = "<stdlib:proc>",
+        .text = @embedFile("stdlib/proc.ecl"),
+    } } },
+    .{ .name = "proc.core", .entry = .{ .bindings = @import("process_adapter.zig").registration } },
     .{ .name = "fs", .entry = .{ .builtin = &fs_module.words } },
-    .{ .name = "net", .entry = .{ .builtin = &net_module.words } },
+    .{ .name = "net", .entry = .{ .source = .{
+        .name = "<stdlib:net>",
+        .text = @embedFile("stdlib/net.ecl"),
+    } } },
+    .{ .name = "net.core", .entry = .{ .bindings = @import("net_adapter.zig").registration } },
     .{ .name = "path", .entry = .{ .source = .{
         .name = "<stdlib:path>",
         .text = @embedFile("stdlib/path.ecl"),
@@ -157,6 +171,16 @@ comptime {
                     @compileError("embedded module provenance is empty: " ++ module.name);
             },
             .native => {},
+            .bindings => |registration| {
+                for (registration.declarations(), 0..) |definition, definition_index| {
+                    env.assertStaticModuleName(definition.name);
+                    if (definition.doc.len == 0) @compileError("registered builtin capability requires documentation");
+                    for (registration.declarations()[0..definition_index]) |prior| {
+                        if (std.mem.eql(u8, definition.name, prior.name))
+                            @compileError("duplicate registered builtin capability: " ++ definition.name);
+                    }
+                }
+            },
             .builtin => |words| {
                 if (words.len == 0)
                     @compileError("embedded builtin module has no words: " ++ module.name);

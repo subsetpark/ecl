@@ -60,6 +60,7 @@ The main components are these:
 | Frame machine | Dispatch quotations, represent continuations, enforce application boundaries, and construct errors | `machine.zig` |
 | Bulk execution | Pervasive scalar semantics, typed flat loops, and guarded source-phrase recognition | `kernel_*.zig`, `kernels.zig`, `idioms.zig` |
 | Scheduler | Green units, structured task scopes, task and external waits, cancellation, timers, external membership, and retirement service | `scheduler_core.zig`, `scheduler.zig`, `external.zig`, `task_prims.zig` |
+| Port controllers | Typed job submission, FIFO admission and cancellation, independent execution, joined retirement, and shared scope lifetime | `port_controller.zig`, `port_transfer.zig` |
 | Process ports | Process policy, POSIX process-group ownership, bounded pipe queues, and terminal publication | `process_port.zig`, `stdlib/proc.zig` |
 | Network listeners and connections | Listen policy, exact grant matching over normalized IP literals, scope-owned listening sockets, demand-gated accept, bounded connection queues serviced by controller threads, and idempotent close | `net_port.zig`, `stdlib/net.zig` |
 | Boundary layers | Embedded modules, native extensions, rendering, terminal safety, the REPL, and the CLI | `prelude.zig`, `stdlib.zig`, `native_*.zig`, `print.zig`, `console.zig`, `line_editor.zig`, `main.zig` |
@@ -430,15 +431,16 @@ nominally constant scheduler turn from hiding an unbounded recursive free.
 
 Port reference lifetime is intentionally distinct from external-resource
 lifetime. A port heap object retains a process cell so terminal observations
-remain safe. A separate `ControllerGroup` issues one lease to every detached
-supervisor, pipe, timeout, and escalation thread and owns the spawning
-`TaskScope` membership. The final controller lease is released only after its
-thread's process-cell reference, and only that final release detaches whatever
-membership the port holds by then. The process-cell reference count therefore
-describes value and readiness observation, never controller quiescence.
+remain safe. A separate `ControllerGroup` owns the spawning `TaskScope`
+membership and execution leases, including cancellation setup before a
+supervisor starts. Quiescence requires a retired process group and all leases
+to return. Final lease retirement publishes reaped readiness, returns capacity,
+and drops the execution reference before scope detachment. Startup rollback
+and joined controller jobs use that same boundary. Value and readiness
+references remain independent of controller quiescence.
 Dropping the last port value cannot orphan a live child, retaining a port
-cannot detach it from scope closure, and Session teardown cannot overtake a
-detached controller thread.
+cannot detach it from scope closure, and Session teardown joins controller
+jobs before releasing their owners.
 
 Which scope holds that membership can change. A live external resource is a
 member of exactly one task scope at a time, and a closed one is a member of
@@ -612,7 +614,7 @@ application, scheduler, module, and error boundaries required by the language.
 `Frame` is one exhaustive tagged union. Its variants represent:
 
 - suspended evaluation;
-- source-effect completion checks;
+- invocation-effect completion checks;
 - combinator and isolated-application continuations;
 - resumption after qualified loading; and
 - transactional boundaries such as `@attempt`, module construction, and
@@ -621,6 +623,18 @@ application, scheduler, module, and error boundaries required by the language.
 Each variant owns exactly the fields meaningful in that phase. Transitions
 consume one state and construct another, giving continuation modes,
 publication phases, and teardown an exhaustive representation.
+
+Declared effects at a module boundary belong to the language invocation, not
+to an implementation callback's return. Input contracts are validated before
+execution; the frame stack owns output checking until successful completion.
+Builtin and native invocations retain a suspended caller beneath that check.
+Their current activation is tagged as an invocation rather than source
+dispatch, so it carries the calling context without authority to execute the
+caller's remaining forms. Driver replacement, parking, and nested quotations
+all complete above the same boundary. Loader replay can dispatch only the
+retried invocation before returning to it. Failure and cancellation unwind
+the boundary without checking successful outputs; native transactions own no
+separate effect-check lifecycle.
 
 Because continuations are explicit, the machine can suspend, move a Unit to
 another worker, unwind incrementally, and guarantee language tail calls without
@@ -725,6 +739,12 @@ Consuming APIs state what happens on every exit. An owned input is moved into a
 driver, returned to the caller, or retired, making append and publication
 ownership exact under failure.
 
+A driver replacement prepares its successor with independent input ownership
+before retiring the installed continuation. Installation then cannot fail.
+The driver's declared storage policy selects retirement at compile time:
+only inline-capable field-owned drivers can release an inline slot, while
+address-stable self-owned drivers retire their complete allocated state.
+
 ### Boundedness includes retirement
 
 Reclamation competes for scheduler service like evaluation. Final references
@@ -732,6 +752,30 @@ detach O(1) retirement records; release cursors later walk the graph. The
 scheduler arbitrates between ready execution and retirement so a continuously
 ready program cannot strand memory, and a large retired graph cannot make
 cancellation latency proportional to the whole graph.
+The release domain charges each newly retired owner until its final step,
+including while a drainer holds it and across continuation requeues. Above a
+backlog watermark, root and worker schedulers withhold ordinary evaluation
+slices. Throttled evaluations wait in FIFO order outside the runnable queue.
+Each wake owns a reserved slice admission, so newcomers cannot consume it;
+outstanding admissions are bounded by the executor count, including the root.
+Cancellation withdraws a pressure waiter without acquiring admission. Wait
+delivery and terminal task work remain runnable. Root and worker evaluation
+use the same admission protocol, and relieving pressure wakes idle executors.
+An admitted evaluation makes at least one transition, then yields at evaluator
+step boundaries if pressure has risen. Thus in-flight producers cannot keep
+allocating for an entire instruction quantum after the backlog fills, and a
+reserved admission always carries progress even if pressure rises again.
+Already admitted slices and descendants of retired owners may add work; the
+watermark bounds accumulation across evaluation turns, not live program data
+or the size of an individual retired graph. Retirement is runnable destruction
+of unreachable owners, never a wait for an evaluating task to release a borrow.
+
+Retirement has its own object-work quantum, independent of scalar kernel
+polling. Backpressure, rather than a ratio between those quanta, prevents
+producers from continually outrunning reclamation. Root and worker turns
+attempt retirement without waiting behind another drainer, then return to
+execution and control; blocking host settlement joins remaining work at the
+public turn boundary.
 
 Cold Sessions and blocking public turns also settle or transfer retirement.
 Memory left after readers drain must be bounded by live or peak simultaneous
@@ -898,33 +942,29 @@ publishes one immutable `Child.Term`. POSIX children are created as
 process-group leaders. The supervisor observes leader termination with
 `waitid(..., WNOWAIT)`, performs the consuming TERM-to-KILL cleanup, and reaps
 the leader only afterward. The waitable leader pins its PID slot, so the PGID
-cannot be reused while cleanup retains it. The controller group stops issuing
-leases at retirement and its final lease may detach scope membership only
-after the group state contains no process identity. Every controller lease
-owns a process-cell reference. Lease creation and release-count transitions
-are serialized by the process-cell mutex; a nonfinal lease drops its cell pin
-before publishing the smaller count, so the supervisor can observe the final
-count only after every other release completes. The final lease takes the
-membership token, drops its cell reference while the external-member reference
-still pins the cell, and only then detaches membership, so scope quiescence
-cannot race any controller release. Each cell owns a nominal live-process
-reservation; after every nonfinal controller has drained, the supervisor
-consumes that reservation under the cell lock before publishing the public
-reaped state. Observing termination therefore also closes the process owner's
-lifetime use. Reaping the group leader therefore
+cannot be reused while cleanup retains it. The runtime activity group owns one process-cell pin across startup,
+all joined jobs, and synchronous cancellation setup. Callback return retires
+borrowed activity; backends never receive a separately releasable lease.
+Root retirement closes activity admission and carries the completed outcome
+until the last activity drains. The runtime then publishes reaped state and
+returns live capacity under the cell lock, releases its execution pin, and
+detaches scope membership. Startup rollback follows the same transition, so
+an outstanding cancellation callback delays capacity return even when no root
+thread started. Observing reaped state closes the process owner's lifetime use.
+Reaping the group leader therefore
 cannot suppress group cleanup or publish scope quiescence while cleanup still
 owns process-group authority. Stdin independently transitions
 through `open`, `closing`, `closed_cleanly`, or `broken`; `proc.run` cannot
 publish success until it observes a terminal stdin state, so a late background
 EPIPE remains observable even after all input entered the bounded queue.
-Compound `proc.run` readiness uses an opaque process-owned cursor over an
-exhaustive set of stdout-terminal, stderr-terminal, input-terminal,
-I/O-failure, and reap edges. Polling returns only previously unobserved edges
-and consumes them under the process lock, while registration compares newly
-published edges with that cursor.
-Buffered bytes and writable queue capacity remain level-triggered. A failure
-published after polling still wakes the driver, while an observed failure
-cannot turn later pipe or reap readiness into a scheduler hot loop.
+The ECL `proc.run` composition uses separate tasks for input, each output
+stream, and a registered wait exchange. It observes task completion in arrival
+order, so a failed collector or pipe operation cannot be hidden behind a
+blocked sibling. A containing task owns the resource, and task cancellation
+joins that ownership before the caller sees a deadline or transport failure.
+Capture retains bounded chunks and materializes the final byte lists through
+ordinary resumable list operations. Deadlines use the scheduler's shared
+clock and task wait arbitration.
 
 Every `proc.write` call acquires its nominal write ticket when the call reaches
 the primitive, before resumable byte validation and encoding. A driver owns
@@ -971,211 +1011,84 @@ one entry per step, and releases the quota slot last, so a task scope or
 Session cannot publish quiescence while an operation still owns any of them.
 The filesystem read, write, and publication primitives run on the worker in
 these bounded quanta, the same convention the archive and package-store
-drivers already use; only process pipes and network ports (listeners and
-connections) use detached controller threads, and a network listener owns a
-socket and starts its one acceptor thread only when a unit first parks in
-`accept`.
+drivers already use. Process pipes, native callbacks, and network ports use
+host-owned controller jobs. Network resource initialization owns socket and
+acceptor startup before publication.
 
 Every failure maps a host error to one closed reason vocabulary at the
 `filesystem_port` boundary and attaches the operation, root, path (or both
 ends of a transfer), and reason to the pending failure, so programs branch on
 stable symbols and never on errno names.
 
-### Network listeners are scope-owned sockets with a lazy acceptor
+### Network resources use registered controllers
 
-Inbound listening follows the filesystem model, not the process model. A Host
-may supply a `NetPolicy`: either an unrestricted grant or an exact allowlist
-of address and port pairs, plus a maximum live-listener count and the kernel
-accept backlog. Session construction copies the policy into a `NetOwner`,
-parsing every address once through `std.Io.net.IpAddress.parse` (literals
-only, never resolution) and normalizing IPv4-mapped IPv6 addresses to IPv4, so
-grant comparison is over parsed values and no spelling of an address can
-bypass an entry. A literal that does not parse, two entries that normalize to
-the same address and port, a zero limit, or an unsupported target fails with
-`InvalidHostPolicy` rather than `OutOfMemory`. The owner mints one opaque
-`NetAccess`; Units receive only that and cannot reach the owner, the socket,
-or the descriptor.
+Session construction validates and copies the host's listen policy into a
+network owner. Exact grants compare parsed, normalized IP addresses and ports;
+no alternate literal spelling widens authority. The owner derives allocation
+and retirement from the Session host and outlives retained resource identities.
+Workers receive its opaque access capability. Resource initialization, accept,
+and socket I/O execute through host-owned controllers.
 
-`listen` runs four bounded syscalls on the worker — socket, bind, listen, and
-getsockname, all through `std.Io.net.IpAddress.listen`, which stores the
-resolved local address on the returned socket — and never parks; a listener
-that is never asked to accept has no controller thread, readiness source, or
-wait registration. The order is the process port's: validate the configuration, check
-the grant, acquire a live-listener reservation (a consuming capability like
-the process live slot), open the socket, create the `ListenerCell`, attach it
-to the calling unit's `TaskScope` through `attachExternal` and store the
-returned membership token, and only then wrap it in a port value with
-`heap.createPort`. Every failure on that path releases the reservation and
-closes the socket exactly once. The socket is opened before the scope is asked,
-because a scope may begin closing between any earlier check and the attach;
-when `attachExternal` refuses a closing scope, the just-opened socket is closed
-through the same `close` transition and the caller sees `'cancelled`.
+The common resource service owns controller lanes, scope membership,
+cancellation, and joined cleanup. Its network adapter owns typed listener or
+connection state. Listener initialization binds the socket and starts its
+acceptor before the initialized resource becomes visible. The private prepared
+state owns rollback; the accepting state owns the socket, wake descriptors,
+and registry entry together. Closing wakes the acceptor and retains that
+bundle until controller return. Retirement first detaches the acceptor under
+the listener lock, then destroys its storage outside that lock. Terminal publication follows descriptor
+closure and quota return, so joined cleanup permits rebinding. An acceptor
+failure closes its resource instead of silently restarting it.
 
-A `ListenerCell` has one mutex-protected exhaustive state, `bound` (owning the
-server socket and its resolved address) or `closed`, and one reference count
-shared by the port value and the scope member; the heap projects a port to a
-cell only when the release adapter matches, so a process port and a listener
-cannot be confused. `ListenerCell.close` is the single close transition: under
-the mutex it moves `bound` to `closed`, stops the acceptor if one is running
-(see the next section), closes the socket, and releases the reservation; after
-unlocking it detaches the scope membership token once. It is idempotent, and
-both the `net.close` word and `cancelExternalMember` call it, so a listener
-closed explicitly and later swept by its scope, or the reverse, closes exactly
-once and detaches exactly once. When `close` returns the socket is closed, so
-the same address and port may be bound again immediately. `local-address` reads
-the state under the mutex and copies the address out; a `closed` cell has no
-address to report. The cell is destroyed when the last reference drops and is
-asserted `closed` at that point. `NetOwner.deinit` asserts a zero live count,
-which holds because Session teardown closes the root scope first.
+Both task scopes and resource-dependent activity groups publish initial
+membership and ownership atomically, with storage prepared before locking.
+The backend's activity belongs to the service's group. Transferring the service
+changes scope ownership without detaching that activity or its cleanup duty.
+The service joins the group before cleanup becomes observable. An initialization
+failure before group attachment still closes and joins the private backend.
 
-Every failure maps a `std.Io.net.IpAddress.ListenError` to one closed reason
-vocabulary at the `net_port` boundary — `'in-use`, `'unavailable`,
-`'resources`, `'unsupported`, `'io` — and the `net` module attaches the
-requested address, the requested port, and the reason to the pending failure.
-Refusals before the host is reached are `'domain` with reasons `'unavailable`,
-`'denied`, and `'limit`, matching the process and filesystem capabilities.
+An accept exchange occupies its FIFO lane through cancellation acknowledgement
+and controller return. Address operations progress on a separate lane. The
+acceptor consumes the kernel backlog only for an outstanding slot with
+connection capacity available. Prepared slot storage is allocated outside the
+listener lock; linking and admission under the lock do not allocate. A slot's
+exhaustive state owns candidate storage through waiting, failure, or closure,
+an accepted socket and its reservation, or no payload after consumption. Slot
+removal moves that payload out under the lock and reclaims it after unlocking. A waiting
+slot consumes no connection capacity. Failed and cancelled handoffs dispose
+of their own payload exactly once.
 
-### Network connections extend the controller model
+An accepted socket carries its close authority, quota reservation, and immutable
+local and peer addresses together. The accept exchange moves it into a new
+common resource with no listener dependency. The new service initializes the
+connection backend in its own activity group. Until result publication, the
+exchange's provisional group owns that resource. `port.result` atomically
+publishes it into the receiving scope; failed publication leaves provisional
+ownership intact. Closing the listener cannot close a claimed independent
+connection or consume a completed exchange's result.
 
-Accepting, reading, and writing block indefinitely at the kernel and have no
-worker-side readiness source, so they follow the process-pipe model rather
-than the filesystem model: detached controller threads perform the blocking
-calls and hand results to the scheduler through bounded queues and the
-readiness capabilities in `external.zig`. A parked unit holds no worker. The
-thread that owns a socket is the only place that closes its descriptor,
-releases its live reservation, and detaches its scope membership, exactly as
-the process supervisor is for a child.
+Connection state distinguishes prepared, running, stopping, and terminal
+execution. Its controller owns a nonblocking socket, a wake pipe, and bounded
+receive and send rings. Producers and readers use readiness capabilities and
+hold no worker while parked. One reader may wait per input endpoint. Writer
+permits carry FIFO turns, including through resumable byte validation; each
+call remains contiguous. Finishing output rejects new writers while preserving
+admitted turns and queued bytes, and sends directional EOF only after they
+drain. Peer EOF leaves buffered input readable and the reverse direction open.
 
-Ownership is carried by consuming types rather than by convention. An
-`OwnedSocket` closes its descriptor at most once; a `ConnectionReservation`
-releases its quota slot at most once; an `AcceptedSocket` bundles both with
-the connection's `Endpoints` (the peer from `accept`, the local end from
-`getsockname`, so a wildcard listener's connection reports the address it was
-actually reached on). No other production code in `net_port.zig` calls
-`closeFd` on a connection socket or decrements the connection counter. Each
-outstanding `accept` owns an `AcceptSlot` whose state is exhaustive:
-`waiting` (holding nothing: neither a socket nor a reservation), `ready`
-(holding an `AcceptedSocket`), `failed`, `taken`, or `closed`. `endAccept`
-releases whatever the slot still holds, so a cancelled accept can neither
-leak a socket nor release a slot twice, and a waiting accept costs the
-connection quota nothing.
+Graceful shutdown refuses new writes, drains accepted output, and then shuts
+the socket down. Abortive closure discards queued output and interrupts polling
+through the wake pipe. A transport failure records one terminal reason and
+wakes observers; buffered input precedes that failure. Socket retirement closes
+descriptors and releases connection capacity only once, independently of the
+remaining identity references. No worker holds a descriptor outside this owner.
 
-The listener gains one acceptor thread, started by the first `beginAccept`
-and never before. It waits in `poll` on the listening socket, switched to
-non-blocking, and on the read end of a private wake pipe. It does not block
-in `std.Io.net.Server.accept`: `shutdown(2)` on a listening socket does not
-wake a blocked `accept` on macOS, closing a descriptor another thread is
-blocked on is a reuse hazard everywhere, and `netAcceptPosix` treats `EAGAIN`
-as a bug, so the non-blocking socket that `poll` requires would trip it. When
-`poll` reports the socket readable, the acceptor takes the listener mutex,
-rechecks that a `waiting` slot exists, acquires a `ConnectionReservation`
-from `NetOwner` under that mutex, and only then calls `accept4`, still
-holding the mutex, and moves the returned socket and its reservation into
-that slot as one `AcceptedSocket` before unlocking (`acceptOneLocked`). When
-no reservation is available the acceptor makes no syscall: the connection
-stays in the kernel backlog, the acceptor marks itself quota-blocked, and it
-polls only its wake pipe, not the listening socket, until a release wake
-arrives, so a full quota spins no thread and takes no socket it cannot own.
-Because
-`endAccept` takes the same mutex, the two cannot interleave: if the
-cancellation wins, no `accept4` runs and the connection stays in the kernel
-backlog for the next accept; if the accept wins, the socket belongs to that
-slot and the cancellation closes exactly that socket. The syscall under the
-lock is bounded because the socket is non-blocking. The number of sockets
-taken and not yet handed over therefore never exceeds the number of
-outstanding accepts (`queued <= demand`), and an idle program leaves
-backpressure in the kernel backlog. A connection aborted between `poll` and
-`accept4` is skipped; descriptor and buffer exhaustion mark the slot `failed`
-with a `resources` reason rather than failing the thread. Readiness keys are
-slot pointers, so a wake reaches the slot's owner and the owning driver takes
-exactly its own socket. `ListenerCell.close` writes one byte to the wake pipe
-and waits under the cell condition until the acceptor reports it has left
-`poll` and will not touch the descriptor again; only then does it close the
-socket, mark every waiting slot `closed`, and wake their owners. That wait is
-bounded by one thread returning from a `poll` the wake byte has already
-satisfied, which is not the unbounded worker wait this document forbids; the
-process controller's cancellation does not wait because a child may take
-hundreds of milliseconds to die, and no such delay exists here.
-
-A `ConnectionCell` has exactly one controller thread. The socket is
-non-blocking, and the controller waits in one `poll` over the socket and the
-read end of its own wake pipe, asking for readability only while the receive
-ring has room and the peer has not finished sending, and for writability only
-while the send ring holds bytes. Workers touch only the rings, the flags, and
-the wait list, and they write one byte to the wake pipe whenever they change
-something the controller's interest depends on: bytes queued to send, room
-freed in a full receive ring, or a stop request. One thread owning both
-directions is what removes the races a reader/writer pair invites: there is
-no second lease to mint before the first thread can finish, no writer failure
-that leaves a reader blocked, and one code path that performs final cleanup.
-
-The cell's `Lifecycle` is exhaustive and switched under one mutex:
-`prepared` (allocated, no thread), `running` (the controller owns the
-socket), `stopping` with a reason (`close` or `abort`), and `terminal` with
-the reason it stopped for. Publication completes every fallible step before
-concurrency begins: allocate the cell, the rings, and the wake pipe; attach
-the member to the *accepting* unit's `TaskScope` (never the listener's, so the
-listener may close first and a per-connection child owns exactly its own
-connection); then, under the cell mutex, move `prepared` to `running` and
-spawn the controller. A scope cancellation that arrives between the attach and
-that lock hold finds `prepared`, records `stopping`, and the publisher seeing
-`stopping` retires the cell without starting a thread and detaches the
-membership it just received, so a scope is never left waiting on a controller
-that does not exist; one that arrives after the lock hold finds `running` and
-signals the controller through the wake pipe. Every failure before the thread
-starts closes the socket, releases the reservation, publishes `terminal`, and
-detaches any membership through the same `finalizeLocked`, which asserts it
-runs once.
-
-Explicit `close` moves `running` to `stopping(close)`: new writes fail
-`'closed`, queued input is dropped because no read can observe it, and the
-controller keeps polling for writability until the send ring is empty, then
-performs `shutdown(SHUT_RDWR)` and finalizes. Scope cancellation
-(`cancelExternalMember`) moves to `stopping(abort)`, discards the send ring,
-and the controller shuts down and finalizes at once, so quiescence never waits
-on a peer. A socket error in either direction records one `Failure` (`reset`
-for `ECONNRESET`, `EPIPE`, and `ENOTCONN`; `io` otherwise), discards the send
-ring, and the controller shuts down and finalizes on its next turn, so a
-failed write can never leave the other direction blocked. End of stream from
-the peer is not termination: the flag is recorded, queued bytes stay readable,
-and the program may still write until it closes. A wake on the cell's wait
-list is always `.ready`: a socket failure is a change in the cell's
-observable state that the driver polls, not a failure of the wait service, so
-every failure reaches the word with the peer's address, port, and reason.
-
-Reads and writes observe the cell through one locked snapshot each. `read`
-returns queued bytes first; otherwise the reason nothing more can arrive
-(`closed` when the program or its scope stopped the connection, which
-outranks a later peer failure; `reset` or `io` for a socket failure); otherwise
-`eof`; otherwise pending. `write` fails for the same reasons, parks while its
-permit is not at the head of the queue or the ring is full, and otherwise
-queues bytes and signals the controller. At most one reader may be pending,
-and writes are serialized by permits in arrival order, as for process streams.
-`observeEndpoint(kind)` selects the local or peer address from the immutable
-`Endpoints` and reports it as `available` while no failure reason applies and
-as `closed` otherwise, so a terminal connection never exposes an address as if
-it were live and a closed `local-address` names the local end rather than the
-peer. A peer that never reads leaves at most `send_capacity` bytes queued
-after an explicit `close`; `write` parked until those bytes entered the ring,
-so the bound is the ring and nothing else.
-
-The connection quota (`max_live_connections`) is a second compare-exchange
-counter on `NetOwner` beside the listener quota. It is reserved when a socket
-is taken from the backlog, never when an accept parks, so it bounds live
-connections only and `accept` has no `'limit` failure. `NetOwner` keeps a
-registry of running acceptors, and `releaseConnection` wakes each of them
-through its pipe, so an acceptor blocked at the quota rechecks the counter as
-soon as any connection in the Session releases its slot; a wake byte means
-"drain and recheck", and only the stop flag distinguishes shutdown from a
-release. The registry mutex is the leaf of the lock order: it is taken
-beneath listener and connection cell mutexes, and nothing is acquired while
-it is held. `ListenerCell.close` waits for its acceptor to exit, so no cell is
-on the registry after `close` returns, and `NetOwner.deinit` asserts an empty
-registry and zero counters, which holds because Session teardown closes the
-root scope and every running controller holds the membership the scope waits
-on. Failures on a connection are `'io` with the peer's address and port and
-one of `'closed`, `'reset`, `'io`; the listener quota alone refuses with
-`'domain` `'limit`; the mapping has one owner in `net_port.zig`.
+The acceptor registry lends only live wake pipes. It removes a record before
+closing those descriptors. Returning connection capacity wakes quota-blocked
+acceptors without taking their listener mutexes. The registry mutex is a leaf
+in the lock order; no listener or connection mutex is acquired beneath it.
+Session teardown joins resource scopes and settles retained values before
+destroying the network owner and its executor.
 
 ### Absolute deadlines govern timer races
 
@@ -1324,6 +1237,88 @@ spellings remain owned by their closed operation enums. The source audit
 checks semantic spelling conventions across all classified production sources;
 documentation completeness and effect syntax are compile-time requirements.
 
+Port operation declarations bind documentation, typed handlers, lanes, and
+supported exchange endpoints together. Built-in and extension bridges derive
+selectors from the same ABI-independent declaration types. Registered lane
+metadata is authoritative; controller invocation does not select a second lane.
+Both bridges dispatch the handlers carried by those declarations. Extension
+modules generate their selector bindings from the registered declarations;
+public names may differ from local endpoint names without coordinating IDs.
+Named endpoint references generate private masks before publication, rejecting
+resource-owned or repeated endpoints in an operation's exchange set.
+Controller endpoint borrows fix their issuing kind, owner, transport, and
+direction at acquisition and expire at controller return. Their opaque types
+expose only the matching directional operations. Transport outcomes distinguish
+EOF, cancellation, and failure; buffered accepted data precedes failure.
+A complete controller byte write holds one shared FIFO writer admission across
+bounded chunks. A transport-owned wake epoch closes the gap between a pending
+write and its blocking wait, including cancellation and predecessor completion.
+Structured construction uses one bounded controller driver for typed backends
+and the extension bridge. Sending, returning a result, and creating a child
+complete their prerequisite validation within that driver. The ABI carries
+semantic construction requests, not interpreter or builder advancement states;
+cancellation is checked between construction quanta before publication.
+Construction requires opaque invocation authority minted by the controller lane. Each public mutation settles its bounded internal work before returning;
+worker code cannot construct this controller facade or obtain its advancement
+state.
+
+Each granted Session service owns its registered library instance. A library
+loaded without a grant owns an inert instance with no host authority.
+A module candidate publishes sealed capabilities as literal word
+bodies and pins its instance until publication or abandonment. Capability
+values retain that identity independently of service cleanup. Module registration
+binds immutable service grants inside the adapter, so module loading does not
+select a resource backend. A generic module-constant provider carries names,
+effects, documentation, and sealed values; domain adapters own their declarations
+and typed service grants. Registration validates declaration-name uniqueness at
+compile time, so one provider cannot replace its own earlier binding during
+publication. Retained issuer metadata has no backend discriminator.
+Factories register through one opaque opening
+interface: bounded configuration validation precedes admission, resumable
+openings own partial work, and resource initialization precedes stack publication.
+The opening borrows its factory and validated request until retirement. It derives
+its scheduler from the calling scope and never receives an interpreter callback.
+Bounded diagnostic details retain their values before the request retires.
+Built-in controllers do not pass through the extension ABI.
+
+Process resource metadata pins its issuing instance through final reclamation.
+Connection metadata carries the same issuer lifetime. Its outgoing transport
+distinguishes open, finishing, and EOF: finish closes admission, existing writer
+permits preserve their turns, and the controller ends that direction after both
+the writer lane and byte ring empty. Incoming progress is independent.
+An endpoint projects a declared direction only after validating that instance
+and the resource kind. Its retained resource pin grants no scope ownership.
+Endpoint adapters register through one semantic interface for built-in and
+third-party resources. Registration binds typed adapter callbacks behind an
+opaque endpoint selector and one directional endpoint capability. The common
+endpoint boundary has no backend-family discriminator: it consumes byte
+progress, bounded capacity, readiness, and runtime message queues. ABI
+translation belongs to the native adapter. Common byte drivers own validation
+and transfer continuations; transports own shared reader exclusion, writer
+admission, and FIFO ordering. A write permit pins its transport independently
+and consumes both its turn and prepared interface storage on finish or
+cancellation. Adapter references are consumed only after successful capability
+publication, so failed registration leaves cleanup with the caller.
+
+Resources use the same registered lifecycle interface for every adapter.
+The core dispatches close, graceful shutdown, cleanup readiness, and ownership
+transfer without inspecting backend types. Registration derives allocation
+authority from the resource owner and seals a nominal adapter identity for
+adapter-side projection. A resource explicitly grants either direct ownership
+or provisional publication support. Atomic handoff consumes only the latter
+capability's ownership projection; it has no knowledge of native libraries or
+built-in resource layouts. Publication snapshots retain the common resource
+handle as well as its adapter reference, so releasing the last language value
+cannot invalidate an in-flight handoff.
+
+Registered operation selectors validate their issuing resource before request
+validation, then return an admitted exchange or admission readiness through
+the same interface for every adapter. Exchange capabilities seal their
+adapter identity, own one execution reference, and expose only cancellation,
+cleanup, and completion interests. Result observation and claiming go directly
+through the common result owner. Neither operation admission nor exchange
+observation dispatches on a backend family or uses backend readiness codes.
+
 Package discovery and synchronization are
 described in `ENVIRONMENT.md`; they enter the evaluator through the same module
 loader and bounded-driver conventions as other sources. Host-side lock and
@@ -1336,11 +1331,12 @@ response before writing it, which the source audit holds to that one call
 site. Malformed response values stay ordinary data; malformed wire output is
 unreachable.
 
-`proc` is a builtin for the same reason as other host-backed modules: process
-creation and pipe readiness require authority and representation ECL source
-cannot possess. Its public values remain ordinary dictionaries, byte lists,
-and opaque ports. The convenience `run` word is a client of the same controller
-as streaming ports; it is not a blocking second implementation.
+`net` and `proc` are ECL modules over registered factory, operation, and endpoint
+capabilities. Their adapters own host authority and typed socket or process
+state. Public words create resources and exchanges through the common vocabulary.
+The process `run` composition owns a child scope, drains both outputs alongside
+input and completion tasks, applies bounded capture and an optional task deadline,
+and joins that scope before returning or raising an error.
 
 ### The native ABI is narrow and transactional
 
@@ -1356,6 +1352,380 @@ The exact wire ABI is the callback's sole interpreter surface. It contains:
 - an output builder constrained by the declared stack effect;
 - a host table containing only requested capabilities; and
 - a typed rescheduling result for work that continues beyond one leaf call.
+
+Port views carry only their value kind. Forwarding retains the opaque heap
+identity in the invocation's candidate table, including for a bounded path
+inside an aggregate; it grants no backend access or scope ownership authority.
+Nested reads and forwarding share one metered path resolver. Candidates remain
+invocation-local, while aggregate builders own values retained across yields.
+Tasks and modules remain unavailable as native value views.
+
+Heap port capabilities distinguish factories, operation selectors, endpoint
+selectors, resources, exchanges, and endpoints. The role is part of the opaque
+heap representation and is checked together with backend identity before payload
+projection. Only resource and exchange roles carry scope-transfer authority;
+borrowed roles retain permitted use and issuer lifetime without acquiring an
+independent scope membership. Their constructors cannot supply transfer hooks.
+All resource producers use the owning resource constructor.
+
+The structured-message validation boundary retains an immutable root while a
+resumable traversal checks each occurrence. Its opaque handle exposes a value
+only after the complete traversal succeeds. Words, tasks, and modules are
+rejected recursively; nodes, portable scalar/text bytes, and capability
+attachments have independent budgets. Repeated references are charged at every
+occurrence, so shared aggregate storage cannot bypass transport limits. Failed
+validation is terminal, and retirement enqueues both the root and traversal
+storage without walking the input synchronously. Validation grants no scope
+publication or ownership-transfer authority. Initial requests, messages, and
+terminal results all cross this boundary before delivery.
+
+Native port definitions are copied and validated with the module descriptor.
+Their identity is the pinned module instance and validated definition index;
+names are descriptive metadata. Typed SDK adapters expose backend state only
+to controller callbacks. Validated definitions distinguish callable words from
+registered factories and selectors. Capability bindings are single-value
+quotations in the immutable module image; each capability independently pins
+its issuing instance. Repeated lookup shares that identity. Selectors carry
+validated resource kinds, fixed operation lanes, and endpoint permissions;
+registration rejects duplicate endpoint identities and undeclared permissions
+before publishing any binding.
+
+Resource lifecycle dispatch uses an opaque registered semantic interface
+(`port_resource.zig`). A borrowed lifecycle capability requires a retained port
+identity throughout its use. Each adapter reports joined cleanup through the
+common controller service.
+Connection cleanup readiness is distinct from send-ring drainage: returning the
+last accepted byte to the kernel does not prove the socket controller has joined.
+Common close and shutdown drivers park on cleanup readiness for every backend.
+
+Registered byte endpoints use a shared bounded transport (`port_bytes.zig`).
+An exchange owns its pipes; each attenuated endpoint retains the exchange and
+exposes only its declared direction. A sealed descriptor index resolves endpoint
+permissions without scanning a module during admission. Pipe construction
+precedes admission, so allocation failure cannot publish a partial transport.
+Scheduler-facing pipes and blocking controller authority are distinct opaque
+capabilities. The shared writer lane orders complete calls, a reader claim
+excludes overlapping reads, and explicit transport phases distinguish pending
+finish, stable EOF, and failure. Finish preserves admitted writer turns; failure
+preserves accepted output unless cleanup is abortive. Cancellation wakes blocked
+transport independently of the operation lane. Copies are bounded per turn,
+and endpoint drivers use the shared resumable byte-transfer machinery.
+
+Every byte transport uses the same monotonic stream phase for pending finish,
+EOF, and failure. Accepted bytes precede its terminal fact. Once established,
+EOF or failure cannot be replaced by a later resource error or cleanup. Process
+outputs record terminal facts separately, so failure of another pipe cannot
+rewrite an output that has finished. TCP receive EOF likewise survives closing
+the resource and borrowing another endpoint.
+
+Message endpoints use `port_messages.zig`, with bounded queues and one shared
+resource byte budget. Unique delivery ownership is distinct from retained
+observation. A validated envelope carries its capacity reservation through
+controller receipt and forwarding, preventing an input producer from consuming
+the capacity needed to forward that same message. Scheduler receivers prepare
+their event and reserve stack capacity before claiming the queue's delivery;
+failed preparation leaves queue ownership intact. Budget readiness has its own
+mutex and generation, so returning shared capacity never locks another queue.
+Terminal failure preserves accepted output; abortive cleanup detaches queued
+messages and unclaimed results before retiring their graphs outside publication
+locks. This breaks capability cycles through an exchange's own messages or
+result. Scope membership remains until controller return and this retirement
+handoff have completed.
+
+The `port` vocabulary is an embedded ECL module over the host operations in
+`port.core`. Its non-streaming call composition uses the same exchange result
+claim and cleanup boundary as explicit callers. It observes the result through
+an inline error boundary and closes the exchange before forwarding that outcome,
+without introducing a second task-scope owner for returned resources.
+
+Configuration and initial requests cross a bounded validation boundary before
+resource creation or operation admission. A nominal validated view grants
+retention of their immutable roots. Controllers receive only read-only wire
+views with bounded paths, never heap handles or allocator authority. Root
+retirement follows the containing resource or exchange lifetime.
+
+Ordinary native words may forward opaque port values. Registered factories,
+operations, and endpoints grant resource authority through the common API;
+host-owned exchange identities carry suspended controller work independently
+of ordinary native invocations.
+Cancellation notification is a bounded concurrent callback; initialization,
+execution, and cleanup belong to host-owned controllers. Initialization precedes
+all lane execution, and cleanup follows every lane executor’s completion.
+
+The native resource owner reserves Session capacity before attaching a provisional
+cell to its scope. Initialization cannot run before the heap identity, membership,
+and controller lifetime are owned. Opening publishes an initialized resource
+to its caller; failed opening closes and joins provisional startup. Ordered lanes use the same FIFO ticket boundary
+as network and process writers. A ticket holds its lane through cancellation
+until execution acknowledges reuse and returns, or the resource closes. The
+operation phase is the authority for dispatch and cancellation; no independent
+active-operation pointer can disagree with it. Native
+kinds' registered operation selectors declare lanes, validated against a
+bounded, state-independent classifier. The
+host partitions the total admission budget across lanes so a saturated lane
+cannot consume another lane's progress capacity. Declared byte and message
+endpoints separate scheduler execution from controller blocking. Every exchange
+owns a validated structured request and only its declared endpoint transports.
+Every admitted controller operation has a heap exchange identity and independent
+scope membership. Retaining or forwarding an exchange preserves its identity
+without changing that ownership. Forwarding shares
+use, while `@give` moves ownership through the same bounded batch protocol as
+resources. Abortive cleanup retains the scope membership until controller
+return, including recovery acknowledgement. The lane's post-return transition
+settles that membership outside both operation and resource locks. Readiness
+registration observes terminal state under the same mutex as notification.
+Lane admission starts in a preparation state that owns its FIFO reservation
+but cannot execute. Opaque admission storage is allocated before acquiring the
+publication lock; capacity rejection retains that uninitialized candidate.
+Publishing the exchange handle and scope membership makes
+the ticket dispatchable. Cancellation can retire an unpublished reservation,
+and a late publication cannot restore it or invoke the backend.
+Endpoint borrows retain a tagged resource or exchange lifetime, independently
+of the original heap handle. Resource transports are prepared before startup
+and survive exchange retirement. Closure wakes their blocked transport, and
+the root controller discards queued capabilities before scope detachment so
+self-referential resource messages cannot prevent final reclamation.
+Controller transport waits borrow a monotonic cancellation latch from their
+invocation. Ticket cancellation publishes that latch before notifying resource
+queues and their shared budget, without changing persistent endpoint state.
+Wait predicates check the latch under the same transport lock as notification;
+acknowledgement and controller return still govern lane reuse.
+
+Native controllers build messages through a host-owned construction stack.
+Its fixed capacity derives from the message node limit, and its owning heap
+buffer retires abandoned roots without a synchronous graph walk. Aggregate
+materialization, symbol insertion, validation, and removal of consumed inputs
+advance in bounded steps. A completed validator grants publication authority;
+partial construction has none. Native code receives neither heap storage nor
+allocator authority, and controller return retires its construction state.
+Reply endpoint construction projects only a declared, admitted message input
+of the current exchange. The resulting sender pins that exchange's identity
+without transferring its ownership or extending its operational lifetime.
+Native-to-ECL requests therefore use the same bounded message and cancellation
+paths as ordinary traffic, with no interpreter re-entry authority.
+
+Native terminal failures distinguish runtime allocation exhaustion from bounded
+domain error data. Endpoint transport preserves that distinction through
+buffered output and completion; cleanup retains its normal join obligations.
+The common result owner carries an immutable terminal fact separately from its
+available, claimed, or discarded value. Adapters publish terminal facts only
+after controller return and cancellation settlement; ABI errors are translated
+before reaching this owner. Completion observation remains repeatable, while
+claiming consumes an available terminal value under the receiving scope and
+result locks. Replacing or discarding an envelope detaches it under the result
+lock and retires it after unlocking. Queue delivery and result claims share one scope-first publication transaction.
+Delivery owns observation, output preparation, and claim arbitration; drivers
+receive only values, readiness, EOF, or terminal transport failures. A changed
+snapshot requires reacquisition. Revoked child authority instead detaches the
+undeliverable envelope under the source lock and transfers its cleanup to
+bounded retirement after unlocking. It can never leave that envelope available
+as a retry candidate. A scope that has begun closing refuses a claim without
+consuming its source. The receiving evaluator reserves stack capacity before that
+transition, so allocation failure cannot consume a result without publishing it.
+The driver's completion carries that reservation with its owned output; only
+the evaluator commits it after driver retirement, without further allocation.
+
+An external-child scope owns provisional resources and separately
+represents permanent parent dependencies. It admits only external members and
+queues the scheduler's bounded cancellation cursor; native controllers cannot
+use it to re-enter ECL. Closing pins its parent until every child's final
+retirement has propagated. A resource's controller joins its dependency scope
+before destroying backend state, while an exchange retains its task-scope
+membership until its provisional-child scope is closed.
+The permanent dependency attachment owns both its scope membership and its
+issuing parent identity. Controller parent-state projection validates that
+attachment's module and nominal registered resource identity. Each native kind
+owns a distinct identity token pinned by its module instance; names describe
+kinds but cannot authorize typed state projection or child creation. Descriptor
+validation rejects missing or duplicate tokens. Detaching consumes the attachment only
+after child cleanup and controller join; consequently even a child's destruction
+callback may use the borrowed native parent state. Independent resources carry
+no parent-state authority, and scope transfer preserves the attachment.
+Controller failures carry both a terminal cause and an operation or resource
+disposition. A resource failure retires its failing exchange before closing
+the resource and interrupting dependent children. This preserves the exchange's
+accepted output and repeatable terminal observation while preventing subsequent
+admission. Cleanup remains asynchronous to the reporting controller and joins
+all dependent work before backend destruction.
+Exchange retirement follows its own ownership state. Resource closure marks
+only outstanding lane members for abort; it cannot retroactively discard a
+completed exchange's result or buffered output. Terminal observation, result
+claiming, and explicit exchange cleanup therefore remain independent of the
+issuing resource's cleanup timing.
+Closed group metadata keeps its allocation authority independently of the
+scheduler facade: a final controller-retirement pin may outlive task-scope
+quiescence, but cannot require scheduler access for destruction.
+
+Validated roots carry a bounded attachment index. Results and queued messages
+retain that index with their immutable root. The common resource boundary owns
+their publication protocol. Only a resource registered with provisional ownership
+support grants the ownership projection needed for atomic publication. Already published
+resources remain shared uses when carried by a message or result.
+Claims snapshot unpublished child
+identities, prepare destination memberships outside locks, and revalidate under
+the receiving scope, source, provisional scopes, and child locks. Scope and
+child locks have stable identity ordering. A successful transition replaces
+all provisional memberships together; stale snapshots grant no destination
+authority. Replaced memberships and pins retire after unlocking. Published
+capabilities are ordinary shared uses and acquire no new ownership on receipt.
+Cancellation carries the issuing scope identity and revalidates its authority
+under the resource's lifetime lock. A cursor retaining an old membership cannot
+cancel a resource after ownership has moved, even before deferred unlinking.
+Only owner-issued creation installs dependency membership; scope transfer cannot
+reparent a resource. Heap identity release closes unpublished resources, while
+controller, scope, and readiness pins release metadata without changing use.
+
+Graceful shutdown closes operation admission and runs one registered callback
+on an independently reserved control lane. Its terminal outcome is stable.
+Abortive close interrupts that callback through the same bounded cancellation
+path as other backend work. The root joins both operation and control lanes
+before cleanup; callback return alone never grants cleanup authority.
+
+Closing cancels active and queued work and prevents further admission. Cancelling
+only a queued operation removes that operation. Active cancellation either
+closes the cell or invokes its declared recovery protocol. Recovery requires
+explicit acknowledgement of reusable state; returning without it closes every
+lane. Close overrides recovery and interrupts all active streams. Lane executors
+are joined before controller cleanup, and the root controller is joined before
+scope detachment.
+The internal port executor owns typed jobs and their execution guards. Its
+retirement queue accepts only completed jobs and joins each before invoking its
+retirement callback; a blocked backend cannot hold up another job's retirement.
+Retirement callbacks perform bounded release and never wait for other jobs.
+Executor shutdown closes admission and joins the reaper after all callbacks
+have returned. Reusable job records are reserved against the owner's resource
+limits before cancellation can require them; submission and retirement do not
+allocate after preparation. Unused records need no initialization walk. One
+additional record covers the retirement callback returning live capacity.
+Network polling, process supervision, stream I/O, timers, and native callbacks
+all submit typed jobs to this boundary. The native byte ABI is an adapter,
+not the representation of built-in operations. Only running jobs receive the
+capability to run and await child lanes; worker submission authority cannot
+join or destroy executors.
+The resource owner joins completed controllers outside ECL workers, so scope
+teardown can await cleanup without blocking a worker. Closed heap identities retain
+their module pin independently of backend cleanup. Session shutdown closes creation,
+settles resources and calls, and releases native images only after those lifetimes.
+
+External resource publication uses the shared scope-attachment boundary.
+Membership storage for a batch of up to sixteen resources is prepared before
+publication locks are acquired. Under the receiving scope lock, one owner-issued
+guard validates the source and commits every membership with the source
+ownership transition. Cancellation can observe the whole batch or none of it.
+Prepared allocation failure and a changed snapshot release pins outside both
+scope and source locks without consuming the delivery. Terminal rejection
+removes the undeliverable source instead. Provisional publication is an opaque
+service-owned capability with provisional, published, and revoked states.
+Revocation is terminal; its retained group pin grants reclamation lifetime only.
+The transaction orders group closure against destination attachment and consumes
+publication authority on success, before the former owner can cancel through
+its replaced membership. An already-published identity is shared without
+reattachment, including when an older snapshot's group has since closed. Its
+ownership state distinguishes provisional attachment from released ownership;
+a release racing initial attachment consumes the eventual membership instead of
+resurrecting a closed resource. Attachment and detachment occur outside the
+resource lock, while membership publication and backend startup revalidation
+use that lock. The creator retains the provisional cell until publication or
+backend rollback completes.
+
+All registered resources bind scope ownership and terminal publication to a
+runtime-owned activity group. Its provisional state owns startup rollback; successful submission transfers the root into the
+executor. Draining owns the root outcome and every outstanding activity until
+all jobs have joined and all borrowed callbacks have returned. Only that
+transition can publish terminal facts, drop the group's execution pin, and
+detach scope memberships. The backend does not supply an independent reference
+or a claimed quiescence condition at completion. Retained value references
+remain independent of this execution lifetime. A listener's acceptor joins before terminal detachment.
+
+An ordered controller lane binds its resource lock and owns admission,
+dispatch, and queue retirement. Opaque prepared storage is allocated outside
+the resource lock for both operations and writers. Admission under that lock
+validates capacity, initializes and links the node without allocation, and pins
+the operation or resource until retirement. Rejected admission retains the
+prepared storage for reuse or destruction after unlocking. There is no
+externally held unadmitted ticket and no independent
+lane argument on cancellation or completion. An operation payload and its ticket share one allocation and reference count.
+Queue and observer ownership independently keep that allocation alive; only
+their final release destroys the payload and ticket. A writer allocation pins
+its admitted resource until both its turn and permit ownership end.
+
+The common controller service validates lane capacity, admits prepared
+exchanges, supplies admission readiness, sequences initialization and graceful
+shutdown, interrupts outstanding operations, and joins execution and dependent
+children before cleanup becomes observable. Adapter state supplies typed
+backend work and transport; ABI descriptors and operation codes remain outside
+this lifecycle. Admission preparation owns its result and resource pin before
+acquiring the publication lock, and rejection retires them after unlocking.
+
+TCP resources use the same service and exchange owners. Their adapters bind
+listening sockets during initialization and prepare operation storage before
+publication locks. An accepted socket moves with its connection quota into a
+provisional child resource owned by the accepting exchange. Claim publication
+transfers the resource into the receiving scope without a listener dependency.
+The service owns backend activity through a dependent group and joins it before
+resource cleanup becomes observable. Both task scopes and dependent groups use
+one atomic initial-membership publication boundary.
+
+The process adapter retains an owned parsed specification through asynchronous
+initialization. Its pipe and supervision activity belongs to the common
+resource's dependent activity group, so transferring the resource transfers
+responsibility for joining that activity. Process exit and resource closure
+are separate terminal facts: exit settles wait operations, while closure
+retires the service and its controller capacity. The issuing process owner
+outlives retained resource identities and their reclamation, including after
+scope cleanup has joined execution.
+
+A shared exchange owner carries scope membership, cancellation settlement,
+provisional child ownership, terminal results, and readiness for registered
+controller adapters. The typed adapter supplies execution and transport, while
+the exchange owner makes cleanup wait for lane retirement and child closure.
+Adapter state contains domain selectors and backend failure data; the shared
+owner observes semantic terminal outcomes without knowing their source.
+
+Callback operations expose observation and cancellation handles. The runtime
+claims the active turn under the resource and operation locks, lends an
+invocation-local running capability, and completes execution only when the
+callback returns. Executor ownership is recorded under the operation mutex and
+ends before acquiring the resource lock for queue retirement. Cancellation
+cannot interrupt a returned callback still awaiting retirement. All execution
+state observation, cancellation, and acknowledgement share the operation mutex.
+Only that borrowed capability can acknowledge active
+cancellation. Callback cancellation can request acknowledgement or resource
+closure; it cannot select the synchronous writer-release policy. Queue removal,
+successor promotion, notifications, and release of the queue pin follow one
+runtime-owned transition. Cancellation and completion still arbitrate under
+the locks; ownership prevents callers from completing through another lane
+or freeing an operation that its queue still owns.
+
+Network and process writers receive a distinct permit that derives writes,
+readiness, and retirement from its admitted resource. Incremental calls retain
+the turn until finish or cancellation; retiring a queued writer preserves the
+active writer. Retiring an active writer acknowledges that enqueueing has
+stopped. Accepted bytes remain resource-owned, and socket duplex progress and
+process stdin/stdout/stderr progress continue independently. Flush, process
+reaping, stream EOF, and resource cleanup are separate observations. Native
+callbacks may still mutate backend state after task cancellation, so their
+lane requires acknowledgement and callback return before reuse.
+
+Port capacity lives in factory-owned resource storage, bound to its issuing
+owner and release policy. Initialization borrows the cell being constructed;
+the factory returns capacity and storage on failure. No separately copyable
+quota token exists. Terminal retirement returns the allocation’s capacity once;
+retained metadata keeps the allocation and its allocator without retaining quota.
+Limits and release milestones remain backend-specific: connection capacity
+wakes blocked acceptors, process capacity follows reaping, listener capacity
+follows socket closure, and native capacity follows controller joining.
+Retaining a closed value does not retain a live-capacity reservation.
+
+Network, process, and native ports share the same scope-transfer boundary.
+Backends supply their locked lifetime predicate and ownership location; the
+shared protocol prepares destination storage outside publication locks, then
+revalidates the origin under the destination scope and resource locks before
+linking cancellation authority and recording the transfer together. Rejected
+preparation never grants the destination authority, even temporarily. Commit
+and rollback consume the resulting ownership transition. Backend
+shutdown retains its own execution model while using the common ownership,
+readiness, and byte-ring representations.
 
 The machine presents the callback a transactional input window. A successful
 return validates and commits the declared outputs. Failure restores the ecl

@@ -28,12 +28,19 @@ pub fn build(b: *std.Build) void {
     runtime_options.addOption(usize, "default_worker_count", 1);
     runtime_options.addOption(bool, "instrument_root_execution", false);
 
+    const port_declarations = b.addModule("port-declarations", .{
+        .root_source_file = b.path("src/port_declarations.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const native_sdk = b.addModule("ecl-native", .{
         .root_source_file = b.path("src/native/sdk.zig"),
         .target = target,
         .optimize = optimize,
     });
     native_sdk.addImport("ecl-native-abi", native_abi);
+    native_sdk.addImport("port-declarations", port_declarations);
     configureRuntime(mod, native_abi, native_sdk, runtime_options);
     const internal_mod = b.createModule(.{
         .root_source_file = b.path("src/internal.zig"),
@@ -61,6 +68,31 @@ pub fn build(b: *std.Build) void {
     native_fixture_step.dependOn(fixture_install);
     const fixture_files = b.addWriteFiles();
     _ = fixture_files.addCopyFile(fixture.getEmittedBin(), "sample.eclmod");
+    for ([_][]const u8{ "portprobe", "foreignport" }) |name| {
+        const options = b.addOptions();
+        options.addOption([]const u8, "module_name", name);
+        const port_fixture = native_build.addExtension(b, .{
+            .name = name,
+            .root_source_file = b.path("test/native/ports.zig"),
+            .target = target,
+            .optimize = optimize,
+            .ecl_native = native_sdk,
+        });
+        port_fixture.root_module.addOptions("port_fixture_options", options);
+        port_fixture.root_module.link_libc = true;
+        native_fixture_step.dependOn(native_build.installExtension(b, port_fixture, "native-fixture"));
+        _ = fixture_files.addCopyFile(port_fixture.getEmittedBin(), b.fmt("{s}.eclmod", .{name}));
+    }
+    const tutorial = native_build.addExtension(b, .{
+        .name = "tutorial",
+        .root_source_file = b.path("test/native/tutorial.zig"),
+        .target = target,
+        .optimize = optimize,
+        .ecl_native = native_sdk,
+    });
+    tutorial.root_module.link_libc = true;
+    native_fixture_step.dependOn(native_build.installExtension(b, tutorial, "native-fixture"));
+    _ = fixture_files.addCopyFile(tutorial.getEmittedBin(), "tutorial.eclmod");
     const native_fixture_options = b.addOptions();
     native_fixture_options.addOptionPath(
         "directory",
@@ -138,6 +170,13 @@ pub fn build(b: *std.Build) void {
     }
 
     const negative_cases = [_]struct { file: []const u8, message: []const u8 }{
+        .{ .file = "missing_port_recovery", .message = "ecl-native: recoverable cancellation requires fn cancelOperation(*State, Lane) void" },
+        .{ .file = "wrong_controller_direction", .message = "has no member named 'read'" },
+        .{ .file = "resource_operation_endpoint", .message = "port: operation endpoints must belong to the exchange" },
+        .{ .file = "invalid_port_lanes", .message = "ecl-native: Port Lane values must be contiguous from zero" },
+        .{ .file = "invalid_port_callbacks", .message = "ecl-native: Port callbacks have invalid signatures" },
+        .{ .file = "undeclared_port", .message = "ecl-native: registered capability requires a declared port" },
+        .{ .file = "retained_port_candidate", .message = "ecl-native: Reschedule State cannot embed an ephemeral capability" },
         .{ .file = "no_call_parameter", .message = "ecl-native: callback first parameter must be *ecl.Call(\"inputs -- outputs\")" },
         .{ .file = "wrong_return_type", .message = "ecl-native: callback return type must be ecl.CallbackResult" },
         .{ .file = "generic_callback", .message = "ecl-native: callback must be non-generic and non-variadic" },
@@ -273,6 +312,7 @@ pub fn build(b: *std.Build) void {
     run_tests.step.dependOn(&fixture_files.step);
     const test_step = b.step("test", "Run the ecl test suite");
     test_step.dependOn(&run_tests.step);
+    test_step.dependOn(native_negative_step);
     const public_api_mod = b.createModule(.{
         .root_source_file = b.path("test/public_api.zig"),
         .target = target,
@@ -304,6 +344,12 @@ pub fn build(b: *std.Build) void {
         "Run native loader and transactional-call tests",
     );
     native_runtime_step.dependOn(&run_native_runtime_tests.step);
+    const port_filter = b.option([]const u8, "port-test-filter", "Run matching public port behavior tests");
+    const port_tests = b.addTest(.{ .root_module = test_mod, .filters = if (port_filter) |filter| &.{filter} else &.{ "process:", "net:", "native:", "port_message.test.", "heap.test.port" } });
+    port_tests.linkage = runtime_linkage;
+    const run_port_tests = b.addRunArtifact(port_tests);
+    run_port_tests.step.dependOn(&fixture_files.step);
+    b.step("test-ports", "Run shared process, network, and native port behavior").dependOn(&run_port_tests.step);
     const native_acceptance_mod = b.createModule(.{
         .root_source_file = b.path("test/native_runtime.zig"),
         .target = target,
@@ -666,6 +712,7 @@ pub fn build(b: *std.Build) void {
     const tsan_tests = b.addTest(.{
         .root_module = tsan_mod,
         .filters = &.{
+            "invocation effects:",
             "concurrency:",
             "env: concurrent cell publication is lease-safe and TSan-clean",
             "env: concurrent readers writers and retirement reclaim production snapshots",
@@ -809,6 +856,9 @@ pub fn build(b: *std.Build) void {
             "session.test.",
             "poll.test.",
             "heap.test.",
+            // Bounded message validation and allocation rollback are small
+            // component checks and introduce no controller or Session startup.
+            "port_message.test.",
             "list.test.",
             "dict.test.",
             "equal.test.",
@@ -1097,6 +1147,7 @@ pub fn build(b: *std.Build) void {
     precommit_step.dependOn(check_formal_step);
     precommit_step.dependOn(b.getInstallStep());
     precommit_step.dependOn(analysis_step);
+    precommit_step.dependOn(native_negative_step);
     precommit_step.dependOn(&run_precommit_tests.step);
     precommit_step.dependOn(&run_public_api_tests.step);
 }
@@ -1122,6 +1173,7 @@ fn configureRuntime(
     module.link_libc = true;
     module.addImport("native-abi", abi);
     module.addImport("ecl-native", sdk);
+    module.addImport("port-declarations", sdk.import_table.get("port-declarations").?);
     module.addOptions("session_options", options);
 }
 

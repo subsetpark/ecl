@@ -67,8 +67,20 @@ pub const DictHandle = opaque {
 
 pub const TaskHandle = opaque {};
 
-/// An identity-bearing external endpoint. Its backend payload and lifecycle
-/// remain inside the runtime; language code receives no descriptor or PID.
+/// Runtime capability roles share the language's opaque `'port` type. Only
+/// resources and exchanges own scope membership; the other roles share use.
+pub const PortVariant = enum {
+    factory,
+    operation_selector,
+    endpoint_selector,
+    resource,
+    exchange,
+    endpoint,
+};
+
+/// An identity-bearing port capability. Its role, backend payload, and
+/// lifecycle remain inside the runtime; language code receives no descriptor
+/// or PID.
 pub const PortHandle = opaque {};
 
 /// An immutable module image. The handle carries identity only: its content,

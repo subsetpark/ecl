@@ -26,12 +26,6 @@ const Machine = machine.Machine;
 const MachineError = machine.MachineError;
 
 pub const words = [_]env.BuiltinWord{
-    // These words state their stack shape in prose rather than as a declared
-    // effect. A declared effect is checked the instant a builtin primitive
-    // returns, but both of these hand their work to a scheduler driver and
-    // produce their output later, so a declaration would fail a contract it
-    // actually honors. Documenting the shape keeps `doc` informative without
-    // asserting something the binding kind cannot enforce.
     .{
         .name = "parse",
         .doc = "( text -- value ) Parse RFC 8259 text into ECL values, " ++

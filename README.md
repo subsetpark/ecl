@@ -261,6 +261,7 @@ cannot be replaced accidentally by a file with the same name.
 | `csv`, `json` | External data formats |
 | `table` | Column-oriented tables represented as ordinary dictionaries |
 | `http` | HTTP GET and POST |
+| `port` | Common resource, exchange, byte-stream, and structured-message capabilities |
 | `proc` | Capability-gated subprocess ports and bounded process execution |
 | `net` | Capability-gated TCP listeners and connections with scope-owned sockets |
 | `http.server` | Bounded HTTP/1.1 serving over `net` listeners |
@@ -278,6 +279,11 @@ ecl "[['a 1] ['b 2]] dict.from-pairs"     # {'a 1 'b 2}
 ecl '"a,b\nc,d" csv.parse'                 # (("a" "b") ("c" "d"))
 ecl '"{\"a\":[1,null]}" json.parse'       # {"a" (1 'null)}
 ```
+
+The `net` and `proc` words are ECL compositions over registered capabilities
+and `port.*`. First-party resources and ABI v5 extensions share controller
+execution, ownership, cancellation, and cleanup. See the
+[common port examples and conformance guide](examples/PORTS.md).
 
 Subprocesses use BEAM-style opaque ports rather than PIDs. The CLI grants an
 explicit process capability; library Sessions deny it unless their Host opts
@@ -358,6 +364,77 @@ A `.eclmod` is a target-specific shared library for trusted Zig code. Native
 words use the public `ecl-native` SDK, declare exact effects, and request only
 the narrow host capabilities they need. Their tables validate and publish
 atomically through the same module registry used by source modules.
+
+The pre-release ABI is version 5 (`ecl_module_abi_v5`); rebuild existing native
+modules against this SDK. Port inputs expose `.port` through `ValueView.kind()`
+and can be returned with `Call.forward`. With `Reschedule`, `Call.forwardNested`
+returns an invocation-local candidate for a bounded `Path` into a list or
+dictionary. Handle `.yield_required` by yielding and reopening the path on the
+next invocation. These views and candidates expose no backend state or scope
+ownership authority.
+
+Declare package resources with `const P = ecl.Port(Spec)` and include `P` in
+`module.ports`. The spec supplies its private state and lifecycle callbacks,
+plus named operations and endpoints. Each operation declares its handler,
+lane, and supported endpoints together. The SDK generates selector bindings;
+export only factories explicitly with `ecl.factory`. Optional `name` fields
+let local declaration names differ from public ECL spellings. All selectors
+remain opaque capabilities tied to the registered kind and module instance.
+The host owns exchanges, controller execution, scope membership, queues, and
+library lifetime. Start with the [port authoring tutorial](examples/port-authoring/README.md).
+
+ECL uses `port.open` and `port.begin` with bounded structured configuration and
+requests. `port.endpoint` selects byte or message directions. Streaming programs
+write and drain output concurrently, then finish input, observe completion, and
+close the exchange. `port.result` claims a structured result once; `port.await`
+remains repeatable. Non-streaming operations use the ECL `port.call` composition.
+Scope exit joins cleanup, and `@give` transfers resource or exchange ownership.
+See the [native fixtures](test/native/ports.zig) and executable
+[storage](examples/port-storage/README.md), [broker](examples/port-broker/README.md),
+[multiplexed channel](examples/port-multiplex/README.md), and
+[native buffer](examples/port-device/README.md) examples.
+
+Controller handlers receive private state and an opaque `Controller`. Acquire
+endpoints by name with `try controller.endpoint(P, .input)`. A byte reader
+returns a positive chunk length or `null` at EOF; a writer accepts its complete
+slice or returns an error. Message receivers preserve whole values, and message
+senders publish the controller's builder. Their types expose only the permitted
+direction. Builder methods complete bounded host work and compose with `try`;
+controllers never advance interpreter work or access its heap.
+
+`init` must be bounded. `open` finishes before operation handlers start;
+`deinit` runs after they finish. The default lane is `.operation`. To allow
+independent progress, declare a `Lane` enum and assign lanes in the operation
+declarations. Different lanes may run concurrently, so synchronize shared state.
+`cancel` may race initialization or operation execution: it must be bounded,
+thread-safe, and interrupt backend waits. Cancellation can already be set when
+a callback starts; check it before external work. Join backend work before
+returning. Host transport waits already respond to cancellation.
+
+Sessions default to 64 live native ports, 16 admitted operations per port, and
+64 KiB per request and response ring. Hosts can set validated limits through
+`Host.native_port_limits`. Full operation queues wait for capacity;
+exceeding the live-port limit raises `'domain`. Cancelling queued work removes
+that operation. By default cancelling active work closes the port and cancels
+its queues. To permit recovery, declare `cancellation = ecl.PortCancellation.acknowledge`
+and `fn cancelOperation(*State, Lane) void`, declaring `Lane` even for a single
+recoverable lane. This bounded, thread-safe callback
+must interrupt the selected lane's backend wait. The interrupted handler must
+restore reusable state and call `controller.acknowledgeCancellation()` before
+returning; otherwise the host closes the resource. The lane stays occupied
+until that handler returns. Resource close always overrides recovery.
+
+The operation budget is partitioned across lanes, with remainder slots assigned
+in declaration order. This reserves progress capacity for every lane; creation
+fails with `'domain` if the budget cannot cover all lanes. Idle lanes do not lend
+their slots. Admission waits are lane-specific. Sending bytes to a host ring
+means acceptance, not peer acknowledgement. Cancellation and errors do not undo
+external effects or bytes already accepted. Graceful shutdown, half-close, and
+protocol acknowledgement are author-defined operations; host close is forced
+cleanup, bounded by the controller's obligation to interrupt its backend waits.
+Ordinary backend errors preserve the port. Kind mismatches raise `'type`, and
+operations on closed ports raise `'io`. Scope cleanup and `@give` follow the
+same ownership protocol as network and process ports.
 
 [`test/native/sample.zig`](test/native/sample.zig) is the reference extension
 used by the acceptance suite. Native loading is a trusted-code boundary:

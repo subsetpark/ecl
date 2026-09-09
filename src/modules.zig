@@ -2682,6 +2682,7 @@ pub const Registry = enum(usize) {
     /// loading and static transport verification. Each turn installs at most
     /// one validated definition into the unpublished generation.
     pub const NativeCandidateCursor = struct {
+        registry: *Registry,
         instance: *native_module.ModuleInstance,
         candidate: ?OwnedImage,
         definition_index: usize = 0,
@@ -2691,6 +2692,7 @@ pub const Registry = enum(usize) {
             instance: *native_module.ModuleInstance,
         ) error{OutOfMemory}!NativeCandidateCursor {
             return .{
+                .registry = registry,
                 .instance = instance,
                 .candidate = try registry.createImage(),
             };
@@ -2709,15 +2711,32 @@ pub const Registry = enum(usize) {
                 return .{ .complete = completed };
             }
             const definition = definitions[self.definition_index];
-            _ = self.candidate.?.publishDefinition(definition.name, .{ .native = .{
-                .callable = .{
-                    .instance = self.instance,
-                    .definition = @intCast(self.definition_index),
+            const releases = self.registry.releaseDomain();
+            var body: ?value.Value = null;
+            defer if (body) |owned| releases.releaseValue(owned);
+            const publication: env.ModulePublication = switch (definition.body) {
+                .call => .{ .native = .{
+                    .callable = .{
+                        .instance = self.instance,
+                        .definition = @intCast(self.definition_index),
+                    },
+                    .visibility = .public,
+                    .effect = definition.effect,
+                    .doc = definition.doc,
+                } },
+                .port => cap: {
+                    const capability = try @import("native_port.zig").sealCapability(self.instance, @intCast(self.definition_index));
+                    defer releases.releaseValue(capability);
+                    body = try list.fromValues(self.registry.allocator(), &.{capability});
+                    break :cap .{ .word = .{
+                        .body = env.quotation(body.?.list).?,
+                        .visibility = .public,
+                        .effect = definition.effect,
+                        .doc = definition.doc,
+                    } };
                 },
-                .visibility = .public,
-                .effect = definition.effect,
-                .doc = definition.doc,
-            } }) catch |err| switch (err) {
+            };
+            _ = self.candidate.?.publishDefinition(definition.name, publication) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.Frozen => unreachable,
             };
@@ -2735,7 +2754,10 @@ pub const Registry = enum(usize) {
     pub const BuiltinCandidateCursor = struct {
         allocator: std.mem.Allocator,
         releases: *heap.ReleaseDomain,
-        words: []const env.BuiltinWord,
+        source: union(enum) {
+            words: []const env.BuiltinWord,
+            registered: *@import("module_bindings.zig").Publication,
+        },
         candidate: ?OwnedImage,
         word_index: usize = 0,
 
@@ -2746,25 +2768,52 @@ pub const Registry = enum(usize) {
             return .{
                 .allocator = registry.allocator(),
                 .releases = registry.releaseDomain(),
-                .words = words,
+                .source = .{ .words = words },
                 .candidate = try registry.createImage(),
+            };
+        }
+
+        /// Borrows the issuing instance on either outcome; an initialized
+        /// cursor owns its independent pin until publication or abandonment.
+        pub fn initRegistered(
+            registry: *Registry,
+            instance: *@import("module_bindings.zig").Publication,
+        ) error{OutOfMemory}!BuiltinCandidateCursor {
+            const candidate = try registry.createImage();
+            instance.retain();
+            return .{
+                .allocator = registry.allocator(),
+                .releases = registry.releaseDomain(),
+                .source = .{ .registered = instance },
+                .candidate = candidate,
             };
         }
 
         pub fn deinit(self: *BuiltinCandidateCursor) void {
             if (self.candidate) |*candidate| candidate.deinit();
+            switch (self.source) {
+                .words => {},
+                .registered => |instance| instance.release(),
+            }
             self.* = undefined;
         }
 
         pub const Error = error{ OutOfMemory, InvalidName };
 
         pub fn advance(self: *BuiltinCandidateCursor) Error!BuiltinCandidateProgress {
-            if (self.word_index == self.words.len) {
+            const length = switch (self.source) {
+                .words => |words| words.len,
+                .registered => |instance| instance.declarations().len,
+            };
+            if (self.word_index == length) {
                 const completed = self.candidate.?.move();
                 self.candidate = null;
                 return .{ .complete = completed };
             }
-            const word = self.words[self.word_index];
+            const word = switch (self.source) {
+                .words => |words| words[self.word_index],
+                .registered => |instance| return self.publishCapability(instance),
+            };
             // Publication retains what it is handed, so this cursor releases
             // its own reference on every path.
             const document = try self.buildDocumentation(word.doc);
@@ -2783,6 +2832,29 @@ pub const Registry = enum(usize) {
                 error.OutOfMemory => return error.OutOfMemory,
                 // The manifest validates names and holds no duplicates at
                 // compile time, and a fresh candidate is never frozen.
+                error.Frozen => return error.InvalidName,
+            };
+            self.word_index += 1;
+            return .pending;
+        }
+
+        fn publishCapability(self: *BuiltinCandidateCursor, instance: *@import("module_bindings.zig").Publication) Error!BuiltinCandidateProgress {
+            const declaration = instance.declarations()[self.word_index];
+            const capability = try instance.seal(self.word_index);
+            defer self.releases.releaseValue(capability);
+            const body = try list.fromValues(self.allocator, &.{capability});
+            defer self.releases.releaseValue(body);
+            const document = try self.buildDocumentation(declaration.doc);
+            defer self.releases.releaseHeader(env.documentationHeader(document));
+            const effect = try self.buildEffect(declaration.effect);
+            defer effect.retire(self.releases);
+            _ = self.candidate.?.publishDefinition(try intern.internNamespace(declaration.name), .{ .word = .{
+                .body = env.quotation(body.list).?,
+                .visibility = .public,
+                .effect = effect,
+                .doc = document,
+            } }) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
                 error.Frozen => return error.InvalidName,
             };
             self.word_index += 1;

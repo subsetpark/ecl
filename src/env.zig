@@ -173,6 +173,8 @@ pub const BuiltinWord = struct {
     /// even though M11 made annotations optional as language semantics.
     doc: []const u8,
     /// Slot names either side of `--`, when the successful effect is fixed.
+    /// Module invocation checks include deferred work; callback return is not
+    /// the completion boundary.
     effect: ?[]const u8 = null,
     primitive: PrimitiveImpl,
 };

@@ -23,11 +23,11 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
 }
 
 pub const words = [_]env.BuiltinWord{
-    .{ .name = "await", .primitive = await, .doc = "( task -- result ) Wait for a task and return its success or error result." },
-    .{ .name = "cancel", .primitive = cancel, .doc = "( task -- ) Request cancellation of a task, doing nothing if it is already complete." },
-    .{ .name = "pending", .primitive = tasks, .doc = "( -- tasks ) Return pending descendant tasks in deterministic spawn order." },
-    .{ .name = "await-any", .primitive = awaitAny, .doc = "( tasks -- index result ) Wait for any task in a nonempty list and return its index and result." },
-    .{ .name = "await-for", .primitive = awaitFor, .doc = "( task milliseconds -- result ) Wait up to a nonnegative number of milliseconds for a task result." },
+    .{ .name = "await", .primitive = await, .effect = "task -- result", .doc = "( task -- result ) Wait for a task and return its success or error result." },
+    .{ .name = "cancel", .primitive = cancel, .effect = "task --", .doc = "( task -- ) Request cancellation of a task, doing nothing if it is already complete." },
+    .{ .name = "pending", .primitive = tasks, .effect = "-- tasks", .doc = "( -- tasks ) Return pending descendant tasks in deterministic spawn order." },
+    .{ .name = "await-any", .primitive = awaitAny, .effect = "tasks -- index result", .doc = "( tasks -- index result ) Wait for any task in a nonempty list and return its index and result." },
+    .{ .name = "await-for", .primitive = awaitFor, .effect = "task milliseconds -- result", .doc = "( task milliseconds -- result ) Wait up to a nonnegative number of milliseconds for a task result." },
 };
 
 fn scheduler(evaluator: *Machine) *const scheduler_api.WorkerScheduler {

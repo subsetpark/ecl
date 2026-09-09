@@ -379,10 +379,11 @@ fn portCapabilityFailureProbe(allocator: std.mem.Allocator) !void {
     var cleanup = testing.Cleanup.init(allocator);
     defer cleanup.deinit();
     var external: ProbePort = .{};
-    const item = try createPort(ProbePort, allocator, 41, &external);
+    const item = try createOwnedPort(ProbePort, .resource, allocator, 41, &external);
     try std.testing.expectEqual(HeapKind.port, kind(item.heapHeader().?));
-    try std.testing.expectEqual(@as(u64, 41), portStorage(item.port).identity);
-    try std.testing.expectEqual(&external, portPayload(ProbePort, item.port).?);
+    try std.testing.expectEqual(@as(u64, 41), portIdentity(item.port));
+    try std.testing.expectEqual(value.PortVariant.resource, portVariant(item.port));
+    try std.testing.expectEqual(&external, portPayload(ProbePort, .resource, item.port).?);
     retainValue(item);
     cleanup.releaseValue(item);
     cleanup.capability().drain();
@@ -404,9 +405,9 @@ test "port payload projection rejects a foreign backend" {
     var cleanup = testing.Cleanup.init(std.testing.allocator);
     defer cleanup.deinit();
     var foreign: ForeignPort = .{};
-    const item = try createPort(ForeignPort, std.testing.allocator, 1, &foreign);
+    const item = try createOwnedPort(ForeignPort, .resource, std.testing.allocator, 1, &foreign);
     defer cleanup.releaseValue(item);
-    try std.testing.expect(portPayload(ProbePort, item.port) == null);
+    try std.testing.expect(portPayload(ProbePort, .resource, item.port) == null);
 }
 
 test "port capability exhausts allocation failures" {
@@ -415,6 +416,90 @@ test "port capability exhausts allocation failures" {
         portCapabilityFailureProbe,
         .{},
     );
+}
+
+const ProbeBorrowedPort = struct {
+    releases: usize = 0,
+
+    fn releasePort(self: *@This()) void {
+        self.releases += 1;
+    }
+};
+
+fn borrowedPortFailureProbe(allocator: std.mem.Allocator) !void {
+    var cleanup = testing.Cleanup.init(allocator);
+    defer cleanup.deinit();
+    inline for (comptime std.meta.tags(BorrowedPortVariant)) |variant| {
+        var payload: ProbeBorrowedPort = .{};
+        const item = try createBorrowedPort(ProbeBorrowedPort, variant, allocator, 42, &payload);
+        const expected: value.PortVariant = comptime switch (variant) {
+            .factory => .factory,
+            .operation_selector => .operation_selector,
+            .endpoint_selector => .endpoint_selector,
+            .endpoint => .endpoint,
+        };
+        try std.testing.expectEqual(expected, portVariant(item.port));
+        try std.testing.expectEqual(&payload, portPayload(ProbeBorrowedPort, expected, item.port).?);
+        try std.testing.expect(portPayload(ProbeBorrowedPort, .resource, item.port) == null);
+        try std.testing.expectError(error.NotOwner, preparePortTransfer(item.port, &payload, &payload));
+        retainValue(item);
+        cleanup.releaseValue(item);
+        cleanup.capability().drain();
+        try std.testing.expectEqual(@as(usize, 0), payload.releases);
+        cleanup.releaseValue(item);
+        cleanup.capability().drain();
+        try std.testing.expectEqual(@as(usize, 1), payload.releases);
+    }
+}
+
+test "port borrowed roles retain identity without scope transfer authority" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, borrowedPortFailureProbe, .{});
+}
+
+test "port exchange transfer consumes its prepared authority once" {
+    const Exchange = struct {
+        owner: *anyopaque,
+        prepared: ?*anyopaque = null,
+        commits: usize = 0,
+        aborts: usize = 0,
+
+        fn releasePort(_: *@This()) void {}
+        fn prepareScopeTransfer(self: *@This(), from: *anyopaque, to: *anyopaque) PortTransferError!void {
+            if (self.owner != from) return error.NotOwner;
+            if (self.prepared != null) return error.Busy;
+            self.prepared = to;
+        }
+        fn commitScopeTransfer(self: *@This()) void {
+            self.owner = self.prepared.?;
+            self.prepared = null;
+            self.commits += 1;
+        }
+        fn abortScopeTransfer(self: *@This()) void {
+            self.prepared = null;
+            self.aborts += 1;
+        }
+    };
+    var origin: u8 = 0;
+    var destination: u8 = 0;
+    var payload: Exchange = .{ .owner = &origin };
+    var cleanup = testing.Cleanup.init(std.testing.allocator);
+    defer cleanup.deinit();
+    const item = try createOwnedPort(Exchange, .exchange, std.testing.allocator, 43, &payload);
+    defer cleanup.releaseValue(item);
+    try std.testing.expectEqual(value.PortVariant.exchange, portVariant(item.port));
+    try std.testing.expect(portPayload(Exchange, .resource, item.port) == null);
+    var abandoned = try preparePortTransfer(item.port, &origin, &destination);
+    abandoned.abort();
+    abandoned.commit();
+    try std.testing.expectEqual(@as(usize, 1), payload.aborts);
+    var moved = try preparePortTransfer(item.port, &origin, &destination);
+    moved.commit();
+    moved.commit();
+    moved.abort();
+    try std.testing.expectEqual(@as(usize, 1), payload.commits);
+    try std.testing.expectError(error.NotOwner, preparePortTransfer(item.port, &origin, &destination));
+    var returned = try preparePortTransfer(item.port, &destination, &origin);
+    returned.commit();
 }
 
 pub const DictPayload = value.DictPayload;
@@ -560,8 +645,24 @@ const PortStorage = struct {
     identity: u64,
     payload: *anyopaque,
     release: *const fn (*anyopaque) void,
-    prepare_transfer: *const fn (*anyopaque, *anyopaque, *anyopaque) PortTransferError!PortTransfer,
+    role: PortRole,
 };
+
+const PreparePortTransfer = *const fn (*anyopaque, *anyopaque, *anyopaque) PortTransferError!PortTransfer;
+
+/// Transfer authority exists exactly for owning roles. A borrowed capability
+/// cannot accidentally acquire it by supplying a backend transfer callback.
+const PortRole = union(value.PortVariant) {
+    factory,
+    operation_selector,
+    endpoint_selector,
+    resource: PreparePortTransfer,
+    exchange: PreparePortTransfer,
+    endpoint,
+};
+
+pub const OwningPortVariant = enum { resource, exchange };
+pub const BorrowedPortVariant = enum { factory, operation_selector, endpoint_selector, endpoint };
 
 /// A module value owns exactly one release of an opaque semantic payload.
 /// The heap never learns what a module image is: it stores the payload and
@@ -1152,7 +1253,7 @@ fn allocPortHeader(
     identity: u64,
     payload: *anyopaque,
     release: *const fn (*anyopaque) void,
-    prepare_transfer: *const fn (*anyopaque, *anyopaque, *anyopaque) PortTransferError!PortTransfer,
+    role: PortRole,
 ) error{OutOfMemory}!*InitializingPort {
     const obj = try allocator.create(Object);
     errdefer allocator.destroy(obj);
@@ -1161,7 +1262,7 @@ fn allocPortHeader(
         .identity = identity,
         .payload = payload,
         .release = release,
-        .prepare_transfer = prepare_transfer,
+        .role = role,
     };
     obj.* = .{
         .header = HeaderImpl.init(.port, identity),
@@ -1201,9 +1302,7 @@ fn PortTransferAdapter(comptime Payload: type) type {
     };
 }
 
-/// Every port kind must be able to change owning scope. This is deliberately
-/// not optional: a payload that omits the transfer steps fails to compile
-/// here rather than becoming a second class of port that `@give` refuses.
+/// Every owning port kind must implement the complete transfer protocol.
 fn portPrepareTransfer(
     comptime Payload: type,
 ) *const fn (*anyopaque, *anyopaque, *anyopaque) PortTransferError!PortTransfer {
@@ -1220,8 +1319,9 @@ fn portPrepareTransfer(
 /// Wraps one already-owned external-cell reference in an opaque port value.
 /// On failure the caller retains the reference; on success final value release
 /// calls `releasePort` exactly once.
-pub fn createPort(
+pub fn createOwnedPort(
     comptime Payload: type,
+    comptime variant: OwningPortVariant,
     allocator: std.mem.Allocator,
     identity: u64,
     payload: *Payload,
@@ -1231,7 +1331,35 @@ pub fn createPort(
         identity,
         @ptrCast(payload),
         PortReleaseAdapter(Payload).release,
-        portPrepareTransfer(Payload),
+        switch (variant) {
+            .resource => .{ .resource = portPrepareTransfer(Payload) },
+            .exchange => .{ .exchange = portPrepareTransfer(Payload) },
+        },
+    );
+    return .{ .port = publishPort(initializing) };
+}
+
+/// Wraps one owned backend reference without granting scope ownership. Failure
+/// leaves the reference with the caller; final value release consumes it once.
+/// The backend retains its issuer or owner for the complete reference lifetime.
+pub fn createBorrowedPort(
+    comptime Payload: type,
+    comptime variant: BorrowedPortVariant,
+    allocator: std.mem.Allocator,
+    identity: u64,
+    payload: *Payload,
+) error{OutOfMemory}!Value {
+    const initializing = try allocPortHeader(
+        allocator,
+        identity,
+        @ptrCast(payload),
+        PortReleaseAdapter(Payload).release,
+        switch (variant) {
+            .factory => .factory,
+            .operation_selector => .operation_selector,
+            .endpoint_selector => .endpoint_selector,
+            .endpoint => .endpoint,
+        },
     );
     return .{ .port = publishPort(initializing) };
 }
@@ -1245,7 +1373,10 @@ pub fn preparePortTransfer(
     to: *anyopaque,
 ) PortTransferError!PortTransfer {
     const storage = portStorage(header);
-    return storage.prepare_transfer(storage.payload, from, to);
+    return switch (storage.role) {
+        .resource, .exchange => |prepare| prepare(storage.payload, from, to),
+        .factory, .operation_selector, .endpoint_selector, .endpoint => error.NotOwner,
+    };
 }
 
 fn portStorage(header: *const PortHandle) *const PortStorage {
@@ -1256,12 +1387,16 @@ pub fn portIdentity(header: *const PortHandle) u64 {
     return portStorage(header).identity;
 }
 
+pub fn portVariant(header: *const PortHandle) value.PortVariant {
+    return std.meta.activeTag(portStorage(header).role);
+}
+
 /// Validated typed projection for the backend that created a port. Matching
 /// the release adapter prevents an unrelated opaque port kind from being
 /// reinterpreted merely because both payloads erase to `anyopaque`.
-pub fn portPayload(comptime Payload: type, header: *const PortHandle) ?*Payload {
+pub fn portPayload(comptime Payload: type, comptime variant: value.PortVariant, header: *const PortHandle) ?*Payload {
     const storage = portStorage(header);
-    if (storage.release != PortReleaseAdapter(Payload).release) return null;
+    if (storage.role != variant or storage.release != PortReleaseAdapter(Payload).release) return null;
     return @ptrCast(@alignCast(storage.payload));
 }
 
@@ -1658,6 +1793,9 @@ pub const ReleaseDomain = struct {
     last: ?*Header = null,
     retirement_first: ?*Retirement = null,
     retirement_last: ?*Retirement = null,
+    // Includes the active drainer's owner, not just linked nodes. Continuation
+    // requeueing carries the same charge until that owner finishes.
+    pending_owners: std.atomic.Value(usize) = .init(0),
     tombstones: std.atomic.Value(?*TombstoneNode) = .init(null),
     prefer_retirement: bool = false,
     wake: ?Wake = null,
@@ -1763,7 +1901,7 @@ pub const ReleaseDomain = struct {
         std.debug.assert(node.context == null and node.advance_fn == null and node.next == null);
         node.context = @ptrCast(owner);
         node.advance_fn = adapters.advance;
-        self.enqueueRetirement(node);
+        self.enqueueRetirement(node, .new);
     }
 
     pub fn releaseHeader(self: *ReleaseDomain, handle: anytype) void {
@@ -1772,11 +1910,14 @@ pub const ReleaseDomain = struct {
         std.debug.assert(old != 0);
         if (old != 1) return;
         _ = headerImpl(header).rc.load(.acquire);
-        self.enqueueZero(header);
+        self.enqueueZero(header, .new);
     }
 
-    fn enqueueZero(self: *ReleaseDomain, header: *Header) void {
+    const Admission = enum { new, continuation };
+
+    fn enqueueZero(self: *ReleaseDomain, header: *Header, admission: Admission) void {
         std.Io.Threaded.mutexLock(&self.queue_mutex);
+        if (admission == .new) _ = self.pending_owners.fetchAdd(1, .release);
         std.debug.assert(object(header).next_destroy == null);
         if (self.last) |last| object(last).next_destroy = header else self.first = header;
         self.last = header;
@@ -1784,8 +1925,9 @@ pub const ReleaseDomain = struct {
         self.notifyWork();
     }
 
-    fn enqueueRetirement(self: *ReleaseDomain, node: *Retirement) void {
+    fn enqueueRetirement(self: *ReleaseDomain, node: *Retirement, admission: Admission) void {
         std.Io.Threaded.mutexLock(&self.queue_mutex);
+        if (admission == .new) _ = self.pending_owners.fetchAdd(1, .release);
         std.debug.assert(node.next == null);
         if (self.retirement_last) |last| last.next = node else self.retirement_first = node;
         self.retirement_last = node;
@@ -1829,6 +1971,21 @@ pub const ReleaseDomain = struct {
         return self.first != null or self.retirement_first != null;
     }
 
+    /// Ordinary evaluation yields to reclamation at this backlog. This is an
+    /// admission watermark, not a live-heap byte limit: already-running slices
+    /// and retirement descendants may add their bounded work after it trips.
+    /// Cancellation and terminal work must remain eligible under pressure.
+    const backlog_watermark = 256;
+
+    pub fn evaluationBackpressured(self: *ReleaseDomain) bool {
+        return self.pending_owners.load(.acquire) >= backlog_watermark;
+    }
+
+    fn completeOwner(self: *ReleaseDomain) void {
+        const previous = self.pending_owners.fetchSub(1, .acq_rel);
+        if (previous == backlog_watermark) self.notifyWork();
+    }
+
     /// Returns true when the queue is empty after at most `budget` object-edge
     /// transitions. Multiple workers may help, but payload destruction is
     /// serialized so every intrusive node has one active owner.
@@ -1856,19 +2013,20 @@ pub const ReleaseDomain = struct {
                     const advance_fn = node.advance_fn.?;
                     const context = node.context.?;
                     if (!advance_fn(self, self.allocator, context)) {
-                        self.enqueueRetirement(node);
-                    }
+                        self.enqueueRetirement(node, .continuation);
+                    } else self.completeOwner();
                     continue;
                 }
             }
             if (self.popZero()) |header| {
                 self.prefer_retirement = true;
                 if (self.releaseNextChild(header)) {
-                    self.enqueueZero(header);
+                    self.enqueueZero(header, .continuation);
                 } else {
                     self.retireCodeIdentity(header);
                     freePayload(self.allocator, header);
                     self.allocator.destroy(object(header));
+                    self.completeOwner();
                 }
                 continue;
             }
@@ -1877,8 +2035,8 @@ pub const ReleaseDomain = struct {
                 const advance_fn = node.advance_fn.?;
                 const context = node.context.?;
                 if (!advance_fn(self, self.allocator, context)) {
-                    self.enqueueRetirement(node);
-                }
+                    self.enqueueRetirement(node, .continuation);
+                } else self.completeOwner();
                 continue;
             }
             return true;
@@ -1953,6 +2111,46 @@ pub const ReleaseDomain = struct {
         }
     }
 };
+
+test "retirement pressure charges active owners and continuations across quanta" {
+    const Probe = struct {
+        node: ReleaseDomain.Retirement = .{},
+        remaining: usize = 3,
+        calls: *usize,
+        first_pressure: *?bool,
+
+        pub fn advanceRetirement(domain: *ReleaseDomain, _: std.mem.Allocator, self: *@This()) bool {
+            if (self.first_pressure.* == null)
+                self.first_pressure.* = domain.evaluationBackpressured();
+            self.calls.* += 1;
+            self.remaining -= 1;
+            return self.remaining == 0;
+        }
+    };
+    for ([_]usize{ 1, 7, 256 }) |quantum| {
+        var owner = HostOwner.init(std.testing.allocator);
+        const domain = owner.domain();
+        var calls: usize = 0;
+        var first_pressure: ?bool = null;
+        const probes = try std.testing.allocator.alloc(Probe, 4096);
+        defer std.testing.allocator.free(probes);
+        // Keep owner storage alive through every retirement exit, including
+        // a failed assertion.
+        defer owner.cleanup().drain();
+        var admitted: usize = 0;
+        while (!domain.evaluationBackpressured() and admitted < probes.len) : (admitted += 1) {
+            probes[admitted] = .{ .calls = &calls, .first_pressure = &first_pressure };
+            domain.retire(&probes[admitted], &probes[admitted].node);
+        }
+        try std.testing.expect(domain.evaluationBackpressured());
+        _ = domain.tryAdvance(1);
+        try std.testing.expectEqual(true, first_pressure.?);
+        try std.testing.expect(domain.evaluationBackpressured());
+        while (!(domain.tryAdvance(quantum) orelse false)) {}
+        try std.testing.expect(!domain.evaluationBackpressured());
+        try std.testing.expectEqual(admitted * 3, calls);
+    }
+}
 
 /// Host-side ownership of a retirement domain and its blocking-cleanup seal.
 /// The owner is kept outside every scheduler-attached type; workers receive

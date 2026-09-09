@@ -691,10 +691,10 @@
 
    A non-port listener, non-dict config, non-quotation handler, non-int limit, or non-quotation
    'on-failure is 'type; an unknown config key or a limit not greater than zero is 'domain. The word
-   fails 'cancelled when the serving unit is cancelled and re-raises an 'io failure of net.accept,
-   such as 'io 'closed when the listener is closed elsewhere; either way every child is quiesced by
-   scope rules and every connection a child owns is closed with it. It never closes the listener,
-   which stays the caller's to close.")
+   fails 'cancelled when the serving unit is cancelled and re-raises failures of net.accept. Closing
+   the listener ends an admitted accept with 'io or 'cancelled; admission after closure fails 'io.
+   Every child is quiesced by scope rules and every connection a child owns is closed with it. It
+   never closes the listener, which stays the caller's to close.")
  (|listener config handler|
   listener type 'port match? "http.server.@serve expects a net listener" type-error assert
   handler type 'list match? "http.server.@serve expects a handler quotation" type-error assert

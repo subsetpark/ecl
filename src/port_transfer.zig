@@ -1,10 +1,203 @@
-//! Shared bounded byte transfers; backend adapters own readiness and error policy.
+//! Shared scope transfers and bounded byte transfers for every port backend.
 const std = @import("std");
 const heap = @import("heap.zig");
 const list = @import("list.zig");
 const machine = @import("machine.zig");
 const storage = @import("kernel_storage.zig");
 const Value = @import("value.zig").Value;
+const external = @import("external.zig");
+const scheduler = @import("scheduler.zig");
+
+fn InitialPublication(comptime Cell: type, comptime ownership: fn (*Cell) *external.Ownership) type {
+    return struct {
+        cell: *Cell,
+        pub fn lock(self: *@This()) void {
+            std.Io.Threaded.mutexLock(&self.cell.mutex);
+        }
+        pub fn unlock(self: *@This()) void {
+            std.Io.Threaded.mutexUnlock(&self.cell.mutex);
+        }
+        pub fn validate(self: *@This()) bool {
+            return ownership(self.cell).* == .provisional;
+        }
+        pub fn publish(self: *@This(), tokens: [16]?external.ScopeMembership) void {
+            ownership(self.cell).* = .{ .owned = tokens[0].? };
+        }
+    };
+}
+
+/// Publish membership and ownership atomically. The caller retains the cell
+/// and owns backend rollback on failure.
+pub fn publishScope(comptime Cell: type, cell: *Cell, scope: *scheduler.TaskScope, comptime ownership: fn (*Cell) *external.Ownership) error{ OutOfMemory, ScopeClosing }!void {
+    var publication: InitialPublication(Cell, ownership) = .{ .cell = cell };
+    var members: [16]?external.ScopeMember = @splat(null);
+    members[0] = external.scopeMember(Cell, cell);
+    if (!try scope.scheduler.publishExternalBatch(scope, members, &publication)) return error.ScopeClosing;
+}
+
+/// Bind backend activity to its owning resource's group using the same atomic
+/// publication as task-owned resources. Failure retains caller ownership.
+pub fn publishGroup(comptime Cell: type, cell: *Cell, group: *scheduler.ExternalGroup, comptime ownership: fn (*Cell) *external.Ownership) error{ OutOfMemory, ScopeClosing }!void {
+    var publication: InitialPublication(Cell, ownership) = .{ .cell = cell };
+    var members: [16]?external.ScopeMember = @splat(null);
+    members[0] = external.scopeMember(Cell, cell);
+    if (!try group.publish(members, &publication)) return error.ScopeClosing;
+}
+
+/// The backend supplies only its locked lifetime predicate and ownership
+/// location. This boundary owns lock ordering, origin authorization, destination
+/// attachment, revalidation, and consuming rollback for every port kind.
+pub fn ScopeTransfer(
+    comptime Cell: type,
+    comptime ownership: fn (*Cell) *external.Ownership,
+    comptime live: fn (*Cell) bool,
+) type {
+    return struct {
+        pub fn prepare(cell: *Cell, from: *anyopaque, to: *anyopaque) heap.PortTransferError!void {
+            const destination: *scheduler.TaskScope = @ptrCast(@alignCast(to));
+            std.Io.Threaded.mutexLock(&cell.mutex);
+            const rejected: ?heap.PortTransferError = if (!live(cell)) error.Closed else switch (ownership(cell).*) {
+                .none, .provisional => error.Closed,
+                .transferring => error.Busy,
+                .owned => |current| if (current.owningScope() == from) null else error.NotOwner,
+            };
+            std.Io.Threaded.mutexUnlock(&cell.mutex);
+            if (rejected) |err| return err;
+
+            // Prepared storage grants no cancellation authority. Revalidate
+            // the origin under both publication locks before linking the
+            // destination: even a transient stale membership could cancel a
+            // resource that has already moved to another owner.
+            var publication: Publication = .{ .cell = cell, .origin = from };
+            var incoming: [16]?external.ScopeMember = .{null} ** 16;
+            incoming[0] = external.scopeMember(Cell, cell);
+            if (!try destination.scheduler.publishExternalBatch(destination, incoming, &publication)) return error.Closed;
+        }
+
+        const Publication = struct {
+            cell: *Cell,
+            origin: *anyopaque,
+            pub fn lock(self: *@This()) void {
+                std.Io.Threaded.mutexLock(&self.cell.mutex);
+            }
+            pub fn unlock(self: *@This()) void {
+                std.Io.Threaded.mutexUnlock(&self.cell.mutex);
+            }
+            pub fn validate(self: *@This()) bool {
+                return live(self.cell) and switch (ownership(self.cell).*) {
+                    .owned => |current| current.owningScope() == self.origin,
+                    .none, .provisional, .transferring => false,
+                };
+            }
+            pub fn publish(self: *@This(), tokens: [16]?external.ScopeMembership) void {
+                ownership(self.cell).beginTransfer(tokens[0].?);
+            }
+        };
+
+        pub fn commit(cell: *Cell) void {
+            std.Io.Threaded.mutexLock(&cell.mutex);
+            var detached = ownership(cell).commitTransfer();
+            std.Io.Threaded.mutexUnlock(&cell.mutex);
+            detached.detachAll();
+        }
+
+        pub fn abort(cell: *Cell) void {
+            std.Io.Threaded.mutexLock(&cell.mutex);
+            var detached = ownership(cell).abortTransfer();
+            std.Io.Threaded.mutexUnlock(&cell.mutex);
+            detached.detachAll();
+        }
+    };
+}
+
+/// Factory-owned storage and capacity. Backend initialization cannot extract
+/// or duplicate quota authority; rollback returns it with the allocation.
+pub fn Resource(
+    comptime Cell: type,
+    comptime Issuer: type,
+    comptime allocatorOf: fn (*Issuer) std.mem.Allocator,
+    comptime reserve: anytype,
+    comptime release: fn (*Issuer) void,
+) type {
+    return struct {
+        // Capacity lives in the allocation, never in a transferable value.
+        // Copies of a cell pointer cannot duplicate its capacity obligation.
+        const Allocation = struct {
+            issuer: *Issuer,
+            allocator: std.mem.Allocator,
+            capacity: enum { vacant, held, returned } = .held,
+            cell: Cell,
+        };
+        fn allocation(cell: *Cell) *Allocation {
+            return @alignCast(@fieldParentPtr("cell", cell));
+        }
+        /// Storage can precede capacity when a pending request waits for a
+        /// resource. Its owner keeps this candidate until activation succeeds.
+        pub const Candidate = opaque {
+            fn state(self: *@This()) *Allocation {
+                return @ptrCast(@alignCast(self));
+            }
+            pub fn deinit(self: *@This()) void {
+                const owned = self.state();
+                owned.allocator.destroy(owned);
+            }
+            /// Failure retains the candidate. Success transfers its allocation
+            /// into the initialized cell; the request replaces its state.
+            pub fn activate(self: *@This(), args: anytype, comptime initialize: anytype) (@typeInfo(@typeInfo(@TypeOf(reserve)).@"fn".return_type.?).error_union.error_set ||
+                @typeInfo(@typeInfo(@TypeOf(initialize)).@"fn".return_type.?).error_union.error_set)!*Cell {
+                const owned = self.state();
+                try reserve(owned.issuer);
+                errdefer release(owned.issuer);
+                try @call(.auto, initialize, .{ &owned.cell, owned.issuer } ++ args);
+                owned.capacity = .held;
+                return &owned.cell;
+            }
+        };
+        pub fn prepare(issuer: *Issuer) error{OutOfMemory}!*Candidate {
+            const allocator = allocatorOf(issuer);
+            const owned = try allocator.create(Allocation);
+            owned.issuer = issuer;
+            owned.allocator = allocator;
+            owned.capacity = .vacant;
+            return @ptrCast(owned);
+        }
+        pub fn create(issuer: *Issuer, args: anytype, comptime initialize: anytype) (error{OutOfMemory} ||
+            @typeInfo(@typeInfo(@TypeOf(reserve)).@"fn".return_type.?).error_union.error_set ||
+            @typeInfo(@typeInfo(@TypeOf(initialize)).@"fn".return_type.?).error_union.error_set)!*Cell {
+            try reserve(issuer);
+            errdefer release(issuer);
+            const allocator = allocatorOf(issuer);
+            const owned = try allocator.create(Allocation);
+            errdefer allocator.destroy(owned);
+            owned.issuer = issuer;
+            owned.allocator = allocator;
+            owned.capacity = .held;
+            // Initialization owns its partial backend resources on failure;
+            // this factory owns storage and capacity on every exit path.
+            try @call(.auto, initialize, .{ &owned.cell, issuer } ++ args);
+            return &owned.cell;
+        }
+        /// Called by terminal retirement under the resource's lifetime lock.
+        /// Retained metadata keeps its allocation, but no longer holds quota.
+        pub fn retire(cell: *Cell) void {
+            const owned = allocation(cell);
+            switch (owned.capacity) {
+                .held => {
+                    owned.capacity = .returned;
+                    release(owned.issuer);
+                },
+                .vacant, .returned => {},
+            }
+        }
+        /// Consumes final allocation ownership after backend destruction.
+        pub fn destroy(cell: *Cell) void {
+            const owned = allocation(cell);
+            const allocator = owned.allocator;
+            retire(cell);
+            allocator.destroy(owned);
+        }
+    };
+}
 
 pub const ReadProgress = union(enum) { pending, eof, data: usize };
 pub const WriteProgress = union(enum) { pending, written: usize };
@@ -64,6 +257,9 @@ pub fn ReadDriver(comptime Backend: type) type {
 /// The encoding and writing phases each own the reserved write ticket.
 /// Completion consumes the ticket and retains only the encoded buffer for
 /// cleanup. Failure leaves every resource owned by the driver.
+/// Backend.WritePermit is an owning capability value: write borrows it,
+/// while finish and cancel consume it. Typed backend unions need no extra
+/// allocation to participate in the common transfer state machine.
 pub fn WriteDriver(comptime Backend: type) type {
     return struct {
         const Self = @This();
@@ -73,12 +269,12 @@ pub fn WriteDriver(comptime Backend: type) type {
         bytes_value: Value,
         backend: Backend,
         state: union(enum) {
-            encoding: struct { encoder: storage.ByteVectorEncoder, permit: *Backend.WritePermit },
-            writing: struct { bytes: storage.ByteVector, permit: *Backend.WritePermit, offset: usize = 0 },
+            encoding: struct { encoder: storage.ByteVectorEncoder, permit: Backend.WritePermit },
+            writing: struct { bytes: storage.ByteVector, permit: Backend.WritePermit, offset: usize = 0 },
             complete: storage.ByteVector,
         },
 
-        pub fn init(allocator: std.mem.Allocator, port: Value, bytes: Value, backend: Backend, permit: *Backend.WritePermit) Self {
+        pub fn init(allocator: std.mem.Allocator, port: Value, bytes: Value, backend: Backend, permit: Backend.WritePermit) Self {
             return .{
                 .port = port,
                 .bytes_value = bytes,
@@ -90,11 +286,11 @@ pub fn WriteDriver(comptime Backend: type) type {
         pub fn deinit(self: *Self, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
             switch (self.state) {
                 .encoding => |*state| {
-                    self.backend.cell.abandonWrite(state.permit);
+                    state.permit.cancel();
                     state.encoder.deinit();
                 },
                 .writing => |*state| {
-                    self.backend.cell.abandonWrite(state.permit);
+                    state.permit.cancel();
                     state.bytes.retire(releases, allocator);
                 },
                 .complete => |*bytes| bytes.retire(releases, allocator),
@@ -122,7 +318,7 @@ pub fn WriteDriver(comptime Backend: type) type {
             const state = &self.state.writing;
             const source = state.bytes.bytes();
             if (state.offset == source.len) {
-                self.backend.cell.finishWrite(state.permit);
+                state.permit.finish();
                 const bytes = state.bytes;
                 self.state = .{ .complete = bytes };
                 return .completed;
@@ -133,7 +329,7 @@ pub fn WriteDriver(comptime Backend: type) type {
                     break :progressed .yielded;
                 },
                 .pending => parked: {
-                    try evaluator.park(.{ .external = self.backend.cell.writeSource(state.permit) });
+                    try evaluator.park(.{ .external = state.permit.source() });
                     break :parked .yielded;
                 },
             };

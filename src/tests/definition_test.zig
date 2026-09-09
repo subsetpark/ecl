@@ -116,6 +116,39 @@ test "which reports effect metadata without expanding documentation" {
     try std.testing.expectEqualStrings("square -> square def public (x -- y)\n", output.written());
 }
 
+test "invocation effects: which reports public task word contracts" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &output.writer);
+    defer runtime.deinit();
+    try expectOk(&runtime, "'task.await which 'task.cancel which 'task.pending which 'task.await-any which 'task.await-for which");
+    try std.testing.expectEqualStrings(
+        "task.await -> task.await primitive public generation 1 (task -- result)\n" ++
+            "task.cancel -> task.cancel primitive public generation 1 (task --)\n" ++
+            "task.pending -> task.pending primitive public generation 1 (-- tasks)\n" ++
+            "task.await-any -> task.await-any primitive public generation 1 (tasks -- index result)\n" ++
+            "task.await-for -> task.await-for primitive public generation 1 (task milliseconds -- result)\n",
+        output.written(),
+    );
+}
+
+test "invocation effects: task completion precedes caller continuation" {
+    try support.expectStack(
+        "task.pending pop " ++
+            "[] (7) @spawn dup task.await pop 0 task.await-for pop " ++
+            "[] (8) @spawn dup pair task.await-any pop pop " ++
+            "[] ((1) () while) @spawn dup task.cancel task.await pop " ++
+            "[] (( -- result ) ([] (9) @spawn task.await) 'wait def) 'nested @defm " ++
+            "nested.wait pop 42",
+        "42",
+    );
+    try support.expectErrors(&.{
+        .{ .name = "entry contract", .source = "task.await", .kind = "contract", .word = "task.await" },
+        .{ .name = "primitive failure", .source = "3 task.await", .kind = "type", .word = "task.await" },
+        .{ .name = "driver failure", .source = "[3] task.await-any", .kind = "type", .word = "task.await-any" },
+    });
+}
+
 test "module annotations retain contracts documentation qualification and shadowing" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();

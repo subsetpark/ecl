@@ -3,6 +3,14 @@
 const std = @import("std");
 pub const abi = @import("ecl-native-abi");
 const capability = @import("capability.zig");
+const ports = @import("ports.zig");
+pub const declarations = @import("port-declarations");
+pub const Port = ports.Port;
+pub const Controller = ports.Controller;
+pub const ControllerError = ports.ControllerError;
+pub const MessageView = ports.MessageView;
+pub const MessageBuilder = ports.MessageBuilder;
+pub const PortCancellation = ports.Cancellation;
 
 pub const Outcome = capability.Outcome;
 pub const ErrorKind = capability.ErrorKind;
@@ -21,6 +29,64 @@ pub const BuildResult = capability.BuildResult;
 pub const BuildAppendResult = capability.BuildAppendResult;
 pub const Reschedule = capability.Reschedule;
 pub const CallbackResult = error{ OutOfMemory, InvalidValue }!Outcome;
+
+pub fn factory(comptime name: []const u8, comptime doc: []const u8, comptime P: type) type {
+    return portBinding(name, doc, P, .{ .kind = .factory });
+}
+
+fn portOperation(comptime P: type, comptime name: P.Operations.Name) type {
+    const entry = P.Operations.get(name);
+    return portBinding(P.Operations.publicName(name), entry.doc, P, .{
+        .kind = .operation,
+        .operation = @intFromEnum(name),
+        .lane = @intFromEnum(P.Operations.lane(name)),
+        .endpoints = P.Operations.endpointMask(name),
+    });
+}
+
+fn portEndpoint(comptime P: type, comptime name: P.Endpoints.Name) type {
+    const entry = P.Endpoints.get(name);
+    return portBinding(P.Endpoints.publicName(name), entry.doc, P, .{
+        .kind = .endpoint,
+        .endpoint = P.Endpoints.id(name),
+        .transport = switch (entry.transport) {
+            .bytes => .bytes,
+            .messages => .messages,
+        },
+        .direction = switch (entry.direction) {
+            .input => .input,
+            .output => .output,
+        },
+        .owner = switch (entry.owner) {
+            .resource => .resource,
+            .exchange => .exchange,
+        },
+    });
+}
+
+fn portBinding(comptime binding_name: []const u8, comptime document: []const u8, comptime P: type, comptime metadata: abi.PortBinding) type {
+    if (!identifier(binding_name)) @compileError("ecl-native: port binding name must be an identifier");
+    if (document.len == 0) @compileError("ecl-native: port binding documentation must not be empty");
+    return struct {
+        pub const registered_port_binding = void;
+        pub const name = binding_name;
+        pub const uses_build_values = false;
+        pub const uses_reschedule = false;
+        var outputs = makeSlots(.{"capability"});
+        var inputs: [0]abi.EffectSlot = .{};
+        pub fn definition(comptime Ports: anytype) abi.Definition {
+            var binding = metadata;
+            binding.resource = comptime index: {
+                for (Ports, 0..) |Declared, i| if (Declared == P) break :index @intCast(i);
+                @compileError("ecl-native: registered capability requires a declared port");
+            };
+            return .{ .callback_index = 0, .name_ptr = name.ptr, .name_len = name.len, .doc_ptr = document.ptr, .doc_len = document.len, .input_count = 0, .inputs_ptr = &inputs, .output_count = 1, .outputs_ptr = &outputs, .binding = binding };
+        }
+        pub fn invoke(comptime _: anytype, _: *const abi.HostTable, _: *anyopaque, output: *abi.InvokeResult) void {
+            output.* = .{ .tag = .fail, .adapter_status = 2 };
+        }
+    };
+}
 
 pub fn Call(comptime effect_source: []const u8) type {
     const EffectSpec = parseEffect(effect_source);
@@ -147,6 +213,34 @@ pub fn Call(comptime effect_source: []const u8) type {
             return @enumFromInt(output);
         }
 
+        /// Forward a nested input without decoding or rebuilding it. The
+        /// candidate is invocation-local, including when it denotes a port.
+        /// A port view grants no access to its private backend state.
+        pub fn forwardNested(
+            self: *Self,
+            comptime index: usize,
+            path: []const u64,
+        ) error{OutOfMemory}!BuildResult {
+            if (index >= EffectSpec.inputs.len)
+                @compileError("ecl-native: forwarded input exceeds the declared effect");
+            if (path.len > Path.max_depth) return .invalid;
+            var output: abi.Candidate = 0;
+            const invocation = &self.state().invocation;
+            return switch ((invocation.host.forward_path orelse return .invalid)(
+                invocation.context,
+                @intCast(index),
+                path.ptr,
+                @intCast(path.len),
+                &output,
+            )) {
+                .ok => .{ .candidate = @enumFromInt(output) },
+                .yield_required => .yield_required,
+                .out_of_memory => error.OutOfMemory,
+                .invalid => .invalid,
+                _ => .invalid,
+            };
+        }
+
         pub fn complete(self: *Self, outputs: anytype) error{ OutOfMemory, InvalidValue }!Outcome {
             const OutputTuple = @TypeOf(outputs);
             const tuple = switch (@typeInfo(OutputTuple)) {
@@ -175,7 +269,7 @@ pub fn Call(comptime effect_source: []const u8) type {
             kind: ErrorKind,
             message: []const u8,
         ) error{ OutOfMemory, InvalidValue }!Outcome {
-            const bounded = message[0..@min(message.len, abi.max_error_message_bytes)];
+            const bounded = capability.boundedErrorMessage(message);
             try capability.requireOk(self.state().invocation.host.fail(
                 self.state().invocation.context,
                 kind,
@@ -192,6 +286,9 @@ pub fn word(
     comptime word_documentation: []const u8,
     comptime callback_fn: anytype,
 ) type {
+    // A module's word declarations share one comptime evaluation budget.
+    // Set it at the factory, before the enclosing module can be evaluated.
+    @setEvalBranchQuota(100_000);
     if (word_documentation.len == 0) @compileError("ecl-native: word documentation must not be empty");
     if (!identifier(word_name)) @compileError("ecl-native: word name must be a nonempty identifier");
     const Callback = @TypeOf(callback_fn);
@@ -215,7 +312,7 @@ pub fn word(
     var build_values = false;
     var reschedule = false;
     var RescheduleType: type = void;
-    for (function.params[1..], 1..) |parameter, parameter_index| {
+    for (function.params[1..]) |parameter| {
         if (parameter.type == null) @compileError("ecl-native: callback capabilities must have concrete types");
         if (parameter.type.? == *BuildValues) {
             if (build_values) @compileError("ecl-native: callback names a capability more than once");
@@ -224,8 +321,7 @@ pub fn word(
             build_values = true;
         } else if (isReschedulePointer(parameter.type.?)) {
             if (reschedule) @compileError("ecl-native: callback names a capability more than once");
-            if (build_values and parameter_index != 2)
-                @compileError("ecl-native: BuildValues must precede Reschedule");
+
             reschedule = true;
             RescheduleType = @typeInfo(parameter.type.?).pointer.child;
         } else {
@@ -281,6 +377,7 @@ pub fn word(
         }
 
         pub fn invoke(
+            comptime _: anytype,
             host: *const abi.HostTable,
             context: *anyopaque,
             output: *abi.InvokeResult,
@@ -291,27 +388,21 @@ pub fn word(
                 return;
             };
             const call = NativeCall.adapterPointer(&call_state);
-            const result: CallbackResult = if (uses_build_values and uses_reschedule) result: {
-                var build_state: capability.BuildState = .{ .invocation = &call_state.invocation };
-                const build: *BuildValues = @ptrCast(&build_state);
-                var reschedule_state = NativeRescheduleType.initAdapter(&call_state.invocation) catch {
+            var build_state: capability.BuildState = .{ .invocation = &call_state.invocation };
+            var reschedule_state: if (uses_reschedule) NativeRescheduleType.AdapterState else void = if (uses_reschedule)
+                NativeRescheduleType.initAdapter(&call_state.invocation) catch {
                     output.* = .{ .tag = .fail, .adapter_status = 1 };
                     return;
-                };
-                const schedule = NativeRescheduleType.adapterPointer(&reschedule_state);
-                break :result callback(call, build, schedule);
-            } else if (uses_build_values) result: {
-                var build_state: capability.BuildState = .{ .invocation = &call_state.invocation };
-                const build: *BuildValues = @ptrCast(&build_state);
-                break :result callback(call, build);
-            } else if (uses_reschedule) result: {
-                var reschedule_state = NativeRescheduleType.initAdapter(&call_state.invocation) catch {
-                    output.* = .{ .tag = .fail, .adapter_status = 1 };
-                    return;
-                };
-                const schedule = NativeRescheduleType.adapterPointer(&reschedule_state);
-                break :result callback(call, schedule);
-            } else callback(call);
+                }
+            else {};
+            // SAFETY: every callback parameter is initialized by the exhaustive capability dispatch below.
+            var arguments: std.meta.ArgsTuple(Callback) = undefined;
+            arguments[0] = call;
+            inline for (function.params[1..], 1..) |parameter, index| {
+                const T = parameter.type.?;
+                if (comptime T == *BuildValues) arguments[index] = @ptrCast(&build_state) else arguments[index] = NativeRescheduleType.adapterPointer(&reschedule_state);
+            }
+            const result = @call(.auto, callback, arguments);
             const outcome = result catch |err| switch (err) {
                 error.OutOfMemory => {
                     output.* = .{ .tag = .fail, .adapter_status = 1 };
@@ -349,13 +440,40 @@ fn writeAdapterFailure(
 /// not export the symbol at all, which is what lets one image carry several.
 pub const Linkage = enum { dynamic, static };
 
+fn portBindingCount(comptime Ports: anytype) usize {
+    var count: usize = 0;
+    for (Ports) |P| {
+        count += P.Operations.count;
+        count += P.Endpoints.count;
+    }
+    return count;
+}
+
+fn portBindings(comptime Ports: anytype) [portBindingCount(Ports)]type {
+    var bindings: [portBindingCount(Ports)]type = undefined;
+    var index: usize = 0;
+    for (Ports) |P| {
+        for (std.meta.tags(P.Operations.Name)) |name| {
+            bindings[index] = portOperation(P, name);
+            index += 1;
+        }
+        for (std.meta.tags(P.Endpoints.Name)) |name| {
+            bindings[index] = portEndpoint(P, name);
+            index += 1;
+        }
+    }
+    return bindings;
+}
+
 pub fn module(comptime spec: anytype) type {
+    const Ports = if (@hasField(@TypeOf(spec), "ports")) spec.ports else .{};
+    const explicit_words = if (@hasField(@TypeOf(spec), "words")) spec.words else .{};
+    @setEvalBranchQuota(1000 + (explicit_words.len + portBindingCount(Ports)) * (explicit_words.len + portBindingCount(Ports)) * 16);
     if (!identifier(spec.name)) @compileError("ecl-native: module name must be a nonempty identifier");
     if (spec.doc.len == 0) @compileError("ecl-native: module documentation must not be empty");
     const module_linkage: Linkage = if (@hasField(@TypeOf(spec), "linkage")) spec.linkage else .dynamic;
-    const words = spec.words;
+    const words = explicit_words ++ portBindings(Ports);
     const word_count = words.len;
-    @setEvalBranchQuota(1000 + word_count * word_count * 16);
     inline for (words, 0..) |Word, index| {
         inline for (0..index) |prior_index| {
             const Prior = words[prior_index];
@@ -366,6 +484,15 @@ pub fn module(comptime spec: anytype) type {
     const ModuleName = spec.name;
     const ModuleDocumentation = spec.doc;
     const Words = words;
+    if (Ports.len > abi.max_port_definitions) @compileError("ecl-native: too many port definitions");
+    inline for (Ports, 0..) |P, index| {
+        if (!identifier(P.name)) @compileError("ecl-native: port name must be an identifier");
+        inline for (0..index) |prior_index| {
+            const prior = Ports[prior_index];
+            if (std.mem.eql(u8, P.name, prior.name))
+                @compileError("ecl-native: module contains a duplicate port name");
+        }
+    }
     const uses_build_values = uses: {
         var result = false;
         for (words) |Word| result = result or Word.uses_build_values;
@@ -378,12 +505,18 @@ pub fn module(comptime spec: anytype) type {
     };
     const requirement_count: usize = 1 +
         @as(usize, @intFromBool(uses_build_values)) +
-        @as(usize, @intFromBool(uses_reschedule));
+        @as(usize, @intFromBool(uses_reschedule)) + @as(usize, @intFromBool(Ports.len != 0));
     return struct {
         const Self = @This();
         var definitions_storage = definitions: {
             var result: [word_count]abi.Definition = undefined;
-            for (Words, 0..) |Word, index| result[index] = Word.definition(index);
+            for (Words, 0..) |Word, index| result[index] = if (@hasDecl(Word, "registered_port_binding")) Word.definition(Ports) else Word.definition(index);
+            break :definitions result;
+        };
+        var ports_storage = definitions: {
+            // SAFETY: every declared port contributes exactly one initialized record.
+            var result: [Ports.len]abi.PortDefinition = undefined;
+            for (Ports, 0..) |P, index| result[index] = P.definition();
             break :definitions result;
         };
         var requirements_storage = requirements: {
@@ -395,6 +528,7 @@ pub fn module(comptime spec: anytype) type {
                 result[1 + @as(usize, @intFromBool(uses_build_values))] = .{
                     .id = @intFromEnum(abi.CapabilityId.reschedule),
                 };
+            if (Ports.len != 0) result[requirement_count - 1] = .{ .id = @intFromEnum(abi.CapabilityId.ports) };
             break :requirements result;
         };
         // The entry point returns this graph after its stack frame is gone;
@@ -410,6 +544,8 @@ pub fn module(comptime spec: anytype) type {
             .capabilities_ptr = &requirements_storage,
             .callback_count = definitions_storage.len,
             .invoke = invoke,
+            .port_count = Ports.len,
+            .ports_ptr = &ports_storage,
         };
 
         pub fn descriptor() *const abi.Descriptor {
@@ -423,7 +559,7 @@ pub fn module(comptime spec: anytype) type {
             output: *abi.InvokeResult,
         ) callconv(.c) void {
             inline for (Words, 0..) |Word, index| if (callback_index == index) {
-                Word.invoke(host, context, output);
+                Word.invoke(Ports, host, context, output);
                 return;
             };
             output.* = .{ .tag = .fail, .adapter_status = 2 };

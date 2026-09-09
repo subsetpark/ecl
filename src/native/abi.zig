@@ -5,8 +5,8 @@
 
 const builtin = @import("builtin");
 
-pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v1";
-pub const abi_version: u32 = 1;
+pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v5";
+pub const abi_version: u32 = 5;
 
 pub const max_error_message_bytes: u32 = 4096;
 pub const max_guest_scalar_bytes: u32 = 4096;
@@ -22,6 +22,7 @@ pub const CapabilityId = enum(u32) {
     call = 1,
     build_values = 2,
     reschedule = 3,
+    ports = 4,
     _,
 };
 
@@ -41,6 +42,7 @@ pub const ErrorKindWire = enum(u32) {
     parse = 5,
     io = 6,
     user = 7,
+    contract = 8,
     _,
 };
 
@@ -66,10 +68,72 @@ pub const ValueKindWire = enum(u32) {
     word = 4,
     list = 5,
     dict = 6,
+    port = 7,
     _,
 };
 
 pub const Candidate = u64;
+
+pub const max_port_definitions = 64;
+pub const max_port_state_bytes = 1 << 20;
+pub const max_port_lanes = 16;
+pub const PortCancellation = enum(u32) { close_resource, acknowledge, _ };
+
+/// Controller streams block only their private host controller. Zero bytes
+/// denotes request EOF or cancellation; failure is reported separately.
+pub const MessageBuildAction = enum(u32) { scalar = 0, copy_input = 1, copy_received = 2, list = 3, dictionary = 4, send = 7, result = 8, clear = 9, reply_endpoint = 10, child = 11, _ };
+pub const ChildDependency = enum(u32) { independent, dependent, _ };
+pub const MessageBuildRequest = extern struct {
+    size: u32 = @sizeOf(MessageBuildRequest),
+    action: MessageBuildAction,
+    count: u32 = 0,
+    endpoint: u32 = 0,
+    scalar: Scalar = .{ .kind = .int },
+    path: ?[*]const u64 = null,
+    depth: u32 = 0,
+    owner: EndpointOwner = .exchange,
+    kind_identity: ?*const anyopaque = null,
+};
+pub const ControllerStatus = enum(u32) { ok, eof, cancelled, failed, out_of_memory, invalid, _ };
+pub const ControllerRead = extern struct { status: ControllerStatus, count: u32 = 0 };
+pub const ControllerTable = extern struct {
+    parent_state: *const fn (*anyopaque, *const anyopaque) callconv(.c) ?*anyopaque,
+    build_message: *const fn (*anyopaque, *const MessageBuildRequest) callconv(.c) HostStatus,
+    fail_allocation: *const fn (*anyopaque) callconv(.c) void,
+    received_message: *const fn (*anyopaque, [*]const u64, u32, *ValueView) callconv(.c) bool,
+    forward_message: *const fn (*anyopaque, EndpointOwner, u32) callconv(.c) bool,
+    result_message: *const fn (*anyopaque) callconv(.c) bool,
+    discard_message: *const fn (*anyopaque) callconv(.c) bool,
+    input: *const fn (*anyopaque, [*]const u64, u32, *ValueView) callconv(.c) bool,
+    finish_endpoint: *const fn (*anyopaque, EndpointOwner, u32) callconv(.c) bool,
+    cancelled: *const fn (*anyopaque) callconv(.c) bool,
+    acknowledge_cancellation: *const fn (*anyopaque) callconv(.c) bool,
+    fail: *const fn (*anyopaque, ErrorKindWire, [*]const u8, u32) callconv(.c) void,
+    fail_resource: *const fn (*anyopaque, ErrorKindWire, [*]const u8, u32) callconv(.c) void,
+    resolve_endpoint: *const fn (*anyopaque, *const anyopaque, EndpointOwner, u32, EndpointTransport, EndpointDirection) callconv(.c) bool,
+    read_bytes: *const fn (*anyopaque, EndpointOwner, u32, [*]u8, u32) callconv(.c) ControllerRead,
+    write_bytes: *const fn (*anyopaque, EndpointOwner, u32, [*]const u8, u64) callconv(.c) ControllerStatus,
+    receive_event: *const fn (*anyopaque, EndpointOwner, u32) callconv(.c) ControllerStatus,
+};
+pub const PortControllerFn = *const fn (*anyopaque, *const ControllerTable, *anyopaque) callconv(.c) void;
+pub const PortOperationFn = *const fn (*anyopaque, u32, *const ControllerTable, *anyopaque) callconv(.c) void;
+pub const PortDefinition = extern struct {
+    size: u32 = @sizeOf(PortDefinition),
+    state_size: u32,
+    state_alignment: u32,
+    name_len: u32,
+    name_ptr: [*]const u8,
+    init_state: ?StateInitFn,
+    initialize: ?PortControllerFn,
+    execute: ?PortOperationFn,
+    cancel: ?StateDeinitFn,
+    cleanup: ?StateDeinitFn,
+    lane_count: u32 = 1,
+    cancellation: PortCancellation = .close_resource,
+    cancel_operation: ?*const fn (*anyopaque, u32) callconv(.c) void = null,
+    shutdown: ?PortControllerFn = null,
+    identity: ?*const anyopaque = null,
+};
 
 pub const CapabilityRequirement = extern struct {
     size: u32 = @sizeOf(CapabilityRequirement),
@@ -80,6 +144,24 @@ pub const EffectSlot = extern struct {
     size: u32 = @sizeOf(EffectSlot),
     name_ptr: [*]const u8,
     name_len: u64,
+};
+
+pub const BindingKind = enum(u32) { call, factory, operation, endpoint, _ };
+pub const EndpointTransport = enum(u32) { bytes, messages, _ };
+pub const EndpointDirection = enum(u32) { input, output, _ };
+pub const EndpointOwner = enum(u32) { resource, exchange, _ };
+/// Registration metadata contains private controller selectors, never ECL
+/// values. The host validates and seals it into module-instance capabilities.
+pub const PortBinding = extern struct {
+    kind: BindingKind = .call,
+    resource: u32 = 0,
+    operation: u32 = 0,
+    lane: u32 = 0,
+    endpoints: u64 = 0,
+    endpoint: u32 = 0,
+    transport: EndpointTransport = .bytes,
+    direction: EndpointDirection = .input,
+    owner: EndpointOwner = .exchange,
 };
 
 pub const Definition = extern struct {
@@ -99,6 +181,7 @@ pub const Definition = extern struct {
     continuation_alignment: u32 = 0,
     init_continuation: ?StateInitFn = null,
     deinit_continuation: ?StateDeinitFn = null,
+    binding: PortBinding = .{},
 };
 
 pub const ValueView = extern struct {
@@ -189,6 +272,15 @@ pub const ReadPathFn = *const fn (
     path_len: u32,
     output: *ValueView,
 ) callconv(.c) HostStatus;
+/// Retains the value addressed by the same bounded path as `read_path` in
+/// the current invocation's candidate table. No backend authority is granted.
+pub const ForwardPathFn = *const fn (
+    call_context: *anyopaque,
+    input_index: u32,
+    path_ptr: [*]const u64,
+    path_len: u32,
+    output: *Candidate,
+) callconv(.c) HostStatus;
 pub const CompleteFn = *const fn (
     call_context: *anyopaque,
     outputs: [*]const Candidate,
@@ -229,6 +321,7 @@ pub const HostTable = extern struct {
     build_list_finish: ?BuildListFinishFn,
     build_dict_append: ?BuildDictAppendFn,
     build_dict_finish: ?BuildDictFinishFn,
+    forward_path: ?ForwardPathFn = null,
 };
 
 pub const Invoke = *const fn (
@@ -253,6 +346,9 @@ pub const Descriptor = extern struct {
     capabilities_ptr: [*]const CapabilityRequirement,
     callback_count: u32,
     invoke: ?Invoke,
+    port_count: u32 = 0,
+    port_record_size: u32 = @sizeOf(PortDefinition),
+    ports_ptr: ?[*]const PortDefinition = null,
 };
 
 pub const EntryResult = extern struct {
@@ -313,17 +409,22 @@ fn assertRecord(comptime T: type, comptime expected_size: usize, comptime expect
 }
 
 comptime {
-    @setEvalBranchQuota(4000);
-    if (@sizeOf(usize) != 8) @compileError("native ABI v1 supports 64-bit targets only");
+    @setEvalBranchQuota(8000);
+    if (@sizeOf(usize) != 8) @compileError("native ABI v5 supports 64-bit targets only");
 
     assertRecord(CapabilityRequirement, 8, 4);
     assertRecord(EffectSlot, 24, 8);
-    assertRecord(Definition, 96, 8);
+    assertRecord(Definition, 136, 8);
+    assertRecord(PortBinding, 40, 8);
     assertRecord(ValueView, 40, 8);
     assertRecord(Scalar, 32, 8);
     assertRecord(InvokeResult, 16, 8);
-    assertRecord(HostTable, 128, 8);
-    assertRecord(Descriptor, 88, 8);
+    assertRecord(HostTable, 136, 8);
+    assertRecord(Descriptor, 104, 8);
+    assertRecord(PortDefinition, 96, 8);
+    assertRecord(MessageBuildRequest, 72, 8);
+    assertRecord(ControllerTable, 136, 8);
+    assertRecord(ControllerRead, 8, 4);
     assertRecord(EntryResult, 32, 8);
 
     if (@offsetOf(Definition, "callback_index") != 4 or
@@ -340,7 +441,7 @@ comptime {
     // The SDK does not import machine.zig. Keeping this list closed and
     // name-stable lets the runtime assert the inverse mapping exhaustively.
     const expected_error_names = [_][]const u8{
-        "type", "shape", "conform", "overflow", "domain", "parse", "io", "user",
+        "type", "shape", "conform", "overflow", "domain", "parse", "io", "user", "contract",
     };
     const fields = @typeInfo(ErrorKindWire).@"enum".fields;
     if (fields.len != expected_error_names.len)
