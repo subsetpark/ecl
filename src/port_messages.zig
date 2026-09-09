@@ -222,6 +222,9 @@ const QueueState = struct {
 };
 
 pub const Send = union(enum) { accepted, pending: external.ReadinessSource, overflow, failed: Failure };
+pub const Delivery = union(enum) { pending, eof, message: Value, failed: Failure };
+const Claim = union(enum) { delivered, retry, rejected: Failure };
+
 pub const Receive = union(enum) { pending, eof, message: *View, failed: Failure };
 
 pub const Queue = opaque {
@@ -287,35 +290,65 @@ pub const Queue = opaque {
             .failed => |failure| .{ .failed = failure },
         };
     }
-    /// Consumes queue ownership on success. The caller keeps its peek reference
-    /// on either outcome. Event construction and stack reservation precede this.
-    pub fn claim(self: *Queue, item: *View, scope: *scheduler.TaskScope) error{ OutOfMemory, ScopeClosing, Overflow }!bool {
-        const handoff = try @import("port_resource.zig").Publication.init(self.state().budget.state().host, item.attachments());
-        defer if (handoff) |publication| publication.deinit();
-        var publication: Publication = .{ .queue = self.state(), .item = item, .handoff = handoff };
-        const accepted = try scope.scheduler.publishExternalBatch(scope, if (handoff) |children| children.members() else .{null} ** 16, &publication);
-        if (accepted) item.state().capability().release();
-        return accepted;
+    /// Owns observation, output preparation and publication as one delivery.
+    /// Preparation failure preserves the envelope. Rejection consumes it and
+    /// retires its graph outside locks; callers see only ordinary transport facts.
+    pub fn receive(self: *Queue, scope: *scheduler.TaskScope, context: anytype) (@TypeOf(context.*).Error || error{ OutOfMemory, ScopeClosing, Overflow })!Delivery {
+        const view = switch (self.peek()) {
+            .message => |view| view,
+            .pending => return .pending,
+            .eof => return .eof,
+            .failed => |failure| return .{ .failed = failure },
+        };
+        defer view.release();
+        const output = try context.prepare(view.value());
+        errdefer context.release(output);
+        switch (try self.claim(view, scope)) {
+            .delivered => return .{ .message = output },
+            .retry => {
+                context.release(output);
+                return .pending;
+            },
+            .rejected => |failure| {
+                context.release(output);
+                return .{ .failed = failure };
+            },
+        }
     }
-    const Publication = struct {
+    fn claim(self: *Queue, item: *View, scope: *scheduler.TaskScope) error{ OutOfMemory, ScopeClosing, Overflow }!Claim {
+        var publication: DeliveryPublication = .{ .queue = self.state(), .item = item };
+        defer if (publication.consumed) |delivery| delivery.release();
+        try @import("port_resource.zig").Publication.deliver(self.state().budget.state().host, item.attachments(), scope, &publication);
+        return publication.result;
+    }
+    const DeliveryPublication = struct {
         queue: *QueueState,
         item: *View,
-        handoff: ?*@import("port_resource.zig").Publication,
+        consumed: ?*Envelope = null,
+        result: Claim = .retry,
         pub fn lock(self: *@This()) void {
             std.Io.Threaded.mutexLock(&self.queue.mutex);
-            if (self.handoff) |handoff| handoff.lock();
         }
         pub fn unlock(self: *@This()) void {
-            if (self.handoff) |handoff| handoff.unlock();
             std.Io.Threaded.mutexUnlock(&self.queue.mutex);
         }
         pub fn validate(self: *@This()) bool {
-            return self.queue.count != 0 and self.queue.messages[self.queue.head] == self.item.state().capability() and
-                (if (self.handoff) |handoff| handoff.validate() else true);
+            return self.queue.count != 0 and self.item.observes(self.queue.messages[self.queue.head].?);
         }
-        pub fn publish(self: *@This(), tokens: [16]?external.ScopeMembership) void {
-            if (self.handoff) |handoff| handoff.publish(tokens);
+        pub fn reject(self: *@This()) void {
+            self.result = .{ .rejected = switch (self.queue.phase) {
+                .failed => |failure| failure,
+                .open, .eof => Failure.init(.cancelled, "message child publication was revoked"),
+            } };
+            self.detach();
+        }
+        pub fn publish(self: *@This()) void {
+            self.result = .delivered;
+            self.detach();
+        }
+        fn detach(self: *@This()) void {
             const owned = self.queue;
+            self.consumed = owned.messages[owned.head].?;
             owned.messages[owned.head] = null;
             owned.head = (owned.head + 1) % max_messages;
             owned.count -= 1;
@@ -457,8 +490,8 @@ test "native: abandoned message publication preserves queue ownership and capaci
     const second = pair.queue.peek().message;
     defer second.release();
     try std.testing.expectEqual(@as(i64, 42), second.value().int);
-    try std.testing.expect(try pair.queue.claim(second, &scope));
-    try std.testing.expect(!try pair.queue.claim(second, &scope));
+    try std.testing.expect(try pair.queue.claim(second, &scope) == .delivered);
+    try std.testing.expect(try pair.queue.claim(second, &scope) == .retry);
     pair.queue.finish();
     try std.testing.expect(pair.queue.peek() == .eof);
 }

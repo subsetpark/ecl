@@ -1776,11 +1776,13 @@ pub const WorkerScheduler = enum(usize) {
     /// Consume all incoming member pins on either outcome. Allocate the fixed
     /// batch before acquiring publication locks. Scope cancellation observes
     /// either the complete publication or none of it. The guard locks its
-    /// owner-issued resources after the scope, validates without mutation, and
+    /// owner-issued resources after the scope, validates the delivery, and
     /// consumes every supplied membership in an infallible publish transition.
-    /// Guard methods must not allocate, release, detach, or acquire scope locks.
-    /// A rejected guard leaves its source ownership unchanged. The borrowed
-    /// scope and guard remain alive for this synchronous, bounded call.
+    /// Guard methods must not allocate, release, detach memberships, or acquire
+    /// scope locks.
+    /// A rejected guard may detach a terminally undeliverable envelope in O(1);
+    /// its owner must retire that envelope after this call releases the locks.
+    /// The borrowed scope and guard remain alive for this synchronous, bounded call.
     pub fn publishExternalBatch(
         self: *const WorkerScheduler,
         scope: *TaskScope,

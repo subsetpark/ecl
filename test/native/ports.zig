@@ -1,4 +1,4 @@
-const CounterMode = enum { step, receive_step, block, block_send, echo, checksum, failure, inspect, allocation_failure, noop, buffered_failure, finished_failure, pipeline, early_exit, resource_messages, resource_bytes, resource_notify, rpc, invalid_reply, reply_result, resource_compete_messages, resource_compete_bytes, datagram, watch, watch_config, transform_message, child, dependent_child, child_event, discard_child, child_pair, events, build_result, duplicate_result, oversize_event, build_received, messages, message_result, message_failure, blocked, long_failure };
+const CounterMode = enum { step, receive_step, block, block_send, echo, checksum, failure, inspect, allocation_failure, noop, buffered_failure, finished_failure, pipeline, early_exit, resource_messages, resource_bytes, resource_notify, rpc, invalid_reply, reply_result, resource_compete_messages, resource_compete_bytes, datagram, watch, watch_config, transform_message, child, dependent_child, child_event, child_event_blocked, child_result_blocked, discard_child, child_pair, events, build_result, duplicate_result, oversize_event, build_received, messages, message_result, message_failure, blocked, long_failure };
 const StorageMode = enum { query, transaction, durable, storage_status, detached_query, lookalike_child };
 const CursorMode = enum { rows, position };
 const TransactionPortMode = enum { transaction_write, commit, transaction_wait };
@@ -174,7 +174,7 @@ fn DuplexSpec(comptime acknowledge: bool) type {
                 _ = controller.acknowledgeCancellation();
             };
             if (switch (mode) {
-                .resource_messages, .resource_bytes, .resource_notify, .rpc, .invalid_reply, .reply_result, .resource_compete_messages, .resource_compete_bytes, .datagram, .watch, .watch_config, .transform_message, .child, .dependent_child, .child_event, .discard_child, .child_pair, .events, .build_result, .duplicate_result, .oversize_event, .build_received => true,
+                .resource_messages, .resource_bytes, .resource_notify, .rpc, .invalid_reply, .reply_result, .resource_compete_messages, .resource_compete_bytes, .datagram, .watch, .watch_config, .transform_message, .child, .dependent_child, .child_event, .child_event_blocked, .child_result_blocked, .discard_child, .child_pair, .events, .build_result, .duplicate_result, .oversize_event, .build_received => true,
                 else => false,
             }) {
                 if (mode == .resource_compete_messages) {
@@ -214,14 +214,14 @@ fn DuplexSpec(comptime acknowledge: bool) type {
                     return;
                 }
                 if (switch (mode) {
-                    .child, .dependent_child, .child_event, .discard_child => true,
+                    .child, .dependent_child, .child_event, .child_event_blocked, .child_result_blocked, .discard_child => true,
                     else => false,
                 }) {
                     {
                         try builder.input(&.{});
                         try builder.child(Duplex, if (mode == .dependent_child) .dependent else .independent);
                     }
-                    if (mode == .child_event) {
+                    if (mode == .child_event or mode == .child_event_blocked) {
                         try (try controller.endpoint(P, .receiver)).send();
                     } else if (mode == .discard_child) {
                         {
@@ -230,6 +230,7 @@ fn DuplexSpec(comptime acknowledge: bool) type {
                         try builder.int(42);
                         try builder.result();
                     } else try builder.result();
+                    if (mode == .child_event_blocked or mode == .child_result_blocked) awaitGate(&current.cancelled);
                     return;
                 }
                 if (mode == .transform_message) {
@@ -520,6 +521,8 @@ const DuplexSdk = ecl.Port(struct {
         .transform_message = .{ .name = "transform-message", .doc = "Release consumed input while retaining a constructed response.", .handler = on_transform_message, .lane = .receive, .endpoints = .{ .sender, .receiver } },
         .child = .{ .name = "child", .doc = "Return an independent child resource.", .handler = on_child, .lane = .receive, .endpoints = .{} },
         .dependent_child = .{ .name = "dependent-child", .doc = "Return a dependent child resource.", .handler = on_dependent_child, .lane = .receive, .endpoints = .{} },
+        .child_event_blocked = .{ .name = "child-event-blocked", .doc = "Queue a child and wait for the controller gate.", .handler = on_child_event_blocked, .lane = .receive, .endpoints = .{.receiver} },
+        .child_result_blocked = .{ .name = "child-result-blocked", .doc = "Set a child result and wait for the controller gate.", .handler = on_child_result_blocked, .lane = .receive, .endpoints = .{} },
         .child_event = .{ .name = "child-event", .doc = "Send an independent child resource.", .handler = on_child_event, .lane = .receive, .endpoints = .{.receiver} },
         .discard_child = .{ .name = "discard-child", .doc = "Discard a provisional child before returning a scalar result.", .handler = on_discard_child, .lane = .receive, .endpoints = .{} },
         .child_pair = .{ .name = "child-pair", .doc = "Return two children in one atomic result publication.", .handler = on_child_pair, .lane = .receive, .endpoints = .{} },
@@ -621,6 +624,12 @@ const DuplexSdk = ecl.Port(struct {
     }
     fn on_dependent_child(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
         try Base.run(Duplex, state, .dependent_child, .receive, controller);
+    }
+    fn on_child_event_blocked(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+        try Base.run(Duplex, state, .child_event_blocked, .receive, controller);
+    }
+    fn on_child_result_blocked(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+        try Base.run(Duplex, state, .child_result_blocked, .receive, controller);
     }
     fn on_child_event(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
         try Base.run(Duplex, state, .child_event, .receive, controller);

@@ -2,7 +2,6 @@
 const std = @import("std");
 const heap = @import("heap.zig");
 const scheduler = @import("scheduler.zig");
-const external = @import("external.zig");
 const messages = @import("port_messages.zig");
 const Publication = @import("port_resource.zig").Publication;
 const Failure = @import("port_bytes.zig").Failure;
@@ -16,7 +15,7 @@ const State = struct {
     host: *const heap.HostCleanup,
     mutex: std.Io.Mutex = .init,
     phase: union(enum) { running, terminal: Terminal } = .running,
-    value: union(enum) { available: *messages.Envelope, claimed, discarded },
+    value: union(enum) { available: *messages.Envelope, claimed, discarded, rejected },
 
     fn capability(self: *State) *Result {
         return @ptrCast(self);
@@ -87,19 +86,18 @@ pub const Result = opaque {
         if (discarded) |item| item.release();
     }
     /// The caller reserves output capacity first. Success publishes every
-    /// provisional attachment and claims the value atomically. All failures
-    /// retain the result; no second caller can claim even a scalar-only value.
+    /// provisional attachment and claims the value atomically. Allocation and
+    /// scope failures retain the result; terminal rejection discards it. No
+    /// second caller can claim even a scalar-only value.
     pub fn claim(self: *Result, scope: *scheduler.TaskScope) error{ OutOfMemory, ScopeClosing, Overflow }!Claim {
         const owned = self.state();
         std.Io.Threaded.mutexLock(&owned.mutex);
         const view = if (owned.value == .available) owned.value.available.borrow() else null;
         std.Io.Threaded.mutexUnlock(&owned.mutex);
         defer if (view) |item| item.release();
-        const handoff = try Publication.init(owned.host, if (view) |item| item.attachments() else &.{});
-        defer if (handoff) |publication| publication.deinit();
-        var publication: ResultPublication = .{ .state = owned, .view = view, .handoff = handoff };
-        _ = try scope.scheduler.publishExternalBatch(scope, if (handoff) |children| children.members() else .{null} ** 16, &publication);
-        if (publication.consumed) |item| item.release();
+        var publication: ResultPublication = .{ .state = owned, .view = view };
+        defer if (publication.consumed) |item| item.release();
+        try Publication.deliver(owned.host, if (view) |item| item.attachments() else &.{}, scope, &publication);
         return publication.result;
     }
 };
@@ -107,15 +105,12 @@ pub const Result = opaque {
 const ResultPublication = struct {
     state: *State,
     view: ?*messages.View,
-    handoff: ?*Publication,
     consumed: ?*messages.Envelope = null,
     result: Claim = .pending,
     pub fn lock(self: *@This()) void {
         std.Io.Threaded.mutexLock(&self.state.mutex);
-        if (self.handoff) |handoff| handoff.lock();
     }
     pub fn unlock(self: *@This()) void {
-        if (self.handoff) |handoff| handoff.unlock();
         std.Io.Threaded.mutexUnlock(&self.state.mutex);
     }
     pub fn validate(self: *@This()) bool {
@@ -124,6 +119,7 @@ const ResultPublication = struct {
             .terminal => |terminal| switch (terminal) {
                 .success => {},
                 .cancelled => {
+                    if (self.state.value == .available) self.reject();
                     self.result = .cancelled;
                     return false;
                 },
@@ -135,18 +131,20 @@ const ResultPublication = struct {
         }
         self.result = switch (self.state.value) {
             .claimed => .claimed,
+            .rejected => .cancelled,
             .discarded => .{ .failed = Failure.init(.io, "exchange result was discarded by close") },
-            .available => |item| available: {
-                if (self.view == null or !self.view.?.observes(item)) break :available .pending;
-                if (self.handoff) |handoff| if (!handoff.validate()) break :available .pending;
-                break :available .{ .value = item.value() };
-            },
+            .available => .pending,
         };
-        return self.result == .value;
+        return self.state.value == .available and self.view != null and self.view.?.observes(self.state.value.available);
     }
-    pub fn publish(self: *@This(), tokens: [16]?external.ScopeMembership) void {
-        if (self.handoff) |handoff| handoff.publish(tokens);
+    pub fn reject(self: *@This()) void {
+        self.consumed = self.state.value.available;
+        self.state.value = .rejected;
+        self.result = .cancelled;
+    }
+    pub fn publish(self: *@This()) void {
         const item = self.state.value.available;
+        self.result = .{ .value = item.value() };
         heap.retainValue(item.value());
         self.consumed = item;
         self.state.value = .claimed;

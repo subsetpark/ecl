@@ -500,8 +500,10 @@ const OperationAdapter = struct {
             error.InvalidLimits => error.InsufficientLanes,
             else => |failure| failure,
         };
-        provisional.retain();
-        cell.publication = .{ .provisional = provisional };
+        cell.publication = resource_api.PublicationAuthority.create(cell.allocator, provisional) catch |err| {
+            cell.releasePort();
+            return err;
+        };
         std.Io.Threaded.mutexLock(&owner.mutex);
         const identity = owner.identity;
         owner.identity +%= 1;

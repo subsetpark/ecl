@@ -2436,8 +2436,10 @@ const OperationAdapter = struct {
             cell.releasePort();
             return err;
         };
-        provisional.retain();
-        cell.publication = .{ .provisional = provisional };
+        cell.publication = port_resource.PublicationAuthority.create(cell.allocator, provisional) catch |err| {
+            cell.releasePort();
+            return err;
+        };
         const resource = port_resource.Resource.create(Service, .staged, self.cell.adapter.owner.instance.next(), cell) catch |err| {
             cell.releasePort();
             return err;

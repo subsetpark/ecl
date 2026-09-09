@@ -12,9 +12,57 @@ pub const Shutdown = union(enum) { pending, ready, unsupported, failed: transpor
 pub const Initialization = union(enum) { ready, pending: external.ReadinessSource, failed: transport.Failure };
 pub const PublicationMode = enum { direct, staged };
 
+pub const PublicationStatus = union(enum) { published, provisional: *scheduler.ExternalGroup, revoked };
+
+const AuthorityState = struct {
+    allocator: std.mem.Allocator,
+    phase: union(enum) { provisional: *scheduler.ExternalGroup, published, revoked: *scheduler.ExternalGroup },
+};
+
+/// Service-owned authority. All transitions require the service mutex; group
+/// arbitration additionally requires the group's publication lock. Revocation
+/// retains only a reclamation pin, never permission to attach a membership.
+pub const PublicationAuthority = opaque {
+    fn state(self: *@This()) *AuthorityState {
+        return @ptrCast(@alignCast(self));
+    }
+    pub fn create(allocator: std.mem.Allocator, group: *scheduler.ExternalGroup) error{OutOfMemory}!*PublicationAuthority {
+        const owned = try allocator.create(AuthorityState);
+        group.retain();
+        owned.* = .{ .allocator = allocator, .phase = .{ .provisional = group } };
+        return @ptrCast(owned);
+    }
+    pub fn statusLocked(self: *@This()) PublicationStatus {
+        return switch (self.state().phase) {
+            .provisional => |group| .{ .provisional = group },
+            .published => .published,
+            .revoked => .revoked,
+        };
+    }
+    pub fn revokeLocked(self: *@This()) void {
+        if (self.state().phase == .provisional) {
+            const group = self.state().phase.provisional;
+            self.state().phase = .{ .revoked = group };
+        }
+    }
+    /// Transfers the original group pin to the transaction's retirement.
+    pub fn publishLocked(self: *@This()) void {
+        if (self.state().phase != .provisional) @panic("publication authority already consumed");
+        self.state().phase = .published;
+    }
+    pub fn deinit(self: *@This()) void {
+        const owned = self.state();
+        switch (owned.phase) {
+            .provisional, .revoked => |group| group.release(),
+            .published => {},
+        }
+        owned.allocator.destroy(owned);
+    }
+};
+
 const ProvisionalTable = struct {
     mutex: *const fn (*anyopaque) *std.Io.Mutex,
-    group: *const fn (*anyopaque) ?*scheduler.ExternalGroup,
+    group: *const fn (*anyopaque) PublicationStatus,
     ownership: *const fn (*anyopaque) *external.Ownership,
     publish: *const fn (*anyopaque) void,
     member: *const fn (*anyopaque) external.ScopeMember,
@@ -76,7 +124,7 @@ fn Bridge(comptime Adapter: type) type {
         fn mutex(raw: *anyopaque) *std.Io.Mutex {
             return typed(raw).resourcePublicationMutex();
         }
-        fn group(raw: *anyopaque) ?*scheduler.ExternalGroup {
+        fn group(raw: *anyopaque) PublicationStatus {
             return typed(raw).resourcePublicationGroupLocked();
         }
         fn ownership(raw: *anyopaque) *external.Ownership {
@@ -173,7 +221,7 @@ const ProvisionalResource = struct {
         const owned = self.resource.state();
         return owned.provisional.?.mutex(owned.payload);
     }
-    fn groupLocked(self: ProvisionalResource) ?*scheduler.ExternalGroup {
+    fn groupLocked(self: ProvisionalResource) PublicationStatus {
         const owned = self.resource.state();
         return owned.provisional.?.group(owned.payload);
     }
@@ -199,7 +247,7 @@ const ProvisionalResource = struct {
 
 /// A fixed ownership snapshot for an atomic message/result claim. Snapshot
 /// pins and replaced memberships retire only after all publication locks are
-/// released. A changed snapshot is rejected; it never grants stale authority.
+/// released. A changed snapshot retries; revoked authority is terminal.
 const PublicationState = struct {
     const Entry = struct {
         cell: ProvisionalResource,
@@ -213,6 +261,7 @@ const PublicationState = struct {
     count: usize = 0,
     group_count: usize = 0,
     published: bool = false,
+    revoked: bool = false,
 
     fn capability(self: *PublicationState) *Publication {
         return @ptrCast(self);
@@ -230,15 +279,22 @@ const PublicationState = struct {
             };
             if (duplicate) continue;
             std.Io.Threaded.mutexLock(cell.mutex());
-            if (cell.groupLocked() == null) {
-                std.Io.Threaded.mutexUnlock(cell.mutex());
-                continue;
-            }
+            const group = switch (cell.groupLocked()) {
+                .published => {
+                    std.Io.Threaded.mutexUnlock(cell.mutex());
+                    continue;
+                },
+                .revoked => {
+                    result.revoked = true;
+                    std.Io.Threaded.mutexUnlock(cell.mutex());
+                    continue;
+                },
+                .provisional => |group| group,
+            };
             if (result.count == result.entries.len) {
                 std.Io.Threaded.mutexUnlock(cell.mutex());
                 return error.Overflow;
             }
-            const group = cell.groupLocked().?;
             const membership = cell.ownershipLocked().* == .owned;
             cell.retainReadiness();
             group.retain();
@@ -281,16 +337,30 @@ const PublicationState = struct {
             self.groups[index].?.unlockPublication();
         }
     }
-    pub fn validate(self: *@This()) bool {
-        for (self.groups[0..self.group_count]) |group| if (!group.?.acceptsPublicationLocked()) return false;
+    pub fn validate(self: *@This()) Outcome {
+        if (self.revoked) return .rejected;
+        var changed = false;
         for (self.entries[0..self.count]) |entry| {
             const item = entry.?;
-            if (item.cell.groupLocked() != item.group) return false;
+            switch (item.cell.groupLocked()) {
+                .revoked => return .rejected,
+                .published => {
+                    changed = true;
+                    continue;
+                },
+                .provisional => |group| {
+                    if (group != item.group) {
+                        changed = true;
+                        continue;
+                    }
+                    if (!group.acceptsPublicationLocked()) return .rejected;
+                },
+            }
             if (item.membership) {
-                if (item.cell.ownershipLocked().* != .owned or !item.group.ownsMembership(item.cell.ownershipLocked().owned)) return false;
-            } else if (item.cell.ownershipLocked().* != .none) return false;
+                if (item.cell.ownershipLocked().* != .owned or !item.group.ownsMembership(item.cell.ownershipLocked().owned)) changed = true;
+            } else if (item.cell.ownershipLocked().* != .none) changed = true;
         }
-        return true;
+        return if (changed) .retry else .ready;
     }
     pub fn publish(self: *@This(), tokens: [16]?external.ScopeMembership) void {
         for (self.entries[0..self.count], 0..) |*entry, index| {
@@ -314,19 +384,57 @@ const PublicationState = struct {
     }
 };
 
+pub const Outcome = enum { ready, retry, rejected };
+
 pub const Publication = opaque {
     fn state(self: *@This()) *PublicationState {
         return @ptrCast(@alignCast(self));
     }
-    pub fn init(host: *const heap.HostCleanup, attachments: []const ?*heap.PortHandle) error{ OutOfMemory, Overflow }!?*Publication {
+    fn init(host: *const heap.HostCleanup, attachments: []const ?*heap.PortHandle) error{ OutOfMemory, Overflow }!?*Publication {
         var snapshot = try PublicationState.init(host, attachments);
         errdefer snapshot.releasePins();
-        if (snapshot.count == 0) return null;
+        if (snapshot.count == 0 and !snapshot.revoked) return null;
         const owned = try host.allocator().create(PublicationState);
         owned.* = snapshot;
         return owned.capability();
     }
-    pub fn members(self: *@This()) [16]?external.ScopeMember {
+    /// Delivery owners supply locked identity validation, detachment and commit.
+    /// Rejection detaches under locks; each owner retires the detached envelope
+    /// after this call returns. Prepared allocation failure leaves it available.
+    pub fn deliver(host: *const heap.HostCleanup, attachments: []const ?*heap.PortHandle, scope: *scheduler.TaskScope, owner: anytype) error{ OutOfMemory, ScopeClosing, Overflow }!void {
+        const handoff = try init(host, attachments);
+        defer if (handoff) |publication| publication.deinit();
+        const Transaction = struct {
+            owner: @TypeOf(owner),
+            handoff: ?*Publication,
+            pub fn lock(self: *@This()) void {
+                self.owner.lock();
+                if (self.handoff) |publication| publication.lock();
+            }
+            pub fn unlock(self: *@This()) void {
+                if (self.handoff) |publication| publication.unlock();
+                self.owner.unlock();
+            }
+            pub fn validate(self: *@This()) bool {
+                if (!self.owner.validate()) return false;
+                switch (if (self.handoff) |publication| publication.validate() else .ready) {
+                    .ready => return true,
+                    .retry => return false,
+                    .rejected => {
+                        self.owner.reject();
+                        return false;
+                    },
+                }
+            }
+            pub fn publish(self: *@This(), tokens: [16]?external.ScopeMembership) void {
+                if (self.handoff) |publication| publication.publish(tokens);
+                self.owner.publish();
+            }
+        };
+        var transaction: Transaction = .{ .owner = owner, .handoff = handoff };
+        _ = try scope.scheduler.publishExternalBatch(scope, if (handoff) |publication| publication.members() else .{null} ** 16, &transaction);
+    }
+    fn members(self: *@This()) [16]?external.ScopeMember {
         return self.state().members();
     }
     pub fn lock(self: *@This()) void {
@@ -335,15 +443,272 @@ pub const Publication = opaque {
     pub fn unlock(self: *@This()) void {
         self.state().unlock();
     }
-    pub fn validate(self: *@This()) bool {
+    pub fn validate(self: *@This()) Outcome {
         return self.state().validate();
     }
     pub fn publish(self: *@This(), tokens: [16]?external.ScopeMembership) void {
         self.state().publish(tokens);
     }
-    pub fn deinit(self: *@This()) void {
+    fn deinit(self: *@This()) void {
         const owned = self.state();
         owned.releasePins();
         owned.host.allocator().destroy(owned);
     }
 };
+
+// Registration-backed fixture: the test observes real queue/result delivery,
+// scope membership, cancellation callbacks, and allocator leak accounting.
+const PublicationProbe = struct {
+    const Parent = struct {
+        pub fn retainReadiness(_: *@This()) void {}
+        pub fn releaseReadiness(_: *@This()) void {}
+        pub fn childrenClosed(_: *@This()) void {}
+    };
+    const Child = struct {
+        allocator: std.mem.Allocator,
+        mutex: std.Io.Mutex = .init,
+        authority: *PublicationAuthority,
+        ownership: external.Ownership = .none,
+        refs: usize = 1,
+        pub fn resourceAllocator(self: *@This()) std.mem.Allocator {
+            return self.allocator;
+        }
+        pub fn resourceInitialization(_: *@This()) Initialization {
+            return .ready;
+        }
+        pub fn resourceClose(self: *@This()) void {
+            std.Io.Threaded.mutexLock(&self.mutex);
+            self.authority.revokeLocked();
+            std.Io.Threaded.mutexUnlock(&self.mutex);
+        }
+        pub fn resourceJoined(_: *@This()) bool {
+            return true;
+        }
+        pub fn resourceSource(_: *@This()) external.ReadinessSource {
+            @panic("no pending probe I/O");
+        }
+        pub fn resourceShutdown(_: *@This()) Shutdown {
+            return .ready;
+        }
+        pub fn releasePort(self: *@This()) void {
+            self.refs -= 1;
+        }
+        pub fn prepareScopeTransfer(_: *@This(), _: *anyopaque, _: *anyopaque) heap.PortTransferError!void {
+            return error.Closed;
+        }
+        pub fn commitScopeTransfer(_: *@This()) void {}
+        pub fn abortScopeTransfer(_: *@This()) void {}
+        pub fn resourcePublicationMutex(self: *@This()) *std.Io.Mutex {
+            return &self.mutex;
+        }
+        pub fn resourcePublicationGroupLocked(self: *@This()) PublicationStatus {
+            return self.authority.statusLocked();
+        }
+        pub fn resourceOwnershipLocked(self: *@This()) *external.Ownership {
+            return &self.ownership;
+        }
+        pub fn resourceMarkPublishedLocked(self: *@This()) void {
+            self.authority.publishLocked();
+        }
+        pub fn resourceMember(self: *@This()) external.ScopeMember {
+            return external.scopeMember(Child, self);
+        }
+        pub fn retainExternalMember(self: *@This()) void {
+            self.refs += 1;
+        }
+        pub fn releaseExternalMember(self: *@This()) void {
+            self.refs -= 1;
+        }
+        pub fn cancelExternalMember(self: *@This(), origin: *external.ScopeIdentity) void {
+            if (self.ownership.authorizesCancellation(origin)) self.resourceClose();
+        }
+    };
+    const Initial = struct {
+        child: *Child,
+        pub fn lock(self: *@This()) void {
+            std.Io.Threaded.mutexLock(&self.child.mutex);
+        }
+        pub fn unlock(self: *@This()) void {
+            std.Io.Threaded.mutexUnlock(&self.child.mutex);
+        }
+        pub fn validate(_: *@This()) bool {
+            return true;
+        }
+        pub fn publish(self: *@This(), tokens: [16]?external.ScopeMembership) void {
+            self.child.ownership = .{ .owned = tokens[0].? };
+        }
+    };
+    const Preparation = struct {
+        pub const Error = error{};
+        pub fn prepare(_: *@This(), value: Value) Error!Value {
+            heap.retainValue(value);
+            return value;
+        }
+        host: *const heap.HostCleanup,
+        pub fn release(self: *@This(), value: Value) void {
+            heap.hostDomain(self.host).releaseValue(value);
+        }
+    };
+    const Schedule = enum { publication_first, cancellation_first, snapshot_prepared, membership_prepared, competing_publication };
+    // Inject closure at real allocator boundaries, outside all publication
+    // locks. This covers a stale snapshot without adding production test hooks.
+    const InterleavingAllocator = struct {
+        backing: std.mem.Allocator,
+        trigger: ?struct {
+            group: *scheduler.ExternalGroup,
+            remaining: usize,
+            rival: ?struct { result: *@import("port_result.zig").Result, scope: *scheduler.TaskScope, host: *const heap.HostCleanup } = null,
+        } = null,
+        fn allocator(self: *@This()) std.mem.Allocator {
+            return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+        }
+        fn alloc(raw: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (self.trigger) |*trigger| {
+                if (trigger.remaining == 0) {
+                    const action = trigger.*;
+                    self.trigger = null;
+                    if (action.rival) |rival| {
+                        const outcome = rival.result.claim(rival.scope) catch return null;
+                        if (outcome != .value) @panic("competing probe publication did not deliver");
+                        heap.hostDomain(rival.host).releaseValue(outcome.value);
+                    }
+                    action.group.close();
+                } else trigger.remaining -= 1;
+            }
+            return self.backing.rawAlloc(len, alignment, ra);
+        }
+        fn resize(raw: *anyopaque, memory: []u8, alignment: std.mem.Alignment, len: usize, ra: usize) bool {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return self.backing.rawResize(memory, alignment, len, ra);
+        }
+        fn remap(raw: *anyopaque, memory: []u8, alignment: std.mem.Alignment, len: usize, ra: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return self.backing.rawRemap(memory, alignment, len, ra);
+        }
+        fn free(raw: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.backing.rawFree(memory, alignment, ra);
+        }
+    };
+    fn run(backing: std.mem.Allocator, schedule: Schedule, result_delivery: bool) !void {
+        var interleaving: InterleavingAllocator = .{ .backing = backing };
+        const allocator = interleaving.allocator();
+        const cancellation = schedule != .publication_first and schedule != .competing_publication;
+        var cleanup = heap.testing.Cleanup.init(allocator);
+        defer cleanup.deinit();
+        var runtime = try scheduler.Scheduler.init(cleanup.capability(), .cooperative, .manual);
+        var scope = scheduler.TaskScope.init(runtime.worker());
+        defer runtime.deinit(&scope);
+        var parent: Parent = .{};
+        const group = try scheduler.ExternalGroup.create(runtime.worker(), Parent, &parent);
+        defer group.release();
+        const authority = try PublicationAuthority.create(allocator, group);
+        defer authority.deinit();
+        var child: Child = .{ .allocator = allocator, .authority = authority };
+        defer {
+            var detached = child.ownership.release();
+            detached.detachAll();
+        }
+        var initial: Initial = .{ .child = &child };
+        var members: [16]?external.ScopeMember = .{null} ** 16;
+        members[0] = child.resourceMember();
+        try std.testing.expect(try group.publish(members, &initial));
+        const value = try Resource.create(Child, .staged, 1, &child);
+        // Settle heap ownership before the stack-backed registered adapter dies.
+        defer cleanup.releaseValue(value);
+        const message_api = @import("port_message.zig");
+        const messages = @import("port_messages.zig");
+        const validating = try message_api.Message.create(allocator, value, .{});
+        defer validating.retire(cleanup.domain());
+        var work = @import("poll.zig").WorkBudget.init(64);
+        try std.testing.expect(try validating.advance(&work) == .complete);
+        const budget = try messages.Budget.create(cleanup.capability(), 8);
+        defer budget.release();
+        const pair = try messages.Queue.create(budget, 1);
+        defer pair.queue.release();
+        const result = try @import("port_result.zig").Result.create(cleanup.capability());
+        defer result.release();
+        const rival = try @import("port_result.zig").Result.create(cleanup.capability());
+        defer rival.release();
+        if (schedule == .competing_publication) {
+            const duplicate = try messages.Envelope.create(cleanup.capability(), validating.validated().?);
+            try std.testing.expect(rival.replace(duplicate));
+            rival.complete(.success);
+        }
+        const envelope = try messages.Envelope.create(cleanup.capability(), validating.validated().?);
+        if (result_delivery) {
+            try std.testing.expect(result.replace(envelope));
+            result.complete(.success);
+        } else try std.testing.expect(pair.queue.send(envelope) == .accepted);
+        // Close the publication group without advancing its cancellation walk:
+        // the authority still looks provisional, but rejection must be terminal.
+        switch (schedule) {
+            .publication_first => {},
+            .competing_publication => interleaving.trigger = .{
+                .group = group,
+                .remaining = 0,
+                .rival = .{ .result = rival, .scope = &scope, .host = cleanup.capability() },
+            },
+            .cancellation_first => group.close(),
+            .snapshot_prepared, .membership_prepared => interleaving.trigger = .{
+                .group = group,
+                .remaining = if (schedule == .snapshot_prepared) 0 else 1,
+            },
+        }
+        defer interleaving.trigger = null;
+        var preparation: Preparation = .{ .host = cleanup.capability() };
+        if (result_delivery) {
+            var outcome = result.claim(&scope) catch |err| {
+                try std.testing.expect(err == error.OutOfMemory);
+                try std.testing.expect(result.completion() == .ready);
+                return err;
+            };
+            if (schedule == .competing_publication) {
+                try std.testing.expect(outcome == .pending);
+                outcome = try result.claim(&scope);
+            }
+            if (cancellation) {
+                try std.testing.expect(outcome == .cancelled);
+                try std.testing.expect(try result.claim(&scope) == .cancelled);
+            } else {
+                try std.testing.expect(outcome == .value);
+                preparation.release(outcome.value);
+                try std.testing.expect(try result.claim(&scope) == .claimed);
+            }
+        } else {
+            var outcome = pair.queue.receive(&scope, &preparation) catch |err| {
+                try std.testing.expect(err == error.OutOfMemory);
+                const view = pair.queue.peek().message;
+                defer view.release();
+                try std.testing.expect(view.value().port == value.port);
+                return err;
+            };
+            if (schedule == .competing_publication) {
+                try std.testing.expect(outcome == .pending);
+                outcome = try pair.queue.receive(&scope, &preparation);
+            }
+            if (cancellation) {
+                try std.testing.expect(outcome == .failed);
+                try std.testing.expect(pair.queue.peek() == .pending);
+            } else {
+                try std.testing.expect(outcome == .message);
+                preparation.release(outcome.message);
+            }
+        }
+        try std.testing.expect(interleaving.trigger == null);
+        if (!cancellation) {
+            group.close();
+            try std.testing.expectEqual(@as(usize, 1), scope.pending());
+            try std.testing.expect(authority.statusLocked() == .published);
+        } else try std.testing.expectEqual(@as(usize, 0), scope.pending());
+    }
+};
+
+test "native: child delivery publication preserves ownership across allocation failure and cancellation" {
+    for (std.enums.values(PublicationProbe.Schedule)) |schedule| {
+        for ([_]bool{ false, true }) |result_delivery| {
+            try std.testing.checkAllAllocationFailures(std.testing.allocator, PublicationProbe.run, .{ schedule, result_delivery });
+        }
+    }
+}

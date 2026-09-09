@@ -48,7 +48,7 @@ pub fn Resource(comptime Adapter: type) type {
         changed: std.Io.Condition = .init,
         waits: external.WaitList(Cell) = .{},
         ownership: external.Ownership = .provisional,
-        publication: union(enum) { published, provisional: *scheduler.ExternalGroup } = .published,
+        publication: ?*resource_api.PublicationAuthority = null,
         dependency: union(enum) {
             independent,
             attached: struct { parent: *Cell, membership: external.ScopeMembership },
@@ -69,7 +69,7 @@ pub fn Resource(comptime Adapter: type) type {
         }
         fn release(self: *Cell) void {
             if (self.refs.fetchSub(1, .acq_rel) != 1) return;
-            if (self.publication == .provisional) self.publication.provisional.release();
+            if (self.publication) |authority| authority.deinit();
             if (self.children) |children| children.release();
             self.controllers.deinit();
             self.adapter.destroy(self);
@@ -151,17 +151,14 @@ pub fn Resource(comptime Adapter: type) type {
         pub fn resourcePublicationMutex(self: *Cell) *std.Io.Mutex {
             return &self.mutex;
         }
-        pub fn resourcePublicationGroupLocked(self: *Cell) ?*scheduler.ExternalGroup {
-            return switch (self.publication) {
-                .published => null,
-                .provisional => |group| group,
-            };
+        pub fn resourcePublicationGroupLocked(self: *Cell) resource_api.PublicationStatus {
+            return if (self.publication) |authority| authority.statusLocked() else .published;
         }
         pub fn resourceOwnershipLocked(self: *Cell) *external.Ownership {
             return &self.ownership;
         }
         pub fn resourceMarkPublishedLocked(self: *Cell) void {
-            self.publication = .published;
+            self.publication.?.publishLocked();
         }
         pub fn resourceMember(self: *Cell) external.ScopeMember {
             return external.scopeMember(Cell, self);
@@ -189,7 +186,7 @@ pub fn Resource(comptime Adapter: type) type {
         }
         pub fn releasePort(self: *Cell) void {
             lock(&self.mutex);
-            if (self.publication == .provisional) self.closeLocked();
+            if (self.resourcePublicationGroupLocked() != .published) self.closeLocked();
             unlock(&self.mutex);
             self.release();
         }
@@ -258,6 +255,7 @@ pub fn Resource(comptime Adapter: type) type {
         }
         pub fn closeLocked(self: *Cell) void {
             if (self.closed.swap(true, .acq_rel)) return;
+            if (self.publication) |authority| authority.revokeLocked();
             const notify_backend = self.phase == .initializing or self.phase == .open;
             self.phase = .closing;
             if (self.children) |children| children.close();

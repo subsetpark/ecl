@@ -1499,8 +1499,13 @@ after controller return and cancellation settlement; ABI errors are translated
 before reaching this owner. Completion observation remains repeatable, while
 claiming consumes an available terminal value under the receiving scope and
 result locks. Replacing or discarding an envelope detaches it under the result
-lock and retires it after unlocking. Queue delivery uses the same scope-first
-publication boundary. A scope that has begun closing refuses a claim without
+lock and retires it after unlocking. Queue delivery and result claims share one scope-first publication transaction.
+Delivery owns observation, output preparation, and claim arbitration; drivers
+receive only values, readiness, EOF, or terminal transport failures. A changed
+snapshot requires reacquisition. Revoked child authority instead detaches the
+undeliverable envelope under the source lock and transfers its cleanup to
+bounded retirement after unlocking. It can never leave that envelope available
+as a retry candidate. A scope that has begun closing refuses a claim without
 consuming its source. The receiving evaluator reserves stack capacity before that
 transition, so allocation failure cannot consume a result without publishing it.
 The driver's completion carries that reservation with its owned output; only
@@ -1593,8 +1598,15 @@ Membership storage for a batch of up to sixteen resources is prepared before
 publication locks are acquired. Under the receiving scope lock, one owner-issued
 guard validates the source and commits every membership with the source
 ownership transition. Cancellation can observe the whole batch or none of it.
-Rejected publication releases prepared pins outside both scope and source
-locks and leaves the source ownership unchanged. Its
+Prepared allocation failure and a changed snapshot release pins outside both
+scope and source locks without consuming the delivery. Terminal rejection
+removes the undeliverable source instead. Provisional publication is an opaque
+service-owned capability with provisional, published, and revoked states.
+Revocation is terminal; its retained group pin grants reclamation lifetime only.
+The transaction orders group closure against destination attachment and consumes
+publication authority on success, before the former owner can cancel through
+its replaced membership. An already-published identity is shared without
+reattachment, including when an older snapshot's group has since closed. Its
 ownership state distinguishes provisional attachment from released ownership;
 a release racing initial attachment consumes the eventual membership instead of
 resurrecting a closed resource. Attachment and detachment occur outside the

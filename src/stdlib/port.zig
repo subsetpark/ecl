@@ -210,33 +210,34 @@ const ReceiveDriver = struct {
         self.queue.endRead();
         releases.releaseValue(self.endpoint);
     }
+    const Preparation = struct {
+        pub const Error = machine.MachineError;
+        evaluator: *machine.Machine,
+        pub fn prepare(self: *@This(), value: Value) Error!Value {
+            return dict.fromUniquePairs(self.evaluator.allocator(), self.evaluator.releaseDomain(), &.{
+                .{ .{ .symbol = try intern.intern("kind") }, .{ .symbol = try intern.intern("message") } },
+                .{ .{ .symbol = try intern.intern("value") }, value },
+            });
+        }
+        pub fn release(self: *@This(), value: Value) void {
+            self.evaluator.releaseDomain().releaseValue(value);
+        }
+    };
     pub fn advance(evaluator: *machine.Machine, self: *ReceiveDriver) machine.MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        switch (self.queue.peek()) {
+        const scope = try callingScope(evaluator);
+        const output = try evaluator.reserveStack(1);
+        var preparation: Preparation = .{ .evaluator = evaluator };
+        const delivery = self.queue.receive(scope, &preparation) catch |err| return switch (err) {
+            error.ScopeClosing => publicationFailure(evaluator, error.ScopeClosing),
+            error.Overflow => publicationFailure(evaluator, error.Overflow),
+            else => |failure| failure,
+        };
+        switch (delivery) {
             .pending => try evaluator.park(.{ .external = self.queue.source() }),
             .failed => |failure| return transportFailure(evaluator, failure),
-            .eof => {
-                const output = try evaluator.reserveStack(1);
-                return output.output(try dict.fromUniquePairs(evaluator.allocator(), evaluator.releaseDomain(), &.{.{ .{ .symbol = try intern.intern("kind") }, .{ .symbol = try intern.intern("eof") } }}));
-            },
-            .message => |input| {
-                defer input.release();
-                const scope = try callingScope(evaluator);
-                const output = try evaluator.reserveStack(1);
-                const event = try dict.fromUniquePairs(evaluator.allocator(), evaluator.releaseDomain(), &.{
-                    .{ .{ .symbol = try intern.intern("kind") }, .{ .symbol = try intern.intern("message") } },
-                    .{ .{ .symbol = try intern.intern("value") }, input.value() },
-                });
-                const accepted = self.queue.claim(input, scope) catch |err| {
-                    evaluator.releaseDomain().releaseValue(event);
-                    return publicationFailure(evaluator, err);
-                };
-                if (!accepted) {
-                    evaluator.releaseDomain().releaseValue(event);
-                    return .yielded;
-                }
-                return output.output(event);
-            },
+            .eof => return output.output(try dict.fromUniquePairs(evaluator.allocator(), evaluator.releaseDomain(), &.{.{ .{ .symbol = try intern.intern("kind") }, .{ .symbol = try intern.intern("eof") } }})),
+            .message => |event| return output.output(event),
         }
         return .yielded;
     }

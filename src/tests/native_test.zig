@@ -1878,3 +1878,21 @@ test "native: complete controller writes retain FIFO turns across bounded pressu
         "r 1 port.read r 1 port.read r 1 port.read r 1 port.read r 1 port.read " ++
         "a port.await b port.await a port.close b port.close p port.close portprobe.cleaned", "[40] [41] [42] [50] [51] [52] 1");
 }
+
+test "native: cancelled child delivery interleavings settle envelopes and join cleanup" {
+    for ([_]u32{ 1, 8 }) |workers| {
+        // The controller enters the gate only after enqueueing the child.
+        try expectPortProgramWithLimits(workers, .{ .message_capacity = 1, .message_queue_bytes = 8 }, "portprobe.factory [] port.open 'p set p portprobe.child-event-blocked [] port.begin 'x set " ++
+            "1 portprobe.await-blocked x port.cancel x wrap (port.await) @attempt 'err at 'kind at " ++
+            "x portprobe.receiver port.endpoint 'r set r wrap (port.receive) @attempt 'err at 'kind at " ++
+            "r wrap (port.receive) @attempt 'err at 'kind at x port.close p port.close portprobe.cleaned", "'cancelled 'cancelled 'cancelled 2");
+        // Receiving first transfers cancellation authority before the old owner closes.
+        try expectPortProgramWithLimits(workers, .{ .message_capacity = 1, .message_queue_bytes = 8 }, "portprobe.factory [] port.open 'p set p portprobe.child-event-blocked [] port.begin 'x set " ++
+            "1 portprobe.await-blocked x portprobe.receiver port.endpoint port.receive 'value at 'c set " ++
+            "x port.cancel x wrap (port.await) @attempt 'err at 'kind at x port.close p port.close " ++
+            "c portprobe.noop [] port.call len c port.close portprobe.cleaned", "'cancelled 0 2");
+        try expectPortProgramAtCapacity(workers, 2, 1, "portprobe.factory [] port.open 'p set p portprobe.child-result-blocked [] port.begin 'x set " ++
+            "1 portprobe.await-blocked x port.cancel x wrap (port.result) @attempt 'err at 'kind at " ++
+            "x wrap (port.result) @attempt 'err at 'kind at x port.close p port.close portprobe.cleaned", "'cancelled 'cancelled 2");
+    }
+}
