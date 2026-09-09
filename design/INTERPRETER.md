@@ -616,6 +616,8 @@ The Session imports current-format dependency catalogs without source discovery
 or store mutation and mints its own identities. Root project discovery remains
 dynamic. Catalog validation owns path safety, namespace uniqueness, reference
 integrity, and graph limits for both imported and freshly built entries.
+Both producers order each artifact's exports by numeric module-name ID for
+bounded binary-search membership, independently of spelling or metadata order.
 Fresh catalog export verification retains export and module cursors across
 scheduler steps and charges each comparison against the caller's work budget.
 

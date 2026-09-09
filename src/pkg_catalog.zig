@@ -19,6 +19,10 @@ const max_artifacts = 4096;
 const max_modules = 65_536;
 const max_relative_path_bytes = 4096;
 
+fn moduleNameLessThan(_: void, left: intern.ModuleName, right: intern.ModuleName) bool {
+    return @intFromEnum(left) < @intFromEnum(right);
+}
+
 pub const PackageId = enum(u32) { _ };
 pub const ArtifactId = enum(u32) { _ };
 
@@ -283,11 +287,7 @@ const Builder = struct {
         const artifact_id: ArtifactId = @enumFromInt(@as(u32, @intCast(self.artifacts.items.len)));
         try self.artifacts.ensureUnusedCapacity(self.allocator, 1);
         try self.modules.ensureUnusedCapacity(self.allocator, names.items.len);
-        std.mem.sort(intern.ModuleName, names.items, {}, struct {
-            fn lessThan(_: void, left: intern.ModuleName, right: intern.ModuleName) bool {
-                return std.mem.order(u8, intern.get(intern.moduleId(left)), intern.get(intern.moduleId(right))) == .lt;
-            }
-        }.lessThan);
+        std.mem.sort(intern.ModuleName, names.items, {}, moduleNameLessThan);
         const owned_names = try names.toOwnedSlice(self.allocator);
         errdefer self.allocator.free(owned_names);
         const relative = try self.allocator.dupe(u8, claim.relative_path);
@@ -1056,6 +1056,7 @@ pub fn read(host: *const heap.HostCleanup, io: std.Io, input: PackageInput, hash
             for (builder.modules.items) |prior| if (prior.name == module.*) return error.Invalid;
             try builder.modules.append(allocator, .{ .name = module.*, .artifact = @enumFromInt(@as(u32, @intCast(index))) });
         }
+        std.mem.sort(intern.ModuleName, names, {}, moduleNameLessThan);
         const absolute = try std.fs.path.join(allocator, &.{ input.root_dir, relative });
         errdefer allocator.free(absolute);
         try builder.artifacts.append(allocator, .{ .package = input.id, .relative_path = relative, .absolute_path = absolute, .modules = names });

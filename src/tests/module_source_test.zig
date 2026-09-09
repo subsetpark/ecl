@@ -65,6 +65,45 @@ test "loader: startup reads dependency metadata and first use opens the source" 
     try std.testing.expect(CatalogIoObservation.source_reads > 0);
 }
 
+test "loader: catalog exports resolve with non-lexical IDs and reversed persisted exports" {
+    // Force fresh discovery's lexical order and persisted metadata order to
+    // disagree with their respective intern-ID orders before opening a Session.
+    _ = try intern.internModuleName("root.order-z");
+    _ = try intern.internModuleName("root.order-a");
+    _ = try intern.internModuleName("dep.order-a");
+    _ = try intern.internModuleName("dep.order-z");
+    inline for ([_]bool{ false, true }) |persisted| {
+        var fixture = try LockFixture.init();
+        defer fixture.deinit();
+        const source = if (persisted)
+            "[] ((11) 'answer def) 'dep.order-a @defm [] ((22) 'answer def) 'dep.order-z @defm"
+        else
+            "[] ((11) 'answer def) 'root.order-a @defm [] ((22) 'answer def) 'root.order-z @defm";
+        if (persisted) {
+            try fixture.writeOnePackageLock("dep", "1.0.0", hash_a);
+            try fixture.writeStoreArtifact("dep", "1.0.0", hash_a, "order.ecl", "\"dep.order-z\" \"dep.order-a\"", source, .{});
+        } else {
+            try fixture.write("project/ecl.lock", "{'format 1 'root \"root\" 'packages {} 'requires {\"root\" {}}}");
+            try fixture.write("project/ecl.pkg", "{'format 1 'name \"root\" 'version \"0.1.0\" " ++
+                "'sources [\"*.ecl\"] 'exports [\"root.order-a\" \"root.order-z\"] 'requires {}}");
+            try fixture.write("project/order.ecl", source);
+        }
+        var backing: test_heap.SessionHeap = .init;
+        defer test_heap.retire(&backing);
+        var inputs = try runtime_fixture.Fixture.init();
+        defer inputs.deinit();
+        const environ = [_]sessionHostEntry{.{ .name = "ECL_CACHE", .value = fixture.cache }};
+        var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{
+            .initial_cwd = fixture.nested,
+            .environ = &environ,
+        }), .cooperative, .evaluate);
+        defer runtime.deinit();
+        try expectOk(&runtime, if (persisted) "dep.order-a.answer dep.order-z.answer" else "root.order-a.answer root.order-z.answer");
+        try std.testing.expectEqual(@as(i64, 11), runtime.stackItems()[0].int);
+        try std.testing.expectEqual(@as(i64, 22), runtime.stackItems()[1].int);
+    }
+}
+
 test "loader: invalid dependency catalogs fail closed with sync diagnostics" {
     const invalid = [_]?[]const u8{
         null,                                                                                                                                                 "not inert metadata",                                                                                                         "{'format 2 'name \"dep\" 'version \"1.0.0\" 'hash \"" ++ hash_a ++ "\" 'sources []}",
