@@ -13,15 +13,15 @@ const source_groups = [_]SourceGroup{
     // Exact, non-rehashing map construction and resumable interning keep
     // user-sized storage work outside scheduler-native stacks.
     .{ .production = true, .files = &.{
-        "value.zig",       "heap.zig", "intern.zig", "list.zig",
-        "equal.zig",       "dict.zig", "print.zig",  "poll.zig",
-        "text_buffer.zig",
+        "value.zig",       "heap.zig",                "intern.zig", "list.zig",
+        "equal.zig",       "dict.zig",                "print.zig",  "poll.zig",
+        "text_buffer.zig", "startup_environment.zig",
     }, .sources = &.{
         @embedFile("../value.zig"),       @embedFile("../heap.zig"),
         @embedFile("../intern.zig"),      @embedFile("../list.zig"),
         @embedFile("../equal.zig"),       @embedFile("../dict.zig"),
         @embedFile("../print.zig"),       @embedFile("../poll.zig"),
-        @embedFile("../text_buffer.zig"),
+        @embedFile("../text_buffer.zig"), @embedFile("../startup_environment.zig"),
     } },
     // Tokenization, parsing, binder lowering, exact materialization, and
     // provenance publication all carry nominal resumable state. The larger

@@ -138,8 +138,7 @@ const UnmoduleDriver = struct {
                         .domain,
                         "unmodule requires a valid module name",
                     );
-                    const registry = evaluator.unit.inherited.registry orelse
-                        return evaluator.fail(.domain, "module registry is unavailable");
+                    const registry = evaluator.unit.inherited.registry;
                     self.cursor = .init(registry.removalCursor(
                         name,
                         &evaluator.unit.turn_authority,
@@ -333,8 +332,7 @@ const ImportDriver = struct {
             }
 
             if (self.generation == null) {
-                const registry = evaluator.unit.inherited.registry orelse
-                    return evaluator.fail(.domain, "module registry is unavailable");
+                const registry = evaluator.unit.inherited.registry;
                 if (self.acquisition == null)
                     self.acquisition = .init(registry.acquireCursor(self.module_name.?));
                 switch (self.acquisition.?.borrowMut().advance()) {
@@ -482,8 +480,7 @@ const AliasDriver = struct {
                     continue;
                 },
             };
-            const registry = evaluator.unit.inherited.registry orelse
-                return evaluator.fail(.domain, "module registry is unavailable");
+            const registry = evaluator.unit.inherited.registry;
             if (self.cursor == null) self.cursor = .init(registry.aliasCursor(self.short.?, self.target.?));
             switch (self.cursor.?.borrowMut().advance() catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,

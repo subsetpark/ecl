@@ -145,6 +145,58 @@ fn validateRunner(name: []const u8) AppError!bool {
     return true;
 }
 
+/// Initialized at its final address: writers borrow these buffers, and the
+/// Session borrows the writers and roots until teardown. Do not move after init.
+const CliRuntime = struct {
+    output_buffer: [4096]u8,
+    diagnostic_buffer: [4096]u8,
+    output_writer: std.Io.File.Writer,
+    diagnostic_writer: std.Io.File.Writer,
+    roots: [2]ecl.filesystem_port.Root,
+    session: ecl.session.Session,
+
+    fn init(
+        self: *CliRuntime,
+        startup: Startup,
+        arguments: []const []const u8,
+        worker_count: usize,
+        standard_input: ecl.machine.StandardInput.Availability,
+        mode: ecl.session.CommandMode,
+        project_root: ?[]const u8,
+    ) AppError!void {
+        self.output_writer = std.Io.File.stdout().writerStreaming(startup.process.io, &self.output_buffer);
+        self.diagnostic_writer = std.Io.File.stderr().writerStreaming(startup.process.io, &self.diagnostic_buffer);
+        self.roots[0] = cwdRoot(startup.cwd);
+        const root_count: usize = if (project_root) |path| count: {
+            self.roots[1] = .{ .name = "project", .absolute_path = path };
+            break :count 2;
+        } else 1;
+        self.session = try ecl.session.Session.init(
+            startup.process.gpa,
+            arguments,
+            .{
+                .io = startup.process.io,
+                .output = &self.output_writer.interface,
+                .diagnostics = &self.diagnostic_writer.interface,
+                .ecl_path = startup.process.environ_map.get("ECL_PATH"),
+                .environ = startup.environ,
+                .standard_input = standard_input,
+                .initial_cwd = startup.cwd,
+                .filesystem = .{ .roots = self.roots[0..root_count] },
+                .clock = .{ .wall = .host },
+            },
+            .{ .worker_pool = worker_count },
+            mode,
+        );
+        self.session.setNativeDiagnostics(startup.process.environ_map.get("ECL_NATIVE_DIAGNOSTICS") != null);
+    }
+
+    fn deinit(self: *CliRuntime) void {
+        self.session.deinit();
+        self.* = undefined;
+    }
+};
+
 fn testCommand(init: Startup, arguments: []const []const u8) AppError!u8 {
     var runner: []const u8 = "test.default.run";
     var trailing: []const []const u8 = &.{};
@@ -172,30 +224,12 @@ fn testCommand(init: Startup, arguments: []const []const u8) AppError!u8 {
     );
 
     const worker_count = try configuredWorkers(init) orelse return 2;
-    var output_buffer: [4096]u8 = undefined;
-    var output_writer = std.Io.File.stdout().writerStreaming(init.process.io, &output_buffer);
-    var diagnostic_buffer: [4096]u8 = undefined;
-    var diagnostic_writer = std.Io.File.stderr().writerStreaming(init.process.io, &diagnostic_buffer);
-    const initial_cwd = init.cwd;
-    var runtime = try ecl.session.Session.init(
-        init.process.gpa,
-        trailing,
-        .{
-            .io = init.process.io,
-            .output = &output_writer.interface,
-            .diagnostics = &diagnostic_writer.interface,
-            .ecl_path = init.process.environ_map.get("ECL_PATH"),
-            .environ = init.environ,
-            .standard_input = .data,
-            .initial_cwd = initial_cwd,
-            .filesystem = .{ .roots = &.{cwdRoot(initial_cwd)} },
-            .clock = .{ .wall = .host },
-        },
-        .{ .worker_pool = worker_count },
-        .language_tests,
-    );
-    defer runtime.deinit();
-    runtime.setNativeDiagnostics(init.process.environ_map.get("ECL_NATIVE_DIAGNOSTICS") != null);
+    // SAFETY: init fills borrowed storage and the Session before use; only a
+    // successful init installs the teardown defer, and cli stays at this address.
+    var cli: CliRuntime = undefined;
+    try cli.init(init, trailing, worker_count, .data, .language_tests, null);
+    defer cli.deinit();
+    const runtime = &cli.session;
 
     while (true) switch (try runtime.advanceRootPreload()) {
         .pending => {},
@@ -209,7 +243,7 @@ fn testCommand(init: Startup, arguments: []const []const u8) AppError!u8 {
         .invalid => |message| return emitSyntheticError(init, .io, message, null),
         .err => |failure| {
             defer runtime.release(failure);
-            try printSessionError(init, &runtime, failure);
+            try printSessionError(init, runtime, failure);
             return 1;
         },
     };
@@ -227,7 +261,7 @@ fn testCommand(init: Startup, arguments: []const []const u8) AppError!u8 {
         ),
         .err => |failure| status: {
             defer runtime.release(failure);
-            try printSessionError(init, &runtime, failure);
+            try printSessionError(init, runtime, failure);
             break :status 1;
         },
     };
@@ -580,38 +614,17 @@ fn executeWith(
     project_root: ?[]const u8,
     package_grant: ?ecl.package_authority.PackageGrant,
 ) AppError!u8 {
-    var output_buffer: [4096]u8 = undefined;
-    var output_writer = std.Io.File.stdout().writerStreaming(init.process.io, &output_buffer);
-    var diagnostic_buffer: [4096]u8 = undefined;
-    var diagnostic_writer = std.Io.File.stderr().writerStreaming(init.process.io, &diagnostic_buffer);
-    const initial_cwd = init.cwd;
-    // SAFETY: the second slot is read only through `filesystem_roots[0..root_count]`,
-    // and `root_count` becomes 2 only after that slot is assigned below.
-    var filesystem_roots: [2]ecl.filesystem_port.Root = .{ cwdRoot(initial_cwd), undefined };
-    var root_count: usize = 1;
-    if (project_root) |path| {
-        filesystem_roots[1] = .{ .name = "project", .absolute_path = path };
-        root_count = 2;
-    }
-    const host: ecl.session.RuntimeInputs = .{
-        .io = init.process.io,
-        .output = &output_writer.interface,
-        .diagnostics = &diagnostic_writer.interface,
-        .ecl_path = init.process.environ_map.get("ECL_PATH"),
-        .environ = init.environ,
-        .standard_input = standard_input,
-        .initial_cwd = initial_cwd,
-        .filesystem = .{ .roots = filesystem_roots[0..root_count] },
-        .clock = .{ .wall = .host },
-    };
-    var session = try ecl.session.Session.init(init.process.gpa, arguments, host, .{ .worker_pool = worker_count }, if (package_grant) |grant| .{ .package = grant } else .evaluate);
-    defer session.deinit();
-    session.setNativeDiagnostics(init.process.environ_map.get("ECL_NATIVE_DIAGNOSTICS") != null);
+    // SAFETY: init fills borrowed storage and the Session before use; only a
+    // successful init installs the teardown defer, and cli stays at this address.
+    var cli: CliRuntime = undefined;
+    try cli.init(init, arguments, worker_count, standard_input, if (package_grant) |grant| .{ .package = grant } else .evaluate, project_root);
+    defer cli.deinit();
+    const session = &cli.session;
     const outcome = try session.runUnit(source_name, source);
     if (session.requestedExit()) |status| return status;
     switch (outcome) {
         .ok => {
-            if (print_stack) try printStack(&session);
+            if (print_stack) try printStack(session);
             return 0;
         },
         .incomplete => |incomplete| return emitSyntheticError(
@@ -622,36 +635,18 @@ fn executeWith(
         ),
         .err => |error_value| {
             defer session.release(error_value);
-            try printSessionError(init, &session, error_value);
+            try printSessionError(init, session, error_value);
             return 1;
         },
     }
 }
 fn repl(init: Startup, worker_count: usize) AppError!u8 {
-    var output_buffer: [4096]u8 = undefined;
-    var output_writer = std.Io.File.stdout().writerStreaming(init.process.io, &output_buffer);
-    var diagnostic_buffer: [4096]u8 = undefined;
-    var diagnostic_writer = std.Io.File.stderr().writerStreaming(init.process.io, &diagnostic_buffer);
-    const initial_cwd = init.cwd;
-    var session = try ecl.session.Session.init(
-        init.process.gpa,
-        &.{},
-        .{
-            .io = init.process.io,
-            .output = &output_writer.interface,
-            .diagnostics = &diagnostic_writer.interface,
-            .ecl_path = init.process.environ_map.get("ECL_PATH"),
-            .environ = init.environ,
-            .standard_input = .program_source,
-            .initial_cwd = initial_cwd,
-            .filesystem = .{ .roots = &.{cwdRoot(initial_cwd)} },
-            .clock = .{ .wall = .host },
-        },
-        .{ .worker_pool = worker_count },
-        .evaluate,
-    );
-    defer session.deinit();
-    session.setNativeDiagnostics(init.process.environ_map.get("ECL_NATIVE_DIAGNOSTICS") != null);
+    // SAFETY: init fills borrowed storage and the Session before use; only a
+    // successful init installs the teardown defer, and cli stays at this address.
+    var cli: CliRuntime = undefined;
+    try cli.init(init, &.{}, worker_count, .program_source, .evaluate, null);
+    defer cli.deinit();
+    const session = &cli.session;
     const history_path = if (init.process.environ_map.get("HOME")) |home|
         std.Io.Dir.path.join(init.process.gpa, &.{ home, ".ecl_history" }) catch
             return error.OutOfMemory
@@ -681,7 +676,7 @@ fn repl(init: Startup, worker_count: usize) AppError!u8 {
             },
             .eof => {
                 if (pending.isEmpty()) return 0;
-                return emitIncompleteAtEof(init, &session, pending.source());
+                return emitIncompleteAtEof(init, session, pending.source());
             },
             .line => |owned| bytes: {
                 var line = owned;
@@ -695,12 +690,12 @@ fn repl(init: Startup, worker_count: usize) AppError!u8 {
         switch (outcome) {
             .incomplete => {},
             .ok => {
-                try printStack(&session);
+                try printStack(session);
                 pending.clear();
             },
             .err => |error_value| {
                 defer session.release(error_value);
-                try printSessionError(init, &session, error_value);
+                try printSessionError(init, session, error_value);
                 pending.clear();
             },
         }

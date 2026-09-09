@@ -849,6 +849,8 @@ pub fn build(b: *std.Build) void {
             "spans.test.",
             "env.test.",
             "console.test.",
+            // Two-allocation startup capture and validation have no Session cost.
+            "startup_environment.test.",
             "tests.value_test.",
             "tests.reader_test.",
             "tests.machine_test.",

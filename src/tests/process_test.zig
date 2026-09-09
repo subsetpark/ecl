@@ -376,3 +376,49 @@ test "process: wait observes broken input after the final accepted write" {
         .stderr_capacity = 1,
     }, "[33] 'io", workers);
 }
+
+test "process: Sessions share captured values with children and isolate overrides" {
+    const fixture_path = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, fixture.process_exe, allocator);
+    defer allocator.free(fixture_path);
+    var heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&heap);
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    var captured = "first".*;
+    const entries = [_]@import("../startup_environment.zig").EnvironmentEntry{
+        .{ .name = "ECL_PROCESS_PROBE", .value = &captured },
+    };
+    var first = try session.Session.init(heap.allocator(), &.{}, inputs.inputs(.{ .environ = &entries }), .{ .worker_pool = 2 }, .evaluate);
+    defer first.deinit();
+    @memcpy(&captured, "later");
+    var second = try session.Session.init(heap.allocator(), &.{}, inputs.inputs(.{ .environ = &entries }), .{ .worker_pool = 2 }, .evaluate);
+    defer second.deinit();
+    @memcpy(&captured, "other");
+    const program = try source(
+        "\"ECL_PROCESS_PROBE\" getenv " ++
+            "[] (\"ECL_PROCESS_PROBE\" getenv) @spawn task.await 'ok at first " ++
+            "{{'executable \"{s}\" 'args (\"inspect\") 'cwd \"/\"}} proc.run 'stdout at chars " ++
+            "{{'executable \"{s}\" 'args (\"inspect\") 'cwd \"/\" 'env {{\"ECL_PROCESS_PROBE\" \"child\"}}}} proc.run 'stdout at chars " ++
+            "\"ECL_PROCESS_PROBE\" getenv",
+        .{ fixture_path, fixture_path },
+    );
+    defer allocator.free(program);
+    for ([_]*session.Session{ &first, &second }, [_][]const u8{ "first", "later" }) |runtime, expected| {
+        switch (try runtime.runUnit("<captured-environment>", program)) {
+            .ok => {},
+            .incomplete => return error.UnexpectedIncomplete,
+            .err => |failure| {
+                defer runtime.release(failure);
+                var rendered = try runtime.renderValue(failure);
+                defer rendered.deinit();
+                std.log.err("unexpected process error: {s}", .{rendered.bytes()});
+                return error.UnexpectedLanguageError;
+            },
+        }
+        var display = try runtime.stackDisplay();
+        defer display.deinit();
+        const wanted = try std.fmt.allocPrint(allocator, "\"{s}\" \"{s}\" \"cwd=/\\nprobe={s}\\n\" \"cwd=/\\nprobe=child\\n\" \"{s}\"", .{ expected, expected, expected, expected });
+        defer allocator.free(wanted);
+        try std.testing.expectEqualStrings(wanted, display.bytes());
+    }
+}

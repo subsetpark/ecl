@@ -215,46 +215,7 @@ fn releaseDisplayBlocks(
     blocks.deinit(allocator);
 }
 
-/// One owned copy of the host environment. Names and values live in a single
-/// byte block so teardown is two frees regardless of how large the
-/// environment was.
-const EnvironSnapshot = struct {
-    entries: []machine.Environ.Entry,
-    bytes: ?[]u8,
-
-    fn capture(
-        allocator: std.mem.Allocator,
-        source: []const machine.Environ.Entry,
-    ) error{OutOfMemory}!EnvironSnapshot {
-        if (source.len == 0) return .{ .entries = &.{}, .bytes = null };
-        var total: usize = 0;
-        for (source) |entry| {
-            total = std.math.add(usize, total, entry.name.len) catch return error.OutOfMemory;
-            total = std.math.add(usize, total, entry.value.len) catch return error.OutOfMemory;
-        }
-        const bytes = try allocator.alloc(u8, total);
-        errdefer allocator.free(bytes);
-        const entries = try allocator.alloc(machine.Environ.Entry, source.len);
-        var offset: usize = 0;
-        for (source, entries) |entry, *copy| {
-            const name_end = offset + entry.name.len;
-            @memcpy(bytes[offset..name_end], entry.name);
-            const value_end = name_end + entry.value.len;
-            @memcpy(bytes[name_end..value_end], entry.value);
-            copy.* = .{
-                .name = bytes[offset..name_end],
-                .value = bytes[name_end..value_end],
-            };
-            offset = value_end;
-        }
-        return .{ .entries = entries, .bytes = bytes };
-    }
-    fn deinit(self: *EnvironSnapshot, allocator: std.mem.Allocator) void {
-        if (self.bytes) |bytes| allocator.free(bytes);
-        if (self.entries.len != 0) allocator.free(self.entries);
-        self.* = undefined;
-    }
-};
+const EnvironSnapshot = @import("startup_environment.zig").Snapshot;
 
 const SessionCore = struct {
     module_access_seal: u8 = 0,
@@ -276,8 +237,7 @@ const SessionCore = struct {
     ecl_path: ?[]u8,
     project_lock: ?*pkg_lock.ProjectLock,
     root_preload: RootPreloadState = .idle,
-    environ: machine.Environ,
-    environ_bytes: ?[]u8,
+    environ: EnvironSnapshot,
     standard_input: machine.StandardInput,
     arguments: Value,
     console: console_api.Console,
@@ -423,16 +383,15 @@ pub const Session = enum(usize) {
             },
         );
         errdefer if (owned_project_lock) |project_lock| project_lock.deinit();
-        var snapshot = try EnvironSnapshot.capture(
+        var snapshot = EnvironSnapshot.capture(
             allocator,
             host.environ,
-        );
-        errdefer snapshot.deinit(allocator);
+        ) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.InvalidConfig => error.InvalidHostConfig,
+        };
+        errdefer snapshot.deinit();
         const process_owner = owner: {
-            const entries = try allocator.alloc(process_port.EnvironmentEntry, snapshot.entries.len);
-            defer allocator.free(entries);
-            for (snapshot.entries, entries) |entry, *copy|
-                copy.* = .{ .name = entry.name, .value = entry.value };
             const owned = try allocator.create(process_port.ProcessOwner);
             errdefer allocator.destroy(owned);
             owned.* = process_port.ProcessOwner.init(
@@ -440,7 +399,7 @@ pub const Session = enum(usize) {
                 host.io,
                 host.initial_cwd,
                 host.process_limits,
-                entries,
+                snapshot.view(),
             ) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.InvalidConfig => return error.InvalidHostConfig,
@@ -525,8 +484,7 @@ pub const Session = enum(usize) {
             },
             .ecl_path = owned_ecl_path,
             .project_lock = owned_project_lock,
-            .environ = .{ .entries = snapshot.entries },
-            .environ_bytes = snapshot.bytes,
+            .environ = snapshot,
             .standard_input = .init(
                 host.standard_input,
             ),
@@ -565,11 +523,6 @@ pub const Session = enum(usize) {
         if (core.tls_trust) |trust| core.allocator().free(trust.ca_file);
         core.root_preload.deinit();
         if (core.project_lock) |project_lock| project_lock.deinit();
-        var snapshot = EnvironSnapshot{
-            .entries = @constCast(core.environ.entries),
-            .bytes = core.environ_bytes,
-        };
-        snapshot.deinit(core.allocator());
         if (core.test_authority) |*authority| authority.deinit();
         core.registry.deinit();
         core.archive_owner.deinit();
@@ -586,6 +539,7 @@ pub const Session = enum(usize) {
         core.allocator().destroy(core.net_owner);
         core.process_owner.deinit();
         core.allocator().destroy(core.process_owner);
+        core.environ.deinit();
         const settled_native_owner = closing_native_owner.settle();
         host.drain();
         settled_native_owner.deinit();
@@ -645,7 +599,6 @@ pub const Session = enum(usize) {
                 .registry = &core.registry,
                 .test_observation = if (core.test_authority) |authority| authority.observation() else null,
                 .test_execution = if (core.test_authority) |authority| authority.execution() else null,
-                .native_loader = core.native_owner.loader(),
                 .native_diagnostics = core.native_diagnostics,
                 .tls_trust = core.tls_trust,
                 .ecl_path = core.ecl_path,
@@ -654,13 +607,14 @@ pub const Session = enum(usize) {
                 .phrase_recognizer = idioms.tryApply,
                 .package_access = if (core.package_owner) |owner| owner.access() else null,
                 .phase = .{ .runtime = .{
+                    .native_loader = core.native_owner.loader(),
                     .console = &core.console,
                     .host_io = core.host_io,
                     .process_access = core.process_owner.access(),
                     .filesystem_access = core.filesystem_owner.access(),
                     .net_access = core.net_owner.access(),
                     .wall_clock = core.wall_clock,
-                    .environ = &core.environ,
+                    .environ = core.environ.view(),
                     .standard_input = &core.standard_input,
                 } },
             },

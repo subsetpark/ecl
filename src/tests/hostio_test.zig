@@ -219,3 +219,22 @@ test "hostio: stack prints the visible operand window without changing it" {
         "[0] 10\n[1] 3\n",
     );
 }
+
+test "hostio: Session rejects invalid startup environment entries" {
+    var heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&heap);
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    for ([_]machine.Environ.Entry{
+        .{ .name = "", .value = "value" },
+        .{ .name = "A=B", .value = "value" },
+        .{ .name = "A\x00B", .value = "value" },
+        .{ .name = "A", .value = "val\x00ue" },
+    }) |entry| try std.testing.expectError(error.InvalidHostConfig, session.Session.init(
+        heap.allocator(),
+        &.{},
+        inputs.inputs(.{ .environ = &.{entry} }),
+        .cooperative,
+        .evaluate,
+    ));
+}

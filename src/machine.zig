@@ -1810,10 +1810,9 @@ pub const IdiomFallback = struct {
 /// Keeping this as one value makes addition of a new inherited service an
 /// atomic parent-to-child copy instead of a scheduler-site field checklist.
 pub const InheritedContext = struct {
-    registry: ?*modules.Registry = null,
+    registry: *modules.Registry,
     test_observation: ?*const modules.TestObservationAccess = null,
     test_execution: ?*const modules.TestExecutionAccess = null,
-    native_loader: ?*native_module.Loader = null,
     native_diagnostics: bool = false,
     tls_trust: ?TlsTrust = null,
     ecl_path: ?[]const u8 = null,
@@ -1841,13 +1840,14 @@ pub const InheritedContext = struct {
 /// Complete runtime services, borrowed from the Session that encloses every
 /// Unit and descendant. Bootstrap evaluation has no runtime services.
 pub const RuntimeContext = struct {
+    native_loader: *native_module.Loader,
     console: *console_api.Console,
     host_io: std.Io,
     process_access: *external.ProcessAccess,
     filesystem_access: *external.FilesystemAccess,
     net_access: *external.NetAccess,
     wall_clock: WallClock,
-    environ: *const Environ,
+    environ: Environ,
     standard_input: *StandardInput,
 };
 
@@ -1869,35 +1869,7 @@ pub const TlsTrust = struct {
 /// One immutable snapshot of the host environment, captured once at session
 /// init. `getenv` reads only this snapshot, so a session observes one
 /// deterministic environment and no primitive ever races a host `setenv`.
-pub const Environ = struct {
-    pub const Entry = struct { name: []const u8, value: []const u8 };
-
-    entries: []const Entry = &.{},
-
-    /// Resumable lookup: the environment block is host-sized rather than
-    /// constant, so the scan yields on the ordinary polled budget.
-    pub const LookupCursor = struct {
-        entries: []const Entry,
-        name: []const u8,
-        index: usize = 0,
-
-        pub fn advance(self: *LookupCursor, budget: usize) poll_api.Progress(?[]const u8) {
-            std.debug.assert(budget != 0);
-            var remaining = budget;
-            while (remaining != 0 and self.index != self.entries.len) : (remaining -= 1) {
-                const entry = self.entries[self.index];
-                self.index += 1;
-                if (std.mem.eql(u8, entry.name, self.name)) return .{ .complete = entry.value };
-            }
-            if (self.index == self.entries.len) return .{ .complete = null };
-            return .pending;
-        }
-    };
-
-    pub fn lookupCursor(self: *const Environ, name: []const u8) LookupCursor {
-        return .{ .entries = self.entries, .name = name };
-    }
-};
+pub const Environ = @import("startup_environment.zig").View;
 
 /// Whole-stream standard input. The stream is claimable exactly once per
 /// session, and only in the CLI modes where stdin is not itself the program
@@ -3153,7 +3125,7 @@ pub const Machine = struct {
         base_dir: std.Io.Dir,
         diagnostic: *?[]u8,
     ) error{OutOfMemory}!pkg_catalog.Build {
-        return self.unit.inherited.registry.?.beginPackageTreeValidation(
+        return self.unit.inherited.registry.beginPackageTreeValidation(
             io,
             package_name,
             root_dir,
@@ -3419,7 +3391,7 @@ pub const Machine = struct {
         requested: u32,
         outcome: ResolutionOutcome,
     ) MachineError!WorkProgress {
-        if (self.unit.current == null or self.unit.inherited.registry == null)
+        if (self.unit.current == null)
             return self.undefinedNameIn(requested, .qualified);
         switch (outcome) {
             .unknown_module_prefix => |prefix| {
@@ -3453,7 +3425,7 @@ pub const Machine = struct {
         module_name: intern.ModuleName,
         requested_word: u32,
     ) MachineError!WorkProgress {
-        if (self.unit.current == null or self.unit.inherited.registry == null) {
+        if (self.unit.current == null) {
             self.releaseDomain().releaseValue(requested);
             return self.undefinedNameIn(requested_word, .qualified);
         }
@@ -3485,7 +3457,7 @@ pub const Machine = struct {
         name: intern.ModuleName,
         request: QualifiedLoadRequest,
     ) MachineError!void {
-        const registry = self.unit.inherited.registry orelse return self.undefinedModule(intern.moduleId(name));
+        const registry = self.unit.inherited.registry;
         try self.startDriver(AutoLoadDriver{
             .name = name,
             .request = request,
@@ -3781,7 +3753,7 @@ pub const Machine = struct {
                         // below is what makes the winner's work count.
                         .contended => {
                             cursor.deinit();
-                            self.state.borrowMut().* = .{ .begin = evaluator.unit.inherited.registry.?.beginLoadingCursor(
+                            self.state.borrowMut().* = .{ .begin = evaluator.unit.inherited.registry.beginLoadingCursor(
                                 self.name,
                                 .of(evaluator.unit),
                             ) };
@@ -3802,7 +3774,7 @@ pub const Machine = struct {
                             } else {
                                 self.state.borrowMut().* = .{ .registered = .{
                                     .loading = .init(lease),
-                                    .cursor = .init(evaluator.unit.inherited.registry.?.acquireCursor(self.name)),
+                                    .cursor = .init(evaluator.unit.inherited.registry.acquireCursor(self.name)),
                                 } };
                             }
                         },
@@ -3892,12 +3864,12 @@ pub const Machine = struct {
                                 };
                                 if (evaluator.unit.inherited.project_lock.?.artifactCommitted(match.artifact_id)) {
                                     self.state.borrowMut().* = .{ .committed = .init(
-                                        evaluator.unit.inherited.registry.?.acquireCursor(self.name),
+                                        evaluator.unit.inherited.registry.acquireCursor(self.name),
                                     ) };
                                 } else {
                                     self.state.borrowMut().* = .{ .artifact_begin = .{
                                         .target = target,
-                                        .cursor = evaluator.unit.inherited.registry.?.beginArtifactLoadingCursor(
+                                        .cursor = evaluator.unit.inherited.registry.beginArtifactLoadingCursor(
                                             match.artifact_id,
                                             .of(evaluator.unit),
                                         ),
@@ -3920,7 +3892,7 @@ pub const Machine = struct {
                             begin.cursor.deinit();
                             self.state.borrowMut().* = .{ .artifact_begin = .{
                                 .target = target,
-                                .cursor = evaluator.unit.inherited.registry.?.beginArtifactLoadingCursor(
+                                .cursor = evaluator.unit.inherited.registry.beginArtifactLoadingCursor(
                                     target.artifact_id,
                                     .of(evaluator.unit),
                                 ),
@@ -3933,7 +3905,7 @@ pub const Machine = struct {
                             self.state.borrowMut().* = .{ .artifact_registered = .{
                                 .target = target,
                                 .loading = .init(lease),
-                                .cursor = .init(evaluator.unit.inherited.registry.?.acquireCursor(self.name)),
+                                .cursor = .init(evaluator.unit.inherited.registry.acquireCursor(self.name)),
                             } };
                         },
                     },
@@ -4264,7 +4236,7 @@ pub const Machine = struct {
             // The candidate is created before ownership moves: struct-literal
             // fields evaluate in order, so a failure here would otherwise
             // strand the lease and path this driver had already taken.
-            const registry = evaluator.unit.inherited.registry.?;
+            const registry = evaluator.unit.inherited.registry;
             const publication = switch (entry) {
                 .builtin => |words| try modules.Registry.BuiltinCandidateCursor.init(registry, words),
                 .bindings => |registration| registered: {
@@ -4293,8 +4265,7 @@ pub const Machine = struct {
             transfer: *@FieldType(State, "transfer"),
             descriptor: *const native_abi.Descriptor,
         ) MachineError!WorkProgress {
-            const loader_authority = evaluator.unit.inherited.native_loader orelse
-                return evaluator.fail(.io, "native module loader is unavailable");
+            const loader_authority = evaluator.unit.inherited.runtime().native_loader;
             const loader = switch (loader_authority.startStatic(self.name, descriptor)) {
                 .failure => |failure| {
                     const failed = evaluator.fail(.io, failure.text());
@@ -4320,8 +4291,7 @@ pub const Machine = struct {
             evaluator: *Machine,
             transfer: *@FieldType(State, "transfer"),
         ) MachineError!WorkProgress {
-            const loader_authority = evaluator.unit.inherited.native_loader orelse
-                return evaluator.fail(.io, "native module loader is unavailable");
+            const loader_authority = evaluator.unit.inherited.runtime().native_loader;
             const start = try loader_authority.startDynamic(
                 self.name,
                 transfer.candidate.borrow(),
@@ -4378,7 +4348,7 @@ pub const Machine = struct {
                         },
                     }
                 }
-                self.commit = .init(evaluator.unit.inherited.registry.?.registrationCursor(
+                self.commit = .init(evaluator.unit.inherited.registry.registrationCursor(
                     self.candidate.?.borrow().ref(),
                     self.name,
                     .standard_library,
@@ -4481,7 +4451,7 @@ pub const Machine = struct {
                 },
                 .loaded => |*instance| {
                     const publication = try modules.Registry.NativeCandidateCursor.init(
-                        evaluator.unit.inherited.registry.?,
+                        evaluator.unit.inherited.registry,
                         instance.borrow(),
                     );
                     self.state.borrowMut().* = .{ .definitions = .{
@@ -4500,7 +4470,7 @@ pub const Machine = struct {
                         );
                         var built = candidate;
                         var sealed = heap.Owned(modules.SealedImage).init(built.seal());
-                        const cursor = evaluator.unit.inherited.registry.?.registrationCursor(
+                        const cursor = evaluator.unit.inherited.registry.registrationCursor(
                             sealed.borrow().ref(),
                             self.name,
                             self.provenance,
@@ -5920,10 +5890,7 @@ pub const Machine = struct {
         module: Value,
         name: intern.ModuleName,
     ) MachineError!void {
-        const registry = self.unit.inherited.registry orelse {
-            self.releaseDomain().releaseValue(module);
-            return self.fail(.domain, "module registry is unavailable");
-        };
+        const registry = self.unit.inherited.registry;
         const image = modules.imageRef(module) orelse {
             self.releaseDomain().releaseValue(module);
             return self.typeError("a module");
@@ -5948,9 +5915,7 @@ pub const Machine = struct {
     ) MachineError!void {
         var owned = input;
         defer owned.deinit(self.releaseDomain());
-        const registry = self.unit.inherited.registry orelse {
-            return self.fail(.domain, "module registry is unavailable");
-        };
+        const registry = self.unit.inherited.registry;
         const word = self.unit.active_word;
         const provenance = self.unit.current.?.site.registration_provenance;
         var candidate = try registry.createImage();
@@ -7425,8 +7390,6 @@ fn continueDispatchAfterLoad(
     name: intern.ModuleName,
     request: QualifiedLoadRequest,
 ) MachineError!WorkProgress {
-    if (self.unit.inherited.registry == null)
-        return self.undefinedWordIn(request.qualified, .qualified);
     try self.autoLoadModule(name, request);
     return .detached;
 }
@@ -7468,7 +7431,7 @@ fn verifyPublishedModule(
     request: QualifiedLoadRequest,
 ) MachineError!WorkProgress {
     loading.borrowMut().finish();
-    const registry = evaluator.unit.inherited.registry.?;
+    const registry = evaluator.unit.inherited.registry;
     const next = QualifiedRegistrationDriver{
         .name = name,
         .path = .init(path.take()),
@@ -7535,7 +7498,7 @@ const QualifiedRegistrationDriver = struct {
                     self.module_index += 1;
                     if (self.module_index != modules_in_artifact.len) {
                         self.acquisition.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                        self.acquisition = .init(evaluator.unit.inherited.registry.?.acquireCursor(
+                        self.acquisition = .init(evaluator.unit.inherited.registry.acquireCursor(
                             modules_in_artifact[self.module_index],
                         ));
                         return .yielded;
@@ -8025,7 +7988,7 @@ pub const ResolutionCursor = struct {
         }
     };
     allocator: std.mem.Allocator,
-    registry: ?*modules.Registry,
+    registry: *modules.Registry,
     project_lock: ?*const pkg_lock.ProjectLock,
     package: ?pkg_catalog.PackageId,
     module_access: *const modules.ExecutionAccess,
@@ -8243,18 +8206,14 @@ pub const ResolutionCursor = struct {
                         }
                         if (intern.isReservedRegistryBytes(self.spelling[0..dot_index])) {
                             // `core` is a scope, not a registration: skip the
-                            // registry entirely, including when there is none.
+                            // registry entirely.
                             self.dot_index = dot_index;
                             self.plain_chain = .core;
                             self.work = .{ .atom = intern.lookupCursor(self.spelling[dot_index + 1 ..]) };
                             self.phase = .core_export;
                             break :result .pending;
                         }
-                        if (self.registry == null) {
-                            self.work.deinit();
-                            self.phase = .complete;
-                            break :result .{ .complete = .{ .unresolved = .qualified } };
-                        }
+
                         self.dot_index = dot_index;
                         self.work = .{ .atom = intern.lookupCursor(self.spelling[0..dot_index]) };
                         self.phase = .prefix;
@@ -8294,7 +8253,7 @@ pub const ResolutionCursor = struct {
                     };
                     if (self.project_lock) |project_lock| {
                         if (stdlib.find(intern.get(intern.moduleId(self.prefix.?))) != null) {
-                            self.work = .{ .acquisition = self.registry.?.acquireCursor(self.prefix.?) };
+                            self.work = .{ .acquisition = self.registry.acquireCursor(self.prefix.?) };
                             self.phase = .qualified_acquire;
                         } else {
                             self.work = .{ .catalog = project_lock.lookupCursor(
@@ -8304,7 +8263,7 @@ pub const ResolutionCursor = struct {
                             self.phase = .package_authorization;
                         }
                     } else {
-                        self.work = .{ .acquisition = self.registry.?.acquireCursor(self.prefix.?) };
+                        self.work = .{ .acquisition = self.registry.acquireCursor(self.prefix.?) };
                         self.phase = .qualified_acquire;
                     }
                     break :result .pending;
@@ -8317,7 +8276,7 @@ pub const ResolutionCursor = struct {
                     switch (outcome) {
                         .matched => |match| {
                             if (self.project_lock.?.artifactCommitted(match.artifact_id)) {
-                                self.work = .{ .acquisition = self.registry.?.acquireCursor(self.prefix.?) };
+                                self.work = .{ .acquisition = self.registry.acquireCursor(self.prefix.?) };
                                 self.phase = .qualified_acquire;
                                 break :result .pending;
                             }
@@ -8768,7 +8727,7 @@ fn resumeFrames(self: *Machine) MachineError!bool {
             }
             // The registration check bounds the retry and gives every
             // transport the same post-load handoff.
-            const registry = self.unit.inherited.registry.?;
+            const registry = self.unit.inherited.registry;
             const artifact = continuation.artifact.artifact();
             const first_name = if (artifact) |artifact_id|
                 self.unit.inherited.project_lock.?.artifactModules(artifact_id)[0]
@@ -9435,7 +9394,7 @@ const ModuleCompletionDriver = struct {
                         .ordinary, .root_package, .standard_library => {},
                     }
                     const provenance = validate.provenance;
-                    const registration = evaluator.unit.inherited.registry.?.registrationCursor(
+                    const registration = evaluator.unit.inherited.registry.registrationCursor(
                         validate.sealed.borrow().ref(),
                         name,
                         provenance,

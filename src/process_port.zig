@@ -20,10 +20,8 @@ fn blockingIo() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
 }
 
-pub const EnvironmentEntry = struct {
-    name: []const u8,
-    value: []const u8,
-};
+const startup_environment = @import("startup_environment.zig");
+pub const EnvironmentEntry = startup_environment.EnvironmentEntry;
 
 pub const Limits = struct {
     max_live_ports: usize = 32,
@@ -73,46 +71,6 @@ pub const SpawnError = error{
 };
 pub const InitError = error{ OutOfMemory, InvalidConfig };
 
-const OwnedEnvironment = struct {
-    entries: []EnvironmentEntry,
-
-    fn init(
-        allocator: std.mem.Allocator,
-        source: []const EnvironmentEntry,
-    ) InitError!OwnedEnvironment {
-        if (source.len == 0) return .{ .entries = &.{} };
-        for (source) |entry| if (!std.process.Environ.Map.validateKeyForPut(entry.name) or
-            std.mem.indexOfScalar(u8, entry.value, 0) != null)
-            return error.InvalidConfig;
-        const entries = try allocator.alloc(EnvironmentEntry, source.len);
-        var initialized: usize = 0;
-        errdefer {
-            for (entries[0..initialized]) |entry| {
-                allocator.free(entry.name);
-                allocator.free(entry.value);
-            }
-            allocator.free(entries);
-        }
-        for (source, entries) |entry, *copy| {
-            const name = try allocator.dupe(u8, entry.name);
-            errdefer allocator.free(name);
-            const entry_value = try allocator.dupe(u8, entry.value);
-            copy.* = .{ .name = name, .value = entry_value };
-            initialized += 1;
-        }
-        return .{ .entries = entries };
-    }
-
-    fn deinit(self: *OwnedEnvironment, allocator: std.mem.Allocator) void {
-        for (self.entries) |entry| {
-            allocator.free(entry.name);
-            allocator.free(entry.value);
-        }
-        if (self.entries.len != 0) allocator.free(self.entries);
-        self.* = undefined;
-    }
-};
-
 /// Session-owned authority and immutable ambient inputs. Units never receive
 /// this owner directly; operations use a narrow opaque access facade.
 pub const ProcessOwner = struct {
@@ -123,17 +81,19 @@ pub const ProcessOwner = struct {
     io: std.Io,
     initial_cwd: [:0]u8,
     limits: Limits,
-    environment: OwnedEnvironment,
+    environment: startup_environment.View,
     executor: *controllers.Owner,
     live: std.atomic.Value(usize) = .init(0),
     next_identity: std.atomic.Value(u64) = .init(1),
 
+    /// Borrows the validated environment through deinit; copies the directory.
+    /// Failure retains both inputs and releases all provisional owned storage.
     pub fn init(
         host: *const heap.HostCleanup,
         io: std.Io,
-        initial_cwd: ?[]const u8,
+        initial_cwd: []const u8,
         limits: Limits,
-        environment: []const EnvironmentEntry,
+        environment: startup_environment.View,
     ) InitError!ProcessOwner {
         const allocator = host.allocator();
         // Backend jobs plus the shared wait, control, and shutdown lanes.
@@ -143,20 +103,9 @@ pub const ProcessOwner = struct {
             limits.stdout_capacity == 0 or limits.stderr_capacity == 0 or
             limits.max_stdout_capture == 0 or limits.max_stderr_capture == 0)
             return error.InvalidConfig;
-        if (initial_cwd) |cwd| if (!cleanAbsolutePath(cwd)) return error.InvalidConfig;
-        const owned_cwd = if (initial_cwd) |cwd|
-            try allocator.dupeZ(u8, cwd)
-        else
-            std.process.currentPathAlloc(io, allocator) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return error.InvalidConfig,
-            };
+        if (!cleanAbsolutePath(initial_cwd)) return error.InvalidConfig;
+        const owned_cwd = try allocator.dupeZ(u8, initial_cwd);
         errdefer allocator.free(owned_cwd);
-        var owned_environment = try OwnedEnvironment.init(
-            allocator,
-            environment,
-        );
-        errdefer owned_environment.deinit(allocator);
         const instance = try @import("module_bindings.zig").Identity.create(allocator);
         errdefer instance.release();
         return .{
@@ -167,7 +116,7 @@ pub const ProcessOwner = struct {
             .executor = try controllers.Owner.init(allocator, capacity),
             .initial_cwd = owned_cwd,
             .limits = limits,
-            .environment = owned_environment,
+            .environment = environment,
         };
     }
 
@@ -175,7 +124,6 @@ pub const ProcessOwner = struct {
         self.executor.deinit();
         self.instance.release();
         std.debug.assert(self.live.load(.acquire) == 0);
-        self.environment.deinit(self.allocator);
         self.allocator.free(self.initial_cwd);
         self.* = undefined;
     }
@@ -1108,7 +1056,9 @@ pub fn fromValue(port: Value) ?*ProcessCell {
 test "process specification rejects relative executable selection before spawn" {
     var host = heap.HostOwner.init(std.testing.allocator);
     defer host.cleanup().drain();
-    var owner = try ProcessOwner.init(host.cleanup(), std.testing.io, null, .{}, &.{});
+    var snapshot = try startup_environment.Snapshot.capture(std.testing.allocator, &.{});
+    defer snapshot.deinit();
+    var owner = try ProcessOwner.init(host.cleanup(), std.testing.io, "/", .{}, snapshot.view());
     defer owner.deinit();
     try std.testing.expectError(error.InvalidSpec, owner.validateSpec(.{ .executable = "program" }));
     try owner.validateSpec(.{ .executable = "/allowed/program" });
@@ -1123,9 +1073,11 @@ test "process: provisional rollback retains capacity until cancellation setup re
     defer std.testing.allocator.free(fixture_path);
     var host = heap.HostOwner.init(std.testing.allocator);
     defer host.cleanup().drain();
-    var owner = try ProcessOwner.init(host.cleanup(), std.testing.io, null, .{
+    var snapshot = try startup_environment.Snapshot.capture(std.testing.allocator, &.{});
+    defer snapshot.deinit();
+    var owner = try ProcessOwner.init(host.cleanup(), std.testing.io, "/", .{
         .max_live_ports = 1,
-    }, &.{});
+    }, snapshot.view());
     defer owner.deinit();
     var runtime_scheduler = try scheduler_api.Scheduler.init(host.cleanup(), .cooperative, .host);
     runtime_scheduler.attachRetirement();
@@ -1195,18 +1147,20 @@ test "dormant controller reaps a direct child before scope detachment" {
 
     var host = heap.HostOwner.init(std.testing.allocator);
     defer host.cleanup().drain();
+    var snapshot = try startup_environment.Snapshot.capture(std.testing.allocator, &.{});
+    defer snapshot.deinit();
+    var owner = try ProcessOwner.init(
+        host.cleanup(),
+        std.testing.io,
+        "/",
+        .{},
+        snapshot.view(),
+    );
+    defer owner.deinit();
     var runtime_scheduler = try scheduler_api.Scheduler.init(host.cleanup(), .cooperative, .host);
     runtime_scheduler.attachRetirement();
     var root_scope = scheduler_api.TaskScope.init(runtime_scheduler.worker());
     defer runtime_scheduler.deinit(&root_scope);
-    var owner = try ProcessOwner.init(
-        host.cleanup(),
-        std.testing.io,
-        null,
-        .{},
-        &.{},
-    );
-    defer owner.deinit();
 
     const port = try owner.spawn(
         runtime_scheduler.worker(),
@@ -1247,12 +1201,14 @@ test "scope shutdown cancels a blocked controller independently of port referenc
     var runtime_scheduler = try scheduler_api.Scheduler.init(host.cleanup(), .cooperative, .host);
     runtime_scheduler.attachRetirement();
     var root_scope = scheduler_api.TaskScope.init(runtime_scheduler.worker());
+    var snapshot = try startup_environment.Snapshot.capture(std.testing.allocator, &.{});
+    defer snapshot.deinit();
     var owner = try ProcessOwner.init(
         host.cleanup(),
         std.testing.io,
-        null,
+        "/",
         .{},
-        &.{},
+        snapshot.view(),
     );
 
     const port = try owner.spawn(

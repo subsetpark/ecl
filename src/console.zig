@@ -172,17 +172,17 @@ fn unitAt(bytes: []const u8, index: usize) Unit {
 }
 
 pub const Console = struct {
-    output: ?*std.Io.Writer,
-    diagnostics: ?*std.Io.Writer,
+    output: *std.Io.Writer,
+    diagnostics: *std.Io.Writer,
     output_mutex: std.Io.Mutex = .init,
     diagnostics_mutex: std.Io.Mutex = .init,
 
-    pub fn init(output: ?*std.Io.Writer, diagnostics: ?*std.Io.Writer) Console {
+    pub fn init(output: *std.Io.Writer, diagnostics: *std.Io.Writer) Console {
         return .{ .output = output, .diagnostics = diagnostics };
     }
 
     pub fn writeOutput(self: *Console, bytes: []const u8, newline: bool) error{WriteFailed}!void {
-        const writer = self.output orelse return error.WriteFailed;
+        const writer = self.output;
         std.Io.Threaded.mutexLock(&self.output_mutex);
         defer std.Io.Threaded.mutexUnlock(&self.output_mutex);
         writer.writeAll(bytes) catch return error.WriteFailed;
@@ -191,7 +191,7 @@ pub const Console = struct {
     }
 
     pub fn writeDiagnostics(self: *Console, bytes: []const u8, newline: bool) error{WriteFailed}!void {
-        const writer = self.diagnostics orelse return error.WriteFailed;
+        const writer = self.diagnostics;
         std.Io.Threaded.mutexLock(&self.diagnostics_mutex);
         defer std.Io.Threaded.mutexUnlock(&self.diagnostics_mutex);
         writer.writeAll(bytes) catch return error.WriteFailed;
@@ -226,7 +226,7 @@ pub const Console = struct {
         const window = planWindow(columns, prompt, view);
         const before = window.before;
         const after = window.after;
-        const writer = self.output orelse return error.WriteFailed;
+        const writer = self.output;
         std.Io.Threaded.mutexLock(&self.output_mutex);
         defer std.Io.Threaded.mutexUnlock(&self.output_mutex);
         writer.writeByte('\r') catch return error.WriteFailed;
@@ -241,7 +241,7 @@ pub const Console = struct {
     }
 
     pub fn writeCandidates(self: *Console, candidates: []const []const u8) error{WriteFailed}!void {
-        const writer = self.output orelse return error.WriteFailed;
+        const writer = self.output;
         std.Io.Threaded.mutexLock(&self.output_mutex);
         defer std.Io.Threaded.mutexUnlock(&self.output_mutex);
         writer.writeAll("\r\n") catch return error.WriteFailed;
@@ -271,7 +271,8 @@ fn writeDisplay(writer: *std.Io.Writer, bytes: []const u8) error{WriteFailed}!vo
 test "console serializes a complete writer use" {
     var bytes: [128]u8 = undefined;
     var writer = std.Io.Writer.fixed(&bytes);
-    var console = Console.init(&writer, null);
+    var diagnostics = std.Io.Writer.Discarding.init(&.{});
+    var console = Console.init(&writer, &diagnostics.writer);
     try console.writeOutput("whole", false);
     try console.redraw(@enumFromInt(40), .primary, .{ .before = "ab", .after = "c" });
     try console.writeCandidates(&.{ "one", "two" });
@@ -284,7 +285,8 @@ test "console serializes a complete writer use" {
 test "console escapes every byte a terminal would act on" {
     var bytes: [256]u8 = undefined;
     var writer = std.Io.Writer.fixed(&bytes);
-    var console = Console.init(&writer, null);
+    var diagnostics = std.Io.Writer.Discarding.init(&.{});
+    var console = Console.init(&writer, &diagnostics.writer);
     // C0 before the cursor, a malformed byte after it, and C1 inside a
     // candidate name all reach the same escaping policy.
     try console.redraw(@enumFromInt(40), .continuation, .{ .before = "\x1b[2J", .after = "\xff" });
@@ -293,4 +295,17 @@ test "console escapes every byte a terminal would act on" {
         "\r.. \\x1b[2J\\xff\x1b[0K\r.. \\x1b[2J\r\n\\xc2\\x9b2J  plain\r\n",
         writer.buffered(),
     );
+}
+
+test "console accepts discard writers and propagates real write failures" {
+    var output = std.Io.Writer.Discarding.init(&.{});
+    var diagnostics = std.Io.Writer.Discarding.init(&.{});
+    var console = Console.init(&output.writer, &diagnostics.writer);
+    try console.writeOutput("output", true);
+    try console.writeDiagnostics("diagnostic", true);
+    var failed_output = std.Io.Writer.fixed(&.{});
+    var failed_diagnostics = std.Io.Writer.fixed(&.{});
+    var failing = Console.init(&failed_output, &failed_diagnostics);
+    try std.testing.expectError(error.WriteFailed, failing.writeOutput("output", false));
+    try std.testing.expectError(error.WriteFailed, failing.writeDiagnostics("diagnostic", false));
 }

@@ -144,8 +144,11 @@ capabilities as core constructors; loading the module grants no additional autho
 A Session captures the host environment once, records whether standard input
 remains available as data, and owns any TLS or path overrides needed by its
 Units. The CLI captures its startup directory and environment snapshot once
-and shares those inputs across every execution entrypoint. Project discovery
-begins at that startup directory.
+and shares those inputs across every execution entrypoint. One private CLI
+runtime owns writer buffers, writers, named-root storage, and its Session. It
+is initialized at its final address and remains there until Session teardown
+releases every borrow. Failed construction retains no live Session. Project
+discovery begins at that startup directory.
 
 Host operations are exposed to executing code through narrow facades. A Unit
 may enqueue work, write through the console, load through the module loader, or
@@ -160,9 +163,10 @@ language tests, and package commands differ only in the additional authorities
 their modes mint. Process, filesystem, and network owners are unconditional.
 
 Inherited context distinguishes prelude bootstrap from runtime execution.
-The bootstrap phase builds the core before a Session is published; it is not a
-reduced Session. Runtime context carries complete service access and is copied
-into descendants without changing module-loading order. All access borrows
+Both phases require a module registry. The bootstrap phase builds the core
+before a Session is published; it is not a reduced Session. Runtime context
+requires the native loader and complete service access, including a Console
+with output and diagnostic writers. Context is copied into descendants without changing module-loading order. All access borrows
 Session-owned state, which survives until tasks, modules, and retirement work
 have settled. Shared test fixtures keep isolated directories, streams, and
 explicit environment inputs alive through Session teardown.
@@ -172,8 +176,16 @@ manual monotonic and fixed or anchored wall clocks, cooperative scheduling, and
 TLS verification overrides are internal deterministic-testing inputs. They
 confer no permissions and introduce no command-line modes.
 
-The process owner retains the startup directory, a copied environment snapshot,
-and live-count, queue, and capture limits. Its opaque `ProcessAccess` lets Units
+The dependency-neutral `startup_environment.zig` owns validated environment
+entries and backing bytes together with their allocator. Session owns this one
+snapshot; evaluation and the process owner borrow immutable views. Shutdown and
+initialization rollback release the snapshot only after its dependent owners;
+normal teardown first joins the scheduler and destroys the process owner. Child
+environment maps retain their independent overrides.
+
+The process owner requires an explicit startup directory and retains its owned
+sentinel-terminated copy, together with live-count, queue, and capture limits.
+Its opaque `ProcessAccess` lets Units
 request operations without obtaining the owner, scheduler scope, process cell,
 group identifier, or PID. Executable and working-directory syntax is validated
 at the process boundary; the operating system determines access.

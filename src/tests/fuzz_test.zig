@@ -449,7 +449,8 @@ fn expectRedraw(
     const rendered = try std.testing.allocator.alloc(u8, expected.items.len + 1);
     defer std.testing.allocator.free(rendered);
     var writer = std.Io.Writer.fixed(rendered);
-    var sink = console.Console.init(&writer, null);
+    var diagnostics = std.Io.Writer.Discarding.init(&.{});
+    var sink = console.Console.init(&writer, &diagnostics.writer);
     try sink.redraw(@enumFromInt(columns), prompt, view);
     try std.testing.expectEqualSlices(u8, expected.items, writer.buffered());
 

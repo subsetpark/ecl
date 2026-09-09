@@ -1948,3 +1948,17 @@ test "oom: standard-library and host: accepted connection result discard" {
     try requireSelectedOomTest(@src());
     try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NetAcceptResultProbe("port.begin dup port.await port.close").run);
 }
+
+fn startupSessionAllocationProbe(allocator: std.mem.Allocator) !void {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{"argument"}, runtime_inputs.inputs(.{
+        .environ = &.{.{ .name = "ECL_OOM_PROBE", .value = "probe" }},
+    }), .cooperative, .evaluate);
+    defer runtime.deinit();
+}
+
+test "oom: standard-library and host: host: startup snapshot and Session initialization" {
+    try requireSelectedOomTest(@src());
+    try checkAllAllocationFailuresParallel(std.heap.smp_allocator, startupSessionAllocationProbe);
+}
