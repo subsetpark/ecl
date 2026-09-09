@@ -1,167 +1,52 @@
 # ECL
 
-ECL is a language drawing from two primary programming language families:
+ECL combines the stack-based composition of Forth and Joy with the whole-array
+operations of APL, J, and K. It is intended for interactive data exploration,
+command-line work, and everyday programs, evolving the ideas behind
+[ec](https://ec-calc.com/) beyond a desk calculator.
 
-*concatenative* - Like Forth, Factor, and Joy, ECL's operational semantics
-model the pushing and popping of values to and from an **operand stack**.
-The language's syntax is a reverse-Polish notation, where stack
-manipulation words are evaluated from left to right. Like Joy in particular,
-ECL is homoiconic (or refective), and lists are special cases of programs.
+- **Stack-based composition.** Values go on a stack; words consume them and
+  leave results. Programs read from left to right.
+- **Array operations.** Arithmetic works on scalars and nested lists, often
+  removing the need for explicit loops.
+- **Programs as data.** Quotations are ordinary lists that you can construct,
+  inspect, combine, and execute.
+- **Immutable values.** Lists, strings, and dictionaries can be freely shared.
+  Modules provide encapsulation and private state.
+- **Built-in tools for real programs.** ECL includes modules, packages, tests,
+  concurrency, and libraries for tables, JSON, CSV, files, HTTP, and processes.
+  Trusted native extensions can be written in Zig.
 
-*array* - Like APL, J, and K, primitive operators are pervasive: they
-automatically conform to arbitrary-dimensional lists without having to
-invoke higher-order-functions like `map` or constructs like loops.
+ECL is pre-1.0 software. Language and native extension compatibility may change
+between prereleases.
 
-As the name suggests, ECL represents the attempt to evolve an old
-project---[ec](https://ec-calc.com/) into a proper programming language.
-Like ECL, ec attempted to combine the two above attributes in a single
-computing environment; both both the semantics and implementation of the
-older project limited it to desk-calculator use and omitted capabilities needed
-by a programming language.
+## Get and build
 
-ECL is intended to attain some of the usefulness for live data exploration and
-command-line use of K, some of the elegance and functional character of Joy,
-while being more suited to writing standard and maintainble user-land programs
-  than either.
-
-ECL is pre-1.0 software. Version `0.1.0` is usable, but language and native
-extension compatibility may change between prereleases.
-
-ECL ships as a CLI interpreter with a supported Zig extension SDK. ECL calls
-Zig extensions through `ecl-native`; embedding the interpreter in Zig
-applications is not supported.
-
-## Build
-
-Building requires Zig 0.16.0, as pinned by `build.zig.zon` and CI.
-The default install prefix is the repository's `zig-out` directory:
+Building requires Zig 0.16.0, as pinned by `build.zig.zon`:
 
 ```sh
 git clone https://github.com/subsetpark/ecl.git
 cd ecl
 zig build install -Doptimize=ReleaseSafe
 ./zig-out/bin/ecl --version
+./zig-out/bin/ecl
 ```
 
-To install under `~/.local` instead:
+To install under `~/.local` and make `ecl` available in your shell:
 
 ```sh
 zig build install -Doptimize=ReleaseSafe --prefix ~/.local
-~/.local/bin/ecl --version
+export PATH="$HOME/.local/bin:$PATH"
+ecl --version
 ```
 
-Add `~/.local/bin` to `PATH` to invoke the executable as `ecl`. The matching
-removal command is `zig build uninstall --prefix ~/.local`.
+Add the `export` line to your shell's startup file to keep it across sessions.
+To remove that installation, run `zig build uninstall --prefix ~/.local`.
 
-## The language model
+## Start using ECL
 
-### Values
-
-Literals push values. Words consume values and leave results.
-
-```sh
-ecl '3 4 +'                         # 7
-ecl '1 2 3 3 pack sum'              # 6
-ecl '[5 -3 8 -1] dup 0 > where at'  # [5 8]
-```
-
-### Quotations
-
-Programs are represented both in syntax and in data as simple lists of words.
-Executing a program is equivalent to pushing its words to the operand stack.
-Defining a function is equivalent to assigning a program to a new word, and
-functions are words which push their programs to the stack.
-
-```sh
-ecl> 10 range (sum) (len) bi /
-4.5
-ecl> 10 range ((sum) (len) bi /) call
-4.5
-ecl> ((sum) (len) bi /) 'mean def
-ecl> 10 range mean
-4.5
-```
-
-Because there's no internal compiled representation of programs besides their
-quoted spellings (see _idioms_ below for an internal exception), program
-construction and metaprogramming by quotation manipulation is a common
-and universally available technique.
-
-```sh
-ecl> 4 range [4 3] reshape 3 4 rng.ints
-([0 1 2]
- [3 0 1]
- [2 3 0]
- [1 2 3]) [2 2 0]
-ecl> (lex-cmp) partial each
-[-1 1 1 -1]
-```
-
-### Array operations
-
-The primitive operators in ECL conform to the shapes of their operands.
-This means that one applies a program like `1 +` to a value of any shape:
-if the value is a scalar then 1 is added to it and the result is pushed on
-  the stack; if the value is a list, or list of lists, then 1 is added to
-  every scalar inside the value in a way that preserves its shape.
-
-```sh
-ecl> 20 100 rng.ints [4 5] reshape
-([35 0 79 44 47]
- [90 13 40 99 90]
- [1 26 83 31 17]
- [7 25 2 92 84])
-ecl> 1 + sqrt
-([6.0 1.0 8.94427190999916 6.708203932499369 6.928203230275509]
- [9.539392014169456 3.7416573867739413 6.4031242374328485 10.0 9.539392014169456]
- [1.4142135623730951 5.196152422706632 9.16515138991168 5.656854249492381 4.242640687119285]
- [2.8284271247461903 5.0990195135927845 1.7320508075688772 9.643650760992955 9.219544457292887])
-ecl>
-```
-
-This semantic unity has both language-level and interpreter-level
-implications: at the level of syntax, many looping constructs necessary in
-other languages are elided. At the level of execution, the
-representation of `1 +` as a single operation allows for optimization
-of its execution over the sequential execution of scalar operations.
-
-### Modules
-
-Modules are the unit of encapsulation and binding-sealing. The word `@defm`
-constructs a module and registers it globally, namespacing its exposed
-definitions and (optionally) encapsulating private state.
-
-```sh
-ecl> [] (((1 +) within) 'inc def
-..    ((1 -) within) 'dec def
-..    ((dup without) within) 'get def 0) 'counter @defm
-ecl> counter.get
-0
-ecl> pop counter.inc counter.inc counter.get
-2
-```
-
-## Running ecl
-
-```text
-ecl                         Start a REPL, or read non-TTY stdin as one unit
-ecl -e <SOURCE> [ARGS...]  Evaluate source and print the final stack
-ecl <FILE> [ARGS...]       Run a UTF-8 script
-ecl <SOURCE> [ARGS...]     Evaluate source and print the final stack
-ecl fmt <FILE|->           Format source to standard output without evaluating it
-ecl fmt -w <FILE>          Format and atomically rewrite a file
-ecl pkg <SUBCOMMAND>       Manage the current project's packages
-ecl test [--runner <qualified-word>] [-- <ARGS...>]
-                            Run the root project's tests
-ecl -h | --help            Show command help
-ecl -V | --version         Show the version
-```
-
-A script file prints only when it calls `io.pp`, `io.print`, `io.prin`,
-`io.inspect`, or `io.debug`. Calculator input, `-e`, and non-TTY stdin print
-the final stack. Trailing arguments are available through `args`.
-
-Running `ecl` on a terminal starts the built-in REPL:
+Run `ecl` in a terminal to start the REPL. Each input leaves its results on
+the stack for the next input:
 
 ```text
 $ ecl
@@ -171,289 +56,29 @@ ecl> +
 7
 ```
 
-The REPL retains its stack between units and provides multiline input,
-history, UTF-8 cursor movement, and completion from the live environment.
-Ctrl-C abandons the current unit; Ctrl-D exits from an empty primary prompt.
+The REPL supports multiline input, history, and completion. Ctrl-C abandons
+the current input; Ctrl-D exits from an empty prompt.
 
-### Neovim
-
-The repository includes filetype detection and lightweight syntax highlighting
-for Neovim. Add its `runtime` directory to Neovim's runtime path:
-
-```lua
-vim.opt.runtimepath:append("/path/to/ecl/runtime")
-vim.cmd("filetype indent on")
-```
-
-Opening an `.ecl` file then enables highlighting for comments, strings and
-escapes, numbers, characters, quoted symbols, delimiters, binders, and
-definition words. With filetype indentation enabled, Neovim also aligns nested
-forms using the formatter's one-space style while preserving whitespace inside
-multiline strings. Run `gggqG` to format the whole buffer through `ecl fmt -`;
-the `ecl` executable must be on Neovim's `PATH`. Formatting arbitrary partial
-ranges is not supported because they may not be complete ECL programs. Restart
-Neovim after changing the runtime path.
-
-### Packages
-
-`ecl pkg` manages exact HTTPS dependencies with an `ecl.pkg` manifest and a
-reproducible `ecl.lock` file. A typical workflow is:
+You can also evaluate an expression directly:
 
 ```sh
-ecl pkg init
-ecl pkg add smoke 1.0.0 https://example.com/smoke-1.0.0.tgz
-ecl pkg sync
-ecl pkg verify
+ecl '3 4 +'                         # 7
+ecl '[1 2 3] 10 *'                  # [10 20 30]
+ecl '[5 -3 8 -1] dup 0 > where at'  # [5 8]
+ecl '"hello" str.upper'             # "HELLO"
 ```
 
-Commit both files. Packages are installed in an immutable shared cache;
-`ecl pkg vendor` copies the locked packages into the project for self-contained
-offline use. Use `tree` and `why` to inspect the lock, and `gc` to clean the
-shared cache. See [`examples/pkg-smoke`](examples/pkg-smoke) for a complete
-workflow.
+Parentheses quote a program; `def` gives it a name:
 
-### Tests
-
-Tests use module declarations and do not require exported words. They may call private
-definitions and may use the same name as an ordinary definition. Ordinary
-application loading validates and then discards them, so test bodies and test
-catalog indexes are not retained in shipped module images:
-
-```ecl
-### module app.math
-[]
-(
- ### defp double
- (n -- n : "Double a number.")
- (2 *) 'double defp
-
- ### test doubles
- (: "Exercise the private implementation.")
- (21 double 42 = {'kind 'user} assert) 'doubles test
-) 'app.math @defm
+```text
+$ ecl
+ecl> ((sum) (len) bi /) 'mean def
+ecl> 10 range mean
+4.5
 ```
 
-From a synchronized root project, `ecl test` loads every root-package module
-declared by the lock-backed catalog and runs tests in canonical module/name
-order. Each invocation has an isolated operand stack, while module state is
-shared for the lifetime of that test command. Session teardown discards that
-state; file, network, process, and other external effects are real and are not
-rolled back.
-
-The bundled `test.default.run` runner is deliberately replaceable. Use
-`ecl test --runner app.custom.run -- --filter smoke` to select any public
-qualified runner word and expose the tokens after `--` through `args`.
-Userland runners compose the closed `tests` and `@test` substrate to implement
-filtering, hooks, retries, concurrency, reporting, and exit policy without
-receiving test bodies or private module authority.
-
-## Modules and the standard library
-
-A qualified reference loads its module on first use. The embedded standard
-library is checked before the filesystem, so it works without `ECL_PATH` and
-cannot be replaced accidentally by a file with the same name.
-
-| Modules | Purpose |
-|---|---|
-| `dict` | Immutable map construction, observation, transformation, selection, and merging |
-| `error` | Structured error construction and inspection |
-| `result` | Validated success and error envelopes |
-| `str` | Text formatting, search, replacement, case, trimming, and padding |
-| `io` | Terminal and stdin operations |
-| `fs` | Capability-gated file reads, atomic writes, metadata, listing, and namespace operations beneath named roots |
-| `path` | Pure lexical slash-path manipulation |
-| `csv`, `json` | External data formats |
-| `table` | Column-oriented tables represented as ordinary dictionaries |
-| `http` | HTTP GET and POST |
-| `port` | Common resource, exchange, byte-stream, and structured-message capabilities |
-| `proc` | Capability-gated subprocess ports and bounded process execution |
-| `net` | Capability-gated TCP listeners and connections with scope-owned sockets |
-| `http.server` | Bounded HTTP/1.1 serving over `net` listeners |
-| `http.request`, `http.response` | Building, reading, and updating the request and response dictionaries |
-| `rand` | Explicit-state random draws and host entropy |
-| `rng` | Durable module-state random generation |
-| `archive` | SHA-256 and atomic validated `.tgz` extraction |
-| `pkg.*` | Package names, versions, manifests, locks, and minimal-version resolution |
-
-Use a qualified word directly:
-
-```sh
-ecl '"hello" str.upper'                    # "HELLO"
-ecl "[['a 1] ['b 2]] dict.from-pairs"     # {'a 1 'b 2}
-ecl '"a,b\nc,d" csv.parse'                 # (("a" "b") ("c" "d"))
-ecl '"{\"a\":[1,null]}" json.parse'       # {"a" (1 'null)}
-```
-
-The `net` and `proc` words are ECL compositions over registered capabilities
-and `port.*`. First-party resources and ABI v5 extensions share controller
-execution, ownership, cancellation, and cleanup. See the
-[common port examples and conformance guide](examples/PORTS.md).
-
-Subprocesses use BEAM-style opaque ports rather than PIDs. `proc.spawn`
-accepts an absolute executable path,
-argv/cwd/environment data, and no shell string or `PATH` lookup. Stdin,
-stdout, and stderr are exact byte lists with bounded scheduler backpressure;
-the spawning task scope owns termination and reap, so retaining a port cannot
-detach a child. `proc.run` is the bounded capture convenience over the same
-controller. The initial backend supports POSIX hosts; other targets fail
-closed until they can provide equivalent process-tree ownership. Child side
-effects are external effects and are not rolled back when an ECL unit fails.
-
-Filesystem words take a root symbol and a canonical relative path
-(`'cwd "notes/todo.txt" fs.read-text`), resolve beneath the root's retained
-directory handle without following escaping symlinks, and publish writes
-atomically. `path` manipulates path strings without touching the filesystem.
-Package commands receive a separate, nonforgeable package-store authority.
-
-`net.listen` accepts a local IP literal and a port; port `0` requests an
-ephemeral bind. `{'address "127.0.0.1" 'port 0} net.listen` returns a
-scope-owned port whose socket is already listening, `net.local-address`
-reports the bound address and kernel-assigned port, and `net.close` releases
-it early; scope closure releases it otherwise. `net.accept` parks until a peer
-connects and returns a connection owned by the accepting unit's scope;
-`net.read` and `net.write` exchange exact byte lists through bounded queues,
-`net.peer-address` names the other end, and `net.close` on a connection
-delivers queued bytes before shutting the socket down. The runtime bounds live
-connections and queue capacities. Protocol framing and TLS belong to the
-modules built over a connection. `http.server.@serve` is the ECL HTTP/1.1
-server over those words: it frames each request, runs the handler in a fresh
-unit, answers framing and handler failures with a status, and never closes
-the listener it is given.
-
-`import` gives selected public module words bare names in the current
-environment. Every requested word must be public.
-
-```ecl
-'str ('upper 'lower) import
-"hello" upper
-```
-
-### Module namespacing
-
-Module definition registers a canonical module name. Module-qualified words
-can then be looked up for any ECL file in `ECL_PATH`. For example, save this as
-`modules/stats.ecl`:
-
-```ecl
-### module stats
-# Small statistical helpers.
-[]
-(
- ### def twice
- (value -- doubled : "Double a number.")
- (2 *) 'twice def
-) 'stats @defm
-```
-
-Put its containing directory on `ECL_PATH`:
-
-```sh
-ECL_PATH="$PWD/modules" ecl '21 stats.twice'
-ECL_PATH="$PWD/modules" ecl "'stats ('twice) import 21 twice"
-```
-
-`ECL_PATH` is an ordered platform path list. For each root, the loader tries
-`<module>.ecl` and then `<module>.eclmod`; the first existing candidate is
-authoritative, including its errors.
-
-### Native modules
-
-A `.eclmod` is a target-specific shared library for trusted Zig code. Native
-words use the public `ecl-native` SDK, declare exact effects, and request only
-the narrow host capabilities they need. Their tables validate and publish
-atomically through the same module registry used by source modules.
-
-The pre-release ABI is version 5 (`ecl_module_abi_v5`); rebuild existing native
-modules against this SDK. Port inputs expose `.port` through `ValueView.kind()`
-and can be returned with `Call.forward`. With `Reschedule`, `Call.forwardNested`
-returns an invocation-local candidate for a bounded `Path` into a list or
-dictionary. Handle `.yield_required` by yielding and reopening the path on the
-next invocation. These views and candidates expose no backend state or scope
-ownership authority.
-
-Declare package resources with `const P = ecl.Port(Spec)` and include `P` in
-`module.ports`. The spec supplies its private state and lifecycle callbacks,
-plus named operations and endpoints. Each operation declares its handler,
-lane, and supported endpoints together. The SDK generates selector bindings;
-export only factories explicitly with `ecl.factory`. Optional `name` fields
-let local declaration names differ from public ECL spellings. All selectors
-remain opaque capabilities tied to the registered kind and module instance.
-The host owns exchanges, controller execution, scope membership, queues, and
-library lifetime. Start with the [port authoring tutorial](examples/port-authoring/README.md).
-
-ECL uses `port.open` and `port.begin` with bounded structured configuration and
-requests. `port.endpoint` selects byte or message directions. Streaming programs
-write and drain output concurrently, then finish input, observe completion, and
-close the exchange. `port.result` claims a structured result once; `port.await`
-remains repeatable. Non-streaming operations use the ECL `port.call` composition.
-Scope exit joins cleanup, and `@give` transfers resource or exchange ownership.
-See the [native fixtures](test/native/ports.zig) and executable
-[storage](examples/port-storage/README.md), [broker](examples/port-broker/README.md),
-[multiplexed channel](examples/port-multiplex/README.md), and
-[native buffer](examples/port-device/README.md) examples.
-
-Controller handlers receive private state and an opaque `Controller`. Acquire
-endpoints by name with `try controller.endpoint(P, .input)`. A byte reader
-returns a positive chunk length or `null` at EOF; a writer accepts its complete
-slice or returns an error. Message receivers preserve whole values, and message
-senders publish the controller's builder. Their types expose only the permitted
-direction. Builder methods complete bounded host work and compose with `try`;
-controllers never advance interpreter work or access its heap.
-
-`init` must be bounded. `open` finishes before operation handlers start;
-`deinit` runs after they finish. The default lane is `.operation`. To allow
-independent progress, declare a `Lane` enum and assign lanes in the operation
-declarations. Different lanes may run concurrently, so synchronize shared state.
-`cancel` may race initialization or operation execution: it must be bounded,
-thread-safe, and interrupt backend waits. Cancellation can already be set when
-a callback starts; check it before external work. Join backend work before
-returning. Host transport waits already respond to cancellation.
-
-Sessions default to 64 live native ports, 16 admitted operations per port, and
-64 KiB per request and response ring. The runtime validates these limits at
-Session construction. Full operation queues wait for capacity;
-exceeding the live-port limit raises `'domain`. Cancelling queued work removes
-that operation. By default cancelling active work closes the port and cancels
-its queues. To permit recovery, declare `cancellation = ecl.PortCancellation.acknowledge`
-and `fn cancelOperation(*State, Lane) void`, declaring `Lane` even for a single
-recoverable lane. This bounded, thread-safe callback
-must interrupt the selected lane's backend wait. The interrupted handler must
-restore reusable state and call `controller.acknowledgeCancellation()` before
-returning; otherwise the host closes the resource. The lane stays occupied
-until that handler returns. Resource close always overrides recovery.
-
-The operation budget is partitioned across lanes, with remainder slots assigned
-in declaration order. This reserves progress capacity for every lane; creation
-fails with `'domain` if the budget cannot cover all lanes. Idle lanes do not lend
-their slots. Admission waits are lane-specific. Sending bytes to a host ring
-means acceptance, not peer acknowledgement. Cancellation and errors do not undo
-external effects or bytes already accepted. Graceful shutdown, half-close, and
-protocol acknowledgement are author-defined operations; host close is forced
-cleanup, bounded by the controller's obligation to interrupt its backend waits.
-Ordinary backend errors preserve the port. Kind mismatches raise `'type`, and
-operations on closed ports raise `'io`. Scope cleanup and `@give` follow the
-same ownership protocol as network and process ports.
-
-[`test/native/sample.zig`](test/native/sample.zig) is the reference extension
-used by the acceptance suite. Native loading is a trusted-code boundary:
-opening a shared library executes machine code before ecl can validate its
-descriptor. Do not place untrusted directories on an `ECL_PATH` used for
-native modules.
-
-## Documentation
-
-- [`design/SPEC.md`](design/SPEC.md) is the authority on language syntax,
-  semantics, errors, and modules.
-- [`design/STDLIB.md`](design/STDLIB.md) is the exhaustive reference for the
-  shipped core, prelude, and standard-library vocabulary.
-- [`design/ENVIRONMENT.md`](design/ENVIRONMENT.md) defines module loading,
-  packages, command-line behavior, and source formatting.
-- [`design/ECL_STYLE.md`](design/ECL_STYLE.md) is the authoring guide for
-  first-party ECL source.
-- [`design/INTERPRETER.md`](design/INTERPRETER.md) describes the runtime
-  architecture and its ownership, scheduling, and reclamation invariants.
-
-ECL is also highly reflective:
+Here, `bi` applies both `(sum)` and `(len)` to the same list, then `/`
+divides their results. The built-in help lets you explore words as you go:
 
 ```ecl
 'fold1 doc
@@ -461,25 +86,98 @@ ECL is also highly reflective:
 'str.upper which
 ```
 
-## Development
+Use `doc` for documentation, `see` for a definition, and `which` to locate a
+binding. The [getting-started guide](GETTING_STARTED.md) introduces more of
+the language with worked examples.
 
-Run the local gate before committing:
+### Scripts and commands
 
-```sh
-zig build precommit < /dev/null
+Save this as `hello.ecl`:
+
+```ecl
+"Hello, world!" io.print
 ```
 
-`zig build check` is the quicker whole-tree compile check. Pull-request CI runs
-the Debug precommit tier and one complete ReleaseSafe suite. `zig build
-test-ecl` is the single first-class ECL test entrypoint and is owned by the
-complete `zig build test` suite, so pull-request CI invokes it once. That suite
-is accompanied by PTY and standalone native-extension acceptance. Master and
-manual CI add the full Debug suite, bounded fuzz campaigns, eight-worker
-concurrency, differential checks, TSan, and ReleaseFast snapshots. The manual
-release-candidate workflow is the exhaustive superset: it repeats every test
-surface and adds the initialized-Session OOM sweep and complete ReleaseFast
-suite. Each optimization mode runs its tiers in one job so Zig can reuse that
-mode's cache and emitted artifacts. See
-[`AGENTS.md`](AGENTS.md) for the repository's testing and architectural rules.
+Then run `ecl hello.ecl`. Scripts print through words such as `io.print` and
+`io.pp`; expressions and piped input print the final stack. Arguments after
+a script or expression are available through `args`.
 
-ecl is distributed under the [BSD 3-Clause License](LICENSE).
+```sh
+ecl hello.ecl              # Run a script
+ecl -e '3 4 +'             # Explicitly evaluate source
+printf '3 4 +' | ecl       # Evaluate standard input
+ecl fmt hello.ecl          # Print formatted source
+ecl fmt -w hello.ecl       # Format a file in place
+ecl --help                 # Show command help
+```
+
+Standard-library modules are bundled with the interpreter: use qualified
+words such as `str.upper`, `json.parse`, or `csv.parse` directly, without
+installing packages.
+
+### Projects and packages
+
+Start a project and synchronize its dependencies:
+
+```sh
+ecl pkg init my.app
+ecl pkg sync
+```
+
+To add a dependency, run `ecl pkg add <name> <version> <https-url>` with the
+package's name, version, and archive URL, then run `ecl pkg sync` again.
+Commit both `ecl.pkg` and `ecl.lock`.
+
+Use `ecl pkg tree` to inspect dependencies, `ecl pkg verify` to check them,
+and `ecl pkg vendor` to prepare the project for offline use. Run a synchronized
+project's declared tests with `ecl test`. The
+[package example](examples/pkg-smoke/README.md) walks through a complete workflow.
+
+### Neovim
+
+The repository includes filetype detection, syntax highlighting, indentation,
+and formatting support. Add this to your Neovim configuration:
+
+```lua
+vim.opt.runtimepath:append("/path/to/ecl/runtime")
+vim.cmd("filetype indent on")
+```
+
+Replace the path with your checkout and restart Neovim. Opening an `.ecl`
+file enables the integration. With `ecl` on Neovim's `PATH`, use `gggqG`
+to format the whole buffer. Formatting partial ranges is not supported.
+
+## Repository layout
+
+| Path | Contents |
+|---|---|
+| [`src/`](src) | Zig interpreter and runtime |
+| [`src/prelude.ecl`](src/prelude.ecl) | Core vocabulary written in ECL |
+| [`src/stdlib/`](src/stdlib) | Embedded standard-library modules |
+| [`src/native/`](src/native) | Public Zig extension SDK |
+| [`src/tests/`](src/tests), [`test/`](test) | Runtime tests, acceptance suites, and fixtures |
+| [`src/tools/`](src/tools) | Source checks and benchmarks |
+| [`examples/`](examples) | Package and native-extension examples |
+| [`runtime/`](runtime) | Neovim integration |
+| [`design/`](design) | Language, library, environment, and architecture references |
+| [`gameplans/`](gameplans) | Implementation plans |
+| [`agent-guides/`](agent-guides) | Engineering and verification guidance |
+| [`build.zig`](build.zig), [`build.zig.zon`](build.zig.zon) | Build tasks, version, and dependencies |
+| [`.github/workflows/`](.github/workflows) | CI and release validation |
+
+For development, `zig build check` is the quick compile check and
+`zig build precommit` is the local source-change gate. See
+[AGENTS.md](AGENTS.md) and the [testing guide](agent-guides/testing.md) for
+contributor instructions.
+
+## Reference
+
+- [Language specification](design/SPEC.md): syntax and semantics.
+- [Standard library](design/STDLIB.md): words, stack effects, and examples.
+- [Environment](design/ENVIRONMENT.md): command behavior, module loading,
+  packages, and host integration.
+- [ECL style](design/ECL_STYLE.md): conventions for ECL source.
+- [Interpreter architecture](design/INTERPRETER.md): runtime design and invariants.
+- [Native extension tutorial](examples/port-authoring/README.md): build a Zig extension.
+
+ECL is distributed under the [BSD 3-Clause License](LICENSE).
