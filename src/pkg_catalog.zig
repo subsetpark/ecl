@@ -180,29 +180,14 @@ const Builder = struct {
         return true;
     }
 
-    /// Order the claims and prove every declared glob selected something. Both
-    /// run over memory already held and are bounded by the manifest, so they
-    /// stay one step.
-    fn closeWalk(self: *Builder, input: PackageInput, walk: *Walk) BuildError!void {
+    /// Keep artifact order deterministic, including when source globs overlap
+    /// or select no files yet.
+    fn closeWalk(walk: *Walk) void {
         std.mem.sort(Claim, walk.claims.items, {}, struct {
             fn lessThan(_: void, left: Claim, right: Claim) bool {
                 return std.mem.order(u8, left.relative_path, right.relative_path) == .lt;
             }
         }.lessThan);
-
-        for (walk.manifest.sources) |glob| {
-            var matched = false;
-            for (walk.claims.items) |claim| {
-                if (globMatches(glob, claim.relative_path)) {
-                    matched = true;
-                    break;
-                }
-            }
-            if (!matched) return self.fail(
-                "package {s} source glob {s} matches no ECL source artifact",
-                .{ input.name, glob },
-            );
-        }
     }
 
     fn buildArtifact(self: *Builder, input: PackageInput, claim: Claim, manifest: *const Manifest) BuildError!void {
@@ -634,7 +619,7 @@ pub const Build = struct {
             },
             .walking => |*walk| {
                 if (try self.builder.walkStep(input, walk, budget)) return .pending;
-                try self.builder.closeWalk(input, walk);
+                Builder.closeWalk(walk);
                 // Move the walk out before the union store: writing the new
                 // stage in place would otherwise overlap the payload being
                 // copied out of it.

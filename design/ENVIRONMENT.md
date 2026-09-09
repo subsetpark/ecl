@@ -497,7 +497,7 @@ boundary is a dot, so `foo` owns `foo.bar` and excludes `foobar`.
 The source list contains distinct portable globs. Globs use relative
 `/`-separated paths and support `*`, `?`, and a whole-segment
 `**`. They exclude absolute paths, backslashes, and empty, `.`, or `..`
-segments. Every glob matches at least one ECL source file; overlapping globs
+segments. A glob may match no files; overlapping globs
 select a file only once. An empty source list is valid.
 
 Exports are distinct, exact, package-owned module names. Exporting a module
@@ -765,9 +765,10 @@ grants the discovered root to evaluated code as the `'project` filesystem root
 with `read-data`, `inspect`, `create`, and `replace`; the discovered path
 itself never enters evaluated code. `init` acts on the `'cwd` root.
 
-- `init [name]` creates a format-1 manifest at version `0.1.0`. The working
-  directory basename supplies the default name. Creation never replaces an
-  existing or racing file.
+- `init [name]` creates `src/` and a format-1 manifest at version `0.1.0`, with
+  `sources ["src/**/*.ecl"]` and no exports. An existing source directory is
+  preserved. The working directory basename supplies the default name.
+  Manifest creation never replaces an existing or racing file.
 - `add <name> <version> <url>` fetches and validates an exact package, derives
   its hash, and records the requirement through an atomic manifest rewrite.
 - `sync` performs network-enabled synchronization. `sync --offline` uses only

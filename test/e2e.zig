@@ -837,9 +837,28 @@ test "e2e: pkg init derives a canonical root manifest without overwriting" {
     const manifest = try project.readFileAlloc(io, "ecl.pkg", allocator, .unlimited);
     defer allocator.free(manifest);
     try std.testing.expectEqualStrings(
-        "{'format 1 'name \"sample\" 'version \"0.1.0\" 'sources () 'exports () 'requires {}}\n",
+        "{'format 1 'name \"sample\" 'version \"0.1.0\" 'sources (\"src/**/*.ecl\") 'exports () 'requires {}}\n",
         manifest,
     );
+    var sources = try project.openDir(io, "src", .{});
+    defer sources.close(io);
+    var synced = try cli.runOptions(.{
+        .argv = &.{ exe, "pkg", "sync", "--offline" },
+        .cwd = .{ .dir = project },
+    });
+    defer synced.deinit();
+    try synced.expect(.{ .exit_code = 0, .stdout = "synced 0 packages\n", .stderr = "" });
+    var empty_tests = try cli.runOptions(.{ .argv = &.{ exe, "test" }, .cwd = .{ .dir = project } });
+    defer empty_tests.deinit();
+    try empty_tests.expect(.{ .exit_code = 0, .stdout = "", .stderr = "" });
+    try sources.createDir(io, "nested", .default_dir);
+    try sources.writeFile(io, .{
+        .sub_path = "nested/suite.ecl",
+        .data = "[] ((42 42 = {'kind 'user} assert) 'answer test) 'suite @defm\n",
+    });
+    var tests = try cli.runOptions(.{ .argv = &.{ exe, "test" }, .cwd = .{ .dir = project } });
+    defer tests.deinit();
+    try tests.expect(.{ .exit_code = 0, .stdout = "ok suite.answer\n", .stderr = "" });
 
     var repeated = try cli.runOptions(.{
         .argv = &.{ exe, "pkg", "init" },
@@ -865,6 +884,8 @@ test "e2e: pkg init derives a canonical root manifest without overwriting" {
         .stdout = "",
         .stderr_contains = &.{ "Bad_Name", "ecl pkg init <name>" },
     });
+    try invalid_project.createDir(io, "src", .default_dir);
+    try invalid_project.writeFile(io, .{ .sub_path = "src/existing.ecl", .data = "42\n" });
     var named = try cli.runOptions(.{
         .argv = &.{ exe, "pkg", "init", "valid.name" },
         .cwd = .{ .dir = invalid_project },
@@ -875,6 +896,18 @@ test "e2e: pkg init derives a canonical root manifest without overwriting" {
         .stdout = "initialized ecl.pkg for valid.name\n",
         .stderr = "",
     });
+    const existing = try invalid_project.readFileAlloc(io, "src/existing.ecl", allocator, .unlimited);
+    defer allocator.free(existing);
+    try std.testing.expectEqualStrings("42\n", existing);
+
+    try scratch.dir.createDir(io, "collision", .default_dir);
+    var collision = try scratch.dir.openDir(io, "collision", .{});
+    defer collision.close(io);
+    try collision.writeFile(io, .{ .sub_path = "src", .data = "keep me\n" });
+    var blocked = try cli.runOptions(.{ .argv = &.{ exe, "pkg", "init" }, .cwd = .{ .dir = collision } });
+    defer blocked.deinit();
+    try blocked.expect(.{ .exit_code = 1, .stdout = "", .stderr_contains = &.{"src to be a directory"} });
+    try std.testing.expectError(error.FileNotFound, collision.access(io, "ecl.pkg", .{}));
 }
 
 test "e2e: pkg tree and why explain the locked graph from a nested directory" {

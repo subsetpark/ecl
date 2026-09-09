@@ -124,6 +124,10 @@ ecl pkg init my.app
 ecl pkg sync
 ```
 
+`pkg init` creates `src/` and selects `src/**/*.ecl`, with no public exports.
+Put source files there and run `ecl test`; modules stay private until you add
+them to `exports`.
+
 To add a dependency, run `ecl pkg add <name> <version> <https-url>` with the
 package's name, version, and archive URL, then run `ecl pkg sync` again.
 Commit both `ecl.pkg` and `ecl.lock`.
