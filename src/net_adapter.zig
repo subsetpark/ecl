@@ -21,11 +21,11 @@ const Binding = struct {
     access: ?*external.NetAccess,
     pub const definitions: []const bindings.Definition = &.{
         .{ .name = "listener", .doc = "Create a TCP listener using the Session's listen grant.", .effect = "-- factory" },
-        .{ .name = "input", .doc = "Select the connection's readable byte stream.", .effect = "-- selector" },
-        .{ .name = "output", .doc = "Select the connection's writable byte stream; finish sends EOF after admitted writes.", .effect = "-- selector" },
-        .{ .name = "accept", .doc = "Accept an independent connection on the accept lane; request [].", .effect = "-- operation" },
-        .{ .name = "local-address", .doc = "Return the recorded local address on the control lane; request [].", .effect = "-- operation" },
-        .{ .name = "peer-address", .doc = "Return the connection's peer address on the control lane; request [].", .effect = "-- operation" },
+        .{ .name = "input", .doc = net.DeclaredEndpoints.get(.input).doc, .effect = "-- selector" },
+        .{ .name = "output", .doc = net.DeclaredEndpoints.get(.output).doc, .effect = "-- selector" },
+        .{ .name = "accept", .doc = net.DeclaredOperations.get(.accept).doc, .effect = "-- operation" },
+        .{ .name = "local-address", .doc = net.DeclaredOperations.get(.local_address).doc, .effect = "-- operation" },
+        .{ .name = "peer-address", .doc = net.DeclaredOperations.get(.peer_address).doc, .effect = "-- operation" },
     };
     pub fn bind(memory: std.mem.Allocator, inherited: *const @import("machine.zig").InheritedContext) error{OutOfMemory}!*bindings.Publication {
         const instance = if (inherited.net_access) |access| net.registeredInstance(access) else try bindings.Identity.create(memory);

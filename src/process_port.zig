@@ -1416,7 +1416,19 @@ pub const PreparedSpec = opaque {
     }
 };
 
-pub const RegisteredOperation = enum { wait, terminate, kill, capture_limits };
+const declarations = @import("port-declarations");
+pub const DeclaredEndpoints = declarations.Endpoints(.{
+    .stdin = declarations.Endpoint{ .doc = "Select the process writable standard input.", .transport = .bytes, .direction = .input, .owner = .resource },
+    .stdout = declarations.Endpoint{ .doc = "Select the process readable standard output.", .transport = .bytes, .direction = .output, .owner = .resource },
+    .stderr = declarations.Endpoint{ .doc = "Select the process readable diagnostics.", .transport = .bytes, .direction = .output, .owner = .resource },
+});
+pub const DeclaredOperations = declarations.Operations(enum { wait, control }, DeclaredEndpoints, .{
+    .wait = .{ .doc = "Wait for process termination on the wait lane; request [].", .handler = OperationAdapter.execute, .lane = .wait, .endpoints = .{} },
+    .terminate = .{ .doc = "Request process-group termination on the control lane; request [].", .handler = OperationAdapter.execute, .lane = .control, .endpoints = .{} },
+    .kill = .{ .doc = "Force process-group termination on the control lane; request [].", .handler = OperationAdapter.execute, .lane = .control, .endpoints = .{} },
+    .capture_limits = .{ .doc = "Read the process capture limits on the control lane; request [].", .handler = OperationAdapter.execute, .lane = .control, .endpoints = .{} },
+});
+pub const RegisteredOperation = DeclaredOperations.Name;
 pub const Service = @import("port_service.zig").Resource(ServiceAdapter);
 const ProcessExchange = @import("port_operation.zig").Exchange(OperationAdapter);
 const ServiceStorage = transfers.Resource(Service, ProcessOwner, ProcessOwner.resourceAllocator, ProcessOwner.reserveService, ProcessOwner.releaseService);
@@ -1436,7 +1448,7 @@ const ServiceAdapter = struct {
         return self.owner.instance.next();
     }
     pub fn operationLane(_: *ServiceAdapter, operation: RegisteredOperation) u32 {
-        return if (operation == .wait) 0 else 1;
+        return @intFromEnum(DeclaredOperations.lane(operation));
     }
     pub fn prepareOperation(_: *ServiceAdapter, cell: *Service, operation: RegisteredOperation, request: *const port_message.Validated, lane: *ProcessExchange.Lane) error{OutOfMemory}!*ProcessExchange.Prepared {
         const terminal = try results.Result.create(cell.adapter.owner.host);

@@ -23,13 +23,13 @@ const Binding = struct {
     access: ?*external.ProcessAccess,
     pub const definitions: []const bindings.Definition = &.{
         .{ .name = "process", .doc = "Create a process using the Session's executable grant.", .effect = "-- factory" },
-        .{ .name = "stdin", .doc = "Select the process's writable standard input.", .effect = "-- selector" },
-        .{ .name = "stdout", .doc = "Select the process's readable standard output.", .effect = "-- selector" },
-        .{ .name = "stderr", .doc = "Select the process's readable diagnostics.", .effect = "-- selector" },
-        .{ .name = "wait", .doc = "Wait for process termination on the wait lane; request [].", .effect = "-- operation" },
-        .{ .name = "terminate", .doc = "Request process-group termination on the control lane; request [].", .effect = "-- operation" },
-        .{ .name = "kill", .doc = "Force process-group termination on the control lane; request [].", .effect = "-- operation" },
-        .{ .name = "capture-limits", .doc = "Read the process capture limits on the control lane; request [].", .effect = "-- operation" },
+        .{ .name = "stdin", .doc = process.DeclaredEndpoints.get(.stdin).doc, .effect = "-- selector" },
+        .{ .name = "stdout", .doc = process.DeclaredEndpoints.get(.stdout).doc, .effect = "-- selector" },
+        .{ .name = "stderr", .doc = process.DeclaredEndpoints.get(.stderr).doc, .effect = "-- selector" },
+        .{ .name = "wait", .doc = process.DeclaredOperations.get(.wait).doc, .effect = "-- operation" },
+        .{ .name = "terminate", .doc = process.DeclaredOperations.get(.terminate).doc, .effect = "-- operation" },
+        .{ .name = "kill", .doc = process.DeclaredOperations.get(.kill).doc, .effect = "-- operation" },
+        .{ .name = "capture-limits", .doc = process.DeclaredOperations.get(.capture_limits).doc, .effect = "-- operation" },
     };
     pub fn bind(memory: std.mem.Allocator, inherited: *const @import("machine.zig").InheritedContext) error{OutOfMemory}!*bindings.Publication {
         const instance = if (inherited.process_access) |access| process.registeredInstance(access) else try bindings.Identity.create(memory);
@@ -72,7 +72,7 @@ const Binding = struct {
     }
 };
 
-const EndpointKind = enum { stdin, stdout, stderr };
+const EndpointKind = process.DeclaredEndpoints.Name;
 const RegisteredCapability = struct {
     issuer: *bindings.Identity,
     body: union(enum) { factory: ?*external.ProcessAccess, endpoint: EndpointKind, operation: process.RegisteredOperation },

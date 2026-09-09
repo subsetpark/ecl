@@ -4,6 +4,7 @@ const std = @import("std");
 pub const abi = @import("ecl-native-abi");
 const capability = @import("capability.zig");
 const ports = @import("ports.zig");
+pub const declarations = @import("port-declarations");
 pub const Port = ports.Port;
 pub const Controller = ports.Controller;
 pub const MessageView = ports.MessageView;
@@ -28,6 +29,18 @@ pub const BuildAppendResult = capability.BuildAppendResult;
 pub const Reschedule = capability.Reschedule;
 pub const CallbackResult = error{ OutOfMemory, InvalidValue }!Outcome;
 
+/// Export an operation from the port's single declaration.
+pub fn portOperation(comptime P: type, comptime name: P.Operations.Name) type {
+    const entry = P.Operations.get(name);
+    return operation(@tagName(name), entry.doc, P, @intFromEnum(name), P.Operations.lane(name), P.Operations.endpointMask(name));
+}
+
+/// Export a declared endpoint without repeating its owner or wire selector.
+pub fn portEndpoint(comptime P: type, comptime name: P.Endpoints.Name) type {
+    const entry = P.Endpoints.get(name);
+    return endpoint(@tagName(name), entry.doc, P, .{ .id = P.Endpoints.id(name), .transport = entry.transport, .direction = entry.direction, .owner = entry.owner });
+}
+
 pub fn factory(comptime name: []const u8, comptime doc: []const u8, comptime P: type) type {
     return portBinding(name, doc, P, .{ .kind = .factory });
 }
@@ -38,9 +51,9 @@ pub fn operation(comptime name: []const u8, comptime doc: []const u8, comptime P
 
 pub const Endpoint = struct {
     id: u6,
-    transport: enum { bytes, messages },
-    direction: enum { input, output },
-    owner: enum { resource, exchange } = .exchange,
+    transport: declarations.Transport,
+    direction: declarations.Direction,
+    owner: declarations.Owner = .exchange,
 };
 
 pub fn endpoint(comptime name: []const u8, comptime doc: []const u8, comptime P: type, comptime spec: Endpoint) type {

@@ -2,7 +2,8 @@
 const abi = @import("ecl-native-abi");
 const capability = @import("capability.zig");
 
-pub const Cancellation = enum { close_resource, acknowledge };
+const declarations = @import("port-declarations");
+pub const Cancellation = declarations.Cancellation;
 
 pub const ControllerState = struct { table: *const abi.ControllerTable, context: *anyopaque, input_view: abi.ValueView = .{ .kind = .list } };
 
@@ -263,24 +264,34 @@ pub fn Port(comptime Spec: type) type {
             @compileError("ecl-native: Port Lane must declare 1 to 16 exhaustive lanes");
         for (info.fields, 0..) |field, index| if (field.value != index)
             @compileError("ecl-native: Port Lane values must be contiguous from zero");
-        if (@hasDecl(Spec, "Lane") and (!@hasDecl(Spec, "lane") or @TypeOf(Spec.lane) != fn (u32) Lane))
-            @compileError("ecl-native: Port lanes require fn lane(u32) Lane");
         if (cancellation == .acknowledge and (!@hasDecl(Spec, "cancelOperation") or @TypeOf(Spec.cancelOperation) != fn (*Spec.State, Lane) void))
             @compileError("ecl-native: recoverable cancellation requires fn cancelOperation(*State, Lane) void");
         if (@hasDecl(Spec, "shutdown") and @TypeOf(Spec.shutdown) != fn (*Spec.State, *Controller) void)
             @compileError("ecl-native: shutdown requires fn (*State, *Controller) void");
-        for (.{ "State", "name", "init", "open", "run", "cancel", "deinit" }) |name|
+        for (.{ "State", "name", "init", "open", "cancel", "deinit" }) |name|
             if (!@hasDecl(Spec, name)) @compileError("ecl-native: Port spec requires State, name, init, open, run, cancel, and deinit");
         if (@sizeOf(Spec.State) == 0 or @sizeOf(Spec.State) > abi.max_port_state_bytes or @alignOf(Spec.State) > 64)
             @compileError("ecl-native: Port State exceeds the supported size or alignment");
         if (@TypeOf(Spec.init) != fn () Spec.State or
             @TypeOf(Spec.open) != fn (*Spec.State, *Controller) void or
-            @TypeOf(Spec.run) != fn (*Spec.State, u32, *Controller) void or
             @TypeOf(Spec.cancel) != fn (*Spec.State) void or
             @TypeOf(Spec.deinit) != fn (*Spec.State) void)
             @compileError("ecl-native: Port callbacks have invalid signatures");
     }
+    const DeclaredEndpoints = declarations.Endpoints(if (@hasDecl(Spec, "endpoints")) Spec.endpoints else .{});
+    const DeclaredOperations = if (@hasDecl(Spec, "operations")) declarations.Operations(Lane, DeclaredEndpoints, Spec.operations) else void;
+    comptime {
+        if (DeclaredOperations != void) {
+            for (@import("std").meta.tags(DeclaredOperations.Name)) |name| {
+                if (@TypeOf(DeclaredOperations.get(name).handler) != fn (*Spec.State, *Controller) void)
+                    @compileError("port: handler must accept resource state and controller");
+            }
+        } else if (!@hasDecl(Spec, "run") or @TypeOf(Spec.run) != fn (*Spec.State, u32, *Controller) void)
+            @compileError("ecl-native: Port callbacks have invalid signatures");
+    }
     return opaque {
+        pub const Endpoints = declarations.Endpoints(if (@hasDecl(Spec, "endpoints")) Spec.endpoints else .{});
+        pub const Operations = if (@hasDecl(Spec, "operations")) declarations.Operations(Lane, Endpoints, Spec.operations) else void;
         pub const ecl_port_marker = void;
         pub const StateType = Spec.State;
         pub const LaneType = Lane;
@@ -295,10 +306,7 @@ pub fn Port(comptime Spec: type) type {
             return .{ .state_size = @sizeOf(Spec.State), .state_alignment = @alignOf(Spec.State), .name_ptr = name.ptr, .name_len = name.len, .init_state = initState, .initialize = initialize, .execute = execute, .cancel = cancelState, .cleanup = cleanup, .lane_count = @typeInfo(Lane).@"enum".fields.len, .cancellation = switch (cancellation) {
                 .close_resource => .close_resource,
                 .acknowledge => .acknowledge,
-            }, .select_lane = selectLane, .cancel_operation = if (cancellation == .acknowledge) cancelOperation else null, .shutdown = if (@hasDecl(Spec, "shutdown")) shutdown else null, .identity = kindIdentity() };
-        }
-        fn selectLane(operation: u32) callconv(.c) u32 {
-            return if (@hasDecl(Spec, "Lane")) @intCast(@intFromEnum(Spec.lane(operation))) else 0;
+            }, .cancel_operation = if (cancellation == .acknowledge) cancelOperation else null, .shutdown = if (@hasDecl(Spec, "shutdown")) shutdown else null, .identity = kindIdentity() };
         }
         fn cancelOperation(raw: *anyopaque, lane: u32) callconv(.c) void {
             Spec.cancelOperation(@ptrCast(@alignCast(raw)), @enumFromInt(lane));
@@ -317,7 +325,18 @@ pub fn Port(comptime Spec: type) type {
         }
         fn execute(raw: *anyopaque, operation: u32, table: *const abi.ControllerTable, context: *anyopaque) callconv(.c) void {
             var state: ControllerState = .{ .table = table, .context = context };
-            Spec.run(@ptrCast(@alignCast(raw)), operation, @ptrCast(&state));
+            if (Operations == void) {
+                Spec.run(@ptrCast(@alignCast(raw)), operation, @ptrCast(&state));
+            } else {
+                inline for (comptime @import("std").meta.tags(Operations.Name)) |operation_name| {
+                    if (operation == @intFromEnum(operation_name)) {
+                        Operations.get(operation_name).handler(@ptrCast(@alignCast(raw)), @ptrCast(&state));
+                        return;
+                    }
+                }
+                const controller: *Controller = @ptrCast(&state);
+                controller.fail(.contract, "unsupported registered operation");
+            }
         }
         fn cancelState(raw: *anyopaque) callconv(.c) void {
             Spec.cancel(@ptrCast(@alignCast(raw)));

@@ -1,6 +1,6 @@
 # Native requests and opaque ECL replies
 
-This example runs the deterministic ABI v4 conformance fixture. It receives
+This example runs the deterministic ABI v5 conformance fixture. It receives
 two native requests with an interleaved notification, then replies in reverse
 order. Each request carries an opaque sender; ECL never sees an operation
 number, native pointer, or descriptor.

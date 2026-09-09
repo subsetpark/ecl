@@ -561,9 +561,6 @@ test "native: SDK port declarations validate state layouts and controller adapte
     definition.cancellation = @enumFromInt(999);
     try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &invalid);
     definition = P.definition();
-    definition.select_lane = null;
-    try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &invalid);
-    definition = P.definition();
     definition.identity = null;
     try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &invalid);
     var duplicates = [_]abi.PortDefinition{ P.definition(), P.definition() };
@@ -1835,4 +1832,12 @@ test "native: explicit message consumption releases pressure without invalidatin
         "x portprobe.sender port.endpoint 42 port.send x portprobe.receiver port.endpoint 'r set " ++
         "r port.receive 'value at r port.receive 'kind at x port.result len " ++
         "x port.close p port.close portprobe.cleaned", "42 'eof 0 1");
+}
+
+test "native: named declarations supply handlers and exchange endpoints" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "portprobe.declared [] port.open 'p set " ++
+        "p portprobe.declared-result {'answer 42} port.call 'answer at " ++
+        "p portprobe.declared-stream [] port.begin 'x set " ++
+        "x portprobe.declared-output port.endpoint dup 1 port.read swap 1 port.read " ++
+        "x port.await x port.close p port.close portprobe.cleaned", "42 [42] [] 1");
 }

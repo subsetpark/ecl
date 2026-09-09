@@ -281,7 +281,7 @@ ecl '"{\"a\":[1,null]}" json.parse'       # {"a" (1 'null)}
 ```
 
 The `net` and `proc` words are ECL compositions over registered capabilities
-and `port.*`. First-party resources and ABI v4 extensions share controller
+and `port.*`. First-party resources and ABI v5 extensions share controller
 execution, ownership, cancellation, and cleanup. See the
 [common port examples and conformance guide](examples/PORTS.md).
 
@@ -365,7 +365,7 @@ words use the public `ecl-native` SDK, declare exact effects, and request only
 the narrow host capabilities they need. Their tables validate and publish
 atomically through the same module registry used by source modules.
 
-The pre-release ABI is version 4 (`ecl_module_abi_v4`); rebuild existing native
+The pre-release ABI is version 5 (`ecl_module_abi_v5`); rebuild existing native
 modules against this SDK. Port inputs expose `.port` through `ValueView.kind()`
 and can be returned with `Call.forward`. With `Reschedule`, `Call.forwardNested`
 returns an invocation-local candidate for a bounded `Path` into a list or

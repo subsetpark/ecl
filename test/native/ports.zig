@@ -849,13 +849,43 @@ const Channel = ecl.Port(struct {
     }
 });
 
+const Declared = ecl.Port(struct {
+    pub const name = "declared";
+    pub const State = u8;
+    pub const endpoints = .{
+        .@"declared-output" = ecl.declarations.Endpoint{ .doc = "Read declared output.", .transport = .bytes, .direction = .output },
+    };
+    pub const operations = .{
+        .@"declared-result" = .{ .doc = "Return the request through a named handler.", .handler = result, .lane = .operation, .endpoints = .{} },
+        .@"declared-stream" = .{ .doc = "Write to a declared exchange endpoint.", .handler = stream, .lane = .operation, .endpoints = .{.@"declared-output"} },
+    };
+    pub fn init() State {
+        return 0;
+    }
+    pub fn open(_: *State, _: *ecl.Controller) void {}
+    fn result(_: *State, controller: *ecl.Controller) void {
+        _ = controller.builder().input(&.{}) and controller.builder().result();
+    }
+    fn stream(_: *State, controller: *ecl.Controller) void {
+        _ = controller.writeTo(Declared.Endpoints.id(.@"declared-output"), &.{42});
+    }
+    pub fn cancel(_: *State) void {}
+    pub fn deinit(_: *State) void {
+        _ = cleaned.fetchAdd(1, .release);
+    }
+});
+
 pub const Extension = extension: {
     @setEvalBranchQuota(20_000);
     break :extension ecl.module(.{
         .name = @import("port_fixture_options").module_name,
         .doc = "Hermetic native port controller fixture.",
-        .ports = .{ Counter, Other, Duplex, Unacknowledged, Storage, Cursor, TransactionPort, Broker, Delivery, Device, Buffer, Multiplex, Channel },
+        .ports = .{ Counter, Other, Duplex, Unacknowledged, Storage, Cursor, TransactionPort, Broker, Delivery, Device, Buffer, Multiplex, Channel, Declared },
         .words = .{
+            ecl.factory("declared", "Open a port with named declarations.", Declared),
+            ecl.portOperation(Declared, .@"declared-result"),
+            ecl.portOperation(Declared, .@"declared-stream"),
+            ecl.portEndpoint(Declared, .@"declared-output"),
             ecl.factory("counter", "Open a single-lane counter.", Counter),
             ecl.operation("counter-step", "Apply a bounded structured increment.", Counter, 41, .operation, 0),
             ecl.operation("counter-block", "Block before applying a structured increment.", Counter, 42, .operation, 0),

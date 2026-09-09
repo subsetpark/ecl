@@ -2141,7 +2141,17 @@ const port_message = @import("port_message.zig");
 const port_result = @import("port_result.zig");
 const port_builder = @import("port_builder.zig");
 const PortFailure = @import("port_bytes.zig").Failure;
-pub const RegisteredOperation = enum { accept, local_address, peer_address };
+const declarations = @import("port-declarations");
+pub const DeclaredEndpoints = declarations.Endpoints(.{
+    .input = declarations.Endpoint{ .doc = "Select the connection readable byte stream.", .transport = .bytes, .direction = .output, .owner = .resource },
+    .output = declarations.Endpoint{ .doc = "Select the connection writable byte stream; finish sends EOF after admitted writes.", .transport = .bytes, .direction = .input, .owner = .resource },
+});
+pub const DeclaredOperations = declarations.Operations(enum { accept, control }, DeclaredEndpoints, .{
+    .accept = .{ .doc = "Accept an independent connection on the accept lane; request [].", .handler = OperationAdapter.execute, .lane = .accept, .endpoints = .{} },
+    .local_address = .{ .doc = "Return the recorded local address on the control lane; request [].", .handler = OperationAdapter.execute, .lane = .control, .endpoints = .{} },
+    .peer_address = .{ .doc = "Return the connection’s peer address on the control lane; request [].", .handler = OperationAdapter.execute, .lane = .control, .endpoints = .{} },
+});
+pub const RegisteredOperation = DeclaredOperations.Name;
 pub const Service = @import("port_service.zig").Resource(ServiceAdapter);
 const NetworkExchange = @import("port_operation.zig").Exchange(OperationAdapter);
 const ServiceStorage = transfers.Resource(Service, NetOwner, NetOwner.resourceAllocator, NetOwner.reserveService, NetOwner.releaseService);
@@ -2167,7 +2177,7 @@ const ServiceAdapter = struct {
         return self.owner.instance.next();
     }
     pub fn operationLane(_: *ServiceAdapter, operation: RegisteredOperation) u32 {
-        return if (operation == .accept) 0 else 1;
+        return @intFromEnum(DeclaredOperations.lane(operation));
     }
     pub fn prepareOperation(_: *ServiceAdapter, cell: *Service, operation: RegisteredOperation, request: *const port_message.Validated, lane: *NetworkExchange.Lane) error{OutOfMemory}!*NetworkExchange.Prepared {
         const terminal = try port_result.Result.create(cell.adapter.owner.host);

@@ -5,8 +5,8 @@
 
 const builtin = @import("builtin");
 
-pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v4";
-pub const abi_version: u32 = 4;
+pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v5";
+pub const abi_version: u32 = 5;
 
 pub const max_error_message_bytes: u32 = 4096;
 pub const max_guest_scalar_bytes: u32 = 4096;
@@ -127,7 +127,6 @@ pub const PortDefinition = extern struct {
     cleanup: ?StateDeinitFn,
     lane_count: u32 = 1,
     cancellation: PortCancellation = .close_resource,
-    select_lane: ?*const fn (u32) callconv(.c) u32 = null,
     cancel_operation: ?*const fn (*anyopaque, u32) callconv(.c) void = null,
     shutdown: ?PortControllerFn = null,
     identity: ?*const anyopaque = null,
@@ -408,7 +407,7 @@ fn assertRecord(comptime T: type, comptime expected_size: usize, comptime expect
 
 comptime {
     @setEvalBranchQuota(8000);
-    if (@sizeOf(usize) != 8) @compileError("native ABI v4 supports 64-bit targets only");
+    if (@sizeOf(usize) != 8) @compileError("native ABI v5 supports 64-bit targets only");
 
     assertRecord(CapabilityRequirement, 8, 4);
     assertRecord(EffectSlot, 24, 8);
@@ -419,7 +418,7 @@ comptime {
     assertRecord(InvokeResult, 16, 8);
     assertRecord(HostTable, 136, 8);
     assertRecord(Descriptor, 104, 8);
-    assertRecord(PortDefinition, 104, 8);
+    assertRecord(PortDefinition, 96, 8);
     assertRecord(MessageBuildRequest, 72, 8);
     assertRecord(ControllerTable, 128, 8);
     assertRecord(EntryResult, 32, 8);

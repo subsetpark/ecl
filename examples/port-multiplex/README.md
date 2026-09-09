@@ -1,6 +1,6 @@
 # Multiplexed child channels
 
-This deterministic ABI v4 fixture models independent message channels on one
+This deterministic ABI v5 fixture models independent message channels on one
 connection. Each channel is an opaque dependent resource with its own operation
 lane. Full output on one channel leaves sibling channels runnable. Cancelling a
 channel exchange permits another exchange on the same channel after its

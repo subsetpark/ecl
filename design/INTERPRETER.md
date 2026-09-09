@@ -1225,6 +1225,13 @@ spellings remain owned by their closed operation enums. The source audit
 checks semantic spelling conventions across all classified production sources;
 documentation completeness and effect syntax are compile-time requirements.
 
+Port operation declarations bind documentation, typed handlers, lanes, and
+supported exchange endpoints together. Built-in and extension bridges derive
+selectors from the same ABI-independent declaration types. Registered lane
+metadata is authoritative; controller invocation does not select a second lane.
+Named endpoint references generate private masks before publication, rejecting
+resource-owned or repeated endpoints in an operation's exchange set.
+
 Each granted Session service owns its registered library instance. A library
 loaded without a grant owns an inert instance with no host authority.
 A module candidate publishes sealed capabilities as literal word

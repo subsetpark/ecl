@@ -1,6 +1,6 @@
 # Opaque native buffers and deferred work
 
-This deterministic ABI v4 fixture creates an opaque eight-byte buffer dependent
+This deterministic ABI v5 fixture creates an opaque eight-byte buffer dependent
 on a device. A native worker computes its checksum only after a separate
 controller lane permits completion. Positioned updates are registered operations.
 Cancellation interrupts the worker, joins it, and acknowledges that the compute

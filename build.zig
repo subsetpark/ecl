@@ -28,12 +28,19 @@ pub fn build(b: *std.Build) void {
     runtime_options.addOption(usize, "default_worker_count", 1);
     runtime_options.addOption(bool, "instrument_root_execution", false);
 
+    const port_declarations = b.addModule("port-declarations", .{
+        .root_source_file = b.path("src/port_declarations.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const native_sdk = b.addModule("ecl-native", .{
         .root_source_file = b.path("src/native/sdk.zig"),
         .target = target,
         .optimize = optimize,
     });
     native_sdk.addImport("ecl-native-abi", native_abi);
+    native_sdk.addImport("port-declarations", port_declarations);
     configureRuntime(mod, native_abi, native_sdk, runtime_options);
     const internal_mod = b.createModule(.{
         .root_source_file = b.path("src/internal.zig"),
@@ -154,7 +161,7 @@ pub fn build(b: *std.Build) void {
 
     const negative_cases = [_]struct { file: []const u8, message: []const u8 }{
         .{ .file = "missing_port_recovery", .message = "ecl-native: recoverable cancellation requires fn cancelOperation(*State, Lane) void" },
-        .{ .file = "invalid_lane_selector", .message = "ecl-native: Port lanes require fn lane(u32) Lane" },
+        .{ .file = "resource_operation_endpoint", .message = "port: operation endpoints must belong to the exchange" },
         .{ .file = "invalid_port_lanes", .message = "ecl-native: Port Lane values must be contiguous from zero" },
         .{ .file = "invalid_port_callbacks", .message = "ecl-native: Port callbacks have invalid signatures" },
         .{ .file = "undeclared_port", .message = "ecl-native: registered capability requires a declared port" },
@@ -1153,6 +1160,7 @@ fn configureRuntime(
     module.link_libc = true;
     module.addImport("native-abi", abi);
     module.addImport("ecl-native", sdk);
+    module.addImport("port-declarations", sdk.import_table.get("port-declarations").?);
     module.addOptions("session_options", options);
 }
 

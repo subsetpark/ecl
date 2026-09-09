@@ -1,6 +1,6 @@
 # Common ports
 
-`net`, `proc`, and ABI v4 extensions use the same port capabilities and
+`net`, `proc`, and ABI v5 extensions use the same port capabilities and
 controller lifecycle. Libraries supply factories, operations, and endpoint
 selectors as ordinary module bindings. The runtime owns admission, scope
 publication, cancellation settlement, transport pressure, and joined cleanup.
@@ -26,7 +26,7 @@ Native loading and SDK ownership contracts are in
 
 ## Executable examples
 
-These examples use the deterministic [ABI v4 fixture](../test/native/ports.zig).
+These examples use the deterministic [ABI v5 fixture](../test/native/ports.zig).
 Each directory includes build instructions and an exact output transcript.
 
 - [Storage](port-storage/README.md): structured rows, exclusive transactions,

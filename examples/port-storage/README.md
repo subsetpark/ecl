@@ -1,6 +1,6 @@
 # Structured storage sessions
 
-This deterministic ABI v4 fixture demonstrates an exclusive transaction child,
+This deterministic ABI v5 fixture demonstrates an exclusive transaction child,
 separate commit and durability acknowledgements, and a cursor that streams row
 messages. Cursor positioning is a registered operation. Dependent children
 retain access to their parent's native state through cleanup and scope transfer.

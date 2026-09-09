@@ -613,7 +613,7 @@ pub const ValidateCursor = struct {
                     port.state_alignment == 0 or port.state_alignment > 64 or
                     !std.math.isPowerOfTwo(port.state_alignment) or
                     port.identity == null or port.init_state == null or port.initialize == null or port.execute == null or
-                    port.cancel == null or port.cleanup == null or port.select_lane == null or
+                    port.cancel == null or port.cleanup == null or
                     port.lane_count == 0 or port.lane_count > abi.max_port_lanes) return error.InvalidPortDefinition;
                 switch (port.cancellation) {
                     .close_resource => if (port.cancel_operation != null) return error.InvalidPortDefinition,
