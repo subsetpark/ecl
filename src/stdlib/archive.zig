@@ -501,11 +501,22 @@ const UnpackDriver = struct {
             diagnostic: ?[]u8 = null,
         },
         seal: struct {
+            catalog: pkg_catalog.Catalog,
+            hasher: std.crypto.hash.sha2.Sha256 = .init(.{}),
             staged: Staged,
             dir: std.Io.Dir,
             file: std.Io.File,
             written: usize = 0,
             created_count: usize,
+        },
+        metadata: struct {
+            staged: Staged,
+            dir: std.Io.Dir,
+            created_count: usize,
+            catalog: pkg_catalog.Catalog,
+            encoder: pkg_catalog.Encoder,
+            hash: [71]u8,
+            work: union(enum) { encode, write: struct { file: std.Io.File, written: usize = 0 } } = .encode,
         },
         commit: struct { staged: Staged, created_count: usize },
         published: heap.Owned([]u8),
@@ -1249,9 +1260,9 @@ const UnpackDriver = struct {
         context: *ScanContext,
         entry: Entry,
     ) MachineError!void {
-        if (entry.kind == .directory) return;
-        if (std.mem.eql(u8, entry.path, package_seal_name))
+        if (std.mem.eql(u8, entry.path, package_seal_name) or std.mem.eql(u8, entry.path, pkg_catalog.filename))
             return self.failPackageMember(evaluator, archive, "package archive uses a reserved store member", entry.path);
+        if (entry.kind == .directory) return;
         if (std.mem.eql(u8, entry.path, "ecl.pkg")) {
             if (context.manifest_data != null)
                 return self.failPackageMember(
@@ -1515,7 +1526,7 @@ const UnpackDriver = struct {
                             const validation = &publication.validate_package;
                             // The staged tree is validated through its own
                             // open handle; the catalog it produces is
-                            // discarded, so relative artifact paths suffice.
+                            // retained for portable metadata publication.
                             validation.catalog = try evaluator.beginPackageTreeValidation(
                                 io,
                                 archivePackageName(archive),
@@ -1588,7 +1599,7 @@ const UnpackDriver = struct {
                         .{validation.diagnostic orelse "validation failed"},
                     ),
                 };
-                catalog.deinit();
+                errdefer catalog.deinit();
                 catalog_cursor.deinit();
                 validation.catalog = null;
                 const seal = validation.dir.createFile(
@@ -1607,6 +1618,7 @@ const UnpackDriver = struct {
                     .staged = staged,
                     .dir = dir,
                     .file = seal,
+                    .catalog = catalog,
                     .created_count = created_count,
                 } };
             },
@@ -1619,19 +1631,55 @@ const UnpackDriver = struct {
                         compressed[seal.written..end],
                         seal.written,
                     ) catch |err| return self.failIo(evaluator, "cannot write package archive seal", err);
+                    seal.hasher.update(compressed[seal.written..end]);
                     seal.written = end;
                 } else {
                     seal.file.sync(io) catch |err|
                         return self.failIo(evaluator, "cannot synchronize package archive seal", err);
                     seal.file.close(io);
-                    seal.dir.close(io);
-                    const staged = seal.staged;
-                    const created_count = seal.created_count;
-                    publication.* = .{ .commit = .{
-                        .staged = staged,
-                        .created_count = created_count,
+                    var digest: [32]u8 = undefined;
+                    seal.hasher.final(&digest);
+                    const hash = "sha256-".* ++ std.fmt.bytesToHex(digest, .lower);
+                    const moved = seal.*;
+                    publication.* = .{ .metadata = .{
+                        .staged = moved.staged,
+                        .dir = moved.dir,
+                        .created_count = moved.created_count,
+                        .catalog = moved.catalog,
+                        .encoder = .init(self.allocator),
+                        .hash = hash,
                     } };
                 }
+            },
+            .metadata => |*metadata| switch (metadata.work) {
+                .encode => {
+                    if (metadata.encoder.advance(&metadata.catalog, &metadata.hash) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        error.Invalid => return evaluator.fail(.domain, "package catalog exceeds its byte limit"),
+                    } == .pending) return .yielded;
+                    const file = metadata.dir.createFile(io, pkg_catalog.filename, .{ .exclusive = true }) catch |err|
+                        return self.failIo(evaluator, "cannot create package catalog", err);
+                    metadata.work = .{ .write = .{ .file = file } };
+                },
+                .write => |*writing| {
+                    const bytes = metadata.encoder.output.written();
+                    if (writing.written < bytes.len) {
+                        const end = @min(writing.written + work_quantum, bytes.len);
+                        writing.file.writePositionalAll(io, bytes[writing.written..end], writing.written) catch |err|
+                            return self.failIo(evaluator, "cannot write package catalog", err);
+                        writing.written = end;
+                        return .yielded;
+                    }
+                    if (!metadata.catalog.retireStep()) return .yielded;
+                    writing.file.sync(io) catch |err| return self.failIo(evaluator, "cannot synchronize package catalog", err);
+                    writing.file.close(io);
+                    metadata.encoder.deinit();
+                    metadata.catalog.deinit();
+                    metadata.dir.close(io);
+                    const staged = metadata.staged;
+                    const created_count = metadata.created_count;
+                    publication.* = .{ .commit = .{ .staged = staged, .created_count = created_count } };
+                },
             },
             .commit => |*commit_state| {
                 const target = self.destinationEntry();
@@ -1728,6 +1776,11 @@ const UnpackDriver = struct {
         active: *Active,
         publication: *Publication,
     ) void {
+        switch (publication.*) {
+            .seal => |*seal| if (!seal.catalog.retireStep()) return,
+            .metadata => |*metadata| if (!metadata.catalog.retireStep()) return,
+            else => {},
+        }
         const archive = takeArchive(&active.archive);
         switch (publication.*) {
             .resolve => |*resolving| {
@@ -1769,11 +1822,12 @@ const UnpackDriver = struct {
                     .path = .init(path),
                 };
                 const dir = extraction.dir;
+                const work = rollbackEntries(self, extraction.created_count);
                 self.state = .{ .rollback = .{
                     .archive = archive,
                     .context = context,
                     .dir = dir,
-                    .work = rollbackEntries(self, extraction.created_count),
+                    .work = work,
                 } };
             },
             .validate_package => |*validation| {
@@ -1784,14 +1838,17 @@ const UnpackDriver = struct {
                 validation.diagnostic = null;
                 releases.releaseValue(validation.staged.result);
                 const path = validation.staged.path.take();
+                const dir = validation.dir;
+                const work = rollbackEntries(self, validation.created_count);
                 self.state = .{ .rollback = .{
                     .archive = archive,
                     .context = .{ .path = .init(path) },
-                    .dir = validation.dir,
-                    .work = rollbackEntries(self, validation.created_count),
+                    .dir = dir,
+                    .work = work,
                 } };
             },
             .seal => |*seal| {
+                seal.catalog.deinit();
                 seal.file.close(self.io.?);
                 releases.releaseValue(seal.staged.result);
                 const path = seal.staged.path.take();
@@ -1799,25 +1856,40 @@ const UnpackDriver = struct {
                     .path = .init(path),
                 };
                 const dir = seal.dir;
+                const created_count = seal.created_count;
                 self.state = .{ .rollback = .{
                     .archive = archive,
                     .context = context,
                     .dir = dir,
-                    .work = .{ .seal = seal.created_count },
+                    .work = .{ .seal = created_count },
                 } };
+            },
+            .metadata => |*metadata| {
+                switch (metadata.work) {
+                    .encode => {},
+                    .write => |writing| writing.file.close(self.io.?),
+                }
+                metadata.encoder.deinit();
+                metadata.catalog.deinit();
+                releases.releaseValue(metadata.staged.result);
+                const path = metadata.staged.path.take();
+                const dir = metadata.dir;
+                const created_count = metadata.created_count;
+                self.state = .{ .rollback = .{ .archive = archive, .context = .{ .path = .init(path) }, .dir = dir, .work = .{ .seal = created_count } } };
             },
             .commit => |*commit_state| {
                 releases.releaseValue(commit_state.staged.result);
                 const path = commit_state.staged.path.take();
+                const plan: RollbackPlan = if (self.operationMode() == .package_install)
+                    .{ .seal_then_entries = commit_state.created_count }
+                else
+                    .{ .entries = commit_state.created_count };
                 self.state = .{ .rollback_reopen = .{
                     .archive = archive,
                     .context = .{
                         .path = .init(path),
                     },
-                    .plan = if (self.operationMode() == .package_install)
-                        .{ .seal_then_entries = commit_state.created_count }
-                    else
-                        .{ .entries = commit_state.created_count },
+                    .plan = plan,
                 } };
             },
             .published => |*path| {
@@ -1874,6 +1946,10 @@ const UnpackDriver = struct {
     ) bool {
         switch (rollback.work) {
             .seal => |created_count| {
+                rollback.dir.deleteFile(self.io.?, pkg_catalog.filename) catch |err| switch (err) {
+                    error.FileNotFound => {},
+                    else => observeCleanupError("remove the package catalog", err),
+                };
                 rollback.dir.deleteFile(self.io.?, package_seal_name) catch |err|
                     observeCleanupError("remove the package archive seal", err);
                 rollback.work = rollbackEntries(self, created_count);

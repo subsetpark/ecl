@@ -32,6 +32,8 @@ pub const PackageInput = struct {
     /// validates a staged tree through the handle it already holds, so no
     /// path text is ever re-resolved from the process working directory.
     base_dir: ?std.Io.Dir = null,
+    /// Present only for immutable dependencies imported from persisted metadata.
+    archive_hash: ?[]const u8 = null,
 
     fn base(self: PackageInput) std.Io.Dir {
         return self.base_dir orelse std.Io.Dir.cwd();
@@ -61,12 +63,29 @@ pub const Catalog = struct {
     allocator: std.mem.Allocator,
     artifacts: []Artifact,
     modules: []Module,
+    identity: ?Identity = null,
+    reclaimed: usize = 0,
+
+    pub const Identity = struct { name: []u8, version: []u8 };
 
     pub fn deinit(self: *Catalog) void {
-        for (self.artifacts) |*entry| entry.deinit(self.allocator);
+        if (self.identity) |identity| {
+            self.allocator.free(identity.name);
+            self.allocator.free(identity.version);
+        }
+        for (self.artifacts[self.reclaimed..]) |*entry| entry.deinit(self.allocator);
         self.allocator.free(self.artifacts);
         self.allocator.free(self.modules);
         self.* = undefined;
+    }
+
+    /// Release one artifact per scheduler retirement step. `deinit` releases
+    /// the final fixed number of buffers once this reports true.
+    pub fn retireStep(self: *Catalog) bool {
+        if (self.reclaimed == self.artifacts.len) return true;
+        self.artifacts[self.reclaimed].deinit(self.allocator);
+        self.reclaimed += 1;
+        return false;
     }
 
     pub fn find(self: *const Catalog, module_name: []const u8) ?Module {
@@ -191,6 +210,7 @@ const Builder = struct {
     }
 
     fn buildArtifact(self: *Builder, input: PackageInput, claim: Claim, manifest: *const Manifest) BuildError!void {
+        if (!safePath(claim.relative_path)) return self.fail("package `{s}` has an unsafe source path", .{input.name});
         const absolute = std.fs.path.join(self.allocator, &.{ input.root_dir, claim.relative_path }) catch
             return error.OutOfMemory;
         errdefer self.allocator.free(absolute);
@@ -265,7 +285,7 @@ const Builder = struct {
         try self.modules.ensureUnusedCapacity(self.allocator, names.items.len);
         std.mem.sort(intern.ModuleName, names.items, {}, struct {
             fn lessThan(_: void, left: intern.ModuleName, right: intern.ModuleName) bool {
-                return @intFromEnum(left) < @intFromEnum(right);
+                return std.mem.order(u8, intern.get(intern.moduleId(left)), intern.get(intern.moduleId(right))) == .lt;
             }
         }.lessThan);
         const owned_names = try names.toOwnedSlice(self.allocator);
@@ -282,6 +302,24 @@ const Builder = struct {
             .name = name,
             .artifact = artifact_id,
         });
+    }
+
+    fn importCatalog(self: *Builder, catalog: *Catalog) BuildError!void {
+        if (self.artifacts.items.len + catalog.artifacts.len > max_artifacts or
+            self.modules.items.len + catalog.modules.len > max_modules) return error.Invalid;
+        for (catalog.modules) |entry| for (self.modules.items) |prior| {
+            if (entry.name == prior.name) return self.fail("module `{s}` is declared by more than one package artifact", .{intern.get(intern.moduleId(entry.name))});
+        };
+        try self.artifacts.ensureUnusedCapacity(self.allocator, catalog.artifacts.len);
+        try self.modules.ensureUnusedCapacity(self.allocator, catalog.modules.len);
+        const offset = self.artifacts.items.len;
+        self.artifacts.appendSliceAssumeCapacity(catalog.artifacts);
+        for (catalog.modules) |entry| self.modules.appendAssumeCapacity(.{
+            .name = entry.name,
+            .artifact = @enumFromInt(@as(u32, @intCast(offset + @intFromEnum(entry.artifact)))),
+        });
+        self.allocator.free(catalog.artifacts);
+        catalog.artifacts = &.{};
     }
 
     fn readManifest(self: *Builder, input: PackageInput) BuildError!Manifest {
@@ -528,6 +566,7 @@ pub const Build = struct {
     owned_input: ?OwnedInput = null,
     package_index: usize = 0,
     stage: Stage = .manifest,
+    identity: ?Catalog.Identity = null,
 
     const OwnedInput = struct {
         input: PackageInput,
@@ -613,7 +652,24 @@ pub const Build = struct {
                 // Open into a local first: writing the union directly would
                 // let a failing `openPackage` leave the stage tagged over an
                 // unwritten payload, which `deinit` would then release.
-                const opened = try self.builder.openPackage(input);
+                if (input.archive_hash) |hash| {
+                    var imported = read(self.builder.host, self.builder.io, input, hash) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        error.Invalid => return self.builder.fail("package `{s}` has missing, corrupt, or incompatible catalog metadata; run `ecl pkg sync`", .{input.name}),
+                    };
+                    defer imported.deinit();
+                    try self.builder.importCatalog(&imported);
+                    self.package_index += 1;
+                    return .pending;
+                }
+                var opened = try self.builder.openPackage(input);
+                errdefer opened.deinit(self.builder.allocator, self.builder.io);
+                if (self.owned_input != null) {
+                    const name = try self.builder.allocator.dupe(u8, opened.manifest.name);
+                    errdefer self.builder.allocator.free(name);
+                    const version = try self.builder.allocator.dupe(u8, opened.manifest.version);
+                    self.identity = .{ .name = name, .version = version };
+                }
                 self.stage = .{ .walking = opened };
                 return .pending;
             },
@@ -661,7 +717,9 @@ pub const Build = struct {
         }
         const modules = try self.builder.modules.toOwnedSlice(allocator);
         self.releaseInput();
-        return .{ .allocator = allocator, .artifacts = artifacts, .modules = modules };
+        const identity = self.identity;
+        self.identity = null;
+        return .{ .allocator = allocator, .artifacts = artifacts, .modules = modules, .identity = identity };
     }
 
     fn releaseInput(self: *Build) void {
@@ -678,6 +736,11 @@ pub const Build = struct {
             .manifest, .finished => {},
         }
         self.stage = .finished;
+        if (self.identity) |identity| {
+            self.builder.allocator.free(identity.name);
+            self.builder.allocator.free(identity.version);
+            self.identity = null;
+        }
         self.builder.deinit();
         self.releaseInput();
     }
@@ -836,3 +899,202 @@ fn validSegment(segment: []const u8) bool {
         (byte >= '0' and byte <= '9') or byte == '-')) return false;
     return true;
 }
+
+/// Derived metadata is inert ECL data, never executable source.
+pub const filename = ".ecl-package.catalog";
+pub const max_bytes = 16 * 1024 * 1024;
+
+fn safePath(path: []const u8) bool {
+    if (path.len > max_relative_path_bytes or !validGlob(path) or
+        !std.unicode.utf8ValidateSlice(path) or !std.mem.endsWith(u8, path, ".ecl")) return false;
+    for (path) |byte| if (byte < 32 or byte == 127 or byte == '*' or byte == '?' or byte == ':') return false;
+    return true;
+}
+
+fn quoted(writer: *std.Io.Writer, bytes: []const u8) error{WriteFailed}!void {
+    try writer.writeByte('"');
+    for (bytes) |byte| switch (byte) {
+        '"', '\\' => {
+            try writer.writeByte('\\');
+            try writer.writeByte(byte);
+        },
+        else => try writer.writeByte(byte),
+    };
+    try writer.writeByte('"');
+}
+
+/// One artifact per advance; the caller retains the catalog until completion.
+pub const Encoder = struct {
+    output: std.Io.Writer.Allocating,
+    index: usize = 0,
+    started: bool = false,
+    counting: ?std.Io.Writer.Discarding = .init(&.{}),
+
+    pub fn init(allocator: std.mem.Allocator) Encoder {
+        return .{ .output = .init(allocator) };
+    }
+    pub fn deinit(self: *Encoder) void {
+        self.output.deinit();
+    }
+    pub fn advance(self: *Encoder, catalog: *const Catalog, hash: []const u8) BuildError!Progress {
+        if (self.counting) |*counting| {
+            self.writeNext(catalog, hash, &counting.writer) catch return error.OutOfMemory;
+            if (counting.fullCount() > max_bytes) return error.Invalid;
+            if (self.index <= catalog.artifacts.len) return .pending;
+            const output = try std.Io.Writer.Allocating.initCapacity(self.output.allocator, @intCast(counting.fullCount()));
+            self.output.deinit();
+            self.output = output;
+            self.counting = null;
+            self.index = 0;
+            self.started = false;
+            return .pending;
+        }
+        self.writeNext(catalog, hash, &self.output.writer) catch return error.OutOfMemory;
+        return if (self.index > catalog.artifacts.len) .done else .pending;
+    }
+    fn writeNext(self: *Encoder, catalog: *const Catalog, hash: []const u8, writer: *std.Io.Writer) error{WriteFailed}!void {
+        if (!self.started) {
+            const identity = catalog.identity.?;
+            try writer.writeAll("{'format 1 'name ");
+            try quoted(writer, identity.name);
+            try writer.writeAll(" 'version ");
+            try quoted(writer, identity.version);
+            try writer.writeAll(" 'hash ");
+            try quoted(writer, hash);
+            try writer.writeAll(" 'sources [\n");
+            self.started = true;
+            return;
+        }
+        if (self.index == catalog.artifacts.len) {
+            try writer.writeAll("]}\n");
+            self.index += 1;
+            return;
+        }
+        const entry = catalog.artifacts[self.index];
+        try writer.writeAll("{'path ");
+        try quoted(writer, entry.relative_path);
+        try writer.writeAll(" 'exports [");
+        for (entry.modules) |name| {
+            try quoted(writer, intern.get(intern.moduleId(name)));
+            try writer.writeByte(' ');
+        }
+        try writer.writeAll("]}\n");
+        self.index += 1;
+    }
+};
+
+/// Reads only the reserved metadata file. No manifest, source read, or walk.
+pub fn read(host: *const heap.HostCleanup, io: std.Io, input: PackageInput, hash: []const u8) BuildError!Catalog {
+    const allocator = host.allocator();
+    const path = try std.fs.path.join(allocator, &.{ input.root_dir, filename });
+    defer allocator.free(path);
+    const file = switch (@import("filesystem_port.zig").openRegularForRead(io, input.base(), path)) {
+        .file => |file| file,
+        .failed => return error.Invalid,
+    };
+    defer file.close(io);
+    const stat = file.stat(io) catch return error.Invalid;
+    if (stat.size > max_bytes) return error.Invalid;
+    const bytes = try allocator.alloc(u8, @intCast(stat.size));
+    defer allocator.free(bytes);
+    if ((file.readPositionalAll(io, bytes, 0) catch return error.Invalid) != bytes.len) return error.Invalid;
+    var diag: reader.Diag = .{};
+    const result = reader.read(host, path, bytes, &diag) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.Invalid,
+    };
+    var parsed = switch (result) {
+        .complete => |complete| complete,
+        .incomplete => return error.Invalid,
+    };
+    defer parsed.deinit();
+    if (parsed.values().len != 1) return error.Invalid;
+    const top = try data.exactFields(parsed.values()[0], &.{ "format", "name", "version", "hash", "sources" });
+    const format = try data.field(top, "format");
+    if (format != .int or format.int != 1) return error.Invalid;
+    const name = try data.ownedUtf8(allocator, try data.field(top, "name"));
+    defer allocator.free(name);
+    const version = try data.ownedUtf8(allocator, try data.field(top, "version"));
+    defer allocator.free(version);
+    const actual_hash = try data.ownedUtf8(allocator, try data.field(top, "hash"));
+    defer allocator.free(actual_hash);
+    if (!validCanonicalName(name) or !validVersion(version) or !validHash(actual_hash) or
+        !std.mem.eql(u8, name, input.name) or !std.mem.eql(u8, version, input.version) or
+        !std.mem.eql(u8, actual_hash, hash)) return error.Invalid;
+    const sources = try data.field(top, "sources");
+    if (sources != .list or sources.list.length() > max_artifacts) return error.Invalid;
+    var diagnostic: ?[]u8 = null;
+    var builder: Builder = .{ .allocator = allocator, .host = host, .io = io, .diagnostic = &diagnostic };
+    defer builder.deinit();
+    for (0..@intCast(sources.list.length())) |index| {
+        const record = try data.exactFields(@import("list.zig").atUnchecked(sources, index), &.{ "path", "exports" });
+        const relative = try data.ownedUtf8(allocator, try data.field(record, "path"));
+        errdefer allocator.free(relative);
+        if (!safePath(relative)) return error.Invalid;
+        for (builder.artifacts.items) |prior| if (std.mem.eql(u8, prior.relative_path, relative)) return error.Invalid;
+        const exports = try data.field(record, "exports");
+        if (exports != .list or exports.list.length() + builder.modules.items.len > max_modules) return error.Invalid;
+        const names = try allocator.alloc(intern.ModuleName, @intCast(exports.list.length()));
+        errdefer allocator.free(names);
+        for (names, 0..) |*module, module_index| {
+            const text = try data.ownedUtf8(allocator, @import("list.zig").atUnchecked(exports, module_index));
+            defer allocator.free(text);
+            if (!validCanonicalName(text) or !ownsNamespace(name, text)) return error.Invalid;
+            module.* = intern.moduleName(try intern.intern(text)) catch return error.Invalid;
+            for (builder.modules.items) |prior| if (prior.name == module.*) return error.Invalid;
+            try builder.modules.append(allocator, .{ .name = module.*, .artifact = @enumFromInt(@as(u32, @intCast(index))) });
+        }
+        const absolute = try std.fs.path.join(allocator, &.{ input.root_dir, relative });
+        errdefer allocator.free(absolute);
+        try builder.artifacts.append(allocator, .{ .package = input.id, .relative_path = relative, .absolute_path = absolute, .modules = names });
+    }
+    const artifacts = try builder.artifacts.toOwnedSlice(allocator);
+    errdefer {
+        for (artifacts) |*entry| entry.deinit(allocator);
+        allocator.free(artifacts);
+    }
+    return .{ .allocator = allocator, .artifacts = artifacts, .modules = try builder.modules.toOwnedSlice(allocator) };
+}
+
+/// Compare portable mappings without depending on record order or local IDs.
+/// Each step budgets path and module-name comparisons separately.
+pub const Comparison = struct {
+    artifact: usize = 0,
+    candidate: usize = 0,
+    module: usize = 0,
+    candidate_module: usize = 0,
+    matched_path: bool = false,
+
+    pub const Result = union(enum) { pending, complete: bool };
+
+    pub fn advance(self: *Comparison, left: *const Catalog, right: *const Catalog, budget: usize) Result {
+        if (left.artifacts.len != right.artifacts.len or left.modules.len != right.modules.len) return .{ .complete = false };
+        for (0..budget) |_| {
+            if (self.artifact == left.artifacts.len) return .{ .complete = true };
+            if (self.candidate == right.artifacts.len) return .{ .complete = false };
+            const entry = left.artifacts[self.artifact];
+            const other = right.artifacts[self.candidate];
+            if (!self.matched_path) {
+                if (!std.mem.eql(u8, entry.relative_path, other.relative_path)) {
+                    self.candidate += 1;
+                    continue;
+                }
+                if (entry.modules.len != other.modules.len) return .{ .complete = false };
+                self.matched_path = true;
+            } else if (self.module == entry.modules.len) {
+                self.artifact += 1;
+                self.candidate = 0;
+                self.module = 0;
+                self.candidate_module = 0;
+                self.matched_path = false;
+            } else {
+                if (self.candidate_module == other.modules.len) return .{ .complete = false };
+                if (entry.modules[self.module] == other.modules[self.candidate_module]) {
+                    self.module += 1;
+                    self.candidate_module = 0;
+                } else self.candidate_module += 1;
+            }
+        }
+        return .pending;
+    }
+};

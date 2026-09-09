@@ -75,6 +75,10 @@ const ConcurrentLockFixture = struct {
             .sub_path = "cache/race-1.0.0-" ++ concurrent_hash[7..] ++ "/ecl.pkg",
             .data = "{'format 1 'name \"race\" 'version \"1.0.0\" 'sources [\"**/*\"] 'exports [\"race\"] 'requires {}}\n",
         });
+        try directory.dir.writeFile(std.testing.io, .{
+            .sub_path = "cache/race-1.0.0-" ++ concurrent_hash[7..] ++ "/.ecl-package.catalog",
+            .data = "{'format 1 'name \"race\" 'version \"1.0.0\" 'hash \"" ++ concurrent_hash ++ "\" 'sources [{'path \"race.ecl\" 'exports [\"race\"]}]}\n",
+        });
         const nested = try std.fs.path.join(allocator, &.{ root, "project", "nested" });
         errdefer allocator.free(nested);
         const cache = try std.fs.path.join(allocator, &.{ root, "cache" });

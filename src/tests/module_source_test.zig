@@ -18,6 +18,112 @@ const intern = @import("../intern.zig");
 const session = @import("../session.zig");
 const test_heap = @import("test_heap.zig");
 
+const CatalogIoObservation = struct {
+    var catalog_reads: usize = 0;
+    var source_reads: usize = 0;
+    var dependency_walks: usize = 0;
+
+    fn openFile(userdata: ?*anyopaque, dir: std.Io.Dir, path: []const u8, options: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
+        if (std.mem.endsWith(u8, path, ".ecl-package.catalog")) catalog_reads += 1;
+        if (std.mem.endsWith(u8, path, ".ecl")) source_reads += 1;
+        return std.testing.io.vtable.dirOpenFile(userdata, dir, path, options);
+    }
+    fn openDir(userdata: ?*anyopaque, dir: std.Io.Dir, path: []const u8, options: std.Io.Dir.OpenOptions) std.Io.Dir.OpenError!std.Io.Dir {
+        if (options.iterate and std.mem.indexOf(u8, path, "/cache/") != null) dependency_walks += 1;
+        return std.testing.io.vtable.dirOpenDir(userdata, dir, path, options);
+    }
+};
+
+test "loader: startup reads dependency metadata and first use opens the source" {
+    var fixture = try LockFixture.init();
+    defer fixture.deinit();
+    try fixture.writeOnePackageLock("dep", "1.0.0", hash_a);
+    try fixture.writeStoreModule("dep", "1.0.0", hash_a, "dep", 42);
+    var vtable = std.testing.io.vtable.*;
+    vtable.dirOpenFile = CatalogIoObservation.openFile;
+    vtable.dirOpenDir = CatalogIoObservation.openDir;
+    const observed: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    CatalogIoObservation.catalog_reads = 0;
+    CatalogIoObservation.source_reads = 0;
+    CatalogIoObservation.dependency_walks = 0;
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    const environ = [_]sessionHostEntry{.{ .name = "ECL_CACHE", .value = fixture.cache }};
+    var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{
+        .io = observed,
+        .initial_cwd = fixture.nested,
+        .environ = &environ,
+    }), .cooperative, .evaluate);
+    defer runtime.deinit();
+    try std.testing.expectEqual(@as(usize, 1), CatalogIoObservation.catalog_reads);
+    try std.testing.expectEqual(@as(usize, 0), CatalogIoObservation.source_reads);
+    try std.testing.expectEqual(@as(usize, 0), CatalogIoObservation.dependency_walks);
+    try expectOk(&runtime, "dep.answer");
+    try std.testing.expectEqual(@as(i64, 42), runtime.stackItems()[0].int);
+    try std.testing.expect(CatalogIoObservation.source_reads > 0);
+}
+
+test "loader: invalid dependency catalogs fail closed with sync diagnostics" {
+    const invalid = [_]?[]const u8{
+        null,                                                                                                                                                 "not inert metadata",                                                                                                         "{'format 2 'name \"dep\" 'version \"1.0.0\" 'hash \"" ++ hash_a ++ "\" 'sources []}",
+        "{'format 1 'name \"other\" 'version \"1.0.0\" 'hash \"" ++ hash_a ++ "\" 'sources []}",                                                              "{'format 1 'name \"dep\" 'version \"2.0.0\" 'hash \"" ++ hash_a ++ "\" 'sources []}",                                        "{'format 1 'name \"dep\" 'version \"1.0.0\" 'hash \"" ++ hash_b ++ "\" 'sources []}",
+        "{'format 1 'name \"dep\" 'version \"1.0.0\" 'hash \"" ++ hash_a ++ "\" 'sources [{'path \"../dep.ecl\" 'exports [\"dep\"]}]}",                       "{'format 1 'name \"dep\" 'version \"1.0.0\" 'hash \"" ++ hash_a ++ "\" 'sources [{'path \"/dep.ecl\" 'exports [\"dep\"]}]}", "{'format 1 'name \"dep\" 'version \"1.0.0\" 'hash \"" ++ hash_a ++ "\" 'sources [{'path \"dep.ecl\" 'exports [\"dep\" \"dep\"]}]}",
+        "{'format 1 'name \"dep\" 'version \"1.0.0\" 'hash \"" ++ hash_a ++ "\" 'sources [{'path \"dep.ecl\" 'exports []} {'path \"dep.ecl\" 'exports []}]}",
+    };
+    for (invalid) |metadata| {
+        var fixture = try LockFixture.init();
+        defer fixture.deinit();
+        try fixture.writeOnePackageLock("dep", "1.0.0", hash_a);
+        try fixture.writeStoreModule("dep", "1.0.0", hash_a, "dep", 42);
+        const path = "cache/dep-1.0.0-" ++ hash_a[7..] ++ "/.ecl-package.catalog";
+        if (metadata) |text| try fixture.write(path, text) else try fixture.directory.dir.deleteFile(std.testing.io, path);
+        var backing: test_heap.SessionHeap = .init;
+        defer test_heap.retire(&backing);
+        var inputs = try runtime_fixture.Fixture.init();
+        defer inputs.deinit();
+        const environ = [_]sessionHostEntry{.{ .name = "ECL_CACHE", .value = fixture.cache }};
+        var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{
+            .initial_cwd = fixture.nested,
+            .environ = &environ,
+        }), .cooperative, .evaluate);
+        defer runtime.deinit();
+        try expectErrorContains(&runtime, "dep.answer", &.{ "dep", "catalog", "ecl pkg sync" });
+        if (metadata) |text| {
+            const unchanged = try fixture.directory.dir.readFileAlloc(std.testing.io, path, std.testing.allocator, .unlimited);
+            defer std.testing.allocator.free(unchanged);
+            try std.testing.expectEqualStrings(text, unchanged);
+        } else try std.testing.expectError(error.FileNotFound, fixture.directory.dir.statFile(std.testing.io, path, .{}));
+    }
+}
+
+test "loader: local file additions and edits are discovered without sync" {
+    var fixture = try LockFixture.init();
+    defer fixture.deinit();
+    try fixture.write("project/ecl.lock", "{'format 1 'root \"root\" 'packages {} 'requires {\"root\" {}}}\n");
+    for ([_]bool{ false, true }) |edited| {
+        try fixture.write("project/ecl.pkg", if (edited)
+            "{'format 1 'name \"root\" 'version \"0.1.0\" 'sources [\"*.ecl\"] 'exports [\"root.one\" \"root.two\"] 'requires {}}\n"
+        else
+            "{'format 1 'name \"root\" 'version \"0.1.0\" 'sources [\"*.ecl\"] 'exports [\"root.one\"] 'requires {}}\n");
+        try fixture.write("project/one.ecl", if (edited) "[] ((2) 'answer def) 'root.one @defm\n" else "[] ((1) 'answer def) 'root.one @defm\n");
+        if (edited) try fixture.write("project/two.ecl", "[] ((3) 'answer def) 'root.two @defm\n");
+        var backing: test_heap.SessionHeap = .init;
+        defer test_heap.retire(&backing);
+        var inputs = try runtime_fixture.Fixture.init();
+        defer inputs.deinit();
+        var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{ .initial_cwd = fixture.nested }), .cooperative, .evaluate);
+        defer runtime.deinit();
+        try expectOk(&runtime, "root.one.answer");
+        try std.testing.expectEqual(@as(i64, if (edited) 2 else 1), runtime.stackItems()[0].int);
+        if (edited) {
+            try expectOk(&runtime, "root.two.answer");
+            try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[1].int);
+        }
+    }
+}
+
 test "loader: private modules belong to their defining file independent of load order" {
     for ([_]bool{ false, true }) |bar_first| {
         var fixture = try LockFixture.init();
@@ -829,6 +935,7 @@ const LockFixture = struct {
         );
         defer std.testing.allocator.free(manifest);
         try self.write(manifest_path, manifest);
+        try self.writeCatalog(package, version, hash, "");
     }
 
     fn writeStoreModule(
@@ -875,6 +982,9 @@ const LockFixture = struct {
         );
         defer std.testing.allocator.free(manifest);
         try self.write(manifest_path, manifest);
+        const records = try std.fmt.allocPrint(std.testing.allocator, "{{'path \"{s}\" 'exports [{s}]}}", .{ relative_path, exports });
+        defer std.testing.allocator.free(records);
+        try self.writeCatalog(package, version, hash, records);
     }
 
     fn writeStoreWord(
@@ -913,6 +1023,17 @@ const LockFixture = struct {
         );
         defer std.testing.allocator.free(manifest);
         try self.write(manifest_path, manifest);
+        const records = try std.fmt.allocPrint(std.testing.allocator, "{{'path \"{s}.ecl\" 'exports [\"{s}\"]}}", .{ module_name, module_name });
+        defer std.testing.allocator.free(records);
+        try self.writeCatalog(package, version, hash, records);
+    }
+
+    fn writeCatalog(self: *LockFixture, package: []const u8, version: []const u8, hash: []const u8, records: []const u8) !void {
+        const path = try std.fmt.allocPrint(std.testing.allocator, "cache/{s}-{s}-{s}/.ecl-package.catalog", .{ package, version, hash[7..] });
+        defer std.testing.allocator.free(path);
+        const text = try std.fmt.allocPrint(std.testing.allocator, "{{'format 1 'name \"{s}\" 'version \"{s}\" 'hash \"{s}\" 'sources [{s}]}}\n", .{ package, version, hash, records });
+        defer std.testing.allocator.free(text);
+        try self.write(path, text);
     }
 
     fn writePathModule(self: *LockFixture, module_name: []const u8, answer: i64) !void {
@@ -1711,4 +1832,50 @@ test "module: a body that reloads its own name keeps its entry generation" {
         "( -- n ) (x) 'get def) 'm @defm m.probe m.get");
     try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
     try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[1].int);
+}
+
+test "loader: persisted catalog assembly propagates every allocation failure" {
+    var fixture = try LockFixture.init();
+    defer fixture.deinit();
+    try fixture.writeStoreModule("dep", "1.0.0", hash_a, "dep", 42);
+    const root = try std.fs.path.join(std.testing.allocator, &.{ fixture.cache, "dep-1.0.0-" ++ hash_a[7..] });
+    defer std.testing.allocator.free(root);
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator, path: []const u8) !void {
+            var owner = @import("../heap.zig").HostOwner.init(allocator);
+            defer owner.cleanup().drain();
+            var diagnostic: ?[]u8 = null;
+            defer if (diagnostic) |message| allocator.free(message);
+            var catalog = try @import("../pkg_catalog.zig").build(owner.cleanup(), std.testing.io, &.{.{
+                .id = @enumFromInt(0),
+                .name = "dep",
+                .version = "1.0.0",
+                .root_dir = path,
+                .archive_hash = hash_a,
+            }}, &diagnostic);
+            defer catalog.deinit();
+            const module = catalog.find("dep") orelse return error.MissingExport;
+            try std.testing.expectEqualStrings("dep.ecl", catalog.artifact(module.artifact).relative_path);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{root});
+}
+
+test "loader: persisted private-only sources retain file identity" {
+    var fixture = try LockFixture.init();
+    defer fixture.deinit();
+    try fixture.writeOnePackageLock("dep", "1.0.0", hash_a);
+    try fixture.writeStoreArtifact("dep", "1.0.0", hash_a, "private.ecl", "", "[] ((42) 'answer def) 'hidden @defm hidden.answer\n", .{});
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    const environ = [_]sessionHostEntry{.{ .name = "ECL_CACHE", .value = fixture.cache }};
+    var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{ .initial_cwd = fixture.nested, .environ = &environ }), .cooperative, .evaluate);
+    defer runtime.deinit();
+    const source = try std.fmt.allocPrint(std.testing.allocator, "\"{s}/dep-1.0.0-{s}/private.ecl\" load", .{ fixture.cache, hash_a[7..] });
+    defer std.testing.allocator.free(source);
+    try expectOk(&runtime, source);
+    try std.testing.expectEqual(@as(i64, 42), runtime.stackItems()[0].int);
+    try expectErrorContains(&runtime, "hidden.answer", &.{"not exported by the active project"});
 }

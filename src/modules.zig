@@ -2196,6 +2196,10 @@ pub const Registry = enum(usize) {
     /// Begin validating one staged package tree. The caller drives the
     /// returned cursor in bounded steps and deinits it; a package tree holds
     /// thousands of artifacts, so the walk cannot be one scheduler step.
+    pub fn readPackageCatalog(self: *const Registry, io: std.Io, input: pkg_catalog.PackageInput, hash: []const u8) pkg_catalog.BuildError!pkg_catalog.Catalog {
+        return pkg_catalog.read(self.privateState().host, io, input, hash);
+    }
+
     pub fn beginPackageTreeValidation(
         self: *const Registry,
         io: std.Io,

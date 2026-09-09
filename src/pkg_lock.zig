@@ -28,12 +28,14 @@ pub const CacheInputs = struct {
 const Entry = struct {
     name: []u8,
     version: []u8,
+    hash: ?[]u8 = null,
     store_dir: ?[]u8,
     requires: []pkg_catalog.PackageId = &.{},
 
     fn deinit(self: *Entry, allocator: std.mem.Allocator) void {
         allocator.free(self.name);
         allocator.free(self.version);
+        if (self.hash) |hash| allocator.free(hash);
         if (self.store_dir) |path| allocator.free(path);
         if (self.requires.len != 0) allocator.free(self.requires);
         self.* = undefined;
@@ -561,6 +563,7 @@ fn discoverLock(
                     .name = entry.name,
                     .version = entry.version,
                     .root_dir = store_dir,
+                    .archive_hash = entry.hash,
                 };
             }
             var catalog_diagnostic: ?[]u8 = null;
@@ -748,7 +751,7 @@ fn validateLock(
         defer allocator.free(url);
         if (!validUrl(url)) return error.Invalid;
         const hash = try data.ownedUtf8(allocator, try data.field(selection, "hash"));
-        defer allocator.free(hash);
+        errdefer allocator.free(hash);
         if (!validHash(hash)) return error.Invalid;
         const store_dir = if (store_root) |root_path|
             std.fmt.allocPrint(
@@ -762,6 +765,7 @@ fn validateLock(
         entries.appendAssumeCapacity(.{
             .name = name,
             .version = version,
+            .hash = hash,
             .store_dir = store_dir,
         });
     }

@@ -704,6 +704,7 @@ pub fn build(b: *std.Build) void {
             "native:",
             "archive: unpack-tgz preserves existing destinations and has one concurrent winner",
             "pkg store: existing immutable entry wins concurrent install",
+            "pkg store: concurrent catalog repairs publish complete metadata",
             "process:",
             "net:",
             "http server:",

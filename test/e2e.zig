@@ -1084,6 +1084,10 @@ test "e2e: checked-in package consumer executes and remains byte-stable offline"
         .sub_path = "cache/smoke-1.0.0-" ++ pkg_example_hash ++ "/smoke.ecl",
         .data = "[] ((42) 'answer def) 'smoke @defm\n",
     });
+    try scratch.dir.writeFile(io, .{
+        .sub_path = "cache/smoke-1.0.0-" ++ pkg_example_hash ++ "/.ecl-package.catalog",
+        .data = "{'format 1 'name \"smoke\" 'version \"1.0.0\" 'hash \"sha256-" ++ pkg_example_hash ++ "\" 'sources [{'path \"smoke.ecl\" 'exports [\"smoke\"]}]}\n",
+    });
     const cache = try scratch.dir.realPathFileAlloc(io, "cache", allocator);
     defer allocator.free(cache);
     var project = try scratch.dir.openDir(io, "project", .{});
@@ -1210,6 +1214,7 @@ test "e2e: pkg vendor makes locked execution and verification cache-independent"
     defer verified.deinit();
     try verified.expect(.{ .exit_code = 0, .stdout = "verified 1 packages\n", .stderr = "" });
 
+    try scratch.dir.deleteFile(io, "project/vendor/" ++ pkg_runtime_key ++ "/.ecl-package.catalog");
     var synced = try cli.runOptions(.{
         .argv = &.{ exe, "pkg", "sync", "--offline" },
         .cwd = .{ .dir = nested },
@@ -1217,10 +1222,18 @@ test "e2e: pkg vendor makes locked execution and verification cache-independent"
     });
     defer synced.deinit();
     try synced.expect(.{ .exit_code = 0, .stdout = "synced 1 packages\n", .stderr = "" });
+    var repaired_run = try cli.runOptions(.{
+        .argv = &.{ exe, "-e", "a.answer" },
+        .cwd = .{ .dir = nested },
+        .environ_map = &environment,
+    });
+    defer repaired_run.deinit();
+    try repaired_run.expect(.{ .exit_code = 0, .stdout = "42\n", .stderr = "" });
     const preserved = try scratch.dir.readFileAlloc(io, "project/ecl.lock", allocator, .unlimited);
     defer allocator.free(preserved);
     try std.testing.expectEqualStrings(pkg_runtime_vendor_lock, preserved);
 
+    try scratch.dir.writeFile(io, .{ .sub_path = "project/vendor/" ++ pkg_runtime_key ++ "/.ecl-package.catalog", .data = "invalid metadata" });
     var repeated = try cli.runOptions(.{
         .argv = &.{ exe, "pkg", "vendor" },
         .cwd = .{ .dir = nested },

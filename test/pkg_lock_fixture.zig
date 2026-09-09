@@ -35,6 +35,10 @@ pub const Fixture = struct {
                 .default_dir,
             );
             try directory.dir.writeFile(io, .{
+                .sub_path = "cache/smoke-1.0.0-" ++ package_hash[7..] ++ "/.ecl-package.catalog",
+                .data = "{'format 1 'name \"smoke\" 'version \"1.0.0\" 'hash \"" ++ package_hash ++ "\" 'sources [{'path \"smoke.ecl\" 'exports [\"smoke\"]}]}\n",
+            });
+            try directory.dir.writeFile(io, .{
                 .sub_path = "cache/smoke-1.0.0-" ++ package_hash[7..] ++ "/smoke.ecl",
                 .data = "[] ((42) 'answer def) 'smoke @defm\n",
             });

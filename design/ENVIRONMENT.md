@@ -634,11 +634,16 @@ rules above and these additional rules:
 - the manifest is valid UTF-8 and valid format-1 package data;
 - ordinary directories and data files are allowed;
 - `.eclmod` files, links, and special nodes are forbidden;
+- the root names `.ecl-package.tgz` and `.ecl-package.catalog` are reserved;
 - every exported source file satisfies the manifest's glob, namespace,
   uniqueness, and parse requirements.
 
 Installation parses package source to build the module catalog and never
-evaluates it.
+evaluates it. It writes `.ecl-package.catalog` into the staging directory before
+publication. The deterministic inert record carries its format, package name
+and version, actual archive SHA-256, selected relative source paths, and exact
+export mappings, including selected files without exports. Absolute paths and
+Session identities are never stored.
 
 `pkg.store.inspect` performs the full archive and package-layout scan and
 returns the exact root manifest text without creating a destination.
@@ -649,9 +654,18 @@ raises `'io` with `'destination-exists 1`; a caller may accept a concurrent
 winner after `present?` confirms a real directory.
 
 Each installed entry retains its source archive as a reserved seal.
-`pkg.store.verify` streams the seal and compares its SHA-256 with the lock.
-`pkg.store.read-seal` performs the same verification and returns the exact seal
-bytes. It accepts no caller-selected child path.
+`pkg.store.verify` streams the seal, compares its SHA-256 with the lock, and
+compares the persisted catalog with one freshly derived from installed sources.
+It is read-only. `pkg.store.read-seal` verifies and returns the exact seal bytes
+independently of catalog metadata. It accepts no caller-selected child path.
+
+`pkg.store.ensure-catalog` accepts a store, key, package name, and expected hash.
+A valid current-format catalog requires no rebuild. Otherwise it verifies the
+retained archive seal and validates the installed source tree before atomically
+replacing the metadata. Failure or cancellation preserves prior metadata.
+Synchronization ensures catalogs for every selected existing cache or vendor
+entry before publishing the lock, including offline synchronization. Concurrent
+repairs publish complete equivalent metadata; dependency sources remain immutable.
 
 Project files are published through the `'project` filesystem root:
 `pkg.sync.write-project-file` uses `fs.create-text` for an absent file and the
@@ -705,6 +719,13 @@ its immutable lock-derived catalog. `ECL_PATH` is excluded from project
 resolution. A cache-backed lock uses the selected shared store; a vendored
 lock uses `<project-root>/vendor` and ignores cache environment variables.
 
+Session startup imports dependency catalogs after checking format and identity
+against the lock, assigning fresh package and artifact identities. Only root
+project sources are discovered dynamically. Missing, malformed, or incompatible
+metadata raises a package-specific error directing the user to `ecl pkg sync`;
+startup never scans dependency sources, writes repairs, or uses a legacy format.
+Source execution remains lazy: first use opens the required source artifact.
+
 The catalog maps each module to an exact package entry and source path. A
 missing selected directory raises `'io` and directs the user to `ecl pkg
 sync`. A module unavailable in the defining file and public catalog, or an
@@ -740,8 +761,8 @@ invalid discovered lock raises `'io` prefixed by `invalid project lock
 ### Vendoring and cache collection
 
 `ecl pkg vendor` verifies every selected entry's seal and installs it at
-`<project-root>/vendor/<store-key>`. Existing vendor entries are verified and
-preserved. After every entry is present, the command atomically rewrites the
+`<project-root>/vendor/<store-key>`. Existing vendor entries have their catalogs ensured, then their seals and
+catalog mappings verified; their source trees are preserved. After every entry is present, the command atomically rewrites the
 lock with `'store 'vendor`. Failure preserves the prior lock and may leave
 valid immutable entries for reuse. Repetition is idempotent.
 
@@ -775,8 +796,8 @@ itself never enters evaluated code. `init` acts on the `'cwd` root.
   immutable store entries.
 - `tree` prints the lock root and dependency edges in requirer/package order.
 - `why <module>` prints one deterministic root-to-owner path.
-- `verify` streams and hashes every selected package seal without network
-  access.
+- `verify` streams and hashes every selected package seal and compares its
+  catalog with installed sources, without writes or network access.
 - `vendor` creates or verifies the project-local store and marks the lock as
   vendored.
 - `gc <lock-file> [lock-file ...]` collects the shared cache against one or

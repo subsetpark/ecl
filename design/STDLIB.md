@@ -2839,8 +2839,8 @@ package authority.
 
 ### install
 `( bytes package-name store key -- regular-file-paths )` — Repeat archive
-validation, derive and validate the staged manifest/glob/module catalog, and
-atomically publish the entry `key` in the named store, which must be absent.
+validation, derive and persist the staged manifest/glob/module catalog with
+the actual archive hash, and atomically publish the entry `key` in the named store, which must be absent.
 Return normalized regular-file paths only after commit; failure never exposes
 a partial destination.
 
@@ -2855,12 +2855,20 @@ directory. A symlink, non-directory, or inaccessible entry is `'io`.
 ### read-seal
 `( store key package-name hash -- bytes )` — Perform the same streamed seal
 verification as `verify`, then return its exact octets as an ordinary integer
-byte list. It never reads a caller-selected child filename.
+byte list. Catalog metadata is not required. It never reads a caller-selected child filename.
 
 ### verify
 `( store key package-name hash -- )` — Stream the installed entry's reserved
-archive seal and require its SHA-256 to equal `hash`. Failures name the
-package and carry the key for host-I/O errors.
+archive seal and require its SHA-256 to equal `hash`, then compare the persisted
+catalog against a freshly derived catalog. It performs no writes. Failures name
+the package and carry the key for host-I/O errors.
+
+### ensure-catalog
+`( store key package-name hash -- )` — Require current-format catalog metadata
+matching the package identity and hash. When invalid or absent, verify the seal,
+validate the installed source tree, and atomically publish replacement metadata.
+Valid metadata needs no rebuild. Failure or cancellation preserves the previous
+catalog. Invalid source data is `'domain`; filesystem failures are `'io`.
 
 ## pkg.sync
 

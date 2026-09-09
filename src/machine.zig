@@ -3139,6 +3139,10 @@ pub const Machine = struct {
     }
     /// Validates a staged package tree through the directory handle the
     /// installer already holds; `root_dir` is relative to `base_dir`.
+    pub fn readPackageCatalog(self: *const Machine, io: std.Io, input: pkg_catalog.PackageInput, hash: []const u8) pkg_catalog.BuildError!pkg_catalog.Catalog {
+        return self.unit.inherited.registry.readPackageCatalog(io, input, hash);
+    }
+
     pub fn beginPackageTreeValidation(
         self: *const Machine,
         io: std.Io,

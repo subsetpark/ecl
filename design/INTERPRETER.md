@@ -607,6 +607,16 @@ the slot's teardown from delayed generation retirement.
 
 ### Package visibility belongs to the defining source
 
+Dependency catalogs are portable derived metadata owned by atomic package
+publication. Their inert format binds relative source selection and exact exports
+to package identity and archive hash; it contains no runtime authority or IDs.
+Only explicit package synchronization may repair metadata, after seal and source
+validation, through atomic replacement that preserves prior metadata on failure.
+The Session imports current-format dependency catalogs without source discovery
+or store mutation and mints its own identities. Root project discovery remains
+dynamic. Catalog validation owns path safety, namespace uniqueness, reference
+integrity, and graph limits for both imported and freshly built entries.
+
 A cataloged source has one Session-owned file identity and private registry.
 The catalog separates source selection from exact public exports; the shared
 registry contains exported registrations while each file owns its private

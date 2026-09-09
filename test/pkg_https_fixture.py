@@ -131,6 +131,12 @@ def build_graph(port: int) -> tuple[dict[str, bytes], dict[str, str]]:
         }
     )
 
+    artifacts["/pkg/foo-1.0.0-reserved-catalog.tgz"] = tgz({
+        "ecl.pkg": manifest("foo", "1.0.0", {}, source=True).encode("utf-8"),
+        "foo.ecl": b"(() 'noop def) 'foo @defm\n",
+        ".ecl-package.catalog": b"forged catalog\n",
+    })
+
     identity_path = "/pkg/expected-1.0.0-identity.tgz"
     artifacts[identity_path] = package(
         "actual",

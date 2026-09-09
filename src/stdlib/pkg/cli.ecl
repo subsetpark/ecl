@@ -94,7 +94,9 @@
 
  ### defp verify-vendor-entry
  (key package requirement -- : "Verify one already-present project vendor entry.")
- (|key package requirement| 'vendor key package requirement 'hash at pkg.store.verify)
+ (|key package requirement|
+  'vendor key package requirement 'hash at pkg.store.ensure-catalog
+  'vendor key package requirement 'hash at pkg.store.verify)
  'verify-vendor-entry defp
 
  ### defp install-vendor-entry

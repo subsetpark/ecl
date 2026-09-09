@@ -132,6 +132,13 @@ To add a dependency, run `ecl pkg add <name> <version> <https-url>` with the
 package's name, version, and archive URL, then run `ecl pkg sync` again.
 Commit both `ecl.pkg` and `ecl.lock`.
 
+Installation stores dependency module catalogs alongside the sealed archives.
+Startup reads these catalogs and discovers your local sources afresh, so local
+file additions and edits need no sync. If dependency metadata is missing or
+invalid, run `ecl pkg sync` (or `ecl pkg sync --offline` with all dependencies
+already installed). Startup never repairs the store or scans dependency sources.
+`ecl pkg verify` checks both archive seals and catalog mappings.
+
 List your source files and the modules other files may use in `ecl.pkg`:
 
 ```ecl
