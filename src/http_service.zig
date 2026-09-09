@@ -8,8 +8,44 @@ const transport = @import("port_bytes.zig");
 const machine = @import("machine.zig");
 pub const Failure = transport.Failure;
 pub const Field = struct { name: []u8, value: []u8 };
-pub const Input = struct { url: []u8, body: ?[]u8 = null, fields: std.ArrayList(Field) = .empty };
-pub const Response = struct { request: Input, status: u16 = 0, fields: std.ArrayList(Field) = .empty };
+pub const Input = struct {
+    url: []u8,
+    body: ?[]u8 = null,
+    fields: std.ArrayList(Field) = .empty,
+
+    /// Frees at most one field per call. True consumes this input.
+    pub fn retire(self: *Input, allocator: std.mem.Allocator) bool {
+        if (!retireFields(&self.fields, allocator)) return false;
+        if (self.body) |body| allocator.free(body);
+        allocator.free(self.url);
+        return true;
+    }
+};
+pub const Response = struct {
+    request: Input,
+    status: u16 = 0,
+    fields: std.ArrayList(Field) = .empty,
+    body: std.ArrayList(u8) = .empty,
+
+    /// Shared by failed execution and successful evaluator materialization.
+    /// True consumes this response; each call frees at most one owned field.
+    pub fn retire(self: *Response, allocator: std.mem.Allocator) bool {
+        if (!retireFields(&self.fields, allocator)) return false;
+        if (!self.request.retire(allocator)) return false;
+        self.body.deinit(allocator);
+        return true;
+    }
+};
+fn retireFields(fields: *std.ArrayList(Field), allocator: std.mem.Allocator) bool {
+    if (fields.pop()) |field| {
+        allocator.free(field.name);
+        allocator.free(field.value);
+        return false;
+    }
+    fields.deinit(allocator);
+    fields.* = .empty;
+    return true;
+}
 pub const Limits = struct {
     live_requests: usize = 16,
     deadline_ms: u63 = 30_000,
@@ -368,20 +404,7 @@ pub const Request = opaque {
         if (active) return false;
         if (cell.phase == .joined) {
             const response = &cell.phase.joined.response;
-            if (response.fields.pop()) |field| {
-                cell.allocator.free(field.name);
-                cell.allocator.free(field.value);
-                return false;
-            }
-            if (response.request.fields.pop()) |field| {
-                cell.allocator.free(field.name);
-                cell.allocator.free(field.value);
-                return false;
-            }
-            response.fields.deinit(cell.allocator);
-            response.request.fields.deinit(cell.allocator);
-            if (response.request.body) |body| cell.allocator.free(body);
-            cell.allocator.free(response.request.url);
+            if (!response.retire(cell.allocator)) return false;
             cell.phase = .taken;
         }
         cell.releaseReadiness();

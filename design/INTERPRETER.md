@@ -1422,7 +1422,9 @@ failures, and byte transport with ports, without creating language port values o
 participating in capability transfer. The Session's opaque HTTP service owns
 configuration, admission, and execution authority; inherited runtime context
 carries submission access. Each admitted request progresses from preparation to
-owned active input, joined response, and consumed response. One host controller
+owned active input, joined response, and consumed response. Execution and evaluator
+materialization transfer one response representation whose bounded retirement
+also owns request storage; failure and success use the same cleanup contract. One host controller
 exclusively owns the cancellable I/O future. Scheduler cancellation only changes
 state and signals that controller and transport; workers never await or cancel
 futures. Joined publication follows both I/O completion and controller join.

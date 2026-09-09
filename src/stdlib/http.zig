@@ -193,12 +193,7 @@ const RequestDriver = struct {
     state: State,
 
     const RequestData = service.Input;
-    const ExchangeData = struct {
-        request: RequestData,
-        status: u16 = 0,
-        fields: std.ArrayList(service.Field) = .empty,
-        body: std.ArrayList(u8) = .empty,
-    };
+    const ExchangeData = service.Response;
     const HeaderBuild = struct {
         exchange: ExchangeData,
         pairs: std.ArrayList(dict.Pair) = .empty,
@@ -208,11 +203,6 @@ const RequestDriver = struct {
         exchange: ExchangeData,
         headers: Value,
         body: Value,
-    };
-    const FinishKeys = struct {
-        status: u32,
-        headers: u32,
-        body: u32,
     };
     const State = union(enum) {
         start,
@@ -279,17 +269,9 @@ const RequestDriver = struct {
             headers: Value,
             bytes: list.ByteListMaterializer,
         },
-        finish_status: Results,
-        finish_headers: struct { results: Results, status_key: u32 },
-        finish_body: struct { results: Results, status_key: u32, headers_key: u32 },
-        finish_allocate: struct { results: Results, keys: FinishKeys },
-        finish_dictionary_prepare: struct {
-            results: Results,
-            slots: []dict.Pair,
-        },
+        finish_response: Results,
         finish_dictionary: struct {
             results: Results,
-            slots: []dict.Pair,
             dictionary: dict.Materializer,
         },
         output: Results,
@@ -495,7 +477,7 @@ const RequestDriver = struct {
                         .failed => |failure| return self.failResult(evaluator, failure),
                         .complete => {
                             const response = self.admitted.take();
-                            self.state = .{ .body_allocate = .{ .request = response.request, .status = response.status, .fields = response.fields } };
+                            self.state = .{ .body_allocate = response };
                         },
                     },
                 }
@@ -622,7 +604,7 @@ const RequestDriver = struct {
                     body.text.deinit();
                     const exchange_data = body.exchange;
                     const headers = body.headers;
-                    self.state = .{ .finish_status = .{
+                    self.state = .{ .finish_response = .{
                         .exchange = exchange_data,
                         .headers = headers,
                         .body = built,
@@ -635,65 +617,26 @@ const RequestDriver = struct {
                     body.bytes.deinit();
                     const exchange_data = body.exchange;
                     const headers = body.headers;
-                    self.state = .{ .finish_status = .{
+                    self.state = .{ .finish_response = .{
                         .exchange = exchange_data,
                         .headers = headers,
                         .body = built,
                     } };
                 },
             },
-            .finish_status => |*results| {
+            .finish_response => |*results| {
                 const status_key = try intern.intern("status");
-                const moved = results.*;
-                self.state = .{ .finish_headers = .{ .results = moved, .status_key = status_key } };
-            },
-            .finish_headers => |*finish| {
                 const headers_key = try intern.intern("headers");
-                const results = finish.results;
-                const status_key = finish.status_key;
-                self.state = .{ .finish_body = .{
-                    .results = results,
-                    .status_key = status_key,
-                    .headers_key = headers_key,
-                } };
-            },
-            .finish_body => |*finish| {
                 const body_key = try intern.intern("body");
-                const results = finish.results;
-                self.state = .{ .finish_allocate = .{
-                    .results = results,
-                    .keys = .{
-                        .status = finish.status_key,
-                        .headers = finish.headers_key,
-                        .body = body_key,
-                    },
-                } };
-            },
-            .finish_allocate => |*finish| {
-                const slots = try self.allocator.alloc(dict.Pair, 3);
-                slots[0] = .{
-                    .{ .symbol = finish.keys.status },
-                    .{ .int = @intCast(finish.results.exchange.status) },
+                const slots = [_]dict.Pair{
+                    .{ .{ .symbol = status_key }, .{ .int = @intCast(results.exchange.status) } },
+                    .{ .{ .symbol = headers_key }, results.headers },
+                    .{ .{ .symbol = body_key }, results.body },
                 };
-                slots[1] = .{ .{ .symbol = finish.keys.headers }, finish.results.headers };
-                slots[2] = .{ .{ .symbol = finish.keys.body }, finish.results.body };
-                const results = finish.results;
-                self.state = .{ .finish_dictionary_prepare = .{
-                    .results = results,
-                    .slots = slots,
-                } };
-            },
-            .finish_dictionary_prepare => |*finish| {
-                const dictionary = try dict.Materializer.init(
-                    self.allocator,
-                    finish.slots,
-                    true,
-                );
-                const results = finish.results;
-                const slots = finish.slots;
+                const dictionary = try dict.Materializer.init(self.allocator, &slots, true);
+                const moved = results.*;
                 self.state = .{ .finish_dictionary = .{
-                    .results = results,
-                    .slots = slots,
+                    .results = moved,
                     .dictionary = dictionary,
                 } };
             },
@@ -702,7 +645,6 @@ const RequestDriver = struct {
                 .duplicate_key => return evaluator.fail(.domain, "http response keys collided"),
                 .complete => |built| {
                     finish.dictionary.deinit();
-                    self.allocator.free(finish.slots);
                     const results = finish.results;
                     self.state = .{ .output = results };
                     if (self.deadline.reachedBy(worker(evaluator).now())) {
@@ -888,17 +830,9 @@ const RequestDriver = struct {
                     .headers = headers,
                 } };
             },
-            .finish_status => |*results| self.beginResultsCleanup(results),
-            .finish_headers => |*finish| self.beginResultsCleanup(&finish.results),
-            .finish_body => |*finish| self.beginResultsCleanup(&finish.results),
-            .finish_allocate => |*finish| self.beginResultsCleanup(&finish.results),
-            .finish_dictionary_prepare => |*finish| {
-                self.allocator.free(finish.slots);
-                self.beginResultsCleanup(&finish.results);
-            },
+            .finish_response => |*results| self.beginResultsCleanup(results),
             .finish_dictionary => |*finish| {
                 finish.dictionary.retire(releases);
-                self.allocator.free(finish.slots);
                 self.beginResultsCleanup(&finish.results);
             },
             .output => |*results| self.beginResultsCleanup(results),
@@ -953,11 +887,7 @@ const RequestDriver = struct {
             .release_header_pairs,
             .response_body_text,
             .response_body_bytes,
-            .finish_status,
-            .finish_headers,
-            .finish_body,
-            .finish_allocate,
-            .finish_dictionary_prepare,
+            .finish_response,
             .finish_dictionary,
             .output,
             => result: {
@@ -998,26 +928,12 @@ const RequestDriver = struct {
                 break :result false;
             },
             .cleanup_exchange => |*cleanup| result: {
-                if (cleanup.fields.pop()) |field| {
-                    self.allocator.free(field.name);
-                    self.allocator.free(field.value);
-                    break :result false;
-                }
-                cleanup.fields.deinit(self.allocator);
-                cleanup.body.deinit(self.allocator);
-                const request = cleanup.request;
-                self.state = .{ .cleanup_request = request };
+                if (!cleanup.retire(self.allocator)) break :result false;
+                self.state = .cleanup_request_value;
                 break :result false;
             },
             .cleanup_request => |*cleanup| result: {
-                if (cleanup.fields.pop()) |field| {
-                    self.allocator.free(field.name);
-                    self.allocator.free(field.value);
-                    break :result false;
-                }
-                cleanup.fields.deinit(self.allocator);
-                if (cleanup.body) |body| self.allocator.free(body);
-                self.allocator.free(cleanup.url);
+                if (!cleanup.retire(self.allocator)) break :result false;
                 self.state = .cleanup_request_value;
                 break :result false;
             },
