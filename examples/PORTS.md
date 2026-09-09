@@ -24,6 +24,12 @@ The observable contracts and limits are in [STDLIB.md](../design/STDLIB.md#port)
 Native loading and SDK ownership contracts are in
 [ENVIRONMENT.md](../design/ENVIRONMENT.md#native-modules).
 
+## Authoring a port
+
+The [authoring tutorial](port-authoring/README.md) supplies a complete small Zig
+extension and ECL clients for a scalar result and a concurrent byte stream.
+Its declarations generate the selector bindings used by both clients.
+
 ## Executable examples
 
 These examples use the deterministic [ABI v5 fixture](../test/native/ports.zig).

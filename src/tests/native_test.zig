@@ -1842,6 +1842,15 @@ test "native: explicit message consumption releases pressure without invalidatin
         "x port.close p port.close portprobe.cleaned", "42 'eof 0 1");
 }
 
+test "native: authoring tutorial composes scalar results and bounded byte streaming" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "tutorial.counter [] port.open 'p set " ++
+        "p tutorial.increment 3 port.call p tutorial.increment 4 port.call " ++
+        "p tutorial.echo [] port.begin 'x set x tutorial.input port.endpoint wrap " ++
+        "(dup [1 2 3 4] port.write port.finish) @spawn 'writer set " ++
+        "x tutorial.output port.endpoint 'r set [] (dup len 4 <) (r 4 port.read cat) while " ++
+        "r 4 port.read writer task.await result.or-raise pop x port.await x port.close p port.close", "3 7 [1 2 3 4] []");
+}
+
 test "native: named declarations supply handlers and exchange endpoints" {
     for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "portprobe.declared [] port.open 'p set " ++
         "p portprobe.declared-result {'answer 42} port.call 'answer at " ++

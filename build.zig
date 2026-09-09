@@ -83,6 +83,16 @@ pub fn build(b: *std.Build) void {
         native_fixture_step.dependOn(native_build.installExtension(b, port_fixture, "native-fixture"));
         _ = fixture_files.addCopyFile(port_fixture.getEmittedBin(), b.fmt("{s}.eclmod", .{name}));
     }
+    const tutorial = native_build.addExtension(b, .{
+        .name = "tutorial",
+        .root_source_file = b.path("test/native/tutorial.zig"),
+        .target = target,
+        .optimize = optimize,
+        .ecl_native = native_sdk,
+    });
+    tutorial.root_module.link_libc = true;
+    native_fixture_step.dependOn(native_build.installExtension(b, tutorial, "native-fixture"));
+    _ = fixture_files.addCopyFile(tutorial.getEmittedBin(), "tutorial.eclmod");
     const native_fixture_options = b.addOptions();
     native_fixture_options.addOptionPath(
         "directory",

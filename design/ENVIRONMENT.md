@@ -70,10 +70,13 @@ A loaded native module remains loaded for the session. Repeated resolution
 uses its existing registration.
 
 Native modules may declare typed port kinds with persistent private state.
-ABI v5 modules also export documented factory, operation-selector, and
-endpoint-selector bindings through `ecl.factory`, `ecl.operation`, and
-`ecl.endpoint`. Bindings are ordinary opaque ECL values with module-instance
-identity. Their complete registration validates before the module is visible.
+The SDK's `Port` spec declares named endpoints and operations. Each operation
+carries its handler, documentation, lane, and enabled exchange endpoints.
+Adding a kind to `module.ports` exports its declared selector bindings; factories
+are exported explicitly with `ecl.factory`. A declaration's optional `name`
+overrides its public spelling. Bindings are ordinary opaque ECL values with
+module-instance identity. Their complete registration validates before the
+module is visible.
 Resource operations belong to host-owned exchanges. Ordinary native callbacks
 can forward their opaque identities; controller execution and cleanup continue
 independently of callback return. Suspension of an ordinary word uses its
@@ -82,31 +85,36 @@ separate `Reschedule` capability.
 controllers read them through bounded `Controller.input` paths. Each request
 allows at most 64 KiB of scalar/text data, 4,096 aggregate nodes, and 16 port
 attachments. Executable words, tasks, and modules are rejected recursively.
-Registered byte endpoints are selected by opaque ECL capabilities; controllers
-use `readFrom`, `writeTo`, and `finishOutput` with their declared endpoint IDs.
+Registered endpoints are selected by opaque ECL capabilities. Controllers acquire
+borrowed capabilities with `controller.endpoint(Port, .name)`. Their types expose
+only the declared byte or message direction. Selectors declare resource or
+exchange ownership; resource endpoints remain available across operations,
+and shutdown joins all users before releasing their transport.
 Each enabled byte endpoint has a bounded ring using the host's configured byte
-capacity. Output and diagnostics require concurrent consumption when both may
-fill. Controller reads and writes may return partial chunks; cancellation and
-resource closure interrupt blocked transport.
-Selectors declare whether their endpoint belongs to an exchange or a resource.
-Resource endpoints remain available across operations. Controllers address them
-with the resource variants of their endpoint methods; shutdown joins all users
-before releasing the transport.
+capacity. Reads return positive chunk lengths, or `null` at stable EOF. Writes
+accept a complete slice with one FIFO admission; an error may leave an accepted
+prefix, so automatic retries are unsafe. Cancellation and closure interrupt
+blocked transport. Output and diagnostics require concurrent consumption when
+both may fill. Finishing one output is distinct from controller completion.
 Message endpoints default to 16 queued messages each and a shared 1 MiB budget
 per resource; hosts may reduce either limit for pressure testing. Messages held
 by a controller retain their budget reservation until forwarding or release.
-Controllers can receive a message, inspect it through bounded `received` paths,
-and consume it with `forwardMessage`, `resultMessage`, or `discardMessage`. Failed consuming calls
-retain ownership, and controller return cleans up an unconsumed message.
-`discardMessage` explicitly releases the input and its budget reservation;
-it returns false when no message is held. Previously constructed builder copies
-remain valid, while borrowed received-message views expire on consumption.
+A receiver's `receive` returns a borrowed message view or `null` at stable EOF.
+The controller owns that message until consuming it through a sender's
+`forward`, `resultMessage`, or `discardMessage`. Bounded `received` paths inspect
+nested data. A second receive while a message is held is rejected. Failed
+consuming calls retain ownership; controller return cleans up an unconsumed
+message. `discardMessage` releases its budget reservation and reports
+`InvalidValue` if no message is held. Builder copies remain valid, while borrowed
+received-message views expire on consumption or the next view lookup.
 The controller-local `MessageBuilder` constructs scalars, nested lists and
 dictionaries, and copies permitted input capabilities without exposing ECL
-storage. Construction and validation advance in bounded steps. Successful
-`send` and `result` consume the completed message; failed transport keeps it
-for cleanup or retry. Construction errors invalidate the partial message, and
-`clear` explicitly starts another. Controller return discards unfinished work.
+storage. Builder methods settle construction and validation in bounded host
+steps before returning; authors use ordinary `try` expressions.
+A sender's `send` and the builder's `result` consume the completed message on
+success. Failure retains it for cleanup or an explicit library decision.
+Construction errors invalidate the partial message, and `clear` explicitly
+starts another. Controller return discards unfinished work.
 `child(Port, dependency)` replaces the builder's top configuration with a newly
 initialized resource of a kind registered by the same module instance. Earlier
 builder values remain available for aggregate construction. The host retains
@@ -121,9 +129,10 @@ independent children, and wrong kinds return null. The borrow remains valid
 through child cleanup, including parent closure and scope transfers. Native
 libraries synchronize shared state across controllers; this access grants no
 ECL heap, allocator, or interpreter authority.
-`replyEndpoint` appends an opaque sender for a declared message input of the
-current exchange. A controller can send it with a request and receive ECL's
-response through that input. Output endpoints and inputs excluded by the
+A message receiver's `reply` appends an opaque sender to the current builder.
+A controller can send it with a request and receive ECL's response through that
+input. The sender follows the input's resource or exchange lifetime; retaining
+it does not extend scope ownership. Output endpoints and inputs excluded by the
 operation cannot grant reply authority. Native controllers never synchronously
 invoke ECL; notification, correlation, and reply ordering are library protocols.
 Controllers report allocation exhaustion with `failOutOfMemory`; observation

@@ -374,12 +374,14 @@ next invocation. These views and candidates expose no backend state or scope
 ownership authority.
 
 Declare package resources with `const P = ecl.Port(Spec)` and include `P` in
-the module's `.ports` tuple. `Spec` supplies `name`, `State`, `init`, `open`,
-`run`, `cancel`, and `deinit`; the SDK checks their signatures. Export factories,
-operation selectors, and endpoint selectors with `ecl.factory`, `ecl.operation`,
-and `ecl.endpoint`. These bindings are opaque capabilities tied to the registered
-kind and module instance. The host owns resource state, exchanges, controller
-execution, scope membership, queues, and library lifetime.
+`module.ports`. The spec supplies its private state and lifecycle callbacks,
+plus named operations and endpoints. Each operation declares its handler,
+lane, and supported endpoints together. The SDK generates selector bindings;
+export only factories explicitly with `ecl.factory`. Optional `name` fields
+let local declaration names differ from public ECL spellings. All selectors
+remain opaque capabilities tied to the registered kind and module instance.
+The host owns exchanges, controller execution, scope membership, queues, and
+library lifetime. Start with the [port authoring tutorial](examples/port-authoring/README.md).
 
 ECL uses `port.open` and `port.begin` with bounded structured configuration and
 requests. `port.endpoint` selects byte or message directions. Streaming programs
@@ -392,20 +394,22 @@ See the [native fixtures](test/native/ports.zig) and executable
 [multiplexed channel](examples/port-multiplex/README.md), and
 [native buffer](examples/port-device/README.md) examples.
 
-Controller callbacks receive private state and a `Controller` with bounded
-byte-stream access, cancellation observation, and error reporting. Stream waits
-block only the private controller. `init` must be bounded. `open` and
-`deinit` surround operation execution: initialization finishes before any `run`,
-and cleanup starts after all runs finish. By default runs are serialized.
-Declare an exhaustive, zero-based `Lane` enum and `fn lane(u32) Lane` to select
-independent FIFO lanes. The selector must be bounded and depend only on its
-operation code. Runs on different lanes may execute concurrently; shared State
-must synchronize cross-lane access. `cancel` can run concurrently with
-`open` or `run`, must be bounded and thread-safe, and must interrupt any backend
-waits. Cancellation can already be set when a callback starts; check it before
-starting external work and preserve that observation across backend waits.
-Integrations with uninterruptible blocking calls do not meet this contract.
-Controllers cannot use ECL values, builders, scopes, or scheduler internals.
+Controller handlers receive private state and an opaque `Controller`. Acquire
+endpoints by name with `try controller.endpoint(P, .input)`. A byte reader
+returns a positive chunk length or `null` at EOF; a writer accepts its complete
+slice or returns an error. Message receivers preserve whole values, and message
+senders publish the controller's builder. Their types expose only the permitted
+direction. Builder methods complete bounded host work and compose with `try`;
+controllers never advance interpreter work or access its heap.
+
+`init` must be bounded. `open` finishes before operation handlers start;
+`deinit` runs after they finish. The default lane is `.operation`. To allow
+independent progress, declare a `Lane` enum and assign lanes in the operation
+declarations. Different lanes may run concurrently, so synchronize shared state.
+`cancel` may race initialization or operation execution: it must be bounded,
+thread-safe, and interrupt backend waits. Cancellation can already be set when
+a callback starts; check it before external work. Join backend work before
+returning. Host transport waits already respond to cancellation.
 
 Sessions default to 64 live native ports, 16 admitted operations per port, and
 64 KiB per request and response ring. Hosts can set validated limits through
@@ -415,10 +419,10 @@ that operation. By default cancelling active work closes the port and cancels
 its queues. To permit recovery, declare `cancellation = ecl.PortCancellation.acknowledge`
 and `fn cancelOperation(*State, Lane) void`, declaring `Lane` even for a single
 recoverable lane. This bounded, thread-safe callback
-must interrupt the selected lane's backend wait. The interrupted `run` must
+must interrupt the selected lane's backend wait. The interrupted handler must
 restore reusable state and call `controller.acknowledgeCancellation()` before
 returning; otherwise the host closes the resource. The lane stays occupied
-until that run returns. Resource close always overrides recovery.
+until that handler returns. Resource close always overrides recovery.
 
 The operation budget is partitioned across lanes, with remainder slots assigned
 in declaration order. This reserves progress capacity for every lane; creation

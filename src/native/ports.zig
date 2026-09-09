@@ -268,7 +268,7 @@ pub const Controller = opaque {
         return self.state().table.cancelled(self.state().context);
     }
     /// Acknowledge that an interrupted operation has restored reusable backend
-    /// state. The lane remains occupied until run returns. False means the
+    /// state. The lane remains occupied until its handler returns. False means the
     /// resource is closing, or this invocation has no recoverable cancellation.
     pub fn acknowledgeCancellation(self: *Controller) bool {
         const value = self.state();
@@ -299,9 +299,9 @@ pub const Controller = opaque {
 /// `init` constructs bounded initial state before publication. `open` precedes
 /// all lane runs, and `deinit` follows their completion. Runs in distinct lanes
 /// may overlap; same-lane runs are FIFO. `cancel` may run concurrently
-/// with `open` or `run`: it must be bounded, thread-safe, and interrupt backend
+/// with `open` or an operation handler: it must be bounded, thread-safe, and interrupt backend
 /// waits. Optional `shutdown` runs independently of operation lanes, stops new
-/// admission, and is joined before `deinit`. It may race `run` and `cancel`;
+/// admission, and is joined before `deinit`. It may race operation handlers and `cancel`;
 /// cancellation must interrupt its waits too. Cleanup runs even when `open` fails.
 pub fn Port(comptime Spec: type) type {
     const Lane = if (@hasDecl(Spec, "Lane")) Spec.Lane else enum { operation };

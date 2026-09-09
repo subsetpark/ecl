@@ -222,6 +222,7 @@ const repository_verification_files = [_][]const u8{
     "test/scheduler_shell_property.zig",
     "test/native/sample.zig",
     "test/native/ports.zig",
+    "test/native/tutorial.zig",
     "test/native/malformed.zig",
     "test/native/negative/no_call_parameter.zig",
     "test/native/negative/wrong_return_type.zig",
