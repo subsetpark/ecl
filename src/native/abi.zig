@@ -81,7 +81,7 @@ pub const PortCancellation = enum(u32) { close_resource, acknowledge, _ };
 
 /// Controller streams block only their private host controller. Zero bytes
 /// denotes request EOF or cancellation; failure is reported separately.
-pub const MessageBuildAction = enum(u32) { scalar, copy_input, copy_received, list, dictionary, finish, advance, send, result, clear, reply_endpoint, child, prepare_child, _ };
+pub const MessageBuildAction = enum(u32) { scalar = 0, copy_input = 1, copy_received = 2, list = 3, dictionary = 4, send = 7, result = 8, clear = 9, reply_endpoint = 10, child = 11, _ };
 pub const ChildDependency = enum(u32) { independent, dependent, _ };
 pub const MessageBuildRequest = extern struct {
     size: u32 = @sizeOf(MessageBuildRequest),

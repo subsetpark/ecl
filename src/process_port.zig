@@ -1569,6 +1569,7 @@ const OperationAdapter = struct {
             std.Io.Threaded.mutexUnlock(&exchange.mutex);
         }
         self.perform(exchange, running) catch |err| {
+            if (err == error.Cancelled) return;
             std.Io.Threaded.mutexLock(&exchange.mutex);
             self.failure = switch (err) {
                 error.OutOfMemory => .out_of_memory,
@@ -1608,7 +1609,7 @@ const OperationAdapter = struct {
         if (cancelled) _ = running.acknowledgeCancellation();
         std.Io.Threaded.mutexUnlock(&exchange.mutex);
         if (cancelled or self.operation == .terminate or self.operation == .kill) return;
-        const builder = try @import("port_builder.zig").Builder.create(self.cell.adapter.owner.host);
+        const builder = try @import("port_builder.zig").Builder.create(self.cell.adapter.owner.host, running);
         defer builder.retire();
         if (self.operation == .wait) {
             const term = backend.termination().?;
@@ -1618,29 +1619,27 @@ const OperationAdapter = struct {
                 .stopped => |signal| .{ .kind = "stopped", .field = "signal", .number = signal },
                 .unknown => |status| .{ .kind = "unknown", .field = "status", .number = status },
             };
-            try symbol(builder, "kind");
-            try symbol(builder, info.kind);
-            try symbol(builder, info.field);
+            try builder.symbol("kind");
+
+            try builder.symbol(info.kind);
+
+            try builder.symbol(info.field);
+
             try builder.int(info.number);
         } else {
-            try symbol(builder, "stdout");
+            try builder.symbol("stdout");
+
             try builder.int(std.math.cast(i64, self.cell.adapter.owner.stdoutCaptureLimit()) orelse return error.Overflow);
-            try symbol(builder, "stderr");
+            try builder.symbol("stderr");
+
             try builder.int(std.math.cast(i64, self.cell.adapter.owner.stderrCaptureLimit()) orelse return error.Overflow);
         }
         try builder.dictionary(2);
-        try settle(builder);
+
         try builder.finish();
-        try settle(builder);
+
         const envelope = try @import("port_messages.zig").Envelope.create(self.cell.adapter.owner.host, builder.validated().?);
         if (!exchange.terminal_result.replace(envelope)) envelope.release();
-    }
-    fn settle(builder: *@import("port_builder.zig").Builder) @import("port_builder.zig").Error!void {
-        while (try builder.advance() == .pending) {}
-    }
-    fn symbol(builder: *@import("port_builder.zig").Builder, name: []const u8) @import("port_builder.zig").Error!void {
-        try builder.symbol(name);
-        try settle(builder);
     }
 };
 

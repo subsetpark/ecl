@@ -2340,7 +2340,7 @@ const OperationAdapter = struct {
             if (exchange.ticket.isCancelled()) _ = running.acknowledgeCancellation();
             std.Io.Threaded.mutexUnlock(&exchange.mutex);
         }
-        self.perform(exchange) catch |err| {
+        self.perform(exchange, running) catch |err| {
             std.Io.Threaded.mutexLock(&exchange.mutex);
             self.failure = switch (err) {
                 error.OutOfMemory => .out_of_memory,
@@ -2352,14 +2352,14 @@ const OperationAdapter = struct {
             std.Io.Threaded.mutexUnlock(&exchange.mutex);
         };
     }
-    fn perform(self: *OperationAdapter, exchange: *NetworkExchange) !void {
+    fn perform(self: *OperationAdapter, exchange: *NetworkExchange, running: *controllers.Running) !void {
         if (!self.valid_request) {
             std.Io.Threaded.mutexLock(&exchange.mutex);
             self.failure = PortFailure.init(.domain, "network operations require an empty request list");
             std.Io.Threaded.mutexUnlock(&exchange.mutex);
             return;
         }
-        const builder = try port_builder.Builder.create(self.cell.adapter.owner.host);
+        const builder = try port_builder.Builder.create(self.cell.adapter.owner.host, running);
         defer builder.retire();
         if (self.operation == .accept) {
             const listener = self.cell.adapter.backend.listener;
@@ -2384,7 +2384,6 @@ const OperationAdapter = struct {
             const resource = try self.stageAccepted(exchange, socket);
             defer self.retireValue(resource);
             try builder.copy(resource);
-            try settle(builder);
         } else {
             const address: IpAddress = switch (self.cell.adapter.backend) {
                 .listener => |backend| backend.localAddress() orelse return error.Io,
@@ -2394,19 +2393,20 @@ const OperationAdapter = struct {
                 },
                 else => unreachable,
             };
-            try symbol(builder, "address");
+            try builder.symbol("address");
+
             var buffer: [64]u8 = undefined;
             const text = formatAddress(address, &buffer);
             for (text) |byte| try builder.char(byte);
             try builder.list(text.len);
-            try settle(builder);
-            try symbol(builder, "port");
+
+            try builder.symbol("port");
+
             try builder.int(address.getPort());
             try builder.dictionary(2);
-            try settle(builder);
         }
         try builder.finish();
-        try settle(builder);
+
         const envelope = try @import("port_messages.zig").Envelope.create(self.cell.adapter.owner.host, builder.validated().?);
         if (!exchange.terminal_result.replace(envelope)) envelope.release();
     }
@@ -2435,13 +2435,6 @@ const OperationAdapter = struct {
         if (cell.initialization_failure) |failure| if (failure == .out_of_memory) return error.OutOfMemory;
         if (cell.phase != .open or cell.initialization_failure != null) return error.Io;
         return resource;
-    }
-    fn settle(builder: *port_builder.Builder) port_builder.Error!void {
-        while (try builder.advance() == .pending) {}
-    }
-    fn symbol(builder: *port_builder.Builder, text: []const u8) port_builder.Error!void {
-        try builder.symbol(text);
-        try settle(builder);
     }
 };
 

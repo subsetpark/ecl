@@ -141,12 +141,7 @@ pub const MessageBuilder = opaque {
     }
     fn apply(self: *MessageBuilder, request: abi.MessageBuildRequest) bool {
         const owned = self.state();
-        var status = owned.table.build_message(owned.context, &request);
-        while (status == .yield_required) {
-            if (owned.table.cancelled(owned.context)) return false;
-            status = owned.table.build_message(owned.context, &.{ .action = .advance });
-        }
-        return status == .ok;
+        return owned.table.build_message(owned.context, &request) == .ok;
     }
     pub fn int(self: *MessageBuilder, item: i64) bool {
         return self.apply(.{ .action = .scalar, .scalar = capability.Scalar.int(item).wire });
@@ -181,7 +176,7 @@ pub const MessageBuilder = opaque {
     /// never detaches that dependency.
     pub fn child(self: *MessageBuilder, comptime P: type, dependency: enum { independent, dependent }) bool {
         if (!@hasDecl(P, "ecl_port_marker")) @compileError("ecl-native: child requires a declared Port type");
-        return self.apply(.{ .action = .prepare_child }) and self.apply(.{
+        return self.apply(.{
             .action = .child,
             .kind_identity = P.kindIdentity(),
             .count = @intFromEnum(switch (dependency) {
@@ -197,13 +192,13 @@ pub const MessageBuilder = opaque {
         return self.apply(.{ .action = .dictionary, .count = pairs });
     }
     pub fn send(self: *MessageBuilder, endpoint: u6) bool {
-        return self.apply(.{ .action = .finish }) and self.apply(.{ .action = .send, .endpoint = endpoint });
+        return self.apply(.{ .action = .send, .endpoint = endpoint });
     }
     pub fn sendResource(self: *MessageBuilder, endpoint: u6) bool {
-        return self.apply(.{ .action = .finish }) and self.apply(.{ .action = .send, .endpoint = endpoint, .owner = .resource });
+        return self.apply(.{ .action = .send, .endpoint = endpoint, .owner = .resource });
     }
     pub fn result(self: *MessageBuilder) bool {
-        return self.apply(.{ .action = .finish }) and self.apply(.{ .action = .result });
+        return self.apply(.{ .action = .result });
     }
     pub fn clear(self: *MessageBuilder) bool {
         return self.apply(.{ .action = .clear });

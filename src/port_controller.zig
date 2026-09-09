@@ -378,10 +378,16 @@ pub const ExecutionState = enum { preparing, queued, active, cancelling, reusabl
 
 /// Invocation-local execution authority, minted only while lending a callback.
 pub const Running = opaque {
-    const Invocation = struct { context: *anyopaque, acknowledge: *const fn (*anyopaque) bool };
+    const Invocation = struct { context: *anyopaque, acknowledge: *const fn (*anyopaque) bool, cancelled: *const fn (*anyopaque) bool };
     pub fn acknowledgeCancellation(self: *Running) bool {
         const state: *Invocation = @ptrCast(@alignCast(self));
         return state.acknowledge(state.context);
+    }
+    /// Observes cancellation under the invocation owner's lock. This borrow
+    /// also witnesses that bounded host work runs on a live controller.
+    pub fn cancelled(self: *Running) bool {
+        const state: *Invocation = @ptrCast(@alignCast(self));
+        return state.cancelled(state.context);
     }
 };
 
@@ -443,6 +449,16 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
             fn acknowledgeErased(raw: *anyopaque) bool {
                 const self: *Node = @ptrCast(@alignCast(raw));
                 return self.acknowledge();
+            }
+            fn cancelledErased(raw: *anyopaque) bool {
+                const self: *Node = @ptrCast(@alignCast(raw));
+                const cell = self.owner();
+                std.Io.Threaded.mutexLock(&cell.mutex);
+                defer std.Io.Threaded.mutexUnlock(&cell.mutex);
+                return switch (self.execution) {
+                    .cancelling, .reusable, .cancelled => true,
+                    .preparing, .queued, .active, .done => false,
+                };
             }
             fn acknowledge(self: *Node) bool {
                 if (self.execution != .cancelling) return false;
@@ -663,7 +679,7 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
             std.Io.Threaded.mutexUnlock(&cell.mutex);
             std.Io.Threaded.mutexUnlock(mutex);
             if (execute) {
-                var execution: Running.Invocation = .{ .context = node, .acknowledge = Node.acknowledgeErased };
+                var execution: Running.Invocation = .{ .context = node, .acknowledge = Node.acknowledgeErased, .cancelled = Node.cancelledErased };
                 callbacks.execute(cell, @as(*Running, @ptrCast(&execution)));
                 std.Io.Threaded.mutexLock(&cell.mutex);
                 node.executing = false;

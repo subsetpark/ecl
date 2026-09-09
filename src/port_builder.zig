@@ -9,7 +9,7 @@ const dict = @import("dict.zig");
 const intern = @import("intern.zig");
 const poll = @import("poll.zig");
 
-pub const Error = error{ OutOfMemory, InvalidState, InvalidValue, Overflow, DuplicateKey };
+pub const Error = error{ OutOfMemory, InvalidState, InvalidValue, Overflow, DuplicateKey, Cancelled };
 const limits: message.Limits = .{};
 const quantum = 64;
 const Dictionary = struct {
@@ -31,12 +31,14 @@ const Phase = union(enum) {
 };
 const State = struct {
     host: *const heap.HostCleanup,
+    running: *@import("port_controller.zig").Running,
     stack: heap.OwnedValueBuffer,
     depth: usize = 0,
     footprint: message.Footprint = .{},
     phase: Phase = .idle,
 
     fn requireIdle(self: *State) Error!void {
+        if (self.running.cancelled()) return error.Cancelled;
         if (self.phase != .idle) return error.InvalidState;
     }
     fn charge(self: *State, footprint: message.Footprint) Error!void {
@@ -172,11 +174,11 @@ pub const Builder = opaque {
     fn state(self: *Builder) *State {
         return @ptrCast(@alignCast(self));
     }
-    pub fn create(host: *const heap.HostCleanup) error{OutOfMemory}!*Builder {
+    pub fn create(host: *const heap.HostCleanup, running: *@import("port_controller.zig").Running) error{OutOfMemory}!*Builder {
         const state_value = try host.allocator().create(State);
         errdefer host.allocator().destroy(state_value);
         const stack = try heap.OwnedValueBuffer.init(heap.hostDomain(host), limits.nodes);
-        state_value.* = .{ .host = host, .stack = stack };
+        state_value.* = .{ .host = host, .running = running, .stack = stack };
         return capability(state_value);
     }
     pub fn retire(self: *Builder) void {
@@ -202,18 +204,20 @@ pub const Builder = opaque {
         try self.state().charge(.{ .nodes = 1, .bytes = std.unicode.utf8CodepointSequenceLength(codepoint) catch return error.InvalidValue });
         self.state().pushOwned(.{ .char = codepoint });
     }
-    /// Borrows text until advance completes or fails, or the builder is cleared.
+    /// Borrows text only for this call; construction finishes before returning.
     pub fn symbol(self: *Builder, bytes: []const u8) Error!void {
         try self.state().requireIdle();
         try self.state().charge(.{ .nodes = 1, .bytes = bytes.len });
         self.state().phase = .{ .symbol = .{ .bytes = bytes } };
+        try self.drive();
     }
-    /// Borrows input on either outcome. Successful start pins it independently.
+    /// Borrows input on either outcome. Success retains its validated value.
     pub fn copy(self: *Builder, input: Value) Error!void {
         const owned = self.state();
         try owned.requireIdle();
         const validating = try message.Message.create(owned.host.allocator(), input, limits);
         owned.phase = .{ .validating = .{ .message = validating, .purpose = .append } };
+        try self.drive();
     }
     /// Replace the last count completed values with one list, preserving order.
     pub fn list(self: *Builder, count: usize) Error!void {
@@ -223,18 +227,23 @@ pub const Builder = opaque {
         try owned.charge(.{ .nodes = 1 });
         const start = owned.depth - count;
         owned.phase = .{ .list = .{ .start = start, .materializer = .init(owned.host.allocator(), owned.stack.values()[start..owned.depth]) } };
+        try self.drive();
     }
     /// Replace the last count key/value pairs with a dictionary. Duplicate keys
-    /// are rejected during advance; neither partial aggregates nor words escape.
+    /// are rejected before returning; neither partial aggregates nor words escape.
     pub fn dictionary(self: *Builder, count: usize) Error!void {
         const owned = self.state();
         try owned.requireIdle();
         if (count > owned.depth / 2) return error.InvalidState;
         try owned.charge(.{ .nodes = 1 });
-        const keys = try owned.host.allocator().alloc(Value, count);
-        errdefer owned.host.allocator().free(keys);
-        const vals = try owned.host.allocator().alloc(Value, count);
-        owned.phase = .{ .dictionary = .{ .start = owned.depth - count * 2, .keys = keys, .vals = vals, .phase = .{ .split = 0 } } };
+        const buffers = allocation: {
+            const keys = try owned.host.allocator().alloc(Value, count);
+            errdefer owned.host.allocator().free(keys);
+            const vals = try owned.host.allocator().alloc(Value, count);
+            break :allocation .{ .keys = keys, .vals = vals };
+        };
+        owned.phase = .{ .dictionary = .{ .start = owned.depth - count * 2, .keys = buffers.keys, .vals = buffers.vals, .phase = .{ .split = 0 } } };
+        try self.drive();
     }
     pub fn finish(self: *Builder) Error!void {
         const owned = self.state();
@@ -243,6 +252,7 @@ pub const Builder = opaque {
         if (owned.depth != 1) return error.InvalidState;
         const validating = try message.Message.create(owned.host.allocator(), owned.stack.values()[0], limits);
         owned.phase = .{ .validating = .{ .message = validating, .purpose = .finish } };
+        try self.drive();
     }
     /// Seal only the top value as a child configuration. Earlier completed
     /// values stay owned by the builder, allowing atomic multi-child results.
@@ -252,6 +262,7 @@ pub const Builder = opaque {
         if (owned.depth == 0) return error.InvalidState;
         const validating = try message.Message.create(owned.host.allocator(), owned.stack.values()[owned.depth - 1], limits);
         owned.phase = .{ .validating = .{ .message = validating, .purpose = .child } };
+        try self.drive();
     }
     pub fn childConfiguration(self: *Builder) ?*const message.Validated {
         const owned = self.state();
@@ -278,11 +289,19 @@ pub const Builder = opaque {
         owned.stack.replaceOwned(owned.depth - 1, child);
         owned.phase = .idle;
     }
-    pub fn advance(self: *Builder) Error!poll.Progress(void) {
+    fn advance(self: *Builder) Error!poll.Progress(void) {
         return self.state().advance() catch |err| {
             self.state().releasePhase();
             return err;
         };
+    }
+    /// Construction is internally resumable, but only a live controller can
+    /// own this facade and drive it to completion.
+    fn drive(self: *Builder) Error!void {
+        while (true) {
+            if (self.state().running.cancelled()) return error.Cancelled;
+            if (try self.advance() == .complete) return;
+        }
     }
     pub fn validated(self: *Builder) ?*const message.Validated {
         return if (self.state().phase == .ready) self.state().phase.ready.validated() else null;
@@ -298,12 +317,13 @@ pub const Builder = opaque {
         owned.footprint = .{};
         owned.phase = .idle;
     }
-    pub fn clear(self: *Builder) void {
+    pub fn clear(self: *Builder) Error!void {
         const owned = self.state();
         owned.releasePhase();
         owned.phase = .{ .retiring = .{ .next = 0, .end = owned.stack.len() } };
         owned.depth = 0;
         owned.footprint = .{};
+        try self.drive();
     }
     pub fn invalidate(self: *Builder) void {
         self.state().releasePhase();

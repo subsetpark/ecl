@@ -752,8 +752,10 @@ fn valueAtPath(root: Value, path: []const u64) ?Value {
 fn controllerBuildMessage(raw: *anyopaque, request: *const abi.MessageBuildRequest) callconv(.c) abi.HostStatus {
     const ctx = context(raw);
     return buildMessage(ctx, request) catch |err| {
+        if (err == error.Cancelled) return .invalid;
         if (ctx.builder) |builder| builder.invalidate();
         recordControllerFailure(ctx, switch (err) {
+            error.Cancelled => unreachable,
             error.OutOfMemory => .out_of_memory,
             error.Overflow => .init(.overflow, "native message exceeds its structured value or queue limits"),
             error.InvalidValue => .init(.type, "native message contains an invalid structured value"),
@@ -768,7 +770,7 @@ fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest
     const op = ctx.operation() orelse return error.InvalidState;
     if (controllerCancelled(ctx)) return .invalid;
     if (ctx.builder == null) {
-        const builder = try message_builder.Builder.create(ctx.cell.adapter.owner.host);
+        const builder = try message_builder.Builder.create(ctx.cell.adapter.owner.host, ctx.invocation.operation.running);
         ctx.builder = builder;
     }
     const builder = ctx.builder.?;
@@ -810,6 +812,8 @@ fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest
             try builder.copy(reply);
         },
         .child => {
+            try builder.prepareChild();
+
             const configuration = builder.childConfiguration() orelse return error.InvalidState;
             const identity = request.kind_identity orelse return error.InvalidValue;
             const dependency: abi.ChildDependency = @enumFromInt(request.count);
@@ -834,13 +838,12 @@ fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest
             defer heap.hostDomain(ctx.cell.adapter.owner.host).releaseValue(child);
             try builder.replaceChild(child);
         },
-        .prepare_child => try builder.prepareChild(),
         .list => try builder.list(request.count),
         .dictionary => try builder.dictionary(request.count),
-        .finish => try builder.finish(),
-        .advance => {},
-        .clear => builder.clear(),
+        .clear => try builder.clear(),
         .send => {
+            try builder.finish();
+
             const validated = builder.validated() orelse return error.InvalidState;
             const pair = controllerQueue(ctx, request.owner, request.endpoint, .output) orelse return error.InvalidState;
             if (validated.footprint().bytes > ctx.cell.adapter.owner.limits.message_queue_bytes) return error.Overflow;
@@ -853,6 +856,8 @@ fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest
             return .ok;
         },
         .result => {
+            try builder.finish();
+
             const validated = builder.validated() orelse return error.InvalidState;
             const item = try message_transport.Envelope.create(ctx.cell.adapter.owner.host, validated);
             if (!op.terminal_result.replace(item)) {
@@ -864,10 +869,8 @@ fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest
         },
         _ => return error.InvalidState,
     }
-    return switch (try builder.advance()) {
-        .pending => .yield_required,
-        .complete => .ok,
-    };
+
+    return .ok;
 }
 fn controllerCancelled(raw: *anyopaque) callconv(.c) bool {
     const ctx = context(raw);

@@ -1238,6 +1238,14 @@ EOF, cancellation, and failure; buffered accepted data precedes failure.
 A complete controller byte write holds one shared FIFO writer admission across
 bounded chunks. A transport-owned wake epoch closes the gap between a pending
 write and its blocking wait, including cancellation and predecessor completion.
+Structured construction uses one bounded controller driver for typed backends
+and the extension bridge. Sending, returning a result, and creating a child
+complete their prerequisite validation within that driver. The ABI carries
+semantic construction requests, not interpreter or builder advancement states;
+cancellation is checked between construction quanta before publication. Construction requires opaque invocation authority minted by the controller
+lane. Each public mutation settles its bounded internal work before returning;
+worker code cannot construct this controller facade or obtain its advancement
+state.
 
 Each granted Session service owns its registered library instance. A library
 loaded without a grant owns an inert instance with no host authority.
