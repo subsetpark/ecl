@@ -161,6 +161,7 @@ pub fn build(b: *std.Build) void {
 
     const negative_cases = [_]struct { file: []const u8, message: []const u8 }{
         .{ .file = "missing_port_recovery", .message = "ecl-native: recoverable cancellation requires fn cancelOperation(*State, Lane) void" },
+        .{ .file = "wrong_controller_direction", .message = "has no member named 'read'" },
         .{ .file = "resource_operation_endpoint", .message = "port: operation endpoints must belong to the exchange" },
         .{ .file = "invalid_port_lanes", .message = "ecl-native: Port Lane values must be contiguous from zero" },
         .{ .file = "invalid_port_callbacks", .message = "ecl-native: Port callbacks have invalid signatures" },
@@ -333,7 +334,8 @@ pub fn build(b: *std.Build) void {
         "Run native loader and transactional-call tests",
     );
     native_runtime_step.dependOn(&run_native_runtime_tests.step);
-    const port_tests = b.addTest(.{ .root_module = test_mod, .filters = &.{ "process:", "net:", "native:", "port_message.test.", "heap.test.port" } });
+    const port_filter = b.option([]const u8, "port-test-filter", "Run matching public port behavior tests");
+    const port_tests = b.addTest(.{ .root_module = test_mod, .filters = if (port_filter) |filter| &.{filter} else &.{ "process:", "net:", "native:", "port_message.test.", "heap.test.port" } });
     port_tests.linkage = runtime_linkage;
     const run_port_tests = b.addRunArtifact(port_tests);
     run_port_tests.step.dependOn(&fixture_files.step);

@@ -1838,6 +1838,26 @@ test "native: named declarations supply handlers and exchange endpoints" {
     for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "portprobe.declared [] port.open 'p set " ++
         "p portprobe.declared-result {'answer 42} port.call 'answer at " ++
         "p portprobe.declared-stream [] port.begin 'x set " ++
-        "x portprobe.declared-output port.endpoint dup 1 port.read swap 1 port.read " ++
-        "x port.await x port.close p port.close portprobe.cleaned", "42 [42] [] 1");
+        "x portprobe.declared-output port.endpoint dup 1 port.read swap dup 1 port.read swap dup 1 port.read swap 1 port.read " ++
+        "x port.await x port.close p port.close portprobe.cleaned", "42 [40] [41] [42] [] 1");
+}
+
+test "native: directional controllers distinguish byte and message EOF" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .ring_capacity = 1, .message_capacity = 1 }, "portprobe.declared [] port.open 'p set " ++
+        "p portprobe.declared-byte-echo [] port.begin 'x set " ++
+        "x portprobe.declared-input port.endpoint dup [7] port.write port.finish " ++
+        "x portprobe.declared-output port.endpoint dup 1 port.read swap 1 port.read x port.await x port.close " ++
+        "p portprobe.declared-message-echo [] port.begin 'y set " ++
+        "y portprobe.declared-messages-in port.endpoint dup [] port.send port.finish " ++
+        "y portprobe.declared-messages-out port.endpoint 'r set r port.receive dup 'kind at swap 'value at len r port.receive 'kind at y port.await y port.close " ++
+        "p portprobe.declared-publish {} port.begin 'z set " ++
+        "z portprobe.declared-messages-out port.endpoint port.receive dup 'kind at swap 'value at {} match? z port.await z port.close p port.close portprobe.cleaned", "[7] [] 'message 0 'eof 'message 1 1");
+}
+
+test "native: complete controller writes retain FIFO turns across bounded pressure" {
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "portprobe.declared [] port.open 'p set p portprobe.declared-shared-output port.endpoint 'r set " ++
+        "p portprobe.declared-first [] port.begin 'a set r 1 port.read " ++
+        "p portprobe.declared-second [] port.begin 'b set " ++
+        "r 1 port.read r 1 port.read r 1 port.read r 1 port.read r 1 port.read " ++
+        "a port.await b port.await a port.close b port.close p port.close portprobe.cleaned", "[40] [41] [42] [50] [51] [52] 1");
 }

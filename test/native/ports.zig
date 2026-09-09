@@ -852,12 +852,22 @@ const Channel = ecl.Port(struct {
 const Declared = ecl.Port(struct {
     pub const name = "declared";
     pub const State = u8;
+    pub const Lane = enum { data, control };
     pub const endpoints = .{
+        .@"declared-input" = ecl.declarations.Endpoint{ .doc = "Write declared input.", .transport = .bytes, .direction = .input },
+        .@"declared-messages-in" = ecl.declarations.Endpoint{ .doc = "Send declared messages.", .transport = .messages, .direction = .input },
+        .@"declared-messages-out" = ecl.declarations.Endpoint{ .doc = "Receive declared messages.", .transport = .messages, .direction = .output },
+        .@"declared-shared-output" = ecl.declarations.Endpoint{ .doc = "Read shared resource output.", .transport = .bytes, .direction = .output, .owner = .resource },
         .@"declared-output" = ecl.declarations.Endpoint{ .doc = "Read declared output.", .transport = .bytes, .direction = .output },
     };
     pub const operations = .{
-        .@"declared-result" = .{ .doc = "Return the request through a named handler.", .handler = result, .lane = .operation, .endpoints = .{} },
-        .@"declared-stream" = .{ .doc = "Write to a declared exchange endpoint.", .handler = stream, .lane = .operation, .endpoints = .{.@"declared-output"} },
+        .@"declared-byte-echo" = .{ .doc = "Echo complete byte writes.", .handler = byteEcho, .lane = .data, .endpoints = .{ .@"declared-input", .@"declared-output" } },
+        .@"declared-message-echo" = .{ .doc = "Forward whole messages.", .handler = messageEcho, .lane = .data, .endpoints = .{ .@"declared-messages-in", .@"declared-messages-out" } },
+        .@"declared-publish" = .{ .doc = "Publish one built message.", .handler = publish, .lane = .data, .endpoints = .{.@"declared-messages-out"} },
+        .@"declared-first" = .{ .doc = "Write the first contiguous resource slice.", .handler = first, .lane = .data, .endpoints = .{} },
+        .@"declared-second" = .{ .doc = "Write the second contiguous resource slice.", .handler = second, .lane = .control, .endpoints = .{} },
+        .@"declared-result" = .{ .doc = "Return the request through a named handler.", .handler = result, .lane = .data, .endpoints = .{} },
+        .@"declared-stream" = .{ .doc = "Write to a declared exchange endpoint.", .handler = stream, .lane = .data, .endpoints = .{.@"declared-output"} },
     };
     pub fn init() State {
         return 0;
@@ -866,8 +876,37 @@ const Declared = ecl.Port(struct {
     fn result(_: *State, controller: *ecl.Controller) void {
         _ = controller.builder().input(&.{}) and controller.builder().result();
     }
-    fn stream(_: *State, controller: *ecl.Controller) void {
-        _ = controller.writeTo(Declared.Endpoints.id(.@"declared-output"), &.{42});
+    fn stream(_: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+        const output = try controller.endpoint(Declared, .@"declared-output");
+        try output.write(&.{ 40, 41, 42 });
+        try output.finish();
+    }
+    fn byteEcho(_: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+        const input = try controller.endpoint(Declared, .@"declared-input");
+        const output = try controller.endpoint(Declared, .@"declared-output");
+        var bytes: [8]u8 = undefined;
+        while (try input.read(&bytes)) |count| try output.write(bytes[0..count]);
+        try output.finish();
+    }
+    fn messageEcho(_: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+        const input = try controller.endpoint(Declared, .@"declared-messages-in");
+        const output = try controller.endpoint(Declared, .@"declared-messages-out");
+        while (try input.receive()) |_| try output.forward();
+        try output.finish();
+    }
+    fn publish(_: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+        const output = try controller.endpoint(Declared, .@"declared-messages-out");
+        if (!controller.builder().input(&.{})) return error.Failed;
+        try output.send();
+        try output.finish();
+    }
+    fn first(_: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+        const output = try controller.endpoint(Declared, .@"declared-shared-output");
+        try output.write(&.{ 40, 41, 42 });
+    }
+    fn second(_: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+        const output = try controller.endpoint(Declared, .@"declared-shared-output");
+        try output.write(&.{ 50, 51, 52 });
     }
     pub fn cancel(_: *State) void {}
     pub fn deinit(_: *State) void {
@@ -885,7 +924,18 @@ pub const Extension = extension: {
             ecl.factory("declared", "Open a port with named declarations.", Declared),
             ecl.portOperation(Declared, .@"declared-result"),
             ecl.portOperation(Declared, .@"declared-stream"),
+            ecl.portOperation(Declared, .@"declared-byte-echo"),
+            ecl.portOperation(Declared, .@"declared-message-echo"),
+            ecl.portOperation(Declared, .@"declared-publish"),
+            ecl.portOperation(Declared, .@"declared-first"),
+            ecl.portOperation(Declared, .@"declared-second"),
+
             ecl.portEndpoint(Declared, .@"declared-output"),
+            ecl.portEndpoint(Declared, .@"declared-input"),
+            ecl.portEndpoint(Declared, .@"declared-messages-in"),
+            ecl.portEndpoint(Declared, .@"declared-messages-out"),
+            ecl.portEndpoint(Declared, .@"declared-shared-output"),
+
             ecl.factory("counter", "Open a single-lane counter.", Counter),
             ecl.operation("counter-step", "Apply a bounded structured increment.", Counter, 41, .operation, 0),
             ecl.operation("counter-block", "Block before applying a structured increment.", Counter, 42, .operation, 0),

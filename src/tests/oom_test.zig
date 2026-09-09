@@ -1840,6 +1840,15 @@ test "oom: standard-library and host: native port registered builder result" {
     ).run);
 }
 
+test "oom: standard-library and host: native port directional writer" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
+        "portprobe.declared [] port.open dup portprobe.declared-stream [] port.begin " ++
+            "dup portprobe.declared-output port.endpoint 8 port.read pop " ++
+            "dup port.await port.close port.close",
+    ).run);
+}
+
 test "oom: standard-library and host: native port registered builder messages" {
     try requireSelectedOomTest(@src());
     try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(

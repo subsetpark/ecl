@@ -918,6 +918,79 @@ fn controllerReadEndpoint(raw: *anyopaque, owner: abi.EndpointOwner, index: u32,
     defer pair.pipe.endRead();
     return @intCast(pair.controller.read(bytes[0..@min(length, 64 * 1024)], context(raw).cancellation()));
 }
+
+fn controllerResolveEndpoint(raw: *anyopaque, identity: *const anyopaque, owner: abi.EndpointOwner, index: u32, transport: abi.EndpointTransport, direction: abi.EndpointDirection) callconv(.c) bool {
+    const ctx = context(raw);
+    if (ctx.cell.adapter.definition.identity != identity or index >= 64) return false;
+    const parent = controllerEndpointParent(ctx, owner) orelse return false;
+    const spec = ctx.cell.adapter.instance.validated().endpoint(ctx.cell.adapter.kind, @intCast(index), switch (owner) {
+        .resource => .resource,
+        .exchange => .exchange,
+        _ => return false,
+    }) orelse return false;
+    return @intFromEnum(spec.transport) == @intFromEnum(transport) and
+        @intFromEnum(spec.direction) == @intFromEnum(direction) and parent.transport(index) != null;
+}
+
+fn controllerTransportFailure(ctx: *ControllerContext, failure: byte_transport.Failure) abi.ControllerStatus {
+    const translated: Failure = switch (failure) {
+        .out_of_memory => .out_of_memory,
+        .report => |report| .init(switch (report.kind) {
+            .type => .type,
+            .shape => .shape,
+            .conform => .conform,
+            .overflow => .overflow,
+            .domain => .domain,
+            .parse => .parse,
+            .io => .io,
+            .user => .user,
+            .contract => .contract,
+            else => .io,
+        }, report.message[0..report.len]),
+    };
+    recordControllerFailure(ctx, translated);
+    return if (translated == .out_of_memory) .out_of_memory else .failed;
+}
+
+fn controllerReadBytes(raw: *anyopaque, owner: abi.EndpointOwner, index: u32, bytes: [*]u8, length: u32) callconv(.c) abi.ControllerRead {
+    if (length == 0) return .{ .status = .invalid };
+    const pair = controllerPipe(raw, owner, index, .input) orelse return .{ .status = .invalid };
+    pair.pipe.beginRead() catch return .{ .status = controllerTransportFailure(context(raw), .init(.contract, "byte endpoint already has a pending reader")) };
+    defer pair.pipe.endRead();
+    return switch (pair.controller.readChunk(bytes[0..length], context(raw).cancellation())) {
+        .data => |count| .{ .status = .ok, .count = @intCast(count) },
+        .eof => .{ .status = .eof },
+        .cancelled => .{ .status = .cancelled },
+        .failed => |failure| .{ .status = controllerTransportFailure(context(raw), failure) },
+    };
+}
+
+fn controllerWriteBytes(raw: *anyopaque, owner: abi.EndpointOwner, index: u32, bytes: [*]const u8, length: u64) callconv(.c) abi.ControllerStatus {
+    const pair = controllerPipe(raw, owner, index, .output) orelse return .invalid;
+    return switch (pair.controller.writeAll(bytes[0..@intCast(length)], context(raw).cancellation())) {
+        .complete => .ok,
+        .cancelled => .cancelled,
+        .out_of_memory => controllerTransportFailure(context(raw), .out_of_memory),
+        .failed => |failure| controllerTransportFailure(context(raw), failure),
+    };
+}
+
+fn controllerReceiveEvent(raw: *anyopaque, owner: abi.EndpointOwner, index: u32) callconv(.c) abi.ControllerStatus {
+    const ctx = context(raw);
+    if (ctx.received != null) return .invalid;
+    const pair = controllerQueue(raw, owner, index, .input) orelse return .invalid;
+    pair.queue.beginRead() catch return controllerTransportFailure(ctx, .init(.contract, "message endpoint already has a pending receiver"));
+    defer pair.queue.endRead();
+    switch (pair.controller.receiveMessage(ctx.cancellation())) {
+        .message => |item| {
+            ctx.received = item;
+            return .ok;
+        },
+        .eof => return .eof,
+        .cancelled => return .cancelled,
+        .failed => |failure| return controllerTransportFailure(ctx, failure),
+    }
+}
 fn controllerWriteEndpoint(raw: *anyopaque, owner: abi.EndpointOwner, index: u32, bytes: [*]const u8, length: u32) callconv(.c) u32 {
     if (length == 0) return 0;
     const pair = controllerPipe(raw, owner, index, .output) orelse {
@@ -1057,7 +1130,7 @@ fn storeControllerFailure(destination: *?Failure, failure: Failure) void {
     if (destination.* != null and failure != .out_of_memory) return;
     destination.* = failure;
 }
-const controller_table: abi.ControllerTable = .{ .fail_resource = controllerFailResource, .parent_state = controllerParent, .discard_message = controllerDiscardMessage, .build_message = controllerBuildMessage, .fail_allocation = controllerFailAllocation, .receive_message = controllerReceiveMessage, .received_message = controllerReceivedMessage, .forward_message = controllerForwardMessage, .result_message = controllerResultMessage, .input = controllerInput, .read_endpoint = controllerReadEndpoint, .write_endpoint = controllerWriteEndpoint, .finish_endpoint = controllerFinishEndpoint, .cancelled = controllerCancelled, .acknowledge_cancellation = controllerAcknowledge, .fail = controllerFail };
+const controller_table: abi.ControllerTable = .{ .resolve_endpoint = controllerResolveEndpoint, .read_bytes = controllerReadBytes, .write_bytes = controllerWriteBytes, .receive_event = controllerReceiveEvent, .fail_resource = controllerFailResource, .parent_state = controllerParent, .discard_message = controllerDiscardMessage, .build_message = controllerBuildMessage, .fail_allocation = controllerFailAllocation, .receive_message = controllerReceiveMessage, .received_message = controllerReceivedMessage, .forward_message = controllerForwardMessage, .result_message = controllerResultMessage, .input = controllerInput, .read_endpoint = controllerReadEndpoint, .write_endpoint = controllerWriteEndpoint, .finish_endpoint = controllerFinishEndpoint, .cancelled = controllerCancelled, .acknowledge_cancellation = controllerAcknowledge, .fail = controllerFail };
 
 pub fn fromValue(value: Value, instance: *native.ModuleInstance, kind: u32) ?*Cell {
     const handle = switch (value) {

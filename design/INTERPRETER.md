@@ -1231,6 +1231,13 @@ selectors from the same ABI-independent declaration types. Registered lane
 metadata is authoritative; controller invocation does not select a second lane.
 Named endpoint references generate private masks before publication, rejecting
 resource-owned or repeated endpoints in an operation's exchange set.
+Controller endpoint borrows fix their issuing kind, owner, transport, and
+direction at acquisition and expire at controller return. Their opaque types
+expose only the matching directional operations. Transport outcomes distinguish
+EOF, cancellation, and failure; buffered accepted data precedes failure.
+A complete controller byte write holds one shared FIFO writer admission across
+bounded chunks. A transport-owned wake epoch closes the gap between a pending
+write and its blocking wait, including cancellation and predecessor completion.
 
 Each granted Session service owns its registered library instance. A library
 loaded without a grant owns an inert instance with no host authority.

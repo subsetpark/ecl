@@ -94,6 +94,8 @@ pub const MessageBuildRequest = extern struct {
     owner: EndpointOwner = .exchange,
     kind_identity: ?*const anyopaque = null,
 };
+pub const ControllerStatus = enum(u32) { ok, eof, cancelled, failed, out_of_memory, invalid, _ };
+pub const ControllerRead = extern struct { status: ControllerStatus, count: u32 = 0 };
 pub const ControllerTable = extern struct {
     parent_state: *const fn (*anyopaque, *const anyopaque) callconv(.c) ?*anyopaque,
     build_message: *const fn (*anyopaque, *const MessageBuildRequest) callconv(.c) HostStatus,
@@ -111,6 +113,10 @@ pub const ControllerTable = extern struct {
     acknowledge_cancellation: *const fn (*anyopaque) callconv(.c) bool,
     fail: *const fn (*anyopaque, ErrorKindWire, [*]const u8, u32) callconv(.c) void,
     fail_resource: *const fn (*anyopaque, ErrorKindWire, [*]const u8, u32) callconv(.c) void,
+    resolve_endpoint: *const fn (*anyopaque, *const anyopaque, EndpointOwner, u32, EndpointTransport, EndpointDirection) callconv(.c) bool,
+    read_bytes: *const fn (*anyopaque, EndpointOwner, u32, [*]u8, u32) callconv(.c) ControllerRead,
+    write_bytes: *const fn (*anyopaque, EndpointOwner, u32, [*]const u8, u64) callconv(.c) ControllerStatus,
+    receive_event: *const fn (*anyopaque, EndpointOwner, u32) callconv(.c) ControllerStatus,
 };
 pub const PortControllerFn = *const fn (*anyopaque, *const ControllerTable, *anyopaque) callconv(.c) void;
 pub const PortOperationFn = *const fn (*anyopaque, u32, *const ControllerTable, *anyopaque) callconv(.c) void;
@@ -420,7 +426,8 @@ comptime {
     assertRecord(Descriptor, 104, 8);
     assertRecord(PortDefinition, 96, 8);
     assertRecord(MessageBuildRequest, 72, 8);
-    assertRecord(ControllerTable, 128, 8);
+    assertRecord(ControllerTable, 160, 8);
+    assertRecord(ControllerRead, 8, 4);
     assertRecord(EntryResult, 32, 8);
 
     if (@offsetOf(Definition, "callback_index") != 4 or

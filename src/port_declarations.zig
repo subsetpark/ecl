@@ -6,6 +6,7 @@ pub const Direction = enum { input, output };
 pub const Transport = enum { bytes, messages };
 pub const Owner = enum { resource, exchange };
 pub const Cancellation = enum { close_resource, acknowledge };
+pub const ControllerError = error{ Cancelled, Failed, OutOfMemory, InvalidValue };
 
 pub const Endpoint = struct {
     doc: []const u8,

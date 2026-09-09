@@ -367,17 +367,31 @@ pub const Controller = opaque {
     }
     /// Success owns the removed message; EOF/failure returns null.
     pub fn receive(self: *Controller, cancelled: *const std.atomic.Value(bool)) ?*Envelope {
+        return switch (self.receiveMessage(cancelled)) {
+            .message => |item| item,
+            .eof, .cancelled, .failed => null,
+        };
+    }
+    pub const Received = union(enum) { message: *Envelope, eof, cancelled, failed: Failure };
+    /// A message transfers ownership to the controller, including its queue
+    /// reservation. Buffered messages precede terminal failure.
+    pub fn receiveMessage(self: *Controller, cancelled: *const std.atomic.Value(bool)) Received {
         const owned = self.state();
         std.Io.Threaded.mutexLock(&owned.mutex);
         defer std.Io.Threaded.mutexUnlock(&owned.mutex);
         while (!cancelled.load(.acquire) and owned.count == 0 and owned.phase == .open) owned.changed.waitUncancelable(io(), &owned.mutex);
-        if (cancelled.load(.acquire) or owned.count == 0 or owned.phase == .failed) return null;
+        if (cancelled.load(.acquire)) return .cancelled;
+        if (owned.count == 0) return switch (owned.phase) {
+            .eof => .eof,
+            .failed => |failure| .{ .failed = failure },
+            .open => unreachable,
+        };
         const item = owned.messages[owned.head].?;
         owned.messages[owned.head] = null;
         owned.head = (owned.head + 1) % max_messages;
         owned.count -= 1;
         owned.notifyLocked();
-        return item;
+        return .{ .message = item };
     }
     /// Consumes only on true. False retains caller ownership.
     pub fn send(self: *Controller, item: *Envelope, cancelled: *const std.atomic.Value(bool)) bool {

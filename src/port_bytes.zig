@@ -10,6 +10,8 @@ const max_chunk = 64 * 1024;
 pub const Failure = @import("port_failure.zig").Failure(ErrorKind);
 pub const Read = union(enum) { pending, eof, data: usize, failed: Failure };
 pub const Write = union(enum) { pending, written: usize, failed: Failure };
+pub const ControllerRead = union(enum) { eof, data: usize, cancelled, failed: Failure };
+pub const ControllerWrite = union(enum) { complete, cancelled, out_of_memory, failed: Failure };
 const Writers = controllers.Lane(State, .writer, .{ .retain = State.retainReadiness, .release = State.releaseReadiness, .write = State.writeLocked, .notify = State.notifyLocked, .source = State.source });
 pub const WritePermit = Writers.Writer;
 
@@ -51,6 +53,7 @@ const State = struct {
     ring: Ring,
     writers: Writers,
     reader: bool = false,
+    epoch: u64 = 0,
     phase: StreamPhase(Failure) = .open,
 
     fn capabilities(self: *State) Pair {
@@ -79,6 +82,7 @@ const State = struct {
         return .{ .written = count };
     }
     fn notifyLocked(self: *State) void {
+        self.epoch +%= 1;
         if (self.phase == .finishing and self.writers.empty()) self.phase.complete();
         self.changed.broadcast(std.Io.Threaded.global_single_threaded.io());
         self.waits.notifyLocked(self);
@@ -181,15 +185,56 @@ pub const Controller = opaque {
         return @ptrCast(@alignCast(self));
     }
     pub fn read(self: *Controller, bytes: []u8, cancelled: *const std.atomic.Value(bool)) usize {
+        return switch (self.readChunk(bytes, cancelled)) {
+            .data => |count| count,
+            .eof, .cancelled, .failed => 0,
+        };
+    }
+    pub fn readChunk(self: *Controller, bytes: []u8, cancelled: *const std.atomic.Value(bool)) ControllerRead {
         const owned = self.state();
         std.Io.Threaded.mutexLock(&owned.mutex);
         defer std.Io.Threaded.mutexUnlock(&owned.mutex);
         while (!cancelled.load(.acquire) and owned.ring.len == 0 and (owned.phase == .open or owned.phase == .finishing))
             owned.changed.waitUncancelable(std.Io.Threaded.global_single_threaded.io(), &owned.mutex);
-        if (cancelled.load(.acquire) or owned.phase == .failed) return 0;
+        if (cancelled.load(.acquire)) return .cancelled;
+        if (owned.ring.len == 0) return switch (owned.phase) {
+            .failed => |failure| .{ .failed = failure },
+            .eof => .eof,
+            .open, .finishing => unreachable,
+        };
         const count = owned.ring.pop(bytes[0..@min(bytes.len, max_chunk)]);
         owned.notifyLocked();
-        return count;
+        return .{ .data = count };
+    }
+    /// One FIFO admission covers the entire borrowed slice. Success accepts
+    /// every byte; interruption may leave an accepted prefix. No caller retry
+    /// is implied. The controller's borrow pins the pipe through this call.
+    pub fn writeAll(self: *Controller, bytes: []const u8, cancelled: *const std.atomic.Value(bool)) ControllerWrite {
+        const owned = self.state();
+        const permit = owned.capabilities().pipe.beginWrite() catch |err| return switch (err) {
+            error.OutOfMemory => .out_of_memory,
+            error.Finished => .{ .failed = Failure.init(.io, "port output is finished") },
+        };
+        // Ending either a successful or interrupted turn wakes the next writer.
+        defer permit.finish();
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            std.Io.Threaded.mutexLock(&owned.mutex);
+            const epoch = owned.epoch;
+            std.Io.Threaded.mutexUnlock(&owned.mutex);
+            if (cancelled.load(.acquire)) return .cancelled;
+            switch (permit.write(bytes[offset..])) {
+                .written => |count| offset += count,
+                .failed => |failure| return .{ .failed = failure },
+                .pending => {
+                    std.Io.Threaded.mutexLock(&owned.mutex);
+                    while (epoch == owned.epoch and !cancelled.load(.acquire))
+                        owned.changed.waitUncancelable(std.Io.Threaded.global_single_threaded.io(), &owned.mutex);
+                    std.Io.Threaded.mutexUnlock(&owned.mutex);
+                },
+            }
+        }
+        return .complete;
     }
     pub fn write(self: *Controller, bytes: []const u8, cancelled: *const std.atomic.Value(bool)) usize {
         const owned = self.state();

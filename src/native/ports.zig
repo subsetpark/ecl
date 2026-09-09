@@ -5,7 +5,100 @@ const capability = @import("capability.zig");
 const declarations = @import("port-declarations");
 pub const Cancellation = declarations.Cancellation;
 
-pub const ControllerState = struct { table: *const abi.ControllerTable, context: *anyopaque, input_view: abi.ValueView = .{ .kind = .list } };
+const ControllerState = struct { table: *const abi.ControllerTable, context: *anyopaque, input_view: abi.ValueView = .{ .kind = .list } };
+pub const ControllerError = declarations.ControllerError;
+
+fn require(status: abi.ControllerStatus) ControllerError!void {
+    return switch (status) {
+        .ok => {},
+        .cancelled => error.Cancelled,
+        .failed => error.Failed,
+        .out_of_memory => error.OutOfMemory,
+        .eof, .invalid => error.InvalidValue,
+        _ => error.InvalidValue,
+    };
+}
+
+/// A borrowed controller endpoint has a statically fixed issuer, owner and
+/// direction. Its opaque context expires when the invoking controller returns.
+/// Acquiring it validates the issuing resource and operation endpoint set.
+pub fn Endpoint(comptime P: type, comptime endpoint_name: P.Endpoints.Name) type {
+    const spec = P.Endpoints.get(endpoint_name);
+    const id = P.Endpoints.id(endpoint_name);
+    const owner: abi.EndpointOwner = switch (spec.owner) {
+        .resource => .resource,
+        .exchange => .exchange,
+    };
+    const Access = struct {
+        fn state(raw: *anyopaque) *ControllerState {
+            return @ptrCast(@alignCast(raw));
+        }
+        fn finish(raw: *anyopaque) ControllerError!void {
+            const owned = state(raw);
+            if (!owned.table.finish_endpoint(owned.context, owner, id)) return error.InvalidValue;
+        }
+    };
+    if (spec.transport == .bytes) {
+        return switch (spec.direction) {
+            .input => opaque {
+                pub fn read(self: *@This(), bytes: []u8) ControllerError!?usize {
+                    if (bytes.len == 0) return error.InvalidValue;
+                    const owned = Access.state(self);
+                    const result = owned.table.read_bytes(owned.context, owner, id, bytes.ptr, @intCast(@min(bytes.len, 64 * 1024)));
+                    if (result.status == .eof) return null;
+                    try require(result.status);
+                    return result.count;
+                }
+            },
+            .output => opaque {
+                /// Success accepts the complete slice. Failure may leave an
+                /// accepted prefix; callers must not automatically retry it.
+                pub fn write(self: *@This(), bytes: []const u8) ControllerError!void {
+                    const owned = Access.state(self);
+                    try require(owned.table.write_bytes(owned.context, owner, id, bytes.ptr, bytes.len));
+                }
+                pub fn finish(self: *@This()) ControllerError!void {
+                    try Access.finish(self);
+                }
+            },
+        };
+    }
+    return switch (spec.direction) {
+        .input => opaque {
+            /// Success owns one message in the controller's received slot;
+            /// null is stable EOF. An unconsumed message rejects another read.
+            pub fn receive(self: *@This()) ControllerError!?*const MessageView {
+                const owned = Access.state(self);
+                const result = owned.table.receive_event(owned.context, owner, id);
+                if (result == .eof) return null;
+                try require(result);
+                const controller: *Controller = @ptrCast(self);
+                return controller.received(&.{}) orelse error.InvalidValue;
+            }
+        },
+        .output => opaque {
+            /// Consumes this controller's completed builder only on success.
+            pub fn send(self: *@This()) ControllerError!void {
+                const controller: *Controller = @ptrCast(self);
+                const builder = controller.builder();
+                const accepted = switch (spec.owner) {
+                    .resource => builder.sendResource(id),
+                    .exchange => builder.send(id),
+                };
+                if (!accepted) return if (controller.cancelled()) error.Cancelled else error.Failed;
+            }
+            /// Consumes the current received message only on success.
+            pub fn forward(self: *@This()) ControllerError!void {
+                const owned = Access.state(self);
+                if (!owned.table.forward_message(owned.context, owner, id))
+                    return if (owned.table.cancelled(owned.context)) error.Cancelled else error.Failed;
+            }
+            pub fn finish(self: *@This()) ControllerError!void {
+                try Access.finish(self);
+            }
+        },
+    };
+}
 
 /// Controller-local read-only view. Borrowed text and this view last until the
 /// next input lookup or controller return. Port values expose only their kind.
@@ -126,6 +219,22 @@ pub const Controller = opaque {
     pub fn builder(self: *Controller) *MessageBuilder {
         return @ptrCast(self);
     }
+    pub fn endpoint(self: *Controller, comptime P: type, comptime endpoint_name: P.Endpoints.Name) ControllerError!*Endpoint(P, endpoint_name) {
+        const spec = P.Endpoints.get(endpoint_name);
+        const owned = self.state();
+        if (!owned.table.resolve_endpoint(owned.context, P.kindIdentity(), switch (spec.owner) {
+            .resource => .resource,
+            .exchange => .exchange,
+        }, P.Endpoints.id(endpoint_name), switch (spec.transport) {
+            .bytes => .bytes,
+            .messages => .messages,
+        }, switch (spec.direction) {
+            .input => .input,
+            .output => .output,
+        }))
+            return error.InvalidValue;
+        return @ptrCast(self);
+    }
     /// Borrow the issuing parent's native state when this resource was
     /// created as its dependent child. A root, independent child, or wrong
     /// parent kind returns null. The borrow lasts through child cleanup;
@@ -139,9 +248,9 @@ pub const Controller = opaque {
     }
     /// Own the next complete message until forwarding, returning it as the
     /// result, or controller return. Refuses to discard an unconsumed message.
-    pub fn receiveMessage(self: *Controller, endpoint: u6) bool {
+    pub fn receiveMessage(self: *Controller, endpoint_id: u6) bool {
         const owned = self.state();
-        return owned.table.receive_message(owned.context, .exchange, endpoint);
+        return owned.table.receive_message(owned.context, .exchange, endpoint_id);
     }
     /// Borrowed view of the owned received message; the next view lookup
     /// invalidates this view. Message ownership is unchanged.
@@ -153,9 +262,9 @@ pub const Controller = opaque {
     }
     /// Success consumes the received message into the output queue. Failure
     /// retains it for retry or automatic cleanup at controller return.
-    pub fn forwardMessage(self: *Controller, endpoint: u6) bool {
+    pub fn forwardMessage(self: *Controller, endpoint_id: u6) bool {
         const owned = self.state();
-        return owned.table.forward_message(owned.context, .exchange, endpoint);
+        return owned.table.forward_message(owned.context, .exchange, endpoint_id);
     }
     /// Success consumes the received message into the terminal result; failure
     /// retains it. Completion is still determined by controller return.
@@ -177,40 +286,40 @@ pub const Controller = opaque {
         if (!owned.table.input(owned.context, path.ptr, @intCast(path.len), &owned.input_view)) return null;
         return @ptrCast(&owned.input_view);
     }
-    pub fn readResourceFrom(self: *Controller, endpoint: u6, bytes: []u8) usize {
+    pub fn readResourceFrom(self: *Controller, endpoint_id: u6, bytes: []u8) usize {
         const owned = self.state();
-        return owned.table.read_endpoint(owned.context, .resource, endpoint, bytes.ptr, @intCast(@min(bytes.len, 64 * 1024)));
+        return owned.table.read_endpoint(owned.context, .resource, endpoint_id, bytes.ptr, @intCast(@min(bytes.len, 64 * 1024)));
     }
-    pub fn writeResourceTo(self: *Controller, endpoint: u6, bytes: []const u8) usize {
+    pub fn writeResourceTo(self: *Controller, endpoint_id: u6, bytes: []const u8) usize {
         const owned = self.state();
-        return owned.table.write_endpoint(owned.context, .resource, endpoint, bytes.ptr, @intCast(@min(bytes.len, 64 * 1024)));
+        return owned.table.write_endpoint(owned.context, .resource, endpoint_id, bytes.ptr, @intCast(@min(bytes.len, 64 * 1024)));
     }
-    pub fn finishResourceOutput(self: *Controller, endpoint: u6) bool {
+    pub fn finishResourceOutput(self: *Controller, endpoint_id: u6) bool {
         const owned = self.state();
-        return owned.table.finish_endpoint(owned.context, .resource, endpoint);
+        return owned.table.finish_endpoint(owned.context, .resource, endpoint_id);
     }
-    pub fn receiveResourceMessage(self: *Controller, endpoint: u6) bool {
+    pub fn receiveResourceMessage(self: *Controller, endpoint_id: u6) bool {
         const owned = self.state();
-        return owned.table.receive_message(owned.context, .resource, endpoint);
+        return owned.table.receive_message(owned.context, .resource, endpoint_id);
     }
-    pub fn forwardResourceMessage(self: *Controller, endpoint: u6) bool {
+    pub fn forwardResourceMessage(self: *Controller, endpoint_id: u6) bool {
         const owned = self.state();
-        return owned.table.forward_message(owned.context, .resource, endpoint);
+        return owned.table.forward_message(owned.context, .resource, endpoint_id);
     }
     pub fn read(self: *Controller, bytes: []u8) usize {
         return self.readFrom(0, bytes);
     }
-    pub fn readFrom(self: *Controller, endpoint: u6, bytes: []u8) usize {
+    pub fn readFrom(self: *Controller, endpoint_id: u6, bytes: []u8) usize {
         const owned = self.state();
-        return owned.table.read_endpoint(owned.context, .exchange, endpoint, bytes.ptr, @intCast(@min(bytes.len, 64 * 1024)));
+        return owned.table.read_endpoint(owned.context, .exchange, endpoint_id, bytes.ptr, @intCast(@min(bytes.len, 64 * 1024)));
     }
-    pub fn writeTo(self: *Controller, endpoint: u6, bytes: []const u8) usize {
+    pub fn writeTo(self: *Controller, endpoint_id: u6, bytes: []const u8) usize {
         const owned = self.state();
-        return owned.table.write_endpoint(owned.context, .exchange, endpoint, bytes.ptr, @intCast(@min(bytes.len, 64 * 1024)));
+        return owned.table.write_endpoint(owned.context, .exchange, endpoint_id, bytes.ptr, @intCast(@min(bytes.len, 64 * 1024)));
     }
-    pub fn finishOutput(self: *Controller, endpoint: u6) bool {
+    pub fn finishOutput(self: *Controller, endpoint_id: u6) bool {
         const owned = self.state();
-        return owned.table.finish_endpoint(owned.context, .exchange, endpoint);
+        return owned.table.finish_endpoint(owned.context, .exchange, endpoint_id);
     }
     pub fn write(self: *Controller, bytes: []const u8) usize {
         return self.writeTo(1, bytes);
@@ -283,7 +392,8 @@ pub fn Port(comptime Spec: type) type {
     comptime {
         if (DeclaredOperations != void) {
             for (@import("std").meta.tags(DeclaredOperations.Name)) |name| {
-                if (@TypeOf(DeclaredOperations.get(name).handler) != fn (*Spec.State, *Controller) void)
+                if (@TypeOf(DeclaredOperations.get(name).handler) != fn (*Spec.State, *Controller) void and
+                    @TypeOf(DeclaredOperations.get(name).handler) != fn (*Spec.State, *Controller) ControllerError!void)
                     @compileError("port: handler must accept resource state and controller");
             }
         } else if (!@hasDecl(Spec, "run") or @TypeOf(Spec.run) != fn (*Spec.State, u32, *Controller) void)
@@ -330,7 +440,18 @@ pub fn Port(comptime Spec: type) type {
             } else {
                 inline for (comptime @import("std").meta.tags(Operations.Name)) |operation_name| {
                     if (operation == @intFromEnum(operation_name)) {
-                        Operations.get(operation_name).handler(@ptrCast(@alignCast(raw)), @ptrCast(&state));
+                        const handler = Operations.get(operation_name).handler;
+                        if (@typeInfo(@TypeOf(handler)).@"fn".return_type.? == void) {
+                            handler(@ptrCast(@alignCast(raw)), @ptrCast(&state));
+                        } else handler(@ptrCast(@alignCast(raw)), @ptrCast(&state)) catch |err| {
+                            const controller: *Controller = @ptrCast(&state);
+                            switch (err) {
+                                error.Cancelled => if (!controller.cancelled()) controller.fail(.contract, "controller reported cancellation without a request"),
+                                error.OutOfMemory => controller.failOutOfMemory(),
+                                error.Failed => controller.fail(.io, "port controller transport failed"),
+                                error.InvalidValue => controller.fail(.contract, "invalid controller capability or value"),
+                            }
+                        };
                         return;
                     }
                 }
