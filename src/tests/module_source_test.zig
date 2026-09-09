@@ -1896,16 +1896,30 @@ test "loader: catalog export verification resumes within its membership budget" 
         defer owner.cleanup().drain();
         var diagnostic: ?[]u8 = null;
         defer if (diagnostic) |message| allocator.free(message);
-        var cursor = pkg_catalog.Build.init(owner.cleanup(), std.testing.io, &.{.{
+        const packages = [_]pkg_catalog.PackageInput{.{
             .id = @enumFromInt(0),
             .name = "dep",
             .version = "1.0.0",
             .root_dir = ".",
             .base_dir = directory.dir,
-        }}, &diagnostic);
+        }};
+        // Abandon a partially indexed manifest to exercise its owned cleanup.
+        {
+            var abandoned = pkg_catalog.Build.init(owner.cleanup(), std.testing.io, &packages, &diagnostic);
+            defer abandoned.deinit();
+            try std.testing.expectEqual(.pending, try abandoned.advance(100));
+            try std.testing.expectEqual(.pending, try abandoned.advance(1));
+        }
+        var cursor = pkg_catalog.Build.init(owner.cleanup(), std.testing.io, &packages, &diagnostic);
         defer cursor.deinit();
-        // Read the manifest, finish the small directory walk, and parse its artifact.
-        for (0..3) |_| try std.testing.expectEqual(.pending, try cursor.advance(100));
+        // Read the manifest, then index its exports one entry at a time.
+        try std.testing.expectEqual(.pending, try cursor.advance(100));
+        for (0..@as(usize, if (missing) 4 else 3)) |_| {
+            try std.testing.expectEqual(.pending, try cursor.advance(0));
+            try std.testing.expectEqual(.pending, try cursor.advance(1));
+        }
+        // Finish the small directory walk and parse its artifact.
+        for (0..2) |_| try std.testing.expectEqual(.pending, try cursor.advance(100));
         // Each export needs one membership check regardless of declaration
         // order. Zero budget preserves progress before and during verification.
         for (0..2) |_| {

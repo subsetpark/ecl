@@ -619,8 +619,11 @@ integrity, and graph limits for both imported and freshly built entries.
 Both producers order each artifact's exports by numeric module-name ID for
 bounded binary-search membership, independently of spelling or metadata order.
 Fresh catalog construction records declaration membership in each unique
-manifest export entry, scoped to that package. Export verification retains its
-cursor across scheduler steps and charges each constant-time membership lookup
+manifest export entry, scoped to that package. A manifest-owned name index is
+reserved once and populated in budgeted steps before parsing artifacts, so
+declarations reach their export entries without rescanning the manifest.
+Export verification retains its cursor across scheduler steps and charges each
+constant-time membership lookup
 against the caller's work budget, independently of the catalog's module count.
 
 A cataloged source has one Session-owned file identity and private registry.

@@ -111,6 +111,8 @@ const Manifest = struct {
     version: []u8,
     sources: [][]u8,
     exports: []Export,
+    // Keys and entry pointers borrow the fixed export storage owned here.
+    export_index: std.StringHashMapUnmanaged(*Export),
 
     // Unique manifest positions are the package-local membership index.
     const Export = struct {
@@ -119,6 +121,7 @@ const Manifest = struct {
     };
 
     fn deinit(self: *Manifest, allocator: std.mem.Allocator) void {
+        self.export_index.deinit(allocator);
         allocator.free(self.name);
         allocator.free(self.version);
         for (self.sources) |entry| allocator.free(entry);
@@ -267,9 +270,7 @@ const Builder = struct {
             // a literal name that discovery can identify without evaluation.
             if (index == 0 or forms[index - 1] != .symbol) continue;
             const name_bytes = intern.get(forms[index - 1].symbol);
-            const export_entry = for (manifest.exports) |*entry| {
-                if (std.mem.eql(u8, name_bytes, entry.name)) break entry;
-            } else continue;
+            const export_entry = manifest.export_index.get(name_bytes) orelse continue;
             const name = intern.moduleName(forms[index - 1].symbol) catch return self.fail(
                 "package `{s}` artifact `{s}` declares an invalid module name",
                 .{ input.name, claim.relative_path },
@@ -404,12 +405,17 @@ const Builder = struct {
             return self.fail("package manifest `{s}` has a non-semver version", .{path});
         try self.validateRequires(path, name, top);
         const exports = try self.allocator.alloc(Manifest.Export, export_names.len);
+        errdefer self.allocator.free(exports);
         for (exports, export_names) |*entry, export_name| entry.* = .{ .name = export_name };
+        var export_index: std.StringHashMapUnmanaged(*Manifest.Export) = .empty;
+        errdefer export_index.deinit(self.allocator);
+        try export_index.ensureTotalCapacity(self.allocator, @intCast(exports.len));
         return .{
             .name = name,
             .version = version,
             .sources = sources,
             .exports = exports,
+            .export_index = export_index,
         };
     }
 
@@ -563,8 +569,8 @@ const Walk = struct {
 pub const Progress = enum { pending, done };
 
 /// A resumable catalog build. One `advance` reads one manifest, claims up to
-/// `budget` directory entries or export membership checks, or parses one
-/// source artifact, so a caller inside the scheduler can traverse a package
+/// `budget` export index entries, directory entries, or membership checks, or
+/// parses one source artifact, so a caller inside the scheduler can traverse a package
 /// tree of any size without monopolizing its worker or deferring cancellation.
 /// `build` below is the same walk run to completion for callers that are not
 /// on a scheduler step.
@@ -583,6 +589,7 @@ pub const Build = struct {
     };
     const Stage = union(enum) {
         manifest,
+        indexing: struct { walk: Walk, index: usize = 0 },
         walking: Walk,
         artifacts: struct {
             walk: Walk,
@@ -682,7 +689,21 @@ pub const Build = struct {
                     const version = try self.builder.allocator.dupe(u8, opened.manifest.version);
                     self.identity = .{ .name = name, .version = version };
                 }
-                self.stage = .{ .walking = opened };
+                self.stage = .{ .indexing = .{ .walk = opened } };
+                return .pending;
+            },
+            .indexing => |*indexing| {
+                const manifest = &indexing.walk.manifest;
+                var remaining = budget;
+                while (indexing.index < manifest.exports.len) {
+                    if (remaining == 0) return .pending;
+                    remaining -= 1;
+                    const entry = &manifest.exports[indexing.index];
+                    manifest.export_index.putAssumeCapacityNoClobber(entry.name, entry);
+                    indexing.index += 1;
+                }
+                const indexed = indexing.walk;
+                self.stage = .{ .walking = indexed };
                 return .pending;
             },
             .walking => |*walk| {
@@ -743,6 +764,7 @@ pub const Build = struct {
 
     pub fn deinit(self: *Build) void {
         switch (self.stage) {
+            .indexing => |*indexing| indexing.walk.deinit(self.builder.allocator, self.builder.io),
             .walking => |*walk| walk.deinit(self.builder.allocator, self.builder.io),
             .artifacts => |*artifacts| artifacts.walk.deinit(self.builder.allocator, self.builder.io),
             .manifest, .finished => {},
