@@ -745,6 +745,7 @@ fn projectSessionInitializationProbe(allocator: std.mem.Allocator) !void {
 
 const StdlibSurface = enum {
     locked_project_module,
+    root_source_preload,
     random,
     dict,
     error_value,
@@ -784,6 +785,16 @@ fn stdlibSessionAllocationProbe(
     var scratch = try PackageScratch.init();
     defer scratch.deinit();
     if (surface == .package_sync) try scratch.installPackageA();
+    if (surface == .root_source_preload) {
+        try scratch.directory.dir.writeFile(std.testing.io, .{
+            .sub_path = "ecl.pkg",
+            .data = "{'format 1 'name \"root\" 'version \"0.1.0\" 'sources [\"suite.ecl\"] 'exports [] 'requires {}}\n",
+        });
+        try scratch.directory.dir.writeFile(std.testing.io, .{
+            .sub_path = "suite.ecl",
+            .data = "[] ((1) 'answer test) 'helper @defm\n",
+        });
+    }
     // Paths and source strings are borrowed test scaffolding outside Session
     // ownership. Keep their construction outside the injected allocator so
     // the sweep enumerates live Session paths rather than this helper's writer.
@@ -823,7 +834,7 @@ fn stdlibSessionAllocationProbe(
             .{ .name = "cwd", .absolute_path = scratch_path },
             .{ .name = "project", .absolute_path = scratch_path },
         } },
-    }), .cooperative, .{ .package = .{ .synchronize = .{ .cache = scratch_path, .project = scratch.directory.dir } } });
+    }), .cooperative, if (surface == .root_source_preload) .language_tests else .{ .package = .{ .synchronize = .{ .cache = scratch_path, .project = scratch.directory.dir } } });
     defer runtime.deinit();
 
     // Loading these large embedded modules has its own failure window. Their
@@ -847,6 +858,15 @@ fn stdlibSessionAllocationProbe(
     if (failure_offset) |offset| failing.fail_index = first_failure_index + offset;
 
     switch (surface) {
+        .root_source_preload => {
+            while (true) switch (try runtime.advanceRootPreload()) {
+                .pending => {},
+                .complete => break,
+                .err => |failure| return reportUnexpectedFailure(&runtime, "root source preload", failure),
+                .invalid, .no_project => return error.UnexpectedPreloadFailure,
+            };
+            try runOk(&runtime, "oom-private-tests.ecl", "tests first @test pop");
+        },
         .locked_project_module => try runOk(
             &runtime,
             "oom-lock-tier.ecl",
@@ -1608,6 +1628,11 @@ fn checkStdlibSurfaceOrdinalShard(
 test "oom: standard-library and host: package: locked project module propagates every allocation failure" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.locked_project_module);
+}
+
+test "oom: standard-library and host: package: root source preload propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
+    try checkStdlibSurface(.root_source_preload);
 }
 
 test "oom: standard-library and host: stdlib: clock propagates every allocation failure" {

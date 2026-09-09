@@ -1903,22 +1903,25 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   suites with independent registration state.
 - **Test discovery and execution form a closed Session mode.** Ordinary
   Sessions reject `tests` and `@test` with `'domain`. A test Session's `tests`
-  returns canonical registrations once each, sorted by module then test name,
-  as dictionaries containing symbol fields `'module` and `'name` plus any
-  declared `'effect` and `'doc`. Descriptors contain no body, private name,
+  returns canonical registrations once each, including root sources' private
+  registrations, sorted by module, test name, and source identifier. Descriptors
+  contain symbol fields `'module` and `'name` plus any declared `'effect` and `'doc`.
+  Private registrations also carry an integer `'source` identifier local to the
+  Session, distinguishing equal names across files. Descriptors contain no body,
   generation handle, state handle, or executable capability.
 - `descriptor @test` validates and late-binds the descriptor against the
-  current canonical registration. A present test runs in a fresh isolated
-  Unit under that generation's private home and real durable registration
+  current canonical registration and its source when specified. A present test
+  runs in a fresh isolated Unit under that generation's private home and durable
+  registration
   state. It returns exactly `{'ok (values)}` or `{'err error}`; a removed or
   replaced-away test is a reified missing-test error. The runner's operand
   stack never seeds the test, state mutations persist between invocations in
   the Session, and Session teardown destroys that state. External effects are
   not transactional or rolled back.
 - **`ecl test` delegates framework policy to ECL.** The command requires a
-  valid lock-backed root project, enumerates and loads only modules exported
-  by its root package catalog, then calls the public qualified runner selected
-  by `--runner` (default `test.default.run`). Tokens after `--` are ordinary
+  valid lock-backed root project, loads each declared root source artifact
+  once, including sources with no exports, then calls the public qualified
+  runner selected by `--runner` (default `test.default.run`). Tokens after `--` are ordinary
   `args`. Successful completion is status 0; `exit` selects the requested
   status; project, load, resolve, or runner failures are command failures.
   The default runner is sequential and deterministic, reports every result,

@@ -8,6 +8,7 @@ const intern = @import("intern.zig");
 const machine = @import("machine.zig");
 const modules = @import("modules.zig");
 const poll = @import("poll.zig");
+const pkg_catalog = @import("pkg_catalog.zig");
 const scheduler_api = @import("scheduler.zig");
 
 const Value = value.Value;
@@ -27,6 +28,7 @@ const DescriptorKeys = struct {
     name: u32,
     effect: u32,
     doc: u32,
+    source: u32,
 
     fn init() error{OutOfMemory}!DescriptorKeys {
         return .{
@@ -34,12 +36,14 @@ const DescriptorKeys = struct {
             .name = try intern.intern("name"),
             .effect = try intern.intern("effect"),
             .doc = try intern.intern("doc"),
+            .source = try intern.intern("source"),
         };
     }
 };
 
 const Collected = struct {
     module: intern.ModuleName,
+    source: ?pkg_catalog.ArtifactId,
     metadata: modules.ModuleTestMetadata,
 
     fn retain(self: Collected) void {
@@ -60,12 +64,14 @@ const CollectedComparator = struct {
         right_module: []const u8,
         left_name: []const u8,
         right_name: []const u8,
+        source_order: std.math.Order,
         phase: enum { module, name } = .module,
         index: usize = 0,
     };
 
     pub fn init(_: Context, left: Collected, right: Collected) Cursor {
         return .{
+            .source_order = std.math.order(if (left.source) |id| @as(i64, @intFromEnum(id)) else -1, if (right.source) |id| @as(i64, @intFromEnum(id)) else -1),
             .left_module = intern.get(intern.moduleId(left.module)),
             .right_module = intern.get(intern.moduleId(right.module)),
             .left_name = intern.get(intern.bindingId(left.metadata.name)),
@@ -83,7 +89,7 @@ const CollectedComparator = struct {
             if (cursor.index == shared) {
                 if (left.len != right.len)
                     return .{ .complete = if (left.len < right.len) .lt else .gt };
-                if (cursor.phase == .name) return .{ .complete = .eq };
+                if (cursor.phase == .name) return .{ .complete = cursor.source_order };
                 cursor.phase = .name;
                 cursor.index = 0;
                 continue;
@@ -107,7 +113,7 @@ fn descriptorValue(
     keys: DescriptorKeys,
     item: Collected,
 ) error{OutOfMemory}!Value {
-    var pairs: [4]dict.Pair = undefined;
+    var pairs: [5]dict.Pair = undefined;
     var count: usize = 0;
     pairs[count] = .{
         .{ .symbol = keys.module },
@@ -119,6 +125,10 @@ fn descriptorValue(
         .{ .symbol = intern.bindingId(item.metadata.name) },
     };
     count += 1;
+    if (item.source) |source| {
+        pairs[count] = .{ .{ .symbol = keys.source }, .{ .int = @intFromEnum(source) } };
+        count += 1;
+    }
     if (item.metadata.effect) |effect| {
         pairs[count] = .{ .{ .symbol = keys.effect }, .{ .list = effect.header() } };
         count += 1;
@@ -134,7 +144,7 @@ const DiscoveryDriver = struct {
     pub const address_stable_driver = {};
     pub const ownership: heap.DriverOwnership = .self_owned;
 
-    cursor: ?modules.Registry.TestDiscoveryCursor,
+    cursor: ?modules.TestSessionDiscoveryCursor,
     items: std.ArrayList(Collected) = .empty,
     values: ?heap.OwnedValueBuffer = null,
     sorter: ?CollectedSortCursor = null,
@@ -165,7 +175,7 @@ const DiscoveryDriver = struct {
                 .pending => budget -= 1,
                 .item => |found| {
                     try self.items.ensureUnusedCapacity(evaluator.allocator(), 1);
-                    const item = Collected{ .module = found.module, .metadata = found.metadata };
+                    const item = Collected{ .module = found.module, .source = found.source, .metadata = found.metadata };
                     item.retain();
                     self.items.appendAssumeCapacity(item);
                     budget -= 1;
@@ -237,6 +247,7 @@ const InvocationDriver = struct {
     scan_index: usize = 0,
     module_id: ?u32 = null,
     name_id: ?u32 = null,
+    source_id: ?pkg_catalog.ArtifactId = null,
     module_validation: ?intern.ModuleNameCursor = null,
     name_validation: ?intern.NamespaceCursor = null,
     module_name: ?intern.ModuleName = null,
@@ -348,7 +359,9 @@ const InvocationDriver = struct {
                     self.lookup = evaluator.unit.inherited.test_execution.?.lookupCursor(
                         self.module_name.?,
                         self.test_name.?,
+                        self.source_id,
                     );
+                    if (self.lookup == null) return .{ .output = try missingOutcome(evaluator) };
                     continue;
                 },
             };
@@ -366,6 +379,9 @@ const InvocationDriver = struct {
                 } else if (key.symbol == self.keys.name) {
                     if (self.name_id != null or payload != .symbol) return invalid(evaluator);
                     self.name_id = payload.symbol;
+                } else if (key.symbol == self.keys.source) {
+                    if (self.source_id != null or payload != .int or payload.int < 0 or payload.int > std.math.maxInt(u32)) return invalid(evaluator);
+                    self.source_id = @enumFromInt(@as(u32, @intCast(payload.int)));
                 } else if (key.symbol != self.keys.effect and key.symbol != self.keys.doc) {
                     return invalid(evaluator);
                 }

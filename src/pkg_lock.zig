@@ -75,6 +75,20 @@ pub const SourceScope = opaque {
         return source.owner.state.valid.catalog.artifact(source.artifact).package;
     }
 
+    pub fn location(self: *const SourceScope) Match {
+        const source = self.state();
+        const valid = source.owner.state.valid;
+        const artifact = valid.catalog.artifact(source.artifact);
+        const entry = valid.entries[@intFromEnum(artifact.package)];
+        return .{
+            .package = entry.name,
+            .store_dir = entry.store_dir.?,
+            .relative_path = artifact.relative_path,
+            .package_id = artifact.package,
+            .artifact_id = source.artifact,
+        };
+    }
+
     pub fn registry(self: *const SourceScope) *modules.Registry {
         return &self.state().private_registry;
     }
@@ -159,11 +173,21 @@ pub const ProjectLock = opaque {
         };
     }
 
-    /// Enumerate only modules exported by the root package. The cursor
+    /// Enumerate every source artifact selected by the root package. The cursor
     /// processes one catalog entry per advance; callers may poll or cancel
     /// between entries instead of hiding a project-sized traversal in one
     /// host operation.
-    pub fn rootModuleCursor(self: *const ProjectLock) RootModuleCursor {
+    pub fn rootSource(self: *const ProjectLock, id: pkg_catalog.ArtifactId) ?*const SourceScope {
+        const valid = switch (backingConst(self).state) {
+            .valid => |valid| valid,
+            .invalid => return null,
+        };
+        const index = @intFromEnum(id);
+        if (index >= valid.sources.len or valid.catalog.artifacts[index].package != valid.root_id) return null;
+        return @ptrCast(&valid.sources[index]);
+    }
+
+    pub fn rootSourceCursor(self: *const ProjectLock) RootSourceCursor {
         return .{ .lock = backingConst(self) };
     }
 
@@ -244,19 +268,19 @@ pub const SourcePathCursor = struct {
     }
 };
 
-pub const RootModuleProgress = union(enum) {
+pub const RootSourceProgress = union(enum) {
     pending,
-    item: intern.ModuleName,
+    item: *const SourceScope,
     complete,
     invalid: []const u8,
 };
 
-pub const RootModuleCursor = struct {
+pub const RootSourceCursor = struct {
     lock: *const Backing,
-    module_index: usize = 0,
+    artifact_index: usize = 0,
     complete: bool = false,
 
-    pub fn advance(self: *RootModuleCursor) RootModuleProgress {
+    pub fn advance(self: *RootSourceCursor) RootSourceProgress {
         std.debug.assert(!self.complete);
         const valid = switch (self.lock.state) {
             .invalid => |message| {
@@ -265,18 +289,18 @@ pub const RootModuleCursor = struct {
             },
             .valid => |valid| valid,
         };
-        if (self.module_index == valid.catalog.modules.len) {
+        if (self.artifact_index == valid.catalog.artifacts.len) {
             self.complete = true;
             return .complete;
         }
-        const module = valid.catalog.modules[self.module_index];
-        self.module_index += 1;
-        const artifact = valid.catalog.artifact(module.artifact);
+        const index = self.artifact_index;
+        self.artifact_index += 1;
+        const artifact = valid.catalog.artifacts[index];
         if (artifact.package != valid.root_id) return .pending;
-        return .{ .item = module.name };
+        return .{ .item = @ptrCast(&valid.sources[index]) };
     }
 
-    pub fn deinit(self: *RootModuleCursor) void {
+    pub fn deinit(self: *RootSourceCursor) void {
         self.* = undefined;
     }
 };

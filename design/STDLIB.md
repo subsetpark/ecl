@@ -193,7 +193,8 @@ wrap [] (net.local-address 'port at 0 >) @give task.await
 
 ### @test
 `( descriptor -- result )` — Test-Session-only protected invocation. Validate
-a pure descriptor returned by `tests`, late-bind its canonical module/name to
+a pure descriptor returned by `tests`, late-bind its module/name and optional
+source identifier to
 the current catalog, and run the body as a fresh isolated Unit under that
 registration's private home and durable state. Return exactly
 `{'ok (values)}` or `{'err error}`; a missing current test is a reified error.
@@ -1020,9 +1021,12 @@ and reject duplicate names.
 
 ### tests
 `( -- descriptors )` — Test-Session-only discovery of current canonical
-registrations, sorted by module then test name. Each dictionary contains
+registrations, including root sources' private registrations, sorted by module
+then test name and source identifier. Each dictionary contains
 symbol fields `'module` and `'name` plus optional declared `'effect` and
-`'doc`; it never contains an executable body or authority handle. Aliases do
+`'doc`. File-private registrations also include an integer `'source` identifier
+local to the test Session, distinguishing equal names in different files.
+Descriptors never contain executable bodies or authority handles. Aliases do
 not duplicate entries. Ordinary Sessions receive `'domain`.
 
 ### shape

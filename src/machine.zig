@@ -1700,6 +1700,20 @@ const QualifiedLoadRequest = struct {
     qualified: u32,
     continuation: QualifiedLoadContinuation,
 };
+const SourceLoadRequest = union(enum) {
+    module: struct { name: intern.ModuleName, operation: QualifiedLoadRequest },
+    source,
+
+    fn preservesCaller(self: SourceLoadRequest) bool {
+        return switch (self) {
+            .module => |module| switch (module.operation.continuation) {
+                .replay, .dispatch => true,
+                .load_only => false,
+            },
+            .source => false,
+        };
+    }
+};
 const ArtifactLoad = enum(u32) {
     none = std.math.maxInt(u32),
     _,
@@ -1717,9 +1731,8 @@ pub const Frame = union(enum(u8)) {
     application: ApplicationFrame,
     qualified_after_load: struct {
         loading: modules.LoadingLease,
-        name: intern.ModuleName,
         path: Value,
-        request: QualifiedLoadRequest,
+        request: SourceLoadRequest,
         artifact: ArtifactLoad,
     },
     boundary: Boundary,
@@ -3471,11 +3484,27 @@ pub const Machine = struct {
     ) MachineError!void {
         const registry = self.unit.inherited.registry;
         try self.startDriver(AutoLoadDriver{
-            .name = name,
-            .request = request,
+            .request = .{ .module = .{ .name = name, .operation = request } },
             .state = .init(.{ .begin = registry.beginLoadingCursor(name, .of(self.unit)) }),
         });
     }
+    pub fn loadSourceOnly(self: *Machine, source: *const pkg_lock.SourceScope) MachineError!void {
+        const location = source.location();
+        try self.startDriver(AutoLoadDriver{
+            .request = .source,
+            .state = .init(.{ .artifact_begin = .{
+                .target = .{
+                    .package = location.package,
+                    .store = location.store_dir,
+                    .relative_path = location.relative_path,
+                    .package_id = location.package_id,
+                    .artifact_id = location.artifact_id,
+                },
+                .cursor = self.unit.inherited.registry.beginArtifactLoadingCursor(location.artifact_id, .of(self.unit)),
+            } }),
+        });
+    }
+
     pub fn currentSource(self: *const Machine) ?*const pkg_lock.SourceScope {
         const current = self.unit.current orelse return null;
         return current.site.registration_provenance.sourceScope();
@@ -3550,11 +3579,6 @@ pub const Machine = struct {
                 target: LockedTarget,
                 cursor: modules.Registry.BeginLoadingCursor,
             },
-            artifact_registered: struct {
-                target: LockedTarget,
-                loading: heap.Owned(modules.LoadingLease),
-                cursor: heap.Owned(modules.Registry.AcquireCursor),
-            },
             committed: heap.Owned(modules.Registry.AcquireCursor),
             locked_store: struct {
                 loading: heap.Owned(modules.LoadingLease),
@@ -3605,10 +3629,6 @@ pub const Machine = struct {
                         lookup.loading.deinit(releases, storage_allocator);
                     },
                     .artifact_begin => |*begin| begin.cursor.deinit(),
-                    .artifact_registered => |*registered| {
-                        registered.cursor.deinit(releases, storage_allocator);
-                        registered.loading.deinit(releases, storage_allocator);
-                    },
                     .committed => |*cursor| cursor.deinit(releases, storage_allocator),
                     .locked_store => |*locked| locked.loading.deinit(releases, storage_allocator),
                     .filename => |*filename| {
@@ -3643,8 +3663,7 @@ pub const Machine = struct {
             }
         };
 
-        name: intern.ModuleName,
-        request: QualifiedLoadRequest,
+        request: SourceLoadRequest,
         state: heap.Owned(State),
 
         fn makeFilename(
@@ -3654,7 +3673,7 @@ pub const Machine = struct {
             kind: FileKind,
             target: FilenameTarget,
         ) error{OutOfMemory}!FilenameState {
-            const module_name = intern.get(intern.moduleId(self.name));
+            const module_name = intern.get(intern.moduleId(self.request.module.name));
             const extension = switch (kind) {
                 .source => ".ecl",
                 .native => ".eclmod",
@@ -3709,7 +3728,7 @@ pub const Machine = struct {
         ) error{OutOfMemory}!void {
             const provenance = switch (entry) {
                 .source => |source| source.name,
-                .native, .builtin, .bindings => intern.get(intern.moduleId(self.name)),
+                .native, .builtin, .bindings => intern.get(intern.moduleId(self.request.module.name)),
             };
             var candidate = heap.Owned([]u8).init(try evaluator.unit.allocator.dupe(u8, provenance));
             const materializer = kernel_storage.Utf8Materializer.init(
@@ -3730,10 +3749,10 @@ pub const Machine = struct {
             loading: *heap.Owned(modules.LoadingLease),
         ) MachineError!WorkProgress {
             loading.borrowMut().finish();
-            return continueQualifiedRequest(evaluator, self, self.request);
+            return continueSourceRequest(evaluator, self, self.request);
         }
         fn notFound(self: *AutoLoadDriver, evaluator: *Machine) MachineError {
-            return evaluator.undefinedWordIn(self.request.qualified, .qualified);
+            return evaluator.undefinedWordIn(self.request.module.operation.qualified, .qualified);
         }
         fn sourceCompletion(
             self: *AutoLoadDriver,
@@ -3743,7 +3762,6 @@ pub const Machine = struct {
         ) SourceCompletion {
             return .{ .register = .{
                 .loading = transfer.loading.borrowMut().move(),
-                .name = self.name,
                 .path = transfer.path.take(),
                 .request = self.request,
                 .provenance = provenance,
@@ -3760,7 +3778,7 @@ pub const Machine = struct {
                         .cycle => return evaluator.failFmt(
                             .domain,
                             "recursive auto-load of module `{s}`",
-                            .{intern.get(intern.moduleId(self.name))},
+                            .{intern.get(intern.moduleId(self.request.module.name))},
                         ),
                         // Another unit is loading this name. Wait for it
                         // rather than publishing a second copy; the recheck
@@ -3768,7 +3786,7 @@ pub const Machine = struct {
                         .contended => {
                             cursor.deinit();
                             self.state.borrowMut().* = .{ .begin = evaluator.unit.inherited.registry.beginLoadingCursor(
-                                self.name,
+                                self.request.module.name,
                                 .of(evaluator.unit),
                             ) };
                             return .yielded;
@@ -3776,19 +3794,19 @@ pub const Machine = struct {
                         .granted => |lease| {
                             cursor.deinit();
                             if (evaluator.unit.inherited.project_lock != null and
-                                stdlib.find(intern.get(intern.moduleId(self.name))) == null)
+                                stdlib.find(intern.get(intern.moduleId(self.request.module.name))) == null)
                             {
                                 self.state.borrowMut().* = .{ .lock_lookup = .{
                                     .loading = .init(lease),
                                     .cursor = .init(evaluator.unit.inherited.project_lock.?.lookupCursor(
-                                        self.request.context.packageId(),
-                                        intern.get(intern.moduleId(self.name)),
+                                        self.request.module.operation.context.packageId(),
+                                        intern.get(intern.moduleId(self.request.module.name)),
                                     )),
                                 } };
                             } else {
                                 self.state.borrowMut().* = .{ .registered = .{
                                     .loading = .init(lease),
-                                    .cursor = .init(evaluator.unit.inherited.registry.acquireCursor(self.name)),
+                                    .cursor = .init(evaluator.unit.inherited.registry.acquireCursor(self.request.module.name)),
                                 } };
                             }
                         },
@@ -3813,7 +3831,7 @@ pub const Machine = struct {
                         // The embedded manifest is consulted before the
                         // search path: a stdlib name resolves without filesystem lookup
                         // and no ECL_PATH, and no path module can shadow one.
-                        if (stdlib.find(intern.get(intern.moduleId(self.name)))) |entry| {
+                        if (stdlib.find(intern.get(intern.moduleId(self.request.module.name)))) |entry| {
                             try self.beginEmbedded(evaluator, &loading, entry);
                             continue;
                         }
@@ -3821,8 +3839,8 @@ pub const Machine = struct {
                             self.state.borrowMut().* = .{ .lock_lookup = .{
                                 .loading = .init(loading.take()),
                                 .cursor = .init(project_lock.lookupCursor(
-                                    self.request.context.packageId(),
-                                    intern.get(intern.moduleId(self.name)),
+                                    self.request.module.operation.context.packageId(),
+                                    intern.get(intern.moduleId(self.request.module.name)),
                                 )),
                             } };
                             continue;
@@ -3853,7 +3871,7 @@ pub const Machine = struct {
                                 return evaluator.failFmt(
                                     .undefined_word,
                                     "module `{s}` is not exported by the active project",
-                                    .{intern.get(intern.moduleId(self.name))},
+                                    .{intern.get(intern.moduleId(self.request.module.name))},
                                 );
                             },
                             .hidden => |hidden| {
@@ -3861,7 +3879,7 @@ pub const Machine = struct {
                                     .undefined_word,
                                     "module `{s}` is exported by package `{s}`, but `{s}` does not require it",
                                     .{
-                                        intern.get(intern.moduleId(self.name)),
+                                        intern.get(intern.moduleId(self.request.module.name)),
                                         hidden.owner,
                                         hidden.consumer,
                                     },
@@ -3876,19 +3894,10 @@ pub const Machine = struct {
                                     .package_id = match.package_id,
                                     .artifact_id = match.artifact_id,
                                 };
-                                if (evaluator.unit.inherited.project_lock.?.artifactCommitted(match.artifact_id)) {
-                                    self.state.borrowMut().* = .{ .committed = .init(
-                                        evaluator.unit.inherited.registry.acquireCursor(self.name),
-                                    ) };
-                                } else {
-                                    self.state.borrowMut().* = .{ .artifact_begin = .{
-                                        .target = target,
-                                        .cursor = evaluator.unit.inherited.registry.beginArtifactLoadingCursor(
-                                            match.artifact_id,
-                                            .of(evaluator.unit),
-                                        ),
-                                    } };
-                                }
+                                self.state.borrowMut().* = .{ .artifact_begin = .{
+                                    .target = target,
+                                    .cursor = evaluator.unit.inherited.registry.beginArtifactLoadingCursor(match.artifact_id, .of(evaluator.unit)),
+                                } };
                             },
                         }
                     },
@@ -3916,43 +3925,14 @@ pub const Machine = struct {
                         .granted => |lease| {
                             const target = begin.target;
                             begin.cursor.deinit();
-                            self.state.borrowMut().* = .{ .artifact_registered = .{
-                                .target = target,
-                                .loading = .init(lease),
-                                .cursor = .init(evaluator.unit.inherited.registry.acquireCursor(self.name)),
-                            } };
-                        },
-                    },
-                },
-                .artifact_registered => |*registered| switch (registered.cursor.borrowMut().advance()) {
-                    .pending => {},
-                    .complete => |maybe_generation| {
-                        var loading = heap.Owned(modules.LoadingLease).init(registered.loading.take());
-                        defer loading.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                        registered.cursor.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                        if (evaluator.unit.inherited.project_lock.?.artifactCommitted(
-                            registered.target.artifact_id,
-                        )) {
-                            if (maybe_generation) |generation| {
-                                var lease = generation;
-                                lease.deinit();
-                                return self.finishWithoutLoading(evaluator, &loading);
+                            self.state.borrowMut().* = .{ .locked_store = .{ .target = target, .loading = .init(lease) } };
+                            if (evaluator.unit.inherited.project_lock.?.artifactCommitted(target.artifact_id)) {
+                                self.state.borrowMut().locked_store.loading.borrowMut().finish();
+                                if (self.request == .source) return .completed;
+                                self.state.borrowMut().locked_store.loading.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                                self.state.borrowMut().* = .{ .committed = .init(evaluator.unit.inherited.registry.acquireCursor(self.request.module.name)) };
                             }
-                            return evaluator.failFmt(
-                                .io,
-                                "committed package artifact `{s}` is missing module `{s}`",
-                                .{ registered.target.relative_path, intern.get(intern.moduleId(self.name)) },
-                            );
-                        }
-                        if (maybe_generation) |generation| {
-                            var partial = generation;
-                            partial.deinit();
-                        }
-                        const target = registered.target;
-                        self.state.borrowMut().* = .{ .locked_store = .{
-                            .loading = .init(loading.take()),
-                            .target = target,
-                        } };
+                        },
                     },
                 },
                 .committed => |*cursor| switch (cursor.borrowMut().advance()) {
@@ -3962,11 +3942,11 @@ pub const Machine = struct {
                         const generation = maybe_generation orelse return evaluator.failFmt(
                             .io,
                             "a committed package artifact is missing module `{s}`",
-                            .{intern.get(intern.moduleId(self.name))},
+                            .{intern.get(intern.moduleId(self.request.module.name))},
                         );
                         var lease = generation;
                         lease.deinit();
-                        return continueQualifiedRequest(evaluator, self, self.request);
+                        return continueSourceRequest(evaluator, self, self.request);
                     },
                 },
                 .locked_store => |*locked| {
@@ -4011,12 +3991,12 @@ pub const Machine = struct {
                     self.state.borrowMut().* = .{ .filename = filename };
                 },
                 .filename => |*filename| {
-                    const module_name = intern.get(intern.moduleId(self.name));
-                    const extension = switch (filename.kind) {
-                        .source => ".ecl",
-                        .native => ".eclmod",
-                    };
                     if (filename.index != filename.filename.borrow().len) {
+                        const module_name = intern.get(intern.moduleId(self.request.module.name));
+                        const extension = switch (filename.kind) {
+                            .source => ".ecl",
+                            .native => ".eclmod",
+                        };
                         filename.filename.borrow()[filename.index] = if (filename.index < module_name.len)
                             module_name[filename.index]
                         else
@@ -4133,11 +4113,8 @@ pub const Machine = struct {
                             switch (origin) {
                                 .locked => |locked| return evaluator.failFmt(
                                     .undefined_word,
-                                    "locked module `{s}` is absent from package `{s}`",
-                                    .{
-                                        intern.get(intern.moduleId(self.name)),
-                                        locked.package,
-                                    },
+                                    "locked source `{s}` is absent from package `{s}`",
+                                    .{ access.candidate.borrow(), locked.package },
                                 ),
                                 .legacy => |legacy| {
                                     const kind: FileKind = if (access.kind == .source) .native else .source;
@@ -4263,8 +4240,8 @@ pub const Machine = struct {
             // No errdefer: from here nothing fails until `startDriver`, which
             // disposes the whole uninstalled driver's owned fields itself.
             const next = BuiltinLoadDriver{
-                .name = self.name,
-                .request = self.request,
+                .name = self.request.module.name,
+                .request = self.request.module.operation,
                 .loading = .init(transfer.loading.take()),
                 .path = .init(transfer.path.take()),
                 .publication = .init(publication),
@@ -4280,7 +4257,7 @@ pub const Machine = struct {
             descriptor: *const native_abi.Descriptor,
         ) MachineError!WorkProgress {
             const loader_authority = evaluator.unit.inherited.runtime().native_loader;
-            const loader = switch (loader_authority.startStatic(self.name, descriptor)) {
+            const loader = switch (loader_authority.startStatic(self.request.module.name, descriptor)) {
                 .failure => |failure| {
                     const failed = evaluator.fail(.io, failure.text());
                     evaluator.unit.pendingFailure().addData(.path, transfer.path.borrow());
@@ -4289,8 +4266,8 @@ pub const Machine = struct {
                 .loading => |loading| loading,
             };
             const next = NativeLoadDriver{
-                .name = self.name,
-                .request = self.request,
+                .name = self.request.module.name,
+                .request = self.request.module.operation,
                 .provenance = .standard_library,
                 .loading = .init(transfer.loading.take()),
                 .path = .init(transfer.path.take()),
@@ -4307,7 +4284,7 @@ pub const Machine = struct {
         ) MachineError!WorkProgress {
             const loader_authority = evaluator.unit.inherited.runtime().native_loader;
             const start = try loader_authority.startDynamic(
-                self.name,
+                self.request.module.name,
                 transfer.candidate.borrow(),
             );
             const loader = switch (start) {
@@ -4319,8 +4296,8 @@ pub const Machine = struct {
                 .loading => |loading| loading,
             };
             const next = NativeLoadDriver{
-                .name = self.name,
-                .request = self.request,
+                .name = self.request.module.name,
+                .request = self.request.module.operation,
                 .provenance = .ordinary,
                 .loading = .init(transfer.loading.take()),
                 .path = .init(transfer.path.take()),
@@ -4550,9 +4527,8 @@ pub const Machine = struct {
         /// tagged qualified operation transfer to the return frame.
         register: struct {
             loading: ?modules.LoadingLease,
-            name: intern.ModuleName,
             path: ?Value,
-            request: QualifiedLoadRequest,
+            request: SourceLoadRequest,
             provenance: modules.RegistrationProvenance,
             artifact: ?pkg_catalog.ArtifactId,
         },
@@ -4717,10 +4693,7 @@ pub const Machine = struct {
                             );
                             site.registration_provenance = register.provenance;
                             heap.incRef(root_header);
-                            const preserves_caller = switch (register.request.continuation) {
-                                .replay, .dispatch => true,
-                                .load_only => false,
-                            };
+                            const preserves_caller = register.request.preservesCaller();
                             _ = (if (preserves_caller)
                                 evaluator.suspendCurrentForQualifiedLoad()
                             else
@@ -4730,7 +4703,6 @@ pub const Machine = struct {
                             };
                             var continuation = OwnedFrame.init(.{ .qualified_after_load = .{
                                 .loading = register.loading.?.move(),
-                                .name = register.name,
                                 .path = register.path.?,
                                 .request = register.request,
                                 .artifact = .init(register.artifact),
@@ -7452,6 +7424,13 @@ fn continueDispatchAfterLoad(
 /// Checking that is what bounds the operation: a source that registered
 /// nothing, or a different name, fails once here instead of starting another
 /// load when its tagged continuation resumes.
+fn continueSourceRequest(evaluator: *Machine, driver: anytype, request: SourceLoadRequest) MachineError!WorkProgress {
+    return switch (request) {
+        .source => .completed,
+        .module => |module| continueQualifiedRequest(evaluator, driver, module.operation),
+    };
+}
+
 fn continueQualifiedRequest(
     evaluator: *Machine,
     driver: anytype,
@@ -7489,10 +7468,9 @@ fn verifyPublishedModule(
     loading.borrowMut().finish();
     const registry = evaluator.unit.inherited.registry;
     const next = QualifiedRegistrationDriver{
-        .name = name,
         .path = .init(path.take()),
         .acquisition = .init(registry.acquireCursor(name)),
-        .request = request,
+        .request = .{ .module = .{ .name = name, .operation = request } },
     };
     evaluator.retireDriver(driver);
     try evaluator.startDriver(next);
@@ -7500,10 +7478,9 @@ fn verifyPublishedModule(
 }
 
 const QualifiedRegistrationDriver = struct {
-    name: intern.ModuleName,
     path: heap.Owned(Value),
     acquisition: heap.Owned(modules.Registry.AcquireCursor),
-    request: QualifiedLoadRequest,
+    request: SourceLoadRequest,
     loading: ?heap.Owned(modules.LoadingLease) = null,
     artifact: ?pkg_catalog.ArtifactId = null,
     module_index: usize = 0,
@@ -7516,7 +7493,7 @@ const QualifiedRegistrationDriver = struct {
                 const checked_name = if (self.artifact) |artifact|
                     evaluator.unit.inherited.project_lock.?.artifactModules(artifact)[self.module_index]
                 else
-                    self.name;
+                    self.request.module.name;
                 const generation = maybe_generation orelse {
                     const failure = if (self.artifact != null)
                         evaluator.failFmt(
@@ -7565,7 +7542,7 @@ const QualifiedRegistrationDriver = struct {
                     );
                     artifact_lease.finish();
                 }
-                return continueQualifiedRequest(evaluator, self, self.request);
+                return continueSourceRequest(evaluator, self, self.request);
             },
         }
     }
@@ -8826,27 +8803,28 @@ fn resumeFrames(self: *Machine) MachineError!bool {
             // Source loading temporarily replaces the caller's evaluation.
             // Replay requests resume at their restored primitive operands;
             // dispatch requests resume the exact stored word without replay.
-            switch (continuation.request.continuation) {
-                .replay, .dispatch => {
-                    const caller = self.unit.frames.pop().?;
-                    self.unit.current = switch (caller) {
-                        .eval => |evaluation| evaluation,
-                        else => unreachable,
-                    };
-                },
-                .load_only => {},
+            if (continuation.request.preservesCaller()) {
+                const caller = self.unit.frames.pop().?;
+                self.unit.current = switch (caller) {
+                    .eval => |evaluation| evaluation,
+                    else => unreachable,
+                };
             }
             // The registration check bounds the retry and gives every
             // transport the same post-load handoff.
             const registry = self.unit.inherited.registry;
             const artifact = continuation.artifact.artifact();
-            const first_name = if (artifact) |artifact_id|
-                self.unit.inherited.project_lock.?.artifactModules(artifact_id)[0]
-            else
-                continuation.name;
+            const first_name = if (artifact) |artifact_id| name: {
+                const names = self.unit.inherited.project_lock.?.artifactModules(artifact_id);
+                if (names.len == 0) {
+                    self.unit.inherited.project_lock.?.commitArtifact(loading.artifactCommit());
+                    loading.finish();
+                    continue;
+                }
+                break :name names[0];
+            } else continuation.request.module.name;
             if (artifact == null) loading.finish();
             try self.startDriver(QualifiedRegistrationDriver{
-                .name = continuation.name,
                 .path = .init(path.take()),
                 .acquisition = .init(registry.acquireCursor(first_name)),
                 .request = continuation.request,

@@ -141,7 +141,8 @@ to their defining file, including when running tests.
 
 Use `ecl pkg tree` to inspect dependencies, `ecl pkg verify` to check them,
 and `ecl pkg vendor` to prepare the project for offline use. Run a synchronized
-project's declared tests with `ecl test`. The
+project's declared tests with `ecl test`, which loads all declared source files,
+including files whose modules are all private. The
 [package example](examples/pkg-smoke/README.md) walks through a complete workflow.
 
 ### Neovim

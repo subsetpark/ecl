@@ -1,5 +1,6 @@
 //! Per-session module registry with typed names and atomic generation publication.
 const std = @import("std");
+const pkg_lock = @import("pkg_lock.zig");
 const builtin = @import("builtin");
 const env = @import("env.zig");
 const value = @import("value.zig");
@@ -1254,6 +1255,7 @@ const TestAuthorityState = struct {
     // Session construction moves that wrapper into its core after minting this
     // seal; the backing identity remains stable.
     registry: Registry,
+    project: ?*const pkg_lock.ProjectLock,
 };
 
 /// Session-owned capability seal for the closed test execution domain. A
@@ -1289,8 +1291,13 @@ pub const TestObservationAccess = opaque {
     fn state(self: *const TestObservationAccess) *TestAuthorityState {
         return @ptrCast(@alignCast(@constCast(self)));
     }
-    pub fn discoveryCursor(self: *const TestObservationAccess) Registry.TestDiscoveryCursor {
-        return .init(&self.state().registry);
+    pub fn discoveryCursor(self: *const TestObservationAccess) TestSessionDiscoveryCursor {
+        const owner = self.state();
+        return .{
+            .project = owner.project,
+            .roots = if (owner.project) |project| project.rootSourceCursor() else null,
+            .current = .init(&owner.registry),
+        };
     }
 };
 
@@ -1302,8 +1309,59 @@ pub const TestExecutionAccess = opaque {
         self: *const TestExecutionAccess,
         module_name: intern.ModuleName,
         test_name: intern.BindingName,
-    ) Registry.TestLookupCursor {
-        return .init(&self.state().registry, module_name, test_name);
+        source: ?@import("pkg_catalog.zig").ArtifactId,
+    ) ?Registry.TestLookupCursor {
+        const owner = self.state();
+        if (source) |id| {
+            const project = owner.project orelse return null;
+            const scope = project.rootSource(id) orelse return null;
+            if (!project.artifactCommitted(id)) return null;
+            return .init(scope.registry(), module_name, test_name);
+        }
+        return .init(&owner.registry, module_name, test_name);
+    }
+};
+
+/// Enumerates the public registry and each committed root source's private
+/// registry while retaining every active snapshot lease.
+pub const TestSessionDiscoveryCursor = struct {
+    project: ?*const pkg_lock.ProjectLock,
+    roots: ?pkg_lock.RootSourceCursor,
+    current: ?Registry.TestDiscoveryCursor,
+    source: ?@import("pkg_catalog.zig").ArtifactId = null,
+
+    pub fn deinit(self: *TestSessionDiscoveryCursor) void {
+        if (self.current) |*current| current.deinit();
+        if (self.roots) |*roots| roots.deinit();
+        self.* = undefined;
+    }
+
+    pub fn advance(self: *TestSessionDiscoveryCursor) Registry.TestDiscoveryProgress {
+        if (self.current) |*current| switch (current.advance()) {
+            .pending => return .pending,
+            .item => |item| return .{ .item = .{ .module = item.module, .metadata = item.metadata, .source = self.source } },
+            .complete => {
+                current.deinit();
+                self.current = null;
+                return .pending;
+            },
+        };
+        if (self.roots) |*roots| switch (roots.advance()) {
+            .pending => return .pending,
+            .item => |source| {
+                const id = source.location().artifact_id;
+                if (self.project.?.artifactCommitted(id)) {
+                    self.current = .init(source.registry());
+                    self.source = id;
+                }
+                return .pending;
+            },
+            .complete, .invalid => {
+                roots.deinit();
+                self.roots = null;
+            },
+        };
+        return .complete;
     }
 };
 
@@ -2117,9 +2175,9 @@ pub const Registry = enum(usize) {
     /// Mint the capability seal owned by a test-mode Session. Its backing
     /// carries the registry rather than accepting one alongside the access
     /// token, so cross-Session authority substitution is unrepresentable.
-    pub fn createTestAuthority(self: *Registry) error{OutOfMemory}!TestAuthority {
+    pub fn createTestAuthority(self: *Registry, project: ?*const pkg_lock.ProjectLock) error{OutOfMemory}!TestAuthority {
         const state = try self.allocator().create(TestAuthorityState);
-        state.* = .{ .registry = self.* };
+        state.* = .{ .registry = self.*, .project = project };
         return .init(state);
     }
 
@@ -2276,6 +2334,7 @@ pub const Registry = enum(usize) {
 
     pub const DiscoveredTest = struct {
         module: intern.ModuleName,
+        source: ?@import("pkg_catalog.zig").ArtifactId = null,
         metadata: ModuleTestMetadata,
     };
     pub const TestDiscoveryProgress = poll.StreamProgress(DiscoveredTest);

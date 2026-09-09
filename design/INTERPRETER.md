@@ -639,6 +639,16 @@ Loading returns to the common dispatch boundary, which continues to own
 privacy, effects, diagnostic naming, generation pinning, idiom guards, and
 cancellation.
 
+Root test discovery enumerates source artifacts rather than public module
+names. Source-only requests and qualified requests share artifact loading
+leases and commit state, so discovering an already loaded source does not
+evaluate it again. A source with no exports commits after successful
+evaluation; sources with exports also verify their declared publications.
+Test authority spans the public registry and committed root sources' private
+registries. Private test descriptors carry a source identity resolved through
+that authority, so equal module and test names in different files invoke their
+own registrations without exposing private modules to ordinary lookup.
+
 ## 5. The frame machine
 
 `machine.zig` is a first-order abstract machine. Its state is a current

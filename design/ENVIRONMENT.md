@@ -848,9 +848,13 @@ editor remains usable.
 
 ### Test command
 
-`ecl test` requires a lock-backed root project. It loads modules exported by
-the root package, discovers their declared tests, and invokes the selected
-runner in a Test Session. The default runner is `test.default.run`.
+`ecl test` requires a lock-backed root project. It loads every source file
+selected by the root package's `sources`, including files with no exported
+modules, discovers their declared tests, and invokes the selected runner in a
+Test Session. Each source artifact is loaded once, including when an earlier
+source already loaded it through an exported module. Private modules keep
+their defining-file visibility. Dependency sources are loaded only as needed.
+The default runner is `test.default.run`.
 
 `--runner <qualified-word>` selects another public runner. Arguments after
 `--` are exposed to that runner through `args`. Test bodies remain private to

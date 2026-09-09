@@ -274,7 +274,7 @@ comptime {
 const OpaqueSessionCore = opaque {};
 const RootPreloadState = union(enum) {
     idle,
-    cursor: pkg_lock.RootModuleCursor,
+    cursor: pkg_lock.RootSourceCursor,
     complete,
 
     fn deinit(self: *RootPreloadState) void {
@@ -345,11 +345,6 @@ pub const Session = enum(usize) {
         try prims.install(&building);
         var registry = try modules.Registry.init(host_owner.cleanup());
         errdefer registry.deinit();
-        var test_authority = if (mode == .language_tests)
-            @as(?modules.TestAuthority, try registry.createTestAuthority())
-        else
-            null;
-        errdefer if (test_authority) |*authority| authority.deinit();
         const native_owner = native_module.Owner.initWithPortLimits(host_owner.cleanup(), host.native_port_limits) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.InvalidLimits => error.InvalidHostConfig,
@@ -391,6 +386,11 @@ pub const Session = enum(usize) {
             },
         );
         errdefer if (owned_project_lock) |project_lock| project_lock.deinit();
+        var test_authority = if (mode == .language_tests)
+            @as(?modules.TestAuthority, try registry.createTestAuthority(owned_project_lock))
+        else
+            null;
+        errdefer if (test_authority) |*authority| authority.deinit();
         var snapshot = EnvironSnapshot.capture(
             allocator,
             host.environ,
@@ -665,6 +665,13 @@ pub const Session = enum(usize) {
             lease.deinit();
             return .ok;
         }
+        return self.loadCatalogTarget(.{ .module = name });
+    }
+
+    const CatalogTarget = union(enum) { module: intern.ModuleName, source: *const pkg_lock.SourceScope };
+
+    fn loadCatalogTarget(self: *Session, target: CatalogTarget) error{OutOfMemory}!UnitOutcome {
+        const core = self.coreState();
         if (core.root_scope == null)
             core.root_scope = try core.environment.createSessionRoot(core.allocator());
         var root = heap.OwnedValue.init(
@@ -680,7 +687,11 @@ pub const Session = enum(usize) {
         defer finishRootUnit(core, &unit);
         try machine.initialize(&unit, root.borrow().list, .empty);
         var evaluator = machine.Machine{ .unit = &unit };
-        evaluator.loadModuleOnly(name) catch |err| switch (err) {
+        const started = switch (target) {
+            .module => |name| evaluator.loadModuleOnly(name),
+            .source => |source| evaluator.loadSourceOnly(source),
+        };
+        started catch |err| switch (err) {
             error.OutOfMemory => {
                 restoreCheckpoint(&unit, checkpoint.values());
                 return error.OutOfMemory;
@@ -705,7 +716,7 @@ pub const Session = enum(usize) {
     }
 
     /// Advance root-project preload by at most one catalog observation and one
-    /// ordinary module load. Cursor authority remains inside SessionCore, so a
+    /// ordinary source load. Cursor authority remains inside SessionCore, so a
     /// host cannot retain a ProjectLock borrow past Session teardown.
     pub fn advanceRootPreload(self: *Session) error{OutOfMemory}!RootPreloadProgress {
         const core = self.coreState();
@@ -714,7 +725,7 @@ pub const Session = enum(usize) {
                 core.root_preload = .complete;
                 return .no_project;
             };
-            core.root_preload = .{ .cursor = project_lock.rootModuleCursor() };
+            core.root_preload = .{ .cursor = project_lock.rootSourceCursor() };
         }
         return switch (core.root_preload) {
             .idle => unreachable,
@@ -731,10 +742,10 @@ pub const Session = enum(usize) {
                     core.root_preload = .complete;
                     break :result .{ .invalid = message };
                 },
-                .item => |module_name| switch (try self.loadModule(module_name)) {
+                .item => |source| switch (try self.loadCatalogTarget(.{ .source = source })) {
                     .ok => .pending,
                     .err => |failure| .{ .err = failure },
-                    .incomplete => .{ .invalid = "root project module loader returned incomplete source" },
+                    .incomplete => .{ .invalid = "root project source loader returned incomplete source" },
                 },
             },
         };

@@ -632,6 +632,37 @@ test "e2e: tests retain file-private module visibility" {
     try loaded.expect(.{ .exit_code = 0, .stdout = "'undefined-word\n", .stderr = "" });
 }
 
+test "e2e: ecl test discovers private-only sources and loads each artifact once" {
+    var scratch = std.testing.tmpDir(.{});
+    defer scratch.cleanup();
+    try writeTestProject(scratch.dir, "{'format 1 'name \"app\" 'version \"0.1.0\" " ++
+        "'sources [\"*.ecl\" \"private.ecl\"] 'exports [] 'requires {}}\n", &.{
+        .{ .path = "private.ecl", .source = "[] ((42) 'answer def) 'helper @defm\n" ++
+            "[] ((helper.answer 42 = {'kind 'user} assert) 'answer test) 'suite @defm\n" },
+        .{ .path = "other.ecl", .source = "[] ((7) 'answer def) 'helper @defm\n" ++
+            "[] ((helper.answer 7 = {'kind 'user} assert) 'answer test) 'suite @defm\n" },
+    });
+    const exe = try absoluteExe();
+    defer allocator.free(exe);
+    var private = try cli.runOptions(.{ .argv = &.{ exe, "test" }, .cwd = .{ .dir = scratch.dir } });
+    defer private.deinit();
+    try private.expect(.{ .exit_code = 0, .stdout = "ok suite.answer\nok suite.answer\n", .stderr = "" });
+
+    // The first source loads the later source through an export. Preload must
+    // reuse that committed artifact, including with overlapping source globs.
+    try writeTestProject(scratch.dir, "{'format 1 'name \"app\" 'version \"0.1.0\" " ++
+        "'sources [\"*.ecl\" \"z-public.ecl\"] 'exports [\"app.public\"] 'requires {}}\n", &.{
+        .{ .path = "a-consumer.ecl", .source = "app.public.answer 42 = {'kind 'user} assert\n" ++
+            "[] (([] (helper.answer) @attempt 'err at 'kind at 'undefined-word match? " ++
+            "{'kind 'user} assert) 'isolated test) 'consumer @defm\n" },
+        .{ .path = "z-public.ecl", .source = "\"loaded public\" io.print\n" ++
+            "[] ((42) 'answer def) 'app.public @defm\n" },
+    });
+    var mixed = try cli.runOptions(.{ .argv = &.{ exe, "test" }, .cwd = .{ .dir = scratch.dir } });
+    defer mixed.deinit();
+    try mixed.expect(.{ .exit_code = 0, .stdout = "loaded public\nok consumer.isolated\nok suite.answer\nok suite.answer\n", .stderr = "" });
+}
+
 test "e2e: ecl test accepts a userland runner" {
     var scratch = std.testing.tmpDir(.{});
     defer scratch.cleanup();
