@@ -2771,7 +2771,7 @@ fn unexpectedReduceShape(evaluator: *Machine) MachineError {
     return evaluator.fail(.domain, "typed reduction reached an unclassified operand shape");
 }
 
-pub const IdiomReduceStart = *const fn (*Machine, Value, Value, bool) MachineError!void;
+pub const IdiomReduceStart = *const fn (*Machine, Value, Value, bool, usize, usize) MachineError!void;
 
 /// Starts the typed reduction. The caller has guarded with
 /// `typedReduceCandidate`, so this asserts rather than reporting a second
@@ -2784,6 +2784,8 @@ pub fn idiomReduceStart(operation: BinaryOp) IdiomReduceStart {
                 input: Value,
                 initial: Value,
                 scan: bool,
+                start: usize,
+                consumed: usize,
             ) MachineError!void {
                 const element_class = leafNumber(input).?;
                 const accumulator_class = scalarNumber(initial).?;
@@ -2811,7 +2813,7 @@ pub fn idiomReduceStart(operation: BinaryOp) IdiomReduceStart {
                                     .integer => .{ .integer = initial.int },
                                     .real => .{ .real = initial.float },
                                 },
-                                .cursor = flat.FlatCursor.init(length),
+                                .cursor = .{ .index = start, .length = length },
                             };
                             var held_locally = true;
                             errdefer if (held_locally) state.retire(evaluator.releaseDomain());
@@ -2838,7 +2840,7 @@ pub fn idiomReduceStart(operation: BinaryOp) IdiomReduceStart {
                                     return evaluator.startDriver(TypedReduceDriver{
                                         .state = .init(state),
                                         .step = step,
-                                        .consumed = 3,
+                                        .consumed = consumed,
                                     });
                                 }
                             }
@@ -2850,3 +2852,84 @@ pub fn idiomReduceStart(operation: BinaryOp) IdiomReduceStart {
         }.run,
     };
 }
+
+/// Reducer symbols select fixed semantics independently of language bindings.
+pub fn reduceGroups(evaluator: *Machine) MachineError!void {
+    try evaluator.require(3);
+    var reducer = try evaluator.popValue();
+    defer reducer.deinit();
+    if (reducer.borrow() != .symbol) return evaluator.typeError("a reducer symbol");
+    const operation = std.meta.stringToEnum(GroupReducer, @import("intern.zig").get(reducer.borrow().symbol)) orelse
+        return evaluator.fail(.domain, "unknown group reducer");
+    var groups = try evaluator.popList();
+    defer groups.deinit();
+    var values = try evaluator.popList();
+    defer values.deinit();
+    try evaluator.startDriver(GroupReduceDriver{
+        .values = .init(values.take()),
+        .groups = .init(groups.take()),
+        .operation = operation,
+    });
+}
+
+const GroupReducer = enum { sum, count, min, max };
+const GroupReduceDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+    values: heap.Owned(Value),
+    groups: heap.Owned(Value),
+    operation: GroupReducer,
+    output: ?heap.Owned(heap.OwnedValueBuffer) = null,
+    group: usize = 0,
+    index: usize = 0,
+    accumulator: Value = .{ .int = 0 },
+    comparison: ?@import("kernel_order.zig").CompareCursor = null,
+
+    pub fn advance(evaluator: *Machine, self: *GroupReduceDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        const count: usize = @intCast(self.groups.borrow().list.length());
+        if (self.output == null) self.output = .init(try .init(evaluator.releaseDomain(), count));
+        var budget: usize = machine.kernel_poll_quantum;
+        while (budget != 0 and self.group != count) : (budget -= 1) {
+            const indices = list.atUnchecked(self.groups.borrow(), self.group);
+            if (indices != .list) return evaluator.typeError("group index lists");
+            if (self.index == indices.list.length()) {
+                if (self.index == 0 and (self.operation == .min or self.operation == .max))
+                    return evaluator.fail(.domain, "first requires a non-empty list");
+                self.output.?.borrowMut().appendBorrowed(self.accumulator);
+                self.accumulator = .{ .int = 0 };
+                self.group += 1;
+                self.index = 0;
+                continue;
+            }
+            const selector = list.atUnchecked(indices, self.index);
+            if (selector != .int) return evaluator.typeError("integer group indices");
+            if (selector.int < 0 or @as(u64, @intCast(selector.int)) >= self.values.borrow().list.length())
+                return evaluator.fail(.domain, "group index is out of bounds");
+            const item = list.atUnchecked(self.values.borrow(), @intCast(selector.int));
+            switch (self.operation) {
+                .count => self.accumulator.int += 1,
+                .sum => {
+                    if (!item.isNumber()) return evaluator.typeError("numeric group values");
+                    self.accumulator = add(self.accumulator, item) catch |err| return scalarFailure(evaluator, err, @intCast(selector.int));
+                },
+                .min, .max => {
+                    if (self.index == 0) self.accumulator = item;
+                    if (self.comparison == null) self.comparison = .init(self.accumulator, item);
+                    switch (self.comparison.?.advance(1)) {
+                        .pending => continue,
+                        .not_comparable => return evaluator.typeError("comparable group values"),
+                        .complete => |order| {
+                            if ((self.operation == .min and order == .gt) or (self.operation == .max and order == .lt)) self.accumulator = item;
+                            self.comparison = null;
+                        },
+                    }
+                },
+            }
+            self.index += 1;
+        }
+        if (self.group != count) return .yielded;
+        const result = self.output.?.borrowMut().takeList();
+        self.output = null;
+        return .{ .output = result };
+    }
+};

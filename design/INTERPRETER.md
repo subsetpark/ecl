@@ -388,8 +388,22 @@ dictionaries use linear search; larger ones add an index without changing the
 ordered vectors.
 
 Numeric hashing agrees with numeric equality, including mixed integer/float
-comparisons. Dictionary construction is resumable because hashing, duplicate
+comparisons. Character leaves share the same per-codepoint hash as generic
+character lists. Shared equality and hashing cursors process typed string
+buffers in charged, bounded ranges, including strings nested inside other
+values. Their source borrows remain valid through the owning caller, and
+string traversal needs no per-character work-stack frames. Scalar children
+complete within their parent's bounded transition; only structural descent
+requires another work-stack slot. Dictionary
+construction is resumable because hashing, duplicate
 detection, and materialization can all depend on user-sized input.
+
+Dictionary batch selectors traverse only their outer key list. Each lookup or
+update compares a whole value through the shared bounded dictionary cursor;
+string and composite keys never become nested selectors. Dictionary assignment
+uses the same bounded rebuild for core `put` and `dict.put`. Borrowed-pair
+materialization keeps its source alive through completion or retirement and
+copies entries incrementally.
 
 ### Symbols are process-lifetime names
 
@@ -865,6 +879,13 @@ the language's conformability rules. Generic pervasion walks nested values with
 bounded cursors. Collection owners centralize selection, traversal order, shape
 preservation, and dictionary behavior for every caller.
 
+Transposition owns only its first two axes. Its validation cursor checks
+immediate row kinds and widths in bounded turns, then materializes columns
+while retaining each cell as a whole value. It never asks the recursive shape
+cursor to validate cell contents. Recursive rectangularity remains the contract
+of `shape`; table conversion supplies the known output width when an empty
+axis cannot carry it in a list value.
+
 When descent reaches a specialized flat leaf, the kernel registry classifies
 the operation and operand representation as one of:
 
@@ -905,7 +926,15 @@ Recognition is guarded by binding identity. Every named token in the pattern
 must resolve, in the candidate's actual scope chain, to the expected trusted
 builtin or source definition. Shadowing, escaped code from another module,
 wrong literal shape, or any other mismatch selects the generic frame-machine
-path. The guard result lives for that application and is discarded afterward,
+path. The `(len) each` list idiom reads stored child lengths into a typed result
+under the normal work budget; dictionary inputs retain generic `each`
+semantics, and invalid elements retain the source word's failure site.
+Boolean reductions share the numeric reduction machinery, including validation
+of every operand. Recognized `fold1` reductions retain the original input and
+start after its first element; they never materialize a tail. An empty fold
+preserves its seed and a singleton `fold1` preserves its sole value without
+invoking the reducer. Arbitrary quotations retain generic application semantics.
+The guard result lives for that application and is discarded afterward,
 so redefinition receives a fresh check.
 
 This has the role of a superinstruction—one checked phrase becomes one more
@@ -1930,6 +1959,44 @@ Every user-sized traversal, materialization, unwind, cancellation walk, and
 destruction is a cursor or bounded chunk. Exact-size output and fixed chunks are
 preferred to relocation in cancellable paths. Reaching the final reference or
 holding a publication lock never grants permission to do an unbounded walk.
+
+Registered native parsers access input through bounded scalar copies and stage
+unknown-length metadata in transaction-owned fixed-chunk chains. Choosing a
+forward or reverse read mode seals the chain; cursors borrow from the transaction
+until retirement detaches one chunk per step. Neither direction requires a
+whole-stream preparation pass. Exact-size bulk builders write directly into
+typed leaves. Forward generic builders expose only their initialized prefix;
+reverse builders initialize placeholders under the work budget before writes.
+Contiguous text construction retains its decoding state in the output builder,
+validates input bounds and hints, and commits exactly one append on completion. Publication and abandonment share the
+transaction's normal bounded retirement protocol. An append that yields has
+not consumed its input; allocation failure terminates the call and leaves all
+partial storage owned by that transaction. Native continuation records contain
+only scalar state, tagged scalar unions, and fixed buffers, with an 8 KiB ceiling to accommodate bulk
+decoding and per-column inference without granting guest allocation authority.
+CSV charges both bulk input copies and numeric conversions to that budget.
+Staged descriptors preserve original spans alongside successful conversions
+until column inference settles, so text fallback preserves spelling. Numeric
+output reuses cached conversions and is appended in bounded batches.
+Numeric normalization retains a bounded significant-digit prefix and sticky
+tail information, so even arbitrarily long decimal fields never enter an
+unbounded library conversion. Scanner cache carry is at most one bulk chunk;
+staged traversal, generic initialization, typed writes, and retirement all
+remain bounded separately from the initial input scan.
+
+Grouping owns a fixed-capacity hash index sized from the row count. Index
+initialization, structural hashing, collision comparison, stable index scatter,
+and dictionary construction are independently resumable. Composite row identity
+is read through pinned columns; only distinct keys acquire materialized lists.
+Grouped reduction walks top-level selectors directly and retains its operands
+through comparison and output publication, preserving selector order without
+gathering temporary value lists.
+
+Flat integer selectors gather whole cells from typed and generic source lists.
+Generic gathers retain their source and selectors until completion, own only
+the initialized output prefix, and materialize through the shared list boundary
+so narrowing remains identical to general indexing. Traversal, publication,
+and retirement remain separately bounded.
 
 ### Separate publication from reclamation
 

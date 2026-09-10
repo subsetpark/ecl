@@ -268,3 +268,238 @@ authority from the registration used for each invocation. The accepted path
 retains one two-way cache implementation with no experimental or legacy
 control branch; the two focused cases and local hit/miss counters remain in
 schema `ecl.workdrivers.*.v6`.
+
+## CSV and table primitives — 2026-09-10
+
+Baseline is the committed columnar implementation `05454f6`; updated is the
+ABI 7 implementation with forward construction, cached CSV conversions,
+shared hash grouping, and whole-key dictionary batches. Both executables use
+Zig 0.16.0 ReleaseSafe on macOS 26.6.2 arm64, with `ECL_WORKERS=1`.
+Each workload has one warmup and three measured runs. Values below are medians;
+peak memory is the median process maximum RSS from `/usr/bin/time -l`, including
+input, output, and runtime memory. Stage clocks have millisecond resolution.
+Baseline and updated use identical fixed input files, verified by SHA-256.
+
+The final benchmark exited 0. Completed baseline runs were
+retained while updated runs were repeated after compacting CSV descriptors;
+failed benchmark setup runs are excluded. No builds or tests ran concurrently
+with measured workloads.
+
+### CSV stages
+
+All times are milliseconds, rates are input MiB/s during parsing, and memory
+is MiB. Each cell shows **baseline → updated**. `bytes` uses `fs.read-bytes`;
+`text` uses `fs.read-text`. Parsing uses automatic inference and headers, then
+`dict.from-lists table.from-columns` constructs the table. File reading and
+UTF-8 decoding are included in the read stage, separately from parsing.
+
+| Workload | Input | Read ms | Parse ms | Table ms | Parse MiB/s | Peak MiB |
+|---|---|---:|---:|---:|---:|---:|
+| all_bands_discography | bytes | 6 → 7 | 1376 → 899 | 21 → 13 | 19.3 → 29.5 | 432.6 → 499.4 |
+| all_bands_discography | text | 306 → 307 | 1526 → 936 | 22 → 14 | 17.4 → 28.3 | 528.6 → 595.4 |
+| complete_roster | bytes | 24 → 22 | 3063 → 1783 | 24 → 20 | 23.6 → 40.6 | 826.9 → 915.8 |
+| complete_roster | text | 853 → 842 | 3801 → 2224 | 28 → 26 | 19.1 → 32.6 | 1210.9 → 1299.8 |
+| escaped | bytes | 3 → 3 | 316 → 188 | 6 → 6 | 31.1 → 52.2 | 74.4 → 79.9 |
+| labels_roster | bytes | 5 → 5 | 795 → 512 | 14 → 10 | 20.9 → 32.5 | 254.3 → 287.0 |
+| labels_roster | text | 197 → 192 | 865 → 528 | 13 → 10 | 19.2 → 31.5 | 286.4 → 319.0 |
+| late-mismatch | bytes | 0 → 0 | 90 → 60 | 6 → 6 | 19.8 → 29.7 | 30.3 → 35.4 |
+| metal_bands | bytes | 7 → 7 | 1061 → 602 | 11 → 9 | 27.5 → 48.5 | 230.8 → 252.0 |
+| metal_bands | text | 338 → 334 | 1428 → 674 | 12 → 11 | 20.5 → 43.4 | 326.9 → 348.1 |
+| metal_bands_roster | bytes | 8 → 8 | 1184 → 676 | 12 → 10 | 26.5 → 46.4 | 264.9 → 290.6 |
+| metal_bands_roster | text | 357 → 361 | 1503 → 764 | 14 → 11 | 20.9 → 41.0 | 360.9 → 386.6 |
+| numeric | bytes | 1 → 1 | 281 → 172 | 9 → 8 | 20.2 → 33.1 | 52.9 → 65.7 |
+
+The five real workloads are the metal datasets named above. The synthetic
+numeric workload has 100,000 rows and eight columns; escaped has 100,000 rows
+and three columns with quotes, Unicode, and embedded newlines; late-mismatch
+has 100,000 rows and three columns ending in a spelling-preserving text fallback.
+
+### Grouping, joins, and reduction
+
+Setup constructs the input before the measured operation. Rates are rows/s;
+all pairs again show baseline → updated. Composite baseline is `flip group`;
+updated is `group-columns`. Aggregation compares gathered `(sum)` / `(len)`
+quotations with fixed `'sum` / `'count` reducers on the same data.
+
+| Workload | Rows | Setup ms | Operation ms | Rows/s | Peak MiB |
+|---|---:|---:|---:|---:|---:|
+| group-low | 100,000 | 0 → 0 | 3 → 4 | 33333333 → 25000000 | 15.9 → 17.0 |
+| group-low-large | 1,000,000 | 2 → 2 | 26 → 41 | 38461538 → 24390244 | 112.1 → 120.5 |
+| group-high | 20,000 | 0 → 0 | 512 → 17 | 39062 → 1176471 | 10.3 → 10.7 |
+| composite-low | 50,000 | 0 → 0 | 3625 → 4 | 13793 → 12500000 | 16.8 → 12.2 |
+| composite-high | 3,000 | 0 → 0 | 2509 → 3 | 1196 → 1000000 | 6.0 → 6.0 |
+| join | 3,000 | 0 → 0 | 2570 → 25 | 1167 → 120000 | 8.7 → 9.4 |
+| aggregate | 100,000 | 0 → 0 | 44 → 19 | 2272727 → 5263158 | 22.2 → 20.1 |
+
+Low-cardinality scalar grouping repeats eight integer keys; high-cardinality
+uses distinct integers. Composite-low combines row indices modulo 32 and 7
+(224 groups); composite-high repeats the distinct row index in two columns.
+Join matches 3,000 distinct keys, with two columns on each side. Aggregation
+has 100 groups and computes sum and count over 100,000 values.
+
+### Regressions and limits
+
+Real CSV parsing improves approximately 1.5–2.1× in this run. CSV memory remains
+higher: preserving original spans and cached numeric bits adds staging storage,
+and staged chains remain transaction-owned during output construction. The
+first measured implementation used seven words per descriptor. Packing scalar
+metadata reduces this to five without narrowing offsets, lengths, or numeric
+bits; the final table includes that reduction. Numeric synthetic peak RSS is
+52.9 → 65.7 MiB, and real byte-input increases range from about 9% to 15%.
+This is an explicit memory-for-repeated-conversion tradeoff, not a memory win.
+
+The eight-key scalar workload regresses from 3 to 4 ms. Increasing it tenfold
+confirms a repeatable regression, 26 → 41 ms, rather than only clock rounding.
+The shared hash path replaces short typed linear searches with per-row hashing
+and a row-sized index initialization; it removes quadratic discovery cost but
+has higher overhead at very low cardinality. High-cardinality, composite,
+join, and aggregate workloads improve. Very small timings and unusually large
+speedup ratios should not be treated as portable constants.
+
+### Verification
+
+The final `zig build precommit test-ecl test-native-acceptance test-snapshots
+-Doptimize=ReleaseSafe -j4` run exited 0. Focused cancellation/session-reuse tests
+for the column primitives exited 0. Initialized-Session allocation-failure
+sweeps for CSV, dictionary operations, tables, and column primitives exited 0;
+the CSV sweep was repeated after descriptor compaction. Commands used closed
+stdin and bounded timeouts.
+
+The independent Python CSV oracle compared every one of 13,644,293 real data
+fields, headers, and inferred column types, plus generated text and numeric
+cases; the final binary passed (exit 0). Public tests cover whole string and
+composite dictionary keys, defaults, duplicates, assignment ordering, malformed
+selectors, reducers, and mixed quotation/symbol aggregates. Standalone SDK
+fixtures cover staging direction and sealing, budget retries, initialized
+prefixes, chunk boundaries, UTF-8, and partial text construction. Deliberately
+incorrect grouped-reduction and SDK assertions each failed their intended
+selected test before being restored.
+
+## Shared string identity and length-map idiom — 2026-09-10
+
+This comparison isolates the changes in `cc41a0d` against `18be833`: shared string
+hash/equality traversal over typed character buffers, and guarded recognition
+of `(len) each` on list inputs. Both executables are Zig 0.16.0 ReleaseSafe on
+macOS 26.6.2 arm64 with `ECL_WORKERS=1`. Each version has one warmup and three
+measured runs on the same files; the table reports median milliseconds.
+
+The inputs are `metal_bands.csv` (183,397 rows) and
+`all_bands_discography.csv` (636,801 rows). Parsing happens before table timers.
+The Band ID join returns 638,937 rows and 12 columns in both versions. Stage
+measurements use public operations matching the table implementation and
+retain intermediate values; their sum need not equal the full join, which
+includes validation and has different temporary lifetimes. Millisecond clocks
+limit precision for short stages.
+
+| Operation | Before | After |
+|---|---:|---:|
+| country grouping | 256 | 26 |
+| composite grouping | 538 | 44 |
+| symbol aggregate | 258 | 31 |
+| quotation aggregate | 278 | 43 |
+| join left grouping | 173 | 176 |
+| join right grouping | 203 | 203 |
+| join distinct lookup | 160 | 158 |
+| join group lengths | 160 | 1 |
+| join match lengths | 134 | 1 |
+| join left gather | 217 | 217 |
+| join right gather | 152 | 151 |
+| whole join | 1336 | 1036 |
+
+Country grouping improves about 9.8× and country/status composite grouping
+about 12.2×. The two interpreted length passes fall from 294 ms combined to
+about 2 ms; the complete join improves from 1,336 to 1,036 ms (about 22% less
+time). Numeric join grouping and output gathering remain essentially unchanged.
+String grouping and map dispatch were the intended targets of these changes;
+this comparison does not attribute any improvement to CSV parsing itself.
+
+The optimized string cursors keep the generic per-codepoint hash semantics
+across character widths and generic character lists. Charged ranges contain
+at most 256 characters. The idiom checks the trusted built-in binding on each
+application, retains generic execution for dictionary inputs, and preserves
+errors for non-list elements.
+
+Each measurement process exited 0; no builds or tests ran alongside the
+measurements. This document retains the methodology, rationale, and results;
+transient benchmark artifacts are not maintained in the repository.
+
+Verification passed with `zig build precommit differential test-ports
+-Dport-test-filter="native: column primitives" -Doptimize=ReleaseSafe -j4`
+(exit 0), plus the table language tests and the initialized-Session column
+primitive allocation-failure sweep (exit 0). Deliberately incorrect string-hash
+and idiom-hit assertions failed their intended selected suites and were restored.
+Cancellation tests cover active string hashing, mixed-width string comparison,
+and the recognized length map, followed by Session reuse. The complete grouped
+aggregate and 144,226,682-byte serialized join result have identical SHA-256
+hashes before and after.
+
+### Boolean reductions, generic gathers, and join keys — 2026-09-10
+
+Compared against `cc41a0d`, using Zig 0.16.0 ReleaseSafe on macOS 26.6.2
+arm64 with `ECL_WORKERS=1`. The fixed inputs remain `metal_bands.csv`
+(183,397 rows, seven columns) and `all_bands_discography.csv` (636,801 rows,
+six columns). Each workload used one warmup process and three measured
+processes. No builds or tests ran alongside timing measurements; every
+measurement process exited 0. Parsing precedes the stage timers.
+
+A standalone join, without the stage experiment's retained intermediate
+structures, produces 638,937 rows and twelve columns:
+
+| Standalone join | Before | After |
+|---|---:|---:|
+| Median join time | 661 ms | 241 ms |
+| Output throughput | 0.97 million rows/s | 2.65 million rows/s |
+| Median process peak RSS | 1,009 MiB | 801 MiB |
+
+The join is about 2.74× faster with 21% lower peak RSS. Measured times were
+658/661/662 ms before and 241/241/242 ms after. RSS comes from `/usr/bin/time
+-l` and includes CSV loading, the retained result, and process teardown;
+the join timer excludes CSV loading and final teardown. These times are not
+directly interchangeable with the earlier retained-intermediate stage runs.
+
+Repeating the previous hotspot stage script gives these medians:
+
+| Stage | Before (ms) | After (ms) |
+|---|---:|---:|
+| Composite numeric left grouping | 166 | 81 |
+| Composite numeric right grouping | 206 | 99 |
+| Composite numeric dictionary lookup | 158 | 20 |
+| Individual generic/text output column gather | 35–37 | 4–6 |
+| Individual numeric output column gather | 0–1 | 1 |
+| Standalone boolean mask fold | 695 | <1 |
+| Filter gather | 32 | 4 |
+| Complete `table.where` | 534 | 14 |
+| Country grouping | 32 | 20 |
+| Country/status grouping | 54 | 38 |
+
+The composite-key rows deliberately retain the old key shape to exercise
+shared cursor improvements. Production single-column joins now use scalar
+keys. Filtering selects even Band IDs. Sub-millisecond stage values are
+below the timer's resolution; stage times are not additive because intermediate
+lifetimes differ. The retained-intermediate whole-join samples were more
+variable, so the standalone join above is the primary end-to-end comparison.
+
+Recognized reductions over eight million elements, with ten reductions per
+measurement batch, use the same typed loop for `fold` and `fold1`:
+
+| Reducer | `fold` median per reduction | `fold1` median per reduction |
+|---|---:|---:|
+| `and`, alternating 0/1 bytes | 6.7 ms | 5.8 ms |
+| `or`, alternating 0/1 bytes | 8.5 ms | 6.9 ms |
+| `+`, integer range | 18.2 ms | 18.2 ms |
+
+`fold1` does not copy the input tail. Boolean reductions still validate every
+operand, including values after a determining zero or one. Generic gathers
+transfer completed generic storage directly; the shared materializer retains
+narrowing behavior for selected scalar values.
+
+`zig build precommit -Doptimize=ReleaseSafe -j4`, the differential suite,
+`test-ecl`, `test-snapshots`, focused column-primitive cancellation/session
+reuse, and initialized-Session column-primitive OOM coverage passed. The
+standalone scalar-composite cursor test also passed in ReleaseSafe with
+allocation disabled and an exhausted shared work budget. Deliberately wrong
+boolean-idiom and list-key join assertions failed their selected differential
+and language suites; both were restored before final verification.
+
+The complete grouped aggregate (23,295 bytes) and serialized join
+(144,226,682 bytes) match the baseline byte-for-byte.

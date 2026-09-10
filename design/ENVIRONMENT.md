@@ -32,7 +32,7 @@ Session's runtime I/O state.
 The public `net` and `proc` modules are ECL compositions over these registered
 capabilities and `port.*`. Their operation and endpoint selectors expose only
 their corresponding resources and streams. First-party adapters use typed backend calls;
-the extension adapter translates ABI v5 calls into the same runtime interfaces
+the extension adapter translates ABI v7 calls into the same runtime interfaces
 for controller execution, transport, cancellation, ownership, and cleanup.
 
 Embedded names have precedence over filesystem modules. A file on `ECL_PATH`
@@ -60,8 +60,8 @@ module. Its descriptor declares the same canonical name requested by the
 loader. The complete word table validates before publication, and publication
 is atomic.
 
-The current pre-release native ABI is version 5, with entry symbol
-`ecl_module_abi_v5`. Native modules built for earlier versions must be rebuilt;
+The current pre-release native ABI is version 7, with entry symbol
+`ecl_module_abi_v7`. Native modules built for earlier versions must be rebuilt;
 the loader provides no legacy adapter.
 
 Each native word has a declared effect and nonempty documentation. Native

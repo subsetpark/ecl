@@ -27,9 +27,12 @@
  'observations test
 
  ### test gathering
- (-- : "Gather through pervasive key selectors in caller shape and order.")
+ (-- : "Gather whole keys in request order.")
  ({'a 1 'b 2 'c 3} ['c 'a 'c] dict.at [3 1 3] equal
-  {'a 1 'b 2 'c 3} [['c 'a] 'b] dict.at [[3 1] 2] equal
+  {['c 'a] 7 'b 2} [['c 'a] 'b] dict.at [7 2] equal
+  {"ab" 9 [1 2] 8} ["ab" [1 2] "ab"] dict.at [9 8 9] equal
+  {"ab" 9 [1 2] 8} ["ab" [3] [1 2] [3]] [0] dict.at-or [9 [0] 8 [0]] equal
+  {} [] 0 dict.at-or [] equal
   {'a 1} [] dict.at () equal
   {[1 2] 9} [1 2] at 9 equal
   ({'a 1} [['a 'missing]] dict.at)
@@ -41,11 +44,12 @@
  'gathering test
 
  ### test updates
- (-- : "Transform pervasive key selections without reordering dictionary keys.")
+ (-- : "Transform whole keys without reordering dictionary keys.")
  ({'a 1 'b 2 'c 3} ['b 'a] (10 *) dict.update
   {'a 10 'b 20 'c 3} equal
-  {'a 1 'b 2} [['a 'b] 'a] (1 +) dict.update
-  {'a 3 'b 3} equal
+  {['a 'b] 1 'a 2} [['a 'b] 'a] (1 +) dict.update
+  {['a 'b] 2 'a 3} equal
+  {"ab" 1} ["ab" "ab"] (1 +) dict.update {"ab" 3} equal
   {'a 1} ['a 'a] (1 +) dict.update {'a 3} equal
   {'a 1} [] (missing) dict.update {'a 1} equal
   ({'a 1} ['a 'b] (10 *) dict.update) 'domain 'dict.update raises-word
@@ -54,6 +58,16 @@
   {'a 2} 'a 9 (10 *) dict.update-or {'a 20} equal
   {'a 2} 'b 9 (missing) dict.update-or {'a 2 'b 9} equal)
  'updates test
+
+ ### test assignment
+ (-- : "Assign one whole key and value, retaining existing positions.")
+ ({} [1 2] [3 4] dict.put {[1 2] [3 4]} equal
+  {"ab" 1 'c 2} "ab" [3 4] dict.put dup
+  {"ab" [3 4] 'c 2} equal dict.keys ["ab" 'c] equal
+  {'a 1} "ab" 2 dict.put dict.keys ['a "ab"] equal
+  {1 9} 1.0 7 dict.put {1 7} equal
+  ([] 'a 1 dict.put) 'type 'dict.put raises-word)
+ 'assignment test
 
  ### test construction
  (-- : "Construct dictionaries from one association, pairs, and repeated values.")
@@ -84,7 +98,9 @@
   {'a 1 'b 2 'c 3} (nip 2 >) dict.reject {'a 1 'b 2} equal
   {'a 1 'b 2 'c 3} ['c 'missing 'a] dict.take {'a 1 'c 3} equal
   {'a 1 'b 2 'c 3} ['b 'missing] dict.del {'a 1 'c 3} equal
-  {1 "one" 2 "two" 3 "three"} [[1 3] 1] dict.del {2 "two"} equal
+  {[1 3] "pair" 1 "one" 2 "two"} [[1 3] 1] dict.del {2 "two"} equal
+  {"ab" 1 [1 2] 2 'c 3} [[1 2] "ab" "ab"] dict.take {"ab" 1 [1 2] 2} equal
+  {"ab" 1 [1 2] 2} ["ab"] dict.split {[1 2] 2} equal {"ab" 1} equal
   {'a 1 'b 2 'c 3} ['c 'a] dict.split
   {'b 2} equal
   {'a 1 'c 3} equal
@@ -107,7 +123,7 @@
 
  ### test documentation
  (-- : "Expose documentation for every dict module export.")
- (['dict.size 'dict.keys 'dict.vals 'dict.pairs 'dict.has? 'dict.at
+ (['dict.size 'dict.keys 'dict.vals 'dict.pairs 'dict.has? 'dict.at 'dict.at-or 'dict.put
    'dict.merge 'dict.associate 'dict.from-flat 'dict.from-lists 'dict.from-pairs
    'dict.from-keys 'dict.keys-exactly? 'dict.update 'dict.update-or
    'dict.map 'dict.filter 'dict.reject 'dict.take

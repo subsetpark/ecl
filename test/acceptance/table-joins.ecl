@@ -5,7 +5,8 @@
  'column)
 import
 
-'cwd "test/acceptance/orders.csv" fs.read-text csv.parse from-header-rows 'orders set
+'cwd "test/acceptance/orders.csv" fs.read-text ['text 'text 'text] csv.parse flip from-header-rows
+'orders set
 'cwd "test/acceptance/customers.json" fs.read-text json.parse from-records 'customers set
 orders io.pp
 customers io.pp

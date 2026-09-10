@@ -1800,6 +1800,7 @@ pub const IdiomRequest = union(enum) {
     each,
     zip_with,
     fold,
+    fold1,
     scan,
 };
 pub const IdiomFallback = struct {

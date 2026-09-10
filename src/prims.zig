@@ -21,6 +21,7 @@ const Machine = machine.Machine;
 const MachineError = machine.MachineError;
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     const definitions = comptime [_]env.BuiltinWord{
+        .{ .name = "reduce-groups", .primitive = @import("kernel_numeric.zig").reduceGroups, .effect = "values groups reducer -- results", .doc = "Reduce top-level index lists using sum, count, min, or max without gathering slices." },
         .{ .name = "dup", .primitive = dup, .effect = "x -- x x", .doc = "Duplicate the top stack value." },
         .{ .name = "swap", .primitive = swap, .effect = "x y -- y x", .doc = "Exchange the top two stack values." },
         .{ .name = "pop", .primitive = pop, .effect = "x --", .doc = "Discard the top stack value." },

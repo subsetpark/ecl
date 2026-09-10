@@ -101,7 +101,7 @@ pub const Operation = union(enum) {
             },
             .order => |operation| switch (operation) {
                 .cmp => .two,
-                .grade, .group => .one,
+                .grade, .group, .group_columns => .one,
             },
             .text => |operation| switch (operation) {
                 // `split`, `join`, and `format` read two sized operands; the
@@ -632,6 +632,12 @@ const sequence_rows = [_]Row{
 
 const order_rows = [_]Row{
     .{
+        .operations = only(.{Operation{ .order = .group_columns }}),
+        .left = any_operand,
+        .class = .generic_fallback,
+        // Composite rows hash and compare through their columns.
+    },
+    .{
         .operations = only(.{Operation{ .order = .cmp }}),
         .left = char_leaves,
         .right = char_leaves,
@@ -681,9 +687,9 @@ const order_rows = [_]Row{
     .{
         .operations = only(.{Operation{ .order = .group }}),
         .left = all_leaves,
-        .class = .sequential_typed,
-        // first-appearance grouping scans pinned typed keys and publishes each stable i64 index
-        // leaf directly
+        .class = .generic_fallback,
+        // Shared hash grouping reads scalar keys without structural cursor allocations
+        // and publishes stable i64 index leaves directly.
     },
     .{
         .operations = only(.{

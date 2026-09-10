@@ -911,8 +911,8 @@ const IterationState = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-const UpdatePolicy = enum { core_selector, dictionary_selector, dictionary_key_list };
-const UpdateMode = enum { list_selector, dictionary_key, dictionary_keys, dictionary_key_list };
+const UpdatePolicy = enum { core_selector, dictionary_key_list };
+const UpdateMode = enum { list_selector, dictionary_key, dictionary_key_list };
 const UpdatePhase = enum {
     count_positions,
     fill_positions,
@@ -1052,10 +1052,7 @@ const UpdateWorkDriver = struct {
                     .pending => {},
                     .depth_exceeded => return evaluator.fail(
                         .domain,
-                        if (state.mode == .dictionary_keys)
-                            "dict.update selector nesting exceeds 256 levels"
-                        else
-                            "update selector nesting exceeds 256 levels",
+                        "update selector nesting exceeds 256 levels",
                     ),
                     .leaf => |selector| {
                         if (state.mode == .list_selector)
@@ -1095,33 +1092,14 @@ const UpdateWorkDriver = struct {
             .find_positions => {
                 const positions = state.positions.?.borrow();
                 if (state.finder == null) {
-                    if (state.mode == .dictionary_keys) {
-                        const selector_progress = try state.selector_cursor.?.borrowMut().advanceOne();
-                        budget -= 1;
-                        switch (selector_progress) {
-                            .pending => continue,
-                            .depth_exceeded => return evaluator.fail(.domain, "dict.update selector nesting exceeds 256 levels"),
-                            .leaf => |key| state.requested_key = key,
-                            .complete => {
-                                state.selector_cursor.?.deinit(
-                                    evaluator.releaseDomain(),
-                                    evaluator.allocator(),
-                                );
-                                state.selector_cursor = null;
-                                state.phase = .copy_values;
-                                continue;
-                            },
-                        }
-                    } else {
-                        if (state.position_index == positions.len) {
-                            state.phase = .copy_values;
-                            continue;
-                        }
-                        state.requested_key = if (state.mode == .dictionary_key_list)
-                            list.atUnchecked(state.selector.borrow(), state.position_index)
-                        else
-                            state.selector.borrow();
+                    if (state.position_index == positions.len) {
+                        state.phase = .copy_values;
+                        continue;
                     }
+                    state.requested_key = if (state.mode == .dictionary_key_list)
+                        list.atUnchecked(state.selector.borrow(), state.position_index)
+                    else
+                        state.selector.borrow();
                     state.finder = .init(dict.FindCursor.initHeader(
                         evaluator.allocator(),
                         state.collection.borrow().dict,
@@ -1210,7 +1188,7 @@ fn update(evaluator: *Machine) MachineError!void {
 }
 
 pub fn updateDictKeysForModule(evaluator: *Machine) MachineError!void {
-    return startUpdate(evaluator, .dictionary_selector);
+    return startUpdate(evaluator, .dictionary_key_list);
 }
 
 fn startUpdate(evaluator: *Machine, policy: UpdatePolicy) MachineError!void {
@@ -1249,7 +1227,6 @@ fn startUpdateOwned(
         .list => if (policy == .core_selector) .list_selector else return evaluator.typeError("a dict"),
         .dict => switch (policy) {
             .core_selector => .dictionary_key,
-            .dictionary_selector => .dictionary_keys,
             .dictionary_key_list => .dictionary_key_list,
         },
         else => return evaluator.typeError(if (policy == .core_selector) "a list or dict" else "a dict"),
@@ -1259,7 +1236,7 @@ fn startUpdateOwned(
 
     const collection_count: usize = switch (mode) {
         .list_selector => @intCast(collection.borrow().list.length()),
-        .dictionary_key, .dictionary_keys, .dictionary_key_list => @intCast(collection.borrow().dict.length()),
+        .dictionary_key, .dictionary_key_list => @intCast(collection.borrow().dict.length()),
     };
     var values = try heap.OwnedValueBuffer.init(evaluator.releaseDomain(), collection_count);
     defer values.deinit();
@@ -1271,7 +1248,6 @@ fn startUpdateOwned(
     const initial_phase: UpdatePhase = switch (mode) {
         .list_selector => if (selector.borrow() == .list) .count_positions else .copy_values,
         .dictionary_key => .find_positions,
-        .dictionary_keys => .count_positions,
         .dictionary_key_list => .find_positions,
     };
 
@@ -1314,7 +1290,7 @@ fn startUpdateOwned(
             state.positions.?.borrow()[0] = position;
             state.phase = .copy_values;
         }
-    } else if (mode == .dictionary_key or mode == .dictionary_key_list) {
+    } else {
         const position_count: usize = if (mode == .dictionary_key_list)
             @intCast(state.selector.borrow().list.length())
         else
@@ -1322,13 +1298,6 @@ fn startUpdateOwned(
         state.positions = .init(try evaluator.allocator().alloc(usize, position_count));
         state.pairs = .init(try evaluator.allocator().alloc(dict.Pair, collection_count));
         state.phase = .find_positions;
-    } else {
-        state.pairs = .init(try evaluator.allocator().alloc(dict.Pair, collection_count));
-        state.selector_cursor = .init(try support.PervasiveSelectorCursor.init(
-            evaluator.allocator(),
-            state.selector.borrow(),
-        ));
-        state.phase = .count_positions;
     }
     state_owner = null;
     try evaluator.startDriver(UpdateWorkDriver{ .state = .init(state) });

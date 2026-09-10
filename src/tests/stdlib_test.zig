@@ -132,7 +132,7 @@ test "stdlib: dynamic qualified execution auto-loads every embedded transport" {
         },
         .{
             .name = "embedded native descriptor",
-            .source = "\"a,b\" 'csv 'parse qualify execute",
+            .source = "\"a,b\" [] 'csv 'parse qualify execute flip",
             .expected = "((\"a\" \"b\"))",
         },
     });

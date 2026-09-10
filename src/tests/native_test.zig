@@ -952,12 +952,13 @@ test "native: the SDK generates a descriptor the production validator accepts" {
     defer validated.deinit();
 
     try std.testing.expectEqualStrings("sample", intern.get(intern.moduleId(validated.name())));
-    try std.testing.expectEqual(@as(usize, 20), validated.definitions().len);
     const expected_names = [_][]const u8{
-        "increment",     "discard",        "split",      "forward",    "nested-port",    "fail-user",      "fail-kind",
-        "make-char",     "singleton",      "pair-dict",  "sum-list",   "sum-dict",       "cooperative",    "draft-fail",
-        "yield-forever", "builder-budget", "large-list", "large-dict", "duplicate-dict", "noncooperative",
+        "increment",          "discard",        "split",                 "forward",        "nested-port",    "fail-user",   "fail-kind",
+        "make-char",          "singleton",      "pair-dict",             "sum-list",       "sum-dict",       "cooperative", "draft-fail",
+        "yield-forever",      "builder-budget", "forward-values-budget", "text-span",      "forward-stage",  "bulk-budget", "bulk-immediate",
+        "bulk-values-budget", "large-list",     "large-dict",            "duplicate-dict", "noncooperative",
     };
+    try std.testing.expectEqual(expected_names.len, validated.definitions().len);
     for (validated.definitions(), expected_names) |definition, expected| {
         try std.testing.expectEqualStrings(expected, intern.get(intern.namespaceId(definition.name)));
         try std.testing.expect(env.documentationHeader(definition.doc).length() != 0);
@@ -988,18 +989,23 @@ test "native: a discovered artifact publishes its complete table atomically" {
     try std.testing.expectEqual(@as(i64, 43), runtime.stackItems()[2].int);
 
     const exports = [_][]const u8{
-        "sample.increment",     "sample.discard",        "sample.split",
-        "sample.forward",       "sample.fail-user",      "sample.fail-kind",
-        "sample.singleton",     "sample.pair-dict",      "sample.sum-list",
-        "sample.sum-dict",      "sample.cooperative",    "sample.draft-fail",
-        "sample.yield-forever", "sample.builder-budget", "sample.large-list",
-        "sample.large-dict",    "sample.duplicate-dict", "sample.noncooperative",
+        "sample.increment",      "sample.discard",            "sample.split",
+        "sample.forward",        "sample.fail-user",          "sample.fail-kind",
+        "sample.singleton",      "sample.pair-dict",          "sample.sum-list",
+        "sample.sum-dict",       "sample.cooperative",        "sample.draft-fail",
+        "sample.yield-forever",  "sample.builder-budget",     "sample.large-list",
+        "sample.large-dict",     "sample.duplicate-dict",     "sample.noncooperative",
+        "sample.nested-port",    "sample.make-char",          "sample.forward-values-budget",
+        "sample.text-span",      "sample.forward-stage",      "sample.bulk-budget",
+        "sample.bulk-immediate", "sample.bulk-values-budget",
     };
-    for (exports) |prefix| {
-        var completion = try runtime.completionCandidates(prefix);
-        defer completion.deinit();
-        try std.testing.expectEqual(@as(usize, 1), completion.items().len);
-        try std.testing.expectEqualStrings(prefix, completion.items()[0]);
+    var completion = try runtime.completionCandidates("sample.");
+    defer completion.deinit();
+    try std.testing.expectEqual(exports.len, completion.items().len);
+    for (exports) |expected| {
+        for (completion.items()) |actual| {
+            if (std.mem.eql(u8, expected, actual)) break;
+        } else return error.MissingNativeExport;
     }
 }
 
@@ -1313,6 +1319,11 @@ test "native: aggregate cursors and builders charge the scheduler budget" {
     try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[3].int);
     try std.testing.expectEqual(@as(u64, 1), runtime.stackItems()[4].dict.length());
     try std.testing.expect(runtime.lastPolls() >= 2);
+    try expectOk(&runtime, "[65 66 67] sample.bulk-budget [11 22 33] match?");
+    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[runtime.stackItems().len - 1].int);
+    try std.testing.expect(runtime.lastPolls() >= 3);
+    try expectOk(&runtime, "[65 66 67] sample.bulk-immediate [11 22 33] match?");
+    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[runtime.stackItems().len - 1].int);
 }
 
 test "native: cancellation after a yield preserves the pre-call operand stack" {
@@ -1336,6 +1347,75 @@ test "native: cancellation after a yield preserves the pre-call operand stack" {
     );
     try std.testing.expectEqual(@as(usize, 1), runtime.stackItems().len);
     try std.testing.expectEqual(@as(i64, 5), runtime.stackItems()[0].int);
+}
+
+test "native: CSV scanner and column builders remain schedulable" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer diagnostics.deinit();
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .ecl_path = native_fixture.directory,
+    }), .cooperative, .evaluate);
+    defer runtime.deinit();
+    try expectOk(&runtime, "sample.bulk-values-budget dup len 70000 = swap 7 = sum 70000 =");
+    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
+    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[1].int);
+    try expectOk(&runtime, "pop pop \"1\\n\" 70000 str.repeat ['int]");
+    try expectOk(&runtime, "csv.parse");
+    try std.testing.expect(runtime.lastPolls() >= 10);
+    try expectOk(&runtime, "first dup len 70000 = swap 1 = sum 70000 =");
+    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
+    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[1].int);
+    // A single cooperative executor must service the parent's deadline while
+    // the child is inside CSV. The error's word proves it reached the parser,
+    // rather than being cancelled during setup or module loading.
+    try expectOk(&runtime, "pop pop \"1\\n\" 1000000 str.repeat");
+    try expectOk(&runtime, "wrap ([] csv.parse) @spawn dup 20 task.await-for pop dup task.cancel task.await " ++
+        "'err at dup 'kind at 'cancelled match? swap 'word at 'csv.parse match?");
+    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
+    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[1].int);
+    try expectOk(&runtime, "pop pop \"9\\n10\" [] csv.parse first sum");
+    try std.testing.expectEqual(@as(i64, 19), runtime.stackItems()[0].int);
+}
+
+test "native: column primitives cancel active work and reuse the session" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
+    defer runtime.deinit();
+    try expectOk(&runtime, "{} dict.keys pop");
+    const cases = [_]struct { setup: []const u8, body: []const u8, word: []const u8 }{
+        .{ .setup = "500000 range wrap", .body = "group", .word = "group" },
+        .{ .setup = "[[]] 8000000 take wrap", .body = "(len) each", .word = "len" },
+        .{ .setup = "[1] 8000000 take 1 pair", .body = "(and) fold", .word = "and" },
+        .{ .setup = "[0] 8000000 take wrap", .body = "(or) fold1", .word = "or" },
+        .{ .setup = "[\"x\" [1]] [0] 8000000 take pair", .body = "at", .word = "at" },
+        .{ .setup = "\"x\" 8000000 str.repeat dup \"😀\" swap cat 1 drop pair", .body = "match?", .word = "match?" },
+        .{ .setup = "500000 range dup pair wrap", .body = "group-columns", .word = "group-columns" },
+        .{ .setup = "\"x\" 2000000 str.repeat dup pair wrap", .body = "group", .word = "group" },
+        .{ .setup = "[1] [0] 8000000 take wrap pair", .body = "'sum reduce-groups", .word = "reduce-groups" },
+        .{ .setup = "{0 1} [0] 2000000 take 0 3 pack", .body = "dict.at-or", .word = "dict.at-or" },
+    };
+    for (cases) |case| {
+        try expectOk(&runtime, case.setup);
+        const source = try std.fmt.allocPrint(std.testing.allocator, "({s}) @spawn dup 1 task.await-for pop dup task.cancel task.await " ++
+            "'err at dup 'kind at 'cancelled match? swap 'word at '{s} match?", .{ case.body, case.word });
+        defer std.testing.allocator.free(source);
+        try expectOk(&runtime, source);
+        if (runtime.stackItems()[0].int != 1 or runtime.stackItems()[1].int != 1)
+            std.log.err("column cancellation failed for {s}: cancelled={d}, word={d}", .{ case.body, runtime.stackItems()[0].int, runtime.stackItems()[1].int });
+        try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
+        try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[1].int);
+        try expectOk(&runtime, "pop pop [1 2] [[0 1]] 'sum reduce-groups first");
+        try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[0].int);
+        try expectOk(&runtime, "pop");
+    }
 }
 
 test "native: graceful shutdown has independent progress and joins cleanup once" {

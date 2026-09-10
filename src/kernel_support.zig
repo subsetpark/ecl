@@ -233,12 +233,14 @@ pub const OrderOp = enum {
     cmp,
     grade,
     group,
+    group_columns,
 
     pub fn spelling(self: OrderOp) []const u8 {
         return switch (self) {
             .cmp => "cmp",
             .grade => "grade",
             .group => "group",
+            .group_columns => "group-columns",
         };
     }
 };

@@ -5,13 +5,13 @@
 
 const builtin = @import("builtin");
 
-pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v5";
-pub const abi_version: u32 = 5;
+pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v7";
+pub const abi_version: u32 = 7;
 
 pub const max_error_message_bytes: u32 = 4096;
 pub const max_guest_scalar_bytes: u32 = 4096;
 pub const max_builder_slots: u32 = 1024;
-pub const max_continuation_state_bytes: u32 = 4096;
+pub const max_continuation_state_bytes: u32 = 8192;
 pub const max_continuation_alignment: u32 = 64;
 /// How deep a nested input read may address. The bound is what keeps one
 /// `read_path` call constant-cost — and, for recursive formats, keeps a
@@ -304,6 +304,13 @@ pub const ConsumeFn = *const fn (
 ) callconv(.c) HostStatus;
 pub const RequestYieldFn = *const fn (call_context: *anyopaque) callconv(.c) HostStatus;
 
+/// Bulk operations copy at most this many scalar units per invocation.
+pub const max_bulk_units: u32 = 256;
+pub const BulkKind = enum(u32) { integers, floats, char1, char2, char4, values, _ };
+pub const BulkAction = enum(u32) { stage, read_staged, append, append_candidate, finish, read_staged_forward, append_text_span, _ };
+pub const ReadUnitsFn = *const fn (*anyopaque, u32, u64, [*]u32, u32, *u32, *u32) callconv(.c) HostStatus;
+pub const BulkBuildFn = *const fn (*anyopaque, u32, BulkAction, BulkKind, u64, u32, [*]u64, u32, *Candidate) callconv(.c) HostStatus;
+
 pub const HostTable = extern struct {
     size: u32 = @sizeOf(HostTable),
     input: InputFn,
@@ -322,6 +329,8 @@ pub const HostTable = extern struct {
     build_dict_append: ?BuildDictAppendFn,
     build_dict_finish: ?BuildDictFinishFn,
     forward_path: ?ForwardPathFn = null,
+    read_units: ?ReadUnitsFn = null,
+    bulk_build: ?BulkBuildFn = null,
 };
 
 pub const Invoke = *const fn (
@@ -410,7 +419,7 @@ fn assertRecord(comptime T: type, comptime expected_size: usize, comptime expect
 
 comptime {
     @setEvalBranchQuota(8000);
-    if (@sizeOf(usize) != 8) @compileError("native ABI v5 supports 64-bit targets only");
+    if (@sizeOf(usize) != 8) @compileError("native ABI v7 supports 64-bit targets only");
 
     assertRecord(CapabilityRequirement, 8, 4);
     assertRecord(EffectSlot, 24, 8);
@@ -419,7 +428,7 @@ comptime {
     assertRecord(ValueView, 40, 8);
     assertRecord(Scalar, 32, 8);
     assertRecord(InvokeResult, 16, 8);
-    assertRecord(HostTable, 136, 8);
+    assertRecord(HostTable, 152, 8);
     assertRecord(Descriptor, 104, 8);
     assertRecord(PortDefinition, 96, 8);
     assertRecord(MessageBuildRequest, 72, 8);

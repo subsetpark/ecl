@@ -63,6 +63,23 @@
   ["a"] [] table.from-rows table.records len 0 equal)
  'conversions test
 
+ ### test whole-cells
+ (-- : "Transpose and gather whole heterogeneous cells, including empty schemas and string rows.")
+ ((["a" "long"] ["bc" "d"]) flip (["a" "bc"] ["long" "d"]) equal
+  ["ab" "cd"] flip ["ac" "bd"] equal
+  ["a" "b" "c"] ([1 [] {"x" 2}] ["long" [3 4] [[5] [6 7]]]) table.from-rows
+  dup {"a" [1 "long"] "b" [[] [3 4]] "c" [{"x" 2} [[5] [6 7]]]} equal
+  dup table.rows ([1 [] {"x" 2}] ["long" [3 4] [[5] [6 7]]]) equal
+  [0 1] table.where
+  {"a" ("long") "b" ([3 4]) "c" ([[5] [6 7]])} equal
+  ["a" "b"] ["ab" "cd"] table.from-rows
+  {"a" "ac" "b" "bd"} equal
+  ["a" "b"] [] table.from-rows [] table.where
+  {"a" [] "b" []} equal
+  (["a"] [1] table.from-rows) 'type "every row" raises-containing
+  (["a"] [[]] table.from-rows) 'shape "one cell per column" raises-containing)
+ 'whole-cells test
+
  ### test transformations
  (-- : "Transform tables while preserving schema and row order by policy.")
  ({"a" [1 2] "b" [3 4]} table.names ("a" "b") equal
@@ -182,7 +199,7 @@
   raises-containing
   ({"r" ["e"] "v" [1]} ["r"] [["t" "v"]] table.aggregate)
   'type
-  "[output-name input-name quotation]"
+  "[output-name input-name reducer]"
   raises-containing
   ({"r" ["e"] "v" [1]} ["r"] [["t" "v" (dup)]] table.aggregate)
   'contract
@@ -257,6 +274,33 @@
   raises-containing)
  'joins test
 
+ ### test array-joins-and-groups
+ (-- : "Preserve whole composite keys, stable duplicate order, fills, and empty join schemas.")
+ ({"k" ["long" "a" "long"] "s" [[1] [] [1]] "v" [10 20 30]}
+  ["k" "s"] [["sum" "v" (sum)]] table.aggregate
+  {"k" ["long" "a"] "s" [[1] []] "sum" [40 20]} equal
+  {"k" ["long" "a" "missing" "long"] "s" [[1] [] [] [1]] "v" [10 20 30 40]}
+  {"rk" ["a" "long" "long"] "rs" [[] [1] [1]] "label" ["A" "L1" "L2"]}
+  [["k" "rk"] ["s" "rs"]] {"label" []} table.left-join-with
+  {"k" ["long" "long" "a" "missing" "long" "long"]
+   "s" [[1] [1] [] [] [1] [1]] "v" [10 10 20 30 40 40]
+   "label" ["L1" "L2" "A" [] "L1" "L2"]} equal
+  {"k" [] "v" []} {"rk" [1] "label" ["a"]} [["k" "rk"]] table.inner-join
+  {"k" [] "v" [] "label" []} equal
+  {"k" [1 2]} {"rk" [] "label" []} [["k" "rk"]] table.inner-join
+  {"k" [] "label" []} equal
+  {"k" [1 2]} {"rk" [] "label" []} [["k" "rk"]]
+  {"label" {"missing" 1}} table.left-join-with
+  {"k" [1 2] "label" [{"missing" 1} {"missing" 1}]} equal
+  {"k" []} {"rk" [] "label" []} [["k" "rk"]] {"label" 0} table.left-join-with
+  {"k" [] "label" []} equal
+  {"k" [1 2 1] "v" [10 20 30]} {"rk" [1.0 1.0 2.0] "label" ["a" "b" "c"]}
+  [["k" "rk"]] table.inner-join
+  {"k" [1 1 2 1 1] "v" [10 10 20 30 30] "label" ["a" "b" "c" "a" "b"]} equal
+  {"k" [[1] [] [1]]} {"rk" [[] [1.0]] "v" [10 20]} [["k" "rk"]] table.inner-join
+  {"k" [[1] [] [1]] "v" [20 10 20]} equal)
+ 'array-joins-and-groups test
+
  ### test documentation
  (-- : "Expose documentation for every table module export.")
  (['table.valid? 'table.names 'table.height 'table.from-columns
@@ -266,4 +310,16 @@
    'table.aggregate 'table.inner-join 'table.left-join-with]
   documented)
  'documentation test
+
+ ### test symbol-aggregates
+ (-- : "Built-in reducer symbols coexist with quotations and are validated before execution.")
+ ({"k" [1 2 1] "v" [10 20 30]} ["k"]
+  [["s" "v" 'sum] ["n" "v" (len)] ["lo" "v" 'min] ["hi" "v" 'max]]
+  table.aggregate {"k" [1 2] "s" [40 20] "n" [2 1] "lo" [10 20] "hi" [30 20]} equal
+  ({"v" [1]} [] [["a" "v" ('user error.new raise)] ["b" "v" 'median]] table.aggregate)
+  'type "specification" raises-containing
+  {"v" []} [] [["s" "v" 'sum] ["n" "v" 'count]] table.aggregate
+  {"s" [0] "n" [0]} equal)
+ 'symbol-aggregates test
+
 ) 'stdlib.test.table @defm

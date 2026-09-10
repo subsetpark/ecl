@@ -1,18 +1,9 @@
 // zlint-disable homeless-try -- zlint 0.9.1 does not resolve the SDK's aliased error union; Zig validates every callback signature.
 //! The first-party `csv` module, authored against the public `ecl-native` SDK.
 //!
-//! Parsing is RFC 4180 with the frozen text-preserving policy: CRLF or LF
-//! record endings, quoted commas and newlines, doubled-quote escapes, and
-//! every field returned as a string. No header interpretation, no delimiter
-//! sniffing, no scalar inference.
-//!
-//! The shape of this file is dictated by two SDK contracts. Continuation
-//! state is fixed-size POD, so nothing about a field can be buffered across a
-//! yield; and aggregate builders are exact-size, so a field's length must be
-//! known before its first character is appended. Both are satisfied by
-//! keeping only *positions* between turns and re-deriving every count by
-//! rescanning from a position. Each rescan is bounded by the record or field
-//! it measures, so the whole parse stays linear in the input.
+//! A bounded lexical scan stages field spans by column. Final construction
+//! decodes those spans into typed leaves, retaining original input spellings
+//! until whole-column inference has settled. No row values are constructed.
 const std = @import("std");
 const ecl = @import("ecl-native");
 
@@ -21,13 +12,14 @@ pub const Extension = ecl.module(.{
     // Linked into this image rather than loaded from one, so the ABI entry
     // symbol stays free for a real extension.
     .linkage = .static,
-    .doc = "RFC 4180 comma-separated values, preserved as text.",
+    .doc = "RFC 4180 comma-separated values with columnar parsing.",
     .words = .{
         ecl.word(
             "parse",
-            "Parse RFC 4180 text into a list of records whose fields are all strings.",
+            "Parse CSV content and a positional schema into a list of columns.",
             parse,
         ),
+        ecl.word("parse-header", "Parse CSV content and a positional schema into headers followed by columns.", parseHeader),
         ecl.word(
             "emit",
             "Render records of string fields as canonical CRLF-terminated RFC 4180 text.",
@@ -36,91 +28,66 @@ pub const Extension = ecl.module(.{
     },
 });
 
-/// Where a field stopped. The distinction survives into the record loop: a
-/// comma means another field follows, and a record terminator means another
-/// record does.
+const max_columns = ecl.abi.max_builder_slots - 5;
+const header_spans = max_columns;
+const column_output = max_columns + 1;
+const field_output = max_columns + 2;
+const columns_output = max_columns + 3;
+const Type = enum(u8) { auto, int, float, text };
+const Column = struct { schema: Type = .auto, inferred: Type = .auto, exact: bool = true };
+const Mode = enum(u8) { start, bare, quoted, quote_seen, cr_seen };
 const Stop = enum(u8) { comma, record, input_end };
+const Phase = enum(u8) { schema, scan, stage, begin_columns, begin_column, span, span_text, numeric_flush, render, flush, append_field, close_column, finish };
 
-/// The quoting state machine's position within one field.
-const Mode = enum(u8) {
-    /// No character of the field has been read yet.
-    start,
-    /// Reading an unquoted field.
-    bare,
-    /// Reading the body of a quoted field.
-    quoted,
-    /// A quote was seen inside a quoted field; the next character decides
-    /// whether it escaped a quote or closed the field.
-    quote_seen,
-    /// A carriage return was consumed outside a quoted field. RFC 4180 ends
-    /// records with CRLF, so only a newline or end of input may follow.
-    /// Keeping this in the state means a yield can land mid-terminator.
-    cr_seen,
-};
-
-/// Builder slots. Nesting is three deep and each level is finished before its
-/// parent advances, so three fixed slots suffice: finishing a child hands its
-/// candidate to the parent, which releases the child's slot for reuse.
-const rows_slot: u32 = 0;
-const row_slot: u32 = 1;
-const field_slot: u32 = 2;
-
-const Phase = enum(u8) {
-    /// Scan the whole input, counting records.
-    count_records,
-    /// Scan one record, counting its fields.
-    count_fields,
-    /// Scan one field, counting its decoded characters.
-    measure_field,
-    /// Rescan the same field, appending its decoded characters.
-    fill_field,
-    /// Finish the field builder and append it to the record.
-    close_field,
-    /// Finish the record builder and append it to the row list.
-    close_record,
-    /// Finish the row list and complete the call.
-    finish,
+// Each descriptor keeps full-width offsets, decoded length, and numeric bits.
+// Compact scalar metadata avoids paying a separate staging word per flag.
+const SpanFlags = packed struct(u64) {
+    max_character: u32,
+    quoted: bool,
+    escaped: bool,
+    number_kind: enum(u2) { text, int, float },
+    reserved: u28 = 0,
 };
 
 const ParseWork = struct {
     pub const State = struct {
-        phase: Phase,
-        mode: Mode,
-        /// Codepoint index the active scan reads next.
-        scan: u64,
-        /// First codepoint of the record being measured or built.
-        record_start: u64,
-        /// First codepoint of the field being measured or built.
-        field_start: u64,
-        records: u64,
-        record_index: u64,
-        fields: u64,
-        field_index: u64,
-        characters: u64,
-        character_index: u64,
-        /// A character taken from the input whose append has not yet been
-        /// accepted. Scanning cannot be rewound — a doubled quote consumes two
-        /// input characters for one output character — so the character waits
-        /// here across a builder yield instead.
-        pending: u32,
-        has_pending: bool,
+        phase: Phase = .schema,
+        columns: [max_columns]Column = @splat(.{}),
+        schema_index: u32 = 0,
+        width: u32 = 0,
+        column: u32 = 0,
+        records: u64 = 0,
+        row: u64 = 0,
+        mode: Mode = .start,
+        stop: Stop = .input_end,
+        position: u64 = 0,
+        start: u64 = 0,
+        end: u64 = 0,
+        characters: u64 = 0,
+        max_character: u32 = 0,
+        cached_number: Number = .text,
+        converted: bool = false,
+        quoted: bool = false,
+        escaped: bool = false,
+        numeric: [256]u64,
+        numeric_len: u32 = 0,
+        token: NumericToken = NumericToken.init(),
+        cache: [256]u32,
+        cache_start: u64 = 0,
+        cache_len: u32 = 0,
+        input_mode: enum(u8) { unknown, bytes, text } = .unknown,
+        utf_remaining: u8 = 0,
+        utf_value: u32 = 0,
+        utf_min: u32 = 0,
+        rendering_header: bool = false,
+        rendered: u64 = 0,
+        pending: [128]u64,
+        pending_len: u32 = 0,
+        render_done: bool = false,
     };
     pub fn init() State {
-        return .{
-            .phase = .count_records,
-            .mode = .start,
-            .scan = 0,
-            .record_start = 0,
-            .field_start = 0,
-            .records = 0,
-            .record_index = 0,
-            .fields = 0,
-            .field_index = 0,
-            .characters = 0,
-            .character_index = 0,
-            .pending = 0,
-            .has_pending = false,
-        };
+        // SAFETY: cache_len and pending_len expose only prefixes written by the producer.
+        return .{ .cache = undefined, .pending = undefined, .numeric = undefined };
     }
     pub fn deinit(state: *State) void {
         state.* = undefined;
@@ -128,281 +95,537 @@ const ParseWork = struct {
 };
 const ParseSchedule = ecl.Reschedule(ParseWork);
 
-/// One step of the field scanner.
-const Step = union(enum) {
-    /// A decoded content character of the current field.
-    character: u32,
-    /// The field ended; `mode` is left at `.start` for the next field.
-    stop: Stop,
-    /// The budget ran out mid-field; the caller must yield.
-    exhausted,
-    /// The input is not the list the cursor needs.
-    invalid,
-    /// The quoting is malformed at `state.scan`.
-    malformed,
-};
+fn parse(call: *ecl.Call("input schema -- columns"), build: *ecl.BuildValues, schedule: *ParseSchedule) ecl.CallbackResult {
+    return parseColumns(false, call, build, schedule);
+}
+fn parseHeader(call: *ecl.Call("input schema -- headers columns"), build: *ecl.BuildValues, schedule: *ParseSchedule) ecl.CallbackResult {
+    return parseColumns(true, call, build, schedule);
+}
 
-/// Advances the scanner by one input character, which is where the budget is
-/// charged. `state.scan` and `state.mode` together are the whole resumable
-/// position, so a yield here loses nothing — including a yield that lands
-/// between the two halves of a CRLF.
-fn step(cursor: *ecl.ListCursor, state: *ParseWork.State, length: u64) Step {
+const Read = union(enum) { character: u32, end, exhausted, invalid, malformed };
+fn character(call: anytype, s: *ParseWork.State, limit: u64) error{OutOfMemory}!Read {
+    while (s.position < limit) {
+        if (s.position < s.cache_start or s.position >= s.cache_start + s.cache_len) {
+            const capacity: usize = @intCast(@min(limit - s.position, s.cache.len));
+            switch (try call.readUnits(0, s.position, s.cache[0..capacity])) {
+                .yield_required => return .exhausted,
+                .invalid => return .invalid,
+                .units => |units| {
+                    const mode: @TypeOf(s.input_mode) = if (units.bytes) .bytes else .text;
+                    if (s.input_mode != .unknown and s.input_mode != mode) return .invalid;
+                    s.input_mode = mode;
+                    s.cache_start = s.position;
+                    s.cache_len = units.count;
+                },
+            }
+        }
+        const unit = s.cache[@intCast(s.position - s.cache_start)];
+        s.position += 1;
+        if (s.input_mode == .text) return .{ .character = unit };
+        if (s.utf_remaining == 0) {
+            if (unit < 128) return .{ .character = unit };
+            if (unit >= 0xc2 and unit <= 0xdf) {
+                s.utf_remaining = 1;
+                s.utf_value = unit & 31;
+                s.utf_min = 128;
+            } else if (unit >= 0xe0 and unit <= 0xef) {
+                s.utf_remaining = 2;
+                s.utf_value = unit & 15;
+                s.utf_min = 2048;
+            } else if (unit >= 0xf0 and unit <= 0xf4) {
+                s.utf_remaining = 3;
+                s.utf_value = unit & 7;
+                s.utf_min = 65536;
+            } else return .malformed;
+        } else {
+            if (unit < 0x80 or unit > 0xbf) return .malformed;
+            s.utf_value = (s.utf_value << 6) | (unit & 63);
+            s.utf_remaining -= 1;
+            if (s.utf_remaining == 0) {
+                const cp = s.utf_value;
+                if (cp < s.utf_min or cp > 0x10ffff or (cp >= 0xd800 and cp <= 0xdfff)) return .malformed;
+                return .{ .character = cp };
+            }
+        }
+    }
+    return if (s.utf_remaining != 0) .malformed else .end;
+}
+
+const Scan = union(enum) { character: u32, field: Stop, exhausted, invalid, malformed };
+fn scan(call: anytype, s: *ParseWork.State, limit: u64) error{OutOfMemory}!Scan {
     while (true) {
-        if (state.scan == length) return switch (state.mode) {
-            // An unterminated quoted field is the one malformed input RFC
-            // 4180 leaves no room to interpret.
-            .quoted => .malformed,
-            .start, .bare, .quote_seen, .cr_seen => stop: {
-                state.mode = .start;
-                break :stop .{ .stop = .input_end };
+        const before = s.position;
+        const cp = switch (try character(call, s, limit)) {
+            .character => |cp| cp,
+            .end => {
+                if (s.mode == .quoted) return .malformed;
+                if (s.mode != .cr_seen) s.end = s.position;
+                return .{ .field = .input_end };
             },
-        };
-        const view = switch (cursor.next()) {
-            .item => |item| item,
-            .end => return .{ .stop = .input_end },
-            .yield_required => return .exhausted,
+            .exhausted => return .exhausted,
             .invalid => return .invalid,
+            .malformed => return .malformed,
         };
-        const codepoint = view.char() orelse return .invalid;
-        state.scan += 1;
-        switch (state.mode) {
-            .start => switch (codepoint) {
-                '"' => state.mode = .quoted,
-                ',' => return .{ .stop = .comma },
-                '\n' => return .{ .stop = .record },
-                '\r' => state.mode = .cr_seen,
-                else => {
-                    state.mode = .bare;
-                    return .{ .character = codepoint };
-                },
+        switch (s.mode) {
+            .cr_seen => return if (cp == '\n') .{ .field = .record } else .malformed,
+            .quoted => {
+                if (cp == '"') {
+                    s.mode = .quote_seen;
+                    continue;
+                }
+                return .{ .character = cp };
             },
-            .bare => switch (codepoint) {
-                // A quote may only open a field, never appear inside a bare
-                // one; RFC 4180 requires such a field to be quoted.
-                '"' => return .malformed,
-                ',' => {
-                    state.mode = .start;
-                    return .{ .stop = .comma };
-                },
-                '\n' => {
-                    state.mode = .start;
-                    return .{ .stop = .record };
-                },
-                '\r' => state.mode = .cr_seen,
-                else => return .{ .character = codepoint },
+            .quote_seen => {
+                if (cp == '"') {
+                    s.mode = .quoted;
+                    s.escaped = true;
+                    return .{ .character = cp };
+                }
+                if (cp != ',' and cp != '\r' and cp != '\n') return .malformed;
             },
-            .quoted => switch (codepoint) {
-                '"' => state.mode = .quote_seen,
-                // A quoted field may hold commas, quotes, and newlines alike.
-                else => return .{ .character = codepoint },
+            .start => {
+                if (cp == '"') {
+                    s.mode = .quoted;
+                    s.quoted = true;
+                    continue;
+                }
+                s.mode = .bare;
             },
-            .quote_seen => switch (codepoint) {
-                // A doubled quote is one literal quote.
-                '"' => {
-                    state.mode = .quoted;
-                    return .{ .character = '"' };
-                },
-                ',' => {
-                    state.mode = .start;
-                    return .{ .stop = .comma };
-                },
-                '\n' => {
-                    state.mode = .start;
-                    return .{ .stop = .record };
-                },
-                '\r' => state.mode = .cr_seen,
-                else => return .malformed,
-            },
-            .cr_seen => switch (codepoint) {
-                '\n' => {
-                    state.mode = .start;
-                    return .{ .stop = .record };
-                },
-                // A carriage return that terminates nothing is malformed
-                // rather than silently becoming data.
-                else => return .malformed,
+            .bare => if (cp == '"') {
+                return .malformed;
             },
         }
+        if (cp == ',' or cp == '\r' or cp == '\n') {
+            s.end = before;
+            if (cp == '\r') {
+                s.mode = .cr_seen;
+                continue;
+            }
+            return .{ .field = if (cp == ',') .comma else .record };
+        }
+        return .{ .character = cp };
     }
 }
 
-fn parse(
-    call: *ecl.Call("text -- rows"),
-    build: *ecl.BuildValues,
-    schedule: *ParseSchedule,
-) ecl.CallbackResult {
-    const view = call.input(0);
-    const length = view.aggregateLength() orelse
-        return call.fail(.type, "csv.parse expects a string");
-    const state = schedule.state();
-    while (true) {
-        switch (state.phase) {
-            // Slot 0's item count must be exact before the first record is
-            // appended, so the record total is measured by its own pass.
-            .count_records => {
+const Number = union(enum) { int: i64, float: f64, text };
+
+/// Decimal normalization bounds scratch space, not accepted field length.
+/// 768 significant digits cover binary64 rounding boundaries; a sticky digit
+/// preserves the direction of any remaining nonzero decimal tail.
+const NumericToken = struct {
+    mode: enum(u8) { start, sign, integer, point, fraction, exponent, exponent_sign, exponent_digits, bad } = .start,
+    negative: bool = false,
+    plus: bool = false,
+    leading_zero: bool = false,
+    integer_digits: u64 = 0,
+    integer: u64 = 0,
+    integer_overflow: bool = false,
+    fractional: i64 = 0,
+    exponent: i64 = 0,
+    exponent_negative: bool = false,
+    digits: [768]u8,
+    count: u16 = 0,
+    ignored: i64 = 0,
+    sticky: bool = false,
+
+    fn init() NumericToken {
+        // SAFETY: count exposes only digits initialized by digit().
+        return .{ .digits = undefined };
+    }
+
+    fn digit(self: *NumericToken, cp: u32, fractional: bool) void {
+        const d = cp - '0';
+        if (fractional) self.fractional += 1 else {
+            if (self.integer_digits == 0) self.leading_zero = d == 0;
+            self.integer_digits += 1;
+            if (!self.integer_overflow) {
+                const bound: u64 = @as(u64, 1) << 63;
+                if (self.integer > (bound - d) / 10) self.integer_overflow = true else self.integer = self.integer * 10 + d;
+            }
+        }
+        if (self.count == 0 and d == 0) return;
+        if (self.count < self.digits.len) {
+            self.digits[self.count] = @intCast(cp);
+            self.count += 1;
+        } else {
+            self.ignored += 1;
+            self.sticky = self.sticky or d != 0;
+        }
+    }
+    fn push(self: *NumericToken, cp: u32) void {
+        const is_digit = cp >= '0' and cp <= '9';
+        switch (self.mode) {
+            .bad => {},
+            .start, .sign => {
+                if (self.mode == .start and (cp == '+' or cp == '-')) {
+                    self.negative = cp == '-';
+                    self.plus = cp == '+';
+                    self.mode = .sign;
+                } else if (is_digit) {
+                    self.mode = .integer;
+                    self.digit(cp, false);
+                } else self.mode = .bad;
+            },
+            .integer => {
+                if (is_digit) self.digit(cp, false) else if (cp == '.') self.mode = .point else if (cp == 'e' or cp == 'E') self.mode = .exponent else self.mode = .bad;
+            },
+            .point, .fraction => {
+                if (is_digit) {
+                    self.mode = .fraction;
+                    self.digit(cp, true);
+                } else if (self.mode == .fraction and (cp == 'e' or cp == 'E')) self.mode = .exponent else self.mode = .bad;
+            },
+            .exponent, .exponent_sign, .exponent_digits => {
+                if (self.mode == .exponent and (cp == '+' or cp == '-')) {
+                    self.exponent_negative = cp == '-';
+                    self.mode = .exponent_sign;
+                } else if (is_digit) {
+                    self.exponent = @min(self.exponent * 10 + cp - '0', 1 << 40);
+                    self.mode = .exponent_digits;
+                } else self.mode = .bad;
+            },
+        }
+    }
+    fn result(self: *const NumericToken, conservative: bool) Number {
+        switch (self.mode) {
+            .integer, .fraction, .exponent_digits => {},
+            else => return .text,
+        }
+        if (conservative and (self.plus or (self.leading_zero and self.integer_digits > 1))) return .text;
+        if (self.mode == .integer) {
+            const bound: u64 = if (self.negative) @as(u64, 1) << 63 else std.math.maxInt(i64);
+            if (!self.integer_overflow and self.integer <= bound) {
+                if (conservative and self.negative and self.integer == 0) return .text;
+                const magnitude: i128 = self.integer;
+                return .{ .int = @intCast(if (self.negative) -magnitude else magnitude) };
+            }
+            if (conservative) return .text;
+        }
+        if (self.count == 0) return .{ .float = if (self.negative) -0.0 else 0.0 };
+        var buffer: [832]u8 = undefined;
+        var index: usize = 0;
+        if (self.negative) {
+            buffer[index] = '-';
+            index += 1;
+        }
+        @memcpy(buffer[index..][0..self.count], self.digits[0..self.count]);
+        index += self.count;
+        var exponent = (if (self.exponent_negative) -self.exponent else self.exponent) - self.fractional + self.ignored;
+        if (self.sticky) {
+            buffer[index] = '1';
+            index += 1;
+            exponent -= 1;
+        }
+        const suffix = std.fmt.bufPrint(buffer[index..], "e{d}", .{exponent}) catch @panic("bounded decimal rendering exceeded scratch buffer");
+        const value = std.fmt.parseFloat(f64, buffer[0 .. index + suffix.len]) catch return .text;
+        if (!std.math.isFinite(value)) return .text;
+        return .{ .float = value };
+    }
+};
+fn remember(s: *ParseWork.State, cp: u32) void {
+    s.token.push(cp);
+}
+fn number(s: *const ParseWork.State, conservative: bool) Number {
+    return s.token.result(conservative);
+}
+fn exactFloat(integer: i64) bool {
+    const converted: f64 = @floatFromInt(integer);
+    return @as(i128, @intFromFloat(converted)) == integer;
+}
+fn refine(column: *Column, result: Number) void {
+    if (column.inferred == .text) return;
+    switch (result) {
+        .text => column.inferred = .text,
+        .int => |integer| {
+            column.exact = column.exact and exactFloat(integer);
+            if (column.inferred == .auto) column.inferred = .int;
+            if (column.inferred == .float and !column.exact) column.inferred = .text;
+        },
+        .float => column.inferred = if (column.exact) .float else .text,
+    }
+}
+fn failure(call: anytype, s: *const ParseWork.State, kind: ecl.ErrorKind, reason: []const u8) ecl.CallbackResult {
+    var buffer: [192]u8 = undefined;
+    const message = std.fmt.bufPrint(&buffer, "csv: {s} at record {d}, column {d}", .{ reason, s.records + 1, s.column + 1 }) catch reason;
+    return call.fail(kind, message);
+}
+fn textKind(maximum: u32) ecl.BulkKind {
+    return if (maximum <= 255) .char1 else if (maximum <= 65535) .char2 else .char4;
+}
+fn columnType(s: *const ParseWork.State) Type {
+    if (s.rendering_header) return .text;
+    const col = s.columns[s.column];
+    return if (col.schema != .auto) col.schema else if (col.inferred == .auto) .text else col.inferred;
+}
+fn outputKind(s: *const ParseWork.State) ecl.BulkKind {
+    return switch (columnType(s)) {
+        .int => .integers,
+        .float => .floats,
+        else => .values,
+    };
+}
+fn resetField(s: *ParseWork.State) void {
+    s.mode = .start;
+    s.start = s.position;
+    s.characters = 0;
+    s.max_character = 0;
+    s.token = NumericToken.init();
+    s.converted = false;
+    s.cached_number = .text;
+    s.quoted = false;
+    s.escaped = false;
+}
+
+fn parseColumns(comptime header: bool, call: anytype, build: *ecl.BuildValues, schedule: *ParseSchedule) ecl.CallbackResult {
+    const s = schedule.state();
+    if (call.input(0).kind() != .list or call.input(1).kind() != .list) return call.fail(.type, "csv expects content and a schema list");
+    const length = call.input(0).aggregateLength().?;
+    const schema_len = call.input(1).aggregateLength().?;
+    if (schema_len > max_columns) return call.fail(.shape, "csv exceeds the native column limit");
+    while (true) switch (s.phase) {
+        .schema => {
+            if (s.schema_index == schema_len) {
                 if (length == 0) {
-                    state.records = 0;
-                    state.phase = .finish;
-                    continue;
+                    if (header) return call.fail(.shape, "csv.parse-header requires a header record");
+                    s.width = @intCast(schema_len);
+                    s.phase = .begin_columns;
+                } else s.phase = .scan;
+                continue;
+            }
+            const cursor = call.listCursor(1, s.schema_index).?;
+            switch (cursor.next()) {
+                .yield_required => return schedule.yield(),
+                .item => |item| {
+                    if (item.kind() != .symbol) return call.fail(.domain, "csv schema entries must be auto, int, float, or text symbols");
+                    const name = item.bytes().?;
+                    s.columns[s.schema_index].schema = std.meta.stringToEnum(Type, name) orelse return call.fail(.domain, "csv schema entries must be auto, int, float, or text symbols");
+                    s.schema_index += 1;
+                },
+                else => return call.fail(.domain, "csv schema is unreadable"),
+            }
+        },
+        .scan => {
+            if (s.column >= max_columns) return call.fail(.shape, "csv exceeds the native column limit");
+            switch (try scan(call, s, length)) {
+                .exhausted => return schedule.yield(),
+                .invalid => return failure(call, s, .type, "expected text or UTF-8 bytes"),
+                .malformed => return failure(call, s, .parse, "malformed quoting or UTF-8"),
+                .character => |cp| {
+                    s.characters += 1;
+                    s.max_character = @max(s.max_character, cp);
+                    const col = s.columns[s.column];
+                    if (!(header and s.records == 0) and col.schema != .text and !(col.schema == .auto and col.inferred == .text)) remember(s, cp);
+                },
+                .field => |stop| {
+                    s.stop = stop;
+                    s.phase = .stage;
+                },
+            }
+        },
+        .stage => {
+            const is_header = header and s.records == 0;
+            const col = &s.columns[s.column];
+            if (!is_header and !s.converted) {
+                if (col.schema == .auto and col.inferred != .text) {
+                    if (!schedule.consume(@as(u32, s.token.count) + 32)) return schedule.yield();
+                    s.cached_number = number(s, true);
+                    refine(col, s.cached_number);
+                } else if (col.schema != .auto and col.schema != .text) {
+                    if (!schedule.consume(@as(u32, s.token.count) + 32)) return schedule.yield();
+                    const result = number(s, false);
+                    s.cached_number = result;
+                    if (result == .text or (col.schema == .int and result != .int)) return failure(call, s, .parse, "numeric schema conversion failed");
                 }
-                const cursor = call.listCursor(0, state.scan) orelse
-                    return call.fail(.type, "csv.parse expects a string");
-                switch (step(cursor, state, length)) {
-                    .malformed => return malformed(call, state),
-                    .invalid => return call.fail(.shape, "csv.parse cursor became invalid"),
-                    .exhausted => return schedule.yield(),
-                    .character => {},
-                    .stop => |stop| switch (stop) {
-                        .comma => {},
-                        .record => {
-                            state.records += 1;
-                            state.record_start = state.scan;
-                        },
-                        // A trailing terminator opens no record, which is
-                        // exactly the case where the scan sits at the record
-                        // start it just set.
-                        .input_end => {
-                            if (state.scan != state.record_start) state.records += 1;
-                            state.scan = 0;
-                            state.record_start = 0;
-                            state.mode = .start;
-                            state.phase = .count_fields;
-                        },
-                    },
-                }
-            },
-            .count_fields => {
-                const cursor = call.listCursor(0, state.scan) orelse
-                    return call.fail(.type, "csv.parse expects a string");
-                switch (step(cursor, state, length)) {
-                    .malformed => return malformed(call, state),
-                    .invalid => return call.fail(.shape, "csv.parse cursor became invalid"),
-                    .exhausted => return schedule.yield(),
-                    .character => {},
-                    .stop => |stop| {
-                        state.fields += 1;
-                        switch (stop) {
-                            .comma => {},
-                            .record, .input_end => {
-                                state.scan = state.record_start;
-                                state.field_start = state.record_start;
-                                state.field_index = 0;
-                                state.characters = 0;
-                                state.mode = .start;
-                                state.phase = .measure_field;
-                            },
-                        }
-                    },
-                }
-            },
-            .measure_field => {
-                const cursor = call.listCursor(0, state.scan) orelse
-                    return call.fail(.type, "csv.parse expects a string");
-                switch (step(cursor, state, length)) {
-                    .malformed => return malformed(call, state),
-                    .invalid => return call.fail(.shape, "csv.parse cursor became invalid"),
-                    .exhausted => return schedule.yield(),
-                    .character => state.characters += 1,
-                    .stop => {
-                        state.scan = state.field_start;
-                        state.character_index = 0;
-                        state.mode = .start;
-                        state.phase = .fill_field;
-                    },
-                }
-            },
-            // The fill runs to the field's terminator rather than to its
-            // character count, so `scan` lands past the separator and the
-            // next field starts where it should.
-            .fill_field => {
-                if (state.has_pending) {
-                    const item = try build.scalar(ecl.Scalar.char(state.pending));
-                    switch (try build.appendList(field_slot, state.characters, item)) {
-                        .appended => {
-                            state.has_pending = false;
-                            state.character_index += 1;
-                        },
-                        .yield_required => return schedule.yield(),
-                        .invalid => return call.fail(.domain, "csv.parse field builder was rejected"),
-                    }
-                    continue;
-                }
-                const cursor = call.listCursor(0, state.scan) orelse
-                    return call.fail(.type, "csv.parse expects a string");
-                switch (step(cursor, state, length)) {
-                    .malformed => return malformed(call, state),
-                    .invalid => return call.fail(.shape, "csv.parse cursor became invalid"),
-                    .exhausted => return schedule.yield(),
-                    .stop => state.phase = .close_field,
-                    .character => |codepoint| {
-                        if (state.character_index == state.characters)
-                            return call.fail(.shape, "csv.parse field length changed");
-                        state.pending = codepoint;
-                        state.has_pending = true;
-                    },
-                }
-            },
-            .close_field => {
-                if (state.character_index != state.characters)
-                    return call.fail(.shape, "csv.parse field length changed");
-                const field = switch (try build.finishList(field_slot, state.characters)) {
-                    .candidate => |candidate| candidate,
+            }
+            s.converted = true;
+            const flags = SpanFlags{
+                .max_character = s.max_character,
+                .quoted = s.quoted,
+                .escaped = s.escaped,
+                .number_kind = switch (s.cached_number) {
+                    .text => .text,
+                    .int => .int,
+                    .float => .float,
+                },
+            };
+            const number_bits: u64 = switch (s.cached_number) {
+                .text => 0,
+                .int => |v| @bitCast(v),
+                .float => |v| @bitCast(v),
+            };
+            switch (try build.stage(if (is_header) header_spans else s.column, &.{ s.start, s.end, s.characters, @bitCast(flags), number_bits })) {
+                .yield_required => return schedule.yield(),
+                .invalid => return call.fail(.domain, "csv span staging rejected"),
+                .appended => {},
+            }
+            s.column += 1;
+            if (s.stop != .comma) {
+                if (s.records == 0) s.width = s.column;
+                if (s.column != s.width or (schema_len != 0 and schema_len != s.width)) return failure(call, s, .shape, "record or schema width mismatch");
+                s.records += 1;
+                s.column = 0;
+            }
+            s.phase = if (s.stop == .input_end or (s.stop == .record and s.position == length)) .begin_columns else .scan;
+            resetField(s);
+        },
+        .begin_columns => {
+            s.column = 0;
+            s.rendering_header = header;
+            s.phase = .begin_column;
+        },
+        .begin_column => {
+            s.row = if (s.rendering_header) s.width else s.records - @intFromBool(header);
+            s.phase = .span;
+        },
+        .span => {
+            if (s.row == 0) {
+                s.phase = .close_column;
+                continue;
+            }
+            var span: [5]u64 = undefined;
+            switch (try build.readStagedForward(if (s.rendering_header) header_spans else s.column, &span)) {
+                .yield_required => return schedule.yield(),
+                .invalid => return call.fail(.domain, "csv span read rejected"),
+                .appended => {},
+            }
+            s.position = span[0];
+            resetField(s);
+            s.end = span[1];
+            s.characters = span[2];
+            const flags: SpanFlags = @bitCast(span[3]);
+            s.max_character = flags.max_character;
+            s.quoted = flags.quoted;
+            s.escaped = flags.escaped;
+            s.cached_number = switch (flags.number_kind) {
+                .int => .{ .int = @bitCast(span[4]) },
+                .float => .{ .float = @bitCast(span[4]) },
+                .text => .text,
+            };
+            s.pending_len = 0;
+            s.rendered = 0;
+            s.render_done = false;
+            s.phase = if (columnType(s) != .text) .append_field else if (!s.escaped) .span_text else .render;
+        },
+        .span_text => {
+            const count = if (s.rendering_header) s.width else s.records - @intFromBool(header);
+            const target = if (s.rendering_header) max_columns + 4 else column_output;
+            const padding: u64 = @intFromBool(s.quoted);
+            switch (try build.appendTextSpan(target, count, 0, s.start + padding, s.end - s.start - 2 * padding, s.characters, textKind(s.max_character))) {
+                .yield_required => return schedule.yield(),
+                .invalid => return call.fail(.parse, "csv staged text span is invalid"),
+                .appended => {},
+            }
+            s.row -= 1;
+            s.phase = .span;
+        },
+        .numeric_flush => {
+            const count = s.records - @intFromBool(header);
+            switch (try build.appendBulk(column_output, outputKind(s), count, false, s.numeric[0..s.numeric_len])) {
+                .yield_required => return schedule.yield(),
+                .invalid => return call.fail(.domain, "csv numeric append rejected"),
+                .appended => {},
+            }
+            s.numeric_len = 0;
+            s.phase = .span;
+        },
+        .render => {
+            switch (try scan(call, s, s.end)) {
+                .exhausted => return schedule.yield(),
+                .invalid, .malformed => return call.fail(.parse, "csv staged field is invalid"),
+                .field => {
+                    s.render_done = true;
+                    s.phase = .flush;
+                },
+                .character => |cp| {
+                    if (columnType(s) == .text) {
+                        s.pending[s.pending_len] = cp;
+                        s.pending_len += 1;
+                        if (s.pending_len == s.pending.len) s.phase = .flush;
+                    } else remember(s, cp);
+                },
+            }
+        },
+        .flush => {
+            if (columnType(s) == .text and s.pending_len != 0) {
+                switch (try build.appendBulk(field_output, textKind(s.max_character), s.characters, false, s.pending[0..s.pending_len])) {
                     .yield_required => return schedule.yield(),
-                    .invalid => return call.fail(.domain, "csv.parse field builder was rejected"),
-                };
-                switch (try build.appendList(row_slot, state.fields, field)) {
+                    .invalid => return call.fail(.domain, "csv text append rejected"),
                     .appended => {},
-                    .yield_required => return schedule.yield(),
-                    .invalid => return call.fail(.domain, "csv.parse record builder was rejected"),
                 }
-                state.field_index += 1;
-                // The scan already sits just past this field's terminator.
-                state.field_start = state.scan;
-                state.characters = 0;
-                state.character_index = 0;
-                state.mode = .start;
-                state.phase = if (state.field_index == state.fields) .close_record else .measure_field;
-            },
-            .close_record => {
-                const record = switch (try build.finishList(row_slot, state.fields)) {
+                s.rendered += s.pending_len;
+                s.pending_len = 0;
+            }
+            s.phase = if (s.render_done) .append_field else .render;
+        },
+        .append_field => {
+            const count = if (s.rendering_header) s.width else s.records - @intFromBool(header);
+            const target = if (s.rendering_header) max_columns + 4 else column_output;
+            if (columnType(s) == .text) {
+                const candidate = switch (try build.finishBulk(field_output, textKind(s.max_character), s.characters, false)) {
+                    .yield_required => return schedule.yield(),
+                    .invalid => return call.fail(.domain, "csv text finish rejected"),
                     .candidate => |candidate| candidate,
-                    .yield_required => return schedule.yield(),
-                    .invalid => return call.fail(.domain, "csv.parse record builder was rejected"),
                 };
-                switch (try build.appendList(rows_slot, state.records, record)) {
-                    .appended => {},
+                switch (try build.appendBulkValue(target, count, false, candidate)) {
                     .yield_required => return schedule.yield(),
-                    .invalid => return call.fail(.domain, "csv.parse row builder was rejected"),
+                    .invalid => return call.fail(.domain, "csv column append rejected"),
+                    .appended => {},
                 }
-                state.record_index += 1;
-                if (state.record_index == state.records) {
-                    state.phase = .finish;
-                    continue;
-                }
-                state.record_start = state.scan;
-                state.field_start = state.scan;
-                state.fields = 0;
-                state.field_index = 0;
-                state.mode = .start;
-                state.phase = .count_fields;
-            },
-            .finish => return switch (try build.finishList(rows_slot, state.records)) {
-                .candidate => |candidate| call.complete(.{candidate}),
-                .yield_required => schedule.yield(),
-                .invalid => call.fail(.domain, "csv.parse row builder was rejected"),
-            },
-        }
-    }
-}
-
-fn malformed(call: anytype, state: *ParseWork.State) ecl.CallbackResult {
-    var buffer: [96]u8 = undefined;
-    const message = std.fmt.bufPrint(
-        &buffer,
-        "csv.parse found malformed quoting at character {d}",
-        .{state.scan},
-    ) catch "csv.parse found malformed quoting";
-    return call.fail(.parse, message);
+            } else {
+                const result = s.cached_number;
+                const bits: u64 = if (columnType(s) == .int) @bitCast(result.int) else @bitCast(switch (result) {
+                    .int => |v| @as(f64, @floatFromInt(v)),
+                    .float => |v| v,
+                    .text => unreachable,
+                });
+                s.numeric[s.numeric_len] = bits;
+                s.numeric_len += 1;
+                s.row -= 1;
+                s.phase = if (s.numeric_len == s.numeric.len or s.row == 0) .numeric_flush else .span;
+                continue;
+            }
+            s.row -= 1;
+            s.phase = .span;
+        },
+        .close_column => {
+            if (s.rendering_header) {
+                s.rendering_header = false;
+                s.phase = if (s.width == 0) .finish else .begin_column;
+                continue;
+            }
+            if (s.column == s.width) {
+                s.phase = .finish;
+                continue;
+            }
+            const candidate = switch (try build.finishBulk(column_output, outputKind(s), s.records - @intFromBool(header), false)) {
+                .yield_required => return schedule.yield(),
+                .invalid => return call.fail(.domain, "csv column finish rejected"),
+                .candidate => |candidate| candidate,
+            };
+            switch (try build.appendList(columns_output, s.width, candidate)) {
+                .yield_required => return schedule.yield(),
+                .invalid => return call.fail(.domain, "csv columns append rejected"),
+                .appended => {},
+            }
+            s.column += 1;
+            s.phase = if (s.column == s.width) .finish else .begin_column;
+        },
+        .finish => {
+            const columns = switch (try build.finishList(columns_output, s.width)) {
+                .yield_required => return schedule.yield(),
+                .invalid => return call.fail(.domain, "csv columns finish rejected"),
+                .candidate => |candidate| candidate,
+            };
+            if (header) {
+                const headers = switch (try build.finishBulk(max_columns + 4, .values, s.width, false)) {
+                    .yield_required => return schedule.yield(),
+                    .invalid => return call.fail(.domain, "csv headers finish rejected"),
+                    .candidate => |candidate| candidate,
+                };
+                return call.complete(.{ headers, columns });
+            } else return call.complete(.{columns});
+        },
+    };
 }
 
 /// Emission is the mirror of parsing and inherits the same two constraints:

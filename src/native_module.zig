@@ -276,6 +276,7 @@ pub const ModuleInstance = opaque {
             result.build_list_finish = null;
             result.build_dict_append = null;
             result.build_dict_finish = null;
+            result.bulk_build = null;
         }
         if (!self.hasCapability(.reschedule)) {
             result.continuation_state = null;
@@ -285,6 +286,7 @@ pub const ModuleInstance = opaque {
             result.dict_at = null;
             result.read_path = null;
             result.forward_path = null;
+            result.read_units = null;
         }
         return result;
     }

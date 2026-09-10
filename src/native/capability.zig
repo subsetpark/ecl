@@ -313,6 +313,61 @@ pub const BuildValues = opaque {
         return self.state().invocation.makeCandidate(item);
     }
 
+    /// Fixed-chunk staging of scalar words. Once either read mode starts, no
+    /// more words may be appended. The host owns storage through call teardown.
+    /// Each operation is atomic on yield; allocation failure terminates the call.
+    pub fn stage(self: *BuildValues, slot: u32, words: []const u64) error{OutOfMemory}!BuildAppendResult {
+        var unused: abi.Candidate = 0;
+        return self.bulk(slot, .stage, .integers, 0, false, @constCast(words), &unused);
+    }
+
+    /// Reads the last unread group, preserving order within the group.
+    pub fn readStaged(self: *BuildValues, slot: u32, words: []u64) error{OutOfMemory}!BuildAppendResult {
+        var unused: abi.Candidate = 0;
+        return self.bulk(slot, .read_staged, .integers, 0, false, words, &unused);
+    }
+
+    /// Reads the next group in input order. Choosing a read mode seals the
+    /// stream, and subsequent reads must use that same mode.
+    pub fn readStagedForward(self: *BuildValues, slot: u32, words: []u64) error{OutOfMemory}!BuildAppendResult {
+        var unused: abi.Candidate = 0;
+        return self.bulk(slot, .read_staged_forward, .integers, 0, false, words, &unused);
+    }
+
+    pub fn appendBulk(self: *BuildValues, slot: u32, kind: abi.BulkKind, count: u64, reverse: bool, words: []const u64) error{OutOfMemory}!BuildAppendResult {
+        var unused: abi.Candidate = 0;
+        return self.bulk(slot, .append, kind, count, reverse, @constCast(words), &unused);
+    }
+
+    /// Consumes the candidate's builder on success only, like appendList.
+    pub fn appendBulkValue(self: *BuildValues, slot: u32, count: u64, reverse: bool, item: Candidate) error{OutOfMemory}!BuildAppendResult {
+        var wire = @intFromEnum(item);
+        return self.bulk(slot, .append_candidate, .values, count, reverse, &.{}, &wire);
+    }
+
+    /// Append a contiguous text or UTF-8 span to a forward generic column.
+    /// Length and character-width hints are validated by the host. Retry the
+    /// identical request after yield; no value is appended until decoding ends.
+    pub fn appendTextSpan(self: *BuildValues, slot: u32, count: u64, input_index: u32, start: u64, length: u64, decoded_length: u64, width: abi.BulkKind) error{OutOfMemory}!BuildAppendResult {
+        var unused: abi.Candidate = 0;
+        var request = [_]u64{ input_index, start, length, decoded_length, @intFromEnum(width) };
+        return self.bulk(slot, .append_text_span, .values, count, false, &request, &unused);
+    }
+
+    pub fn finishBulk(self: *BuildValues, slot: u32, kind: abi.BulkKind, count: u64, reverse: bool) error{OutOfMemory}!BuildResult {
+        var output: abi.Candidate = 0;
+        return switch (try self.bulk(slot, .finish, kind, count, reverse, &.{}, &output)) {
+            .appended => .{ .candidate = @enumFromInt(output) },
+            .yield_required => .yield_required,
+            .invalid => .invalid,
+        };
+    }
+
+    fn bulk(self: *BuildValues, slot: u32, action: abi.BulkAction, kind: abi.BulkKind, count: u64, reverse: bool, words: []u64, output: *abi.Candidate) error{OutOfMemory}!BuildAppendResult {
+        if (words.len > abi.max_bulk_units) return .invalid;
+        return buildAppendResult((self.state().invocation.host.bulk_build orelse unreachable)(self.state().invocation.context, slot, action, kind, count, @intFromBool(reverse), words.ptr, @intCast(words.len), output));
+    }
+
     /// Append one value to a host-owned, exact-size list builder. `slot` is a
     /// logical identifier stored safely in continuation state; it is not a
     /// pointer or host handle. Repeating the same slot and count resumes the
@@ -495,11 +550,15 @@ fn validateContinuationState(comptime State: type) void {
     if (State == Candidate or State == ValueView or State == BuildValues)
         @compileError("ecl-native: Reschedule State cannot embed an ephemeral capability");
     switch (@typeInfo(State)) {
-        .bool, .int, .float, .@"enum" => {},
+        .void, .bool, .int, .float, .@"enum" => {},
         .array => |array| validateContinuationState(array.child),
         .optional => |optional| validateContinuationState(optional.child),
         .@"struct" => |record| inline for (record.fields) |field|
             validateContinuationState(field.type),
+        .@"union" => |tagged| {
+            if (tagged.tag_type == null) @compileError("ecl-native: Reschedule unions must be tagged");
+            inline for (tagged.fields) |field| validateContinuationState(field.type);
+        },
         else => @compileError(
             "ecl-native: Reschedule State must contain only owned scalar value fields",
         ),

@@ -15,6 +15,212 @@ const value = @import("value.zig");
 const Value = value.Value;
 const BuilderKind = enum { list, dict };
 
+/// The transaction owns the entire chain. Cursor and backward links borrow
+/// from that owner; retirement detaches one chunk per scheduler step.
+const ScalarStage = struct {
+    const Chunk = struct {
+        retirement: heap.ReleaseDomain.Retirement = .{},
+        next: ?*Chunk = null,
+        previous: ?*Chunk = null,
+        words: [256]u64,
+        len: usize = 0,
+
+        pub fn advanceRetirement(domain: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *Chunk) bool {
+            if (self.next) |next| domain.retire(next, &next.retirement);
+            allocator.destroy(self);
+            return true;
+        }
+    };
+    const Cursor = struct { chunk: *Chunk, index: usize };
+    first: *Chunk,
+    state: union(enum) { writing: *Chunk, forward: Cursor, reverse: Cursor },
+
+    fn init(call: *Transaction) error{OutOfMemory}!ScalarStage {
+        const first = try call.allocator.create(Chunk);
+        // SAFETY: len exposes only words initialized by append.
+        first.* = .{ .words = undefined };
+        return .{ .first = first, .state = .{ .writing = first } };
+    }
+    fn append(self: *ScalarStage, call: *Transaction, words: []const u64) error{OutOfMemory}!bool {
+        if (self.state != .writing) return false;
+        for (words) |word| {
+            if (self.state.writing.len == 256) {
+                const next = try call.allocator.create(Chunk);
+                // SAFETY: len exposes only words initialized by append.
+                next.* = .{ .previous = self.state.writing, .words = undefined };
+                self.state.writing.next = next;
+                self.state.writing = next;
+            }
+            const chunk = self.state.writing;
+            chunk.words[chunk.len] = word;
+            chunk.len += 1;
+        }
+        return true;
+    }
+    fn read(self: *ScalarStage, words: []u64, forward: bool) bool {
+        if (self.state == .writing) {
+            const tail = self.state.writing;
+            self.state = if (forward)
+                .{ .forward = .{ .chunk = self.first, .index = 0 } }
+            else
+                .{ .reverse = .{ .chunk = tail, .index = tail.len } };
+        }
+        if (forward != (self.state == .forward)) return false;
+        var cursor = if (forward) self.state.forward else self.state.reverse;
+        for (0..words.len) |i| {
+            if (forward) {
+                if (cursor.index == cursor.chunk.len) {
+                    cursor.chunk = cursor.chunk.next orelse return false;
+                    cursor.index = 0;
+                }
+                words[i] = cursor.chunk.words[cursor.index];
+                cursor.index += 1;
+            } else {
+                if (cursor.index == 0) {
+                    cursor.chunk = cursor.chunk.previous orelse return false;
+                    cursor.index = cursor.chunk.len;
+                }
+                cursor.index -= 1;
+                words[words.len - i - 1] = cursor.chunk.words[cursor.index];
+            }
+        }
+        self.state = if (forward) .{ .forward = cursor } else .{ .reverse = cursor };
+        return true;
+    }
+    fn retire(self: *ScalarStage, releases: *heap.ReleaseDomain) void {
+        releases.retire(self.first, &self.first.retirement);
+    }
+};
+
+const BulkList = struct {
+    kind: abi.BulkKind,
+    expected: usize,
+    reverse: bool,
+    appended: usize = 0,
+    text_span: ?TextSpan = null,
+    state: union(enum) {
+        preparing: heap.AnyListBuilder,
+        writing: heap.AnyListBuilder,
+        complete: Value,
+    },
+
+    fn init(allocator: std.mem.Allocator, kind: abi.BulkKind, count: usize, reverse: bool) error{OutOfMemory}!BulkList {
+        const representation: value.HeapKind = switch (kind) {
+            .integers => .leaf_i64,
+            .floats => .leaf_f64,
+            .char1 => .leaf_char1,
+            .char2 => .leaf_char2,
+            .char4 => .leaf_char4,
+            .values => .generic_spine,
+            else => unreachable,
+        };
+        const builder = try heap.AnyListBuilder.init(allocator, representation, if (kind == .values) 0 else count, count);
+        return .{ .kind = kind, .expected = count, .reverse = reverse, .state = if (kind == .values and reverse) .{ .preparing = builder } else .{ .writing = builder } };
+    }
+    fn prepare(self: *BulkList, call: *Transaction) bool {
+        if (self.state != .preparing) return true;
+        const builder = &self.state.preparing.generic;
+        while (builder.len() != self.expected) {
+            if (charge(call, 1) != .ok) return false;
+            const i = builder.len();
+            builder.items()[i] = .{ .int = 0 };
+            builder.setLen(i + 1);
+        }
+        const prepared = self.state.preparing;
+        self.state = .{ .writing = prepared };
+        return true;
+    }
+    fn write(self: *BulkList, item: Value) bool {
+        if (self.state != .writing or self.appended == self.expected) return false;
+        const index = if (self.reverse) self.expected - self.appended - 1 else self.appended;
+        self.state.writing.writeValue(index, item);
+        self.appended += 1;
+        if (self.kind == .values) self.state.writing.generic.setLen(if (self.reverse) self.expected else self.appended);
+        return true;
+    }
+    fn retire(self: *BulkList, releases: *heap.ReleaseDomain) void {
+        if (self.text_span) |*span| span.builder.retirePartial(releases);
+        switch (self.state) {
+            .preparing, .writing => |*builder| builder.retirePartial(releases),
+            .complete => |result| releases.releaseValue(result),
+        }
+    }
+};
+
+/// Partial decoding belongs to the output transaction, including on retry and
+/// cancellation. Input coordinates identify a borrow from its pinned operands.
+const TextSpan = struct {
+    request: [5]u64,
+    builder: heap.AnyListBuilder,
+    position: usize = 0,
+    written: usize = 0,
+    byte_mode: ?bool = null,
+    remaining: u8 = 0,
+    codepoint: u32 = 0,
+    minimum: u32 = 0,
+
+    fn advance(self: *TextSpan, call: *Transaction) abi.HostStatus {
+        // SAFETY: hostReadUnits initializes exactly the returned prefix.
+        var units: [abi.max_bulk_units]u32 = undefined;
+        var n: u32 = 0;
+        var byte_wire: u32 = 0;
+        const capacity: u32 = @intCast(@min(units.len, self.request[2] - self.position));
+        const status = hostReadUnits(call, @intCast(self.request[0]), self.request[1] + self.position, &units, capacity, &n, &byte_wire);
+        if (status != .ok) return status;
+        const bytes = byte_wire != 0;
+        if (n != 0) {
+            if (self.byte_mode) |mode| {
+                if (mode != bytes) return .invalid;
+            } else self.byte_mode = bytes;
+        }
+        for (units[0..n]) |unit| {
+            self.position += 1;
+            var cp = unit;
+            if (bytes) {
+                if (self.remaining != 0) {
+                    if (unit < 0x80 or unit > 0xbf) return .invalid;
+                    self.codepoint = (self.codepoint << 6) | (unit & 63);
+                    self.remaining -= 1;
+                    if (self.remaining != 0) continue;
+                    cp = self.codepoint;
+                    if (cp < self.minimum) return .invalid;
+                } else if (unit >= 128) {
+                    if (unit >= 0xc2 and unit <= 0xdf) {
+                        self.remaining = 1;
+                        self.codepoint = unit & 31;
+                        self.minimum = 128;
+                    } else if (unit >= 0xe0 and unit <= 0xef) {
+                        self.remaining = 2;
+                        self.codepoint = unit & 15;
+                        self.minimum = 2048;
+                    } else if (unit >= 0xf0 and unit <= 0xf4) {
+                        self.remaining = 3;
+                        self.codepoint = unit & 7;
+                        self.minimum = 65536;
+                    } else return .invalid;
+                    continue;
+                }
+            }
+            if (cp > 0x10ffff or (cp >= 0xd800 and cp <= 0xdfff) or self.written == self.request[3]) return .invalid;
+            const maximum: u32 = switch (self.builder) {
+                .char1 => 255,
+                .char2 => 65535,
+                .char4 => 0x10ffff,
+                else => unreachable,
+            };
+            if (cp > maximum) return .invalid;
+            self.builder.writeCodepoint(self.written, cp);
+            self.written += 1;
+        }
+        if (self.position != self.request[2]) {
+            call.yield_requested = true;
+            return .yield_required;
+        }
+        if (self.remaining != 0 or self.written != self.request[3]) return .invalid;
+        return .ok;
+    }
+};
+
 const BuilderOrigin = struct {
     slot: u32,
     serial: u32,
@@ -245,9 +451,11 @@ const DictBuild = struct {
 
 const AggregateBuilder = struct {
     serial: u32,
-    value: union(BuilderKind) {
+    value: union(enum) {
         list: ListBuild,
         dict: DictBuild,
+        stage: ScalarStage,
+        bulk: BulkList,
     },
 
     fn retire(self: *AggregateBuilder, releases: *heap.ReleaseDomain) void {
@@ -411,6 +619,7 @@ const Transaction = struct {
             const matches = switch (existing.value) {
                 .list => |builder_value| kind == .list and builder_value.expected == expected,
                 .dict => |builder_value| kind == .dict and builder_value.expected == expected,
+                .stage, .bulk => false,
             };
             if (!matches) return error.Invalid;
             return existing;
@@ -532,6 +741,8 @@ const full_host_table = abi.HostTable{
     .read_path = hostReadPath,
     .build_list_append = hostBuildListAppend,
     .build_list_finish = hostBuildListFinish,
+    .read_units = hostReadUnits,
+    .bulk_build = hostBulkBuild,
     .build_dict_append = hostBuildDictAppend,
     .build_dict_finish = hostBuildDictFinish,
     .forward_path = hostForwardPath,
@@ -584,6 +795,188 @@ fn hostInput(
     if (index >= call.definition.effect.inputs) return .invalid;
     const item = call.activeEvaluator().nativeInputBorrowed(call.definition.effect.inputs, index);
     return writeView(call, item, output);
+}
+
+fn hostReadUnits(context: *anyopaque, input_index: u32, start: u64, output: [*]u32, capacity: u32, count: *u32, bytes: *u32) callconv(.c) abi.HostStatus {
+    const call = transactionFrom(context);
+    if (call.terminal != .idle or call.continuation == null or capacity > abi.max_bulk_units or input_index >= call.definition.effect.inputs) return .invalid;
+    const source = call.activeEvaluator().nativeInputBorrowed(call.definition.effect.inputs, input_index);
+    if (source != .list or start > source.list.length()) return .invalid;
+    const n: u32 = @intCast(@min(capacity, source.list.length() - start));
+    if (charge(call, @max(n, 1)) != .ok) return .yield_required;
+    const offset: usize = @intCast(start);
+    switch (source.list.kind()) {
+        .leaf_u8, .leaf_char1, .leaf_char2, .leaf_char4 => |kind| {
+            switch (kind) {
+                .leaf_u8 => for (heap.u8s(source.list)[offset..][0..n], 0..) |unit, i| {
+                    output[i] = unit;
+                },
+                .leaf_char1 => for (heap.chars8(source.list)[offset..][0..n], 0..) |unit, i| {
+                    output[i] = unit;
+                },
+                .leaf_char2 => for (heap.chars16(source.list)[offset..][0..n], 0..) |unit, i| {
+                    output[i] = unit;
+                },
+                .leaf_char4 => @memcpy(output[0..n], heap.chars32(source.list)[offset..][0..n]),
+                else => unreachable,
+            }
+            count.* = n;
+            bytes.* = @intFromBool(kind == .leaf_u8);
+            return .ok;
+        },
+        .leaf_i64 => {
+            for (heap.i64s(source.list)[offset..][0..n], 0..) |unit, i| {
+                if (unit < 0 or unit > 255) return .invalid;
+                output[i] = @intCast(unit);
+            }
+            count.* = n;
+            bytes.* = 1;
+            return .ok;
+        },
+        else => {},
+    }
+    var byte_mode: ?bool = null;
+    for (0..n) |i| {
+        const item = list.atUnchecked(source, @as(usize, @intCast(start)) + i);
+        const is_byte = item == .int;
+        if (byte_mode) |mode| {
+            if (mode != is_byte) return .invalid;
+        } else byte_mode = is_byte;
+        output[i] = switch (item) {
+            .int => |v| if (v >= 0 and v <= 255) @intCast(v) else return .invalid,
+            .char => |v| v,
+            else => return .invalid,
+        };
+    }
+    count.* = n;
+    bytes.* = @intFromBool(byte_mode orelse false);
+    return .ok;
+}
+
+fn hostBulkBuild(context: *anyopaque, slot: u32, action: abi.BulkAction, kind: abi.BulkKind, count_wire: u64, reverse_wire: u32, words: [*]u64, n: u32, output: *abi.Candidate) callconv(.c) abi.HostStatus {
+    const call = transactionFrom(context);
+    if (call.terminal != .idle or slot >= abi.max_builder_slots or n > abi.max_bulk_units or reverse_wire > 1) return .invalid;
+    const count = std.math.cast(usize, count_wire) orelse return .invalid;
+    if (count >= std.math.maxInt(u32)) return .invalid;
+    switch (kind) {
+        .integers, .floats, .char1, .char2, .char4, .values => {},
+        else => return .invalid,
+    }
+    switch (action) {
+        .stage, .read_staged, .read_staged_forward, .append_text_span, .append, .append_candidate, .finish => {},
+        else => return .invalid,
+    }
+    if (charge(call, @max(n, 1)) != .ok) return .yield_required;
+    const staged = action == .stage or action == .read_staged or action == .read_staged_forward;
+    if (call.builders[slot] == null) {
+        const aggregate = call.allocator.create(AggregateBuilder) catch return .out_of_memory;
+        aggregate.* = .{ .serial = call.next_builder_serial, .value = if (staged)
+            .{ .stage = ScalarStage.init(call) catch {
+                call.allocator.destroy(aggregate);
+                return .out_of_memory;
+            } }
+        else
+            .{ .bulk = BulkList.init(call.allocator, kind, count, reverse_wire != 0) catch {
+                call.allocator.destroy(aggregate);
+                return .out_of_memory;
+            } } };
+        call.next_builder_serial +%= 1;
+        if (call.next_builder_serial == 0) call.next_builder_serial = 1;
+        call.builders[slot] = aggregate;
+    }
+    const aggregate = call.builders[slot].?;
+    if (staged) {
+        if (aggregate.value != .stage) return .invalid;
+        const success = if (action == .stage)
+            aggregate.value.stage.append(call, words[0..n]) catch return .out_of_memory
+        else
+            aggregate.value.stage.read(words[0..n], action == .read_staged_forward);
+        return if (success) .ok else .invalid;
+    }
+    if (aggregate.value != .bulk) return .invalid;
+    const builder = &aggregate.value.bulk;
+    if (builder.kind != kind or builder.expected != count or builder.reverse != (reverse_wire != 0)) return .invalid;
+    if (!builder.prepare(call)) return .yield_required;
+    if (builder.text_span != null and action != .append_text_span) return .invalid;
+    switch (action) {
+        .append => {
+            if (kind == .values or builder.state != .writing or n > count - builder.appended) return .invalid;
+            for (words[0..n]) |word| switch (kind) {
+                .char1 => if (word > 255) {
+                    return .invalid;
+                },
+                .char2 => if (word > 65535 or (word >= 0xd800 and word <= 0xdfff)) {
+                    return .invalid;
+                },
+                .char4 => if (word > 0x10ffff or (word >= 0xd800 and word <= 0xdfff)) {
+                    return .invalid;
+                },
+                else => {},
+            };
+            switch (builder.state.writing) {
+                inline .i64, .f64, .char1, .char2, .char4 => |*typed| {
+                    for (words[0..n], 0..) |word, i| {
+                        const index = if (builder.reverse) count - builder.appended - i - 1 else builder.appended + i;
+                        const Element = @TypeOf(typed.items()[index]);
+                        typed.items()[index] = if (Element == i64 or Element == f64) @bitCast(word) else @intCast(word);
+                    }
+                },
+                else => unreachable,
+            }
+            builder.appended += n;
+        },
+        .append_text_span => {
+            if (kind != .values or reverse_wire != 0 or n != 5 or builder.state != .writing or builder.appended == count) return .invalid;
+            const request = words[0..5];
+            if (request[0] >= call.definition.effect.inputs) return .invalid;
+            const source = call.activeEvaluator().nativeInputBorrowed(call.definition.effect.inputs, @intCast(request[0]));
+            if (source != .list or request[1] > source.list.length() or request[2] > source.list.length() - request[1] or request[3] >= std.math.maxInt(u32)) return .invalid;
+            const representation: value.HeapKind = switch (request[4]) {
+                @intFromEnum(abi.BulkKind.char1) => .leaf_char1,
+                @intFromEnum(abi.BulkKind.char2) => .leaf_char2,
+                @intFromEnum(abi.BulkKind.char4) => .leaf_char4,
+                else => return .invalid,
+            };
+            if (builder.text_span == null) {
+                builder.text_span = .{
+                    .request = request.*,
+                    .builder = heap.AnyListBuilder.init(call.allocator, representation, @intCast(request[3]), @intCast(request[3])) catch return .out_of_memory,
+                };
+            }
+            const span = &builder.text_span.?;
+            if (!std.mem.eql(u64, &span.request, request)) return .invalid;
+            const status = span.advance(call);
+            if (status != .ok) return status;
+            // Decoding charged every unit before mutation; this final transfer
+            // is O(1) and cannot yield after consuming the completed string.
+            const text: Value = .{ .list = span.builder.finish() };
+            builder.text_span = null;
+            if (!builder.write(text)) unreachable;
+            call.releases.releaseValue(text);
+        },
+        .append_candidate => {
+            if (kind != .values) return .invalid;
+            const item = call.candidate(output.*) orelse return .invalid;
+            // A builder cannot consume itself through a candidate alias.
+            if (item.origin) |origin| if (origin.slot == slot) return .invalid;
+            if (!builder.write(item.value)) return .invalid;
+            call.consumeOrigin(item.origin);
+        },
+        .finish => {
+            if (builder.appended != count) return .invalid;
+            if (builder.state == .writing) {
+                const finished: Value = .{ .list = builder.state.writing.finish() };
+                builder.state = .{ .complete = finished };
+            }
+            const result = builder.state.complete;
+            heap.retainValue(result);
+            const status = call.appendCandidate(result, .{ .slot = slot, .serial = aggregate.serial });
+            if (status == .ok) output.* = call.candidateWire();
+            return status;
+        },
+        else => unreachable,
+    }
+    return .ok;
 }
 
 fn hostListAt(
@@ -777,7 +1170,7 @@ fn hostBuildListAppend(
     if (charge(call, 1) != .ok) return .yield_required;
     const appended = switch (aggregate.value) {
         .list => |*builder| builder.append(item.value),
-        .dict => unreachable,
+        else => unreachable,
     };
     if (!appended) return .invalid;
     call.consumeOrigin(item.origin);
@@ -798,7 +1191,7 @@ fn hostBuildListFinish(
     };
     const result = switch (aggregate.value) {
         .list => |*builder| builder.advance(call) catch return .out_of_memory,
-        .dict => unreachable,
+        else => unreachable,
     } orelse return if (call.yield_requested) .yield_required else .invalid;
     heap.retainValue(result);
     const status = call.appendCandidate(result, .{ .slot = slot, .serial = aggregate.serial });
@@ -824,7 +1217,7 @@ fn hostBuildDictAppend(
     if (charge(call, 1) != .ok) return .yield_required;
     const appended = switch (aggregate.value) {
         .dict => |*builder| builder.append(key.value, item.value),
-        .list => unreachable,
+        else => unreachable,
     };
     if (!appended) return .invalid;
     call.consumeOrigin(key.origin);
@@ -846,7 +1239,7 @@ fn hostBuildDictFinish(
     };
     const result = switch (aggregate.value) {
         .dict => |*builder| builder.advance(call) catch return .out_of_memory,
-        .list => unreachable,
+        else => unreachable,
     } orelse return if (call.yield_requested) .yield_required else .invalid;
     heap.retainValue(result);
     const status = call.appendCandidate(result, .{ .slot = slot, .serial = aggregate.serial });
