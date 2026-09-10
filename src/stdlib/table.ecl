@@ -376,8 +376,8 @@
  ### defp join-matches
  (left right pairs -- matches : "Look up grouped composite keys and restore left-row order.")
  (|left right pairs|
-  left pairs (first) each selected-groups
-  right pairs (1 at) each selected-groups
+  left pairs (first) each group-keys
+  right pairs (1 at) each group-keys
   ordered-matches) 'join-matches defp
 
  ### defp fill-matches

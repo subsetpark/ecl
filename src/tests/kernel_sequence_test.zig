@@ -84,6 +84,36 @@ test "sequence: at gathers list string and dict indices" {
     );
 }
 
+test "sequence: flat generic gathers preserve whole cells repeats and narrowing" {
+    try helper.expectStack(
+        "[\"λ😀\" [1 2] {'a 3} 7] [2 0 1 0] at " ++
+            "[\"unused\" 7 9] [2 1 2] at " ++
+            "[\"unused\"] \"aλ\" cat [2 1] at " ++
+            "[\"x\" [1]] [] at " ++
+            "[\"x\" [1]] [0] 513 take at len",
+        "({'a 3} \"λ😀\" [1 2] \"λ😀\") [9 7 9] \"λa\" () 513",
+    );
+    try helper.expectErrors(&.{
+        .{ .name = "generic gather negative", .source = "[\"x\" [1]] [0 -1] at", .kind = "domain", .word = "at", .message = "at index is negative" },
+        .{ .name = "generic gather bounds", .source = "[\"x\" [1]] [1 2] at", .kind = "domain", .word = "at", .message = "at index is out of bounds" },
+    });
+}
+
+test "sequence: fold and fold1 boolean and numeric results" {
+    try helper.expectStack(
+        "[1 0 1] 1 (and) fold [0 0 1] 0 (or) fold " ++
+            "[1 0 1] (and) fold1 [0 0 1] (or) fold1 " ++
+            "[1 2 3] (+) fold1 [5] (or) fold1 [] 7 (and) fold " ++
+            "[10 3 2] (-) fold1",
+        "0 1 0 1 6 5 7 5",
+    );
+    try helper.expectErrors(&.{
+        .{ .name = "empty fold1", .source = "[] (or) fold1", .kind = "domain" },
+        .{ .name = "and validates later values", .source = "[0 2] 1 (and) fold", .kind = "type", .word = "and" },
+        .{ .name = "or validates later values", .source = "[1 2] (or) fold1", .kind = "type", .word = "or" },
+    });
+}
+
 test "sequence: where, in?, and find validate and search" {
     try helper.expectStack(
         "[1 0 1 0] where [0 2 0] first-where [0 0] first-where [] first-where " ++

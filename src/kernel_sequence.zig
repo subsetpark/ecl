@@ -93,6 +93,16 @@ fn atPrimitive(evaluator: *Machine) MachineError!void {
             .gather,
             @intCast(index.borrow().list.length()),
         )) return;
+        if (collection.borrow() == .list and index.borrow().list.length() != 0) {
+            const count: usize = @intCast(index.borrow().list.length());
+            const values = try heap.OwnedValueBuffer.init(evaluator.releaseDomain(), count);
+            return evaluator.startDriver(FlatGatherDriver{
+                .source = .init(collection.take()),
+                .indices = .init(index.take()),
+                .values = .init(values),
+                .cursor = kernel_flat.FlatCursor.init(count),
+            });
+        }
     }
     // A scalar index into a list is the cursor's own leaf case, reached in one
     // step with no state to carry. `IndexCursor` allocates a frame stack and a
@@ -145,6 +155,40 @@ const IndexDriver = struct {
     pub fn advance(evaluator: *Machine, self: *IndexDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (try self.cursor.borrowMut().advance(evaluator, machine.kernel_poll_quantum)) {
+            .pending => .yielded,
+            .complete => |result| .{ .output = result },
+        };
+    }
+};
+
+/// Integer selectors address whole cells, even when the cells have structure.
+/// Materialization retains the ordinary indexing path's narrowing semantics.
+const FlatGatherDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+    source: heap.Owned(Value),
+    indices: heap.Owned(Value),
+    values: heap.Owned(heap.OwnedValueBuffer),
+    cursor: kernel_flat.FlatCursor,
+    materializer: ?heap.Owned(list.ValueMaterializer) = null,
+
+    pub fn advance(evaluator: *Machine, self: *FlatGatherDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        if (try self.cursor.nextRange(.{ .evaluator = evaluator })) |range| {
+            const source = self.source.borrow();
+            for (range.start..range.end) |index| {
+                const position = list.atUnchecked(self.indices.borrow(), index).int;
+                if (position < 0) return evaluator.fail(.domain, "at index is negative");
+                const offset = std.math.cast(usize, position) orelse
+                    return evaluator.fail(.domain, "at index is out of bounds");
+                if (offset >= source.list.length()) return evaluator.fail(.domain, "at index is out of bounds");
+                self.values.borrowMut().appendBorrowed(list.atUnchecked(source, offset));
+            }
+            return .yielded;
+        }
+        if (!self.cursor.complete()) return .yielded;
+        if (self.materializer == null)
+            self.materializer = .init(.initOwned(evaluator.allocator(), self.values.borrowMut().take()));
+        return switch (try self.materializer.?.borrowMut().advance(machine.kernel_poll_quantum)) {
             .pending => .yielded,
             .complete => |result| .{ .output = result },
         };

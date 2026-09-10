@@ -934,6 +934,10 @@ fn stdlibSessionAllocationProbe(
             "oom-column-primitives.ecl",
             "[[1 2] [\"a\" \"b\"]] group-columns pop " ++
                 "[[1] []] (len) each pop " ++
+                "[\"a\" [1]] [1 0 1] at pop " ++
+                "[\"a\" 2] [1] at pop " ++
+                "[1 0] 1 (and) fold pop [0 1] (or) fold1 pop " ++
+                "[1 2] (pair) fold1 pop " ++
                 "[\"λ😀\" \"λ😀\"] group pop " ++
                 "[[1 1] [\"a\" \"a\"]] group-columns dup dict.keys [] dict.at-or pop " ++
                 "[1 2] [[0 1] []] 'sum reduce-groups pop " ++

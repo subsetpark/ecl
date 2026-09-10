@@ -436,3 +436,77 @@ Cancellation tests cover active string hashing, mixed-width string comparison,
 and the recognized length map, followed by Session reuse. The complete grouped
 aggregate and 144,226,682-byte serialized join result have identical SHA-256
 hashes before and after; `result-equivalence.json` retains the evidence.
+
+### Boolean reductions, generic gathers, and join keys — 2026-09-10
+
+Compared against `cc41a0d`, using Zig 0.16.0 ReleaseSafe on macOS 26.6.2
+arm64 with `ECL_WORKERS=1`. The fixed inputs remain `metal_bands.csv`
+(183,397 rows, seven columns) and `all_bands_discography.csv` (636,801 rows,
+six columns). Each workload used one warmup process and three measured
+processes. No builds or tests ran alongside timing measurements; every
+measurement process exited 0. Parsing precedes the stage timers.
+
+A standalone join, without the stage experiment's retained intermediate
+structures, produces 638,937 rows and twelve columns:
+
+| Standalone join | Before | After |
+|---|---:|---:|
+| Median join time | 661 ms | 241 ms |
+| Output throughput | 0.97 million rows/s | 2.65 million rows/s |
+| Median process peak RSS | 1,009 MiB | 801 MiB |
+
+The join is about 2.74× faster with 21% lower peak RSS. Measured times were
+658/661/662 ms before and 241/241/242 ms after. RSS comes from `/usr/bin/time
+-l` and includes CSV loading, the retained result, and process teardown;
+the join timer excludes CSV loading and final teardown. These times are not
+directly interchangeable with the earlier retained-intermediate stage runs.
+
+Repeating the previous hotspot stage script gives these medians:
+
+| Stage | Before (ms) | After (ms) |
+|---|---:|---:|
+| Composite numeric left grouping | 166 | 81 |
+| Composite numeric right grouping | 206 | 99 |
+| Composite numeric dictionary lookup | 158 | 20 |
+| Individual generic/text output column gather | 35–37 | 4–6 |
+| Individual numeric output column gather | 0–1 | 1 |
+| Standalone boolean mask fold | 695 | <1 |
+| Filter gather | 32 | 4 |
+| Complete `table.where` | 534 | 14 |
+| Country grouping | 32 | 20 |
+| Country/status grouping | 54 | 38 |
+
+The composite-key rows deliberately retain the old key shape to exercise
+shared cursor improvements. Production single-column joins now use scalar
+keys. Filtering selects even Band IDs. Sub-millisecond stage values are
+below the timer's resolution; stage times are not additive because intermediate
+lifetimes differ. The retained-intermediate whole-join samples were more
+variable, so the standalone join above is the primary end-to-end comparison.
+
+Recognized reductions over eight million elements, with ten reductions per
+measurement batch, use the same typed loop for `fold` and `fold1`:
+
+| Reducer | `fold` median per reduction | `fold1` median per reduction |
+|---|---:|---:|
+| `and`, alternating 0/1 bytes | 6.7 ms | 5.8 ms |
+| `or`, alternating 0/1 bytes | 8.5 ms | 6.9 ms |
+| `+`, integer range | 18.2 ms | 18.2 ms |
+
+`fold1` does not copy the input tail. Boolean reductions still validate every
+operand, including values after a determining zero or one. Generic gathers
+transfer completed generic storage directly; the shared materializer retains
+narrowing behavior for selected scalar values.
+
+`zig build precommit -Doptimize=ReleaseSafe -j4`, the differential suite,
+`test-ecl`, `test-snapshots`, focused column-primitive cancellation/session
+reuse, and initialized-Session column-primitive OOM coverage passed. The
+standalone scalar-composite cursor test also passed in ReleaseSafe with
+allocation disabled and an exhausted shared work budget. Deliberately wrong
+boolean-idiom and list-key join assertions failed their selected differential
+and language suites; both were restored before final verification.
+
+The complete grouped aggregate (23,295 bytes) and serialized join
+(144,226,682 bytes) match the baseline byte-for-byte. Raw runs, input and
+executable SHA-256 hashes, scripts, output comparisons, and verification
+records are in `/tmp/ecl-hotspots-implementation/`. The earlier stage baseline
+is retained in `/tmp/ecl-hotspots-pass/`.

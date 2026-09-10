@@ -316,7 +316,7 @@
 ### def fold1
 (list quotation -- value :
  "Reduce a nonempty list from its first element rather than from an explicit accumulator.")
-(|xs quotation| xs uncons swap quotation fold) 'fold1 def
+(swap uncons swap rolldown fold) 'fold1 def
 
 ### def scan1
 (list quotation -- list :

@@ -2771,7 +2771,7 @@ fn unexpectedReduceShape(evaluator: *Machine) MachineError {
     return evaluator.fail(.domain, "typed reduction reached an unclassified operand shape");
 }
 
-pub const IdiomReduceStart = *const fn (*Machine, Value, Value, bool) MachineError!void;
+pub const IdiomReduceStart = *const fn (*Machine, Value, Value, bool, usize, usize) MachineError!void;
 
 /// Starts the typed reduction. The caller has guarded with
 /// `typedReduceCandidate`, so this asserts rather than reporting a second
@@ -2784,6 +2784,8 @@ pub fn idiomReduceStart(operation: BinaryOp) IdiomReduceStart {
                 input: Value,
                 initial: Value,
                 scan: bool,
+                start: usize,
+                consumed: usize,
             ) MachineError!void {
                 const element_class = leafNumber(input).?;
                 const accumulator_class = scalarNumber(initial).?;
@@ -2811,7 +2813,7 @@ pub fn idiomReduceStart(operation: BinaryOp) IdiomReduceStart {
                                     .integer => .{ .integer = initial.int },
                                     .real => .{ .real = initial.float },
                                 },
-                                .cursor = flat.FlatCursor.init(length),
+                                .cursor = .{ .index = start, .length = length },
                             };
                             var held_locally = true;
                             errdefer if (held_locally) state.retire(evaluator.releaseDomain());
@@ -2838,7 +2840,7 @@ pub fn idiomReduceStart(operation: BinaryOp) IdiomReduceStart {
                                     return evaluator.startDriver(TypedReduceDriver{
                                         .state = .init(state),
                                         .step = step,
-                                        .consumed = 3,
+                                        .consumed = consumed,
                                     });
                                 }
                             }

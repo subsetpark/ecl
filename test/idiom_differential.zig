@@ -24,7 +24,12 @@ test "every idiom entry hits across values empties spines floats and failures" {
         inline for (std.meta.tags(Variant)) |variant| {
             const source = try sourceFor(entry, variant);
             defer allocator.free(source);
-            compareExecutions(source) catch |err| {
+            const comparison = if (variant != .empty and (entry.context == .fold1 or
+                (entry.operation == .direct and entry.operation.direct == .fold1)))
+                compareReductionModes(source)
+            else
+                compareExecutions(source);
+            comparison catch |err| {
                 std.log.err("idiom {d} variant {s} failed for `{s}`", .{ index, @tagName(variant), source });
                 return err;
             };
@@ -126,6 +131,7 @@ fn sourceFor(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {
                     phrase,
                 },
             ),
+            .fold1 => std.fmt.allocPrint(allocator, "{s} ({s}) fold1", .{ reductionInput(variant), phrase }),
             .fold, .scan => std.fmt.allocPrint(
                 allocator,
                 "{s} {s} ({s}) {s}",
@@ -346,6 +352,8 @@ fn reductionInitial(operation: ecl.kernels.numeric.BinaryOp) []const u8 {
         .mul => "1",
         .min => "10",
         .max => "0",
+        .and_word => "1",
+        .or_word => "0",
         else => unreachable,
     };
 }
@@ -372,6 +380,13 @@ fn sortInput(variant: Variant) []const u8 {
 
 fn directInput(operation: ecl.idioms.DirectOp, variant: Variant) []const u8 {
     return switch (operation) {
+        .fold1 => switch (variant) {
+            .atom => "[1 2 3] (+)",
+            .empty => "[] (+)",
+            .spine => "[[1] [2]] (+)",
+            .float => "[0.1 -0.0 0.2] (+)",
+            .failure => "[1 'bad] (+)",
+        },
         .sort => sortInput(variant),
         .find => switch (variant) {
             .atom => "[1 2 1] 2",
@@ -458,6 +473,17 @@ fn expectValueEquivalent(left: ecl.value.Value, right: ecl.value.Value) !void {
 /// expectValueEquivalent), rendered representation, and — unlike the
 /// exhaustive harness above — the complete error dict on failure.
 fn compareModesExactly(source: []const u8) !void {
+    return compareModes(source, true);
+}
+
+// Generic source-defined boolean words blame their internal `not`, whereas
+// the existing scalar idiom blames `and`/`or`. Compare their error contract
+// independently of that pre-existing difference in execution-site metadata.
+fn compareReductionModes(source: []const u8) !void {
+    return compareModes(source, false);
+}
+
+fn compareModes(source: []const u8, exact_errors: bool) !void {
     var automatic_heap: SessionHeap = .init;
     defer retireHeap(&automatic_heap);
     var generic_heap: SessionHeap = .init;
@@ -469,6 +495,16 @@ fn compareModesExactly(source: []const u8) !void {
 
     try std.testing.expectEqual(generic.failure != null, automatic.failure != null);
     if (automatic.failure) |automatic_failure| {
+        if (!exact_errors) {
+            for ([_][]const u8{ "kind", "msg" }) |name| {
+                const key: ecl.value.Value = .{ .symbol = try ecl.intern.intern(name) };
+                try expectValueEquivalent(
+                    (try ecl.dict.get(generic.failure.?, key)).?,
+                    (try ecl.dict.get(automatic_failure, key)).?,
+                );
+            }
+            return;
+        }
         var automatic_rendered = try automatic.runtime.renderValue(automatic_failure);
         defer automatic_rendered.deinit();
         var generic_rendered = try generic.runtime.renderValue(generic.failure.?);
@@ -579,6 +615,8 @@ fn expectHits(source: []const u8, expected: u64) !void {
     defer retireHeap(&heap);
     var run = try execute(source, .automatic, heap.allocator());
     defer run.deinit();
+    if (expected != run.runtime.lastIdiomHits())
+        std.log.err("idiom hit count for {s}: expected {d}, got {d}", .{ source, expected, run.runtime.lastIdiomHits() });
     try std.testing.expectEqual(expected, run.runtime.lastIdiomHits());
 }
 
@@ -599,4 +637,26 @@ test "idioms: length each preserves errors dictionaries shadowing and generated 
     for (cases) |source| try compareModesExactly(source);
     try expectHits("[[1] []] (len) each", 1);
     try expectHits("(pop 99) 'len def [[1] []] (len) each", 0);
+}
+
+test "idioms: boolean folds and fold1 preserve seeds errors and bindings" {
+    for ([_][]const u8{
+        "[1 0 1] 1 (and) fold",                   "[0 0 1] 0 (or) fold",
+        "[1 0 1] (and) fold1",                    "[0 0 1] (or) fold1",
+        "[] 'seed (and) fold",                    "[7] (and) fold1",
+        "[1 2] (and) fold1",                      "[0 2] (or) fold1",
+        "[[1 0] [0 1]] (or) fold1",               "[1 'bad] 0 (and) fold",
+        "[1 'bad] 1 (or) fold",                   "[1.0 0.0] (and) fold1",
+        "[9223372036854775807 1] (+) fold1",      "[1 2 3] (-) fold1",
+        "[1 2] (pop pop) fold1",                  "[1 2] (pair) fold1",
+        "(pop pop 9) 'and def [1 0] (and) fold1", "(pop pop 9) 'or def [0 0] 0 (or) fold",
+        "(pop 1) 'not def [1 0] 1 (and) fold",    "(pop pop 7) 'fold1 def [1 0] (and) fold1",
+    }) |source| compareReductionModes(source) catch |err| {
+        std.log.err("reduction comparison failed for {s}", .{source});
+        return err;
+    };
+    try expectHits("[1 0 1] 1 (and) fold", 1);
+    try expectHits("[0 0 1] 0 (or) fold", 1);
+    try expectHits("[1 0 1] (and) fold1", 1);
+    try expectHits("[0 0 1] (or) fold1", 1);
 }

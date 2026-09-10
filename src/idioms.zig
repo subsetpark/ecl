@@ -17,7 +17,7 @@ const Value = value.Value;
 const Machine = machine.Machine;
 const MachineError = machine.MachineError;
 
-pub const Context = enum { direct, each, zip_with, fold, scan };
+pub const Context = enum { direct, each, zip_with, fold, fold1, scan };
 pub const DirectOp = enum {
     sort,
     first,
@@ -27,6 +27,7 @@ pub const DirectOp = enum {
     distinct,
     dip,
     str_format,
+    fold1,
 
     pub fn spelling(self: DirectOp) []const u8 {
         return switch (self) {
@@ -190,10 +191,17 @@ const str_format_pattern = [_]PatternAtom{
         .origin = .candidate_module,
     } },
 };
+const fold1_pattern = [_]PatternAtom{
+    .{ .word = .{ .spelling = "swap" } },
+    .{ .word = .{ .spelling = "uncons", .binding = .source } },
+    .{ .word = .{ .spelling = "swap" } },
+    .{ .word = .{ .spelling = "rolldown", .binding = .source } },
+    .{ .word = .{ .spelling = "fold" } },
+};
 const unary_count = std.meta.fields(numeric.UnaryOp).len;
 const binary_count = std.meta.fields(numeric.BinaryOp).len;
 pub const registry = blk: {
-    var entries: [unary_count + binary_count * 5 + 5 + 8 + 16]RegistryEntry = undefined;
+    var entries: [unary_count + binary_count * 5 + 5 + 18 + 17]RegistryEntry = undefined;
     var index: usize = 0;
     entries[index] = .{ .context = .each, .pattern = &operation_pattern, .operation = .length };
     index += 1;
@@ -250,7 +258,7 @@ pub const registry = blk: {
         };
         index += 1;
     }
-    for ([_]numeric.BinaryOp{ .add, .mul, .min, .max }) |operation| {
+    for ([_]numeric.BinaryOp{ .add, .mul, .min, .max, .and_word, .or_word }) |operation| {
         entries[index] = .{
             .context = .fold,
             .pattern = &operation_pattern,
@@ -261,7 +269,12 @@ pub const registry = blk: {
             .pattern = &operation_pattern,
             .operation = .{ .binary = operation },
         };
-        index += 2;
+        entries[index + 2] = .{
+            .context = .fold1,
+            .pattern = &operation_pattern,
+            .operation = .{ .binary = operation },
+        };
+        index += 3;
     }
     for ([_]struct { operation: Operation, pattern: []const PatternAtom }{
         .{ .operation = .{ .unary = .neg }, .pattern = &neg_pattern },
@@ -282,6 +295,7 @@ pub const registry = blk: {
         index += 1;
     }
     for ([_]struct { operation: DirectOp, pattern: []const PatternAtom }{
+        .{ .operation = .fold1, .pattern = &fold1_pattern },
         .{ .operation = .sort, .pattern = &sort_pattern },
         .{ .operation = .first, .pattern = &first_pattern },
         .{ .operation = .find, .pattern = &find_pattern },
@@ -341,11 +355,12 @@ fn requestCandidate(evaluator: *Machine, request: machine.IdiomRequest) ?Candida
         .each => .each,
         .zip_with => .zip_with,
         .fold => .fold,
+        .fold1 => .fold1,
         .scan => .scan,
     };
     const phrase: Value = switch (request) {
         .direct => |direct| .{ .list = direct.body },
-        .each => blk: {
+        .each, .fold1 => blk: {
             if (evaluator.available() < 2) return null;
             break :blk evaluator.unit.stack.items[evaluator.unit.stack.items.len - 1];
         },
@@ -436,8 +451,14 @@ const IdiomDriver = struct {
         self.resolution = null;
         evaluator.retireDriver(self);
         if (entry) |selected| {
+            if (selected.operation == .direct and selected.operation.direct == .fold1) {
+                // Keep the original source continuation until the reducer's
+                // independent binding guard succeeds as well.
+                try evaluator.continueWithIdiom(.fold1, fallback);
+                return .detached;
+            }
             defer fallback.deinit(evaluator.releaseDomain(), evaluator.allocator());
-            const direct_parent = if (selected.context == .direct)
+            const direct_parent = if (selected.context == .direct or selected.context == .fold1)
                 evaluator.commitDirectIdiomTrace()
             else
                 null;
@@ -626,6 +647,7 @@ fn canApplyEntry(evaluator: *Machine, entry: RegistryEntry) bool {
                 break :blk left != .list or right != .list or left.list.length() == right.list.length();
             },
             .fold, .scan => stack[stack.len - 3] == .list,
+            .fold1 => stack[stack.len - 2] == .list and stack[stack.len - 2].list.length() != 0,
             .direct => evaluator.available() >= 2,
         },
         .length, .match => entry.context == .each and stack[stack.len - 2] == .list,
@@ -633,6 +655,7 @@ fn canApplyEntry(evaluator: *Machine, entry: RegistryEntry) bool {
         // non-list top must reach the generic composition so the type error
         // still names the word that observed it.
         .direct => |operation| switch (operation) {
+            .fold1 => evaluator.available() >= 2 and stack[stack.len - 2] == .list and stack[stack.len - 2].list.length() != 0 and stack[stack.len - 1] == .list,
             .dip => evaluator.available() >= 2 and stack[stack.len - 1] == .list,
             .find => evaluator.available() >= 2 and stack[stack.len - 2] == .list,
             .str_format => evaluator.available() >= 2,
@@ -657,7 +680,7 @@ fn applyEntry(evaluator: *Machine, entry: RegistryEntry, capture: Capture) Machi
                 entry.constant_left,
             ),
             .zip_with => applyZipWith(evaluator, operation),
-            .fold, .scan => applyReduction(evaluator, operation, entry.context == .scan),
+            .fold, .fold1, .scan => applyReduction(evaluator, operation, entry.context),
             .direct => binaryPrimitive(operation)(evaluator),
         },
         .match => applyMatchEach(evaluator, capture.constant.?),
@@ -668,6 +691,7 @@ fn applyEntry(evaluator: *Machine, entry: RegistryEntry, capture: Capture) Machi
 
 fn applyDirect(evaluator: *Machine, operation: DirectOp) MachineError!void {
     try switch (operation) {
+        .fold1 => unreachable, // Transfers the source fallback to the reducer guard.
         .sort => order.sortForIdiom(evaluator),
         .first => sequence.firstForIdiom(evaluator),
         .find => applyMatchFind(evaluator),
@@ -1014,14 +1038,25 @@ const MatchFindDriver = struct {
 fn applyReduction(
     evaluator: *Machine,
     operation: numeric.BinaryOp,
-    scan: bool,
+    context: Context,
 ) MachineError!void {
+    const scan = context == .scan;
+    const from_first = context == .fold1;
+    const consumed: usize = if (from_first) 2 else 3;
+    const start: usize = if (from_first) 1 else 0;
     const stack = evaluator.unit.stack.items;
-    const initial = stack[stack.len - 2];
-    const input = stack[stack.len - 3];
+    const input = stack[stack.len - consumed];
+    const initial = if (from_first) list.atUnchecked(input, 0) else stack[stack.len - 2];
     std.debug.assert(input == .list);
     const count: usize = @intCast(input.list.length());
-    if (count == 0) {
+    if (count == start) {
+        if (from_first) {
+            try evaluator.pushBorrowed(initial);
+            var result = try evaluator.popValue();
+            defer result.deinit();
+            popRelease(evaluator, consumed);
+            return evaluator.pushOwned(result.take());
+        }
         if (scan) return finishCollected(evaluator, &.{}, 3);
         popRelease(evaluator, 1);
         var accumulator = try evaluator.popValue();
@@ -1035,7 +1070,7 @@ fn applyReduction(
     // scheduler turn per element. Association stays strictly left-to-right, so
     // float sums keep the generic route's bits.
     if (numeric.typedReduceCandidate(operation, input, initial)) {
-        return numeric.idiomReduceStart(operation)(evaluator, input, initial, scan);
+        return numeric.idiomReduceStart(operation)(evaluator, input, initial, scan, start, consumed);
     }
     const results: ?heap.OwnedValueBuffer = if (scan)
         try .init(evaluator.releaseDomain(), count)
@@ -1045,6 +1080,8 @@ fn applyReduction(
         .operation = operation,
         .scan = scan,
         .input = input,
+        .initialized = start,
+        .consumed = consumed,
         .accumulator = .init(.{ .borrowed = initial }),
         .results = if (results) |owned_results| .init(owned_results) else null,
         .materializer = null,
@@ -1052,6 +1089,7 @@ fn applyReduction(
 }
 
 const ReductionDriver = struct {
+    consumed: usize,
     operation: numeric.BinaryOp,
     scan: bool,
     input: Value,
@@ -1091,7 +1129,7 @@ const ReductionDriver = struct {
             return .yielded;
         }
         if (!self.scan) {
-            popRelease(evaluator, 3);
+            popRelease(evaluator, self.consumed);
             return .{ .output = self.accumulator.borrowMut().takeOwned() };
         }
         if (!self.materializing) {

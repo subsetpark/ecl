@@ -158,7 +158,7 @@ pub const ValueMaterializer = struct {
     pub const owned_disposal: heap.OwnedDisposal = .retire;
 
     allocator: std.mem.Allocator,
-    source: []const Value,
+    source: union(enum) { borrowed: []const Value, owned: heap.OwnedValueBuffer },
     phase: enum { profile, fill, complete } = .profile,
     index: usize = 0,
     item_profile: Profile = .{ .kind = .empty },
@@ -166,7 +166,22 @@ pub const ValueMaterializer = struct {
     builder: ?heap.AnyListBuilder = null,
 
     pub fn init(allocator: std.mem.Allocator, source: []const Value) ValueMaterializer {
-        return .{ .allocator = allocator, .source = source };
+        return .{ .allocator = allocator, .source = .{ .borrowed = source } };
+    }
+    /// Consumes the initialized buffer on success; this constructor cannot fail.
+    /// Generic publication transfers its storage rather than retaining cells again.
+    pub fn initOwned(allocator: std.mem.Allocator, source: heap.OwnedValueBuffer) ValueMaterializer {
+        return .{ .allocator = allocator, .source = .{ .owned = source } };
+    }
+    fn values(self: *const ValueMaterializer) []const Value {
+        return switch (self.source) {
+            .borrowed => |items| items,
+            .owned => |*items| items.values(),
+        };
+    }
+    fn retireSource(self: *ValueMaterializer) void {
+        if (self.source == .owned) self.source.owned.deinit();
+        self.source = .{ .borrowed = &.{} };
     }
     pub fn initCode(
         allocator: std.mem.Allocator,
@@ -175,16 +190,18 @@ pub const ValueMaterializer = struct {
     ) ValueMaterializer {
         return .{
             .allocator = allocator,
-            .source = source,
+            .source = .{ .borrowed = source },
             .provenance_namespace = provenance_namespace,
         };
     }
     pub fn deinit(self: *ValueMaterializer) void {
         std.debug.assert(self.builder == null);
+        self.retireSource();
         self.* = undefined;
     }
     pub fn retire(self: *ValueMaterializer, releases: *heap.ReleaseDomain) void {
         if (self.builder) |*builder| builder.retirePartial(releases);
+        self.retireSource();
     }
     pub fn takePartial(self: *ValueMaterializer) ?Value {
         if (self.builder == null) return null;
@@ -203,25 +220,27 @@ pub const ValueMaterializer = struct {
         std.debug.assert(self.phase != .complete);
         while (!work.exhausted()) switch (self.phase) {
             .profile => {
-                if (self.index == self.source.len) {
-                    try self.beginFill();
+                if (self.index == self.values().len) {
+                    if (try self.beginFill()) |result| return .{ .complete = result };
                     continue;
                 }
                 std.debug.assert(work.spend());
-                self.profileOne(self.source[self.index]);
+                self.profileOne(self.values()[self.index]);
                 self.index += 1;
-                if (self.item_profile.kind == .mixed) self.index = self.source.len;
+                if (self.item_profile.kind == .mixed) self.index = self.values().len;
             },
             .fill => {
-                if (self.index == self.source.len) return self.finish();
+                if (self.index == self.values().len) return self.finish();
                 std.debug.assert(work.spend());
-                self.builder.?.writeValue(self.index, self.source[self.index]);
+                self.builder.?.writeValue(self.index, self.values()[self.index]);
                 self.index += 1;
             },
             .complete => unreachable,
         };
-        if (self.phase == .profile and self.index == self.source.len) try self.beginFill();
-        if (self.phase == .fill and self.index == self.source.len) return self.finish();
+        if (self.phase == .profile and self.index == self.values().len) {
+            if (try self.beginFill()) |result| return .{ .complete = result };
+        }
+        if (self.phase == .fill and self.index == self.values().len) return self.finish();
         return .pending;
     }
     fn profileOne(self: *ValueMaterializer, item: Value) void {
@@ -262,7 +281,13 @@ pub const ValueMaterializer = struct {
             .mixed => {},
         }
     }
-    fn beginFill(self: *ValueMaterializer) error{OutOfMemory}!void {
+    fn beginFill(self: *ValueMaterializer) error{OutOfMemory}!?Value {
+        if (self.source == .owned and (self.item_profile.kind == .mixed or self.item_profile.kind == .empty)) {
+            const result = self.source.owned.takeList();
+            self.source = .{ .borrowed = &.{} };
+            self.phase = .complete;
+            return result;
+        }
         const kind: HeapKind = switch (self.item_profile.kind) {
             .empty, .mixed => .generic_spine,
             .all_byte => .leaf_u8,
@@ -279,8 +304,8 @@ pub const ValueMaterializer = struct {
         var builder = try heap.AnyListBuilder.initCode(
             self.allocator,
             kind,
-            self.source.len,
-            initialCapacity(self.source.len),
+            self.values().len,
+            initialCapacity(self.values().len),
             self.provenance_namespace,
         );
         if (kind == .generic_spine) switch (builder) {
@@ -290,6 +315,7 @@ pub const ValueMaterializer = struct {
         self.builder = builder;
         self.phase = .fill;
         self.index = 0;
+        return null;
     }
     fn finish(self: *ValueMaterializer) MaterializeResult {
         const header = self.builder.?.finish();

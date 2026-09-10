@@ -293,7 +293,12 @@
   {"label" {"missing" 1}} table.left-join-with
   {"k" [1 2] "label" [{"missing" 1} {"missing" 1}]} equal
   {"k" []} {"rk" [] "label" []} [["k" "rk"]] {"label" 0} table.left-join-with
-  {"k" [] "label" []} equal)
+  {"k" [] "label" []} equal
+  {"k" [1 2 1] "v" [10 20 30]} {"rk" [1.0 1.0 2.0] "label" ["a" "b" "c"]}
+  [["k" "rk"]] table.inner-join
+  {"k" [1 1 2 1 1] "v" [10 10 20 30 30] "label" ["a" "b" "c" "a" "b"]} equal
+  {"k" [[1] [] [1]]} {"rk" [[] [1.0]] "v" [10 20]} [["k" "rk"]] table.inner-join
+  {"k" [[1] [] [1]] "v" [20 10 20]} equal)
  'array-joins-and-groups test
 
  ### test documentation

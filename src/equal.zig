@@ -133,6 +133,16 @@ pub const MatchCursor = struct {
     }
 
     /// One bounded transition; a non-null result means the cursor is done.
+    fn compareChild(self: *MatchCursor, a: Value, b: Value) error{OutOfMemory}!void {
+        // A scalar child completes within its parent's charged transition;
+        // only structural descent needs another continuation slot.
+        if (matchWithoutStructure(a, b)) |answer| {
+            self.last = answer;
+        } else {
+            try self.actions.push(.{ .compare = .{ .a = a, .b = b } });
+        }
+    }
+
     fn step(self: *MatchCursor, work: *poll.WorkBudget) error{OutOfMemory}!?bool {
         if (self.hashing) |*hashing| {
             const maybe_hash = try hashing.cursor.step(work);
@@ -204,10 +214,7 @@ pub const MatchCursor = struct {
                                 .next = 1,
                                 .len = a_len,
                             } });
-                            try self.actions.push(.{ .compare = .{
-                                .a = list.atUnchecked(pair.a, 0),
-                                .b = list.atUnchecked(pair.b, 0),
-                            } });
+                            try self.compareChild(list.atUnchecked(pair.a, 0), list.atUnchecked(pair.b, 0));
                         }
                     },
                     .dict => |a_header| {
@@ -251,10 +258,10 @@ pub const MatchCursor = struct {
                     .next = continuation.next + 1,
                     .len = continuation.len,
                 } });
-                try self.actions.push(.{ .compare = .{
-                    .a = list.atUnchecked(continuation.a, continuation.next),
-                    .b = list.atUnchecked(continuation.b, continuation.next),
-                } });
+                try self.compareChild(
+                    list.atUnchecked(continuation.a, continuation.next),
+                    list.atUnchecked(continuation.b, continuation.next),
+                );
             },
             .dict_search => |search| {
                 const b_len: usize = @intCast(search.b.length());
@@ -441,6 +448,14 @@ pub const HashCursor = struct {
         return .pending;
     }
 
+    fn visitChild(self: *HashCursor, child: Value) error{OutOfMemory}!void {
+        if (scalarHash(child)) |result| {
+            self.last = result;
+        } else {
+            try self.actions.push(.{ .visit = child });
+        }
+    }
+
     fn step(self: *HashCursor, work: *poll.WorkBudget) error{OutOfMemory}!?u64 {
         const action = self.actions.pop() orelse return self.last;
         switch (action) {
@@ -463,7 +478,7 @@ pub const HashCursor = struct {
                                 .index = 0,
                                 .state = state,
                             } });
-                            try self.actions.push(.{ .visit = list.atUnchecked(current, 0) });
+                            try self.visitChild(list.atUnchecked(current, 0));
                         }
                     },
                     .dict => |header| {
@@ -504,9 +519,7 @@ pub const HashCursor = struct {
                         .index = next,
                         .state = state,
                     } });
-                    try self.actions.push(.{
-                        .visit = list.atUnchecked(continuation.collection, next),
-                    });
+                    try self.visitChild(list.atUnchecked(continuation.collection, next));
                 }
             },
             .dict_after_key => |continuation| {
@@ -741,6 +754,40 @@ test "allocator-aware equality paths propagate every allocation failure" {
         allocationFailureProbe,
         .{},
     );
+}
+
+test "identity: scalar composite children use bounded allocation-free cursors" {
+    const allocator = std.testing.allocator;
+    var cleanup = heap.testing.Cleanup.init(allocator);
+    defer cleanup.deinit();
+    var integers: [513]Value = @splat(.{ .int = 1 });
+    var reals: [513]Value = @splat(.{ .float = 1 });
+    integers[256] = .{ .int = 0 };
+    reals[256] = .{ .float = -0.0 };
+    const left = try list.fromValues(allocator, &integers);
+    defer cleanup.releaseValue(left);
+    const right = try list.fromValuesGeneric(allocator, &reals);
+    defer cleanup.releaseValue(right);
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var comparison = try MatchCursor.init(failing.allocator(), left, right);
+    defer comparison.deinit();
+    var exhausted: poll.WorkBudget = .init(1);
+    try std.testing.expect(exhausted.spend());
+    try std.testing.expect(try comparison.advanceWithBudget(&exhausted) == .pending);
+    try std.testing.expect(try comparison.advance(1) == .pending);
+    try std.testing.expect(try poll.driveFallible(bool, &comparison, .{1}));
+    var hashing = try HashCursor.init(failing.allocator(), left);
+    defer hashing.deinit();
+    try std.testing.expect(try hashing.advanceWithBudget(&exhausted) == .pending);
+    try std.testing.expect(try hashing.advance(1) == .pending);
+    try std.testing.expectEqual(
+        try hashWithAllocator(failing.allocator(), right),
+        try poll.driveFallible(u64, &hashing, .{1}),
+    );
+    reals[512] = .{ .float = 2 };
+    const different = try list.fromValuesGeneric(allocator, &reals);
+    defer cleanup.releaseValue(different);
+    try std.testing.expect(!try matchWithAllocator(failing.allocator(), left, different));
 }
 
 test "identity: strings share equality and hashes across widths and generic lists" {

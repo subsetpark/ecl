@@ -1385,6 +1385,9 @@ test "native: column primitives cancel active work and reuse the session" {
     const cases = [_]struct { setup: []const u8, body: []const u8, word: []const u8 }{
         .{ .setup = "500000 range wrap", .body = "group", .word = "group" },
         .{ .setup = "[[]] 8000000 take wrap", .body = "(len) each", .word = "len" },
+        .{ .setup = "[1] 8000000 take 1 pair", .body = "(and) fold", .word = "and" },
+        .{ .setup = "[0] 8000000 take wrap", .body = "(or) fold1", .word = "or" },
+        .{ .setup = "[\"x\" [1]] [0] 8000000 take pair", .body = "at", .word = "at" },
         .{ .setup = "\"x\" 8000000 str.repeat dup \"😀\" swap cat 1 drop pair", .body = "match?", .word = "match?" },
         .{ .setup = "500000 range dup pair wrap", .body = "group-columns", .word = "group-columns" },
         .{ .setup = "\"x\" 2000000 str.repeat dup pair wrap", .body = "group", .word = "group" },
@@ -1397,6 +1400,8 @@ test "native: column primitives cancel active work and reuse the session" {
             "'err at dup 'kind at 'cancelled match? swap 'word at '{s} match?", .{ case.body, case.word });
         defer std.testing.allocator.free(source);
         try expectOk(&runtime, source);
+        if (runtime.stackItems()[0].int != 1 or runtime.stackItems()[1].int != 1)
+            std.log.err("column cancellation failed for {s}: cancelled={d}, word={d}", .{ case.body, runtime.stackItems()[0].int, runtime.stackItems()[1].int });
         try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
         try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[1].int);
         try expectOk(&runtime, "pop pop [1 2] [[0 1]] 'sum reduce-groups first");

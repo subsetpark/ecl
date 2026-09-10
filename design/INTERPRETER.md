@@ -392,7 +392,9 @@ comparisons. Character leaves share the same per-codepoint hash as generic
 character lists. Shared equality and hashing cursors process typed string
 buffers in charged, bounded ranges, including strings nested inside other
 values. Their source borrows remain valid through the owning caller, and
-string traversal needs no per-character work-stack frames. Dictionary
+string traversal needs no per-character work-stack frames. Scalar children
+complete within their parent's bounded transition; only structural descent
+requires another work-stack slot. Dictionary
 construction is resumable because hashing, duplicate
 detection, and materialization can all depend on user-sized input.
 
@@ -927,6 +929,11 @@ wrong literal shape, or any other mismatch selects the generic frame-machine
 path. The `(len) each` list idiom reads stored child lengths into a typed result
 under the normal work budget; dictionary inputs retain generic `each`
 semantics, and invalid elements retain the source word's failure site.
+Boolean reductions share the numeric reduction machinery, including validation
+of every operand. Recognized `fold1` reductions retain the original input and
+start after its first element; they never materialize a tail. An empty fold
+preserves its seed and a singleton `fold1` preserves its sole value without
+invoking the reducer. Arbitrary quotations retain generic application semantics.
 The guard result lives for that application and is discarded afterward,
 so redefinition receives a fresh check.
 
@@ -1984,6 +1991,12 @@ is read through pinned columns; only distinct keys acquire materialized lists.
 Grouped reduction walks top-level selectors directly and retains its operands
 through comparison and output publication, preserving selector order without
 gathering temporary value lists.
+
+Flat integer selectors gather whole cells from typed and generic source lists.
+Generic gathers retain their source and selectors until completion, own only
+the initialized output prefix, and materialize through the shared list boundary
+so narrowing remains identical to general indexing. Traversal, publication,
+and retirement remain separately bounded.
 
 ### Separate publication from reclamation
 
