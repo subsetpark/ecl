@@ -280,10 +280,7 @@ peak memory is the median process maximum RSS from `/usr/bin/time -l`, including
 input, output, and runtime memory. Stage clocks have millisecond resolution.
 Baseline and updated use identical fixed input files, verified by SHA-256.
 
-The local artifact directory `/tmp/ecl-csv-table-20260910` contains
-`benchmark.py`, `metadata.json` (input and executable hashes),
-`measurements.json` (all successful raw runs), `summary.json`, and the independent
-`verify.py` oracle. The final benchmark exited 0. Completed baseline runs were
+The final benchmark exited 0. Completed baseline runs were
 retained while updated runs were repeated after compacting CSV descriptors;
 failed benchmark setup runs are excluded. No builds or tests ran concurrently
 with measured workloads.
@@ -316,7 +313,6 @@ The five real workloads are the metal datasets named above. The synthetic
 numeric workload has 100,000 rows and eight columns; escaped has 100,000 rows
 and three columns with quotes, Unicode, and embedded newlines; late-mismatch
 has 100,000 rows and three columns ending in a spelling-preserving text fallback.
-Exact file sizes and hashes are retained in the artifact manifest.
 
 ### Grouping, joins, and reduction
 
@@ -381,7 +377,7 @@ selected test before being restored.
 
 ## Shared string identity and length-map idiom — 2026-09-10
 
-This comparison isolates the next two changes against `18be833`: shared string
+This comparison isolates the changes in `cc41a0d` against `18be833`: shared string
 hash/equality traversal over typed character buffers, and guarded recognition
 of `(len) each` on list inputs. Both executables are Zig 0.16.0 ReleaseSafe on
 macOS 26.6.2 arm64 with `ECL_WORKERS=1`. Each version has one warmup and three
@@ -423,11 +419,9 @@ at most 256 characters. The idiom checks the trusted built-in binding on each
 application, retains generic execution for dictionary inputs, and preserves
 errors for non-list elements.
 
-Raw runs, executable hashes, result-equivalence evidence, and portable
-reproduction commands are in
-[the checked-in benchmark artifacts](benchmarks/string-len-20260910/README.md).
-Each measurement process
-exited 0; no builds or tests ran alongside the measurements.
+Each measurement process exited 0; no builds or tests ran alongside the
+measurements. This document retains the methodology, rationale, and results;
+transient benchmark artifacts are not maintained in the repository.
 
 Verification passed with `zig build precommit differential test-ports
 -Dport-test-filter="native: column primitives" -Doptimize=ReleaseSafe -j4`
@@ -437,7 +431,7 @@ and idiom-hit assertions failed their intended selected suites and were restored
 Cancellation tests cover active string hashing, mixed-width string comparison,
 and the recognized length map, followed by Session reuse. The complete grouped
 aggregate and 144,226,682-byte serialized join result have identical SHA-256
-hashes before and after; `result-equivalence.json` retains the evidence.
+hashes before and after.
 
 ### Boolean reductions, generic gathers, and join keys — 2026-09-10
 
@@ -508,7 +502,4 @@ boolean-idiom and list-key join assertions failed their selected differential
 and language suites; both were restored before final verification.
 
 The complete grouped aggregate (23,295 bytes) and serialized join
-(144,226,682 bytes) match the baseline byte-for-byte. Raw runs, input and
-executable SHA-256 hashes, scripts, output comparisons, and verification
-records are in `/tmp/ecl-hotspots-implementation/`. The earlier stage baseline
-is retained in `/tmp/ecl-hotspots-pass/`.
+(144,226,682 bytes) match the baseline byte-for-byte.

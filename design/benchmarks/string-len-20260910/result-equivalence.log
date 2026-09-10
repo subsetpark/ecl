@@ -1,4 +1,0 @@
-aggregate baseline {'bytes': 23295, 'sha256': 'cd6f1d82991ebed5bf0f3bb287fc236795bbc42df171c4eab3c017eb48523e4a', 'exit': 0}
-aggregate updated {'bytes': 23295, 'sha256': 'cd6f1d82991ebed5bf0f3bb287fc236795bbc42df171c4eab3c017eb48523e4a', 'exit': 0}
-join baseline {'bytes': 144226682, 'sha256': '5ccc897fb3dbae7ef3ef921df506eca57c44e0e66bf16d1c25f7011f12becefe', 'exit': 0}
-join updated {'bytes': 144226682, 'sha256': '5ccc897fb3dbae7ef3ef921df506eca57c44e0e66bf16d1c25f7011f12becefe', 'exit': 0}
