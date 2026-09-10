@@ -855,7 +855,7 @@ fn hostReadUnits(context: *anyopaque, input_index: u32, start: u64, output: [*]u
 
 fn hostBulkBuild(context: *anyopaque, slot: u32, action: abi.BulkAction, kind: abi.BulkKind, count_wire: u64, reverse_wire: u32, words: [*]u64, n: u32, output: *abi.Candidate) callconv(.c) abi.HostStatus {
     const call = transactionFrom(context);
-    if (call.terminal != .idle or call.continuation == null or slot >= abi.max_builder_slots or n > abi.max_bulk_units or reverse_wire > 1) return .invalid;
+    if (call.terminal != .idle or slot >= abi.max_builder_slots or n > abi.max_bulk_units or reverse_wire > 1) return .invalid;
     const count = std.math.cast(usize, count_wire) orelse return .invalid;
     if (count >= std.math.maxInt(u32)) return .invalid;
     switch (kind) {

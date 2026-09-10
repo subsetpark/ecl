@@ -2903,14 +2903,14 @@ const GroupReduceDriver = struct {
             }
             const selector = list.atUnchecked(indices, self.index);
             if (selector != .int) return evaluator.typeError("integer group indices");
-            if (selector.int < 0 or selector.int >= self.values.borrow().list.length())
+            if (selector.int < 0 or @as(u64, @intCast(selector.int)) >= self.values.borrow().list.length())
                 return evaluator.fail(.domain, "group index is out of bounds");
             const item = list.atUnchecked(self.values.borrow(), @intCast(selector.int));
             switch (self.operation) {
                 .count => self.accumulator.int += 1,
                 .sum => {
                     if (!item.isNumber()) return evaluator.typeError("numeric group values");
-                    self.accumulator = add(self.accumulator, item) catch |err| return scalarFailure(evaluator, err, self.index);
+                    self.accumulator = add(self.accumulator, item) catch |err| return scalarFailure(evaluator, err, @intCast(selector.int));
                 },
                 .min, .max => {
                     if (self.index == 0) self.accumulator = item;

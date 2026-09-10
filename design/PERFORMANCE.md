@@ -423,8 +423,10 @@ at most 256 characters. The idiom checks the trusted built-in binding on each
 application, retains generic execution for dictionary inputs, and preserves
 errors for non-list elements.
 
-Raw runs, executable hashes, and reproducing scripts are in
-`/tmp/ecl-string-len-20260910/{baseline,updated}/`. Each measurement process
+Raw runs, executable hashes, result-equivalence evidence, and portable
+reproduction commands are in
+[the checked-in benchmark artifacts](benchmarks/string-len-20260910/README.md).
+Each measurement process
 exited 0; no builds or tests ran alongside the measurements.
 
 Verification passed with `zig build precommit differential test-ports

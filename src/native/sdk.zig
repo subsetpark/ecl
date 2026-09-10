@@ -149,7 +149,7 @@ pub fn Call(comptime effect_source: []const u8) type {
             var count: u32 = 0;
             var bytes: u32 = 0;
             const invocation = &self.state().invocation;
-            return switch ((invocation.host.read_units orelse unreachable)(invocation.context, index, start, output.ptr, @intCast(output.len), &count, &bytes)) {
+            return switch ((invocation.host.read_units orelse return .invalid)(invocation.context, index, start, output.ptr, @intCast(output.len), &count, &bytes)) {
                 .ok => .{ .units = .{ .count = count, .bytes = bytes != 0 } },
                 .yield_required => .yield_required,
                 .out_of_memory => error.OutOfMemory,

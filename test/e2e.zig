@@ -2315,7 +2315,7 @@ test "e2e: every stdlib module resolves with no ECL_PATH and no filesystem" {
         },
         .{ .name = "str", .imported = "'str ('upper) import \"hi\" upper io.pp", .qualified = "\"hi\" str.upper io.pp" },
         .{ .name = "io", .imported = "'io ('print) import \"hi\" print", .qualified = "\"hi\" io.print" },
-        .{ .name = "csv", .imported = "'csv ('parse) import \"a,b\" [] parse io.pp", .qualified = "\"a,b\" [] csv.parse io.pp" },
+        .{ .name = "csv", .imported = "'csv ('parse) import \"a,b\" [] parse flip io.pp", .qualified = "\"a,b\" [] csv.parse flip io.pp" },
         .{ .name = "json", .imported = "'json ('parse) import \"[1]\" parse io.pp", .qualified = "\"[1]\" json.parse io.pp" },
         .{
             .name = "table",

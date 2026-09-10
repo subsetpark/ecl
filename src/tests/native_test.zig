@@ -1316,6 +1316,8 @@ test "native: aggregate cursors and builders charge the scheduler budget" {
     try expectOk(&runtime, "[65 66 67] sample.bulk-budget [11 22 33] match?");
     try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[runtime.stackItems().len - 1].int);
     try std.testing.expect(runtime.lastPolls() >= 3);
+    try expectOk(&runtime, "[65 66 67] sample.bulk-immediate [11 22 33] match?");
+    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[runtime.stackItems().len - 1].int);
 }
 
 test "native: cancellation after a yield preserves the pre-call operand stack" {

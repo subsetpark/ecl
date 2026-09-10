@@ -191,6 +191,19 @@ fn bulkValuesBudgetImpl(comptime reverse: bool, call: *ecl.Call("-- result"), bu
     };
 }
 
+fn bulkImmediate(call: *ecl.Call("input -- result"), build: *ecl.BuildValues) ecl.CallbackResult {
+    var units: [3]u32 = undefined;
+    if (try call.readUnits(0, 0, &units) != .invalid) return call.fail(.user, "read without reschedule must be invalid");
+    if (try build.stage(0, &.{ 11, 22, 33 }) != .appended) return call.fail(.user, "immediate stage failed");
+    var words: [3]u64 = undefined;
+    if (try build.readStaged(0, &words) != .appended) return call.fail(.user, "immediate staged read failed");
+    if (try build.appendBulk(1, .integers, 3, false, &words) != .appended) return call.fail(.user, "immediate append failed");
+    return switch (try build.finishBulk(1, .integers, 3, false)) {
+        .candidate => |result| call.complete(.{result}),
+        else => call.fail(.user, "immediate finish failed"),
+    };
+}
+
 fn bulkBudget(call: *ecl.Call("input -- result"), build: *ecl.BuildValues, schedule: *BulkProbeSchedule) ecl.CallbackResult {
     const state = schedule.state();
     while (true) switch (state.phase) {
@@ -571,6 +584,7 @@ pub const Extension = ecl.module(.{
         ecl.word("text-span", "Copy and validate a host-owned text span.", textSpan),
         ecl.word("forward-stage", "Exercise forward staging across chunk boundaries.", forwardStage),
         ecl.word("bulk-budget", "Prove bulk reads and builders preserve values across budget exhaustion.", bulkBudget),
+        ecl.word("bulk-immediate", "Build bulk values without rescheduling and reject unavailable unit reads.", bulkImmediate),
         ecl.word("bulk-values-budget", "Prove generic bulk initialization and reverse writes yield without exposing unwritten cells.", bulkValuesBudget),
         ecl.word("large-list", "Build a list across multiple scheduler turns.", largeList),
         ecl.word("large-dict", "Build a dictionary across multiple scheduler turns.", largeDict),

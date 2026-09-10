@@ -37,6 +37,7 @@ test "order: grouped reducers preserve selector order and validate errors" {
         .{ .name = "empty min", .source = "[] [[]] 'min reduce-groups", .kind = "domain", .word = "reduce-groups" },
         .{ .name = "unknown reducer", .source = "[] [] 'median reduce-groups", .kind = "domain", .word = "reduce-groups" },
         .{ .name = "sum overflow", .source = "[9223372036854775807 1] [[0 1]] 'sum reduce-groups", .kind = "overflow", .word = "reduce-groups" },
+        .{ .name = "sum overflow uses value position", .source = "[1 0 9223372036854775807] [[1] [0 2]] 'sum reduce-groups", .kind = "overflow", .word = "reduce-groups", .data = &.{.{ .name = "index", .expected = .{ .int = 2 } }} },
         .{ .name = "non numeric sum", .source = "[\"a\"] [[0]] 'sum reduce-groups", .kind = "type", .word = "reduce-groups" },
     });
 }
