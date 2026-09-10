@@ -138,6 +138,13 @@ fn sourceFor(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {
             ),
             .direct => unreachable,
         },
+        .length => std.fmt.allocPrint(allocator, "{s} ({s}) each", .{ switch (variant) {
+            .atom => "[[] [1] [2 3]]",
+            .empty => "[]",
+            .spine => "([1] [2 3] [4 5 6])",
+            .float => "[[1.5] [2.5 3.5]]",
+            .failure => "[[1] 2]",
+        }, phrase }),
         .match => std.fmt.allocPrint(
             allocator,
             "{s} ({s}) each",
@@ -163,7 +170,7 @@ fn directSource(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {
                 entry.source_word.?,
             },
         ),
-        .match => unreachable,
+        .match, .length => unreachable,
         .direct => |operation| std.fmt.allocPrint(
             allocator,
             "{s} {s}",
@@ -573,4 +580,23 @@ fn expectHits(source: []const u8, expected: u64) !void {
     var run = try execute(source, .automatic, heap.allocator());
     defer run.deinit();
     try std.testing.expectEqual(expected, run.runtime.lastIdiomHits());
+}
+
+test "idioms: length each preserves errors dictionaries shadowing and generated quotations" {
+    const cases = [_][]const u8{
+        "[[] [1] [1 2] \"λ😀\"] (len) each",
+        "[] (len) each",
+        "[[1] 2] (len) each",
+        "[[1] {}] (len) each",
+        "\"ab\" (len) each",
+        "{\"a\" [1 2] [3] []} (len) each",
+        "{\"a\" [1] \"b\" 2} (len) each",
+        "{} (len) each",
+        "(pop 99) 'len def [[1] []] (len) each",
+        "(len) 'q set (pop 99) 'len def [[1] []] q each",
+        "[[1] []] (len) () cat each",
+    };
+    for (cases) |source| try compareModesExactly(source);
+    try expectHits("[[1] []] (len) each", 1);
+    try expectHits("(pop 99) 'len def [[1] []] (len) each", 0);
 }

@@ -378,3 +378,61 @@ fixtures cover staging direction and sealing, budget retries, initialized
 prefixes, chunk boundaries, UTF-8, and partial text construction. Deliberately
 incorrect grouped-reduction and SDK assertions each failed their intended
 selected test before being restored.
+
+## Shared string identity and length-map idiom — 2026-09-10
+
+This comparison isolates the next two changes against `18be833`: shared string
+hash/equality traversal over typed character buffers, and guarded recognition
+of `(len) each` on list inputs. Both executables are Zig 0.16.0 ReleaseSafe on
+macOS 26.6.2 arm64 with `ECL_WORKERS=1`. Each version has one warmup and three
+measured runs on the same files; the table reports median milliseconds.
+
+The inputs are `metal_bands.csv` (183,397 rows) and
+`all_bands_discography.csv` (636,801 rows). Parsing happens before table timers.
+The Band ID join returns 638,937 rows and 12 columns in both versions. Stage
+measurements use public operations matching the table implementation and
+retain intermediate values; their sum need not equal the full join, which
+includes validation and has different temporary lifetimes. Millisecond clocks
+limit precision for short stages.
+
+| Operation | Before | After |
+|---|---:|---:|
+| country grouping | 256 | 26 |
+| composite grouping | 538 | 44 |
+| symbol aggregate | 258 | 31 |
+| quotation aggregate | 278 | 43 |
+| join left grouping | 173 | 176 |
+| join right grouping | 203 | 203 |
+| join distinct lookup | 160 | 158 |
+| join group lengths | 160 | 1 |
+| join match lengths | 134 | 1 |
+| join left gather | 217 | 217 |
+| join right gather | 152 | 151 |
+| whole join | 1336 | 1036 |
+
+Country grouping improves about 9.8× and country/status composite grouping
+about 12.2×. The two interpreted length passes fall from 294 ms combined to
+about 2 ms; the complete join improves from 1,336 to 1,036 ms (about 22% less
+time). Numeric join grouping and output gathering remain essentially unchanged.
+String grouping and map dispatch were the intended targets of these changes;
+this comparison does not attribute any improvement to CSV parsing itself.
+
+The optimized string cursors keep the generic per-codepoint hash semantics
+across character widths and generic character lists. Charged ranges contain
+at most 256 characters. The idiom checks the trusted built-in binding on each
+application, retains generic execution for dictionary inputs, and preserves
+errors for non-list elements.
+
+Raw runs, executable hashes, and reproducing scripts are in
+`/tmp/ecl-string-len-20260910/{baseline,updated}/`. Each measurement process
+exited 0; no builds or tests ran alongside the measurements.
+
+Verification passed with `zig build precommit differential test-ports
+-Dport-test-filter="native: column primitives" -Doptimize=ReleaseSafe -j4`
+(exit 0), plus the table language tests and the initialized-Session column
+primitive allocation-failure sweep (exit 0). Deliberately incorrect string-hash
+and idiom-hit assertions failed their intended selected suites and were restored.
+Cancellation tests cover active string hashing, mixed-width string comparison,
+and the recognized length map, followed by Session reuse. The complete grouped
+aggregate and 144,226,682-byte serialized join result have identical SHA-256
+hashes before and after; `result-equivalence.json` retains the evidence.

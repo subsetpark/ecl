@@ -850,13 +850,16 @@ const GroupDriver = struct {
                     continue;
                 }
                 const item = self.cellValue(self.item_index, self.cell);
-                const hash_value = if (equal.scalarHash(item)) |h| h else blk: {
+                const hash_value = if (equal.scalarHash(item)) |h| scalar: {
+                    budget -= 1;
+                    break :scalar h;
+                } else blk: {
                     if (self.hasher == null) self.hasher = .init(try equal.HashCursor.init(evaluator.allocator(), item));
-                    switch (try self.hasher.?.borrowMut().advance(1)) {
-                        .pending => {
-                            budget -= 1;
-                            continue;
-                        },
+                    var work: poll.WorkBudget = .init(budget);
+                    const progress = try self.hasher.?.borrowMut().advanceWithBudget(&work);
+                    budget = work.remaining;
+                    switch (progress) {
+                        .pending => continue,
                         .complete => |h| {
                             self.hasher.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                             self.hasher = null;
@@ -866,7 +869,6 @@ const GroupDriver = struct {
                 };
                 self.row_hash = std.math.rotl(u64, self.row_hash, 13) ^ hash_value;
                 self.cell += 1;
-                budget -= 1;
             },
             .scan => {
                 const slots = self.slots.?.borrow();
@@ -897,7 +899,10 @@ const GroupDriver = struct {
                     continue;
                 }
                 if (self.matcher == null) self.matcher = .init(try equal.MatchCursor.init(evaluator.allocator(), left, right));
-                switch (try self.matcher.?.borrowMut().advance(1)) {
+                var work: poll.WorkBudget = .init(budget);
+                const progress = try self.matcher.?.borrowMut().advanceWithBudget(&work);
+                budget = work.remaining;
+                switch (progress) {
                     .pending => {},
                     .complete => |matches| {
                         self.matcher.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
@@ -908,7 +913,6 @@ const GroupDriver = struct {
                         }
                     },
                 }
-                budget -= 1;
             },
             .key => {
                 if (self.columns) {

@@ -388,7 +388,12 @@ dictionaries use linear search; larger ones add an index without changing the
 ordered vectors.
 
 Numeric hashing agrees with numeric equality, including mixed integer/float
-comparisons. Dictionary construction is resumable because hashing, duplicate
+comparisons. Character leaves share the same per-codepoint hash as generic
+character lists. Shared equality and hashing cursors process typed string
+buffers in charged, bounded ranges, including strings nested inside other
+values. Their source borrows remain valid through the owning caller, and
+string traversal needs no per-character work-stack frames. Dictionary
+construction is resumable because hashing, duplicate
 detection, and materialization can all depend on user-sized input.
 
 Dictionary batch selectors traverse only their outer key list. Each lookup or
@@ -919,7 +924,10 @@ Recognition is guarded by binding identity. Every named token in the pattern
 must resolve, in the candidate's actual scope chain, to the expected trusted
 builtin or source definition. Shadowing, escaped code from another module,
 wrong literal shape, or any other mismatch selects the generic frame-machine
-path. The guard result lives for that application and is discarded afterward,
+path. The `(len) each` list idiom reads stored child lengths into a typed result
+under the normal work budget; dictionary inputs retain generic `each`
+semantics, and invalid elements retain the source word's failure site.
+The guard result lives for that application and is discarded afterward,
 so redefinition receives a fresh check.
 
 This has the role of a superinstruction—one checked phrase becomes one more

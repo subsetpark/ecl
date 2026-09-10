@@ -19,6 +19,7 @@ const DictSearch = struct {
 
 const Action = union(enum) {
     compare: Pair,
+    string_compare: struct { a: *value.ListHandle, b: *value.ListHandle, index: usize = 0 },
     list_continue: struct {
         a: Value,
         b: Value,
@@ -126,15 +127,15 @@ pub const MatchCursor = struct {
         work: *poll.WorkBudget,
     ) error{OutOfMemory}!MatchProgress {
         while (work.spend()) {
-            if (try self.step()) |result| return .{ .complete = result };
+            if (try self.step(work)) |result| return .{ .complete = result };
         }
         return .pending;
     }
 
     /// One bounded transition; a non-null result means the cursor is done.
-    fn step(self: *MatchCursor) error{OutOfMemory}!?bool {
+    fn step(self: *MatchCursor, work: *poll.WorkBudget) error{OutOfMemory}!?bool {
         if (self.hashing) |*hashing| {
-            const maybe_hash = try hashing.cursor.step();
+            const maybe_hash = try hashing.cursor.step(work);
             const computed_hash = maybe_hash orelse return null;
             hashing.cursor.deinit();
             switch (hashing.side) {
@@ -194,6 +195,8 @@ pub const MatchCursor = struct {
                             self.last = false;
                         } else if (a_len == 0) {
                             self.last = true;
+                        } else if (pair.a.isString() and pair.b.isString()) {
+                            try self.actions.push(.{ .string_compare = .{ .a = a_header, .b = b_header } });
                         } else {
                             try self.actions.push(.{ .list_continue = .{
                                 .a = pair.a,
@@ -225,6 +228,16 @@ pub const MatchCursor = struct {
                         }
                     },
                 }
+            },
+            .string_compare => |continuation| {
+                var next = continuation;
+                const remaining: usize = @intCast(next.a.length() - next.index);
+                // The transition already paid for its first character.
+                const count = 1 + work.take(@min(remaining - 1, 255));
+                self.last = matchStringRange(next.a, next.b, next.index, count);
+                next.index += count;
+                if (self.last and next.index != next.a.length())
+                    try self.actions.push(.{ .string_compare = next });
             },
             .list_continue => |continuation| {
                 if (!self.last) return null;
@@ -359,6 +372,7 @@ fn reverseOrder(order: std.math.Order) std.math.Order {
 }
 
 const HashAction = union(enum) {
+    string_hash: struct { header: *value.ListHandle, index: usize = 0, state: u64 },
     visit: Value,
     list_after: struct {
         collection: Value,
@@ -416,14 +430,18 @@ pub const HashCursor = struct {
     }
 
     pub fn advance(self: *HashCursor, budget: usize) error{OutOfMemory}!HashProgress {
-        std.debug.assert(budget != 0);
-        for (0..budget) |_| {
-            if (try self.step()) |result| return .{ .complete = result };
+        var work: poll.WorkBudget = .init(budget);
+        return self.advanceWithBudget(&work);
+    }
+
+    pub fn advanceWithBudget(self: *HashCursor, work: *poll.WorkBudget) error{OutOfMemory}!HashProgress {
+        while (work.spend()) {
+            if (try self.step(work)) |result| return .{ .complete = result };
         }
         return .pending;
     }
 
-    fn step(self: *HashCursor) error{OutOfMemory}!?u64 {
+    fn step(self: *HashCursor, work: *poll.WorkBudget) error{OutOfMemory}!?u64 {
         const action = self.actions.pop() orelse return self.last;
         switch (action) {
             .visit => |current| {
@@ -437,6 +455,8 @@ pub const HashCursor = struct {
                         const state = mix(0x4c49_5354, count);
                         if (count == 0) {
                             self.last = state;
+                        } else if (current.isString()) {
+                            try self.actions.push(.{ .string_hash = .{ .header = header, .state = state } });
                         } else {
                             try self.actions.push(.{ .list_after = .{
                                 .collection = current,
@@ -462,6 +482,16 @@ pub const HashCursor = struct {
                     },
                     .int, .float, .char, .symbol, .word, .task, .port, .module => unreachable,
                 }
+            },
+            .string_hash => |continuation| {
+                var next = continuation;
+                const remaining: usize = @intCast(next.header.length() - next.index);
+                const count = 1 + work.take(@min(remaining - 1, 255));
+                next.state = hashStringRange(next.header, next.index, count, next.state);
+                next.index += count;
+                self.last = next.state;
+                if (next.index != next.header.length())
+                    try self.actions.push(.{ .string_hash = next });
             },
             .list_after => |continuation| {
                 const state = mix(continuation.state, self.last);
@@ -510,6 +540,49 @@ pub const HashCursor = struct {
         return if (self.actions.isEmpty()) self.last else null;
     }
 };
+
+const string_kinds = [_]value.HeapKind{ .leaf_char1, .leaf_char2, .leaf_char4 };
+
+// These slices are borrowed only within one charged transition. The cursor's
+// caller keeps the source values alive through completion or cancellation.
+fn stringSlice(comptime kind: value.HeapKind, header: *value.ListHandle) []const heap.LeafElement(kind) {
+    return switch (kind) {
+        .leaf_char1 => heap.chars8(header),
+        .leaf_char2 => heap.chars16(header),
+        .leaf_char4 => heap.chars32(header),
+        else => unreachable,
+    };
+}
+
+fn matchStringRange(a: *value.ListHandle, b: *value.ListHandle, start: usize, count: usize) bool {
+    inline for (string_kinds) |left_kind| {
+        if (a.kind() == left_kind) inline for (string_kinds) |right_kind| {
+            if (b.kind() == right_kind) {
+                const left = stringSlice(left_kind, a)[start..][0..count];
+                const right = stringSlice(right_kind, b)[start..][0..count];
+                if (left_kind == right_kind) return std.mem.eql(heap.LeafElement(left_kind), left, right);
+                for (left, right) |l, r| if (@as(u32, l) != @as(u32, r)) return false;
+                return true;
+            }
+        };
+    }
+    unreachable;
+}
+
+fn hashStringRange(header: *value.ListHandle, start: usize, count: usize, initial: u64) u64 {
+    inline for (string_kinds) |kind| {
+        if (header.kind() == kind) {
+            var state = initial;
+            for (stringSlice(kind, header)[start..][0..count]) |cp| state = mix(state, characterHash(cp));
+            return state;
+        }
+    }
+    unreachable;
+}
+
+fn characterHash(codepoint: u32) u64 {
+    return mix(0x4348_4152, codepoint);
+}
 
 fn numericPair(a: Value, b: Value) bool {
     const a_numeric = switch (a) {
@@ -571,7 +644,7 @@ pub fn scalarHash(item: Value) ?u64 {
     return switch (item) {
         .int => |number| numericHash(@floatFromInt(number)),
         .float => |number| numericHash(number),
-        .char => |codepoint| mix(0x4348_4152, codepoint),
+        .char => |codepoint| characterHash(codepoint),
         .symbol => |id| mix(0x5359_4d42, id),
         .word => |id| mix(0x574f_5244, id.name),
         .task => |header| mix(0x5441_534b, @intFromPtr(header)),
@@ -668,4 +741,54 @@ test "allocator-aware equality paths propagate every allocation failure" {
         allocationFailureProbe,
         .{},
     );
+}
+
+test "identity: strings share equality and hashes across widths and generic lists" {
+    const allocator = std.testing.allocator;
+    var cleanup = heap.testing.Cleanup.init(allocator);
+    defer cleanup.deinit();
+    var characters: [513]Value = @splat(.{ .char = 'a' });
+    characters[256] = .{ .char = 0 };
+    const generic = try list.fromValuesGeneric(allocator, &characters);
+    defer cleanup.releaseValue(generic);
+    var strings: [3]Value = undefined;
+    inline for (string_kinds, 0..) |kind, i| {
+        var writer = try heap.LeafWriter(kind).init(allocator, characters.len);
+        writer.fillRange(0, characters.len, 'a');
+        writer.fillRange(256, 1, 0);
+        strings[i] = writer.finish();
+    }
+    defer for (strings) |item| cleanup.releaseValue(item);
+    const expected_hash = try hashWithAllocator(allocator, generic);
+    for (strings) |left| {
+        try std.testing.expect(try matchWithAllocator(allocator, generic, left));
+        try std.testing.expectEqual(expected_hash, try hashWithAllocator(allocator, left));
+        for (strings) |right| {
+            var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+            try std.testing.expect(try matchWithAllocator(failing.allocator(), left, right));
+            try std.testing.expectEqual(expected_hash, try hashWithAllocator(failing.allocator(), left));
+        }
+    }
+    var comparison = try MatchCursor.init(allocator, strings[0], strings[1]);
+    defer comparison.deinit();
+    try std.testing.expect(try comparison.advance(1) == .pending);
+    try std.testing.expect(try comparison.advance(1) == .pending);
+    try std.testing.expect(try poll.driveFallible(bool, &comparison, .{17}));
+    var hashing = try HashCursor.init(allocator, strings[2]);
+    defer hashing.deinit();
+    try std.testing.expect(try hashing.advance(1) == .pending);
+    try std.testing.expect(try hashing.advance(1) == .pending);
+    try std.testing.expectEqual(expected_hash, try poll.driveFallible(u64, &hashing, .{17}));
+    var mismatch_writer = try heap.LeafWriter(.leaf_char4).init(allocator, characters.len);
+    mismatch_writer.fillRange(0, characters.len, 'a');
+    mismatch_writer.fillRange(256, 1, 0);
+    mismatch_writer.fillRange(512, 1, 0x1f600);
+    const mismatch = mismatch_writer.finish();
+    defer cleanup.releaseValue(mismatch);
+    for (strings) |item| try std.testing.expect(!try matchWithAllocator(allocator, item, mismatch));
+    characters[512] = .{ .char = 0x1f600 };
+    const wide_generic = try list.fromValuesGeneric(allocator, &characters);
+    defer cleanup.releaseValue(wide_generic);
+    try std.testing.expect(try matchWithAllocator(allocator, wide_generic, mismatch));
+    try std.testing.expectEqual(try hashWithAllocator(allocator, wide_generic), try hashWithAllocator(allocator, mismatch));
 }

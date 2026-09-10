@@ -39,6 +39,7 @@ pub const Operation = union(enum) {
     unary: numeric.UnaryOp,
     binary: numeric.BinaryOp,
     match,
+    length,
     direct: DirectOp,
 
     pub fn spelling(self: Operation) []const u8 {
@@ -46,6 +47,7 @@ pub const Operation = union(enum) {
             .unary => |operation| operation.spelling(),
             .binary => |operation| operation.spelling(),
             .match => "match?",
+            .length => "len",
             .direct => |operation| operation.spelling(),
         };
     }
@@ -191,8 +193,10 @@ const str_format_pattern = [_]PatternAtom{
 const unary_count = std.meta.fields(numeric.UnaryOp).len;
 const binary_count = std.meta.fields(numeric.BinaryOp).len;
 pub const registry = blk: {
-    var entries: [unary_count + binary_count * 5 + 4 + 8 + 16]RegistryEntry = undefined;
+    var entries: [unary_count + binary_count * 5 + 5 + 8 + 16]RegistryEntry = undefined;
     var index: usize = 0;
+    entries[index] = .{ .context = .each, .pattern = &operation_pattern, .operation = .length };
+    index += 1;
     for (std.meta.fields(numeric.UnaryOp)) |field| {
         entries[index] = .{
             .context = .each,
@@ -624,7 +628,7 @@ fn canApplyEntry(evaluator: *Machine, entry: RegistryEntry) bool {
             .fold, .scan => stack[stack.len - 3] == .list,
             .direct => evaluator.available() >= 2,
         },
-        .match => entry.context == .each and stack[stack.len - 2] == .list,
+        .length, .match => entry.context == .each and stack[stack.len - 2] == .list,
         // `dip` is the one direct entry that needs a second input, and a
         // non-list top must reach the generic composition so the type error
         // still names the word that observed it.
@@ -657,6 +661,7 @@ fn applyEntry(evaluator: *Machine, entry: RegistryEntry, capture: Capture) Machi
             .direct => binaryPrimitive(operation)(evaluator),
         },
         .match => applyMatchEach(evaluator, capture.constant.?),
+        .length => applyLengthEach(evaluator),
         .direct => |operation| applyDirect(evaluator, operation),
     };
 }
@@ -851,6 +856,37 @@ const PervadeEachDriver = struct {
     }
 
     pub const ownership: heap.DriverOwnership = .fields;
+};
+
+fn applyLengthEach(evaluator: *Machine) MachineError!void {
+    const stack = evaluator.unit.stack.items;
+    const input = stack[stack.len - 2];
+    const count: usize = @intCast(input.list.length());
+    if (count == 0) return finishCollected(evaluator, &.{}, 2);
+    const writer = try heap.LeafWriter(.leaf_i64).init(evaluator.allocator(), count);
+    try evaluator.startDriver(LengthEachDriver{ .input = input, .writer = .init(writer) });
+}
+
+const LengthEachDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+    // The caller's stack owns input and quotation until successful publication.
+    input: Value,
+    writer: heap.Owned(heap.LeafWriter(.leaf_i64)),
+    index: usize = 0,
+
+    pub fn advance(evaluator: *Machine, self: *LengthEachDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        const count: usize = @intCast(self.input.list.length());
+        const end = @min(self.index + machine.kernel_poll_quantum, count);
+        while (self.index < end) : (self.index += 1) {
+            const item = list.atUnchecked(self.input, self.index);
+            if (item != .list) return evaluator.typeError("a list");
+            self.writer.borrowMut().fillRange(self.index, 1, @intCast(item.list.length()));
+        }
+        if (self.index != count) return .yielded;
+        popRelease(evaluator, 2);
+        return .{ .output = self.writer.borrowMut().finish() };
+    }
 };
 
 fn applyMatchEach(evaluator: *Machine, constant: Value) MachineError!void {
@@ -1131,7 +1167,7 @@ fn operationPrimitive(operation: Operation) ?env.PrimitiveImpl {
     return switch (operation) {
         .unary => |selected| unaryPrimitive(selected),
         .binary => |selected| binaryPrimitive(selected),
-        .match => null,
+        .match, .length => null,
         .direct => null,
     };
 }
@@ -1146,7 +1182,7 @@ fn operationBinding(operation: Operation) BindingKind {
             .mod, .ne, .le, .ge, .and_word, .or_word => .source,
             else => .builtin,
         },
-        .match => .builtin,
+        .match, .length => .builtin,
         .direct => .source,
     };
 }
