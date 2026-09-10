@@ -1,10 +1,10 @@
 const std = @import("std");
 const pkg_lock_fixture = @import("pkg_lock_fixture.zig");
 const pkg_example_hash = "315c772a16778673e205ae556185d25b4109ad40641e60e6b5d96d1f7db99745";
-const pkg_runtime_hash = "362f3e41985531be0e370732383222845a4533c75f07ca384323e49ea93801eb";
+const pkg_runtime_hash = "02144e0eecfc76ebeedaa720e6bc713e658e61b732a40c3e8841ad57d2c7c9a7";
 const pkg_runtime_key = "a-1.0.0-" ++ pkg_runtime_hash;
 const pkg_runtime_manifest =
-    "{'format 1 'name \"root\" 'version \"0.1.0\" 'exports {} 'requires " ++
+    "{'format 1 'name \"root\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires " ++
     "{\"a\" {'package \"a\" 'version \"1.0.0\" 'url \"https://example.invalid/a.tgz\" " ++
     "'hash \"sha256-" ++ pkg_runtime_hash ++ "\"}}}\n";
 const pkg_runtime_lock =
@@ -575,7 +575,7 @@ test "e2e: ecl test runs the default stateful runner" {
     try writeTestProject(
         scratch.dir,
         "{'format 1 'name \"app\" 'version \"0.1.0\" " ++
-            "'exports {\"app.suite\" [\"suite.ecl\"]} 'requires {}}\n",
+            "'sources [\"suite.ecl\"] 'exports [\"app.suite\"] 'requires {}}\n",
         &.{.{
             .path = "suite.ecl",
             .source = "[] (0 " ++
@@ -605,14 +605,71 @@ test "e2e: ecl test runs the default stateful runner" {
     });
 }
 
+test "e2e: tests retain file-private module visibility" {
+    var scratch = std.testing.tmpDir(.{});
+    defer scratch.cleanup();
+    try writeTestProject(scratch.dir, "{'format 1 'name \"app\" 'version \"0.1.0\" 'sources [\"*.ecl\"] " ++
+        "'exports [\"app.foo\" \"app.bar\"] 'requires {}}\n", &.{
+        .{ .path = "bar.ecl", .source = "[] ((42) 'answer def) @module 'baz register\n" ++
+            "[] ((baz.answer 42 = {'kind 'user} assert) 'local test) 'app.bar @defm\n" ++
+            "baz.answer 42 = {'kind 'user} assert\n" },
+        .{ .path = "foo.ecl", .source = "[] (([] (baz.answer) @attempt 'err at 'kind at 'undefined-word match? " ++
+            "{'kind 'user} assert) 'isolated test) 'app.foo @defm\n" },
+    });
+    const exe = try absoluteExe();
+    defer allocator.free(exe);
+    var result = try cli.runOptions(.{ .argv = &.{ exe, "test" }, .cwd = .{ .dir = scratch.dir } });
+    defer result.deinit();
+    try result.expect(.{ .exit_code = 0, .stdout = "ok app.bar.local\nok app.foo.isolated\n", .stderr = "" });
+    var script = try cli.runOptions(.{ .argv = &.{ exe, "bar.ecl" }, .cwd = .{ .dir = scratch.dir } });
+    defer script.deinit();
+    try script.expect(.{ .exit_code = 0, .stdout = "", .stderr = "" });
+    var loaded = try cli.runOptions(.{
+        .argv = &.{ exe, "-e", "\"bar.ecl\" load [] (baz.answer) @attempt 'err at 'kind at" },
+        .cwd = .{ .dir = scratch.dir },
+    });
+    defer loaded.deinit();
+    try loaded.expect(.{ .exit_code = 0, .stdout = "'undefined-word\n", .stderr = "" });
+}
+
+test "e2e: ecl test discovers private-only sources and loads each artifact once" {
+    var scratch = std.testing.tmpDir(.{});
+    defer scratch.cleanup();
+    try writeTestProject(scratch.dir, "{'format 1 'name \"app\" 'version \"0.1.0\" " ++
+        "'sources [\"*.ecl\" \"private.ecl\"] 'exports [] 'requires {}}\n", &.{
+        .{ .path = "private.ecl", .source = "[] ((42) 'answer def) 'helper @defm\n" ++
+            "[] ((helper.answer 42 = {'kind 'user} assert) 'answer test) 'suite @defm\n" },
+        .{ .path = "other.ecl", .source = "[] ((7) 'answer def) 'helper @defm\n" ++
+            "[] ((helper.answer 7 = {'kind 'user} assert) 'answer test) 'suite @defm\n" },
+    });
+    const exe = try absoluteExe();
+    defer allocator.free(exe);
+    var private = try cli.runOptions(.{ .argv = &.{ exe, "test" }, .cwd = .{ .dir = scratch.dir } });
+    defer private.deinit();
+    try private.expect(.{ .exit_code = 0, .stdout = "ok suite.answer\nok suite.answer\n", .stderr = "" });
+
+    // The first source loads the later source through an export. Preload must
+    // reuse that committed artifact, including with overlapping source globs.
+    try writeTestProject(scratch.dir, "{'format 1 'name \"app\" 'version \"0.1.0\" " ++
+        "'sources [\"*.ecl\" \"z-public.ecl\"] 'exports [\"app.public\"] 'requires {}}\n", &.{
+        .{ .path = "a-consumer.ecl", .source = "app.public.answer 42 = {'kind 'user} assert\n" ++
+            "[] (([] (helper.answer) @attempt 'err at 'kind at 'undefined-word match? " ++
+            "{'kind 'user} assert) 'isolated test) 'consumer @defm\n" },
+        .{ .path = "z-public.ecl", .source = "\"loaded public\" io.print\n" ++
+            "[] ((42) 'answer def) 'app.public @defm\n" },
+    });
+    var mixed = try cli.runOptions(.{ .argv = &.{ exe, "test" }, .cwd = .{ .dir = scratch.dir } });
+    defer mixed.deinit();
+    try mixed.expect(.{ .exit_code = 0, .stdout = "loaded public\nok consumer.isolated\nok suite.answer\nok suite.answer\n", .stderr = "" });
+}
+
 test "e2e: ecl test accepts a userland runner" {
     var scratch = std.testing.tmpDir(.{});
     defer scratch.cleanup();
     try writeTestProject(
         scratch.dir,
         "{'format 1 'name \"app\" 'version \"0.1.0\" " ++
-            "'exports {\"app.suite\" [\"suite.ecl\"] " ++
-            "\"app.custom\" [\"custom.ecl\"]} " ++
+            "'sources [\"suite.ecl\" \"custom.ecl\"] 'exports [\"app.suite\" \"app.custom.runner\"] " ++
             "'requires {}}\n",
         &.{
             .{
@@ -658,7 +715,7 @@ test "e2e: ecl test reports project and runner failures" {
     defer invalid.cleanup();
     try invalid.dir.writeFile(io, .{
         .sub_path = "ecl.pkg",
-        .data = "{'format 1 'name \"app\" 'version \"0.1.0\" 'exports {} 'requires {}}\n",
+        .data = "{'format 1 'name \"app\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires {}}\n",
     });
     try invalid.dir.writeFile(io, .{ .sub_path = "ecl.lock", .data = "not a lock\n" });
     var invalid_result = try cli.runOptions(.{
@@ -677,7 +734,7 @@ test "e2e: ecl test reports project and runner failures" {
     try writeTestProject(
         project.dir,
         "{'format 1 'name \"app\" 'version \"0.1.0\" " ++
-            "'exports {\"app.suite\" [\"suite.ecl\"]} 'requires {}}\n",
+            "'sources [\"suite.ecl\"] 'exports [\"app.suite\"] 'requires {}}\n",
         &.{.{ .path = "suite.ecl", .source = "[] ((1) 'one test) 'app.suite @defm\n" }},
     );
     var unqualified = try cli.runOptions(.{
@@ -780,9 +837,28 @@ test "e2e: pkg init derives a canonical root manifest without overwriting" {
     const manifest = try project.readFileAlloc(io, "ecl.pkg", allocator, .unlimited);
     defer allocator.free(manifest);
     try std.testing.expectEqualStrings(
-        "{'format 1 'name \"sample\" 'version \"0.1.0\" 'exports {} 'requires {}}\n",
+        "{'format 1 'name \"sample\" 'version \"0.1.0\" 'sources (\"src/**/*.ecl\") 'exports () 'requires {}}\n",
         manifest,
     );
+    var sources = try project.openDir(io, "src", .{});
+    defer sources.close(io);
+    var synced = try cli.runOptions(.{
+        .argv = &.{ exe, "pkg", "sync", "--offline" },
+        .cwd = .{ .dir = project },
+    });
+    defer synced.deinit();
+    try synced.expect(.{ .exit_code = 0, .stdout = "synced 0 packages\n", .stderr = "" });
+    var empty_tests = try cli.runOptions(.{ .argv = &.{ exe, "test" }, .cwd = .{ .dir = project } });
+    defer empty_tests.deinit();
+    try empty_tests.expect(.{ .exit_code = 0, .stdout = "", .stderr = "" });
+    try sources.createDir(io, "nested", .default_dir);
+    try sources.writeFile(io, .{
+        .sub_path = "nested/suite.ecl",
+        .data = "[] ((42 42 = {'kind 'user} assert) 'answer test) 'suite @defm\n",
+    });
+    var tests = try cli.runOptions(.{ .argv = &.{ exe, "test" }, .cwd = .{ .dir = project } });
+    defer tests.deinit();
+    try tests.expect(.{ .exit_code = 0, .stdout = "ok suite.answer\n", .stderr = "" });
 
     var repeated = try cli.runOptions(.{
         .argv = &.{ exe, "pkg", "init" },
@@ -808,6 +884,8 @@ test "e2e: pkg init derives a canonical root manifest without overwriting" {
         .stdout = "",
         .stderr_contains = &.{ "Bad_Name", "ecl pkg init <name>" },
     });
+    try invalid_project.createDir(io, "src", .default_dir);
+    try invalid_project.writeFile(io, .{ .sub_path = "src/existing.ecl", .data = "42\n" });
     var named = try cli.runOptions(.{
         .argv = &.{ exe, "pkg", "init", "valid.name" },
         .cwd = .{ .dir = invalid_project },
@@ -818,6 +896,18 @@ test "e2e: pkg init derives a canonical root manifest without overwriting" {
         .stdout = "initialized ecl.pkg for valid.name\n",
         .stderr = "",
     });
+    const existing = try invalid_project.readFileAlloc(io, "src/existing.ecl", allocator, .unlimited);
+    defer allocator.free(existing);
+    try std.testing.expectEqualStrings("42\n", existing);
+
+    try scratch.dir.createDir(io, "collision", .default_dir);
+    var collision = try scratch.dir.openDir(io, "collision", .{});
+    defer collision.close(io);
+    try collision.writeFile(io, .{ .sub_path = "src", .data = "keep me\n" });
+    var blocked = try cli.runOptions(.{ .argv = &.{ exe, "pkg", "init" }, .cwd = .{ .dir = collision } });
+    defer blocked.deinit();
+    try blocked.expect(.{ .exit_code = 1, .stdout = "", .stderr_contains = &.{"src to be a directory"} });
+    try std.testing.expectError(error.FileNotFound, collision.access(io, "ecl.pkg", .{}));
 }
 
 test "e2e: pkg tree and why explain the locked graph from a nested directory" {
@@ -915,7 +1005,7 @@ test "e2e: pkg sync regenerates a corrupt lock from the explicit project" {
     try scratch.dir.createDir(io, "cache", .default_dir);
     try scratch.dir.writeFile(io, .{
         .sub_path = "project/ecl.pkg",
-        .data = "{'format 1 'name \"root\" 'version \"0.1.0\" 'exports {} 'requires {}}\n",
+        .data = "{'format 1 'name \"root\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires {}}\n",
     });
     try scratch.dir.writeFile(io, .{
         .sub_path = "project/ecl.lock",
@@ -988,11 +1078,15 @@ test "e2e: checked-in package consumer executes and remains byte-stable offline"
     try scratch.dir.writeFile(io, .{ .sub_path = "project/main.ecl", .data = build_options.pkg_example_program });
     try scratch.dir.writeFile(io, .{
         .sub_path = "cache/smoke-1.0.0-" ++ pkg_example_hash ++ "/ecl.pkg",
-        .data = "{'format 1 'name \"smoke\" 'version \"1.0.0\" 'exports {\"smoke\" [\"**/*\"]} 'requires {}}\n",
+        .data = "{'format 1 'name \"smoke\" 'version \"1.0.0\" 'sources [\"**/*\"] 'exports [\"smoke\"] 'requires {}}\n",
     });
     try scratch.dir.writeFile(io, .{
         .sub_path = "cache/smoke-1.0.0-" ++ pkg_example_hash ++ "/smoke.ecl",
         .data = "[] ((42) 'answer def) 'smoke @defm\n",
+    });
+    try scratch.dir.writeFile(io, .{
+        .sub_path = "cache/smoke-1.0.0-" ++ pkg_example_hash ++ "/.ecl-package.catalog",
+        .data = "{'format 1 'name \"smoke\" 'version \"1.0.0\" 'hash \"sha256-" ++ pkg_example_hash ++ "\" 'sources [{'path \"smoke.ecl\" 'exports [\"smoke\"]}]}\n",
     });
     const cache = try scratch.dir.realPathFileAlloc(io, "cache", allocator);
     defer allocator.free(cache);
@@ -1047,7 +1141,7 @@ test "e2e: pkg vendor makes locked execution and verification cache-independent"
     try scratch.dir.writeFile(io, .{ .sub_path = "project/ecl.lock", .data = pkg_runtime_lock });
     try scratch.dir.writeFile(io, .{
         .sub_path = "cache/" ++ pkg_runtime_key ++ "/ecl.pkg",
-        .data = "{'format 1 'name \"a\" 'version \"1.0.0\" 'exports {\"a\" [\"**/*\"]} 'requires {}}\n",
+        .data = "{'format 1 'name \"a\" 'version \"1.0.0\" 'sources [\"**/*\"] 'exports [\"a\"] 'requires {}}\n",
     });
     try scratch.dir.writeFile(io, .{
         .sub_path = "cache/" ++ pkg_runtime_key ++ "/a.ecl",
@@ -1120,6 +1214,7 @@ test "e2e: pkg vendor makes locked execution and verification cache-independent"
     defer verified.deinit();
     try verified.expect(.{ .exit_code = 0, .stdout = "verified 1 packages\n", .stderr = "" });
 
+    try scratch.dir.deleteFile(io, "project/vendor/" ++ pkg_runtime_key ++ "/.ecl-package.catalog");
     var synced = try cli.runOptions(.{
         .argv = &.{ exe, "pkg", "sync", "--offline" },
         .cwd = .{ .dir = nested },
@@ -1127,10 +1222,18 @@ test "e2e: pkg vendor makes locked execution and verification cache-independent"
     });
     defer synced.deinit();
     try synced.expect(.{ .exit_code = 0, .stdout = "synced 1 packages\n", .stderr = "" });
+    var repaired_run = try cli.runOptions(.{
+        .argv = &.{ exe, "-e", "a.answer" },
+        .cwd = .{ .dir = nested },
+        .environ_map = &environment,
+    });
+    defer repaired_run.deinit();
+    try repaired_run.expect(.{ .exit_code = 0, .stdout = "42\n", .stderr = "" });
     const preserved = try scratch.dir.readFileAlloc(io, "project/ecl.lock", allocator, .unlimited);
     defer allocator.free(preserved);
     try std.testing.expectEqualStrings(pkg_runtime_vendor_lock, preserved);
 
+    try scratch.dir.writeFile(io, .{ .sub_path = "project/vendor/" ++ pkg_runtime_key ++ "/.ecl-package.catalog", .data = "invalid metadata" });
     var repeated = try cli.runOptions(.{
         .argv = &.{ exe, "pkg", "vendor" },
         .cwd = .{ .dir = nested },

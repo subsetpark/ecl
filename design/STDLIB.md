@@ -193,7 +193,8 @@ wrap [] (net.local-address 'port at 0 >) @give task.await
 
 ### @test
 `( descriptor -- result )` — Test-Session-only protected invocation. Validate
-a pure descriptor returned by `tests`, late-bind its canonical module/name to
+a pure descriptor returned by `tests`, late-bind its module/name and optional
+source identifier to
 the current catalog, and run the body as a fresh isolated Unit under that
 registration's private home and durable state. Return exactly
 `{'ok (values)}` or `{'err error}`; a missing current test is a reified error.
@@ -1020,9 +1021,12 @@ and reject duplicate names.
 
 ### tests
 `( -- descriptors )` — Test-Session-only discovery of current canonical
-registrations, sorted by module then test name. Each dictionary contains
+registrations, including root sources' private registrations, sorted by module
+then test name and source identifier. Each dictionary contains
 symbol fields `'module` and `'name` plus optional declared `'effect` and
-`'doc`; it never contains an executable body or authority handle. Aliases do
+`'doc`. File-private registrations also include an integer `'source` identifier
+local to the test Session, distinguishing equal names in different files.
+Descriptors never contain executable bodies or authority handles. Aliases do
 not duplicate entries. Ordinary Sessions receive `'domain`.
 
 ### shape
@@ -1299,6 +1303,17 @@ it is `'domain`. Parking, nesting, and a second module's slot are
 `( -- )` — Move the draft's top value onto the pending outputs of the
 active `within` application. `'domain` outside one, `'underflow` on an
 empty draft. Outputs reach the caller only if the application publishes.
+
+### word
+`( symbol -- word )` — Convert a symbol to an executable word with the same
+spelling. Conversion does not resolve the name or execute it. The result
+resolves where it is invoked, without a captured definition scope. Any
+non-symbol operand is `'type`.
+
+```ecl
+2 3 '+ word execute
+# => 5
+```
 
 ### words
 `( -- )` — Print the visible dictionary in sorted order.
@@ -2755,8 +2770,9 @@ package, minimum version, URL, and hash declaration.
 `( candidate -- manifest )` — Return a manifest unchanged, or raise. A non-dict
 is `'type`; an undeclared key, unsupported format, malformed name, version,
 hash, or URL, self-requirement, ownership collision, or executable word value
-is `'domain`. Export namespaces are package-owned canonical names whose values
-are nonempty distinct lists of safe portable globs. Requirement keys are local
+is `'domain`. Sources are distinct safe portable glob strings. Exports are distinct,
+exact, package-owned module names; exporting a parent does not export its
+children. Private module names are visible only within their defining file. Requirement keys are local
 aliases and do not rewrite module names.
 
 ### read
@@ -2834,8 +2850,8 @@ package authority.
 
 ### install
 `( bytes package-name store key -- regular-file-paths )` — Repeat archive
-validation, derive and validate the staged manifest/glob/module catalog, and
-atomically publish the entry `key` in the named store, which must be absent.
+validation, derive and persist the staged manifest/glob/module catalog with
+the actual archive hash, and atomically publish the entry `key` in the named store, which must be absent.
 Return normalized regular-file paths only after commit; failure never exposes
 a partial destination.
 
@@ -2850,12 +2866,20 @@ directory. A symlink, non-directory, or inaccessible entry is `'io`.
 ### read-seal
 `( store key package-name hash -- bytes )` — Perform the same streamed seal
 verification as `verify`, then return its exact octets as an ordinary integer
-byte list. It never reads a caller-selected child filename.
+byte list. Catalog metadata is not required. It never reads a caller-selected child filename.
 
 ### verify
 `( store key package-name hash -- )` — Stream the installed entry's reserved
-archive seal and require its SHA-256 to equal `hash`. Failures name the
-package and carry the key for host-I/O errors.
+archive seal and require its SHA-256 to equal `hash`, then compare the persisted
+catalog against a freshly derived catalog. It performs no writes. Failures name
+the package and carry the key for host-I/O errors.
+
+### ensure-catalog
+`( store key package-name hash -- )` — Require current-format catalog metadata
+matching the package identity and hash. When invalid or absent, verify the seal,
+validate the installed source tree, and atomically publish replacement metadata.
+Valid metadata needs no rebuild. Failure or cancellation preserves the previous
+catalog. Invalid source data is `'domain`; filesystem failures are `'io`.
 
 ## pkg.sync
 

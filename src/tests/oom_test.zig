@@ -53,11 +53,11 @@ fn archiveSource(allocator: std.mem.Allocator) ![]u8 {
     return allocator.dupe(u8, source.written());
 }
 
-const package_a_key = "a-1.0.0-1f9aefdfdd91996e4f2f80b7f89f1ac3d8907616b74f1cf55a1a48042556738a";
+const package_a_key = "a-1.0.0-68c57ef8116b31d853d00ba9b295bacf14bf30730d61a05c5d51b00a3d223277";
 /// The lock hash of package `a` in the sync probes; the store probe verifies
 /// the seal it just installed, so it needs the fixture's real digest.
 const package_a_hash = "sha256-1f9aefdfdd91996e4f2f80b7f89f1ac3d8907616b74f1cf55a1a48042556738a";
-const package_valid_seal_hash = "sha256-0e22c7712d6b5dc9fe01542ffcc7e6c01e641aab3c7ed0021a29fbf93004f4d8";
+const package_valid_seal_hash = "sha256-68c57ef8116b31d853d00ba9b295bacf14bf30730d61a05c5d51b00a3d223277";
 
 fn packageStoreSource(allocator: std.mem.Allocator) ![]u8 {
     var source = std.Io.Writer.Allocating.init(allocator);
@@ -74,7 +74,7 @@ fn packageStoreSource(allocator: std.mem.Allocator) ![]u8 {
 }
 
 const package_sync_source =
-    "{'format 1 'name \"r\" 'version \"0.1.0\" 'exports {} 'requires " ++
+    "{'format 1 'name \"r\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires " ++
     "{\"a\" {'package \"a\" 'version \"1.0.0\" 'url \"https://e.com/a.tgz\" " ++
     "'hash \"" ++ package_a_hash ++ "\"}}} pkg.sync.run pop";
 
@@ -93,7 +93,7 @@ const PackageScratch = struct {
         const lock_probe_hash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "ecl.pkg",
-            .data = "{'format 1 'name \"root\" 'version \"0.1.0\" 'exports {} 'requires {}}\n",
+            .data = "{'format 1 'name \"root\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires {}}\n",
         });
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "ecl.lock",
@@ -106,11 +106,16 @@ const PackageScratch = struct {
         );
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "lockprobe-1.0.0-" ++ lock_probe_hash ++ "/lockprobe.ecl",
-            .data = "[] ((42) 'answer def) 'lockprobe @defm\n",
+            .data = "[] ((42) 'answer def) @module 'helper register\n" ++
+                "[] ((helper.answer) 'answer def) 'lockprobe @defm\n",
         });
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "lockprobe-1.0.0-" ++ lock_probe_hash ++ "/ecl.pkg",
-            .data = "{'format 1 'name \"lockprobe\" 'version \"1.0.0\" 'exports {\"lockprobe\" [\"**/*\"]} 'requires {}}\n",
+            .data = "{'format 1 'name \"lockprobe\" 'version \"1.0.0\" 'sources [\"**/*\"] 'exports [\"lockprobe\"] 'requires {}}\n",
+        });
+        try directory.dir.writeFile(std.testing.io, .{
+            .sub_path = "lockprobe-1.0.0-" ++ lock_probe_hash ++ "/.ecl-package.catalog",
+            .data = "{'format 1 'name \"lockprobe\" 'version \"1.0.0\" 'hash \"sha256-" ++ lock_probe_hash ++ "\" 'sources [{'path \"lockprobe.ecl\" 'exports [\"lockprobe\"]}]}\n",
         });
         return .{ .directory = directory, .path = path };
     }
@@ -133,7 +138,11 @@ const PackageScratch = struct {
         });
         try self.directory.dir.writeFile(std.testing.io, .{
             .sub_path = key ++ "/ecl.pkg",
-            .data = "{'format 1 'name \"a\" 'version \"1.0.0\" 'exports {\"a\" [\"**/*\"]} 'requires {}}\n",
+            .data = "{'format 1 'name \"a\" 'version \"1.0.0\" 'sources [\"**/*\"] 'exports [\"a\"] 'requires {}}\n",
+        });
+        try self.directory.dir.writeFile(std.testing.io, .{
+            .sub_path = key ++ "/.ecl-package.catalog",
+            .data = "{'format 1 'name \"a\" 'version \"1.0.0\" 'hash \"" ++ package_a_hash ++ "\" 'sources [{'path \"a.ecl\" 'exports [\"a\"]}]}\n",
         });
     }
 };
@@ -744,6 +753,7 @@ fn projectSessionInitializationProbe(allocator: std.mem.Allocator) !void {
 
 const StdlibSurface = enum {
     locked_project_module,
+    root_source_preload,
     random,
     dict,
     error_value,
@@ -755,6 +765,7 @@ const StdlibSurface = enum {
     archive_hash,
     archive_unpack,
     package_store,
+    package_catalog_repair,
     package_store_gc,
     host_io,
     filesystem,
@@ -783,6 +794,27 @@ fn stdlibSessionAllocationProbe(
     var scratch = try PackageScratch.init();
     defer scratch.deinit();
     if (surface == .package_sync) try scratch.installPackageA();
+    if (surface == .package_catalog_repair) {
+        try scratch.directory.dir.createDir(std.testing.io, package_a_key, .default_dir);
+        try scratch.directory.dir.writeFile(std.testing.io, .{ .sub_path = package_a_key ++ "/ecl.pkg", .data = "{'format 1 'name \"a\" 'version \"1.0.0\" 'sources [\"**/*\"] 'exports [\"a\"] 'requires {}}\n" });
+        try scratch.directory.dir.writeFile(std.testing.io, .{ .sub_path = package_a_key ++ "/a.ecl", .data = "[] (() 'noop def) 'a @defm\n" });
+        const hex = std.mem.trim(u8, archive_fixtures.package_valid, " \r\n\t");
+        const bytes = try std.testing.allocator.alloc(u8, hex.len / 2);
+        defer std.testing.allocator.free(bytes);
+        _ = try std.fmt.hexToBytes(bytes, hex);
+        try scratch.directory.dir.writeFile(std.testing.io, .{ .sub_path = package_a_key ++ "/.ecl-package.tgz", .data = bytes });
+        try scratch.directory.dir.writeFile(std.testing.io, .{ .sub_path = package_a_key ++ "/.ecl-package.catalog", .data = "invalid metadata" });
+    }
+    if (surface == .root_source_preload) {
+        try scratch.directory.dir.writeFile(std.testing.io, .{
+            .sub_path = "ecl.pkg",
+            .data = "{'format 1 'name \"root\" 'version \"0.1.0\" 'sources [\"suite.ecl\"] 'exports [] 'requires {}}\n",
+        });
+        try scratch.directory.dir.writeFile(std.testing.io, .{
+            .sub_path = "suite.ecl",
+            .data = "[] ((1) 'answer test) 'helper @defm\n",
+        });
+    }
     // Paths and source strings are borrowed test scaffolding outside Session
     // ownership. Keep their construction outside the injected allocator so
     // the sweep enumerates live Session paths rather than this helper's writer.
@@ -822,7 +854,7 @@ fn stdlibSessionAllocationProbe(
             .{ .name = "cwd", .absolute_path = scratch_path },
             .{ .name = "project", .absolute_path = scratch_path },
         } },
-    }), .cooperative, .{ .package = .{ .synchronize = .{ .cache = scratch_path, .project = scratch.directory.dir } } });
+    }), .cooperative, if (surface == .root_source_preload) .language_tests else .{ .package = .{ .synchronize = .{ .cache = scratch_path, .project = scratch.directory.dir } } });
     defer runtime.deinit();
 
     // Loading these large embedded modules has its own failure window. Their
@@ -846,6 +878,15 @@ fn stdlibSessionAllocationProbe(
     if (failure_offset) |offset| failing.fail_index = first_failure_index + offset;
 
     switch (surface) {
+        .root_source_preload => {
+            while (true) switch (try runtime.advanceRootPreload()) {
+                .pending => {},
+                .complete => break,
+                .err => |failure| return reportUnexpectedFailure(&runtime, "root source preload", failure),
+                .invalid, .no_project => return error.UnexpectedPreloadFailure,
+            };
+            try runOk(&runtime, "oom-private-tests.ecl", "tests first @test pop");
+        },
         .locked_project_module => try runOk(
             &runtime,
             "oom-lock-tier.ecl",
@@ -920,6 +961,11 @@ fn stdlibSessionAllocationProbe(
             defer scaffold_allocator.free(package_source);
             try runOk(&runtime, "oom-pkg-store.ecl", package_source);
         },
+        .package_catalog_repair => try runOk(
+            &runtime,
+            "oom-pkg-catalog.ecl",
+            "'cache \"" ++ package_a_key ++ "\" \"a\" \"" ++ package_valid_seal_hash ++ "\" pkg.store.ensure-catalog",
+        ),
         .package_store_gc => try runOk(
             &runtime,
             "oom-pkg-gc.ecl",
@@ -1609,6 +1655,11 @@ test "oom: standard-library and host: package: locked project module propagates 
     try checkStdlibSurface(.locked_project_module);
 }
 
+test "oom: standard-library and host: package: root source preload propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
+    try checkStdlibSurface(.root_source_preload);
+}
+
 test "oom: standard-library and host: stdlib: clock propagates every allocation failure" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.clock);
@@ -1996,4 +2047,9 @@ fn startupSessionAllocationProbe(allocator: std.mem.Allocator) !void {
 test "oom: standard-library and host: host: startup snapshot and Session initialization" {
     try requireSelectedOomTest(@src());
     try checkAllAllocationFailuresParallel(std.heap.smp_allocator, startupSessionAllocationProbe);
+}
+
+test "oom: standard-library and host: package: catalog repair propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
+    try checkStdlibSurface(.package_catalog_repair);
 }

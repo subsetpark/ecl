@@ -755,6 +755,15 @@ pub const StagedFile = struct {
         return null;
     }
 
+    /// Atomically publish complete derived metadata, whether or not it existed.
+    /// Failure leaves the old entry intact and this staging file owned by the caller.
+    pub fn commitReplace(self: *StagedFile, final_name: []const u8) ?Reason {
+        if (self.seal()) |reason| return reason;
+        self.parent.rename(&self.name, self.parent, final_name, self.io) catch |err|
+            return reasonForError(err);
+        return null;
+    }
+
     /// Atomically exchanges the staging entry with an existing destination.
     /// The displaced entry now sits under the staging name and must be
     /// disposed by the caller.

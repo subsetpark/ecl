@@ -321,6 +321,13 @@
   store (install-selection) partial
   for) 'install-selected defp
 
+ ### defp ensure-selection
+ (pair store -- : "Ensure portable catalog metadata for one selected installed package.")
+ (|pair store|
+  store pair first pair 1 at store-key
+  pair first pair 1 at 'hash at pkg.store.ensure-catalog)
+ 'ensure-selection defp
+
  ### defp verify-selection
  (pair store -- : "Stream and hash-check one selected package's retained archive seal.")
  (|pair store|
@@ -383,5 +390,6 @@
   root swap pkg.mvs.resolve
   store 'vendor match? (pkg.lock.vendor) when
   dup store install-selected
+  dup 'packages at pkg.data.sorted-entries store (ensure-selection) partial for
   dup pkg.lock.write "ecl.lock" write-project-file) 'run-validated defp
 ) 'pkg.sync @defm

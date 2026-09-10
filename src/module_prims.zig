@@ -138,7 +138,7 @@ const UnmoduleDriver = struct {
                         .domain,
                         "unmodule requires a valid module name",
                     );
-                    const registry = evaluator.unit.inherited.registry;
+                    const registry = evaluator.publicationRegistry(name, evaluator.unit.current.?.site.registration_provenance);
                     self.cursor = .init(registry.removalCursor(
                         name,
                         &evaluator.unit.turn_authority,
@@ -253,7 +253,7 @@ const ImportDriver = struct {
     prepare_index: usize = 0,
     binding_validation: ?intern.NamespaceCursor = null,
     qualifier: ?heap.Owned(intern.QualifiedCursor) = null,
-    acquisition: ?heap.Owned(modules.Registry.AcquireCursor) = null,
+    acquisition: ?heap.Owned(machine.ModuleLookupCursor) = null,
     generation: ?heap.Owned(modules.GenerationLease) = null,
     validation_index: usize = 0,
     resolution: ?heap.Owned(modules.ModuleResolveCursor) = null,
@@ -332,9 +332,8 @@ const ImportDriver = struct {
             }
 
             if (self.generation == null) {
-                const registry = evaluator.unit.inherited.registry;
                 if (self.acquisition == null)
-                    self.acquisition = .init(registry.acquireCursor(self.module_name.?));
+                    self.acquisition = .init(machine.ModuleLookupCursor.atCurrent(evaluator, self.module_name.?));
                 switch (self.acquisition.?.borrowMut().advance()) {
                     .pending => continue,
                     .complete => |maybe_generation| if (maybe_generation) |generation| {
@@ -480,7 +479,7 @@ const AliasDriver = struct {
                     continue;
                 },
             };
-            const registry = evaluator.unit.inherited.registry;
+            const registry = evaluator.publicationRegistry(self.target.?, evaluator.unit.current.?.site.registration_provenance);
             if (self.cursor == null) self.cursor = .init(registry.aliasCursor(self.short.?, self.target.?));
             switch (self.cursor.?.borrowMut().advance() catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,

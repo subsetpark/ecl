@@ -30,8 +30,8 @@ test "pkg store: inspect returns exact root manifest" {
     defer host.deinit();
     try host.expectStack(
         source,
-        "\"{'format 1 'name \\\"bad\\\" 'version \\\"1.0.0\\\" 'exports " ++
-            "{\\\"bad\\\" [\\\"**/*\\\"]} 'requires {}}\\n\"",
+        "\"{'format 1 'name \\\"bad\\\" 'version \\\"1.0.0\\\" 'sources [\\\"**/*\\\"] " ++
+            "'exports [\\\"bad\\\"] 'requires {}}\\n\"",
     );
 }
 
@@ -43,6 +43,7 @@ test "pkg store: rejects invalid source package layouts before publication" {
         .{ .endpoint = "/pkg/foo-1.0.0-missing-manifest.tgz", .message = "no root ecl.pkg" },
         .{ .endpoint = "/pkg/foo-1.0.0-invalid-manifest.tgz", .message = "not valid UTF-8" },
         .{ .endpoint = "/pkg/foo-1.0.0-reserved-seal.tgz", .message = ".ecl-package.tgz" },
+        .{ .endpoint = "/pkg/foo-1.0.0-reserved-catalog.tgz", .message = ".ecl-package.catalog" },
     };
     var host = try PackageHost.init(.{ .tls = true });
     defer host.deinit();
@@ -59,7 +60,7 @@ test "pkg store: rejects invalid source package layouts before publication" {
     }
 }
 
-test "pkg store: package export globs admit nested source artifacts" {
+test "pkg store: package source globs admit nested source artifacts" {
     var fixture = try HttpsFixture.start();
     defer fixture.stop();
     var host = try PackageHost.init(.{ .tls = true, .cache = true });
@@ -87,7 +88,7 @@ test "pkg store: atomically installs one valid source package" {
     );
     defer allocator.free(manifest);
     try std.testing.expectEqualStrings(
-        "{'format 1 'name \"bad\" 'version \"1.0.0\" 'exports {\"bad\" [\"**/*\"]} 'requires {}}\n",
+        "{'format 1 'name \"bad\" 'version \"1.0.0\" 'sources [\"**/*\"] 'exports [\"bad\"] 'requires {}}\n",
         manifest,
     );
     const seal = try host.scratch.directory.dir.readFileAlloc(
@@ -101,7 +102,7 @@ test "pkg store: atomically installs one valid source package" {
     defer allocator.free(expected_seal);
     try std.testing.expectEqualSlices(u8, expected_seal, seal);
     try host.expectStack("'cache \"" ++ key ++ "\" pkg.store.present? 'cache \"" ++ key ++ "\" pkg.store.manifest", "1 " ++
-        "\"{'format 1 'name \\\"bad\\\" 'version \\\"1.0.0\\\" 'exports {\\\"bad\\\" [\\\"**/*\\\"]} 'requires {}}\\n\"");
+        "\"{'format 1 'name \\\"bad\\\" 'version \\\"1.0.0\\\" 'sources [\\\"**/*\\\"] 'exports [\\\"bad\\\"] 'requires {}}\\n\"");
 }
 
 test "pkg store: ordinary Sessions have no package authority" {
@@ -409,8 +410,8 @@ test "pkg sync: explicit project root selects store mode without ambient discove
     var host = try PackageHost.init(.{ .cache = true });
     defer host.deinit();
     try host.scratch.directory.dir.createDir(std.testing.io, "ambient", .default_dir);
-    const ambient_manifest = "{'format 1 'name \"ambient\" 'version \"0.1.0\" 'exports {} 'requires {}}\n";
-    const target_manifest = "{'format 1 'name \"target\" 'version \"0.1.0\" 'exports {} 'requires {}}\n";
+    const ambient_manifest = "{'format 1 'name \"ambient\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires {}}\n";
+    const target_manifest = "{'format 1 'name \"target\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires {}}\n";
     try host.scratch.directory.dir.writeFile(std.testing.io, .{
         .sub_path = "ambient/ecl.pkg",
         .data = ambient_manifest,
@@ -552,6 +553,7 @@ const Scratch = struct {
 };
 
 const HostOptions = struct {
+    io: std.Io = std.testing.io,
     tls: bool = false,
     /// Name `<scratch>/cache` as the shared cache store, creating it.
     cache: bool = false,
@@ -634,7 +636,7 @@ const PackageHost = struct {
 
     fn openSessionWithConfig(self: *const PackageHost, heap_allocator: std.mem.Allocator, config: session.Config) !session.Session {
         return session.Session.init(heap_allocator, &.{}, .{
-            .io = std.testing.io,
+            .io = self.options.io,
             .output = self.output.writer(),
             .diagnostics = self.output.writer(),
             .tls_trust = if (self.options.tls) .{ .ca_file = pkg_fixture.ca_file, .now = valid_cert_time } else null,
@@ -962,7 +964,7 @@ test "pkg sync: prefix violation names offender without retained entry" {
         .name = "prefix violation",
         .source = source,
         .kind = "domain",
-        .message_contains = "outside export namespace `foo`",
+        .message_contains = "exports undeclared module foo",
         .data = &.{.{ .name = "package", .expected = .{ .string = "foo" } }},
     });
     try paths.expectUnchanged();
@@ -1051,4 +1053,181 @@ test "pkg sync: verification streams every selected seal and offline sync names 
             .{ .name = "store", .expected = .{ .symbol = "cache" } },
         },
     });
+}
+
+test "pkg sync: offline sync repairs catalogs and failed repair preserves metadata" {
+    var fixture = try HttpsFixture.start();
+    defer fixture.stop();
+    var host = try PackageHost.init(.{ .tls = true, .cache = true });
+    defer host.deinit();
+    const online = try syncSource(fixture.root_manifest, " pop");
+    defer allocator.free(online);
+    try host.expectStack(online, "");
+    // Offline discovery needs every exact referenced version, including
+    // the lower c version that MVS did not select for the final lock.
+    const lower = try packageSource(fixture.port, "/pkg/c-1.2.0.tgz", "c", .install, "c-1.2.0-07c063c13e6362374b08d5594ead07db47903e34ef0a9e5f0332805d5fea0b05");
+    defer allocator.free(lower);
+    try host.expectStack(lower, "(\"c.ecl\" \"ecl.pkg\")");
+    const key = try installedAKey(host.scratch);
+    defer allocator.free(key);
+    const path = try std.fmt.allocPrint(allocator, "cache/{s}/.ecl-package.catalog", .{key});
+    defer allocator.free(path);
+    const expected = try host.scratch.directory.dir.readFileAlloc(std.testing.io, path, allocator, .unlimited);
+    defer allocator.free(expected);
+    var offline = std.Io.Writer.Allocating.init(allocator);
+    defer offline.deinit();
+    try appendString(&offline.writer, fixture.root_manifest);
+    try offline.writer.writeAll(" pkg.manifest.read pkg.sync.run-offline pop");
+    const invalid = [_]?[]const u8{ null, "garbage", "{'format 999}", "{'format 1 'name \"wrong\" 'version \"1.0.0\" 'hash \"" ++ fixture_a_hash ++ "\" 'sources []}" };
+    for (invalid) |metadata| {
+        if (metadata) |text| try host.scratch.directory.dir.writeFile(std.testing.io, .{ .sub_path = path, .data = text }) else try host.scratch.directory.dir.deleteFile(std.testing.io, path);
+        try host.expectStack(offline.written(), "");
+        const repaired = try host.scratch.directory.dir.readFileAlloc(std.testing.io, path, allocator, .unlimited);
+        defer allocator.free(repaired);
+        try std.testing.expectEqualStrings(expected, repaired);
+    }
+    try host.scratch.directory.dir.writeFile(std.testing.io, .{ .sub_path = path, .data = "old invalid catalog" });
+    const source_path = try std.fmt.allocPrint(allocator, "cache/{s}/a.ecl", .{key});
+    defer allocator.free(source_path);
+    try host.scratch.directory.dir.writeFile(std.testing.io, .{ .sub_path = source_path, .data = "[" });
+    try host.expectError(offline.written(), .{ .name = "failed catalog repair", .source = offline.written(), .kind = "domain", .message_contains = "catalog validation failed" });
+    const preserved = try host.scratch.directory.dir.readFileAlloc(std.testing.io, path, allocator, .unlimited);
+    defer allocator.free(preserved);
+    try std.testing.expectEqualStrings("old invalid catalog", preserved);
+}
+
+test "pkg store: concurrent catalog repairs publish complete metadata" {
+    var fixture = try HttpsFixture.start();
+    defer fixture.stop();
+    var host = try PackageHost.init(.{ .tls = true, .cache = true });
+    defer host.deinit();
+    const online = try syncSource(fixture.root_manifest, " pop");
+    defer allocator.free(online);
+    try host.expectStack(online, "");
+    const key = try installedAKey(host.scratch);
+    defer allocator.free(key);
+    const path = try std.fmt.allocPrint(allocator, "cache/{s}/.ecl-package.catalog", .{key});
+    defer allocator.free(path);
+    try host.scratch.directory.dir.deleteFile(std.testing.io, path);
+    const command = try std.fmt.allocPrint(allocator, "'cache \"{s}\" \"a\" \"sha256-{s}\" pkg.store.ensure-catalog", .{ key, key[key.len - 64 ..] });
+    defer allocator.free(command);
+    var successes: std.atomic.Value(u32) = .init(0);
+    var failures: std.atomic.Value(u32) = .init(0);
+    var unexpected: std.atomic.Value(bool) = .init(false);
+    var result: ConcurrentResult = .{ .scratch = host.scratch, .source = command, .successes = &successes, .io_failures = &failures, .unexpected = &unexpected };
+    const first = try std.Thread.spawn(.{}, concurrentInstall, .{&result});
+    const second = try std.Thread.spawn(.{}, concurrentInstall, .{&result});
+    first.join();
+    second.join();
+    try std.testing.expect(!unexpected.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 2), successes.load(.acquire));
+    const verify_command = try std.fmt.allocPrint(allocator, "'cache \"{s}\" \"a\" \"sha256-{s}\" pkg.store.verify", .{ key, key[key.len - 64 ..] });
+    defer allocator.free(verify_command);
+    try host.expectStack(verify_command, "");
+}
+
+fn installedAKey(scratch: *Scratch) ![]u8 {
+    var cache = try scratch.directory.dir.openDir(std.testing.io, "cache", .{ .iterate = true });
+    defer cache.close(std.testing.io);
+    var iterator = cache.iterate();
+    while (try iterator.next(std.testing.io)) |entry| {
+        if (std.mem.startsWith(u8, entry.name, "a-1.0.0-")) return allocator.dupe(u8, entry.name);
+    }
+    return error.MissingInstalledPackage;
+}
+
+const CatalogPublicationFault = struct {
+    var cancel: ?*session.Session = null;
+    var observed: bool = false;
+
+    fn create(userdata: ?*anyopaque, dir: std.Io.Dir, path: []const u8, options: std.Io.Dir.CreateFileOptions) std.Io.File.OpenError!std.Io.File {
+        const file = try std.testing.io.vtable.dirCreateFile(userdata, dir, path, options);
+        if (std.mem.startsWith(u8, path, ".ecl-fs-") or std.mem.eql(u8, path, ".ecl-package.catalog")) if (cancel) |runtime| {
+            observed = true;
+            runtime.requestCancellation();
+        };
+        return file;
+    }
+    fn rename(userdata: ?*anyopaque, old: std.Io.Dir, source: []const u8, new: std.Io.Dir, destination: []const u8) std.Io.Dir.RenameError!void {
+        if (std.mem.eql(u8, destination, ".ecl-package.catalog")) {
+            observed = true;
+            return error.AccessDenied;
+        }
+        return std.testing.io.vtable.dirRename(userdata, old, source, new, destination);
+    }
+};
+
+test "pkg store: catalog publication failure and cancellation preserve previous metadata" {
+    var fixture = try HttpsFixture.start();
+    defer fixture.stop();
+    var host = try PackageHost.init(.{ .tls = true, .cache = true });
+    defer host.deinit();
+    const online = try syncSource(fixture.root_manifest, " pop");
+    defer allocator.free(online);
+    try host.expectStack(online, "");
+    const key = try installedAKey(host.scratch);
+    defer allocator.free(key);
+    const path = try std.fmt.allocPrint(allocator, "cache/{s}/.ecl-package.catalog", .{key});
+    defer allocator.free(path);
+    const command = try std.fmt.allocPrint(allocator, "'cache \"{s}\" \"a\" \"sha256-{s}\" pkg.store.ensure-catalog", .{ key, key[key.len - 64 ..] });
+    defer allocator.free(command);
+    for ([_]bool{ false, true }) |cancel| {
+        try host.scratch.directory.dir.writeFile(std.testing.io, .{ .sub_path = path, .data = "previous metadata" });
+        var vtable = std.testing.io.vtable.*;
+        if (cancel) vtable.dirCreateFile = CatalogPublicationFault.create else vtable.dirRename = CatalogPublicationFault.rename;
+        host.options.io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+        var backing: test_heap.SessionHeap = .init;
+        defer test_heap.retire(&backing);
+        var runtime = try host.openSession(backing.allocator());
+        defer runtime.deinit();
+        CatalogPublicationFault.observed = false;
+        CatalogPublicationFault.cancel = if (cancel) &runtime else null;
+        defer CatalogPublicationFault.cancel = null;
+        const failure = switch (try runtime.runUnit("<catalog-publication-fault>", command)) {
+            .err => |failure| failure,
+            else => return error.ExpectedPublicationFailure,
+        };
+        defer runtime.release(failure);
+        try support.expectLanguageError(failure, .{ .name = "catalog publication fault", .source = command, .kind = if (cancel) "cancelled" else "io" });
+        try std.testing.expect(CatalogPublicationFault.observed);
+        const preserved = try host.scratch.directory.dir.readFileAlloc(std.testing.io, path, allocator, .unlimited);
+        defer allocator.free(preserved);
+        try std.testing.expectEqualStrings("previous metadata", preserved);
+        const entry_path = try std.fmt.allocPrint(allocator, "cache/{s}", .{key});
+        defer allocator.free(entry_path);
+        var entry = try host.scratch.directory.dir.openDir(std.testing.io, entry_path, .{ .iterate = true });
+        defer entry.close(std.testing.io);
+        var iterator = entry.iterate();
+        while (try iterator.next(std.testing.io)) |item| try std.testing.expect(!std.mem.startsWith(u8, item.name, ".ecl-fs-"));
+    }
+}
+
+test "pkg store: cancellation while writing installation metadata publishes no package" {
+    var host = try PackageHost.init(.{ .cache = true });
+    defer host.deinit();
+    var vtable = std.testing.io.vtable.*;
+    vtable.dirCreateFile = CatalogPublicationFault.create;
+    host.options.io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    const key = "a-1.0.0-" ++ placeholder_hex;
+    const source = try fixtureInstallSource(key);
+    defer allocator.free(source);
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var runtime = try host.openSession(backing.allocator());
+    defer runtime.deinit();
+    CatalogPublicationFault.observed = false;
+    CatalogPublicationFault.cancel = &runtime;
+    defer CatalogPublicationFault.cancel = null;
+    const failure = switch (try runtime.runUnit("<catalog-install-cancel>", source)) {
+        .err => |failure| failure,
+        else => return error.ExpectedCancellation,
+    };
+    defer runtime.release(failure);
+    try support.expectLanguageError(failure, .{ .name = "installation metadata cancellation", .source = source, .kind = "cancelled" });
+    try std.testing.expect(CatalogPublicationFault.observed);
+    try std.testing.expectError(error.FileNotFound, host.scratch.directory.dir.statFile(std.testing.io, "cache/" ++ key, .{}));
+    var cache = try host.scratch.directory.dir.openDir(std.testing.io, "cache", .{ .iterate = true });
+    defer cache.close(std.testing.io);
+    var iterator = cache.iterate();
+    try std.testing.expect((try iterator.next(std.testing.io)) == null);
 }

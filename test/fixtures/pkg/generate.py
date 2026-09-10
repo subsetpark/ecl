@@ -13,7 +13,7 @@ import tarfile
 ROOT = Path(__file__).parent
 MANIFEST = (
     b"{'format 1 'name \"a\" 'version \"1.0.0\" "
-    b"'exports {\"a\" [\"**/*\"]} 'requires {}}\n"
+    b"'sources [\"**/*\"] 'exports [\"a\"] 'requires {}}\n"
 )
 
 

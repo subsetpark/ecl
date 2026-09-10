@@ -6,20 +6,20 @@
  import
 
  ### setp manifest-text
- "{'format 1 'name \"my.proj\" 'version \"0.1.0\" 'exports {\"my.proj\" [\"**/*\"]} 'requires {\"foo\" {'package \"foo\" 'version \"1.2.0\" 'url \"https://e.com/f.tgz\" 'hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}}}"
+ "{'format 1 'name \"my.proj\" 'version \"0.1.0\" 'sources [\"**/*\"] 'exports [\"my.proj\"] 'requires {\"foo\" {'package \"foo\" 'version \"1.2.0\" 'url \"https://e.com/f.tgz\" 'hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}}}"
  'manifest-text setp
 
  ### test read-and-validate
  (-- : "Read canonical manifests and enforce their declared schema.")
  (manifest-text pkg.manifest.read 'name at "my.proj" equal
-  "# a comment\n{'format 1 'name \"a\" 'version \"0.1.0\" 'exports {} 'requires {}}"
+  "# a comment\n{'format 1 'name \"a\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires {}}"
   pkg.manifest.read 'requires at dict.size 0 equal
   manifest-text parse first dup pkg.manifest.validate match? 1 equal
   ("{'format 1" pkg.manifest.read) 'parse raises
   ("{} {}" pkg.manifest.read) 'shape "exactly one form" raises-containing
   ("" pkg.manifest.read) 'shape "exactly one form" raises-containing
   ("[1 2]" pkg.manifest.read) 'type "a manifest is a dict" raises-containing
-  ("{'format 1 'name \"a\" 'version \"0.1.0\" 'exports {} 'requires {} 'require {}}"
+  ("{'format 1 'name \"a\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires {} 'require {}}"
    pkg.manifest.read)
   'domain
   "exactly the keys"
@@ -28,12 +28,12 @@
   'domain
   "exactly the keys"
   raises-containing
-  ("{'format 2 'name \"a\" 'version \"0.1.0\" 'exports {} 'requires {}}"
+  ("{'format 2 'name \"a\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires {}}"
    pkg.manifest.read)
   'domain
   "format is 1"
   raises-containing
-  ("{'format 1 'name \"My.Proj\" 'version \"0.1.0\" 'exports {} 'requires {}}"
+  ("{'format 1 'name \"My.Proj\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires {}}"
    pkg.manifest.read)
   'domain
   "lowercase segments"
@@ -42,47 +42,47 @@
 
  ### test exports-and-requirements
  (-- : "Validate export ownership, portable globs, URLs, hashes, and package collisions.")
- (("{'format 1 'name \"a\" 'version \"0.1.0\" 'exports {\"foreign\" [\"**/*\"]} 'requires {}}"
+ (("{'format 1 'name \"a\" 'version \"0.1.0\" 'sources [\"**/*\"] 'exports [\"foreign\"] 'requires {}}"
    pkg.manifest.read)
   'domain
-  "owns every namespace"
+  "owns every module"
   raises-containing
-  ("{'format 1 'name \"a\" 'version \"0.1.0\" 'exports {\"a\" [\"src//*.ecl\"]} 'requires {}}"
+  ("{'format 1 'name \"a\" 'version \"0.1.0\" 'sources [\"src//*.ecl\"] 'exports [\"a\"] 'requires {}}"
    pkg.manifest.read)
   'domain
-  "portable glob lists"
+  "portable glob strings"
   raises-containing
-  ("{'format 1 'name \"a\" 'version \"0.1.0\" 'exports {\"a\" [\"src/prefix**/*.ecl\"]} 'requires {}}"
+  ("{'format 1 'name \"a\" 'version \"0.1.0\" 'sources [\"src/prefix**/*.ecl\"] 'exports [\"a\"] 'requires {}}"
    pkg.manifest.read)
   'domain
-  "portable glob lists"
+  "portable glob strings"
   raises-containing
-  ("{'format 1 'name \"a\" 'version \"0.1.0\" 'exports {} 'requires {\"foo\" {'package \"foo\" 'version \"1.0.0\" 'url \"http://e.com/f.tgz\" 'hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}}}"
+  ("{'format 1 'name \"a\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires {\"foo\" {'package \"foo\" 'version \"1.0.0\" 'url \"http://e.com/f.tgz\" 'hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}}}"
    pkg.manifest.read)
   'domain
   "https"
   raises-containing
-  ("{'format 1 'name \"a\" 'version \"0.1.0\" 'exports {} 'requires {\"foo\" {'package \"foo\" 'version \"1.0.0\" 'url \"https://e.com/f.tgz\" 'hash \"sha256-ABC\"}}}"
+  ("{'format 1 'name \"a\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires {\"foo\" {'package \"foo\" 'version \"1.0.0\" 'url \"https://e.com/f.tgz\" 'hash \"sha256-ABC\"}}}"
    pkg.manifest.read)
   'domain
   "lowercase hex"
   raises-containing
-  ("{'format 1 'name \"foo\" 'version \"0.1.0\" 'exports {} 'requires {\"foo\" {'package \"foo\" 'version \"1.0.0\" 'url \"https://e.com/f.tgz\" 'hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}}}"
+  ("{'format 1 'name \"foo\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires {\"foo\" {'package \"foo\" 'version \"1.0.0\" 'url \"https://e.com/f.tgz\" 'hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}}}"
    pkg.manifest.read)
   'domain
   "require itself"
   raises-containing
-  ("{'format 1 'name \"a\" 'version \"0.1.0\" 'exports {} 'requires {\"foo\" {'package \"foo\" 'version \"1.0.0\" 'url \"https://e.com/f.tgz\" 'hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"} \"foo.bar\" {'package \"foo.bar\" 'version \"1.0.0\" 'url \"https://e.com/g.tgz\" 'hash \"sha256-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\"}}}"
+  ("{'format 1 'name \"a\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires {\"foo\" {'package \"foo\" 'version \"1.0.0\" 'url \"https://e.com/f.tgz\" 'hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"} \"foo.bar\" {'package \"foo.bar\" 'version \"1.0.0\" 'url \"https://e.com/g.tgz\" 'hash \"sha256-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\"}}}"
    pkg.manifest.read)
   'domain
   "require itself"
   raises-containing
-  ("{'format 1 'name \"p\" 'version \"0.1.0\" 'exports {} 'requires {\"p-\" {'package \"p-\" 'version \"1.0.0\" 'url \"https://e.com/f.tgz\" 'hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"} \"p.a\" {'package \"p.a\" 'version \"1.0.0\" 'url \"https://e.com/g.tgz\" 'hash \"sha256-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\"}}}"
+  ("{'format 1 'name \"p\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires {\"p-\" {'package \"p-\" 'version \"1.0.0\" 'url \"https://e.com/f.tgz\" 'hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"} \"p.a\" {'package \"p.a\" 'version \"1.0.0\" 'url \"https://e.com/g.tgz\" 'hash \"sha256-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\"}}}"
    pkg.manifest.read)
   'domain
   "require itself"
   raises-containing
-  ("{'format 1 'name \"p\" 'version \"0.1.0\" 'exports {} 'requires {\"p0\" {'package \"p0\" 'version \"1.0.0\" 'url \"https://e.com/f.tgz\" 'hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"} \"p.a\" {'package \"p.a\" 'version \"1.0.0\" 'url \"https://e.com/g.tgz\" 'hash \"sha256-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\"}}}"
+  ("{'format 1 'name \"p\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires {\"p0\" {'package \"p0\" 'version \"1.0.0\" 'url \"https://e.com/f.tgz\" 'hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"} \"p.a\" {'package \"p.a\" 'version \"1.0.0\" 'url \"https://e.com/g.tgz\" 'hash \"sha256-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\"}}}"
    pkg.manifest.read)
   'domain
   "require itself"
@@ -91,7 +91,7 @@
 
  ### test writing
  (-- : "Round-trip manifests while retaining requirement insertion order.")
- ({'format 1 'name "a" 'version "0.1.0" 'exports {"a" ["**/*"]}
+ ({'format 1 'name "a" 'version "0.1.0" 'sources ["**/*"] 'exports ["a"]
    'requires
    {"z"
     {'package "z" 'version "2.0.0" 'url "https://e.com/z.tgz"
@@ -100,7 +100,7 @@
     {'package "b" 'version "1.0.0" 'url "https://e.com/b.tgz"
      'hash "sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}}
   dup pkg.manifest.write pkg.manifest.read match? 1 equal
-  {'format 1 'name "a" 'version "0.1.0" 'exports {"a" ["**/*"]}
+  {'format 1 'name "a" 'version "0.1.0" 'sources ["**/*"] 'exports ["a"]
    'requires
    {"z"
     {'package "z" 'version "2.0.0" 'url "https://e.com/z.tgz"
@@ -109,7 +109,7 @@
     {'package "b" 'version "1.0.0" 'url "https://e.com/b.tgz"
      'hash "sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}}
   pkg.manifest.write
-  "{'format 1 'name \"a\" 'version \"0.1.0\" 'exports {\"a\" (\"**/*\")} 'requires {\"z\" {'package \"z\" 'version \"2.0.0\" 'url \"https://e.com/z.tgz\" 'hash \"sha256-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\"} \"b\" {'package \"b\" 'version \"1.0.0\" 'url \"https://e.com/b.tgz\" 'hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}}}\n"
+  "{'format 1 'name \"a\" 'version \"0.1.0\" 'sources (\"**/*\") 'exports (\"a\") 'requires {\"z\" {'package \"z\" 'version \"2.0.0\" 'url \"https://e.com/z.tgz\" 'hash \"sha256-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\"} \"b\" {'package \"b\" 'version \"1.0.0\" 'url \"https://e.com/b.tgz\" 'hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}}}\n"
   equal)
  'writing test
 

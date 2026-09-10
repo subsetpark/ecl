@@ -459,8 +459,8 @@ chooses among minimum versions declared by reachable manifests.
 {'format 1
  'name "my.proj"
  'version "0.1.0"
- 'exports
- {"my.proj" ["src/**/*.ecl"]}
+ 'sources ["src/**/*.ecl"]
+ 'exports ["my.proj"]
  'requires
  {"statistics" {'package "foo"
                  'version "1.2.0"
@@ -469,8 +469,8 @@ chooses among minimum versions declared by reachable manifests.
 ```
 
 `'format` is the integer `1`. `'name` is the package's canonical name, and
-`'version` is its version. `'exports` maps owned module namespaces to portable
-source globs. `'requires` maps consumer-local aliases to requirements.
+`'version` is its version. `'sources` lists portable source-file globs, and
+`'exports` lists exact public module names. `'requires` maps consumer-local aliases to requirements.
 
 A requirement contains exactly `'package`, `'version`, `'url`, and `'hash`.
 The version is a minimum. The URL begins with `https://`. The hash has the
@@ -494,18 +494,31 @@ matches `[a-z][a-z0-9-]*`. Every package name is also a valid module name.
 Package `foo` owns module namespaces `foo` and `foo.<rest>`. The ownership
 boundary is a dot, so `foo` owns `foo.bar` and excludes `foobar`.
 
-Each exported namespace maps to a nonempty list of distinct portable globs.
-Globs use relative `/`-separated paths and support `*`, `?`, and a
-whole-segment `**`. They exclude absolute paths, backslashes, and empty, `.`,
-or `..` segments.
+The source list contains distinct portable globs. Globs use relative
+`/`-separated paths and support `*`, `?`, and a whole-segment
+`**`. They exclude absolute paths, backslashes, and empty, `.`, or `..`
+segments. A glob may match no files; overlapping globs
+select a file only once. An empty source list is valid.
 
-The package catalog is derived from matching source files and their parsed
-forms. Each matched `.ecl` file declares one or more top-level modules through
-a literal module symbol followed by `@defm`. Every declaration is the export
-namespace or one of its dotted children. A source file may declare several
-modules. Every glob matches at least one file, one file belongs to one export
-namespace, and one module name maps to one source file across the selection.
-File and directory names carry no module-name meaning beyond glob matching.
+Exports are distinct, exact, package-owned module names. Exporting a module
+does not export its dotted children. Each export must have one top-level
+literal declaration in the selected source files: a module-name symbol
+followed by `@defm`. A source file may export several modules, and every
+export maps to exactly one source file. File and directory names do not
+determine module names.
+
+Other registrations in a selected file are private to that file. They may
+use unrelated names and may be constructed dynamically with `@module` and
+`register`. Modules and their tests can use their defining file's private
+registrations. Other files cannot access those registrations, including files
+in the same package. Two files may independently register the same private
+name.
+
+Calling an exported module preserves the called code's defining-file
+visibility. Loading another file does not add its private registrations to
+the caller's environment. Module-authored quotations and module handles keep
+their defining-file context when passed elsewhere; passing such a value
+explicitly is distinct from making its private module name public.
 
 ### Resolution
 
@@ -621,11 +634,16 @@ rules above and these additional rules:
 - the manifest is valid UTF-8 and valid format-1 package data;
 - ordinary directories and data files are allowed;
 - `.eclmod` files, links, and special nodes are forbidden;
+- the root names `.ecl-package.tgz` and `.ecl-package.catalog` are reserved;
 - every exported source file satisfies the manifest's glob, namespace,
   uniqueness, and parse requirements.
 
 Installation parses package source to build the module catalog and never
-evaluates it.
+evaluates it. It writes `.ecl-package.catalog` into the staging directory before
+publication. The deterministic inert record carries its format, package name
+and version, actual archive SHA-256, selected relative source paths, and exact
+export mappings, including selected files without exports. Absolute paths and
+Session identities are never stored.
 
 `pkg.store.inspect` performs the full archive and package-layout scan and
 returns the exact root manifest text without creating a destination.
@@ -636,9 +654,18 @@ raises `'io` with `'destination-exists 1`; a caller may accept a concurrent
 winner after `present?` confirms a real directory.
 
 Each installed entry retains its source archive as a reserved seal.
-`pkg.store.verify` streams the seal and compares its SHA-256 with the lock.
-`pkg.store.read-seal` performs the same verification and returns the exact seal
-bytes. It accepts no caller-selected child path.
+`pkg.store.verify` streams the seal, compares its SHA-256 with the lock, and
+compares the persisted catalog with one freshly derived from installed sources.
+It is read-only. `pkg.store.read-seal` verifies and returns the exact seal bytes
+independently of catalog metadata. It accepts no caller-selected child path.
+
+`pkg.store.ensure-catalog` accepts a store, key, package name, and expected hash.
+A valid current-format catalog requires no rebuild. Otherwise it verifies the
+retained archive seal and validates the installed source tree before atomically
+replacing the metadata. Failure or cancellation preserves prior metadata.
+Synchronization ensures catalogs for every selected existing cache or vendor
+entry before publishing the lock, including offline synchronization. Concurrent
+repairs publish complete equivalent metadata; dependency sources remain immutable.
 
 Project files are published through the `'project` filesystem root:
 `pkg.sync.write-project-file` uses `fs.create-text` for an absent file and the
@@ -692,20 +719,28 @@ its immutable lock-derived catalog. `ECL_PATH` is excluded from project
 resolution. A cache-backed lock uses the selected shared store; a vendored
 lock uses `<project-root>/vendor` and ignores cache environment variables.
 
+Session startup imports dependency catalogs after checking format and identity
+against the lock, assigning fresh package and artifact identities. Only root
+project sources are discovered dynamically. Missing, malformed, or incompatible
+metadata raises a package-specific error directing the user to `ecl pkg sync`;
+startup never scans dependency sources, writes repairs, or uses a legacy format.
+Source execution remains lazy: first use opens the required source artifact.
+
 The catalog maps each module to an exact package entry and source path. A
 missing selected directory raises `'io` and directs the user to `ecl pkg
-sync`. An unexported module or a module outside the current package's direct
-requirements raises `'undefined-word`. Package lookup never falls through to
+sync`. A module unavailable in the defining file and public catalog, or an
+export outside the current package's direct requirements, raises `'undefined-word`. Package lookup never falls through to
 `ECL_PATH` and never performs network or package writes.
 
-Runtime package visibility is lexical. Root and package code can resolve their
+Runtime package visibility is lexical. Root and package code can resolve exports from their
 own package and packages named by their direct requirement edges. Loading a
 transitive package into the shared registry does not grant visibility to an
 unrelated caller.
 
 One source artifact is evaluated once. Its cataloged registrations and package
-provenance are verified before commit. Qualified resolution ignores
-registrations from an uncommitted artifact.
+provenance are verified before commit. Other files cannot resolve
+exports from an uncommitted artifact; the file being evaluated can use its
+own registrations as they are created.
 
 Runtime lookup uses these stable diagnostics:
 
@@ -726,8 +761,8 @@ invalid discovered lock raises `'io` prefixed by `invalid project lock
 ### Vendoring and cache collection
 
 `ecl pkg vendor` verifies every selected entry's seal and installs it at
-`<project-root>/vendor/<store-key>`. Existing vendor entries are verified and
-preserved. After every entry is present, the command atomically rewrites the
+`<project-root>/vendor/<store-key>`. Existing vendor entries have their catalogs ensured, then their seals and
+catalog mappings verified; their source trees are preserved. After every entry is present, the command atomically rewrites the
 lock with `'store 'vendor`. Failure preserves the prior lock and may leave
 valid immutable entries for reuse. Repetition is idempotent.
 
@@ -751,17 +786,18 @@ grants the discovered root to evaluated code as the `'project` filesystem root
 with `read-data`, `inspect`, `create`, and `replace`; the discovered path
 itself never enters evaluated code. `init` acts on the `'cwd` root.
 
-- `init [name]` creates a format-1 manifest at version `0.1.0`. The working
-  directory basename supplies the default name. Creation never replaces an
-  existing or racing file.
+- `init [name]` creates `src/` and a format-1 manifest at version `0.1.0`, with
+  `sources ["src/**/*.ecl"]` and no exports. An existing source directory is
+  preserved. The working directory basename supplies the default name.
+  Manifest creation never replaces an existing or racing file.
 - `add <name> <version> <url>` fetches and validates an exact package, derives
   its hash, and records the requirement through an atomic manifest rewrite.
 - `sync` performs network-enabled synchronization. `sync --offline` uses only
   immutable store entries.
 - `tree` prints the lock root and dependency edges in requirer/package order.
 - `why <module>` prints one deterministic root-to-owner path.
-- `verify` streams and hashes every selected package seal without network
-  access.
+- `verify` streams and hashes every selected package seal and compares its
+  catalog with installed sources, without writes or network access.
 - `vendor` creates or verifies the project-local store and marks the lock as
   vendored.
 - `gc <lock-file> [lock-file ...]` collects the shared cache against one or
@@ -834,9 +870,13 @@ editor remains usable.
 
 ### Test command
 
-`ecl test` requires a lock-backed root project. It loads modules exported by
-the root package, discovers their declared tests, and invokes the selected
-runner in a Test Session. The default runner is `test.default.run`.
+`ecl test` requires a lock-backed root project. It loads every source file
+selected by the root package's `sources`, including files with no exported
+modules, discovers their declared tests, and invokes the selected runner in a
+Test Session. Each source artifact is loaded once, including when an earlier
+source already loaded it through an exported module. Private modules keep
+their defining-file visibility. Dependency sources are loaded only as needed.
+The default runner is `test.default.run`.
 
 `--runner <qualified-word>` selects another public runner. Arguments after
 `--` are exposed to that runner through `args`. Test bodies remain private to

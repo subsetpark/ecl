@@ -18,6 +18,202 @@ const intern = @import("../intern.zig");
 const session = @import("../session.zig");
 const test_heap = @import("test_heap.zig");
 
+const CatalogIoObservation = struct {
+    var catalog_reads: usize = 0;
+    var source_reads: usize = 0;
+    var dependency_walks: usize = 0;
+
+    fn openFile(userdata: ?*anyopaque, dir: std.Io.Dir, path: []const u8, options: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
+        if (std.mem.endsWith(u8, path, ".ecl-package.catalog")) catalog_reads += 1;
+        if (std.mem.endsWith(u8, path, ".ecl")) source_reads += 1;
+        return std.testing.io.vtable.dirOpenFile(userdata, dir, path, options);
+    }
+    fn openDir(userdata: ?*anyopaque, dir: std.Io.Dir, path: []const u8, options: std.Io.Dir.OpenOptions) std.Io.Dir.OpenError!std.Io.Dir {
+        if (options.iterate and std.mem.indexOf(u8, path, "/cache/") != null) dependency_walks += 1;
+        return std.testing.io.vtable.dirOpenDir(userdata, dir, path, options);
+    }
+};
+
+test "loader: startup reads dependency metadata and first use opens the source" {
+    var fixture = try LockFixture.init();
+    defer fixture.deinit();
+    try fixture.writeOnePackageLock("dep", "1.0.0", hash_a);
+    try fixture.writeStoreModule("dep", "1.0.0", hash_a, "dep", 42);
+    var vtable = std.testing.io.vtable.*;
+    vtable.dirOpenFile = CatalogIoObservation.openFile;
+    vtable.dirOpenDir = CatalogIoObservation.openDir;
+    const observed: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    CatalogIoObservation.catalog_reads = 0;
+    CatalogIoObservation.source_reads = 0;
+    CatalogIoObservation.dependency_walks = 0;
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    const environ = [_]sessionHostEntry{.{ .name = "ECL_CACHE", .value = fixture.cache }};
+    var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{
+        .io = observed,
+        .initial_cwd = fixture.nested,
+        .environ = &environ,
+    }), .cooperative, .evaluate);
+    defer runtime.deinit();
+    try std.testing.expectEqual(@as(usize, 1), CatalogIoObservation.catalog_reads);
+    try std.testing.expectEqual(@as(usize, 0), CatalogIoObservation.source_reads);
+    try std.testing.expectEqual(@as(usize, 0), CatalogIoObservation.dependency_walks);
+    try expectOk(&runtime, "dep.answer");
+    try std.testing.expectEqual(@as(i64, 42), runtime.stackItems()[0].int);
+    try std.testing.expect(CatalogIoObservation.source_reads > 0);
+}
+
+test "loader: catalog exports resolve with non-lexical IDs and reversed persisted exports" {
+    // Force fresh discovery's lexical order and persisted metadata order to
+    // disagree with their respective intern-ID orders before opening a Session.
+    _ = try intern.internModuleName("root.order-z");
+    _ = try intern.internModuleName("root.order-a");
+    _ = try intern.internModuleName("dep.order-a");
+    _ = try intern.internModuleName("dep.order-z");
+    inline for ([_]bool{ false, true }) |persisted| {
+        var fixture = try LockFixture.init();
+        defer fixture.deinit();
+        const source = if (persisted)
+            "[] ((11) 'answer def) 'dep.order-a @defm [] ((22) 'answer def) 'dep.order-z @defm"
+        else
+            "[] ((11) 'answer def) 'root.order-a @defm [] ((22) 'answer def) 'root.order-z @defm";
+        if (persisted) {
+            try fixture.writeOnePackageLock("dep", "1.0.0", hash_a);
+            try fixture.writeStoreArtifact("dep", "1.0.0", hash_a, "order.ecl", "\"dep.order-z\" \"dep.order-a\"", source, .{});
+        } else {
+            try fixture.write("project/ecl.lock", "{'format 1 'root \"root\" 'packages {} 'requires {\"root\" {}}}");
+            try fixture.write("project/ecl.pkg", "{'format 1 'name \"root\" 'version \"0.1.0\" " ++
+                "'sources [\"*.ecl\"] 'exports [\"root.order-a\" \"root.order-z\"] 'requires {}}");
+            try fixture.write("project/order.ecl", source);
+        }
+        var backing: test_heap.SessionHeap = .init;
+        defer test_heap.retire(&backing);
+        var inputs = try runtime_fixture.Fixture.init();
+        defer inputs.deinit();
+        const environ = [_]sessionHostEntry{.{ .name = "ECL_CACHE", .value = fixture.cache }};
+        var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{
+            .initial_cwd = fixture.nested,
+            .environ = &environ,
+        }), .cooperative, .evaluate);
+        defer runtime.deinit();
+        try expectOk(&runtime, if (persisted) "dep.order-a.answer dep.order-z.answer" else "root.order-a.answer root.order-z.answer");
+        try std.testing.expectEqual(@as(i64, 11), runtime.stackItems()[0].int);
+        try std.testing.expectEqual(@as(i64, 22), runtime.stackItems()[1].int);
+    }
+}
+
+test "loader: invalid dependency catalogs fail closed with sync diagnostics" {
+    const invalid = [_]?[]const u8{
+        null,                                                                                                                                                 "not inert metadata",                                                                                                         "{'format 2 'name \"dep\" 'version \"1.0.0\" 'hash \"" ++ hash_a ++ "\" 'sources []}",
+        "{'format 1 'name \"other\" 'version \"1.0.0\" 'hash \"" ++ hash_a ++ "\" 'sources []}",                                                              "{'format 1 'name \"dep\" 'version \"2.0.0\" 'hash \"" ++ hash_a ++ "\" 'sources []}",                                        "{'format 1 'name \"dep\" 'version \"1.0.0\" 'hash \"" ++ hash_b ++ "\" 'sources []}",
+        "{'format 1 'name \"dep\" 'version \"1.0.0\" 'hash \"" ++ hash_a ++ "\" 'sources [{'path \"../dep.ecl\" 'exports [\"dep\"]}]}",                       "{'format 1 'name \"dep\" 'version \"1.0.0\" 'hash \"" ++ hash_a ++ "\" 'sources [{'path \"/dep.ecl\" 'exports [\"dep\"]}]}", "{'format 1 'name \"dep\" 'version \"1.0.0\" 'hash \"" ++ hash_a ++ "\" 'sources [{'path \"dep.ecl\" 'exports [\"dep\" \"dep\"]}]}",
+        "{'format 1 'name \"dep\" 'version \"1.0.0\" 'hash \"" ++ hash_a ++ "\" 'sources [{'path \"dep.ecl\" 'exports []} {'path \"dep.ecl\" 'exports []}]}",
+    };
+    for (invalid) |metadata| {
+        var fixture = try LockFixture.init();
+        defer fixture.deinit();
+        try fixture.writeOnePackageLock("dep", "1.0.0", hash_a);
+        try fixture.writeStoreModule("dep", "1.0.0", hash_a, "dep", 42);
+        const path = "cache/dep-1.0.0-" ++ hash_a[7..] ++ "/.ecl-package.catalog";
+        if (metadata) |text| try fixture.write(path, text) else try fixture.directory.dir.deleteFile(std.testing.io, path);
+        var backing: test_heap.SessionHeap = .init;
+        defer test_heap.retire(&backing);
+        var inputs = try runtime_fixture.Fixture.init();
+        defer inputs.deinit();
+        const environ = [_]sessionHostEntry{.{ .name = "ECL_CACHE", .value = fixture.cache }};
+        var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{
+            .initial_cwd = fixture.nested,
+            .environ = &environ,
+        }), .cooperative, .evaluate);
+        defer runtime.deinit();
+        try expectErrorContains(&runtime, "dep.answer", &.{ "dep", "catalog", "ecl pkg sync" });
+        if (metadata) |text| {
+            const unchanged = try fixture.directory.dir.readFileAlloc(std.testing.io, path, std.testing.allocator, .unlimited);
+            defer std.testing.allocator.free(unchanged);
+            try std.testing.expectEqualStrings(text, unchanged);
+        } else try std.testing.expectError(error.FileNotFound, fixture.directory.dir.statFile(std.testing.io, path, .{}));
+    }
+}
+
+test "loader: local file additions and edits are discovered without sync" {
+    var fixture = try LockFixture.init();
+    defer fixture.deinit();
+    try fixture.write("project/ecl.lock", "{'format 1 'root \"root\" 'packages {} 'requires {\"root\" {}}}\n");
+    for ([_]bool{ false, true }) |edited| {
+        try fixture.write("project/ecl.pkg", if (edited)
+            "{'format 1 'name \"root\" 'version \"0.1.0\" 'sources [\"*.ecl\"] 'exports [\"root.one\" \"root.two\"] 'requires {}}\n"
+        else
+            "{'format 1 'name \"root\" 'version \"0.1.0\" 'sources [\"*.ecl\"] 'exports [\"root.one\"] 'requires {}}\n");
+        try fixture.write("project/one.ecl", if (edited) "[] ((2) 'answer def) 'root.one @defm\n" else "[] ((1) 'answer def) 'root.one @defm\n");
+        if (edited) try fixture.write("project/two.ecl", "[] ((3) 'answer def) 'root.two @defm\n");
+        var backing: test_heap.SessionHeap = .init;
+        defer test_heap.retire(&backing);
+        var inputs = try runtime_fixture.Fixture.init();
+        defer inputs.deinit();
+        var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{ .initial_cwd = fixture.nested }), .cooperative, .evaluate);
+        defer runtime.deinit();
+        try expectOk(&runtime, "root.one.answer");
+        try std.testing.expectEqual(@as(i64, if (edited) 2 else 1), runtime.stackItems()[0].int);
+        if (edited) {
+            try expectOk(&runtime, "root.two.answer");
+            try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[1].int);
+        }
+    }
+}
+
+test "loader: private modules belong to their defining file independent of load order" {
+    for ([_]bool{ false, true }) |bar_first| {
+        var fixture = try LockFixture.init();
+        defer fixture.deinit();
+        try fixture.write("project/ecl.pkg", "{'format 1 'name \"root\" 'version \"0.1.0\" " ++
+            "'sources [\"*.ecl\"] 'exports [\"root.foo\" \"root.bar\" \"root.other\"] 'requires {}}\n");
+        try fixture.write("project/ecl.lock", "{'format 1 'root \"root\" 'packages {} 'requires {\"root\" {}}}\n");
+        try fixture.write("project/foo.ecl", "[] ((99) 'answer def) 'root.foo.hidden @defm\n" ++
+            "[] ((baz.answer) 'answer def (call) 'apply def " ++
+            "(root.foo.hidden.answer) 'own def) 'root.foo @defm\n");
+        try fixture.write("project/bar.ecl", "[] ((42) 'answer def) @module 'baz register\n" ++
+            "[] ('baz ('answer) import " ++
+            "((baz.answer)) 'quoted def " ++
+            "(root.foo.answer) 'foreign def " ++
+            "([] ((9) 'answer def) @module 'baz register) 'replace def) 'root.bar @defm\n");
+        try fixture.write("project/other.ecl", "[] ((7) 'answer def) 'baz @defm\n" ++
+            "[] ((baz.answer) 'answer def) 'root.other @defm\n");
+
+        var backing: test_heap.SessionHeap = .init;
+        defer test_heap.retire(&backing);
+        var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer output.deinit();
+        var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer diagnostics.deinit();
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{
+            .io = std.testing.io,
+            .output = &output.writer,
+            .diagnostics = &diagnostics.writer,
+            .initial_cwd = fixture.nested,
+        }), .default, .evaluate);
+        defer runtime.deinit();
+
+        if (bar_first) try expectOk(&runtime, "root.bar.answer pop");
+        try expectErrorContains(&runtime, "root.foo.answer", &.{"not exported by the active project"});
+        try expectOk(&runtime, "root.bar.answer root.other.answer root.bar.quoted root.foo.apply");
+        try std.testing.expectEqual(@as(i64, 42), runtime.stackItems()[0].int);
+        try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[1].int);
+        try std.testing.expectEqual(@as(i64, 42), runtime.stackItems()[2].int);
+        try expectErrorContains(&runtime, "root.bar.foreign", &.{"not exported by the active project"});
+        try expectErrorContains(&runtime, "baz.answer", &.{"not exported by the active project"});
+        try expectErrorContains(&runtime, "'baz ('answer) import", &.{"not exported by the active project"});
+        try expectErrorContains(&runtime, "root.foo.hidden.answer", &.{"not exported by the active project"});
+        try expectOk(&runtime, "root.foo.own 99 = {'kind 'user} assert");
+        try expectOk(&runtime, "root.bar.replace root.bar.answer root.other.answer");
+        try std.testing.expectEqual(@as(i64, 9), runtime.stackItems()[3].int);
+        try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[4].int);
+    }
+}
+
 test "loader: catalog cold-loads multiple full module names from an unrelated artifact name" {
     var fixture = try LockFixture.init();
     defer fixture.deinit();
@@ -27,6 +223,7 @@ test "loader: catalog cold-loads multiple full module names from an unrelated ar
         "1.0.0",
         hash_a,
         "unrelated.ecl",
+        "\"stats.regressions\" \"stats.distributions\"",
         "[] (({d}) 'answer def) 'stats.regressions @defm\n" ++
             "[] (({d}) 'answer def) 'stats.distributions @defm\n",
         .{ 1, 2 },
@@ -60,7 +257,7 @@ test "loader: the root package exports local source through the same catalog" {
     try fixture.write(
         "project/ecl.pkg",
         "{'format 1 'name \"root\" 'version \"0.1.0\" " ++
-            "'exports {\"root\" [\"src/**/*\"]} 'requires {}}\n",
+            "'sources [\"src/**/*\"] 'exports [\"root.local\"] 'requires {}}\n",
     );
     try fixture.write(
         "project/ecl.lock",
@@ -98,7 +295,7 @@ test "loader: a root-defined module reaches its declared direct dependency" {
     try fixture.write(
         "project/ecl.pkg",
         "{'format 1 'name \"root\" 'version \"0.1.0\" " ++
-            "'exports {\"root\" [\"src/**/*\"]} 'requires " ++
+            "'sources [\"src/**/*\"] 'exports [\"root.local\"] 'requires " ++
             "{\"dep\" {'package \"dep\" 'version \"1.0.0\" " ++
             "'url \"https://example.invalid/dep.tgz\" 'hash \"" ++ hash_a ++ "\"}}}\n",
     );
@@ -130,6 +327,57 @@ test "loader: a root-defined module reaches its declared direct dependency" {
 
     try expectOk(&runtime, "root.local.answer");
     try std.testing.expectEqual(@as(i64, 5), runtime.stackItems()[0].int);
+}
+
+test "loader: both manifest validators reject drive-prefixed source globs" {
+    const pkg_catalog = @import("../pkg_catalog.zig");
+    const allocator = std.testing.allocator;
+    var directory = std.testing.tmpDir(.{});
+    defer directory.cleanup();
+    var owner = @import("../heap.zig").HostOwner.init(allocator);
+    defer owner.cleanup().drain();
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{}), .cooperative, .evaluate);
+    defer runtime.deinit();
+    const cases = [_]struct { glob: []const u8, valid: bool }{
+        .{ .glob = "C:/src/**/*.ecl", .valid = false },
+        .{ .glob = "C:src/**/*.ecl", .valid = false },
+        .{ .glob = "c:/src/**/*.ecl", .valid = false },
+        .{ .glob = "z:src/**/*.ecl", .valid = false },
+        .{ .glob = "C:", .valid = false },
+        .{ .glob = "src/**/*.ecl", .valid = true },
+        .{ .glob = "*.ecl", .valid = true },
+        .{ .glob = "C", .valid = true },
+        .{ .glob = "src/C:part/*.ecl", .valid = true },
+        .{ .glob = "CC:src/**/*.ecl", .valid = true },
+    };
+    for (cases) |case| {
+        const manifest = try std.fmt.allocPrint(allocator, "{{'format 1 'name \"dep\" 'version \"1.0.0\" 'sources [\"{s}\"] 'exports [] 'requires {{}}}}", .{case.glob});
+        defer allocator.free(manifest);
+        try directory.dir.writeFile(std.testing.io, .{ .sub_path = "ecl.pkg", .data = manifest });
+        const source = try std.fmt.allocPrint(allocator, "{s} pkg.manifest.validate pop", .{manifest});
+        defer allocator.free(source);
+        if (case.valid) try expectOk(&runtime, source) else try expectErrorContains(&runtime, source, &.{"portable glob strings"});
+        var diagnostic: ?[]u8 = null;
+        defer if (diagnostic) |message| allocator.free(message);
+        const result = pkg_catalog.build(owner.cleanup(), std.testing.io, &.{.{
+            .id = @enumFromInt(0),
+            .name = "dep",
+            .version = "1.0.0",
+            .root_dir = ".",
+            .base_dir = directory.dir,
+        }}, &diagnostic);
+        if (case.valid) {
+            var catalog = try result;
+            defer catalog.deinit();
+        } else {
+            try std.testing.expectError(error.Invalid, result);
+            try std.testing.expect(std.mem.indexOf(u8, diagnostic.?, "sources contains an invalid entry") != null);
+        }
+    }
 }
 
 test "loader: catalog discovery holds a manifest to the whole public contract" {
@@ -174,7 +422,7 @@ test "loader: catalog discovery holds a manifest to the whole public contract" {
         const manifest = try std.fmt.allocPrint(
             std.testing.allocator,
             "{{'format 1 'name \"root\" 'version \"0.1.0\" " ++
-                "'exports {{\"root\" [\"src/**/*\"]}} 'requires {s}}}\n",
+                "'sources [\"src/**/*\"] 'exports [\"root.local\"] 'requires {s}}}\n",
             .{case.requires},
         );
         defer std.testing.allocator.free(manifest);
@@ -320,6 +568,7 @@ test "loader: direct requires mask both cold and already-loaded transitive modul
         "1.0.0",
         hash_a,
         "implementation.ecl",
+        "\"alpha\"",
         "[] ((beta.answer) 'through def) 'alpha @defm\n",
         .{},
     );
@@ -361,6 +610,7 @@ test "loader: one quotation rechecks authorization in each package context" {
         "1.0.0",
         hash_a,
         "alpha.ecl",
+        "\"alpha\"",
         "secret.answer pop [] ((2 swap times pop pop) 'run def) 'alpha @defm\n",
         .{},
     );
@@ -369,6 +619,7 @@ test "loader: one quotation rechecks authorization in each package context" {
         "1.0.0",
         hash_b,
         "beta.ecl",
+        "\"beta\"",
         "[] ((2 swap times pop pop) 'run def) 'beta @defm\n",
         .{},
     );
@@ -413,6 +664,7 @@ test "loader: a failing multi-module artifact publishes no usable module" {
         "1.0.0",
         hash_a,
         "many.ecl",
+        "\"broken.first\" \"broken.second\"",
         "[] ((1) 'answer def) 'broken.first @defm\n" ++
             "missing-during-artifact-load\n" ++
             "[] ((2) 'answer def) 'broken.second @defm\n",
@@ -657,7 +909,7 @@ const LockFixture = struct {
         try directory.dir.createDir(std.testing.io, "path", .default_dir);
         if (marker) try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "project/ecl.pkg",
-            .data = "{'format 1 'name \"root\" 'version \"0.1.0\" 'exports {} 'requires {}}\n",
+            .data = "{'format 1 'name \"root\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires {}}\n",
         });
         const nested = try std.fs.path.join(allocator, &.{ root, "project", "nested" });
         errdefer allocator.free(nested);
@@ -768,11 +1020,12 @@ const LockFixture = struct {
         defer std.testing.allocator.free(manifest_path);
         const manifest = try std.fmt.allocPrint(
             std.testing.allocator,
-            "{{'format 1 'name \"{s}\" 'version \"{s}\" 'exports {{}} 'requires {{}}}}\n",
+            "{{'format 1 'name \"{s}\" 'version \"{s}\" 'sources [] 'exports [] 'requires {{}}}}\n",
             .{ package, version },
         );
         defer std.testing.allocator.free(manifest);
         try self.write(manifest_path, manifest);
+        try self.writeCatalog(package, version, hash, "");
     }
 
     fn writeStoreModule(
@@ -792,6 +1045,7 @@ const LockFixture = struct {
         version: []const u8,
         hash: []const u8,
         relative_path: []const u8,
+        exports: []const u8,
         comptime source_format: []const u8,
         args: anytype,
     ) !void {
@@ -813,11 +1067,14 @@ const LockFixture = struct {
         defer std.testing.allocator.free(manifest_path);
         const manifest = try std.fmt.allocPrint(
             std.testing.allocator,
-            "{{'format 1 'name \"{s}\" 'version \"{s}\" 'exports {{\"{s}\" [\"**/*\"]}} 'requires {{}}}}\n",
-            .{ package, version, package },
+            "{{'format 1 'name \"{s}\" 'version \"{s}\" 'sources [\"**/*\"] 'exports [{s}] 'requires {{}}}}\n",
+            .{ package, version, exports },
         );
         defer std.testing.allocator.free(manifest);
         try self.write(manifest_path, manifest);
+        const records = try std.fmt.allocPrint(std.testing.allocator, "{{'path \"{s}\" 'exports [{s}]}}", .{ relative_path, exports });
+        defer std.testing.allocator.free(records);
+        try self.writeCatalog(package, version, hash, records);
     }
 
     fn writeStoreWord(
@@ -851,11 +1108,22 @@ const LockFixture = struct {
         defer std.testing.allocator.free(manifest_path);
         const manifest = try std.fmt.allocPrint(
             std.testing.allocator,
-            "{{'format 1 'name \"{s}\" 'version \"{s}\" 'exports {{\"{s}\" [\"**/*\"]}} 'requires {{}}}}\n",
-            .{ package, version, package },
+            "{{'format 1 'name \"{s}\" 'version \"{s}\" 'sources [\"**/*\"] 'exports [\"{s}\"] 'requires {{}}}}\n",
+            .{ package, version, module_name },
         );
         defer std.testing.allocator.free(manifest);
         try self.write(manifest_path, manifest);
+        const records = try std.fmt.allocPrint(std.testing.allocator, "{{'path \"{s}.ecl\" 'exports [\"{s}\"]}}", .{ module_name, module_name });
+        defer std.testing.allocator.free(records);
+        try self.writeCatalog(package, version, hash, records);
+    }
+
+    fn writeCatalog(self: *LockFixture, package: []const u8, version: []const u8, hash: []const u8, records: []const u8) !void {
+        const path = try std.fmt.allocPrint(std.testing.allocator, "cache/{s}-{s}-{s}/.ecl-package.catalog", .{ package, version, hash[7..] });
+        defer std.testing.allocator.free(path);
+        const text = try std.fmt.allocPrint(std.testing.allocator, "{{'format 1 'name \"{s}\" 'version \"{s}\" 'hash \"{s}\" 'sources [{s}]}}\n", .{ package, version, hash, records });
+        defer std.testing.allocator.free(text);
+        try self.write(path, text);
     }
 
     fn writePathModule(self: *LockFixture, module_name: []const u8, answer: i64) !void {
@@ -1654,4 +1922,158 @@ test "module: a body that reloads its own name keeps its entry generation" {
         "( -- n ) (x) 'get def) 'm @defm m.probe m.get");
     try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
     try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[1].int);
+}
+
+test "loader: catalog export verification resumes within its membership budget" {
+    const pkg_catalog = @import("../pkg_catalog.zig");
+    const allocator = std.testing.allocator;
+    var directory = std.testing.tmpDir(.{});
+    defer directory.cleanup();
+    try directory.dir.writeFile(std.testing.io, .{
+        .sub_path = "modules.ecl",
+        // Discovery must ignore private declarations, even when their literal
+        // names would be invalid if evaluated as module registrations.
+        .data = "[] () '-- @defm " ++
+            "[] () 'dep.a @defm [] () 'dep.b @defm [] () 'dep.c @defm",
+    });
+    inline for ([_]bool{ false, true }) |missing| {
+        try directory.dir.writeFile(std.testing.io, .{
+            .sub_path = "ecl.pkg",
+            .data = "{'format 1 'name \"dep\" 'version \"1.0.0\" 'sources [\"*.ecl\"] " ++
+                "'requires {} 'exports [\"dep.c\" \"dep.b\" \"dep.a\"" ++
+                (if (missing) " \"dep.missing\"]}" else "]}"),
+        });
+        var owner = @import("../heap.zig").HostOwner.init(allocator);
+        defer owner.cleanup().drain();
+        var diagnostic: ?[]u8 = null;
+        defer if (diagnostic) |message| allocator.free(message);
+        const packages = [_]pkg_catalog.PackageInput{.{
+            .id = @enumFromInt(0),
+            .name = "dep",
+            .version = "1.0.0",
+            .root_dir = ".",
+            .base_dir = directory.dir,
+        }};
+        // Abandon a partially indexed manifest to exercise its owned cleanup.
+        {
+            var abandoned = pkg_catalog.Build.init(owner.cleanup(), std.testing.io, &packages, &diagnostic);
+            defer abandoned.deinit();
+            try std.testing.expectEqual(.pending, try abandoned.advance(100));
+            try std.testing.expectEqual(.pending, try abandoned.advance(1));
+        }
+        var cursor = pkg_catalog.Build.init(owner.cleanup(), std.testing.io, &packages, &diagnostic);
+        defer cursor.deinit();
+        // Read the manifest, then index its exports one entry at a time.
+        try std.testing.expectEqual(.pending, try cursor.advance(100));
+        for (0..@as(usize, if (missing) 4 else 3)) |_| {
+            try std.testing.expectEqual(.pending, try cursor.advance(0));
+            try std.testing.expectEqual(.pending, try cursor.advance(1));
+        }
+        // Finish the small directory walk and parse its artifact.
+        for (0..2) |_| try std.testing.expectEqual(.pending, try cursor.advance(100));
+        // Each export needs one membership check regardless of declaration
+        // order. Zero budget preserves progress before and during verification.
+        for (0..2) |_| {
+            try std.testing.expectEqual(.pending, try cursor.advance(0));
+            try std.testing.expectEqual(.pending, try cursor.advance(1));
+            try std.testing.expect(diagnostic == null);
+        }
+        if (missing) {
+            try std.testing.expectEqual(.pending, try cursor.advance(1));
+            try std.testing.expectEqual(.pending, try cursor.advance(0));
+            try std.testing.expect(diagnostic == null);
+            try std.testing.expectError(error.Invalid, cursor.advance(1));
+            try std.testing.expectEqualStrings("package dep exports undeclared module dep.missing", diagnostic.?);
+        } else {
+            try std.testing.expectEqual(.done, try cursor.advance(1));
+            var catalog = try cursor.take();
+            defer catalog.deinit();
+            for ([_][]const u8{ "dep.a", "dep.b", "dep.c" }) |name|
+                try std.testing.expect(catalog.find(name) != null);
+        }
+    }
+}
+
+test "loader: catalog membership is package-local and survives allocation failures" {
+    var fixture = try LockFixture.init();
+    defer fixture.deinit();
+    const manifest = "{'format 1 'name \"dep\" 'version \"1.0.0\" 'sources [\"*.ecl\"] " ++
+        "'exports [\"dep.only\"] 'requires {}}";
+    try fixture.write("project/ecl.pkg", manifest);
+    try fixture.write("project/module.ecl", "[] () 'dep.only @defm");
+    try fixture.write("path/ecl.pkg", manifest);
+    try fixture.write("path/module.ecl", "[]");
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator, directory: std.Io.Dir) !void {
+            const pkg_catalog = @import("../pkg_catalog.zig");
+            var owner = @import("../heap.zig").HostOwner.init(allocator);
+            defer owner.cleanup().drain();
+            const packages = [_]pkg_catalog.PackageInput{
+                .{ .id = @enumFromInt(0), .name = "dep", .version = "1.0.0", .root_dir = "project", .base_dir = directory },
+                .{ .id = @enumFromInt(1), .name = "dep", .version = "1.0.0", .root_dir = "path", .base_dir = directory },
+            };
+            for ([_]usize{ 1, 2 }) |count| {
+                var diagnostic: ?[]u8 = null;
+                defer if (diagnostic) |message| allocator.free(message);
+                var catalog = pkg_catalog.build(owner.cleanup(), std.testing.io, packages[0..count], &diagnostic) catch |err| switch (err) {
+                    error.OutOfMemory => return err,
+                    error.Invalid => {
+                        try std.testing.expectEqual(@as(usize, 2), count);
+                        try std.testing.expectEqualStrings("package dep exports undeclared module dep.only", diagnostic.?);
+                        continue;
+                    },
+                };
+                defer catalog.deinit();
+                try std.testing.expectEqual(@as(usize, 1), count);
+                try std.testing.expect(catalog.find("dep.only") != null);
+            }
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{fixture.directory.dir});
+}
+
+test "loader: persisted catalog assembly propagates every allocation failure" {
+    var fixture = try LockFixture.init();
+    defer fixture.deinit();
+    try fixture.writeStoreModule("dep", "1.0.0", hash_a, "dep", 42);
+    const root = try std.fs.path.join(std.testing.allocator, &.{ fixture.cache, "dep-1.0.0-" ++ hash_a[7..] });
+    defer std.testing.allocator.free(root);
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator, path: []const u8) !void {
+            var owner = @import("../heap.zig").HostOwner.init(allocator);
+            defer owner.cleanup().drain();
+            var diagnostic: ?[]u8 = null;
+            defer if (diagnostic) |message| allocator.free(message);
+            var catalog = try @import("../pkg_catalog.zig").build(owner.cleanup(), std.testing.io, &.{.{
+                .id = @enumFromInt(0),
+                .name = "dep",
+                .version = "1.0.0",
+                .root_dir = path,
+                .archive_hash = hash_a,
+            }}, &diagnostic);
+            defer catalog.deinit();
+            const module = catalog.find("dep") orelse return error.MissingExport;
+            try std.testing.expectEqualStrings("dep.ecl", catalog.artifact(module.artifact).relative_path);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{root});
+}
+
+test "loader: persisted private-only sources retain file identity" {
+    var fixture = try LockFixture.init();
+    defer fixture.deinit();
+    try fixture.writeOnePackageLock("dep", "1.0.0", hash_a);
+    try fixture.writeStoreArtifact("dep", "1.0.0", hash_a, "private.ecl", "", "[] ((42) 'answer def) 'hidden @defm hidden.answer\n", .{});
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    const environ = [_]sessionHostEntry{.{ .name = "ECL_CACHE", .value = fixture.cache }};
+    var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{ .initial_cwd = fixture.nested, .environ = &environ }), .cooperative, .evaluate);
+    defer runtime.deinit();
+    const source = try std.fmt.allocPrint(std.testing.allocator, "\"{s}/dep-1.0.0-{s}/private.ecl\" load", .{ fixture.cache, hash_a[7..] });
+    defer std.testing.allocator.free(source);
+    try expectOk(&runtime, source);
+    try std.testing.expectEqual(@as(i64, 42), runtime.stackItems()[0].int);
+    try expectErrorContains(&runtime, "hidden.answer", &.{"not exported by the active project"});
 }

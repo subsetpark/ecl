@@ -124,13 +124,36 @@ ecl pkg init my.app
 ecl pkg sync
 ```
 
+`pkg init` creates `src/` and selects `src/**/*.ecl`, with no public exports.
+Put source files there and run `ecl test`; modules stay private until you add
+them to `exports`.
+
 To add a dependency, run `ecl pkg add <name> <version> <https-url>` with the
 package's name, version, and archive URL, then run `ecl pkg sync` again.
 Commit both `ecl.pkg` and `ecl.lock`.
 
+Installation stores dependency module catalogs alongside the sealed archives.
+Startup reads these catalogs and discovers your local sources afresh, so local
+file additions and edits need no sync. If dependency metadata is missing or
+invalid, run `ecl pkg sync` (or `ecl pkg sync --offline` with all dependencies
+already installed). Startup never repairs the store or scans dependency sources.
+`ecl pkg verify` checks both archive seals and catalog mappings.
+
+List your source files and the modules other files may use in `ecl.pkg`:
+
+```ecl
+{'format 1 'name "my.app" 'version "0.1.0"
+ 'sources ["src/*.ecl"] 'exports ["my.app"]
+ 'requires {}}
+```
+
+Exports name exact modules declared in those files. Other modules stay private
+to their defining file, including when running tests.
+
 Use `ecl pkg tree` to inspect dependencies, `ecl pkg verify` to check them,
 and `ecl pkg vendor` to prepare the project for offline use. Run a synchronized
-project's declared tests with `ecl test`. The
+project's declared tests with `ecl test`, which loads all declared source files,
+including files whose modules are all private. The
 [package example](examples/pkg-smoke/README.md) walks through a complete workflow.
 
 ### Neovim

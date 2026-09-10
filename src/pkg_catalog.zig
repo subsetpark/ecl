@@ -1,9 +1,8 @@
 //! Derived, inert package module catalogs.
 //!
 //! A catalog is built from validated package manifests and parsed ECL source;
-//! no package source is evaluated during discovery. Export globs select source
-//! artifacts, while top-level literal `@defm` declarations provide the exact
-//! canonical module names those artifacts may publish.
+//! no package source is evaluated during discovery. Source globs select files;
+//! exact exports select their public, statically declared module names.
 const std = @import("std");
 const value = @import("value.zig");
 const heap = @import("heap.zig");
@@ -20,6 +19,10 @@ const max_artifacts = 4096;
 const max_modules = 65_536;
 const max_relative_path_bytes = 4096;
 
+fn moduleNameLessThan(_: void, left: intern.ModuleName, right: intern.ModuleName) bool {
+    return @intFromEnum(left) < @intFromEnum(right);
+}
+
 pub const PackageId = enum(u32) { _ };
 pub const ArtifactId = enum(u32) { _ };
 
@@ -33,6 +36,8 @@ pub const PackageInput = struct {
     /// validates a staged tree through the handle it already holds, so no
     /// path text is ever re-resolved from the process working directory.
     base_dir: ?std.Io.Dir = null,
+    /// Present only for immutable dependencies imported from persisted metadata.
+    archive_hash: ?[]const u8 = null,
 
     fn base(self: PackageInput) std.Io.Dir {
         return self.base_dir orelse std.Io.Dir.cwd();
@@ -62,12 +67,29 @@ pub const Catalog = struct {
     allocator: std.mem.Allocator,
     artifacts: []Artifact,
     modules: []Module,
+    identity: ?Identity = null,
+    reclaimed: usize = 0,
+
+    pub const Identity = struct { name: []u8, version: []u8 };
 
     pub fn deinit(self: *Catalog) void {
-        for (self.artifacts) |*entry| entry.deinit(self.allocator);
+        if (self.identity) |identity| {
+            self.allocator.free(identity.name);
+            self.allocator.free(identity.version);
+        }
+        for (self.artifacts[self.reclaimed..]) |*entry| entry.deinit(self.allocator);
         self.allocator.free(self.artifacts);
         self.allocator.free(self.modules);
         self.* = undefined;
+    }
+
+    /// Release one artifact per scheduler retirement step. `deinit` releases
+    /// the final fixed number of buffers once this reports true.
+    pub fn retireStep(self: *Catalog) bool {
+        if (self.reclaimed == self.artifacts.len) return true;
+        self.artifacts[self.reclaimed].deinit(self.allocator);
+        self.reclaimed += 1;
+        return false;
     }
 
     pub fn find(self: *const Catalog, module_name: []const u8) ?Module {
@@ -84,27 +106,27 @@ pub const Catalog = struct {
 
 pub const BuildError = error{ OutOfMemory, Invalid };
 
-const Export = struct {
-    namespace: []u8,
-    globs: [][]u8,
-
-    fn deinit(self: *Export, allocator: std.mem.Allocator) void {
-        allocator.free(self.namespace);
-        for (self.globs) |glob| allocator.free(glob);
-        allocator.free(self.globs);
-        self.* = undefined;
-    }
-};
-
 const Manifest = struct {
     name: []u8,
     version: []u8,
+    sources: [][]u8,
     exports: []Export,
+    // Keys and entry pointers borrow the fixed export storage owned here.
+    export_index: std.StringHashMapUnmanaged(*Export),
+
+    // Unique manifest positions are the package-local membership index.
+    const Export = struct {
+        name: []u8,
+        declared: bool = false,
+    };
 
     fn deinit(self: *Manifest, allocator: std.mem.Allocator) void {
+        self.export_index.deinit(allocator);
         allocator.free(self.name);
         allocator.free(self.version);
-        for (self.exports) |*export_entry| export_entry.deinit(allocator);
+        for (self.sources) |entry| allocator.free(entry);
+        allocator.free(self.sources);
+        for (self.exports) |entry| allocator.free(entry.name);
         allocator.free(self.exports);
         self.* = undefined;
     }
@@ -112,7 +134,6 @@ const Manifest = struct {
 
 const Claim = struct {
     relative_path: []u8,
-    namespace: []const u8,
 };
 
 const Builder = struct {
@@ -139,7 +160,7 @@ const Builder = struct {
     }
 
     /// Read and validate one package's manifest, then open the directory walk
-    /// its export globs select over. The walk itself is resumable: a package
+    /// its source globs select over. The walk itself is resumable: a package
     /// tree holds thousands of artifacts and a scheduler step may not traverse
     /// them all at once.
     fn openPackage(self: *Builder, input: PackageInput) BuildError!Walk {
@@ -160,7 +181,7 @@ const Builder = struct {
         return .{ .manifest = manifest, .directory = directory, .walker = walker };
     }
 
-    /// Claim up to `budget` directory entries for their export namespace.
+    /// Claim up to `budget` directory entries selected by source globs.
     /// Returns false once the walk is exhausted.
     fn walkStep(self: *Builder, input: PackageInput, walk: *Walk, budget: usize) BuildError!bool {
         var remaining = budget;
@@ -175,68 +196,34 @@ const Builder = struct {
                 "package `{s}` contains an ECL artifact path longer than {d} bytes",
                 .{ input.name, max_relative_path_bytes },
             );
-            var matched_namespace: ?[]const u8 = null;
-            for (walk.manifest.exports) |export_entry| {
-                var matched = false;
-                for (export_entry.globs) |glob| {
-                    if (globMatches(glob, entry.path)) {
-                        matched = true;
-                        break;
-                    }
-                }
-                if (!matched) continue;
-                if (matched_namespace) |prior| {
-                    if (!std.mem.eql(u8, prior, export_entry.namespace)) return self.fail(
-                        "package `{s}` artifact `{s}` is claimed by export namespaces `{s}` and `{s}`",
-                        .{ input.name, entry.path, prior, export_entry.namespace },
-                    );
-                } else matched_namespace = export_entry.namespace;
-            }
-            if (matched_namespace) |namespace| {
+            for (walk.manifest.sources) |glob| {
+                if (!globMatches(glob, entry.path)) continue;
                 try walk.claims.ensureUnusedCapacity(self.allocator, 1);
                 walk.claims.appendAssumeCapacity(.{
                     .relative_path = try self.allocator.dupe(u8, entry.path),
-                    .namespace = namespace,
                 });
+                break;
             }
             if (self.artifacts.items.len + walk.claims.items.len > max_artifacts) return self.fail(
-                "package graph contains more than {d} exported ECL artifacts",
+                "package graph contains more than {d} ECL source artifacts",
                 .{max_artifacts},
             );
         }
         return true;
     }
 
-    /// Order the claims and prove every declared glob selected something. Both
-    /// run over memory already held and are bounded by the manifest, so they
-    /// stay one step.
-    fn closeWalk(self: *Builder, input: PackageInput, walk: *Walk) BuildError!void {
+    /// Keep artifact order deterministic, including when source globs overlap
+    /// or select no files yet.
+    fn closeWalk(walk: *Walk) void {
         std.mem.sort(Claim, walk.claims.items, {}, struct {
             fn lessThan(_: void, left: Claim, right: Claim) bool {
                 return std.mem.order(u8, left.relative_path, right.relative_path) == .lt;
             }
         }.lessThan);
-
-        for (walk.manifest.exports) |export_entry| {
-            for (export_entry.globs) |glob| {
-                var matched = false;
-                for (walk.claims.items) |claim| {
-                    if (std.mem.eql(u8, claim.namespace, export_entry.namespace) and
-                        globMatches(glob, claim.relative_path))
-                    {
-                        matched = true;
-                        break;
-                    }
-                }
-                if (!matched) return self.fail(
-                    "package `{s}` export `{s}` glob `{s}` matches no ECL source artifact",
-                    .{ input.name, export_entry.namespace, glob },
-                );
-            }
-        }
     }
 
-    fn buildArtifact(self: *Builder, input: PackageInput, claim: Claim) BuildError!void {
+    fn buildArtifact(self: *Builder, input: PackageInput, claim: Claim, manifest: *Manifest) BuildError!void {
+        if (!safePath(claim.relative_path)) return self.fail("package `{s}` has an unsafe source path", .{input.name});
         const absolute = std.fs.path.join(self.allocator, &.{ input.root_dir, claim.relative_path }) catch
             return error.OutOfMemory;
         errdefer self.allocator.free(absolute);
@@ -279,18 +266,14 @@ const Builder = struct {
         const forms = parsed.values();
         for (forms, 0..) |form, index| {
             if (form != .word or !std.mem.eql(u8, intern.get(form.word.name), "@defm")) continue;
-            if (index == 0 or forms[index - 1] != .symbol) return self.fail(
-                "package `{s}` artifact `{s}` has a top-level @defm without a literal module name",
-                .{ input.name, claim.relative_path },
-            );
+            // Dynamic declarations are file-private. Only exports require
+            // a literal name that discovery can identify without evaluation.
+            if (index == 0 or forms[index - 1] != .symbol) continue;
+            const name_bytes = intern.get(forms[index - 1].symbol);
+            const export_entry = manifest.export_index.get(name_bytes) orelse continue;
             const name = intern.moduleName(forms[index - 1].symbol) catch return self.fail(
                 "package `{s}` artifact `{s}` declares an invalid module name",
                 .{ input.name, claim.relative_path },
-            );
-            const name_bytes = intern.get(intern.moduleId(name));
-            if (!ownsNamespace(claim.namespace, name_bytes)) return self.fail(
-                "package `{s}` artifact `{s}` declares module `{s}` outside export namespace `{s}`",
-                .{ input.name, claim.relative_path, name_bytes, claim.namespace },
             );
             for (names.items) |prior| if (prior == name) return self.fail(
                 "package `{s}` artifact `{s}` declares module `{s}` more than once",
@@ -301,19 +284,16 @@ const Builder = struct {
                 .{name_bytes},
             );
             try names.append(self.allocator, name);
+            export_entry.declared = true;
             if (self.modules.items.len + names.items.len > max_modules) return self.fail(
                 "package graph declares more than {d} modules",
                 .{max_modules},
             );
         }
-        if (names.items.len == 0) return self.fail(
-            "package `{s}` artifact `{s}` declares no top-level statically named modules",
-            .{ input.name, claim.relative_path },
-        );
-
         const artifact_id: ArtifactId = @enumFromInt(@as(u32, @intCast(self.artifacts.items.len)));
         try self.artifacts.ensureUnusedCapacity(self.allocator, 1);
         try self.modules.ensureUnusedCapacity(self.allocator, names.items.len);
+        std.mem.sort(intern.ModuleName, names.items, {}, moduleNameLessThan);
         const owned_names = try names.toOwnedSlice(self.allocator);
         errdefer self.allocator.free(owned_names);
         const relative = try self.allocator.dupe(u8, claim.relative_path);
@@ -328,6 +308,24 @@ const Builder = struct {
             .name = name,
             .artifact = artifact_id,
         });
+    }
+
+    fn importCatalog(self: *Builder, catalog: *Catalog) BuildError!void {
+        if (self.artifacts.items.len + catalog.artifacts.len > max_artifacts or
+            self.modules.items.len + catalog.modules.len > max_modules) return error.Invalid;
+        for (catalog.modules) |entry| for (self.modules.items) |prior| {
+            if (entry.name == prior.name) return self.fail("module `{s}` is declared by more than one package artifact", .{intern.get(intern.moduleId(entry.name))});
+        };
+        try self.artifacts.ensureUnusedCapacity(self.allocator, catalog.artifacts.len);
+        try self.modules.ensureUnusedCapacity(self.allocator, catalog.modules.len);
+        const offset = self.artifacts.items.len;
+        self.artifacts.appendSliceAssumeCapacity(catalog.artifacts);
+        for (catalog.modules) |entry| self.modules.appendAssumeCapacity(.{
+            .name = entry.name,
+            .artifact = @enumFromInt(@as(u32, @intCast(offset + @intFromEnum(entry.artifact)))),
+        });
+        self.allocator.free(catalog.artifacts);
+        catalog.artifacts = &.{};
     }
 
     fn readManifest(self: *Builder, input: PackageInput) BuildError!Manifest {
@@ -362,7 +360,7 @@ const Builder = struct {
     }
 
     fn parseManifest(self: *Builder, path: []const u8, item: Value) BuildError!Manifest {
-        const top = data.exactFields(item, &.{ "format", "name", "version", "exports", "requires" }) catch
+        const top = data.exactFields(item, &.{ "format", "name", "version", "sources", "exports", "requires" }) catch
             return self.fail("package manifest `{s}` does not have the exact format-1 fields", .{path});
         const format = data.field(top, "format") catch @panic("exact manifest lost its format field");
         if (format != .int or format.int != 1)
@@ -386,84 +384,65 @@ const Builder = struct {
         };
         errdefer self.allocator.free(version);
 
-        const exports_dict = data.asDict(
-            data.field(top, "exports") catch @panic("exact manifest lost its exports field"),
-        ) catch
-            return self.fail("package manifest `{s}` exports must be a dict", .{path});
-        var exports: std.ArrayList(Export) = .empty;
+        const sources = try self.stringList(path, top, "sources", validGlob);
         errdefer {
-            for (exports.items) |*entry| entry.deinit(self.allocator);
-            exports.deinit(self.allocator);
+            for (sources) |entry| self.allocator.free(entry);
+            self.allocator.free(sources);
         }
-        const export_count: usize = @intCast(exports_dict.length());
-        try exports.ensureTotalCapacity(self.allocator, export_count);
-        for (0..export_count) |index| {
-            const namespace = data.ownedUtf8(self.allocator, dict.keyAt(exports_dict, index)) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.Invalid => return self.fail("package manifest `{s}` has a non-string export namespace", .{path}),
-            };
-            errdefer self.allocator.free(namespace);
-            if (!validCanonicalName(namespace) or !ownsNamespace(name, namespace)) return self.fail(
-                "package `{s}` does not own export namespace `{s}`",
-                .{ name, namespace },
+        const export_names = try self.stringList(path, top, "exports", validCanonicalName);
+        defer self.allocator.free(export_names);
+        errdefer {
+            for (export_names) |entry| self.allocator.free(entry);
+        }
+        for (export_names) |export_name| {
+            if (!ownsNamespace(name, export_name)) return self.fail(
+                "package {s} does not own exported module {s}",
+                .{ name, export_name },
             );
-            const glob_list = switch (dict.valueAt(exports_dict, index)) {
-                .list => |list_header| list_header,
-                else => return self.fail(
-                    "package manifest `{s}` export `{s}` must be a nonempty glob list",
-                    .{ path, namespace },
-                ),
-            };
-            const glob_count: usize = @intCast(glob_list.length());
-            if (glob_count == 0) return self.fail(
-                "package manifest `{s}` export `{s}` has an empty glob list",
-                .{ path, namespace },
-            );
-            const globs = try self.allocator.alloc([]u8, glob_count);
-            var built: usize = 0;
-            errdefer {
-                for (globs[0..built]) |glob| self.allocator.free(glob);
-                self.allocator.free(globs);
-            }
-            for (0..glob_count) |glob_index| {
-                const glob = data.ownedUtf8(
-                    self.allocator,
-                    @import("list.zig").atUnchecked(.{ .list = glob_list }, glob_index),
-                ) catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    error.Invalid => return self.fail(
-                        "package manifest `{s}` export `{s}` contains a non-string glob",
-                        .{ path, namespace },
-                    ),
-                };
-                if (!validGlob(glob)) {
-                    self.allocator.free(glob);
-                    return self.fail(
-                        "package manifest `{s}` export `{s}` contains an unsafe glob",
-                        .{ path, namespace },
-                    );
-                }
-                for (globs[0..built]) |prior| if (std.mem.eql(u8, prior, glob)) {
-                    self.allocator.free(glob);
-                    return self.fail(
-                        "package manifest `{s}` export `{s}` repeats a glob",
-                        .{ path, namespace },
-                    );
-                };
-                globs[built] = glob;
-                built += 1;
-            }
-            exports.appendAssumeCapacity(.{ .namespace = namespace, .globs = globs });
         }
 
         if (!validVersion(version))
             return self.fail("package manifest `{s}` has a non-semver version", .{path});
         try self.validateRequires(path, name, top);
+        const exports = try self.allocator.alloc(Manifest.Export, export_names.len);
+        errdefer self.allocator.free(exports);
+        for (exports, export_names) |*entry, export_name| entry.* = .{ .name = export_name };
+        var export_index: std.StringHashMapUnmanaged(*Manifest.Export) = .empty;
+        errdefer export_index.deinit(self.allocator);
+        try export_index.ensureTotalCapacity(self.allocator, @intCast(exports.len));
         return .{
             .name = name,
             .version = version,
-            .exports = try exports.toOwnedSlice(self.allocator),
+            .sources = sources,
+            .exports = exports,
+            .export_index = export_index,
         };
+    }
+
+    fn stringList(self: *Builder, path: []const u8, top: *value.DictHandle, field: []const u8, validate: *const fn ([]const u8) bool) BuildError![][]u8 {
+        const item = data.field(top, field) catch @panic("exact manifest lost a validated field");
+        if (item != .list) return self.fail("package manifest {s} {s} must be a list", .{ path, field });
+        const count: usize = @intCast(item.list.length());
+        const entries = try self.allocator.alloc([]u8, count);
+        var built: usize = 0;
+        errdefer {
+            for (entries[0..built]) |entry| self.allocator.free(entry);
+            self.allocator.free(entries);
+        }
+        for (0..count) |index| {
+            const entry = data.ownedUtf8(self.allocator, @import("list.zig").atUnchecked(item, index)) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Invalid => return self.fail("package manifest {s} {s} contains a non-string", .{ path, field }),
+            };
+            entries[built] = entry;
+            built += 1;
+            if (!validate(entry)) return self.fail("package manifest {s} {s} contains an invalid entry {s}", .{ path, field, entry });
+            for (entries[0..index]) |prior| if (std.mem.eql(u8, entry, prior)) return self.fail(
+                "package manifest {s} {s} repeats an entry",
+                .{ path, field },
+            );
+        }
+        return entries;
     }
 
     /// The requirement contract `pkg.manifest.validate` states. The installer
@@ -590,16 +569,18 @@ const Walk = struct {
 pub const Progress = enum { pending, done };
 
 /// A resumable catalog build. One `advance` reads one manifest, claims up to
-/// `budget` directory entries, or parses one source artifact, so a caller
-/// inside the scheduler can traverse a package tree of any size without
-/// monopolizing its worker or deferring cancellation. `build` below is the
-/// same walk run to completion for callers that are not on a scheduler step.
+/// `budget` export index entries, directory entries, or membership checks, or
+/// parses one source artifact, so a caller inside the scheduler can traverse a package
+/// tree of any size without monopolizing its worker or deferring cancellation.
+/// `build` below is the same walk run to completion for callers that are not
+/// on a scheduler step.
 pub const Build = struct {
     builder: Builder,
     packages: []const PackageInput,
     owned_input: ?OwnedInput = null,
     package_index: usize = 0,
     stage: Stage = .manifest,
+    identity: ?Catalog.Identity = null,
 
     const OwnedInput = struct {
         input: PackageInput,
@@ -608,8 +589,13 @@ pub const Build = struct {
     };
     const Stage = union(enum) {
         manifest,
+        indexing: struct { walk: Walk, index: usize = 0 },
         walking: Walk,
-        artifacts: struct { walk: Walk, index: usize = 0 },
+        artifacts: struct {
+            walk: Walk,
+            index: usize = 0,
+            export_index: usize = 0,
+        },
         finished,
     };
 
@@ -685,13 +671,44 @@ pub const Build = struct {
                 // Open into a local first: writing the union directly would
                 // let a failing `openPackage` leave the stage tagged over an
                 // unwritten payload, which `deinit` would then release.
-                const opened = try self.builder.openPackage(input);
-                self.stage = .{ .walking = opened };
+                if (input.archive_hash) |hash| {
+                    var imported = read(self.builder.host, self.builder.io, input, hash) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        error.Invalid => return self.builder.fail("package `{s}` has missing, corrupt, or incompatible catalog metadata; run `ecl pkg sync`", .{input.name}),
+                    };
+                    defer imported.deinit();
+                    try self.builder.importCatalog(&imported);
+                    self.package_index += 1;
+                    return .pending;
+                }
+                var opened = try self.builder.openPackage(input);
+                errdefer opened.deinit(self.builder.allocator, self.builder.io);
+                if (self.owned_input != null) {
+                    const name = try self.builder.allocator.dupe(u8, opened.manifest.name);
+                    errdefer self.builder.allocator.free(name);
+                    const version = try self.builder.allocator.dupe(u8, opened.manifest.version);
+                    self.identity = .{ .name = name, .version = version };
+                }
+                self.stage = .{ .indexing = .{ .walk = opened } };
+                return .pending;
+            },
+            .indexing => |*indexing| {
+                const manifest = &indexing.walk.manifest;
+                var remaining = budget;
+                while (indexing.index < manifest.exports.len) {
+                    if (remaining == 0) return .pending;
+                    remaining -= 1;
+                    const entry = &manifest.exports[indexing.index];
+                    manifest.export_index.putAssumeCapacityNoClobber(entry.name, entry);
+                    indexing.index += 1;
+                }
+                const indexed = indexing.walk;
+                self.stage = .{ .walking = indexed };
                 return .pending;
             },
             .walking => |*walk| {
                 if (try self.builder.walkStep(input, walk, budget)) return .pending;
-                try self.builder.closeWalk(input, walk);
+                Builder.closeWalk(walk);
                 // Move the walk out before the union store: writing the new
                 // stage in place would otherwise overlap the payload being
                 // copied out of it.
@@ -701,12 +718,20 @@ pub const Build = struct {
             },
             .artifacts => |*artifacts| {
                 if (artifacts.index == artifacts.walk.claims.items.len) {
+                    var remaining = budget;
+                    while (artifacts.export_index < artifacts.walk.manifest.exports.len) {
+                        if (remaining == 0) return .pending;
+                        remaining -= 1;
+                        const entry = artifacts.walk.manifest.exports[artifacts.export_index];
+                        if (!entry.declared) return self.builder.fail("package {s} exports undeclared module {s}", .{ input.name, entry.name });
+                        artifacts.export_index += 1;
+                    }
                     artifacts.walk.deinit(self.builder.allocator, self.builder.io);
                     self.stage = .manifest;
                     self.package_index += 1;
                     return if (self.package_index == self.packageCount()) .done else .pending;
                 }
-                try self.builder.buildArtifact(input, artifacts.walk.claims.items[artifacts.index]);
+                try self.builder.buildArtifact(input, artifacts.walk.claims.items[artifacts.index], &artifacts.walk.manifest);
                 artifacts.index += 1;
                 return .pending;
             },
@@ -725,7 +750,9 @@ pub const Build = struct {
         }
         const modules = try self.builder.modules.toOwnedSlice(allocator);
         self.releaseInput();
-        return .{ .allocator = allocator, .artifacts = artifacts, .modules = modules };
+        const identity = self.identity;
+        self.identity = null;
+        return .{ .allocator = allocator, .artifacts = artifacts, .modules = modules, .identity = identity };
     }
 
     fn releaseInput(self: *Build) void {
@@ -737,11 +764,17 @@ pub const Build = struct {
 
     pub fn deinit(self: *Build) void {
         switch (self.stage) {
+            .indexing => |*indexing| indexing.walk.deinit(self.builder.allocator, self.builder.io),
             .walking => |*walk| walk.deinit(self.builder.allocator, self.builder.io),
             .artifacts => |*artifacts| artifacts.walk.deinit(self.builder.allocator, self.builder.io),
             .manifest, .finished => {},
         }
         self.stage = .finished;
+        if (self.identity) |identity| {
+            self.builder.allocator.free(identity.name);
+            self.builder.allocator.free(identity.version);
+            self.identity = null;
+        }
         self.builder.deinit();
         self.releaseInput();
     }
@@ -762,6 +795,7 @@ pub fn build(
 fn validGlob(glob: []const u8) bool {
     if (glob.len == 0 or glob[0] == '/' or std.mem.indexOfScalar(u8, glob, '\\') != null)
         return false;
+    if (glob.len >= 2 and std.ascii.isAlphabetic(glob[0]) and glob[1] == ':') return false;
     var segments = std.mem.splitScalar(u8, glob, '/');
     while (segments.next()) |segment| {
         if (segment.len == 0 or std.mem.eql(u8, segment, ".") or std.mem.eql(u8, segment, ".."))
@@ -900,3 +934,203 @@ fn validSegment(segment: []const u8) bool {
         (byte >= '0' and byte <= '9') or byte == '-')) return false;
     return true;
 }
+
+/// Derived metadata is inert ECL data, never executable source.
+pub const filename = ".ecl-package.catalog";
+pub const max_bytes = 16 * 1024 * 1024;
+
+fn safePath(path: []const u8) bool {
+    if (path.len > max_relative_path_bytes or !validGlob(path) or
+        !std.unicode.utf8ValidateSlice(path) or !std.mem.endsWith(u8, path, ".ecl")) return false;
+    for (path) |byte| if (byte < 32 or byte == 127 or byte == '*' or byte == '?' or byte == ':') return false;
+    return true;
+}
+
+fn quoted(writer: *std.Io.Writer, bytes: []const u8) error{WriteFailed}!void {
+    try writer.writeByte('"');
+    for (bytes) |byte| switch (byte) {
+        '"', '\\' => {
+            try writer.writeByte('\\');
+            try writer.writeByte(byte);
+        },
+        else => try writer.writeByte(byte),
+    };
+    try writer.writeByte('"');
+}
+
+/// One artifact per advance; the caller retains the catalog until completion.
+pub const Encoder = struct {
+    output: std.Io.Writer.Allocating,
+    index: usize = 0,
+    started: bool = false,
+    counting: ?std.Io.Writer.Discarding = .init(&.{}),
+
+    pub fn init(allocator: std.mem.Allocator) Encoder {
+        return .{ .output = .init(allocator) };
+    }
+    pub fn deinit(self: *Encoder) void {
+        self.output.deinit();
+    }
+    pub fn advance(self: *Encoder, catalog: *const Catalog, hash: []const u8) BuildError!Progress {
+        if (self.counting) |*counting| {
+            self.writeNext(catalog, hash, &counting.writer) catch return error.OutOfMemory;
+            if (counting.fullCount() > max_bytes) return error.Invalid;
+            if (self.index <= catalog.artifacts.len) return .pending;
+            const output = try std.Io.Writer.Allocating.initCapacity(self.output.allocator, @intCast(counting.fullCount()));
+            self.output.deinit();
+            self.output = output;
+            self.counting = null;
+            self.index = 0;
+            self.started = false;
+            return .pending;
+        }
+        self.writeNext(catalog, hash, &self.output.writer) catch return error.OutOfMemory;
+        return if (self.index > catalog.artifacts.len) .done else .pending;
+    }
+    fn writeNext(self: *Encoder, catalog: *const Catalog, hash: []const u8, writer: *std.Io.Writer) error{WriteFailed}!void {
+        if (!self.started) {
+            const identity = catalog.identity.?;
+            try writer.writeAll("{'format 1 'name ");
+            try quoted(writer, identity.name);
+            try writer.writeAll(" 'version ");
+            try quoted(writer, identity.version);
+            try writer.writeAll(" 'hash ");
+            try quoted(writer, hash);
+            try writer.writeAll(" 'sources [\n");
+            self.started = true;
+            return;
+        }
+        if (self.index == catalog.artifacts.len) {
+            try writer.writeAll("]}\n");
+            self.index += 1;
+            return;
+        }
+        const entry = catalog.artifacts[self.index];
+        try writer.writeAll("{'path ");
+        try quoted(writer, entry.relative_path);
+        try writer.writeAll(" 'exports [");
+        for (entry.modules) |name| {
+            try quoted(writer, intern.get(intern.moduleId(name)));
+            try writer.writeByte(' ');
+        }
+        try writer.writeAll("]}\n");
+        self.index += 1;
+    }
+};
+
+/// Reads only the reserved metadata file. No manifest, source read, or walk.
+pub fn read(host: *const heap.HostCleanup, io: std.Io, input: PackageInput, hash: []const u8) BuildError!Catalog {
+    const allocator = host.allocator();
+    const path = try std.fs.path.join(allocator, &.{ input.root_dir, filename });
+    defer allocator.free(path);
+    const file = switch (@import("filesystem_port.zig").openRegularForRead(io, input.base(), path)) {
+        .file => |file| file,
+        .failed => return error.Invalid,
+    };
+    defer file.close(io);
+    const stat = file.stat(io) catch return error.Invalid;
+    if (stat.size > max_bytes) return error.Invalid;
+    const bytes = try allocator.alloc(u8, @intCast(stat.size));
+    defer allocator.free(bytes);
+    if ((file.readPositionalAll(io, bytes, 0) catch return error.Invalid) != bytes.len) return error.Invalid;
+    var diag: reader.Diag = .{};
+    const result = reader.read(host, path, bytes, &diag) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.Invalid,
+    };
+    var parsed = switch (result) {
+        .complete => |complete| complete,
+        .incomplete => return error.Invalid,
+    };
+    defer parsed.deinit();
+    if (parsed.values().len != 1) return error.Invalid;
+    const top = try data.exactFields(parsed.values()[0], &.{ "format", "name", "version", "hash", "sources" });
+    const format = try data.field(top, "format");
+    if (format != .int or format.int != 1) return error.Invalid;
+    const name = try data.ownedUtf8(allocator, try data.field(top, "name"));
+    defer allocator.free(name);
+    const version = try data.ownedUtf8(allocator, try data.field(top, "version"));
+    defer allocator.free(version);
+    const actual_hash = try data.ownedUtf8(allocator, try data.field(top, "hash"));
+    defer allocator.free(actual_hash);
+    if (!validCanonicalName(name) or !validVersion(version) or !validHash(actual_hash) or
+        !std.mem.eql(u8, name, input.name) or !std.mem.eql(u8, version, input.version) or
+        !std.mem.eql(u8, actual_hash, hash)) return error.Invalid;
+    const sources = try data.field(top, "sources");
+    if (sources != .list or sources.list.length() > max_artifacts) return error.Invalid;
+    var diagnostic: ?[]u8 = null;
+    var builder: Builder = .{ .allocator = allocator, .host = host, .io = io, .diagnostic = &diagnostic };
+    defer builder.deinit();
+    for (0..@intCast(sources.list.length())) |index| {
+        const record = try data.exactFields(@import("list.zig").atUnchecked(sources, index), &.{ "path", "exports" });
+        const relative = try data.ownedUtf8(allocator, try data.field(record, "path"));
+        errdefer allocator.free(relative);
+        if (!safePath(relative)) return error.Invalid;
+        for (builder.artifacts.items) |prior| if (std.mem.eql(u8, prior.relative_path, relative)) return error.Invalid;
+        const exports = try data.field(record, "exports");
+        if (exports != .list or exports.list.length() + builder.modules.items.len > max_modules) return error.Invalid;
+        const names = try allocator.alloc(intern.ModuleName, @intCast(exports.list.length()));
+        errdefer allocator.free(names);
+        for (names, 0..) |*module, module_index| {
+            const text = try data.ownedUtf8(allocator, @import("list.zig").atUnchecked(exports, module_index));
+            defer allocator.free(text);
+            if (!validCanonicalName(text) or !ownsNamespace(name, text)) return error.Invalid;
+            module.* = intern.moduleName(try intern.intern(text)) catch return error.Invalid;
+            for (builder.modules.items) |prior| if (prior.name == module.*) return error.Invalid;
+            try builder.modules.append(allocator, .{ .name = module.*, .artifact = @enumFromInt(@as(u32, @intCast(index))) });
+        }
+        std.mem.sort(intern.ModuleName, names, {}, moduleNameLessThan);
+        const absolute = try std.fs.path.join(allocator, &.{ input.root_dir, relative });
+        errdefer allocator.free(absolute);
+        try builder.artifacts.append(allocator, .{ .package = input.id, .relative_path = relative, .absolute_path = absolute, .modules = names });
+    }
+    const artifacts = try builder.artifacts.toOwnedSlice(allocator);
+    errdefer {
+        for (artifacts) |*entry| entry.deinit(allocator);
+        allocator.free(artifacts);
+    }
+    return .{ .allocator = allocator, .artifacts = artifacts, .modules = try builder.modules.toOwnedSlice(allocator) };
+}
+
+/// Compare portable mappings without depending on record order or local IDs.
+/// Each step budgets path and module-name comparisons separately.
+pub const Comparison = struct {
+    artifact: usize = 0,
+    candidate: usize = 0,
+    module: usize = 0,
+    candidate_module: usize = 0,
+    matched_path: bool = false,
+
+    pub const Result = union(enum) { pending, complete: bool };
+
+    pub fn advance(self: *Comparison, left: *const Catalog, right: *const Catalog, budget: usize) Result {
+        if (left.artifacts.len != right.artifacts.len or left.modules.len != right.modules.len) return .{ .complete = false };
+        for (0..budget) |_| {
+            if (self.artifact == left.artifacts.len) return .{ .complete = true };
+            if (self.candidate == right.artifacts.len) return .{ .complete = false };
+            const entry = left.artifacts[self.artifact];
+            const other = right.artifacts[self.candidate];
+            if (!self.matched_path) {
+                if (!std.mem.eql(u8, entry.relative_path, other.relative_path)) {
+                    self.candidate += 1;
+                    continue;
+                }
+                if (entry.modules.len != other.modules.len) return .{ .complete = false };
+                self.matched_path = true;
+            } else if (self.module == entry.modules.len) {
+                self.artifact += 1;
+                self.candidate = 0;
+                self.module = 0;
+                self.candidate_module = 0;
+                self.matched_path = false;
+            } else {
+                if (self.candidate_module == other.modules.len) return .{ .complete = false };
+                if (entry.modules[self.module] == other.modules[self.candidate_module]) {
+                    self.module += 1;
+                    self.candidate_module = 0;
+                } else self.candidate_module += 1;
+            }
+        }
+        return .pending;
+    }
+};

@@ -1,5 +1,6 @@
 //! Per-session module registry with typed names and atomic generation publication.
 const std = @import("std");
+const pkg_lock = @import("pkg_lock.zig");
 const builtin = @import("builtin");
 const env = @import("env.zig");
 const value = @import("value.zig");
@@ -490,6 +491,7 @@ const ExecutionHome = struct {
 /// image back several independent registrations, and it keeps the value heap a
 /// DAG, because a registration retains an image and never the reverse.
 const ModuleImage = struct {
+    source: ?*const @import("pkg_lock.zig").SourceScope,
     allocator: std.mem.Allocator,
     refs: std.atomic.Value(u32) = .init(1),
     environment: env.Environment,
@@ -525,6 +527,7 @@ const ModuleImage = struct {
     fn create(
         allocator: std.mem.Allocator,
         releases: *heap.ReleaseDomain,
+        source: ?*const @import("pkg_lock.zig").SourceScope,
     ) error{OutOfMemory}!*ModuleImage {
         // No scope cell is minted here. An image needs one only if ECL source
         // is stamped against it, which `moduleOwned` arranges lazily; a registry
@@ -538,6 +541,7 @@ const ModuleImage = struct {
         };
         anchor.* = .{ .park = .{ .image = result } };
         result.allocator = allocator;
+        result.source = source;
         result.anchor = anchor;
         result.minted_cell = false;
         result.environment = env.Environment.init(allocator, releases);
@@ -655,21 +659,32 @@ const ModuleImage = struct {
 /// it publishes and owns everything the image deliberately does not: the name,
 /// the generation number, and the slot lifetime witness that keeps the durable
 /// state and arbiter reachable while old code can still name them.
-/// Nominal publication provenance. Only the embedded-module loader may pass
-/// `standard_library`; `register`, `@defm`, dynamic native loading, and
-/// explicit replacement publish `ordinary`. Cataloged package source publishes
-/// `package`, and the root project's own cataloged source publishes
-/// `root_package`; both carry the package id that `requires` masks visibility
-/// against, so a module registered from package source keeps its own package's
-/// direct lock edges wherever it later executes. Resolution exposes these
-/// distinctions without exposing a registry, image, or mutation capability, so
-/// optimizers can trust shipped module definitions without trusting a later
-/// replacement registered under the same name.
+/// Nominal publication provenance. Embedded definitions retain their trusted
+/// origin. Cataloged code carries its defining-file capability, which also
+/// identifies its package and direct dependencies. Interactive root code has
+/// package authority without access to any file's private namespace.
+/// Images preserve lexical file identity even when invoked without a
+/// registration or republished by another file.
 pub const RegistrationProvenance = union(enum) {
     ordinary,
     standard_library,
     root_package: pkg_catalog.PackageId,
-    package: pkg_catalog.PackageId,
+    package: *const @import("pkg_lock.zig").SourceScope,
+
+    pub fn packageId(self: RegistrationProvenance) ?pkg_catalog.PackageId {
+        return switch (self) {
+            .root_package => |id| id,
+            .package => |source| source.package(),
+            .ordinary, .standard_library => null,
+        };
+    }
+
+    pub fn sourceScope(self: RegistrationProvenance) ?*const @import("pkg_lock.zig").SourceScope {
+        return switch (self) {
+            .package => |source| source,
+            else => null,
+        };
+    }
 };
 
 const Registration = struct {
@@ -1240,6 +1255,7 @@ const TestAuthorityState = struct {
     // Session construction moves that wrapper into its core after minting this
     // seal; the backing identity remains stable.
     registry: Registry,
+    project: ?*const pkg_lock.ProjectLock,
 };
 
 /// Session-owned capability seal for the closed test execution domain. A
@@ -1275,8 +1291,13 @@ pub const TestObservationAccess = opaque {
     fn state(self: *const TestObservationAccess) *TestAuthorityState {
         return @ptrCast(@alignCast(@constCast(self)));
     }
-    pub fn discoveryCursor(self: *const TestObservationAccess) Registry.TestDiscoveryCursor {
-        return .init(&self.state().registry);
+    pub fn discoveryCursor(self: *const TestObservationAccess) TestSessionDiscoveryCursor {
+        const owner = self.state();
+        return .{
+            .project = owner.project,
+            .roots = if (owner.project) |project| project.rootSourceCursor() else null,
+            .current = .init(&owner.registry),
+        };
     }
 };
 
@@ -1288,8 +1309,59 @@ pub const TestExecutionAccess = opaque {
         self: *const TestExecutionAccess,
         module_name: intern.ModuleName,
         test_name: intern.BindingName,
-    ) Registry.TestLookupCursor {
-        return .init(&self.state().registry, module_name, test_name);
+        source: ?@import("pkg_catalog.zig").ArtifactId,
+    ) ?Registry.TestLookupCursor {
+        const owner = self.state();
+        if (source) |id| {
+            const project = owner.project orelse return null;
+            const scope = project.rootSource(id) orelse return null;
+            if (!project.artifactCommitted(id)) return null;
+            return .init(scope.registry(), module_name, test_name);
+        }
+        return .init(&owner.registry, module_name, test_name);
+    }
+};
+
+/// Enumerates the public registry and each committed root source's private
+/// registry while retaining every active snapshot lease.
+pub const TestSessionDiscoveryCursor = struct {
+    project: ?*const pkg_lock.ProjectLock,
+    roots: ?pkg_lock.RootSourceCursor,
+    current: ?Registry.TestDiscoveryCursor,
+    source: ?@import("pkg_catalog.zig").ArtifactId = null,
+
+    pub fn deinit(self: *TestSessionDiscoveryCursor) void {
+        if (self.current) |*current| current.deinit();
+        if (self.roots) |*roots| roots.deinit();
+        self.* = undefined;
+    }
+
+    pub fn advance(self: *TestSessionDiscoveryCursor) Registry.TestDiscoveryProgress {
+        if (self.current) |*current| switch (current.advance()) {
+            .pending => return .pending,
+            .item => |item| return .{ .item = .{ .module = item.module, .metadata = item.metadata, .source = self.source } },
+            .complete => {
+                current.deinit();
+                self.current = null;
+                return .pending;
+            },
+        };
+        if (self.roots) |*roots| switch (roots.advance()) {
+            .pending => return .pending,
+            .item => |source| {
+                const id = source.location().artifact_id;
+                if (self.project.?.artifactCommitted(id)) {
+                    self.current = .init(source.registry());
+                    self.source = id;
+                }
+                return .pending;
+            },
+            .complete, .invalid => {
+                roots.deinit();
+                self.roots = null;
+            },
+        };
+        return .complete;
     }
 };
 
@@ -1322,6 +1394,7 @@ pub const ModuleHome = opaque {
         return registration.generation;
     }
     pub fn registrationProvenance(self: *const ModuleHome) RegistrationProvenance {
+        if (self.state().image.source) |source| return .{ .package = source };
         const registration = self.state().registration orelse return .ordinary;
         return registration.provenance;
     }
@@ -1411,7 +1484,7 @@ test "modules: an image's registration-less home is reachable from its own root 
     var container = try env.Env.init(&host);
     defer container.deinit();
 
-    const image = try ModuleImage.create(std.testing.allocator, releases);
+    const image = try ModuleImage.create(std.testing.allocator, releases, null);
     defer image.release();
 
     const recovered = homeForModuleRootScope(&image.scope) orelse
@@ -1449,7 +1522,7 @@ test "modules: a stamped retired image leaves one anchor and an unstamped one le
         host.cleanup().drain();
         const unstamped_base = counting.total_requested_bytes;
         for (0..rounds) |_| {
-            const image = try ModuleImage.create(allocator, releases);
+            const image = try ModuleImage.create(allocator, releases, null);
             image.release();
             host.cleanup().drain();
         }
@@ -1462,7 +1535,7 @@ test "modules: a stamped retired image leaves one anchor and an unstamped one le
         // leaves precisely that cell plus its parked anchor behind.
         const stamped_base = counting.total_requested_bytes;
         for (0..rounds) |_| {
-            const image = try ModuleImage.create(allocator, releases);
+            const image = try ModuleImage.create(allocator, releases, null);
             _ = try container.scopeIdForOwned(&image.scope, @ptrCast(image.anchor));
             image.release();
             host.cleanup().drain();
@@ -1502,7 +1575,7 @@ test "modules: a borrow holds an image's contents across a full drain" {
         const releases = host.domain();
         var container = try env.Env.init(&host);
 
-        const image = try ModuleImage.create(allocator, releases);
+        const image = try ModuleImage.create(allocator, releases, null);
         const owner: *anyopaque = @ptrCast(image.anchor);
         _ = try container.scopeIdForOwned(&image.scope, owner);
         const cell = try container.scopeCell(&image.scope, owner);
@@ -1565,7 +1638,7 @@ test "modules: the same drop with no borrow reclaims the contents" {
         const releases = host.domain();
         var container = try env.Env.init(&host);
 
-        const image = try ModuleImage.create(allocator, releases);
+        const image = try ModuleImage.create(allocator, releases, null);
         const owner: *anyopaque = @ptrCast(image.anchor);
         _ = try container.scopeIdForOwned(&image.scope, owner);
 
@@ -2102,9 +2175,9 @@ pub const Registry = enum(usize) {
     /// Mint the capability seal owned by a test-mode Session. Its backing
     /// carries the registry rather than accepting one alongside the access
     /// token, so cross-Session authority substitution is unrepresentable.
-    pub fn createTestAuthority(self: *Registry) error{OutOfMemory}!TestAuthority {
+    pub fn createTestAuthority(self: *Registry, project: ?*const pkg_lock.ProjectLock) error{OutOfMemory}!TestAuthority {
         const state = try self.allocator().create(TestAuthorityState);
-        state.* = .{ .registry = self.* };
+        state.* = .{ .registry = self.*, .project = project };
         return .init(state);
     }
 
@@ -2123,6 +2196,10 @@ pub const Registry = enum(usize) {
     /// Begin validating one staged package tree. The caller drives the
     /// returned cursor in bounded steps and deinits it; a package tree holds
     /// thousands of artifacts, so the walk cannot be one scheduler step.
+    pub fn readPackageCatalog(self: *const Registry, io: std.Io, input: pkg_catalog.PackageInput, hash: []const u8) pkg_catalog.BuildError!pkg_catalog.Catalog {
+        return pkg_catalog.read(self.privateState().host, io, input, hash);
+    }
+
     pub fn beginPackageTreeValidation(
         self: *const Registry,
         io: std.Io,
@@ -2261,6 +2338,7 @@ pub const Registry = enum(usize) {
 
     pub const DiscoveredTest = struct {
         module: intern.ModuleName,
+        source: ?@import("pkg_catalog.zig").ArtifactId = null,
         metadata: ModuleTestMetadata,
     };
     pub const TestDiscoveryProgress = poll.StreamProgress(DiscoveredTest);
@@ -2673,7 +2751,11 @@ pub const Registry = enum(usize) {
     /// A fresh anonymous image. Naming it is a separate, later decision, so
     /// nothing here validates or reserves a registry name.
     pub fn createImage(self: *Registry) error{OutOfMemory}!OwnedImage {
-        return .init(try ModuleImage.create(self.allocator(), self.releaseDomain()));
+        return self.createSourceImage(null);
+    }
+
+    pub fn createSourceImage(self: *Registry, source: ?*const @import("pkg_lock.zig").SourceScope) error{OutOfMemory}!OwnedImage {
+        return .init(try ModuleImage.create(self.allocator(), self.releaseDomain(), source));
     }
 
     pub const NativeCandidateProgress = poll.Progress(OwnedImage);

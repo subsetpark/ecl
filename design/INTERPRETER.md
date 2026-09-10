@@ -605,6 +605,46 @@ Old code remains executable, but a superseded home cannot publish new durable
 state. Removal closes admission, lets outstanding turns settle, and separates
 the slot's teardown from delayed generation retirement.
 
+### Package visibility belongs to the defining source
+
+Dependency catalogs are portable derived metadata owned by atomic package
+publication. Their inert format binds relative source selection and exact exports
+to package identity and archive hash; it contains no runtime authority or IDs.
+Only explicit package synchronization may repair metadata, after seal and source
+validation, through atomic replacement that preserves prior metadata on failure.
+The Session imports current-format dependency catalogs without source discovery
+or store mutation and mints its own identities. Root project discovery remains
+dynamic. Catalog validation owns path safety, namespace uniqueness, reference
+integrity, and graph limits for both imported and freshly built entries.
+Both producers order each artifact's exports by numeric module-name ID for
+bounded binary-search membership, independently of spelling or metadata order.
+Fresh catalog construction records declaration membership in each unique
+manifest export entry, scoped to that package. A manifest-owned name index is
+reserved once and populated in budgeted steps before parsing artifacts, so
+declarations reach their export entries without rescanning the manifest.
+Export verification retains its cursor across scheduler steps and charges each
+constant-time membership lookup
+against the caller's work budget, independently of the catalog's module count.
+
+A cataloged source has one Session-owned file identity and private registry.
+The catalog separates source selection from exact public exports; the shared
+registry contains exported registrations while each file owns its private
+registrations. Private names therefore cannot collide across files or become
+visible through incidental loading.
+
+Module images retain their defining source identity independently of any
+registration name. Execution, module-value invocation, escaped quotations,
+and test bodies preserve that identity. Qualified lookup and import use one
+visibility cursor: the defining file's private registrations, followed by
+authorized public exports. Suspended loads retain the same lexical context
+through authorization and resumed dispatch.
+
+File identity, package ownership, and the private registry are carried by one
+opaque source capability. The Session keeps it alive until execution stops;
+registry teardown uses the existing host-owned retirement protocol. Frame
+storage accommodates the lexical capability retained by a suspended load,
+with a 144-byte ceiling.
+
 ### Loading feeds the same resolution tail
 
 An unresolved qualified name may suspend dispatch while the loader searches
@@ -617,6 +657,16 @@ binding path used by an already-loaded module.
 Loading returns to the common dispatch boundary, which continues to own
 privacy, effects, diagnostic naming, generation pinning, idiom guards, and
 cancellation.
+
+Root test discovery enumerates source artifacts rather than public module
+names. Source-only requests and qualified requests share artifact loading
+leases and commit state, so discovering an already loaded source does not
+evaluate it again. A source with no exports commits after successful
+evaluation; sources with exports also verify their declared publications.
+Test authority spans the public registry and committed root sources' private
+registries. Private test descriptors carry a source identity resolved through
+that authority, so equal module and test names in different files invoke their
+own registrations without exposing private modules to ordinary lookup.
 
 ## 5. The frame machine
 

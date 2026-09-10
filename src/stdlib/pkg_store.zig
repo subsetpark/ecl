@@ -13,6 +13,7 @@ const list = @import("../list.zig");
 const env = @import("../env.zig");
 const fsport = @import("../filesystem_port.zig");
 const machine = @import("../machine.zig");
+const pkg_catalog = @import("../pkg_catalog.zig");
 const pkg_lock = @import("../pkg_lock.zig");
 const storage = @import("../kernel_storage.zig");
 const archive = @import("archive.zig");
@@ -46,6 +47,11 @@ pub const words = [_]env.BuiltinWord{
         .primitive = verify,
     },
     .{
+        .name = "ensure-catalog",
+        .doc = "( store key package-name hash -- ) Validate catalog metadata, repairing it atomically from the sealed installed tree when needed.",
+        .primitive = ensureCatalog,
+    },
+    .{
         .name = "read-seal",
         .doc = "( store key package-name hash -- bytes ) Verify and return an installed package's exact sealed archive bytes.",
         .primitive = readSeal,
@@ -70,7 +76,11 @@ fn readSeal(evaluator: *Machine) MachineError!void {
     return startSealDriver(evaluator, .read);
 }
 
-const SealMode = enum { verify, read };
+fn ensureCatalog(evaluator: *Machine) MachineError!void {
+    return startSealDriver(evaluator, .ensure_catalog);
+}
+
+const SealMode = enum { verify, read, ensure_catalog };
 
 fn startSealDriver(evaluator: *Machine, mode: SealMode) MachineError!void {
     try evaluator.require(4);
@@ -122,6 +132,7 @@ const VerifyDriver = struct {
     state: State,
     buffer: [work_quantum]u8,
     hasher: std.crypto.hash.sha2.Sha256 = .init(.{}),
+    diagnostic: ?[]u8 = null,
     digest: [32]u8 = @splat(0),
     rendered: [64]u8 = @splat(0),
     const Names = struct {
@@ -166,6 +177,17 @@ const VerifyDriver = struct {
             contents: heap.Owned([]u8),
             materializer: heap.Owned(list.ByteListMaterializer),
         },
+        accepted: struct { names: Names, catalog: pkg_catalog.Catalog },
+        catalog: struct {
+            names: Names,
+            dir: std.Io.Dir,
+            work: union(enum) {
+                build: pkg_catalog.Build,
+                compare: struct { derived: pkg_catalog.Catalog, persisted: pkg_catalog.Catalog, cursor: pkg_catalog.Comparison = .{} },
+                encode: struct { catalog: pkg_catalog.Catalog, encoder: pkg_catalog.Encoder },
+                write: struct { catalog: pkg_catalog.Catalog, encoder: pkg_catalog.Encoder, staged: fsport.StagedFile, written: usize = 0 },
+            },
+        },
         complete: struct { names: Names, contents: heap.Owned([]u8) },
 
         fn deinit(self: *State, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, io: std.Io) void {
@@ -204,6 +226,30 @@ const VerifyDriver = struct {
                     materialize_state.contents.deinit(releases, allocator);
                     materialize_state.names.deinit(releases, allocator);
                 },
+                .accepted => |*accepted| {
+                    accepted.catalog.deinit();
+                    accepted.names.deinit(releases, allocator);
+                },
+                .catalog => |*catalog| {
+                    switch (catalog.work) {
+                        .compare => |*comparison| {
+                            comparison.derived.deinit();
+                            comparison.persisted.deinit();
+                        },
+                        .build => |*build| build.deinit(),
+                        .encode => |*encoding| {
+                            encoding.encoder.deinit();
+                            encoding.catalog.deinit();
+                        },
+                        .write => |*writing| {
+                            writing.staged.dispose();
+                            writing.encoder.deinit();
+                            writing.catalog.deinit();
+                        },
+                    }
+                    catalog.dir.close(io);
+                    catalog.names.deinit(releases, allocator);
+                },
                 .complete => |*complete| {
                     complete.contents.deinit(releases, allocator);
                     complete.names.deinit(releases, allocator);
@@ -223,7 +269,8 @@ const VerifyDriver = struct {
             .read => |*read_state| self.read(evaluator, read_state),
             .compare => |*compare_state| self.compare(evaluator, compare_state),
             .materialize => |*materialize_state| self.materialize(evaluator, materialize_state),
-            .complete => unreachable,
+            .catalog => |*catalog| self.catalogStep(evaluator, catalog),
+            .complete, .accepted => unreachable,
         };
     }
 
@@ -319,6 +366,16 @@ const VerifyDriver = struct {
         var entry = self.store.openDir(self.io, names.key.borrow(), .{ .follow_symlinks = false }) catch |err|
             return self.failIo(evaluator, "cannot open installed package entry", err);
         defer entry.close(self.io);
+        if (self.mode == .ensure_catalog) {
+            if (evaluator.readPackageCatalog(self.io, try self.catalogInput(evaluator, names, entry), names.hash.borrow())) |loaded| {
+                const moved_names = names.*;
+                self.state = .{ .accepted = .{ .names = moved_names, .catalog = loaded } };
+                return .completed;
+            } else |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Invalid => {},
+            }
+        }
         const file = switch (fsport.openRegularForRead(self.io, entry, archive.package_seal_name)) {
             .failed => |reason| return self.failIoName(evaluator, reason.message()),
             .file => |file| file,
@@ -395,7 +452,16 @@ const VerifyDriver = struct {
                 "package `{s}` archive seal does not match lock hash",
                 .{compare_state.names.package.borrow()},
             );
-        if (self.mode == .verify) return .completed;
+        if (self.mode != .read) {
+            const names = compare_state.names;
+            const dir = self.store.openDir(self.io, names.key.borrow(), .{ .follow_symlinks = false }) catch |err|
+                return self.failIo(evaluator, "cannot open installed package", err);
+            errdefer dir.close(self.io);
+            _ = try self.catalogInput(evaluator, &names, dir);
+            const build = try evaluator.beginPackageTreeValidation(self.io, names.package.borrow(), ".", dir, &self.diagnostic);
+            self.state = .{ .catalog = .{ .names = names, .dir = dir, .work = .{ .build = build } } };
+            return .yielded;
+        }
         const names = compare_state.names;
         const contents = compare_state.contents.?.take();
         self.state = .{ .materialize = .{
@@ -403,6 +469,78 @@ const VerifyDriver = struct {
             .contents = .init(contents),
             .materializer = .init(.init(self.allocator, contents)),
         } };
+        return .yielded;
+    }
+
+    fn catalogInput(self: *VerifyDriver, evaluator: *Machine, names: *const Names, dir: std.Io.Dir) MachineError!pkg_catalog.PackageInput {
+        _ = self;
+        const key = names.key.borrow();
+        const name = names.package.borrow();
+        const hash = names.hash.borrow();
+        if (!pkg_catalog.validCanonicalName(name) or key.len <= name.len + 66 or
+            !std.mem.startsWith(u8, key, name) or key[name.len] != '-' or
+            !std.mem.eql(u8, key[key.len - 64 ..], hash[7..])) return evaluator.fail(.domain, "package store key does not match package identity");
+        const version = key[name.len + 1 .. key.len - 65];
+        if (!pkg_catalog.validVersion(version)) return evaluator.fail(.domain, "package store key has an invalid version");
+        return .{ .id = @enumFromInt(0), .name = name, .version = version, .root_dir = ".", .base_dir = dir };
+    }
+
+    fn catalogStep(self: *VerifyDriver, evaluator: *Machine, state: *@FieldType(State, "catalog")) MachineError!machine.WorkProgress {
+        switch (state.work) {
+            .build => |*build| {
+                if (build.advance(work_quantum) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.Invalid => return evaluator.failFmt(.domain, "package `{s}` catalog validation failed: {s}", .{ state.names.package.borrow(), self.diagnostic orelse "invalid source tree" }),
+                } == .pending) return .yielded;
+                var catalog = build.take() catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.Invalid => unreachable,
+                };
+                errdefer catalog.deinit();
+                const input = try self.catalogInput(evaluator, &state.names, state.dir);
+                if (!std.mem.eql(u8, catalog.identity.?.version, input.version)) return evaluator.fail(.domain, "installed package version does not match store key");
+                build.deinit();
+                state.work = .{ .encode = .{ .catalog = catalog, .encoder = .init(self.allocator) } };
+            },
+            .encode => |*encoding| {
+                if (encoding.encoder.advance(&encoding.catalog, state.names.hash.borrow()) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.Invalid => return evaluator.fail(.domain, "package catalog exceeds its byte limit"),
+                } == .pending) return .yielded;
+                if (self.mode == .verify) {
+                    const persisted = evaluator.readPackageCatalog(self.io, try self.catalogInput(evaluator, &state.names, state.dir), state.names.hash.borrow()) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        error.Invalid => return evaluator.failFmt(.domain, "package `{s}` has invalid catalog metadata; run `ecl pkg sync`", .{state.names.package.borrow()}),
+                    };
+                    const derived = encoding.catalog;
+                    encoding.encoder.deinit();
+                    state.work = .{ .compare = .{ .derived = derived, .persisted = persisted } };
+                    return .yielded;
+                }
+                const staged = switch (fsport.StagedFile.create(self.io, state.dir, .default_file)) {
+                    .staged => |staged| staged,
+                    .failed => |reason| return self.failIoName(evaluator, reason.message()),
+                };
+                const moved = encoding.*;
+                state.work = .{ .write = .{ .catalog = moved.catalog, .encoder = moved.encoder, .staged = staged } };
+            },
+            .compare => |*comparison| switch (comparison.cursor.advance(&comparison.derived, &comparison.persisted, work_quantum)) {
+                .pending => return .yielded,
+                .complete => |matches| return if (matches) .completed else evaluator.failFmt(.domain, "package `{s}` catalog differs from installed sources; run `ecl pkg sync`", .{state.names.package.borrow()}),
+            },
+            .write => |*writing| {
+                const bytes = writing.encoder.output.written();
+                if (writing.written < bytes.len) {
+                    const end = @min(writing.written + work_quantum, bytes.len);
+                    writing.staged.file.?.writePositionalAll(self.io, bytes[writing.written..end], writing.written) catch |err|
+                        return self.failIo(evaluator, "cannot write replacement catalog", err);
+                    writing.written = end;
+                    return .yielded;
+                }
+                if (writing.staged.commitReplace(pkg_catalog.filename)) |reason| return self.failIoName(evaluator, reason.message());
+                return .completed;
+            },
+        }
         return .yielded;
     }
 
@@ -459,6 +597,8 @@ const VerifyDriver = struct {
             .compare => |*compare_state| compare_state.names.package.borrow(),
             .materialize => |*materialize_state| materialize_state.names.package.borrow(),
             .complete => |*complete| complete.names.package.borrow(),
+            .catalog => |*catalog| catalog.names.package.borrow(),
+            .accepted => |*accepted| accepted.names.package.borrow(),
             .encode_key, .encode_package => unreachable,
         };
     }
@@ -468,7 +608,18 @@ const VerifyDriver = struct {
         allocator: std.mem.Allocator,
         self: *VerifyDriver,
     ) bool {
+        if (self.state == .accepted and !self.state.accepted.catalog.retireStep()) return false;
+        if (self.state == .catalog) switch (self.state.catalog.work) {
+            .compare => |*comparison| {
+                if (!comparison.derived.retireStep()) return false;
+                if (!comparison.persisted.retireStep()) return false;
+            },
+            .build => {},
+            .encode => |*encoding| if (!encoding.catalog.retireStep()) return false,
+            .write => |*writing| if (!writing.catalog.retireStep()) return false,
+        };
         self.state.deinit(releases, allocator, self.io);
+        if (self.diagnostic) |message| allocator.free(message);
         self.hash_value.deinit(releases, allocator);
         self.package_value.deinit(releases, allocator);
         self.key_value.deinit(releases, allocator);

@@ -13,10 +13,18 @@
  (-- lock : "Read and parse the discovered project's lock.")
  ('project "ecl.lock" fs.read-text pkg.lock.read) 'read-lock defp
 
+ ### defp prepare-sources
+ (-- : "Create the default source directory, preserving an existing directory.")
+ ('cwd "src" fs.exists?
+  ('cwd "src" fs.lstat 'kind at 'directory match?
+   'domain error.new "pkg init requires src to be a directory" error.with-message assert)
+  ('cwd "src" fs.mkdir)
+  if)
+ 'prepare-sources defp
+
  ### def init
  (arguments -- :
-  "Create one default root manifest in the working directory and report its canonical package
-   name.")
+  "Create a source directory and default root manifest, then report the canonical package name.")
  (first
   (|name|
    name pkg.name.valid?
@@ -26,8 +34,9 @@
    name wrap (|name| 'name name) infra dict.from-flat
    error.with-data
    assert
+   prepare-sources
    name wrap
-   (|name| 'format 1 'name name 'version "0.1.0" 'exports {} 'requires {})
+   (|name| 'format 1 'name name 'version "0.1.0" 'sources ["src/**/*.ecl"] 'exports [] 'requires {})
    infra
    dict.from-flat
    pkg.manifest.write
@@ -85,7 +94,9 @@
 
  ### defp verify-vendor-entry
  (key package requirement -- : "Verify one already-present project vendor entry.")
- (|key package requirement| 'vendor key package requirement 'hash at pkg.store.verify)
+ (|key package requirement|
+  'vendor key package requirement 'hash at pkg.store.ensure-catalog
+  'vendor key package requirement 'hash at pkg.store.verify)
  'verify-vendor-entry defp
 
  ### defp install-vendor-entry

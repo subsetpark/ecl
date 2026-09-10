@@ -28,12 +28,14 @@ pub const CacheInputs = struct {
 const Entry = struct {
     name: []u8,
     version: []u8,
+    hash: ?[]u8 = null,
     store_dir: ?[]u8,
     requires: []pkg_catalog.PackageId = &.{},
 
     fn deinit(self: *Entry, allocator: std.mem.Allocator) void {
         allocator.free(self.name);
         allocator.free(self.version);
+        if (self.hash) |hash| allocator.free(hash);
         if (self.store_dir) |path| allocator.free(path);
         if (self.requires.len != 0) allocator.free(self.requires);
         self.* = undefined;
@@ -45,6 +47,8 @@ const State = union(enum) {
         entries: []Entry,
         catalog: pkg_catalog.Catalog,
         committed: []std.atomic.Value(bool),
+        sources: []SourceState,
+        start_dir: []u8,
         root_id: pkg_catalog.PackageId,
     },
     invalid: []u8,
@@ -54,6 +58,58 @@ const Backing = struct {
     host: *const heap.HostCleanup,
     state: State,
 };
+
+const SourceState = struct {
+    owner: *Backing,
+    artifact: pkg_catalog.ArtifactId,
+    private_registry: modules.Registry,
+};
+
+/// Lexical file identity, minted with the Session's immutable catalog. Its
+/// private registrations never enter the session-wide exported namespace.
+pub const SourceScope = opaque {
+    fn state(self: *const SourceScope) *SourceState {
+        return @ptrCast(@alignCast(@constCast(self)));
+    }
+
+    pub fn package(self: *const SourceScope) pkg_catalog.PackageId {
+        const source = self.state();
+        return source.owner.state.valid.catalog.artifact(source.artifact).package;
+    }
+
+    pub fn location(self: *const SourceScope) Match {
+        const source = self.state();
+        const valid = source.owner.state.valid;
+        const artifact = valid.catalog.artifact(source.artifact);
+        const entry = valid.entries[@intFromEnum(artifact.package)];
+        return .{
+            .package = entry.name,
+            .store_dir = entry.store_dir.?,
+            .relative_path = artifact.relative_path,
+            .package_id = artifact.package,
+            .artifact_id = source.artifact,
+        };
+    }
+
+    pub fn registry(self: *const SourceScope) *modules.Registry {
+        return &self.state().private_registry;
+    }
+
+    pub fn exports(self: *const SourceScope, name: intern.ModuleName) bool {
+        const source = self.state();
+        const names = source.owner.state.valid.catalog.artifact(source.artifact).modules;
+        var low: usize = 0;
+        var high: usize = names.len;
+        // Catalog module IDs are sorted and their count is capped at 65,536:
+        // membership takes at most seventeen comparisons on a worker step.
+        while (low < high) {
+            const middle = low + (high - low) / 2;
+            if (names[middle] == name) return true;
+            if (@intFromEnum(names[middle]) < @intFromEnum(name)) low = middle + 1 else high = middle;
+        }
+        return false;
+    }
+};
 comptime {
     heap.requireSingleHostCapability(Backing);
 }
@@ -61,6 +117,20 @@ comptime {
 /// Opaque, immutable capability. Only Session can obtain one from discovery;
 /// Units can borrow it for lookup but cannot construct, retarget, or mutate it.
 pub const ProjectLock = opaque {
+    pub fn sourceScope(self: *const ProjectLock, artifact: pkg_catalog.ArtifactId) *const SourceScope {
+        return @ptrCast(&backingConst(self).state.valid.sources[@intFromEnum(artifact)]);
+    }
+
+    pub fn sourcePathCursor(self: *const ProjectLock, path: []const u8) error{OutOfMemory}!SourcePathCursor {
+        const owner = backingConst(self);
+        return .{
+            .owner = owner,
+            .path = try std.fs.path.resolve(owner.host.allocator(), &.{ switch (owner.state) {
+                .valid => |valid| valid.start_dir,
+                .invalid => "",
+            }, path }),
+        };
+    }
     pub fn discover(
         host: *const heap.HostCleanup,
         io: std.Io,
@@ -85,7 +155,7 @@ pub const ProjectLock = opaque {
             },
             .found => |root| result: {
                 defer root.deinit();
-                break :result try discoverLock(host, io, root.path(), cache);
+                break :result try discoverLock(host, io, root.path(), cache, start);
             },
         };
     }
@@ -105,11 +175,21 @@ pub const ProjectLock = opaque {
         };
     }
 
-    /// Enumerate only modules exported by the root package. The cursor
+    /// Enumerate every source artifact selected by the root package. The cursor
     /// processes one catalog entry per advance; callers may poll or cancel
     /// between entries instead of hiding a project-sized traversal in one
     /// host operation.
-    pub fn rootModuleCursor(self: *const ProjectLock) RootModuleCursor {
+    pub fn rootSource(self: *const ProjectLock, id: pkg_catalog.ArtifactId) ?*const SourceScope {
+        const valid = switch (backingConst(self).state) {
+            .valid => |valid| valid,
+            .invalid => return null,
+        };
+        const index = @intFromEnum(id);
+        if (index >= valid.sources.len or valid.catalog.artifacts[index].package != valid.root_id) return null;
+        return @ptrCast(&valid.sources[index]);
+    }
+
+    pub fn rootSourceCursor(self: *const ProjectLock) RootSourceCursor {
         return .{ .lock = backingConst(self) };
     }
 
@@ -147,44 +227,14 @@ pub const ProjectLock = opaque {
         };
     }
 
-    pub fn artifactPackage(
-        self: *const ProjectLock,
-        artifact: pkg_catalog.ArtifactId,
-    ) pkg_catalog.PackageId {
-        return switch (backingConst(self).state) {
-            .valid => |valid| valid.catalog.artifact(artifact).package,
-            .invalid => unreachable,
-        };
-    }
-
-    pub fn artifactDeclares(
-        self: *const ProjectLock,
-        artifact: pkg_catalog.ArtifactId,
-        name: intern.ModuleName,
-    ) bool {
-        for (self.artifactModules(artifact)) |declared| if (declared == name) return true;
-        return false;
-    }
-
-    pub fn packageDeclares(
-        self: *const ProjectLock,
-        package: pkg_catalog.PackageId,
-        name: intern.ModuleName,
-    ) bool {
-        return switch (backingConst(self).state) {
-            .valid => |valid| if (valid.catalog.find(intern.get(intern.moduleId(name)))) |module|
-                valid.catalog.artifact(module.artifact).package == package
-            else
-                false,
-            .invalid => false,
-        };
-    }
-
     pub fn deinit(self: *ProjectLock) void {
         const owned = backing(self);
         const allocator = owned.host.allocator();
         switch (owned.state) {
             .valid => |*valid| {
+                for (valid.sources) |*source| source.private_registry.deinit();
+                allocator.free(valid.sources);
+                allocator.free(valid.start_dir);
                 for (valid.entries) |*entry| entry.deinit(allocator);
                 allocator.free(valid.entries);
                 valid.catalog.deinit();
@@ -196,19 +246,43 @@ pub const ProjectLock = opaque {
     }
 };
 
-pub const RootModuleProgress = union(enum) {
+pub const SourcePathCursor = struct {
+    owner: *const Backing,
+    path: []u8,
+    index: usize = 0,
+
+    pub fn advance(self: *SourcePathCursor) @import("poll.zig").Progress(?*const SourceScope) {
+        const valid = switch (self.owner.state) {
+            .valid => |valid| valid,
+            .invalid => return .{ .complete = null },
+        };
+        if (self.index == valid.catalog.artifacts.len) return .{ .complete = null };
+        const index = self.index;
+        self.index += 1;
+        if (std.mem.eql(u8, self.path, valid.catalog.artifacts[index].absolute_path))
+            return .{ .complete = @ptrCast(&valid.sources[index]) };
+        return .pending;
+    }
+
+    pub fn deinit(self: *SourcePathCursor) void {
+        self.owner.host.allocator().free(self.path);
+        self.* = undefined;
+    }
+};
+
+pub const RootSourceProgress = union(enum) {
     pending,
-    item: intern.ModuleName,
+    item: *const SourceScope,
     complete,
     invalid: []const u8,
 };
 
-pub const RootModuleCursor = struct {
+pub const RootSourceCursor = struct {
     lock: *const Backing,
-    module_index: usize = 0,
+    artifact_index: usize = 0,
     complete: bool = false,
 
-    pub fn advance(self: *RootModuleCursor) RootModuleProgress {
+    pub fn advance(self: *RootSourceCursor) RootSourceProgress {
         std.debug.assert(!self.complete);
         const valid = switch (self.lock.state) {
             .invalid => |message| {
@@ -217,18 +291,18 @@ pub const RootModuleCursor = struct {
             },
             .valid => |valid| valid,
         };
-        if (self.module_index == valid.catalog.modules.len) {
+        if (self.artifact_index == valid.catalog.artifacts.len) {
             self.complete = true;
             return .complete;
         }
-        const module = valid.catalog.modules[self.module_index];
-        self.module_index += 1;
-        const artifact = valid.catalog.artifact(module.artifact);
+        const index = self.artifact_index;
+        self.artifact_index += 1;
+        const artifact = valid.catalog.artifacts[index];
         if (artifact.package != valid.root_id) return .pending;
-        return .{ .item = module.name };
+        return .{ .item = @ptrCast(&valid.sources[index]) };
     }
 
-    pub fn deinit(self: *RootModuleCursor) void {
+    pub fn deinit(self: *RootSourceCursor) void {
         self.* = undefined;
     }
 };
@@ -331,6 +405,7 @@ fn discoverLock(
     io: std.Io,
     project_root: []const u8,
     cache: CacheInputs,
+    start_dir: []const u8,
 ) error{OutOfMemory}!?*ProjectLock {
     const allocator = host.allocator();
     const lock_path = std.fs.path.join(allocator, &.{ project_root, "ecl.lock" }) catch
@@ -488,6 +563,7 @@ fn discoverLock(
                     .name = entry.name,
                     .version = entry.version,
                     .root_dir = store_dir,
+                    .archive_hash = entry.hash,
                 };
             }
             var catalog_diagnostic: ?[]u8 = null;
@@ -512,10 +588,27 @@ fn discoverLock(
             errdefer allocator.free(committed);
             for (committed) |*state| state.* = .init(false);
             const owned = try allocator.create(Backing);
+            errdefer allocator.destroy(owned);
+            const owned_start = try allocator.dupe(u8, start_dir);
+            errdefer allocator.free(owned_start);
+            const sources = try allocator.alloc(SourceState, catalog.artifacts.len);
+            errdefer allocator.free(sources);
+            var sources_built: usize = 0;
+            errdefer for (sources[0..sources_built]) |*entry| entry.private_registry.deinit();
+            for (sources, 0..) |*entry, index| {
+                entry.* = .{
+                    .owner = owned,
+                    .artifact = @enumFromInt(@as(u32, @intCast(index))),
+                    .private_registry = try modules.Registry.init(host),
+                };
+                sources_built += 1;
+            }
             owned.* = .{ .host = host, .state = .{ .valid = .{
                 .entries = entries,
                 .catalog = catalog,
                 .committed = committed,
+                .sources = sources,
+                .start_dir = owned_start,
                 .root_id = @enumFromInt(@as(u32, @intCast(entries.len - 1))),
             } } };
             break :result projectLock(owned);
@@ -658,7 +751,7 @@ fn validateLock(
         defer allocator.free(url);
         if (!validUrl(url)) return error.Invalid;
         const hash = try data.ownedUtf8(allocator, try data.field(selection, "hash"));
-        defer allocator.free(hash);
+        errdefer allocator.free(hash);
         if (!validHash(hash)) return error.Invalid;
         const store_dir = if (store_root) |root_path|
             std.fmt.allocPrint(
@@ -672,6 +765,7 @@ fn validateLock(
         entries.appendAssumeCapacity(.{
             .name = name,
             .version = version,
+            .hash = hash,
             .store_dir = store_dir,
         });
     }
