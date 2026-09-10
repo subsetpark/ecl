@@ -1313,6 +1313,9 @@ test "native: aggregate cursors and builders charge the scheduler budget" {
     try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[3].int);
     try std.testing.expectEqual(@as(u64, 1), runtime.stackItems()[4].dict.length());
     try std.testing.expect(runtime.lastPolls() >= 2);
+    try expectOk(&runtime, "[65 66 67] sample.bulk-budget [11 22 33] match?");
+    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[runtime.stackItems().len - 1].int);
+    try std.testing.expect(runtime.lastPolls() >= 3);
 }
 
 test "native: cancellation after a yield preserves the pre-call operand stack" {
@@ -1336,6 +1339,41 @@ test "native: cancellation after a yield preserves the pre-call operand stack" {
     );
     try std.testing.expectEqual(@as(usize, 1), runtime.stackItems().len);
     try std.testing.expectEqual(@as(i64, 5), runtime.stackItems()[0].int);
+}
+
+test "native: CSV scanner and column builders remain schedulable" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer diagnostics.deinit();
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .ecl_path = native_fixture.directory,
+    }), .cooperative, .evaluate);
+    defer runtime.deinit();
+    try expectOk(&runtime, "sample.bulk-values-budget dup len 70000 = swap 7 = sum 70000 =");
+    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
+    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[1].int);
+    try expectOk(&runtime, "pop pop \"1\\n\" 70000 str.repeat ['int]");
+    try expectOk(&runtime, "csv.parse");
+    try std.testing.expect(runtime.lastPolls() >= 10);
+    try expectOk(&runtime, "first dup len 70000 = swap 1 = sum 70000 =");
+    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
+    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[1].int);
+    // A single cooperative executor must service the parent's deadline while
+    // the child is inside CSV. The error's word proves it reached the parser,
+    // rather than being cancelled during setup or module loading.
+    try expectOk(&runtime, "pop pop \"1\\n\" 1000000 str.repeat");
+    try expectOk(&runtime, "wrap ([] csv.parse) @spawn dup 20 task.await-for pop dup task.cancel task.await " ++
+        "'err at dup 'kind at 'cancelled match? swap 'word at 'csv.parse match?");
+    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
+    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[1].int);
+    try expectOk(&runtime, "pop pop \"9\\n10\" [] csv.parse first sum");
+    try std.testing.expectEqual(@as(i64, 19), runtime.stackItems()[0].int);
 }
 
 test "native: graceful shutdown has independent progress and joins cleanup once" {

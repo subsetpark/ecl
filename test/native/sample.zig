@@ -59,6 +59,102 @@ const OneBuild = struct {
 };
 const OneBuildSchedule = ecl.Reschedule(OneBuild);
 
+const BulkProbe = struct {
+    pub const State = struct { phase: u8 = 0 };
+    pub fn init() State {
+        return .{};
+    }
+    pub fn deinit(state: *State) void {
+        state.* = undefined;
+    }
+};
+const BulkProbeSchedule = ecl.Reschedule(BulkProbe);
+
+const BulkValuesProbe = struct {
+    pub const State = struct { began: bool = false, appended: u64 = 0 };
+    pub fn init() State {
+        return .{};
+    }
+    pub fn deinit(state: *State) void {
+        state.* = undefined;
+    }
+};
+const BulkValuesSchedule = ecl.Reschedule(BulkValuesProbe);
+
+fn bulkValuesBudget(call: *ecl.Call("-- result"), build: *ecl.BuildValues, schedule: *BulkValuesSchedule) ecl.CallbackResult {
+    const state = schedule.state();
+    const item = try build.scalar(ecl.Scalar.int(7));
+    if (!state.began) {
+        state.began = true;
+        if (try build.appendBulkValue(0, 70000, true, item) != .yield_required)
+            return call.fail(.user, "generic bulk initialization did not yield");
+        return schedule.yield();
+    }
+    while (state.appended < 70000) {
+        switch (try build.appendBulkValue(0, 70000, true, item)) {
+            .appended => state.appended += 1,
+            .yield_required => return schedule.yield(),
+            .invalid => return call.fail(.user, "generic bulk append was rejected"),
+        }
+    }
+    return switch (try build.finishBulk(0, .values, 70000, true)) {
+        .candidate => |result| call.complete(.{result}),
+        .yield_required => schedule.yield(),
+        .invalid => call.fail(.user, "generic bulk finish was rejected"),
+    };
+}
+
+fn bulkBudget(call: *ecl.Call("input -- result"), build: *ecl.BuildValues, schedule: *BulkProbeSchedule) ecl.CallbackResult {
+    const state = schedule.state();
+    while (true) switch (state.phase) {
+        0 => {
+            _ = schedule.consume(65_536);
+            var units: [3]u32 = undefined;
+            if (try call.readUnits(0, 0, &units) != .yield_required) return call.fail(.user, "bulk read ignored budget");
+            state.phase = 1;
+            return schedule.yield();
+        },
+        1 => {
+            var units: [3]u32 = undefined;
+            const read = try call.readUnits(0, 0, &units);
+            if (read != .units or read.units.count != 3 or !read.units.bytes or !std.mem.eql(u32, &units, &.{ 65, 66, 67 })) return call.fail(.user, "bulk read lost input");
+            if (try build.stage(0, &.{ 11, 22, 33 }) != .appended) return call.fail(.user, "stage rejected input");
+            state.phase = 2;
+        },
+        2 => {
+            _ = schedule.consume(65_536);
+            var words: [2]u64 = undefined;
+            if (try build.readStaged(0, &words) != .yield_required) return call.fail(.user, "staged read ignored budget");
+            state.phase = 3;
+            return schedule.yield();
+        },
+        3 => {
+            var words: [2]u64 = undefined;
+            if (try build.readStaged(0, &words) != .appended or !std.mem.eql(u64, &words, &.{ 22, 33 })) return call.fail(.user, "staged retry lost values");
+            if (try build.readStaged(0, &words) != .invalid) return call.fail(.user, "staged read exceeded available values");
+            if (try build.stage(0, &.{44}) != .invalid) return call.fail(.user, "staged reader accepted a write");
+            if (try build.readStaged(0, words[0..1]) != .appended or words[0] != 11) return call.fail(.user, "failed read consumed a value");
+            state.phase = 4;
+        },
+        4 => {
+            _ = schedule.consume(65_536);
+            if (try build.appendBulk(1, .integers, 3, false, &.{ 11, 22, 33 }) != .yield_required) return call.fail(.user, "bulk append ignored budget");
+            state.phase = 5;
+            return schedule.yield();
+        },
+        5 => {
+            if (try build.appendBulk(1, .integers, 3, false, &.{ 11, 22, 33 }) != .appended) return call.fail(.user, "bulk retry rejected input");
+            state.phase = 6;
+        },
+        6 => return switch (try build.finishBulk(1, .integers, 3, false)) {
+            .candidate => |result| call.complete(.{result}),
+            .yield_required => schedule.yield(),
+            .invalid => call.fail(.user, "bulk finish rejected input"),
+        },
+        else => unreachable,
+    };
+}
+
 fn forwardNestedPort(
     call: *ecl.Call("value -- result"),
     schedule: *OneBuildSchedule,
@@ -384,6 +480,8 @@ pub const Extension = ecl.module(.{
         ecl.word("draft-fail", "Yield with drafts and then fail.", draftFail),
         ecl.word("yield-forever", "Yield until the calling task is cancelled.", yieldForever),
         ecl.word("builder-budget", "Prove aggregate builders charge the native budget.", builderBudget),
+        ecl.word("bulk-budget", "Prove bulk reads and builders preserve values across budget exhaustion.", bulkBudget),
+        ecl.word("bulk-values-budget", "Prove generic bulk initialization and reverse writes yield without exposing unwritten cells.", bulkValuesBudget),
         ecl.word("large-list", "Build a list across multiple scheduler turns.", largeList),
         ecl.word("large-dict", "Build a dictionary across multiple scheduler turns.", largeDict),
         ecl.word("duplicate-dict", "Report duplicate dictionary keys without trapping.", duplicateDict),

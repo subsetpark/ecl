@@ -931,7 +931,9 @@ fn stdlibSessionAllocationProbe(
         .csv => try runOk(
             &runtime,
             "oom-csv.ecl",
-            "\"a,b\\nc,d\" csv.parse dup csv.emit pop pop",
+            "\"a,b\\nc,d\" [] csv.parse flip dup csv.emit pop pop " ++
+                "\"id,v,name\\n1,2.5,λ\\n2,3.5,😀\" [] csv.parse-header pop pop " ++
+                "\"1\\n\" 65 str.repeat ['int] csv.parse pop",
         ),
         .json => try runOk(
             &runtime,

@@ -15,6 +15,130 @@ const value = @import("value.zig");
 const Value = value.Value;
 const BuilderKind = enum { list, dict };
 
+/// Staging is an owning heap chain, never a relocating array. A reading
+/// cursor borrows only from its own root, which remains live through teardown.
+const ScalarStage = union(enum) {
+    writing: struct { frame: heap.ListBuilder(.generic_spine), words: heap.ListBuilder(.leaf_i64) },
+    reading: struct { root: Value, frame: *value.ListHandle, words: []const i64, index: usize },
+
+    fn init(call: *Transaction) error{OutOfMemory}!ScalarStage {
+        var words = try heap.ListBuilder(.leaf_i64).init(call.allocator, 0, 256);
+        errdefer words.retirePartial(call.releases);
+        var frame = try heap.ListBuilder(.generic_spine).init(call.allocator, 1, 2);
+        frame.items()[0] = .{ .int = 0 };
+        return .{ .writing = .{ .frame = frame, .words = words } };
+    }
+    fn seal(self: *ScalarStage) Value {
+        const words = self.writing.words.finish();
+        self.writing.frame.items()[1] = .{ .list = words };
+        self.writing.frame.setLen(2);
+        return .{ .list = self.writing.frame.finish() };
+    }
+    fn append(self: *ScalarStage, call: *Transaction, words: []const u64) error{OutOfMemory}!bool {
+        if (self.* != .writing) return false;
+        for (words) |word| {
+            if (self.writing.words.len() == 256) {
+                var next = try ScalarStage.init(call);
+                const previous = self.seal();
+                next.writing.frame.items()[0] = previous;
+                self.* = next;
+            }
+            const index = self.writing.words.len();
+            self.writing.words.items()[index] = @bitCast(word);
+            self.writing.words.setLen(index + 1);
+        }
+        return true;
+    }
+    fn read(self: *ScalarStage, words: []u64) bool {
+        if (self.* == .writing) {
+            const root = self.seal();
+            const leaf = heap.valuesConst(root.list)[1].list;
+            const chunk = heap.i64s(leaf)[0..@intCast(leaf.length())];
+            self.* = .{ .reading = .{ .root = root, .frame = root.list, .words = chunk, .index = chunk.len } };
+        }
+        // Commit the cursor only after the complete group has been read.
+        var cursor = self.reading;
+        var i = words.len;
+        while (i != 0) {
+            if (cursor.index == 0) {
+                const previous = heap.valuesConst(cursor.frame)[0];
+                if (previous != .list) return false;
+                cursor.frame = previous.list;
+                const leaf = heap.valuesConst(cursor.frame)[1].list;
+                cursor.words = heap.i64s(leaf)[0..@intCast(leaf.length())];
+                cursor.index = cursor.words.len;
+            }
+            cursor.index -= 1;
+            i -= 1;
+            words[i] = @bitCast(cursor.words[cursor.index]);
+        }
+        self.reading = cursor;
+        return true;
+    }
+    fn retire(self: *ScalarStage, releases: *heap.ReleaseDomain) void {
+        switch (self.*) {
+            .writing => |*storage| {
+                storage.frame.retirePartial(releases);
+                storage.words.retirePartial(releases);
+            },
+            .reading => |cursor| releases.releaseValue(cursor.root),
+        }
+    }
+};
+
+const BulkList = struct {
+    kind: abi.BulkKind,
+    expected: usize,
+    reverse: bool,
+    appended: usize = 0,
+    state: union(enum) {
+        preparing: heap.AnyListBuilder,
+        writing: heap.AnyListBuilder,
+        complete: Value,
+    },
+
+    fn init(allocator: std.mem.Allocator, kind: abi.BulkKind, count: usize, reverse: bool) error{OutOfMemory}!BulkList {
+        const representation: value.HeapKind = switch (kind) {
+            .integers => .leaf_i64,
+            .floats => .leaf_f64,
+            .char1 => .leaf_char1,
+            .char2 => .leaf_char2,
+            .char4 => .leaf_char4,
+            .values => .generic_spine,
+            else => unreachable,
+        };
+        const builder = try heap.AnyListBuilder.init(allocator, representation, if (kind == .values) 0 else count, count);
+        return .{ .kind = kind, .expected = count, .reverse = reverse, .state = if (kind == .values) .{ .preparing = builder } else .{ .writing = builder } };
+    }
+    fn prepare(self: *BulkList, call: *Transaction) bool {
+        if (self.state != .preparing) return true;
+        const builder = &self.state.preparing.generic;
+        while (builder.len() != self.expected) {
+            if (charge(call, 1) != .ok) return false;
+            const i = builder.len();
+            builder.items()[i] = .{ .int = 0 };
+            builder.setLen(i + 1);
+        }
+        const prepared = self.state.preparing;
+        self.state = .{ .writing = prepared };
+        return true;
+    }
+    fn write(self: *BulkList, item: Value) bool {
+        if (self.state != .writing or self.appended == self.expected) return false;
+        const index = if (self.reverse) self.expected - self.appended - 1 else self.appended;
+        self.state.writing.writeValue(index, item);
+        if (self.kind == .values) self.state.writing.generic.setLen(self.expected);
+        self.appended += 1;
+        return true;
+    }
+    fn retire(self: *BulkList, releases: *heap.ReleaseDomain) void {
+        switch (self.state) {
+            .preparing, .writing => |*builder| builder.retirePartial(releases),
+            .complete => |result| releases.releaseValue(result),
+        }
+    }
+};
+
 const BuilderOrigin = struct {
     slot: u32,
     serial: u32,
@@ -245,9 +369,11 @@ const DictBuild = struct {
 
 const AggregateBuilder = struct {
     serial: u32,
-    value: union(BuilderKind) {
+    value: union(enum) {
         list: ListBuild,
         dict: DictBuild,
+        stage: ScalarStage,
+        bulk: BulkList,
     },
 
     fn retire(self: *AggregateBuilder, releases: *heap.ReleaseDomain) void {
@@ -411,6 +537,7 @@ const Transaction = struct {
             const matches = switch (existing.value) {
                 .list => |builder_value| kind == .list and builder_value.expected == expected,
                 .dict => |builder_value| kind == .dict and builder_value.expected == expected,
+                .stage, .bulk => false,
             };
             if (!matches) return error.Invalid;
             return existing;
@@ -532,6 +659,8 @@ const full_host_table = abi.HostTable{
     .read_path = hostReadPath,
     .build_list_append = hostBuildListAppend,
     .build_list_finish = hostBuildListFinish,
+    .read_units = hostReadUnits,
+    .bulk_build = hostBulkBuild,
     .build_dict_append = hostBuildDictAppend,
     .build_dict_finish = hostBuildDictFinish,
     .forward_path = hostForwardPath,
@@ -584,6 +713,125 @@ fn hostInput(
     if (index >= call.definition.effect.inputs) return .invalid;
     const item = call.activeEvaluator().nativeInputBorrowed(call.definition.effect.inputs, index);
     return writeView(call, item, output);
+}
+
+fn hostReadUnits(context: *anyopaque, input_index: u32, start: u64, output: [*]u32, capacity: u32, count: *u32, bytes: *u32) callconv(.c) abi.HostStatus {
+    const call = transactionFrom(context);
+    if (call.terminal != .idle or call.continuation == null or capacity > abi.max_bulk_units or input_index >= call.definition.effect.inputs) return .invalid;
+    const source = call.activeEvaluator().nativeInputBorrowed(call.definition.effect.inputs, input_index);
+    if (source != .list or start > source.list.length()) return .invalid;
+    const n: u32 = @intCast(@min(capacity, source.list.length() - start));
+    if (charge(call, @max(n, 1)) != .ok) return .yield_required;
+    var byte_mode: ?bool = null;
+    for (0..n) |i| {
+        const item = list.atUnchecked(source, @as(usize, @intCast(start)) + i);
+        const is_byte = item == .int;
+        if (byte_mode) |mode| {
+            if (mode != is_byte) return .invalid;
+        } else byte_mode = is_byte;
+        output[i] = switch (item) {
+            .int => |v| if (v >= 0 and v <= 255) @intCast(v) else return .invalid,
+            .char => |v| v,
+            else => return .invalid,
+        };
+    }
+    count.* = n;
+    bytes.* = @intFromBool(byte_mode orelse false);
+    return .ok;
+}
+
+fn hostBulkBuild(context: *anyopaque, slot: u32, action: abi.BulkAction, kind: abi.BulkKind, count_wire: u64, reverse_wire: u32, words: [*]u64, n: u32, output: *abi.Candidate) callconv(.c) abi.HostStatus {
+    const call = transactionFrom(context);
+    if (call.terminal != .idle or call.continuation == null or slot >= abi.max_builder_slots or n > abi.max_bulk_units or reverse_wire > 1) return .invalid;
+    const count = std.math.cast(usize, count_wire) orelse return .invalid;
+    if (count >= std.math.maxInt(u32)) return .invalid;
+    switch (kind) {
+        .integers, .floats, .char1, .char2, .char4, .values => {},
+        else => return .invalid,
+    }
+    switch (action) {
+        .stage, .read_staged, .append, .append_candidate, .finish => {},
+        else => return .invalid,
+    }
+    if (charge(call, @max(n, 1)) != .ok) return .yield_required;
+    const staged = action == .stage or action == .read_staged;
+    if (call.builders[slot] == null) {
+        const aggregate = call.allocator.create(AggregateBuilder) catch return .out_of_memory;
+        aggregate.* = .{ .serial = call.next_builder_serial, .value = if (staged)
+            .{ .stage = ScalarStage.init(call) catch {
+                call.allocator.destroy(aggregate);
+                return .out_of_memory;
+            } }
+        else
+            .{ .bulk = BulkList.init(call.allocator, kind, count, reverse_wire != 0) catch {
+                call.allocator.destroy(aggregate);
+                return .out_of_memory;
+            } } };
+        call.next_builder_serial +%= 1;
+        if (call.next_builder_serial == 0) call.next_builder_serial = 1;
+        call.builders[slot] = aggregate;
+    }
+    const aggregate = call.builders[slot].?;
+    if (staged) {
+        if (aggregate.value != .stage) return .invalid;
+        const success = if (action == .stage)
+            aggregate.value.stage.append(call, words[0..n]) catch return .out_of_memory
+        else
+            aggregate.value.stage.read(words[0..n]);
+        return if (success) .ok else .invalid;
+    }
+    if (aggregate.value != .bulk) return .invalid;
+    const builder = &aggregate.value.bulk;
+    if (builder.kind != kind or builder.expected != count or builder.reverse != (reverse_wire != 0)) return .invalid;
+    if (!builder.prepare(call)) return .yield_required;
+    switch (action) {
+        .append => {
+            if (kind == .values or builder.state != .writing or n > count - builder.appended) return .invalid;
+            for (words[0..n]) |word| switch (kind) {
+                .char1 => if (word > 255) {
+                    return .invalid;
+                },
+                .char2 => if (word > 65535 or (word >= 0xd800 and word <= 0xdfff)) {
+                    return .invalid;
+                },
+                .char4 => if (word > 0x10ffff or (word >= 0xd800 and word <= 0xdfff)) {
+                    return .invalid;
+                },
+                else => {},
+            };
+            for (words[0..n]) |word| {
+                const item: Value = switch (kind) {
+                    .integers => .{ .int = @bitCast(word) },
+                    .floats => .{ .float = @bitCast(word) },
+                    .char1, .char2, .char4 => .{ .char = @intCast(word) },
+                    else => unreachable,
+                };
+                if (!builder.write(item)) return .invalid;
+            }
+        },
+        .append_candidate => {
+            if (kind != .values) return .invalid;
+            const item = call.candidate(output.*) orelse return .invalid;
+            // A builder cannot consume itself through a candidate alias.
+            if (item.origin) |origin| if (origin.slot == slot) return .invalid;
+            if (!builder.write(item.value)) return .invalid;
+            call.consumeOrigin(item.origin);
+        },
+        .finish => {
+            if (builder.appended != count) return .invalid;
+            if (builder.state == .writing) {
+                const finished: Value = .{ .list = builder.state.writing.finish() };
+                builder.state = .{ .complete = finished };
+            }
+            const result = builder.state.complete;
+            heap.retainValue(result);
+            const status = call.appendCandidate(result, .{ .slot = slot, .serial = aggregate.serial });
+            if (status == .ok) output.* = call.candidateWire();
+            return status;
+        },
+        else => unreachable,
+    }
+    return .ok;
 }
 
 fn hostListAt(
@@ -777,7 +1025,7 @@ fn hostBuildListAppend(
     if (charge(call, 1) != .ok) return .yield_required;
     const appended = switch (aggregate.value) {
         .list => |*builder| builder.append(item.value),
-        .dict => unreachable,
+        else => unreachable,
     };
     if (!appended) return .invalid;
     call.consumeOrigin(item.origin);
@@ -798,7 +1046,7 @@ fn hostBuildListFinish(
     };
     const result = switch (aggregate.value) {
         .list => |*builder| builder.advance(call) catch return .out_of_memory,
-        .dict => unreachable,
+        else => unreachable,
     } orelse return if (call.yield_requested) .yield_required else .invalid;
     heap.retainValue(result);
     const status = call.appendCandidate(result, .{ .slot = slot, .serial = aggregate.serial });
@@ -824,7 +1072,7 @@ fn hostBuildDictAppend(
     if (charge(call, 1) != .ok) return .yield_required;
     const appended = switch (aggregate.value) {
         .dict => |*builder| builder.append(key.value, item.value),
-        .list => unreachable,
+        else => unreachable,
     };
     if (!appended) return .invalid;
     call.consumeOrigin(key.origin);
@@ -846,7 +1094,7 @@ fn hostBuildDictFinish(
     };
     const result = switch (aggregate.value) {
         .dict => |*builder| builder.advance(call) catch return .out_of_memory,
-        .list => unreachable,
+        else => unreachable,
     } orelse return if (call.yield_requested) .yield_required else .invalid;
     heap.retainValue(result);
     const status = call.appendCandidate(result, .{ .slot = slot, .serial = aggregate.serial });

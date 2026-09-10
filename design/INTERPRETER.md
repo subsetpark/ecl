@@ -1938,6 +1938,23 @@ destruction is a cursor or bounded chunk. Exact-size output and fixed chunks are
 preferred to relocation in cancellable paths. Reaching the final reference or
 holding a publication lock never grants permission to do an unbounded walk.
 
+Registered native parsers access input through bounded scalar copies and stage
+unknown-length metadata in transaction-owned heap chains. A staged reader owns
+its chain root for the full lifetime of its cursor. Exact-size bulk builders
+write directly into typed leaves; generic builders initialize a bounded prefix
+before accepting writes in either order. Publication and abandonment share the
+transaction's normal bounded retirement protocol. An append that yields has
+not consumed its input; allocation failure terminates the call and leaves all
+partial storage owned by that transaction. Native continuation records contain
+only scalar state and fixed buffers, with an 8 KiB ceiling to accommodate bulk
+decoding and per-column inference without granting guest allocation authority.
+CSV charges both bulk input copies and numeric conversions to that budget.
+Numeric normalization retains a bounded significant-digit prefix and sticky
+tail information, so even arbitrarily long decimal fields never enter an
+unbounded library conversion. Scanner cache carry is at most one bulk chunk;
+staged traversal, generic initialization, typed writes, and retirement all
+remain bounded separately from the initial input scan.
+
 ### Separate publication from reclamation
 
 Build before the lock, commit in constant time, and retire after unlocking.

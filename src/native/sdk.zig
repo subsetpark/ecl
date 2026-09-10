@@ -27,6 +27,8 @@ pub const DictCursor = capability.DictCursor;
 pub const BuildValues = capability.BuildValues;
 pub const BuildResult = capability.BuildResult;
 pub const BuildAppendResult = capability.BuildAppendResult;
+pub const BulkKind = abi.BulkKind;
+pub const UnitRead = union(enum) { units: struct { count: u32, bytes: bool }, yield_required, invalid };
 pub const Reschedule = capability.Reschedule;
 pub const CallbackResult = error{ OutOfMemory, InvalidValue }!Outcome;
 
@@ -137,6 +139,22 @@ pub fn Call(comptime effect_source: []const u8) type {
             if (index >= EffectSpec.inputs.len)
                 @compileError("ecl-native: input index exceeds the declared effect");
             return @ptrCast(&self.state().views[index].?);
+        }
+
+        /// Copies a bounded run of Unicode scalar values or bytes into caller
+        /// storage. No borrowed host pointer escapes this invocation.
+        pub fn readUnits(self: *Self, comptime index: usize, start: u64, output: []u32) error{OutOfMemory}!UnitRead {
+            if (index >= EffectSpec.inputs.len) @compileError("input index exceeds effect");
+            if (output.len > abi.max_bulk_units) return .invalid;
+            var count: u32 = 0;
+            var bytes: u32 = 0;
+            const invocation = &self.state().invocation;
+            return switch ((invocation.host.read_units orelse unreachable)(invocation.context, index, start, output.ptr, @intCast(output.len), &count, &bytes)) {
+                .ok => .{ .units = .{ .count = count, .bytes = bytes != 0 } },
+                .yield_required => .yield_required,
+                .out_of_memory => error.OutOfMemory,
+                else => .invalid,
+            };
         }
 
         pub fn listCursor(self: *Self, comptime index: usize, start: u64) ?*ListCursor {

@@ -169,7 +169,7 @@ test "conversion: data-facing words never intern their input" {
     try expectError(&runtime, "\"conv-json-key-91\" symbol", &.{"'kind 'domain"});
     try expectStack(&runtime, "\"{\\\"conv-json-key-91\\\": 1}\" json.parse dict.keys first", "\"conv-json-key-91\"");
     try expectError(&runtime, "\"conv-json-key-91\" symbol", &.{"'kind 'domain"});
-    try expectStack(&runtime, "\"conv-csv-h1\\n1\" csv.parse first first", "\"conv-csv-h1\"");
+    try expectStack(&runtime, "\"conv-csv-h1\\n1\" [] csv.parse first first", "\"conv-csv-h1\"");
     try expectError(&runtime, "\"conv-csv-h1\" symbol", &.{"'kind 'domain"});
     try expectStack(&runtime, "\"conv-str-92\" str.upper str.lower \"-\" split len", "3");
     try expectError(&runtime, "\"conv-str-92\" symbol", &.{"'kind 'domain"});
