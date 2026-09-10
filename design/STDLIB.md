@@ -451,7 +451,7 @@ leaves are nonnegative in-bounds integer positions in the original list;
 duplicates remove a position once, and the relative order of retained elements
 is unchanged. An empty selector returns the list unchanged. A missing
 dictionary key leaves the dictionary unchanged. Use `dict.del` to remove a
-pervasive selection of dictionary keys.
+list of whole dictionary keys.
 
 ### dip
 `( x q -- … x )` — *Inline.* Run a quotation beneath a protected top
@@ -629,6 +629,22 @@ defaulting idiom. Absent host IO is `'io`.
 ['a 'b 'a] group
 # => {'a [0 2] 'b [1]}
 ```
+
+### group-columns
+`( columns -- groups )` — Group rows from a nonempty list of equal-length
+columns. Keys are whole composite lists, in first-occurrence order; row indices
+within each group are ascending. Zero rows produces an empty dictionary.
+An empty column list or ragged columns raises `'shape`; non-list columns raise `'type`.
+
+### reduce-groups
+`( values groups reducer -- results )` — Reduce each top-level index list,
+preserving group and index order, including repeated indices. Reducer symbols
+are `'sum`, `'count`, `'min`, and `'max`. Sum uses checked numeric
+addition from zero, left to right; count accepts any selected value. Min/max
+use whole-value comparison and preserve the first value on ties. Empty groups
+yield zero for sum/count and raise `'domain` for min/max. Noninteger selectors
+raise `'type`; negative or out-of-range indices and unknown symbols raise
+`'domain`. Built-in reducer meanings do not depend on word bindings.
 
 ### if
 `( bool then else -- ... )` — *Inline.* Run `then` when the condition is 1,
@@ -1491,9 +1507,9 @@ dictionary semantics. The constructor family accepts one key/value association,
 flat adjacent entries, parallel key/value lists, association lists, or one
 shared value for a key list. All constructors reject duplicate keys instead of
 silently choosing a winner. Core `at`, `put`, `update`, and `del` treat a
-dictionary selector as one whole-value key. Their `dict.at`, `dict.update`, and
-`dict.del` counterparts instead pervade through nested list selectors; use the
-core forms to address a dictionary key that is itself a list.
+dictionary selector as one whole-value key. `dict.put` also assigns one whole key and value. Batch operations `dict.at`,
+`dict.at-or`, `dict.update`, `dict.take`, `dict.del`, and `dict.split` consume
+a list of whole keys: strings and composite keys remain atomic.
 
 ### associate
 `( value key -- dict )` — Build a one-entry dictionary associating `key` with
@@ -1507,17 +1523,21 @@ core forms to address a dictionary key that is itself a list.
 ```
 
 ### at
-`( dict selector -- values )` — Look up every leaf of a nested list selector
-and preserve the selector's shape and request order in the result. Duplicate
-keys produce duplicate values. An absent key is `'domain`; the operation never
-silently drops a request. Core `at` is the whole-value operation for looking up
-a structural list key directly.
+`( dict keys -- values )` — Look up each top-level key in request order,
+preserving duplicates. An absent key is `'domain`. Strings and composite keys
+are whole values; the result has one element per requested key.
+
+### at-or
+`( dict keys default -- values )` — Like `dict.at`, using `default` as a whole
+value for each missing key.
+
+### put
+`( dict key value -- dict )` — Assign one whole key and value. An existing key
+retains its position; a new key appends at the end.
 
 ### del
-`( dict selector -- dict )` — Remove entries named by the leaves of a nested
-list selector, ignoring absent and duplicate keys and preserving the relative
-order of every retained entry. Core `del` removes one whole-value key,
-including a key that is itself a list.
+`( dict keys -- dict )` — Remove entries named by whole top-level keys,
+ignoring absent and duplicate keys and preserving retained dictionary order.
 
 ### filter
 `( dict predicate -- dict )` — Call a `( key value -- bool )` predicate in
@@ -1619,12 +1639,11 @@ keys. Output follows dictionary order independently of the requested key-list
 order.
 
 ### update
-`( dict selector quotation -- dict )` — Apply an isolated `( value -- value )`
-quotation to every leaf of a nested list selector without moving entries. Keys
-are processed in pervasive request order, so duplicates observe earlier
-updates. All keys are validated before the quotation is first applied; an
-absent key is `'domain`, and an empty selector returns the dictionary
-unchanged. Core `update` addresses one whole-value key, including a list key.
+`( dict keys quotation -- dict )` — Apply an isolated `( value -- value )`
+quotation to each whole top-level key without moving entries. Keys are
+processed in request order, so duplicates observe earlier updates. All keys
+are validated before the quotation is first applied; an absent key is
+`'domain`, and an empty key list returns the dictionary unchanged.
 
 ### update-or
 `( dict key default quotation -- dict )` — Update an existing value as
@@ -3273,8 +3292,11 @@ table convention and frozen error kinds.
 
 ### aggregate
 `( table names specs -- table )` — Group by `names` and aggregate each group
-with `[output input quotation]` triples. Validate the complete specification
-before running a quotation; key columns precede aggregate columns.
+with `[output input reducer]` triples. A reducer is a quotation or one of
+`'sum`, `'count`, `'min`, and `'max`. Symbols use `reduce-groups`;
+quotations receive gathered slices and retain ordinary resolution and shadowing.
+Validate the complete specification before running a quotation; key columns
+precede aggregate columns.
 
 ### cast
 `( table spec -- table )` — Coerce named columns with isolated

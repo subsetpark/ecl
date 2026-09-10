@@ -244,18 +244,16 @@
 
  # --- grouping, aggregation, and joins -------------------------------------
 
- ### defp composite-keys
- (table names -- keys : "Transpose the selected columns into whole composite row keys.")
- (|table names|
-  names table (swap at) partial each table dict.vals first len transpose) 'composite-keys defp
+ ### defp selected-groups
+ (table names -- groups : "Group selected columns using whole composite row keys.")
+ (|table names| names table (swap at) partial each group-columns) 'selected-groups defp
 
  ### defp group-keys
- (table names -- keys :
-  "Return grouping keys for all rows: scalar keys for one column and list keys for multiple
-   columns.")
+ (table names -- groups :
+  "Group rows with scalar keys for one column and composite keys for multiple columns.")
  (|table names| names len 1 =
-  table names first (at) partial partial
-  table names (composite-keys) partial partial if) 'group-keys defp
+  table names first (at group) partial partial
+  table names (selected-groups) partial partial if) 'group-keys defp
 
  ### defp global-group
  (table -- groups : "Return one group containing every row index.")
@@ -279,7 +277,7 @@
   'domain error.new "table.group-by rejects duplicate column names" error.with-message assert
   names len 0 =
   table (global-group) partial
-  table names (group-keys group) partial partial
+  table names (group-keys) partial partial
   if) 'group-by def
 
  ### defp apply-aggregate
@@ -290,10 +288,14 @@
  (|column quotation| column wrap quotation each first) 'apply-aggregate defp
 
  ### defp aggregate-column
- (spec table groups -- column : "Gather group slices and apply one aggregate to each slice.")
+ (spec table groups -- column :
+  "Reduce group selectors with a symbol or apply a quotation to gathered slices.")
  (|spec table groups|
-  table spec 1 at at groups dict.vals at
-  spec 2 at (apply-aggregate) partial each) 'aggregate-column defp
+  table spec 1 at at groups dict.vals spec 2 at
+  dup type 'symbol match?
+  (reduce-groups)
+  ((at) dip (apply-aggregate) partial each)
+  if) 'aggregate-column defp
 
  ### defp key-columns
  (groups names -- columns : "Return grouping-key columns in name order.")
@@ -306,11 +308,18 @@
  (groups names -- columns : "Split composite group keys into one column per name.")
  (|groups names| groups dict.keys names len transpose) 'composite-key-columns defp
 
+ ### defp reducer?
+ (candidate -- bool : "Accept a quotation or one of the fixed built-in reducer symbols.")
+ (dup type 'list match?
+  (pop 1)
+  (dup type 'symbol match? (['sum 'count 'min 'max] in?) (pop 0) if)
+  if) 'reducer? defp
+
  ### defp spec-shaped?
- (spec -- bool : "Return 1 for an [output-name input-name quotation] aggregate specification.")
+ (spec -- bool : "Return 1 for an [output-name input-name reducer] aggregate specification.")
  (dup type 'list match?
   (dup len 3 =
-   (dup first string? over 1 at string? and swap 2 at type 'list match? and)
+   (dup first string? over 1 at string? and swap 2 at reducer? and)
    (pop 0)
    if)
   (pop 0)
@@ -327,7 +336,7 @@
 
  ### def aggregate
  (table names specs -- table :
-  "Group rows and apply [output-name input-name quotation] aggregate specifications.
+  "Group rows and apply [output-name input-name reducer] aggregate specifications.
 
    All names and specifications are validated before a quotation runs. The result contains key
    columns first, followed by aggregate columns in specification order, with one row per group.")
@@ -344,7 +353,7 @@
   specs type 'list match?
   'type error.new "table.aggregate expects a list of specifications" error.with-message assert
   specs (spec-shaped?) all?
-  'type error.new "each aggregate specification is [output-name input-name quotation]"
+  'type error.new "each aggregate specification is [output-name input-name reducer]"
   error.with-message
   assert
   specs (1 at) each table (swap dict.has?) partial all?
@@ -357,12 +366,19 @@
   assert
   table names specs table names group-by aggregate-build) 'aggregate def
 
+ ### defp ordered-matches
+ (left-groups right-groups -- matches : "Expand distinct-key matches into original left-row order.")
+ (|left-groups right-groups|
+  right-groups left-groups dict.keys [] dict.at-or
+  left-groups dict.vals (len) each core.where at
+  left-groups dict.vals raze grade at) 'ordered-matches defp
+
  ### defp join-matches
- (left right pairs -- matches : "Look up each left key in grouped right-row indices.")
+ (left right pairs -- matches : "Look up grouped composite keys and restore left-row order.")
  (|left right pairs|
-  left pairs (first) each composite-keys
-  right pairs (1 at) each composite-keys group
-  (swap [] at-or) partial each) 'join-matches defp
+  left pairs (first) each selected-groups
+  right pairs (1 at) each selected-groups
+  ordered-matches) 'join-matches defp
 
  ### defp fill-matches
  (indices missing -- indices : "Use the appended fill row when a left key has no matches.")

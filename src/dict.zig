@@ -31,6 +31,7 @@ pub const Materializer = struct {
 
     const State = union(enum) {
         copy: struct { keys: []const Value, vals: []const Value, index: usize = 0 },
+        copy_pairs: struct { pairs: []const Pair, index: usize = 0 },
         table_init: usize,
         hash: struct {
             index: usize = 0,
@@ -124,6 +125,21 @@ pub const Materializer = struct {
         return result;
     }
 
+    /// Borrow pairs until completion or retirement; copy only during advance.
+    pub fn initBorrowedPairs(allocator: std.mem.Allocator, pairs: []const Pair, check_duplicates: bool) error{OutOfMemory}!Materializer {
+        if (pairs.len >= std.math.maxInt(u32)) return error.OutOfMemory;
+        const keys = try allocator.alloc(Value, pairs.len);
+        errdefer allocator.free(keys);
+        const vals = try allocator.alloc(Value, pairs.len);
+        errdefer allocator.free(vals);
+        const hashes = try allocator.alloc(i64, pairs.len);
+        errdefer allocator.free(hashes);
+        const table = try allocateIndex(allocator, pairs.len);
+        var result = initOwned(allocator, keys, vals, hashes, table, check_duplicates);
+        result.state = .{ .copy_pairs = .{ .pairs = pairs } };
+        return result;
+    }
+
     fn initOwned(
         allocator: std.mem.Allocator,
         keys: []Value,
@@ -151,7 +167,7 @@ pub const Materializer = struct {
     }
     pub fn retire(self: *Materializer, releases: *heap.ReleaseDomain) void {
         switch (self.state) {
-            .copy, .table_init => {},
+            .copy, .copy_pairs, .table_init => {},
             .hash => |*state| if (state.cursor) |*cursor| cursor.deinit(),
             .duplicate_linear => |*state| if (state.cursor) |*cursor| cursor.deinit(),
             .duplicate_index => |*state| if (state.cursor) |*cursor| cursor.deinit(),
@@ -184,6 +200,16 @@ pub const Materializer = struct {
     pub fn advance(self: *Materializer, budget: usize) error{OutOfMemory}!MaterializeProgress {
         std.debug.assert(budget != 0 and self.state != .complete);
         while (true) switch (self.state) {
+            .copy_pairs => |*source| {
+                const end = @min(source.index + budget, source.pairs.len);
+                for (source.index..end) |index| {
+                    self.keys[index] = source.pairs[index][0];
+                    self.vals[index] = source.pairs[index][1];
+                }
+                source.index = end;
+                if (end == source.pairs.len) self.state = if (self.table != null) .{ .table_init = 0 } else .{ .hash = .{} };
+                return .pending;
+            },
             .copy => |*source| {
                 const end = @min(source.index + budget, source.keys.len);
                 @memcpy(self.keys[source.index..end], source.keys[source.index..end]);

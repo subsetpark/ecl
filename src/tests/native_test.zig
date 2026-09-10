@@ -1376,6 +1376,33 @@ test "native: CSV scanner and column builders remain schedulable" {
     try std.testing.expectEqual(@as(i64, 19), runtime.stackItems()[0].int);
 }
 
+test "native: column primitives cancel active work and reuse the session" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
+    defer runtime.deinit();
+    try expectOk(&runtime, "{} dict.keys pop");
+    const cases = [_]struct { setup: []const u8, body: []const u8, word: []const u8 }{
+        .{ .setup = "500000 range wrap", .body = "group", .word = "group" },
+        .{ .setup = "500000 range dup pair wrap", .body = "group-columns", .word = "group-columns" },
+        .{ .setup = "\"x\" 2000000 str.repeat dup pair wrap", .body = "group", .word = "group" },
+        .{ .setup = "[1] [0] 8000000 take wrap pair", .body = "'sum reduce-groups", .word = "reduce-groups" },
+        .{ .setup = "{0 1} [0] 2000000 take 0 3 pack", .body = "dict.at-or", .word = "dict.at-or" },
+    };
+    for (cases) |case| {
+        try expectOk(&runtime, case.setup);
+        const source = try std.fmt.allocPrint(std.testing.allocator, "({s}) @spawn dup 1 task.await-for pop dup task.cancel task.await " ++
+            "'err at dup 'kind at 'cancelled match? swap 'word at '{s} match?", .{ case.body, case.word });
+        defer std.testing.allocator.free(source);
+        try expectOk(&runtime, source);
+        try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
+        try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[1].int);
+        try expectOk(&runtime, "pop pop [1 2] [[0 1]] 'sum reduce-groups first");
+        try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[0].int);
+        try expectOk(&runtime, "pop");
+    }
+}
+
 test "native: graceful shutdown has independent progress and joins cleanup once" {
     for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.factory [] port.open 'p set " ++
         "p portprobe.blocked [] port.begin 'x set 1 portprobe.await-blocked " ++

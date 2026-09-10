@@ -298,3 +298,25 @@ test "native runtime: diagnostics are opt-in and never change results" {
         .stderr_contains = &.{"native module `sample` returned after an over-quantum slice"},
     });
 }
+
+test "native runtime: forward staging and partial text spans retain ownership" {
+    var result = try run(
+        "sample.forward-stage \"λ😀\" 1000 str.repeat dup bytes 2000 4 sample.text-span first match? " ++ "sample.bulk-values-budget len sample.forward-values-budget 7 = sum [65 66 67] sample.bulk-budget",
+        "1",
+        false,
+    );
+    defer result.deinit();
+    try result.expect(.{ .exit_code = 0, .stdout = "600 1 70000 70000 [11 22 33]\n", .stderr = "" });
+    for ([_][]const u8{
+        "[195] 1 2 sample.text-span",
+        "[237 160 128] 1 4 sample.text-span",
+        "[192 128] 1 4 sample.text-span",
+        "\"😀\" 1 2 sample.text-span",
+        "\"abc\" 2 1 sample.text-span",
+        "\"abc\" 4 1 sample.text-span",
+    }) |source| {
+        var invalid = try run(source, "1", false);
+        defer invalid.deinit();
+        try invalid.expect(.{ .exit_code = 1, .stderr_contains = &.{"invalid span"} });
+    }
+}

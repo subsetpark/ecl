@@ -199,7 +199,7 @@
   raises-containing
   ({"r" ["e"] "v" [1]} ["r"] [["t" "v"]] table.aggregate)
   'type
-  "[output-name input-name quotation]"
+  "[output-name input-name reducer]"
   raises-containing
   ({"r" ["e"] "v" [1]} ["r"] [["t" "v" (dup)]] table.aggregate)
   'contract
@@ -305,4 +305,16 @@
    'table.aggregate 'table.inner-join 'table.left-join-with]
   documented)
  'documentation test
+
+ ### test symbol-aggregates
+ (-- : "Built-in reducer symbols coexist with quotations and are validated before execution.")
+ ({"k" [1 2 1] "v" [10 20 30]} ["k"]
+  [["s" "v" 'sum] ["n" "v" (len)] ["lo" "v" 'min] ["hi" "v" 'max]]
+  table.aggregate {"k" [1 2] "s" [40 20] "n" [2 1] "lo" [10 20] "hi" [30 20]} equal
+  ({"v" [1]} [] [["a" "v" ('user error.new raise)] ["b" "v" 'median]] table.aggregate)
+  'type "specification" raises-containing
+  {"v" []} [] [["s" "v" 'sum] ["n" "v" 'count]] table.aggregate
+  {"s" [0] "n" [0]} equal)
+ 'symbol-aggregates test
+
 ) 'stdlib.test.table @defm

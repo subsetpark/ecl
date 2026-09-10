@@ -391,6 +391,13 @@ Numeric hashing agrees with numeric equality, including mixed integer/float
 comparisons. Dictionary construction is resumable because hashing, duplicate
 detection, and materialization can all depend on user-sized input.
 
+Dictionary batch selectors traverse only their outer key list. Each lookup or
+update compares a whole value through the shared bounded dictionary cursor;
+string and composite keys never become nested selectors. Dictionary assignment
+uses the same bounded rebuild for core `put` and `dict.put`. Borrowed-pair
+materialization keeps its source alive through completion or retirement and
+copies entries incrementally.
+
 ### Symbols are process-lifetime names
 
 Symbols and words share one append-only intern table and distinct value tags.
@@ -1939,21 +1946,36 @@ preferred to relocation in cancellable paths. Reaching the final reference or
 holding a publication lock never grants permission to do an unbounded walk.
 
 Registered native parsers access input through bounded scalar copies and stage
-unknown-length metadata in transaction-owned heap chains. A staged reader owns
-its chain root for the full lifetime of its cursor. Exact-size bulk builders
-write directly into typed leaves; generic builders initialize a bounded prefix
-before accepting writes in either order. Publication and abandonment share the
+unknown-length metadata in transaction-owned fixed-chunk chains. Choosing a
+forward or reverse read mode seals the chain; cursors borrow from the transaction
+until retirement detaches one chunk per step. Neither direction requires a
+whole-stream preparation pass. Exact-size bulk builders write directly into
+typed leaves. Forward generic builders expose only their initialized prefix;
+reverse builders initialize placeholders under the work budget before writes.
+Contiguous text construction retains its decoding state in the output builder,
+validates input bounds and hints, and commits exactly one append on completion. Publication and abandonment share the
 transaction's normal bounded retirement protocol. An append that yields has
 not consumed its input; allocation failure terminates the call and leaves all
 partial storage owned by that transaction. Native continuation records contain
-only scalar state and fixed buffers, with an 8 KiB ceiling to accommodate bulk
+only scalar state, tagged scalar unions, and fixed buffers, with an 8 KiB ceiling to accommodate bulk
 decoding and per-column inference without granting guest allocation authority.
 CSV charges both bulk input copies and numeric conversions to that budget.
+Staged descriptors preserve original spans alongside successful conversions
+until column inference settles, so text fallback preserves spelling. Numeric
+output reuses cached conversions and is appended in bounded batches.
 Numeric normalization retains a bounded significant-digit prefix and sticky
 tail information, so even arbitrarily long decimal fields never enter an
 unbounded library conversion. Scanner cache carry is at most one bulk chunk;
 staged traversal, generic initialization, typed writes, and retirement all
 remain bounded separately from the initial input scan.
+
+Grouping owns a fixed-capacity hash index sized from the row count. Index
+initialization, structural hashing, collision comparison, stable index scatter,
+and dictionary construction are independently resumable. Composite row identity
+is read through pinned columns; only distinct keys acquire materialized lists.
+Grouped reduction walks top-level selectors directly and retains its operands
+through comparison and output publication, preserving selector order without
+gathering temporary value lists.
 
 ### Separate publication from reclamation
 

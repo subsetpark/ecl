@@ -101,4 +101,16 @@
  (-- : "Require documentation for every CSV export.")
  (('csv.parse 'csv.parse-header 'csv.emit) documented)
  'documentation test
+
+ ### test forward-spans-and-cached-numbers
+ (-- : "Forward spans preserve quoted text and cached numbers across append chunks and fallback.")
+ ("1\n" 257 repeat "2.5\n" cat [] csv.parse first
+  dup len 258 equal last 2.5 equal
+  "1\n" 257 repeat "001\n" cat [] csv.parse first
+  dup first "1" equal last "001" equal
+  "\"\"\n\"λ\"\n\"😀\"" [] csv.parse first
+  ("" "λ" "😀") equal
+  "42\n1" [] csv.parse-header ([1]) equal ("42") equal)
+ 'forward-spans-and-cached-numbers test
+
 ) 'stdlib.test.csv @defm

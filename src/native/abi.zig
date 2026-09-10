@@ -5,8 +5,8 @@
 
 const builtin = @import("builtin");
 
-pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v6";
-pub const abi_version: u32 = 6;
+pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v7";
+pub const abi_version: u32 = 7;
 
 pub const max_error_message_bytes: u32 = 4096;
 pub const max_guest_scalar_bytes: u32 = 4096;
@@ -307,7 +307,7 @@ pub const RequestYieldFn = *const fn (call_context: *anyopaque) callconv(.c) Hos
 /// Bulk operations copy at most this many scalar units per invocation.
 pub const max_bulk_units: u32 = 256;
 pub const BulkKind = enum(u32) { integers, floats, char1, char2, char4, values, _ };
-pub const BulkAction = enum(u32) { stage, read_staged, append, append_candidate, finish, _ };
+pub const BulkAction = enum(u32) { stage, read_staged, append, append_candidate, finish, read_staged_forward, append_text_span, _ };
 pub const ReadUnitsFn = *const fn (*anyopaque, u32, u64, [*]u32, u32, *u32, *u32) callconv(.c) HostStatus;
 pub const BulkBuildFn = *const fn (*anyopaque, u32, BulkAction, BulkKind, u64, u32, [*]u64, u32, *Candidate) callconv(.c) HostStatus;
 
@@ -419,7 +419,7 @@ fn assertRecord(comptime T: type, comptime expected_size: usize, comptime expect
 
 comptime {
     @setEvalBranchQuota(8000);
-    if (@sizeOf(usize) != 8) @compileError("native ABI v6 supports 64-bit targets only");
+    if (@sizeOf(usize) != 8) @compileError("native ABI v7 supports 64-bit targets only");
 
     assertRecord(CapabilityRequirement, 8, 4);
     assertRecord(EffectSlot, 24, 8);

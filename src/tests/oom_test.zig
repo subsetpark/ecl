@@ -564,7 +564,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     var display = try runtime.stackDisplay();
     display.deinit();
     try runOk(&runtime, "oom-display-cleanup.ecl", "pop");
-    try runOk(&runtime, "oom-order.ecl", "[2 1 2 1] grade group pop [1 2 1] distinct pop");
+    try runOk(&runtime, "oom-order.ecl", "[2 1 2 1] grade group pop [1 2 1] distinct pop [[1 2] [2 1]] group-columns pop [1 2] [[0 1]] 'sum reduce-groups pop");
     try runOk(
         &runtime,
         "oom-dict-text.ecl",
@@ -760,6 +760,7 @@ const StdlibSurface = enum {
     result,
     string,
     csv,
+    column_primitives,
     json,
     table,
     archive_hash,
@@ -904,7 +905,7 @@ fn stdlibSessionAllocationProbe(
             "oom-dict.ecl",
             "[1 2] [0 1] del pop " ++
                 "[['a 1] ['b 2]] dict.from-pairs dup dict.keys pop dup dict.vals pop " ++
-                "dup 'a dict.has? pop dup [['b] 'a] dict.at pop dup {} dict.merge dup dict.pairs dict.from-pairs pop " ++
+                "dup [1 2] [3 4] dict.put pop dup 'a dict.has? pop dup ['b 'a] dict.at pop dup {} dict.merge dup dict.pairs dict.from-pairs pop " ++
                 "dup ['a 'b] dict.keys-exactly? pop dup ['a] (1 +) dict.update " ++
                 "dup 'c 0 (1 +) dict.update-or dup (nip) dict.map dup (1 +) each " ++
                 "dup (pop pop 1) dict.filter dup (pop pop 0) dict.reject dup ['a] dict.take " ++
@@ -928,6 +929,14 @@ fn stdlibSessionAllocationProbe(
             "oom-string.ecl",
             "\"  hi  \" str.trim str.upper pop",
         ),
+        .column_primitives => try runOk(
+            &runtime,
+            "oom-column-primitives.ecl",
+            "[[1 2] [\"a\" \"b\"]] group-columns pop " ++
+                "[[1 1] [\"a\" \"a\"]] group-columns dup dict.keys [] dict.at-or pop " ++
+                "[1 2] [[0 1] []] 'sum reduce-groups pop " ++
+                "[\"a\" \"b\"] [[0 1]] 'min reduce-groups pop",
+        ),
         .csv => try runOk(
             &runtime,
             "oom-csv.ecl",
@@ -944,7 +953,7 @@ fn stdlibSessionAllocationProbe(
             &runtime,
             "oom-table.ecl",
             "{\"r\" [\"e\" \"w\"] \"v\" [1 2]} " ++
-                "[\"r\"] [[\"t\" \"v\" (sum)]] table.aggregate pop " ++
+                "[\"r\"] [[\"t\" \"v\" 'sum]] table.aggregate pop " ++
                 "{\"id\" [1 2]} {\"cid\" [2] \"n\" [9]} [[\"id\" \"cid\"]] " ++
                 "{\"n\" 0} table.left-join-with pop",
         ),
@@ -1700,6 +1709,11 @@ test "oom: standard-library and host: stdlib: result propagates every allocation
 test "oom: standard-library and host: stdlib: string propagates every allocation failure" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.string);
+}
+
+test "oom: standard-library and host: column primitives" {
+    try requireSelectedOomTest(@src());
+    try checkStdlibSurface(.column_primitives);
 }
 
 test "oom: standard-library and host: stdlib: CSV propagates every allocation failure" {

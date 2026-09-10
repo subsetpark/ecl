@@ -1377,8 +1377,9 @@ selector shape, `put` conforms a replacement value to it with atom extension,
 and `update` applies its unary quotation at each leaf in left-to-right order.
 
 For a dictionary, the selector is always one atomic whole-value key, even when
-that key is a list. The `dict.at` and `dict.update` adapters supply the distinct
-operation of traversing an outer list of such whole keys.
+that key is a list. `dict.put` likewise assigns one whole key and value. The `dict.at`,
+`dict.at-or`, `dict.update`, `dict.take`, `dict.del`, and `dict.split` adapters
+traverse an outer list of whole keys without descending into those keys.
 
 ## Numbers
 

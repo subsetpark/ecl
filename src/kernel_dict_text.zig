@@ -209,7 +209,15 @@ const HasDriver = struct {
     }
 };
 
+pub fn putForModule(evaluator: *Machine) MachineError!void {
+    return putImpl(evaluator, true);
+}
+
 fn putPrimitive(evaluator: *Machine) MachineError!void {
+    return putImpl(evaluator, false);
+}
+
+fn putImpl(evaluator: *Machine, comptime dictionary_only: bool) MachineError!void {
     try evaluator.require(3);
     var new_value = try evaluator.popValue();
     defer new_value.deinit();
@@ -217,6 +225,7 @@ fn putPrimitive(evaluator: *Machine) MachineError!void {
     defer key.deinit();
     var collection = try evaluator.popValue();
     defer collection.deinit();
+    if (dictionary_only and collection.borrow() != .dict) return evaluator.typeError("a dict");
     switch (collection.borrow()) {
         .dict => {
             const finder = dict.FindCursor.initHeader(
@@ -627,7 +636,7 @@ const DictPutDriver = struct {
             budget -= copied;
             if (self.index != pairs.len) return .yielded;
             self.work.borrowMut().* = .{
-                .materializing = try .init(evaluator.allocator(), pairs, false),
+                .materializing = try .initBorrowedPairs(evaluator.allocator(), pairs, false),
             };
         }
         if (budget == 0) return .yielded;

@@ -81,23 +81,110 @@ const BulkValuesProbe = struct {
 };
 const BulkValuesSchedule = ecl.Reschedule(BulkValuesProbe);
 
+fn textSpan(call: *ecl.Call("input decoded width -- result"), build: *ecl.BuildValues, schedule: *OneBuildSchedule) ecl.CallbackResult {
+    const decoded = call.input(1).int() orelse return call.fail(.type, "decoded length");
+    const width = call.input(2).int() orelse return call.fail(.type, "width");
+    const kind: ecl.BulkKind = switch (width) {
+        1 => .char1,
+        2 => .char2,
+        4 => .char4,
+        else => return call.fail(.domain, "width"),
+    };
+    if (decoded < 0) return call.fail(.domain, "decoded length");
+    const length = call.input(0).aggregateLength() orelse return call.fail(.type, "input");
+    if (!schedule.state().appended) {
+        switch (try build.appendTextSpan(0, 1, 0, 0, length, @intCast(decoded), kind)) {
+            .yield_required => return schedule.yield(),
+            .invalid => return call.fail(.parse, "invalid span"),
+            .appended => schedule.state().appended = true,
+        }
+    }
+    return switch (try build.finishBulk(0, .values, 1, false)) {
+        .candidate => |result| call.complete(.{result}),
+        .yield_required => schedule.yield(),
+        .invalid => call.fail(.domain, "finish span"),
+    };
+}
+
+const ForwardProbe = struct {
+    pub const State = struct { staged: u64 = 0, read: u64 = 0, phase: enum { stage, read, finish } = .stage };
+    pub fn init() State {
+        return .{};
+    }
+    pub fn deinit(state: *State) void {
+        state.* = undefined;
+    }
+};
+const ForwardSchedule = ecl.Reschedule(ForwardProbe);
+fn forwardStage(call: *ecl.Call("-- result"), build: *ecl.BuildValues, schedule: *ForwardSchedule) ecl.CallbackResult {
+    const state = schedule.state();
+    while (true) switch (state.phase) {
+        .stage => {
+            if (state.staged == 600) {
+                state.phase = .read;
+                continue;
+            }
+            var words: [3]u64 = .{ state.staged, state.staged + 1, state.staged + 2 };
+            switch (try build.stage(0, &words)) {
+                .yield_required => return schedule.yield(),
+                .invalid => return call.fail(.user, "stage rejected"),
+                .appended => state.staged += 3,
+            }
+        },
+        .read => {
+            if (state.read == 600) {
+                state.phase = .finish;
+                continue;
+            }
+            var words: [3]u64 = undefined;
+            switch (try build.readStagedForward(0, &words)) {
+                .yield_required => return schedule.yield(),
+                .invalid => return call.fail(.user, "forward read rejected"),
+                .appended => {},
+            }
+            if (!std.mem.eql(u64, &words, &.{ state.read, state.read + 1, state.read + 2 })) return call.fail(.user, "forward order changed");
+            state.read += 3;
+        },
+        .finish => {
+            var word: [1]u64 = undefined;
+            if (try build.stage(0, &.{1}) == .yield_required) return schedule.yield();
+            if (try build.stage(0, &.{1}) != .invalid) return call.fail(.user, "sealed staging accepted append");
+            if (try build.readStaged(0, &word) == .yield_required) return schedule.yield();
+            if (try build.readStaged(0, &word) != .invalid) return call.fail(.user, "staging changed direction");
+            return call.complete(.{ecl.Scalar.int(@intCast(state.read))});
+        },
+    };
+}
+
 fn bulkValuesBudget(call: *ecl.Call("-- result"), build: *ecl.BuildValues, schedule: *BulkValuesSchedule) ecl.CallbackResult {
+    return bulkValuesBudgetImpl(true, call, build, schedule);
+}
+
+fn forwardValuesBudget(call: *ecl.Call("-- result"), build: *ecl.BuildValues, schedule: *BulkValuesSchedule) ecl.CallbackResult {
+    return bulkValuesBudgetImpl(false, call, build, schedule);
+}
+
+fn bulkValuesBudgetImpl(comptime reverse: bool, call: *ecl.Call("-- result"), build: *ecl.BuildValues, schedule: *BulkValuesSchedule) ecl.CallbackResult {
     const state = schedule.state();
     const item = try build.scalar(ecl.Scalar.int(7));
     if (!state.began) {
         state.began = true;
-        if (try build.appendBulkValue(0, 70000, true, item) != .yield_required)
-            return call.fail(.user, "generic bulk initialization did not yield");
-        return schedule.yield();
+        const result = try build.appendBulkValue(0, 70000, reverse, item);
+        if (reverse) {
+            if (result != .yield_required) return call.fail(.user, "reverse initialization did not yield");
+            return schedule.yield();
+        }
+        if (result != .appended) return call.fail(.user, "forward initialization traversed unwritten cells");
+        state.appended = 1;
     }
     while (state.appended < 70000) {
-        switch (try build.appendBulkValue(0, 70000, true, item)) {
+        switch (try build.appendBulkValue(0, 70000, reverse, item)) {
             .appended => state.appended += 1,
             .yield_required => return schedule.yield(),
             .invalid => return call.fail(.user, "generic bulk append was rejected"),
         }
     }
-    return switch (try build.finishBulk(0, .values, 70000, true)) {
+    return switch (try build.finishBulk(0, .values, 70000, reverse)) {
         .candidate => |result| call.complete(.{result}),
         .yield_required => schedule.yield(),
         .invalid => call.fail(.user, "generic bulk finish was rejected"),
@@ -480,6 +567,9 @@ pub const Extension = ecl.module(.{
         ecl.word("draft-fail", "Yield with drafts and then fail.", draftFail),
         ecl.word("yield-forever", "Yield until the calling task is cancelled.", yieldForever),
         ecl.word("builder-budget", "Prove aggregate builders charge the native budget.", builderBudget),
+        ecl.word("forward-values-budget", "Prove forward generic construction publishes only initialized values.", forwardValuesBudget),
+        ecl.word("text-span", "Copy and validate a host-owned text span.", textSpan),
+        ecl.word("forward-stage", "Exercise forward staging across chunk boundaries.", forwardStage),
         ecl.word("bulk-budget", "Prove bulk reads and builders preserve values across budget exhaustion.", bulkBudget),
         ecl.word("bulk-values-budget", "Prove generic bulk initialization and reverse writes yield without exposing unwritten cells.", bulkValuesBudget),
         ecl.word("large-list", "Build a list across multiple scheduler turns.", largeList),

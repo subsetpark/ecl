@@ -268,3 +268,113 @@ authority from the registration used for each invocation. The accepted path
 retains one two-way cache implementation with no experimental or legacy
 control branch; the two focused cases and local hit/miss counters remain in
 schema `ecl.workdrivers.*.v6`.
+
+## CSV and table primitives — 2026-09-10
+
+Baseline is the committed columnar implementation `05454f6`; updated is the
+ABI 7 implementation with forward construction, cached CSV conversions,
+shared hash grouping, and whole-key dictionary batches. Both executables use
+Zig 0.16.0 ReleaseSafe on macOS 26.6.2 arm64, with `ECL_WORKERS=1`.
+Each workload has one warmup and three measured runs. Values below are medians;
+peak memory is the median process maximum RSS from `/usr/bin/time -l`, including
+input, output, and runtime memory. Stage clocks have millisecond resolution.
+Baseline and updated use identical fixed input files, verified by SHA-256.
+
+The local artifact directory `/tmp/ecl-csv-table-20260910` contains
+`benchmark.py`, `metadata.json` (input and executable hashes),
+`measurements.json` (all successful raw runs), `summary.json`, and the independent
+`verify.py` oracle. The final benchmark exited 0. Completed baseline runs were
+retained while updated runs were repeated after compacting CSV descriptors;
+failed benchmark setup runs are excluded. No builds or tests ran concurrently
+with measured workloads.
+
+### CSV stages
+
+All times are milliseconds, rates are input MiB/s during parsing, and memory
+is MiB. Each cell shows **baseline → updated**. `bytes` uses `fs.read-bytes`;
+`text` uses `fs.read-text`. Parsing uses automatic inference and headers, then
+`dict.from-lists table.from-columns` constructs the table. File reading and
+UTF-8 decoding are included in the read stage, separately from parsing.
+
+| Workload | Input | Read ms | Parse ms | Table ms | Parse MiB/s | Peak MiB |
+|---|---|---:|---:|---:|---:|---:|
+| all_bands_discography | bytes | 6 → 7 | 1376 → 899 | 21 → 13 | 19.3 → 29.5 | 432.6 → 499.4 |
+| all_bands_discography | text | 306 → 307 | 1526 → 936 | 22 → 14 | 17.4 → 28.3 | 528.6 → 595.4 |
+| complete_roster | bytes | 24 → 22 | 3063 → 1783 | 24 → 20 | 23.6 → 40.6 | 826.9 → 915.8 |
+| complete_roster | text | 853 → 842 | 3801 → 2224 | 28 → 26 | 19.1 → 32.6 | 1210.9 → 1299.8 |
+| escaped | bytes | 3 → 3 | 316 → 188 | 6 → 6 | 31.1 → 52.2 | 74.4 → 79.9 |
+| labels_roster | bytes | 5 → 5 | 795 → 512 | 14 → 10 | 20.9 → 32.5 | 254.3 → 287.0 |
+| labels_roster | text | 197 → 192 | 865 → 528 | 13 → 10 | 19.2 → 31.5 | 286.4 → 319.0 |
+| late-mismatch | bytes | 0 → 0 | 90 → 60 | 6 → 6 | 19.8 → 29.7 | 30.3 → 35.4 |
+| metal_bands | bytes | 7 → 7 | 1061 → 602 | 11 → 9 | 27.5 → 48.5 | 230.8 → 252.0 |
+| metal_bands | text | 338 → 334 | 1428 → 674 | 12 → 11 | 20.5 → 43.4 | 326.9 → 348.1 |
+| metal_bands_roster | bytes | 8 → 8 | 1184 → 676 | 12 → 10 | 26.5 → 46.4 | 264.9 → 290.6 |
+| metal_bands_roster | text | 357 → 361 | 1503 → 764 | 14 → 11 | 20.9 → 41.0 | 360.9 → 386.6 |
+| numeric | bytes | 1 → 1 | 281 → 172 | 9 → 8 | 20.2 → 33.1 | 52.9 → 65.7 |
+
+The five real workloads are the metal datasets named above. The synthetic
+numeric workload has 100,000 rows and eight columns; escaped has 100,000 rows
+and three columns with quotes, Unicode, and embedded newlines; late-mismatch
+has 100,000 rows and three columns ending in a spelling-preserving text fallback.
+Exact file sizes and hashes are retained in the artifact manifest.
+
+### Grouping, joins, and reduction
+
+Setup constructs the input before the measured operation. Rates are rows/s;
+all pairs again show baseline → updated. Composite baseline is `flip group`;
+updated is `group-columns`. Aggregation compares gathered `(sum)` / `(len)`
+quotations with fixed `'sum` / `'count` reducers on the same data.
+
+| Workload | Rows | Setup ms | Operation ms | Rows/s | Peak MiB |
+|---|---:|---:|---:|---:|---:|
+| group-low | 100,000 | 0 → 0 | 3 → 4 | 33333333 → 25000000 | 15.9 → 17.0 |
+| group-low-large | 1,000,000 | 2 → 2 | 26 → 41 | 38461538 → 24390244 | 112.1 → 120.5 |
+| group-high | 20,000 | 0 → 0 | 512 → 17 | 39062 → 1176471 | 10.3 → 10.7 |
+| composite-low | 50,000 | 0 → 0 | 3625 → 4 | 13793 → 12500000 | 16.8 → 12.2 |
+| composite-high | 3,000 | 0 → 0 | 2509 → 3 | 1196 → 1000000 | 6.0 → 6.0 |
+| join | 3,000 | 0 → 0 | 2570 → 25 | 1167 → 120000 | 8.7 → 9.4 |
+| aggregate | 100,000 | 0 → 0 | 44 → 19 | 2272727 → 5263158 | 22.2 → 20.1 |
+
+Low-cardinality scalar grouping repeats eight integer keys; high-cardinality
+uses distinct integers. Composite-low combines row indices modulo 32 and 7
+(224 groups); composite-high repeats the distinct row index in two columns.
+Join matches 3,000 distinct keys, with two columns on each side. Aggregation
+has 100 groups and computes sum and count over 100,000 values.
+
+### Regressions and limits
+
+Real CSV parsing improves approximately 1.5–2.1× in this run. CSV memory remains
+higher: preserving original spans and cached numeric bits adds staging storage,
+and staged chains remain transaction-owned during output construction. The
+first measured implementation used seven words per descriptor. Packing scalar
+metadata reduces this to five without narrowing offsets, lengths, or numeric
+bits; the final table includes that reduction. Numeric synthetic peak RSS is
+52.9 → 65.7 MiB, and real byte-input increases range from about 9% to 15%.
+This is an explicit memory-for-repeated-conversion tradeoff, not a memory win.
+
+The eight-key scalar workload regresses from 3 to 4 ms. Increasing it tenfold
+confirms a repeatable regression, 26 → 41 ms, rather than only clock rounding.
+The shared hash path replaces short typed linear searches with per-row hashing
+and a row-sized index initialization; it removes quadratic discovery cost but
+has higher overhead at very low cardinality. High-cardinality, composite,
+join, and aggregate workloads improve. Very small timings and unusually large
+speedup ratios should not be treated as portable constants.
+
+### Verification
+
+The final `zig build precommit test-ecl test-native-acceptance test-snapshots
+-Doptimize=ReleaseSafe -j4` run exited 0. Focused cancellation/session-reuse tests
+for the column primitives exited 0. Initialized-Session allocation-failure
+sweeps for CSV, dictionary operations, tables, and column primitives exited 0;
+the CSV sweep was repeated after descriptor compaction. Commands used closed
+stdin and bounded timeouts.
+
+The independent Python CSV oracle compared every one of 13,644,293 real data
+fields, headers, and inferred column types, plus generated text and numeric
+cases; the final binary passed (exit 0). Public tests cover whole string and
+composite dictionary keys, defaults, duplicates, assignment ordering, malformed
+selectors, reducers, and mixed quotation/symbol aggregates. Standalone SDK
+fixtures cover staging direction and sealing, budget retries, initialized
+prefixes, chunk boundaries, UTF-8, and partial text construction. Deliberately
+incorrect grouped-reduction and SDK assertions each failed their intended
+selected test before being restored.

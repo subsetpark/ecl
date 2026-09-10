@@ -6,6 +6,49 @@ const heap = @import("../heap.zig");
 const session = @import("../session.zig");
 const helper = @import("kernel_test_support.zig");
 
+test "order: composite grouping and indexed lookup preserve whole keys and order" {
+    try helper.expectStack(
+        "[[1 2 1 1.0] [\"a\" \"b\" \"a\" \"a\"]] group-columns dict.pairs " ++
+            "[[] []] group-columns " ++
+            "{\"a\" 7 [1 2] 8} [\"a\" [1 2] \"missing\" \"a\"] 9 dict.at-or " ++
+            "[1 1.0 2 1] group dict.vals",
+        "(((1 \"a\") [0 2 3]) ((2 \"b\") [1])) {} (7 8 9 7) ([0 1 3] [2])",
+    );
+    try helper.expectErrors(&.{
+        .{ .name = "no columns", .source = "[] group-columns", .kind = "shape", .word = "group-columns" },
+        .{ .name = "ragged columns", .source = "[[1] []] group-columns", .kind = "shape", .word = "group-columns" },
+        .{ .name = "scalar column", .source = "[1] group-columns", .kind = "type", .word = "group-columns" },
+    });
+}
+
+test "order: grouped reducers preserve selector order and validate errors" {
+    try helper.expectStack(
+        "[10 20 30] [[2 0 2] []] 'sum reduce-groups " ++
+            "[\"a\" [1]] [[1 0 1] []] 'count reduce-groups " ++
+            "[4 2.5 9] [[0 1] [2]] 'min reduce-groups " ++
+            "[\"a\" \"λ\" \"😀\"] [[2 0 1]] 'max reduce-groups " ++
+            "[1e16 -1e16 1.0] [[0 1 2] [0 2 1]] 'sum reduce-groups",
+        "(70 0) (3 0) (2.5 9) (\"😀\") (1.0 0.0)",
+    );
+    try helper.expectErrors(&.{
+        .{ .name = "negative index", .source = "[1] [[-1]] 'count reduce-groups", .kind = "domain", .word = "reduce-groups" },
+        .{ .name = "out of range", .source = "[1] [[1]] 'sum reduce-groups", .kind = "domain", .word = "reduce-groups" },
+        .{ .name = "nested selector", .source = "[1] [[[0]]] 'sum reduce-groups", .kind = "type", .word = "reduce-groups" },
+        .{ .name = "empty min", .source = "[] [[]] 'min reduce-groups", .kind = "domain", .word = "reduce-groups" },
+        .{ .name = "unknown reducer", .source = "[] [] 'median reduce-groups", .kind = "domain", .word = "reduce-groups" },
+        .{ .name = "sum overflow", .source = "[9223372036854775807 1] [[0 1]] 'sum reduce-groups", .kind = "overflow", .word = "reduce-groups" },
+        .{ .name = "non numeric sum", .source = "[\"a\"] [[0]] 'sum reduce-groups", .kind = "type", .word = "reduce-groups" },
+    });
+}
+
+test "order: aggregate symbols have fixed meaning while quotations resolve normally" {
+    try helper.expectStack(
+        "(pop 999) 'sum def {\"v\" [1 2]} [] " ++
+            "[[\"fixed\" \"v\" 'sum] [\"quoted\" \"v\" (sum)]] table.aggregate",
+        "{\"fixed\" (3) \"quoted\" [999]}",
+    );
+}
+
 test "order: cmp and grade share exact whole-value ordering" {
     try helper.expectStack(
         "1 1 cmp 1 2 cmp 2 1 cmp " ++

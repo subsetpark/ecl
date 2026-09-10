@@ -37,7 +37,17 @@ const Type = enum(u8) { auto, int, float, text };
 const Column = struct { schema: Type = .auto, inferred: Type = .auto, exact: bool = true };
 const Mode = enum(u8) { start, bare, quoted, quote_seen, cr_seen };
 const Stop = enum(u8) { comma, record, input_end };
-const Phase = enum(u8) { schema, scan, stage, begin_columns, begin_column, span, render, flush, append_field, close_column, finish };
+const Phase = enum(u8) { schema, scan, stage, begin_columns, begin_column, span, span_text, numeric_flush, render, flush, append_field, close_column, finish };
+
+// Each descriptor keeps full-width offsets, decoded length, and numeric bits.
+// Compact scalar metadata avoids paying a separate staging word per flag.
+const SpanFlags = packed struct(u64) {
+    max_character: u32,
+    quoted: bool,
+    escaped: bool,
+    number_kind: enum(u2) { text, int, float },
+    reserved: u28 = 0,
+};
 
 const ParseWork = struct {
     pub const State = struct {
@@ -55,6 +65,12 @@ const ParseWork = struct {
         end: u64 = 0,
         characters: u64 = 0,
         max_character: u32 = 0,
+        cached_number: Number = .text,
+        converted: bool = false,
+        quoted: bool = false,
+        escaped: bool = false,
+        numeric: [256]u64,
+        numeric_len: u32 = 0,
         token: NumericToken = NumericToken.init(),
         cache: [256]u32,
         cache_start: u64 = 0,
@@ -71,7 +87,7 @@ const ParseWork = struct {
     };
     pub fn init() State {
         // SAFETY: cache_len and pending_len expose only prefixes written by the producer.
-        return .{ .cache = undefined, .pending = undefined };
+        return .{ .cache = undefined, .pending = undefined, .numeric = undefined };
     }
     pub fn deinit(state: *State) void {
         state.* = undefined;
@@ -162,6 +178,7 @@ fn scan(call: anytype, s: *ParseWork.State, limit: u64) error{OutOfMemory}!Scan 
             .quote_seen => {
                 if (cp == '"') {
                     s.mode = .quoted;
+                    s.escaped = true;
                     return .{ .character = cp };
                 }
                 if (cp != ',' and cp != '\r' and cp != '\n') return .malformed;
@@ -169,6 +186,7 @@ fn scan(call: anytype, s: *ParseWork.State, limit: u64) error{OutOfMemory}!Scan 
             .start => {
                 if (cp == '"') {
                     s.mode = .quoted;
+                    s.quoted = true;
                     continue;
                 }
                 s.mode = .bare;
@@ -352,6 +370,10 @@ fn resetField(s: *ParseWork.State) void {
     s.characters = 0;
     s.max_character = 0;
     s.token = NumericToken.init();
+    s.converted = false;
+    s.cached_number = .text;
+    s.quoted = false;
+    s.escaped = false;
 }
 
 fn parseColumns(comptime header: bool, call: anytype, build: *ecl.BuildValues, schedule: *ParseSchedule) ecl.CallbackResult {
@@ -391,7 +413,8 @@ fn parseColumns(comptime header: bool, call: anytype, build: *ecl.BuildValues, s
                 .character => |cp| {
                     s.characters += 1;
                     s.max_character = @max(s.max_character, cp);
-                    remember(s, cp);
+                    const col = s.columns[s.column];
+                    if (!(header and s.records == 0) and col.schema != .text and !(col.schema == .auto and col.inferred == .text)) remember(s, cp);
                 },
                 .field => |stop| {
                     s.stop = stop;
@@ -402,17 +425,35 @@ fn parseColumns(comptime header: bool, call: anytype, build: *ecl.BuildValues, s
         .stage => {
             const is_header = header and s.records == 0;
             const col = &s.columns[s.column];
-            if (!is_header) {
+            if (!is_header and !s.converted) {
                 if (col.schema == .auto and col.inferred != .text) {
                     if (!schedule.consume(@as(u32, s.token.count) + 32)) return schedule.yield();
-                    refine(col, number(s, true));
+                    s.cached_number = number(s, true);
+                    refine(col, s.cached_number);
                 } else if (col.schema != .auto and col.schema != .text) {
                     if (!schedule.consume(@as(u32, s.token.count) + 32)) return schedule.yield();
                     const result = number(s, false);
+                    s.cached_number = result;
                     if (result == .text or (col.schema == .int and result != .int)) return failure(call, s, .parse, "numeric schema conversion failed");
                 }
             }
-            switch (try build.stage(if (is_header) header_spans else s.column, &.{ s.start, s.end, s.characters, s.max_character })) {
+            s.converted = true;
+            const flags = SpanFlags{
+                .max_character = s.max_character,
+                .quoted = s.quoted,
+                .escaped = s.escaped,
+                .number_kind = switch (s.cached_number) {
+                    .text => .text,
+                    .int => .int,
+                    .float => .float,
+                },
+            };
+            const number_bits: u64 = switch (s.cached_number) {
+                .text => 0,
+                .int => |v| @bitCast(v),
+                .float => |v| @bitCast(v),
+            };
+            switch (try build.stage(if (is_header) header_spans else s.column, &.{ s.start, s.end, s.characters, @bitCast(flags), number_bits })) {
                 .yield_required => return schedule.yield(),
                 .invalid => return call.fail(.domain, "csv span staging rejected"),
                 .appended => {},
@@ -441,8 +482,8 @@ fn parseColumns(comptime header: bool, call: anytype, build: *ecl.BuildValues, s
                 s.phase = .close_column;
                 continue;
             }
-            var span: [4]u64 = undefined;
-            switch (try build.readStaged(if (s.rendering_header) header_spans else s.column, &span)) {
+            var span: [5]u64 = undefined;
+            switch (try build.readStagedForward(if (s.rendering_header) header_spans else s.column, &span)) {
                 .yield_required => return schedule.yield(),
                 .invalid => return call.fail(.domain, "csv span read rejected"),
                 .appended => {},
@@ -451,11 +492,41 @@ fn parseColumns(comptime header: bool, call: anytype, build: *ecl.BuildValues, s
             resetField(s);
             s.end = span[1];
             s.characters = span[2];
-            s.max_character = @intCast(span[3]);
+            const flags: SpanFlags = @bitCast(span[3]);
+            s.max_character = flags.max_character;
+            s.quoted = flags.quoted;
+            s.escaped = flags.escaped;
+            s.cached_number = switch (flags.number_kind) {
+                .int => .{ .int = @bitCast(span[4]) },
+                .float => .{ .float = @bitCast(span[4]) },
+                .text => .text,
+            };
             s.pending_len = 0;
             s.rendered = 0;
             s.render_done = false;
-            s.phase = .render;
+            s.phase = if (columnType(s) != .text) .append_field else if (!s.escaped) .span_text else .render;
+        },
+        .span_text => {
+            const count = if (s.rendering_header) s.width else s.records - @intFromBool(header);
+            const target = if (s.rendering_header) max_columns + 4 else column_output;
+            const padding: u64 = @intFromBool(s.quoted);
+            switch (try build.appendTextSpan(target, count, 0, s.start + padding, s.end - s.start - 2 * padding, s.characters, textKind(s.max_character))) {
+                .yield_required => return schedule.yield(),
+                .invalid => return call.fail(.parse, "csv staged text span is invalid"),
+                .appended => {},
+            }
+            s.row -= 1;
+            s.phase = .span;
+        },
+        .numeric_flush => {
+            const count = s.records - @intFromBool(header);
+            switch (try build.appendBulk(column_output, outputKind(s), count, false, s.numeric[0..s.numeric_len])) {
+                .yield_required => return schedule.yield(),
+                .invalid => return call.fail(.domain, "csv numeric append rejected"),
+                .appended => {},
+            }
+            s.numeric_len = 0;
+            s.phase = .span;
         },
         .render => {
             switch (try scan(call, s, s.end)) {
@@ -495,26 +566,23 @@ fn parseColumns(comptime header: bool, call: anytype, build: *ecl.BuildValues, s
                     .invalid => return call.fail(.domain, "csv text finish rejected"),
                     .candidate => |candidate| candidate,
                 };
-                switch (try build.appendBulkValue(target, count, true, candidate)) {
+                switch (try build.appendBulkValue(target, count, false, candidate)) {
                     .yield_required => return schedule.yield(),
                     .invalid => return call.fail(.domain, "csv column append rejected"),
                     .appended => {},
                 }
             } else {
-                // Conversion sees at most 768 significant digits plus a
-                // bounded exponent, independent of the original field length.
-                if (!schedule.consume(@as(u32, s.token.count) + 32)) return schedule.yield();
-                const result = number(s, false);
+                const result = s.cached_number;
                 const bits: u64 = if (columnType(s) == .int) @bitCast(result.int) else @bitCast(switch (result) {
                     .int => |v| @as(f64, @floatFromInt(v)),
                     .float => |v| v,
                     .text => unreachable,
                 });
-                switch (try build.appendBulk(target, outputKind(s), count, true, &.{bits})) {
-                    .yield_required => return schedule.yield(),
-                    .invalid => return call.fail(.domain, "csv numeric append rejected"),
-                    .appended => {},
-                }
+                s.numeric[s.numeric_len] = bits;
+                s.numeric_len += 1;
+                s.row -= 1;
+                s.phase = if (s.numeric_len == s.numeric.len or s.row == 0) .numeric_flush else .span;
+                continue;
             }
             s.row -= 1;
             s.phase = .span;
@@ -529,7 +597,7 @@ fn parseColumns(comptime header: bool, call: anytype, build: *ecl.BuildValues, s
                 s.phase = .finish;
                 continue;
             }
-            const candidate = switch (try build.finishBulk(column_output, outputKind(s), s.records - @intFromBool(header), true)) {
+            const candidate = switch (try build.finishBulk(column_output, outputKind(s), s.records - @intFromBool(header), false)) {
                 .yield_required => return schedule.yield(),
                 .invalid => return call.fail(.domain, "csv column finish rejected"),
                 .candidate => |candidate| candidate,
@@ -549,7 +617,7 @@ fn parseColumns(comptime header: bool, call: anytype, build: *ecl.BuildValues, s
                 .candidate => |candidate| candidate,
             };
             if (header) {
-                const headers = switch (try build.finishBulk(max_columns + 4, .values, s.width, true)) {
+                const headers = switch (try build.finishBulk(max_columns + 4, .values, s.width, false)) {
                     .yield_required => return schedule.yield(),
                     .invalid => return call.fail(.domain, "csv headers finish rejected"),
                     .candidate => |candidate| candidate,
