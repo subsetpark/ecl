@@ -952,12 +952,13 @@ test "native: the SDK generates a descriptor the production validator accepts" {
     defer validated.deinit();
 
     try std.testing.expectEqualStrings("sample", intern.get(intern.moduleId(validated.name())));
-    try std.testing.expectEqual(@as(usize, 20), validated.definitions().len);
     const expected_names = [_][]const u8{
-        "increment",     "discard",        "split",      "forward",    "nested-port",    "fail-user",      "fail-kind",
-        "make-char",     "singleton",      "pair-dict",  "sum-list",   "sum-dict",       "cooperative",    "draft-fail",
-        "yield-forever", "builder-budget", "large-list", "large-dict", "duplicate-dict", "noncooperative",
+        "increment",          "discard",        "split",                 "forward",        "nested-port",    "fail-user",   "fail-kind",
+        "make-char",          "singleton",      "pair-dict",             "sum-list",       "sum-dict",       "cooperative", "draft-fail",
+        "yield-forever",      "builder-budget", "forward-values-budget", "text-span",      "forward-stage",  "bulk-budget", "bulk-immediate",
+        "bulk-values-budget", "large-list",     "large-dict",            "duplicate-dict", "noncooperative",
     };
+    try std.testing.expectEqual(expected_names.len, validated.definitions().len);
     for (validated.definitions(), expected_names) |definition, expected| {
         try std.testing.expectEqualStrings(expected, intern.get(intern.namespaceId(definition.name)));
         try std.testing.expect(env.documentationHeader(definition.doc).length() != 0);
@@ -988,18 +989,23 @@ test "native: a discovered artifact publishes its complete table atomically" {
     try std.testing.expectEqual(@as(i64, 43), runtime.stackItems()[2].int);
 
     const exports = [_][]const u8{
-        "sample.increment",     "sample.discard",        "sample.split",
-        "sample.forward",       "sample.fail-user",      "sample.fail-kind",
-        "sample.singleton",     "sample.pair-dict",      "sample.sum-list",
-        "sample.sum-dict",      "sample.cooperative",    "sample.draft-fail",
-        "sample.yield-forever", "sample.builder-budget", "sample.large-list",
-        "sample.large-dict",    "sample.duplicate-dict", "sample.noncooperative",
+        "sample.increment",      "sample.discard",            "sample.split",
+        "sample.forward",        "sample.fail-user",          "sample.fail-kind",
+        "sample.singleton",      "sample.pair-dict",          "sample.sum-list",
+        "sample.sum-dict",       "sample.cooperative",        "sample.draft-fail",
+        "sample.yield-forever",  "sample.builder-budget",     "sample.large-list",
+        "sample.large-dict",     "sample.duplicate-dict",     "sample.noncooperative",
+        "sample.nested-port",    "sample.make-char",          "sample.forward-values-budget",
+        "sample.text-span",      "sample.forward-stage",      "sample.bulk-budget",
+        "sample.bulk-immediate", "sample.bulk-values-budget",
     };
-    for (exports) |prefix| {
-        var completion = try runtime.completionCandidates(prefix);
-        defer completion.deinit();
-        try std.testing.expectEqual(@as(usize, 1), completion.items().len);
-        try std.testing.expectEqualStrings(prefix, completion.items()[0]);
+    var completion = try runtime.completionCandidates("sample.");
+    defer completion.deinit();
+    try std.testing.expectEqual(exports.len, completion.items().len);
+    for (exports) |expected| {
+        for (completion.items()) |actual| {
+            if (std.mem.eql(u8, expected, actual)) break;
+        } else return error.MissingNativeExport;
     }
 }
 
