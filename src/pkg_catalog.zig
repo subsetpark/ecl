@@ -795,6 +795,7 @@ pub fn build(
 fn validGlob(glob: []const u8) bool {
     if (glob.len == 0 or glob[0] == '/' or std.mem.indexOfScalar(u8, glob, '\\') != null)
         return false;
+    if (glob.len >= 2 and std.ascii.isAlphabetic(glob[0]) and glob[1] == ':') return false;
     var segments = std.mem.splitScalar(u8, glob, '/');
     while (segments.next()) |segment| {
         if (segment.len == 0 or std.mem.eql(u8, segment, ".") or std.mem.eql(u8, segment, ".."))

@@ -30,6 +30,12 @@
   (|candidate|
    candidate len 0 >
    candidate "\\" str.contains? not and
+   candidate dup len 2 >=
+   (|text|
+    text first "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" in?
+    text 1 at \: = and)
+   (pop 0)
+   if not and
    candidate "/" split (glob-segment-valid?) all? and)
   (pop 0)
   if) 'glob-valid? defp

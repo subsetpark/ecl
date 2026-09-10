@@ -329,6 +329,57 @@ test "loader: a root-defined module reaches its declared direct dependency" {
     try std.testing.expectEqual(@as(i64, 5), runtime.stackItems()[0].int);
 }
 
+test "loader: both manifest validators reject drive-prefixed source globs" {
+    const pkg_catalog = @import("../pkg_catalog.zig");
+    const allocator = std.testing.allocator;
+    var directory = std.testing.tmpDir(.{});
+    defer directory.cleanup();
+    var owner = @import("../heap.zig").HostOwner.init(allocator);
+    defer owner.cleanup().drain();
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{}), .cooperative, .evaluate);
+    defer runtime.deinit();
+    const cases = [_]struct { glob: []const u8, valid: bool }{
+        .{ .glob = "C:/src/**/*.ecl", .valid = false },
+        .{ .glob = "C:src/**/*.ecl", .valid = false },
+        .{ .glob = "c:/src/**/*.ecl", .valid = false },
+        .{ .glob = "z:src/**/*.ecl", .valid = false },
+        .{ .glob = "C:", .valid = false },
+        .{ .glob = "src/**/*.ecl", .valid = true },
+        .{ .glob = "*.ecl", .valid = true },
+        .{ .glob = "C", .valid = true },
+        .{ .glob = "src/C:part/*.ecl", .valid = true },
+        .{ .glob = "CC:src/**/*.ecl", .valid = true },
+    };
+    for (cases) |case| {
+        const manifest = try std.fmt.allocPrint(allocator, "{{'format 1 'name \"dep\" 'version \"1.0.0\" 'sources [\"{s}\"] 'exports [] 'requires {{}}}}", .{case.glob});
+        defer allocator.free(manifest);
+        try directory.dir.writeFile(std.testing.io, .{ .sub_path = "ecl.pkg", .data = manifest });
+        const source = try std.fmt.allocPrint(allocator, "{s} pkg.manifest.validate pop", .{manifest});
+        defer allocator.free(source);
+        if (case.valid) try expectOk(&runtime, source) else try expectErrorContains(&runtime, source, &.{"portable glob strings"});
+        var diagnostic: ?[]u8 = null;
+        defer if (diagnostic) |message| allocator.free(message);
+        const result = pkg_catalog.build(owner.cleanup(), std.testing.io, &.{.{
+            .id = @enumFromInt(0),
+            .name = "dep",
+            .version = "1.0.0",
+            .root_dir = ".",
+            .base_dir = directory.dir,
+        }}, &diagnostic);
+        if (case.valid) {
+            var catalog = try result;
+            defer catalog.deinit();
+        } else {
+            try std.testing.expectError(error.Invalid, result);
+            try std.testing.expect(std.mem.indexOf(u8, diagnostic.?, "sources contains an invalid entry") != null);
+        }
+    }
+}
+
 test "loader: catalog discovery holds a manifest to the whole public contract" {
     // `pkg.store.install` seals a staged package against this boundary rather
     // than against `pkg.manifest.validate`, so anything the public validator
