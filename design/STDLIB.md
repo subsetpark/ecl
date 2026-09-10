@@ -548,8 +548,22 @@ miss. Defined in ecl.
 `( list -- value )` — First element of a nonempty list.
 
 ### flip
-`( list -- list )` — Transpose; requires an exact rectangular
-list-of-lists.
+`( list -- list )` — Exchange the first two axes of a list of equally
+wide rows. Cells are preserved whole: strings, nested lists, dictionaries,
+and mixed values need not share a type or shape. Only the immediate row
+lengths must agree. Strings used as rows transpose their characters.
+
+An empty list or a list containing no list items is unchanged. Mixing list
+rows with non-list items, unequal row lengths, or nonempty collections of
+zero-width rows raises `'shape`; the last case cannot retain the other axis
+after transposition. A non-list argument raises `'type`.
+
+```ecl
+(["a" "long"] ["bc" "d"]) flip
+# => (("a" "bc") ("long" "d"))
+["ab" "cd"] flip
+# => ("ac" "bd")
+```
 
 ### float
 `( value -- float )` — Return a float unchanged, an int as a float, or the

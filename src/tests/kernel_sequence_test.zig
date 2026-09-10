@@ -162,6 +162,16 @@ test "sequence: raze and cat specialize their outputs" {
 }
 
 test "sequence: flip and reshape obey rectangular row-major semantics" {
+    try helper.expectStack(
+        "([\"a\" \"long\"] [\"bc\" \"d\"]) flip " ++
+            "([\"a\" \"bc\"] [\"long\" \"d\"]) match? " ++
+            "([1 [] {'x 2}] [\"long\" [3 4] [[5] [6 7]]]) flip " ++
+            "([1 \"long\"] [[] [3 4]] [{'x 2} [[5] [6 7]]]) match? " ++
+            "[\"ab\" \"cd\"] flip [\"ac\" \"bd\"] match? " ++
+            "[] flip [] match? \"abc\" flip \"abc\" match? " ++
+            "[1 {'x 2}] flip [1 {'x 2}] match?",
+        "1 1 1 1 1 1",
+    );
     try expectDisplay(
         "[[1 2] [3 4]] flip [1 2 3] [2 3] reshape [1 2] flip [] [2 0] reshape shape",
         "([1 3]  ([1 2 3]\n [2 4])  [1 2 3]) [1 2] [2 0]",
@@ -176,6 +186,24 @@ test "sequence: flip and reshape obey rectangular row-major semantics" {
         "\"([0 1 2] [3 4 5])\"",
     );
     try helper.expectErrors(&.{
+        .{
+            .name = "flip rejects unequal row widths",
+            .source = "[[1 2] [3]] flip",
+            .kind = "shape",
+            .word = "flip",
+        },
+        .{
+            .name = "flip rejects scalar after row",
+            .source = "[[1 2] 3] flip",
+            .kind = "shape",
+            .word = "flip",
+        },
+        .{
+            .name = "flip rejects row after scalar",
+            .source = "[3 [1 2]] flip",
+            .kind = "shape",
+            .word = "flip",
+        },
         .{
             .name = "reshape cannot hide a later axis behind zero",
             .source = "[] [0 3] reshape",

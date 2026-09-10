@@ -865,6 +865,13 @@ the language's conformability rules. Generic pervasion walks nested values with
 bounded cursors. Collection owners centralize selection, traversal order, shape
 preservation, and dictionary behavior for every caller.
 
+Transposition owns only its first two axes. Its validation cursor checks
+immediate row kinds and widths in bounded turns, then materializes columns
+while retaining each cell as a whole value. It never asks the recursive shape
+cursor to validate cell contents. Recursive rectangularity remains the contract
+of `shape`; table conversion supplies the known output width when an empty
+axis cannot carry it in a list value.
+
 When descent reaches a specialized flat leaf, the kernel registry classifies
 the operation and operand representation as one of:
 

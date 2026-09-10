@@ -1445,19 +1445,30 @@ fn flipPrimitive(evaluator: *Machine) MachineError!void {
     var collection = try evaluator.popValue();
     defer collection.deinit();
     if (collection.borrow() != .list) return evaluator.typeError("a rectangular list");
-    const shape = try ShapeCursor.init(evaluator.allocator(), collection.borrow());
+    const source = collection.borrow();
+    const validation: FlipDriver.Validation = if (source.list.length() == 0)
+        .{ .flat = 0 }
+    else switch (list.atUnchecked(source, 0)) {
+        .list => |row| .{ .rows = .{ .columns = @intCast(row.length()), .next = 1 } },
+        else => .{ .flat = 1 },
+    };
     try evaluator.startDriver(FlipDriver{
         .collection = .init(collection.take()),
-        .shape = .init(shape),
+        .validation = validation,
     });
 }
 
 const FlipDriver = struct {
+    // Only the two transposed axes belong to flip. Cells are opaque values;
+    // ShapeCursor's recursive rectangularity contract belongs to shape.
+    const Validation = union(enum) {
+        flat: usize,
+        rows: struct { columns: usize, next: usize },
+        ready: usize,
+    };
+
     collection: heap.Owned(Value),
-    shape: heap.Owned(ShapeCursor),
-    dimensions: ?heap.Owned([]usize) = null,
-    rows: usize = 0,
-    columns: usize = 0,
+    validation: Validation,
     result_rows: ?heap.Owned(heap.OwnedValueBuffer) = null,
     cells: ?heap.Owned([]Value) = null,
     column: usize = 0,
@@ -1467,27 +1478,40 @@ const FlipDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *FlipDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        if (self.dimensions == null) switch (try self.shape.borrowMut().advance(machine.kernel_poll_quantum)) {
-            .pending => return .yielded,
-            .ragged => return evaluator.fail(.shape, "flip requires a rectangular list"),
-            .too_deep => return evaluator.fail(.shape, "flip nesting exceeds 256 levels"),
-            .complete => |dimensions| {
-                self.dimensions = .init(dimensions);
-                if (dimensions.len <= 1) {
-                    try evaluator.pushBorrowed(self.collection.borrow());
-                    return .completed;
+        const rows: usize = @intCast(self.collection.borrow().list.length());
+        const columns = switch (self.validation) {
+            .flat => |*next| {
+                const end = @min(next.* + machine.kernel_poll_quantum, rows);
+                while (next.* != end) : (next.* += 1) {
+                    if (list.atUnchecked(self.collection.borrow(), next.*) == .list)
+                        return evaluator.fail(.shape, "flip requires rows of the same length");
                 }
-                self.rows = dimensions[0];
-                self.columns = dimensions[1];
-                if (self.columns == 0 and self.rows != 0) return evaluator.fail(
+                if (next.* != rows) return .yielded;
+                try evaluator.pushBorrowed(self.collection.borrow());
+                return .completed;
+            },
+            .rows => |*validation| {
+                const end = @min(validation.next + machine.kernel_poll_quantum, rows);
+                while (validation.next != end) : (validation.next += 1) {
+                    const row = list.atUnchecked(self.collection.borrow(), validation.next);
+                    if (row != .list or row.list.length() != validation.columns)
+                        return evaluator.fail(.shape, "flip requires rows of the same length");
+                }
+                if (validation.next != rows) return .yielded;
+                if (validation.columns == 0) return evaluator.fail(
                     .shape,
                     "flip cannot retain trailing axes after a transposed zero dimension",
                 );
-                self.result_rows = .init(try .init(evaluator.releaseDomain(), self.columns));
-                self.cells = .init(try evaluator.allocator().alloc(Value, self.rows));
+                self.validation = .{ .ready = validation.columns };
                 return .yielded;
             },
+            .ready => |columns| columns,
         };
+        if (self.result_rows == null) {
+            self.result_rows = .init(try .init(evaluator.releaseDomain(), columns));
+            self.cells = .init(try evaluator.allocator().alloc(Value, rows));
+            return .yielded;
+        }
         if (self.outer) |*outer| return switch (try outer.borrowMut().advance(machine.kernel_poll_quantum)) {
             .pending => .yielded,
             .complete => |result| .{ .output = result },
@@ -1500,7 +1524,7 @@ const FlipDriver = struct {
                 self.result_rows.?.borrowMut().appendOwned(row_value);
                 self.column += 1;
                 self.row = 0;
-                if (self.column == self.columns) {
+                if (self.column == columns) {
                     self.outer = .init(.init(
                         evaluator.allocator(),
                         self.result_rows.?.borrow().values(),
@@ -1509,12 +1533,12 @@ const FlipDriver = struct {
                 return .yielded;
             },
         };
-        const end = @min(self.row + machine.kernel_poll_quantum, self.rows);
+        const end = @min(self.row + machine.kernel_poll_quantum, rows);
         while (self.row != end) : (self.row += 1) {
             const source_row = list.atUnchecked(self.collection.borrow(), self.row);
             self.cells.?.borrow()[self.row] = list.atUnchecked(source_row, self.column);
         }
-        if (self.row == self.rows) self.inner = .init(.init(
+        if (self.row == rows) self.inner = .init(.init(
             evaluator.allocator(),
             self.cells.?.borrow(),
         ));
