@@ -11,7 +11,10 @@ These incremental trials start at `5922754`, using the same Zig 0.16.0,
 ReleaseSafe, native x86_64 Linux host and CLI-only fresh-local-cache build
 procedure described below. Each row is one isolated build with LLVM IR emission;
 individual timing differences are exploratory, not repeated speedup estimates.
-The baseline's isolated build was 256.6 seconds with 159.19 MiB of IR.
+The baseline's isolated build was 256.6 seconds with 159.19 MiB of IR. The
+series began with CPU energy preference `power`; `balance_performance` was
+observed during the later arithmetic-helper trial. The initial timings below
+therefore cannot establish isolated code-change speedups across that transition.
 
 | Change | Build, seconds | Unoptimized IR, MiB |
 |---|---:|---:|
@@ -46,6 +49,53 @@ p50 94/96 ms and p95 106/110 ms. Each batch performs 20,000 iterations of
 covers fault kind and first index when unique-buffer reuse changes integer and
 float representation; a deliberately wrong index was confirmed to fail the
 77-test kernel slice before restoration.
+
+An isolated instrumented compiler invocation at `9991eb2`, using the CLI's exact
+module arguments with `--time-report` and without IR dumping, took 248.12
+seconds. File processing took 0.30 seconds, declaration work 18.51 seconds,
+LLVM object emission 228.79 seconds, and linker flush 0.27 seconds. LLVM thus
+accounted for about 92% of this invocation. Its largest individual pass wall
+times were x86 instruction selection (24.20 seconds), instruction combining
+(21.40 seconds), and inlining (19.69 seconds). Pass timing instrumentation makes
+this a separate series from the ordinary IR-emitting builds above; these
+measurements should not be averaged together.
+
+The first shared arithmetic-helper implementation built in 240.48 seconds.
+Inlining its type adapter produced a 95.81-second build, but the CPU policy
+change made that apparent improvement inconclusive. Under the newly recorded
+`balance_performance` policy, the preceding commit `9991eb2` also rebuilt in
+92.99 seconds. CPU preference is recorded before and after subsequent controlled
+builds, each with a fresh local cache and identical IR-emission options.
+The inline-adapter trial took 93.85 seconds under that same recorded policy,
+with larger IR (149.27 versus 148.47 MiB) and numeric-kernel machine code
+(897,964 versus 879,911 bytes). Neither arithmetic-helper variant was retained:
+there was no demonstrated compile-time benefit to justify the refactor.
+
+With CPU placement unrestricted but energy preference recorded as
+`balance_performance`, two fresh-cache builds of `5922754` took 100.26 and
+118.65 seconds; the retained `9991eb2` state took 92.99 and 106.13 seconds.
+That variation motivated a final series pinned to logical CPU 2 (a performance
+core thread, listed maximum 4.3 GHz), in before/after/after/before order.
+Pinning is scoped to the benchmark processes with `taskset -c 2`; it does not
+change the build defaults or the machine's power policy.
+
+| Fixed-core ReleaseSafe CLI build | Run 1, seconds | Run 2, seconds | Mean, seconds |
+|---|---:|---:|---:|
+| Starting commit `5922754` | 115.85 | 120.97 | 118.41 |
+| Retained changes `9991eb2` | 108.08 | 107.73 | 107.90 |
+
+CPU energy preference remained `balance_performance` at both ends of every
+fixed-core build. The mean reduction is 8.9%, with only two observations per
+variant; this is target-specific evidence, not a portable timing guarantee.
+Unoptimized IR falls 6.7%, from 159.19 to 148.47 MiB. The much larger drop from
+the initial multi-minute builds coincided with the host policy transition and
+must not be attributed to the code changes. All non-model local gates passed
+before each retained source commit, and each retained numeric refactor matched 525
+ReleaseSafe CLI cases against its predecessor, including exit status and error
+output. Model checking was omitted by explicit instruction for this work.
+The final retained tree also passed all 77 kernel-slice tests in ReleaseSafe,
+including representation-changing reuse, first-fault reporting, bounded work,
+and typed-write allocation failures.
 
 A separate build-only cache-splitting experiment compiled the existing runtime
 aggregation module as a static library. Its 2,710-byte archive contained no
