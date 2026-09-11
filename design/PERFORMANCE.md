@@ -5,6 +5,100 @@ characterizations through public runtime surfaces. They are not portable
 constants. Regenerate a baseline on the target under discussion rather than
 copying timings from this file.
 
+## Binary kernel specialization — 2026-09-11
+
+Compared `ebaa07d` with shared binary-kernel preparation and compile-time
+exclusion of unreachable character and scalar-storage combinations. Both
+variants use Zig 0.16.0, ReleaseSafe, native x86_64 Linux on an Intel Core Ultra
+5 125U with 16 GiB RAM. The host's energy preference remained `power`.
+
+Each variant builds from a separate source snapshot and a fresh local Zig
+cache, sharing an already populated global dependency/toolchain cache. The
+measured artifact is the CLI executable, without tests or native fixtures.
+IR emission is enabled identically for both variants:
+
+```sh
+timeout 1200 zig build -Doptimize=ReleaseSafe --summary all \
+  --cache-dir /tmp/ecl-compile-cache --prefix /tmp/ecl-compile-out \
+  --verbose-llvm-ir=/tmp/ecl-compile.ll < /dev/null > /tmp/ecl-compile.log 2>&1
+build_status=$?
+printf 'build_exit=%s\n' "$build_status"
+```
+
+Use distinct empty cache and output directories for each variant and repeat;
+an unchanged build against its existing cache measures cache validation instead
+of compilation. This is a warm-dependency rebuild measurement, not a completely
+cold installation of Zig and the project's dependencies.
+
+### Compilation time
+
+Both variants completed two fresh-local-cache builds. The first pass overlapped
+local verification; its approximate elapsed times come from log creation and
+final-write timestamps at one-second resolution. The repeat ran the two builds
+serially with no other build, test, or benchmark process active, measured by a
+monotonic clock around each complete `zig build` invocation. Both passes include
+the identical IR-emission option, build-runner work, and installation.
+
+| Pass | Before, seconds | After, seconds |
+|---|---:|---:|
+| Initial diagnostic, concurrent verification | ~329 | ~295 |
+| Isolated repeat | 330.3 | 256.6 |
+
+The isolated repeat removes 73.7 seconds, or 22.3% of build time. These are two
+observations per variant, not a portable compile-time guarantee; the explicit
+isolation makes the second pair the useful comparison. LLVM compilation still
+takes several minutes on this host.
+
+### Emitted size
+
+The IR numbers include debug metadata and precede LLVM optimization. Function
+counts are emitted definitions, including generated helpers. Object code bytes
+sum text-symbol sizes reported by `nm -S`; they exclude debug information.
+
+| Measurement | Before | After |
+|---|---:|---:|
+| Unoptimized LLVM IR, MiB | 220.92 | 159.19 |
+| Numeric-kernel IR definitions | 8,798 | 3,578 |
+| Shared flat-kernel IR definitions | 1,934 | 689 |
+| Numeric-kernel emitted functions | 2,336 | 1,190 |
+| Numeric-kernel object code, bytes | 2,478,037 | 970,549 |
+| Total object function code, bytes | 5,973,607 | 4,464,543 |
+| CLI executable, MiB | 32.46 | 26.28 |
+
+The reachable arithmetic loops retain their specialized element types and
+operation bodies. Shared preparation removes repeated allocation and ownership
+setup, while selection avoids generating loops for unsupported character
+operations and storage classes that a scalar cannot have.
+
+### Runtime comparison
+
+Each workload has 31 before/after pairs with alternating execution order,
+`ECL_WORKERS=1`, and ReleaseSafe CLI binaries. No build or test process ran
+during this comparison. Each sample starts a fresh CLI process, loads `clock`,
+performs its setup and three warmup iterations, then uses `clock.now` and
+`clock.elapsed` around the measured batch. Session startup and input setup are
+excluded. Times are whole milliseconds for a batch, not per-element times.
+For the large cases, setup binds `1000000 range` to `x`; retaining that binding
+exercises fresh output allocation rather than unique-input reuse.
+
+| Workload | Iterations | Before p50 | After p50 | Before p95 | After p95 |
+|---|---:|---:|---:|---:|---:|
+| `[1 2 3] 1 + pop` | 20,000 | 79 | 78 | 87 | 87 |
+| `x 1 + pop` | 20 | 140 | 139 | 153 | 148 |
+| `1 x + pop` | 20 | 140 | 140 | 148 | 154 |
+| `x x + pop` | 20 | 146 | 142 | 174 | 153 |
+| `"aλ🙂" 1 + pop` | 20,000 | 94 | 94 | 103 | 103 |
+| `[[1 2] [3]] 1 + pop` | 10,000 | 1,399 | 1,400 | 1,443 | 1,449 |
+
+Medians remain within 2.8%; the tails vary in both directions. No consistent
+runtime regression was observed. The 76-test kernel slice also passes in Debug
+and ReleaseSafe,
+including differential representation checks, fault indices, aliased output,
+bounded work, and typed-write allocation failures. New public character cases
+cover width combinations, both scalar broadcasts, and byte-subtraction
+fallback; a deliberately incorrect expected value was confirmed to fail the
+selected test before restoration.
+
 ## WorkDriver baseline — 2026-08-28
 
 This baseline was recorded by the WorkDriver harness added on top of `f63f189`, using

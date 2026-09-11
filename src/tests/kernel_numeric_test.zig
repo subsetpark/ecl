@@ -24,6 +24,31 @@ test "numeric: empty leaves bypass scalar signature selection" {
     try helper.expectStack("\"\" \"\" + \"\" neg", "() ()");
 }
 
+test "numeric: character plans preserve widths shapes and fallback" {
+    try helper.expectStacks(&.{
+        .{
+            .name = "leaf pairs across all character widths",
+            .source = "\"az\" \"λμ\" - \"λμ\" \"🙂🙃\" < \"🙂🙃\" \"az\" max",
+            .expected = "[-858 -834] [1 1] \"🙂🙃\"",
+        },
+        .{
+            .name = "character scalars have no narrow storage width",
+            .source = "\\λ \"az\" - \"λμ\" \\🙂 < \"🙂🙃\" \\a min",
+            .expected = "[858 833] [1 1] \"aa\"",
+        },
+        .{
+            .name = "numeric leaves and scalar broadcasting",
+            .source = "\"az\" [1 2] + [1 2] \"az\" + 1 \"λμ\" + \"🙂🙃\" 1 -",
+            .expected = "\"b|\" \"b|\" \"μν\" \"🙁🙂\"",
+        },
+        .{
+            .name = "byte subtraction retains the scalar fallback semantics",
+            .source = "\"λμ\" [1 2] - [\"az\" \"λμ\"] 1 +",
+            .expected = "\"κκ\" (\"b{\" \"μν\")",
+        },
+    });
+}
+
 test "numeric: transcendental non-finite edges" {
     try helper.expectStacks(&.{
         .{
