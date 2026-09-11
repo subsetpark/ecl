@@ -5,6 +5,26 @@ characterizations through public runtime surfaces. They are not portable
 constants. Regenerate a baseline on the target under discussion rather than
 copying timings from this file.
 
+## Further compile-time trials — 2026-09-11
+
+These incremental trials start at `5922754`, using the same Zig 0.16.0,
+ReleaseSafe, native x86_64 Linux host and CLI-only fresh-local-cache build
+procedure described below. Each row is one isolated build with LLVM IR emission;
+individual timing differences are exploratory, not repeated speedup estimates.
+The baseline's isolated build was 256.6 seconds with 159.19 MiB of IR.
+
+| Change | Build, seconds | Unoptimized IR, MiB |
+|---|---:|---:|
+| Shared validated builtin installation | 246.0 | 155.89 |
+
+The builtin installer preserves static declaration validation and runtime
+installation/allocation order. Effect builders specialize by token count instead
+of authored spelling. Environment object-function code falls from 107,474 to
+26,285 bytes. In 31 alternating before/after ReleaseSafe CLI processes executing
+`1 2 +`, with `ECL_WORKERS=1` and no concurrent build/test workload, whole-process
+p50 was 33.42/32.96 ms and p95 was 36.33/35.29 ms. This includes startup and
+teardown; it does not establish a runtime speedup.
+
 ## Binary kernel specialization — 2026-09-11
 
 Compared `ebaa07d` with shared binary-kernel preparation and compile-time

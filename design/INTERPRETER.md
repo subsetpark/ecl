@@ -1349,6 +1349,10 @@ metadata directly; primitive families own their declarations, and kernel
 spellings remain owned by their closed operation enums. The source audit
 checks semantic spelling conventions across all classified production sources;
 documentation completeness and effect syntax are compile-time requirements.
+Validated static descriptors carry those declarations into a shared runtime
+installation path. Effect token storage is specialized by its required capacity,
+not by the spelling of each word; installation retains declaration order and
+the same ownership and failure cleanup contract.
 
 Port operation declarations bind documentation, typed handlers, lanes, and
 supported exchange endpoints together. Built-in and extension bridges derive
