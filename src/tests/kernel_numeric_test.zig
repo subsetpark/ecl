@@ -24,6 +24,31 @@ test "numeric: empty leaves bypass scalar signature selection" {
     try helper.expectStack("\"\" \"\" + \"\" neg", "() ()");
 }
 
+test "numeric: character plans preserve widths shapes and fallback" {
+    try helper.expectStacks(&.{
+        .{
+            .name = "leaf pairs across all character widths",
+            .source = "\"az\" \"λμ\" - \"λμ\" \"🙂🙃\" < \"🙂🙃\" \"az\" max",
+            .expected = "[-858 -834] [1 1] \"🙂🙃\"",
+        },
+        .{
+            .name = "character scalars have no narrow storage width",
+            .source = "\\λ \"az\" - \"λμ\" \\🙂 < \"🙂🙃\" \\a min",
+            .expected = "[858 833] [1 1] \"aa\"",
+        },
+        .{
+            .name = "numeric leaves and scalar broadcasting",
+            .source = "\"az\" [1 2] + [1 2] \"az\" + 1 \"λμ\" + \"🙂🙃\" 1 -",
+            .expected = "\"b|\" \"b|\" \"μν\" \"🙁🙂\"",
+        },
+        .{
+            .name = "byte subtraction retains the scalar fallback semantics",
+            .source = "\"λμ\" [1 2] - [\"az\" \"λμ\"] 1 +",
+            .expected = "\"κκ\" (\"b{\" \"μν\")",
+        },
+    });
+}
+
 test "numeric: transcendental non-finite edges" {
     try helper.expectStacks(&.{
         .{
@@ -106,6 +131,32 @@ test "numeric: fault blocks report first index before aliased stores" {
             .kind = "overflow",
             .word = "+",
             .data = &.{.{ .name = "index", .expected = .{ .int = 256 } }},
+        },
+    });
+}
+
+test "numeric: aliased fault replay retains source representation across retags" {
+    try helper.expectErrors(&.{
+        .{
+            .name = "float input reused for integer output",
+            .source = "[1.0 1.0e100] floor",
+            .kind = "overflow",
+            .word = "floor",
+            .data = &.{.{ .name = "index", .expected = .{ .int = 1 } }},
+        },
+        .{
+            .name = "integer input reused for float output",
+            .source = "[0 9223372036854775807] 1024 pow",
+            .kind = "overflow",
+            .word = "pow",
+            .data = &.{.{ .name = "index", .expected = .{ .int = 1 } }},
+        },
+        .{
+            .name = "unary integer input reused for float output",
+            .source = "[1 -1] sqrt",
+            .kind = "domain",
+            .word = "sqrt",
+            .data = &.{.{ .name = "index", .expected = .{ .int = 1 } }},
         },
     });
 }

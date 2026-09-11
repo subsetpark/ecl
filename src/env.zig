@@ -2119,26 +2119,87 @@ pub const BuildingEnv = struct {
         validated: ValidatedEffect,
     };
 
+    /// Only the static factory can pair authored metadata with its validated
+    /// effect builder. Runtime installation never accepts an unchecked word.
+    const StaticBuiltin = opaque {
+        const EffectData = struct {
+            tokens: []const []const u8,
+            separator: usize,
+            build: *const fn (*BuildingEnv, *const EffectData) error{OutOfMemory}!BuiltinEffect,
+        };
+        const Data = struct {
+            definition: BuiltinWord,
+            effect: ?EffectData,
+        };
+
+        fn effectBuilder(comptime count: usize) @FieldType(EffectData, "build") {
+            return struct {
+                fn build(builder: *BuildingEnv, effect: *const EffectData) error{OutOfMemory}!BuiltinEffect {
+                    return builder.builtinEffect(count, effect);
+                }
+            }.build;
+        }
+
+        fn init(comptime definition: BuiltinWord) *const StaticBuiltin {
+            const data = comptime blk: {
+                assertStaticBuiltin(definition);
+                const effect: ?EffectData = if (definition.effect) |source| effect: {
+                    const count = countEffectTokens(source);
+                    var tokens: [count][]const u8 = undefined;
+                    var iterator = std.mem.tokenizeScalar(u8, source, ' ');
+                    // SAFETY: assertStaticBuiltin guarantees exactly one `--`
+                    // token, so the loop assigns separator before it is read.
+                    var separator: usize = undefined;
+                    for (&tokens, 0..) |*token, index| {
+                        token.* = iterator.next().?;
+                        if (std.mem.eql(u8, token.*, "--")) separator = index;
+                    }
+                    const frozen = tokens;
+                    break :effect .{ .tokens = &frozen, .separator = separator, .build = effectBuilder(count) };
+                } else null;
+                break :blk Data{ .definition = definition, .effect = effect };
+            };
+            return @ptrCast(&data);
+        }
+
+        fn install(self: *const StaticBuiltin, builder: *BuildingEnv) error{OutOfMemory}!void {
+            const data: *const Data = @ptrCast(@alignCast(self));
+            const definition = data.definition;
+            const install_name = intern.internReservedNamespace(definition.name) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidName => unreachable,
+            };
+            const core = &builder.target.privateState().core;
+            const document_value = try machine.stringValue(core.allocator, core.releases, definition.doc);
+            defer core.releases.releaseValue(document_value);
+            const builtin_effect: ?BuiltinEffect = if (data.effect) |*effect|
+                try effect.build(builder, effect)
+            else
+                null;
+            defer if (builtin_effect) |effect| core.releases.releaseValue(effect.value);
+            try builder.target.installCoreSpec(install_name, .{
+                .binding = .{ .builtin = definition.primitive },
+                .effect = if (builtin_effect) |effect| effect.validated else null,
+                .doc = documentation(document_value.list).?,
+            });
+        }
+    };
+
     fn builtinEffect(
         self: *BuildingEnv,
-        comptime source: []const u8,
+        comptime token_count: usize,
+        effect: *const StaticBuiltin.EffectData,
     ) error{OutOfMemory}!BuiltinEffect {
         const core = &self.target.privateState().core;
-        const token_count = comptime countEffectTokens(source);
         var tokens: [token_count]value.Value = undefined;
-        var iterator = std.mem.tokenizeScalar(u8, source, ' ');
-        var index: usize = 0;
-        var separator_index: ?usize = null;
-        while (iterator.next()) |token| : (index += 1) {
+        for (effect.tokens, &tokens) |token, *destination| {
             const id = try intern.intern(token);
-            tokens[index] = .{ .word = .{ .name = id } };
-            if (std.mem.eql(u8, token, "--")) separator_index = index;
+            destination.* = .{ .word = .{ .name = id } };
         }
-        std.debug.assert(index == token_count and separator_index != null);
         const effect_value = try list.fromValuesGeneric(core.allocator, &tokens);
         return .{
             .value = effect_value,
-            .validated = .fromValidated(effect_value.list, separator_index.?),
+            .validated = .fromValidated(effect_value.list, effect.separator),
         };
     }
 
@@ -2152,38 +2213,24 @@ pub const BuildingEnv = struct {
         });
     }
     pub fn installBuiltin(self: *BuildingEnv, comptime definition: BuiltinWord) error{OutOfMemory}!void {
-        comptime assertStaticBuiltin(definition);
-        const install_name = intern.internReservedNamespace(definition.name) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidName => unreachable,
-        };
-        const core = &self.target.privateState().core;
-        const document_value = try machine.stringValue(core.allocator, core.releases, definition.doc);
-        defer core.releases.releaseValue(document_value);
-        const builtin_effect: ?BuiltinEffect = if (definition.effect) |source|
-            try self.builtinEffect(source)
-        else
-            null;
-        defer if (builtin_effect) |effect| core.releases.releaseValue(effect.value);
-        try self.target.installCoreSpec(install_name, .{
-            .binding = .{ .builtin = definition.primitive },
-            .effect = if (builtin_effect) |effect| effect.validated else null,
-            .doc = documentation(document_value.list).?,
-        });
+        return StaticBuiltin.init(definition).install(self);
     }
     pub fn installBuiltins(self: *BuildingEnv, comptime definitions: []const BuiltinWord) error{OutOfMemory}!void {
-        comptime {
+        const descriptors = comptime blk: {
             @setEvalBranchQuota(100_000);
+            var result: [definitions.len]*const StaticBuiltin = undefined;
             for (definitions, 0..) |definition, index| {
                 for (definitions[0..index]) |prior| {
                     if (std.mem.eql(u8, prior.name, definition.name)) {
                         @compileError("duplicate builtin namespace name: " ++ definition.name);
                     }
                 }
+                result[index] = StaticBuiltin.init(definition);
             }
-        }
-        inline for (definitions) |definition| {
-            try self.installBuiltin(definition);
+            break :blk result;
+        };
+        for (descriptors) |descriptor| {
+            try descriptor.install(self);
         }
     }
     pub fn runtime(self: *BuildingEnv) *Env {

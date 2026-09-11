@@ -5,6 +5,199 @@ characterizations through public runtime surfaces. They are not portable
 constants. Regenerate a baseline on the target under discussion rather than
 copying timings from this file.
 
+## Further compile-time trials — 2026-09-11
+
+These incremental trials start at `5922754`, using the same Zig 0.16.0,
+ReleaseSafe, native x86_64 Linux host and CLI-only fresh-local-cache build
+procedure described below. Each row is one isolated build with LLVM IR emission;
+individual timing differences are exploratory, not repeated speedup estimates.
+The baseline's isolated build was 256.6 seconds with 159.19 MiB of IR. The
+series began with CPU energy preference `power`; `balance_performance` was
+observed during the later arithmetic-helper trial. The initial timings below
+therefore cannot establish isolated code-change speedups across that transition.
+
+| Change | Build, seconds | Unoptimized IR, MiB |
+|---|---:|---:|
+| Shared validated builtin installation | 246.0 | 155.89 |
+| Shared unary and sequential reduction preparation | 243.8 | 154.16 |
+| Shared cold scalar fault replay | 237.7 | 148.47 |
+
+The builtin installer preserves static declaration validation and runtime
+installation/allocation order. Effect builders specialize by token count instead
+of authored spelling. Environment object-function code falls from 107,474 to
+26,285 bytes. In 31 alternating before/after ReleaseSafe CLI processes executing
+`1 2 +`, with `ECL_WORKERS=1` and no concurrent build/test workload, whole-process
+p50 was 33.42/32.96 ms and p95 was 36.33/35.29 ms. This includes startup and
+teardown; it does not establish a runtime speedup.
+
+Shared unary/reduction plans reduce numeric-kernel object-function code from
+952,822 to 857,853 bytes without changing the element loops. The same
+31-alternating-pair method, timing warmed batches inside the CLI, gives these
+before/after p50 milliseconds: small unary 113/115, large unary 153/153,
+small fold 97/97, large fold 119/120, and large scan 25/25. Small batches execute
+20,000 iterations over `[1 2 3]`; large unary/fold batches execute 20 iterations
+over a retained million-element integer range, and scan uses 100,000 elements.
+Unary uses `neg`; fold and scan use seed `0` and quotation `(+)`. Corresponding
+p95 pairs are 135/136, 170/173, 108/110, 140/143, and 32/34 ms.
+
+Shared fault replay removes 873 numeric-kernel IR definitions (3,548 to 2,675).
+Numeric-kernel machine code increases by 22,058 bytes, so the improvement is in
+the input to LLVM rather than final code size. The 31-pair warmed-batch method
+gives small numeric addition p50 79/79 ms and p95 89/87 ms, and character offset
+p50 94/96 ms and p95 106/110 ms. Each batch performs 20,000 iterations of
+`[1 2 3] 1 + pop` or `"aλ🙂" 1 + pop`, respectively. A public regression test
+covers fault kind and first index when unique-buffer reuse changes integer and
+float representation; a deliberately wrong index was confirmed to fail the
+77-test kernel slice before restoration.
+
+An isolated instrumented compiler invocation at `9991eb2`, using the CLI's exact
+module arguments with `--time-report` and without IR dumping, took 248.12
+seconds. File processing took 0.30 seconds, declaration work 18.51 seconds,
+LLVM object emission 228.79 seconds, and linker flush 0.27 seconds. LLVM thus
+accounted for about 92% of this invocation. Its largest individual pass wall
+times were x86 instruction selection (24.20 seconds), instruction combining
+(21.40 seconds), and inlining (19.69 seconds). Pass timing instrumentation makes
+this a separate series from the ordinary IR-emitting builds above; these
+measurements should not be averaged together.
+
+The first shared arithmetic-helper implementation built in 240.48 seconds.
+Inlining its type adapter produced a 95.81-second build, but the CPU policy
+change made that apparent improvement inconclusive. Under the newly recorded
+`balance_performance` policy, the preceding commit `9991eb2` also rebuilt in
+92.99 seconds. CPU preference is recorded before and after subsequent controlled
+builds, each with a fresh local cache and identical IR-emission options.
+The inline-adapter trial took 93.85 seconds under that same recorded policy,
+with larger IR (149.27 versus 148.47 MiB) and numeric-kernel machine code
+(897,964 versus 879,911 bytes). Neither arithmetic-helper variant was retained:
+there was no demonstrated compile-time benefit to justify the refactor.
+
+With CPU placement unrestricted but energy preference recorded as
+`balance_performance`, two fresh-cache builds of `5922754` took 100.26 and
+118.65 seconds; the retained `9991eb2` state took 92.99 and 106.13 seconds.
+That variation motivated a final series pinned to logical CPU 2 (a performance
+core thread, listed maximum 4.3 GHz), in before/after/after/before order.
+Pinning is scoped to the benchmark processes with `taskset -c 2`; it does not
+change the build defaults or the machine's power policy.
+
+| Fixed-core ReleaseSafe CLI build | Run 1, seconds | Run 2, seconds | Mean, seconds |
+|---|---:|---:|---:|
+| Starting commit `5922754` | 115.85 | 120.97 | 118.41 |
+| Retained changes `9991eb2` | 108.08 | 107.73 | 107.90 |
+
+CPU energy preference remained `balance_performance` at both ends of every
+fixed-core build. The mean reduction is 8.9%, with only two observations per
+variant; this is target-specific evidence, not a portable timing guarantee.
+Unoptimized IR falls 6.7%, from 159.19 to 148.47 MiB. The much larger drop from
+the initial multi-minute builds coincided with the host policy transition and
+must not be attributed to the code changes. All non-model local gates passed
+before each retained source commit, and each retained numeric refactor matched 525
+ReleaseSafe CLI cases against its predecessor, including exit status and error
+output. Model checking was omitted by explicit instruction for this work.
+The final retained tree also passed all 77 kernel-slice tests in ReleaseSafe,
+including representation-changing reuse, first-fault reporting, bounded work,
+and typed-write allocation failures.
+
+A separate build-only cache-splitting experiment compiled the existing runtime
+aggregation module as a static library. Its 2,710-byte archive contained no
+text symbols: public Zig declarations remain source imports, not independently
+linked definitions. That shortcut was rejected. Reusable runtime machine code
+would require an explicit external boundary; merely adding another build module
+or library does not provide it.
+
+## Binary kernel specialization — 2026-09-11
+
+Compared `ebaa07d` with shared binary-kernel preparation and compile-time
+exclusion of unreachable character and scalar-storage combinations. Both
+variants use Zig 0.16.0, ReleaseSafe, native x86_64 Linux on an Intel Core Ultra
+5 125U with 16 GiB RAM. The host's energy preference remained `power`.
+
+Each variant builds from a separate source snapshot and a fresh local Zig
+cache, sharing an already populated global dependency/toolchain cache. The
+measured artifact is the CLI executable, without tests or native fixtures.
+IR emission is enabled identically for both variants:
+
+```sh
+timeout 1200 zig build -Doptimize=ReleaseSafe --summary all \
+  --cache-dir /tmp/ecl-compile-cache --prefix /tmp/ecl-compile-out \
+  --verbose-llvm-ir=/tmp/ecl-compile.ll < /dev/null > /tmp/ecl-compile.log 2>&1
+build_status=$?
+printf 'build_exit=%s\n' "$build_status"
+```
+
+Use distinct empty cache and output directories for each variant and repeat;
+an unchanged build against its existing cache measures cache validation instead
+of compilation. This is a warm-dependency rebuild measurement, not a completely
+cold installation of Zig and the project's dependencies.
+
+### Compilation time
+
+Both variants completed two fresh-local-cache builds. The first pass overlapped
+local verification; its approximate elapsed times come from log creation and
+final-write timestamps at one-second resolution. The repeat ran the two builds
+serially with no other build, test, or benchmark process active, measured by a
+monotonic clock around each complete `zig build` invocation. Both passes include
+the identical IR-emission option, build-runner work, and installation.
+
+| Pass | Before, seconds | After, seconds |
+|---|---:|---:|
+| Initial diagnostic, concurrent verification | ~329 | ~295 |
+| Isolated repeat | 330.3 | 256.6 |
+
+The isolated repeat removes 73.7 seconds, or 22.3% of build time. These are two
+observations per variant, not a portable compile-time guarantee; the explicit
+isolation makes the second pair the useful comparison. LLVM compilation still
+takes several minutes on this host.
+
+### Emitted size
+
+The IR numbers include debug metadata and precede LLVM optimization. Function
+counts are emitted definitions, including generated helpers. Object code bytes
+sum text-symbol sizes reported by `nm -S`; they exclude debug information.
+
+| Measurement | Before | After |
+|---|---:|---:|
+| Unoptimized LLVM IR, MiB | 220.92 | 159.19 |
+| Numeric-kernel IR definitions | 8,798 | 3,578 |
+| Shared flat-kernel IR definitions | 1,934 | 689 |
+| Numeric-kernel emitted functions | 2,336 | 1,190 |
+| Numeric-kernel object code, bytes | 2,478,037 | 970,549 |
+| Total object function code, bytes | 5,973,607 | 4,464,543 |
+| CLI executable, MiB | 32.46 | 26.28 |
+
+The reachable arithmetic loops retain their specialized element types and
+operation bodies. Shared preparation removes repeated allocation and ownership
+setup, while selection avoids generating loops for unsupported character
+operations and storage classes that a scalar cannot have.
+
+### Runtime comparison
+
+Each workload has 31 before/after pairs with alternating execution order,
+`ECL_WORKERS=1`, and ReleaseSafe CLI binaries. No build or test process ran
+during this comparison. Each sample starts a fresh CLI process, loads `clock`,
+performs its setup and three warmup iterations, then uses `clock.now` and
+`clock.elapsed` around the measured batch. Session startup and input setup are
+excluded. Times are whole milliseconds for a batch, not per-element times.
+For the large cases, setup binds `1000000 range` to `x`; retaining that binding
+exercises fresh output allocation rather than unique-input reuse.
+
+| Workload | Iterations | Before p50 | After p50 | Before p95 | After p95 |
+|---|---:|---:|---:|---:|---:|
+| `[1 2 3] 1 + pop` | 20,000 | 79 | 78 | 87 | 87 |
+| `x 1 + pop` | 20 | 140 | 139 | 153 | 148 |
+| `1 x + pop` | 20 | 140 | 140 | 148 | 154 |
+| `x x + pop` | 20 | 146 | 142 | 174 | 153 |
+| `"aλ🙂" 1 + pop` | 20,000 | 94 | 94 | 103 | 103 |
+| `[[1 2] [3]] 1 + pop` | 10,000 | 1,399 | 1,400 | 1,443 | 1,449 |
+
+Medians remain within 2.8%; the tails vary in both directions. No consistent
+runtime regression was observed. The 76-test kernel slice also passes in Debug
+and ReleaseSafe,
+including differential representation checks, fault indices, aliased output,
+bounded work, and typed-write allocation failures. New public character cases
+cover width combinations, both scalar broadcasts, and byte-subtraction
+fallback; a deliberately incorrect expected value was confirmed to fail the
+selected test before restoration.
+
 ## WorkDriver baseline — 2026-08-28
 
 This baseline was recorded by the WorkDriver harness added on top of `f63f189`, using

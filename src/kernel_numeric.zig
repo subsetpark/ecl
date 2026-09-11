@@ -1163,7 +1163,7 @@ const FlatScalarOperand = union(enum) {
     }
 };
 
-fn acquireFlatScalarOperand(comptime class: FlatScalarClass, item: Value) FlatScalarOperand {
+fn acquireFlatScalarOperand(class: FlatScalarClass, item: Value) FlatScalarOperand {
     return switch (class) {
         .byte => .{ .bytes = .acquire(item.list) },
         .integer => .{ .ints = .acquire(item.list) },
@@ -1443,17 +1443,6 @@ fn fixedCharStep(
                 state.right.slice(right_class)[index];
         }
 
-        fn replay(state: *FixedCharState, context: support.Context, piece: flat.Chunk) MachineError {
-            for (piece.start..piece.end) |index| {
-                _ = scalarBinary(
-                    operation,
-                    left_class.boxed(leftValue(state, index)),
-                    right_class.boxed(rightValue(state, index)),
-                ) catch |fault| return failTypedScalar(context, state.report, fault, index);
-            }
-            unreachable;
-        }
-
         fn step(state: *FixedCharState, context: support.Context) MachineError!void {
             const range = try state.cursor.nextRange(context) orelse return;
             var block = Loops.Staging.init();
@@ -1484,7 +1473,7 @@ fn fixedCharStep(
                     ),
                     .leaf_only => unreachable,
                 };
-                if (status == .faulted) return replay(state, context, piece);
+                if (status == .faulted) return replayCharacterBinary(&state.left, &state.right, state.report, context, piece, selectScalar(operation));
                 state.output.writeRange(piece.start, block.written());
                 offset += piece.len();
             }
@@ -1583,17 +1572,6 @@ fn dynamicCharStep(
                 state.right.slice(right_class)[index];
         }
 
-        fn replay(state: *DynamicCharState, context: support.Context, piece: flat.Chunk) MachineError {
-            for (piece.start..piece.end) |index| {
-                _ = scalarBinary(
-                    operation,
-                    left_class.boxed(leftValue(state, index)),
-                    right_class.boxed(rightValue(state, index)),
-                ) catch |fault| return failTypedScalar(context, state.report, fault, index);
-            }
-            unreachable;
-        }
-
         fn step(state: *DynamicCharState, context: support.Context) MachineError!void {
             const range = try state.cursor.nextRange(context) orelse return;
             var block = Loops.Staging.init();
@@ -1624,7 +1602,7 @@ fn dynamicCharStep(
                     ),
                     .leaf_only => unreachable,
                 };
-                if (status == .faulted) return replay(state, context, piece);
+                if (status == .faulted) return replayCharacterBinary(&state.left, &state.right, state.report, context, piece, selectScalar(operation));
                 if (state.phase == .profile) {
                     for (block.written()) |codepoint| state.max_codepoint = @max(state.max_codepoint, codepoint);
                 } else state.writer.?.borrowMut().writeCodepoints(piece.start, block.written());
@@ -1724,6 +1702,62 @@ const NestedTyped = union(enum) {
         };
     }
 };
+
+/// Fault replay reads the still-unpublished block through retained capabilities.
+/// Its runtime operand tags and scalar callback avoid operation/width/shape
+/// expansion in this cold path. The caller has already charged this block.
+fn replayNumericValue(operand: *const TypedOperand, state: *const TypedState, index: usize) Value {
+    return switch (operand.*) {
+        .absent => unreachable,
+        .scalar => |item| item,
+        .bytes => |*reader| .{ .int = reader.slice()[index] },
+        .ints => |*reader| .{ .int = reader.slice()[index] },
+        .reals => |*reader| .{ .float = reader.slice()[index] },
+        // Same-width reuse may retag integers as floats or vice versa. The
+        // owned root still has the source kind until output publication.
+        .aliased => switch (leafNumber(state.root.?).?) {
+            .byte => .{ .int = state.output.aliasedSlice(.byte)[index] },
+            .integer => .{ .int = state.output.aliasedSlice(.integer)[index] },
+            .real => .{ .float = state.output.aliasedSlice(.real)[index] },
+        },
+    };
+}
+
+noinline fn replayNumericBinary(state: *TypedState, context: support.Context, piece: flat.Chunk, scalar: ScalarBinary) MachineError {
+    for (piece.start..piece.end) |index| {
+        _ = scalar(replayNumericValue(&state.left, state, index), replayNumericValue(&state.right, state, index)) catch |fault|
+            return state.faultAt(context, fault, index);
+    }
+    unreachable;
+}
+
+noinline fn replayNumericUnary(state: *TypedState, context: support.Context, piece: flat.Chunk, scalar: ScalarUnary) MachineError {
+    for (piece.start..piece.end) |index| {
+        _ = scalar(replayNumericValue(&state.left, state, index)) catch |fault|
+            return state.faultAt(context, fault, index);
+    }
+    unreachable;
+}
+
+fn replayCharacterValue(operand: *const FlatScalarOperand, index: usize) Value {
+    return switch (operand.*) {
+        .absent => unreachable,
+        .scalar => |item| item,
+        .bytes => |*reader| .{ .int = reader.slice()[index] },
+        .ints => |*reader| .{ .int = reader.slice()[index] },
+        .char1 => |*reader| .{ .char = reader.slice()[index] },
+        .char2 => |*reader| .{ .char = reader.slice()[index] },
+        .char4 => |*reader| .{ .char = @intCast(reader.slice()[index]) },
+    };
+}
+
+noinline fn replayCharacterBinary(left: *const FlatScalarOperand, right: *const FlatScalarOperand, report: FaultReport, context: support.Context, piece: flat.Chunk, scalar: ScalarBinary) MachineError {
+    for (piece.start..piece.end) |index| {
+        _ = scalar(replayCharacterValue(left, index), replayCharacterValue(right, index)) catch |fault|
+            return failTypedScalar(context, report, fault, index);
+    }
+    unreachable;
+}
 
 /// One charged chunk of a binary typed operation.
 fn binaryStep(
@@ -1858,27 +1892,6 @@ fn binaryStep(
                 state.right.slice(right_class);
         }
 
-        /// Replays one faulted block through the shared scalar semantics to find
-        /// the first failing logical index. The mask proved something in this
-        /// block faults, so the walk always finds it.
-        fn replay(state: *TypedState, context: support.Context, piece: flat.Chunk) MachineError {
-            for (piece.start..piece.end) |index| {
-                const a = switch (shape) {
-                    .leaf_leaf, .leaf_scalar => leftSlice(state)[index],
-                    .scalar_leaf => left_class.unboxed(state.left.scalar),
-                    .leaf_only => unreachable,
-                };
-                const b = switch (shape) {
-                    .leaf_leaf, .scalar_leaf => rightSlice(state)[index],
-                    .leaf_scalar => right_class.unboxed(state.right.scalar),
-                    .leaf_only => unreachable,
-                };
-                _ = scalarBinary(operation, left_class.boxed(a), right_class.boxed(b)) catch |fault|
-                    return state.faultAt(context, fault, index);
-            }
-            unreachable;
-        }
-
         fn step(state: *TypedState, context: support.Context) MachineError!void {
             const range = try state.cursor.nextRange(context) orelse return;
             var block = flat.Block(out.Element()).init();
@@ -1919,7 +1932,7 @@ fn binaryStep(
                 };
                 // Nothing is stored until the whole block is known clean: a
                 // reused input buffer still holds the operands the replay reads.
-                if (status == .faulted) return replay(state, context, piece);
+                if (status == .faulted) return replayNumericBinary(state, context, piece, selectScalar(operation));
                 state.output.store(out, piece.start, block.written());
                 offset += piece.len();
             }
@@ -1964,15 +1977,6 @@ fn unaryStep(comptime operation: UnaryOp, comptime operand_class: Number) TypedS
                 state.left.slice(operand_class);
         }
 
-        fn replay(state: *TypedState, context: support.Context, piece: flat.Chunk) MachineError {
-            for (piece.start..piece.end) |index| {
-                const a = operandSlice(state)[index];
-                _ = scalarUnary(operation, operand_class.boxed(a)) catch |fault|
-                    return state.faultAt(context, fault, index);
-            }
-            unreachable;
-        }
-
         fn step(state: *TypedState, context: support.Context) MachineError!void {
             const range = try state.cursor.nextRange(context) orelse return;
             var block = flat.Block(out.Element()).init();
@@ -1987,7 +1991,7 @@ fn unaryStep(comptime operation: UnaryOp, comptime operand_class: Number) TypedS
                     .scalar_checked => Checked.unary(checked_body, operandSlice(state), piece, &block),
                     .vector_checked, .scalar_infallible => unreachable,
                 };
-                if (status == .faulted) return replay(state, context, piece);
+                if (status == .faulted) return replayNumericUnary(state, context, piece, selectUnary(operation));
                 state.output.store(out, piece.start, block.written());
                 offset += piece.len();
             }
@@ -2030,13 +2034,95 @@ fn acquireOutput(
     };
 }
 
-fn acquireOperand(comptime class: Number, item: Value) TypedOperand {
+fn acquireOperand(class: Number, item: Value) TypedOperand {
     return switch (class) {
         .byte => .{ .bytes = heap.LeafReader(.leaf_u8).acquire(item.list) },
         .integer => .{ .ints = heap.LeafReader(.leaf_i64).acquire(item.list) },
         .real => .{ .reals = heap.LeafReader(.leaf_f64).acquire(item.list) },
     };
 }
+
+/// Static selection binds the element classes, output width, and monomorphic
+/// step together. Preparation runs once outside the operation/type expansion;
+/// callers cannot supply a step independently of its storage contract.
+const NumericBinaryPlan = opaque {
+    const Data = struct {
+        left: Number,
+        right: Number,
+        shape: Shape,
+        out: Number,
+        step: TypedStep,
+    };
+
+    fn select(operation: BinaryOp, left: Number, right: Number, shape: Shape) ?*const NumericBinaryPlan {
+        return switch (operation) {
+            inline else => |selected| selectFor(selected, left, right, shape),
+        };
+    }
+
+    fn selectFor(comptime operation: BinaryOp, left: Number, right: Number, shape: Shape) ?*const NumericBinaryPlan {
+        inline for (number_classes) |candidate_left| {
+            inline for (number_classes) |candidate_right| {
+                inline for (binary_shapes) |candidate_shape| {
+                    if (comptime candidate_shape == .scalar_leaf and candidate_left == .byte) continue;
+                    if (comptime candidate_shape == .leaf_scalar and candidate_right == .byte) continue;
+                    if (candidate_left == left and candidate_right == right and candidate_shape == shape) {
+                        const maybe_out = comptime binaryResult(operation, candidate_left, candidate_right);
+                        if (comptime maybe_out == null) return null;
+                        const out = comptime maybe_out.?;
+                        const data = comptime Data{
+                            .left = candidate_left,
+                            .right = candidate_right,
+                            .shape = candidate_shape,
+                            .out = out,
+                            .step = binaryStep(operation, candidate_left, candidate_right, candidate_shape),
+                        };
+                        return @ptrCast(&data);
+                    }
+                }
+            }
+        }
+        unreachable;
+    }
+
+    /// On success the returned payload owns its readers and output, including
+    /// any consumed reuse candidate. On allocation failure inputs remain owned
+    /// by the caller. No fallible operation follows a successful reuse claim.
+    fn prepare(
+        self: *const NumericBinaryPlan,
+        evaluator: *Machine,
+        left: Value,
+        right: Value,
+        reuse_candidate: ?*heap.OwnedValue,
+        length: usize,
+        report: FaultReport,
+    ) error{OutOfMemory}!NestedTyped {
+        const data: *const Data = @ptrCast(@alignCast(self));
+        const reuse = if (data.shape == .leaf_scalar) reuse_candidate else null;
+        const acquired = switch (data.out) {
+            inline else => |out| try acquireOutput(evaluator, out, reuse, length),
+        };
+        return .{ .numeric = .{
+            .state = .{
+                .left = if (acquired.aliased)
+                    .aliased
+                else if (data.shape == .scalar_leaf)
+                    .{ .scalar = left }
+                else
+                    acquireOperand(data.left, left),
+                .right = if (data.shape == .leaf_scalar)
+                    .{ .scalar = right }
+                else
+                    acquireOperand(data.right, right),
+                .output = acquired.output,
+                .cursor = .init(length),
+                .report = report,
+                .root = acquired.root,
+            },
+            .step = data.step,
+        } };
+    }
+};
 
 fn startTypedDriver(
     evaluator: *Machine,
@@ -2067,9 +2153,106 @@ fn scalarFlatScalarClass(item: Value) ?FlatScalarClass {
     };
 }
 
-fn buildNestedTypedCharBinaryFor(
+/// The result variant is selected before generating a loop. In particular, a
+/// numeric pair must never instantiate a character loop merely because the
+/// runtime dispatcher would reject that pair later.
+const CharacterBinaryPlan = opaque {
+    const Step = union(enum) {
+        fixed: FixedCharStep,
+        dynamic: DynamicCharStep,
+    };
+    const Data = struct {
+        left: FlatScalarClass,
+        right: FlatScalarClass,
+        shape: Shape,
+        step: Step,
+    };
+
+    fn select(operation: BinaryOp, left: FlatScalarClass, right: FlatScalarClass, shape: Shape) ?*const CharacterBinaryPlan {
+        return switch (operation) {
+            inline else => |selected| selectFor(selected, left, right, shape),
+        };
+    }
+
+    fn selectFor(comptime operation: BinaryOp, left: FlatScalarClass, right: FlatScalarClass, shape: Shape) ?*const CharacterBinaryPlan {
+        const classes = [_]FlatScalarClass{ .byte, .integer, .char1, .char2, .char4 };
+        inline for (classes) |candidate_left| {
+            inline for (classes) |candidate_right| {
+                const both_char = comptime candidate_left.isCharacter() and candidate_right.isCharacter();
+                const fixed = comptime both_char and switch (operation) {
+                    .sub, .eq, .ne, .lt, .gt, .le, .ge => true,
+                    else => false,
+                };
+                const dynamic = comptime switch (operation) {
+                    .add => candidate_left.isCharacter() != candidate_right.isCharacter(),
+                    .sub => candidate_left.isCharacter() and candidate_right == .integer,
+                    .min, .max => both_char,
+                    else => false,
+                };
+                if (comptime !fixed and !dynamic) continue;
+                inline for (binary_shapes) |candidate_shape| {
+                    // Scalars have no narrow storage class.
+                    if (comptime candidate_shape == .scalar_leaf and candidate_left != .integer and candidate_left != .char4) continue;
+                    if (comptime candidate_shape == .leaf_scalar and candidate_right != .integer and candidate_right != .char4) continue;
+                    if (candidate_left == left and candidate_right == right and candidate_shape == shape) {
+                        const data = comptime Data{
+                            .left = candidate_left,
+                            .right = candidate_right,
+                            .shape = candidate_shape,
+                            .step = if (fixed)
+                                .{ .fixed = fixedCharStep(operation, candidate_left, candidate_right, candidate_shape) }
+                            else
+                                .{ .dynamic = dynamicCharStep(operation, candidate_left, candidate_right, candidate_shape) },
+                        };
+                        return @ptrCast(&data);
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /// Borrows inputs on failure; success returns the sole owner of the new
+    /// readers and any output. Acquiring readers cannot fail after allocation.
+    fn prepare(
+        self: *const CharacterBinaryPlan,
+        evaluator: *Machine,
+        left: Value,
+        right: Value,
+        length: usize,
+        report: FaultReport,
+    ) error{OutOfMemory}!NestedTyped {
+        const data: *const Data = @ptrCast(@alignCast(self));
+        switch (data.step) {
+            .fixed => |step| {
+                const output = try heap.LeafWriter(.leaf_i64).init(evaluator.allocator(), length);
+                return .{ .fixed_char = .{
+                    .state = .{
+                        .left = if (data.shape == .scalar_leaf) .{ .scalar = left } else acquireFlatScalarOperand(data.left, left),
+                        .right = if (data.shape == .leaf_scalar) .{ .scalar = right } else acquireFlatScalarOperand(data.right, right),
+                        .output = output,
+                        .cursor = .init(length),
+                        .report = report,
+                    },
+                    .step = step,
+                } };
+            },
+            .dynamic => |step| return .{ .dynamic_char = .{
+                .state = .{
+                    .left = if (data.shape == .scalar_leaf) .{ .scalar = left } else acquireFlatScalarOperand(data.left, left),
+                    .right = if (data.shape == .leaf_scalar) .{ .scalar = right } else acquireFlatScalarOperand(data.right, right),
+                    .cursor = .init(length),
+                    .report = report,
+                },
+                .step = step,
+            } },
+        }
+    }
+};
+
+fn buildNestedTypedCharBinary(
     evaluator: *Machine,
-    comptime operation: BinaryOp,
+    operation: BinaryOp,
     left_item: Value,
     right_item: Value,
     report: FaultReport,
@@ -2091,102 +2274,18 @@ fn buildNestedTypedCharBinaryFor(
     if (!left_class.isCharacter() and !right_class.isCharacter()) return null;
     const length = try conformingLength(evaluator, shape, left_item, right_item);
     if (length == 0) return null;
-    const fixed_result = left_class.isCharacter() and right_class.isCharacter() and
-        (operation == .sub or switch (operation) {
-            .eq, .ne, .lt, .gt, .le, .ge => true,
-            else => false,
-        });
-    const dynamic_result = switch (operation) {
-        .add => left_class.isCharacter() != right_class.isCharacter(),
-        .sub => left_class.isCharacter() and right_class == .integer,
-        .min, .max => left_class.isCharacter() and right_class.isCharacter(),
-        else => false,
-    };
-    if (!fixed_result and !dynamic_result) return null;
-
-    const flat_classes = [_]FlatScalarClass{ .byte, .integer, .char1, .char2, .char4 };
-    inline for (flat_classes) |candidate_left| {
-        inline for (flat_classes) |candidate_right| {
-            inline for (binary_shapes) |candidate_shape| {
-                if (candidate_left == left_class and candidate_right == right_class and candidate_shape == shape) {
-                    if (fixed_result) {
-                        var state = FixedCharState{
-                            .left = .absent,
-                            .right = .absent,
-                            .output = try .init(evaluator.allocator(), length),
-                            .cursor = .init(length),
-                            .report = report,
-                        };
-                        var held_locally = true;
-                        errdefer if (held_locally) state.retire(evaluator.releaseDomain());
-                        state.left = if (candidate_shape == .scalar_leaf)
-                            .{ .scalar = left_item }
-                        else
-                            acquireFlatScalarOperand(candidate_left, left_item);
-                        state.right = if (candidate_shape == .leaf_scalar)
-                            .{ .scalar = right_item }
-                        else
-                            acquireFlatScalarOperand(candidate_right, right_item);
-                        const step = comptime fixedCharStep(
-                            operation,
-                            candidate_left,
-                            candidate_right,
-                            candidate_shape,
-                        );
-                        held_locally = false;
-                        return .{ .fixed_char = .{ .state = state, .step = step } };
-                    }
-                    var state = DynamicCharState{
-                        .left = .absent,
-                        .right = .absent,
-                        .cursor = .init(length),
-                        .report = report,
-                    };
-                    var held_locally = true;
-                    errdefer if (held_locally) state.retire(evaluator.releaseDomain());
-                    state.left = if (candidate_shape == .scalar_leaf)
-                        .{ .scalar = left_item }
-                    else
-                        acquireFlatScalarOperand(candidate_left, left_item);
-                    state.right = if (candidate_shape == .leaf_scalar)
-                        .{ .scalar = right_item }
-                    else
-                        acquireFlatScalarOperand(candidate_right, right_item);
-                    const step = comptime dynamicCharStep(
-                        operation,
-                        candidate_left,
-                        candidate_right,
-                        candidate_shape,
-                    );
-                    held_locally = false;
-                    return .{ .dynamic_char = .{ .state = state, .step = step } };
-                }
-            }
-        }
-    }
-    unreachable;
-}
-
-fn buildNestedTypedCharBinary(
-    evaluator: *Machine,
-    operation: BinaryOp,
-    left: Value,
-    right: Value,
-    report: FaultReport,
-) MachineError!?NestedTyped {
-    return switch (operation) {
-        inline else => |selected| buildNestedTypedCharBinaryFor(evaluator, selected, left, right, report),
-    };
+    const plan = CharacterBinaryPlan.select(operation, left_class, right_class, shape) orelse return null;
+    return try plan.prepare(evaluator, left_item, right_item, length, report);
 }
 
 fn startTypedCharBinary(
     evaluator: *Machine,
-    comptime operation: BinaryOp,
+    operation: BinaryOp,
     left: *heap.OwnedValue,
     right: *heap.OwnedValue,
     report: FaultReport,
 ) MachineError!bool {
-    var typed = (try buildNestedTypedCharBinaryFor(
+    var typed = (try buildNestedTypedCharBinary(
         evaluator,
         operation,
         left.borrow(),
@@ -2229,7 +2328,7 @@ fn firstFlatElement(item: Value) ?Value {
 /// nonnumeric combinations without manufacturing a boxed fallback loop.
 fn rejectUnsupportedFlatBinary(
     evaluator: *Machine,
-    comptime operation: BinaryOp,
+    operation: BinaryOp,
     left: Value,
     right: Value,
     report: FaultReport,
@@ -2247,29 +2346,27 @@ fn rejectUnsupportedFlatBinary(
         if (left_count == 0) return false;
     } else if ((left == .list and left.list.length() == 0) or
         (right == .list and right.list.length() == 0)) return false;
-    _ = scalarBinary(
-        operation,
-        left_first orelse left,
-        right_first orelse right,
-    ) catch |fault| return scalarFailure(evaluator, fault, if (report.index) 0 else null);
+    _ = (switch (operation) {
+        inline else => |selected| scalarBinary(selected, left_first orelse left, right_first orelse right),
+    }) catch |fault| return scalarFailure(evaluator, fault, if (report.index) 0 else null);
     return false;
 }
 
 fn rejectUnsupportedFlatUnary(
     evaluator: *Machine,
-    comptime operation: UnaryOp,
+    operation: UnaryOp,
     operand: Value,
     report: FaultReport,
 ) MachineError!bool {
     const first = firstFlatElement(operand) orelse return false;
-    _ = scalarUnary(operation, first) catch |fault|
+    _ = selectUnary(operation)(first) catch |fault|
         return scalarFailure(evaluator, fault, if (report.index) 0 else null);
     return false;
 }
 
-fn buildNestedTypedNumericBinaryFor(
+fn buildNestedTypedNumericBinary(
     evaluator: *Machine,
-    comptime operation: BinaryOp,
+    operation: BinaryOp,
     left_item: Value,
     right_item: Value,
     report: FaultReport,
@@ -2290,42 +2387,8 @@ fn buildNestedTypedNumericBinaryFor(
     if (length == 0) return null;
     const left_class = left_leaf orelse left_scalar.?;
     const right_class = right_leaf orelse right_scalar.?;
-    inline for (number_classes) |candidate_left| {
-        inline for (number_classes) |candidate_right| {
-            inline for (binary_shapes) |candidate_shape| {
-                if (candidate_left == left_class and candidate_right == right_class and candidate_shape == shape) {
-                    const maybe_out = comptime binaryResult(operation, candidate_left, candidate_right);
-                    if (maybe_out == null) return null;
-                    const out = comptime maybe_out.?;
-                    const acquired = try acquireOutput(evaluator, out, null, length);
-                    var state = TypedState{
-                        .left = .absent,
-                        .right = .absent,
-                        .output = acquired.output,
-                        .cursor = .init(length),
-                        .report = report,
-                        .root = null,
-                    };
-                    var held_locally = true;
-                    errdefer if (held_locally) state.retire(evaluator.releaseDomain());
-                    state.left = switch (candidate_shape) {
-                        .leaf_leaf, .leaf_scalar => acquireOperand(candidate_left, left_item),
-                        .scalar_leaf => .{ .scalar = left_item },
-                        .leaf_only => unreachable,
-                    };
-                    state.right = switch (candidate_shape) {
-                        .leaf_leaf, .scalar_leaf => acquireOperand(candidate_right, right_item),
-                        .leaf_scalar => .{ .scalar = right_item },
-                        .leaf_only => unreachable,
-                    };
-                    const step = comptime binaryStep(operation, candidate_left, candidate_right, candidate_shape);
-                    held_locally = false;
-                    return .{ .numeric = .{ .state = state, .step = step } };
-                }
-            }
-        }
-    }
-    unreachable;
+    const plan = NumericBinaryPlan.select(operation, left_class, right_class, shape) orelse return null;
+    return try plan.prepare(evaluator, left_item, right_item, null, length, report);
 }
 
 fn buildNestedTypedBinary(
@@ -2336,19 +2399,66 @@ fn buildNestedTypedBinary(
     report: FaultReport,
 ) MachineError!?NestedTyped {
     if (try buildNestedTypedCharBinary(evaluator, operation, left, right, report)) |typed| return typed;
-    const numeric = switch (operation) {
-        inline else => |selected| try buildNestedTypedNumericBinaryFor(evaluator, selected, left, right, report),
-    };
+    const numeric = try buildNestedTypedNumericBinary(evaluator, operation, left, right, report);
     if (numeric) |typed| return typed;
-    _ = switch (operation) {
-        inline else => |selected| try rejectUnsupportedFlatBinary(evaluator, selected, left, right, report),
-    };
+    _ = try rejectUnsupportedFlatBinary(evaluator, operation, left, right, report);
     return null;
 }
 
-fn buildNestedTypedUnaryFor(
+/// A closed operation/class pair binds the loop and its output representation.
+/// Both nested and direct pervasion share preparation and ownership transfer.
+const NumericUnaryPlan = opaque {
+    const Data = struct { input: Number, out: Number, step: TypedStep };
+
+    fn select(operation: UnaryOp, input: Number) *const NumericUnaryPlan {
+        return switch (operation) {
+            inline else => |selected| blk: {
+                inline for (number_classes) |candidate| {
+                    if (candidate == input) {
+                        const data = comptime Data{
+                            .input = candidate,
+                            .out = unaryResult(selected, candidate),
+                            .step = unaryStep(selected, candidate),
+                        };
+                        break :blk @ptrCast(&data);
+                    }
+                }
+                unreachable;
+            },
+        };
+    }
+
+    /// Failure borrows the input; success transfers the acquired output and
+    /// reader into the returned state. Reader acquisition cannot fail.
+    fn prepare(
+        self: *const NumericUnaryPlan,
+        evaluator: *Machine,
+        operand: Value,
+        reuse: ?*heap.OwnedValue,
+        length: usize,
+        report: FaultReport,
+    ) error{OutOfMemory}!NestedTyped {
+        const data: *const Data = @ptrCast(@alignCast(self));
+        const acquired = switch (data.out) {
+            inline else => |out| try acquireOutput(evaluator, out, reuse, length),
+        };
+        return .{ .numeric = .{
+            .state = .{
+                .left = if (acquired.aliased) .aliased else acquireOperand(data.input, operand),
+                .right = .absent,
+                .output = acquired.output,
+                .cursor = .init(length),
+                .report = report,
+                .root = acquired.root,
+            },
+            .step = data.step,
+        } };
+    }
+};
+
+fn buildNestedTypedUnary(
     evaluator: *Machine,
-    comptime operation: UnaryOp,
+    operation: UnaryOp,
     operand: Value,
     report: FaultReport,
 ) MachineError!?NestedTyped {
@@ -2358,45 +2468,14 @@ fn buildNestedTypedUnaryFor(
     };
     const length: usize = @intCast(operand.list.length());
     if (length == 0) return null;
-    inline for (number_classes) |candidate| {
-        if (candidate == class) {
-            const out = comptime unaryResult(operation, candidate);
-            const acquired = try acquireOutput(evaluator, out, null, length);
-            var state = TypedState{
-                .left = .absent,
-                .right = .absent,
-                .output = acquired.output,
-                .cursor = .init(length),
-                .report = report,
-                .root = null,
-            };
-            var held_locally = true;
-            errdefer if (held_locally) state.retire(evaluator.releaseDomain());
-            state.left = acquireOperand(candidate, operand);
-            const step = comptime unaryStep(operation, candidate);
-            held_locally = false;
-            return .{ .numeric = .{ .state = state, .step = step } };
-        }
-    }
-    unreachable;
-}
-
-fn buildNestedTypedUnary(
-    evaluator: *Machine,
-    operation: UnaryOp,
-    operand: Value,
-    report: FaultReport,
-) MachineError!?NestedTyped {
-    return switch (operation) {
-        inline else => |selected| buildNestedTypedUnaryFor(evaluator, selected, operand, report),
-    };
+    return try NumericUnaryPlan.select(operation, class).prepare(evaluator, operand, null, length, report);
 }
 
 /// Dispatches one binary operation. Returns false when the operand shapes belong
 /// to the generic route, having consumed nothing.
 fn startTypedBinary(
     evaluator: *Machine,
-    comptime operation: BinaryOp,
+    operation: BinaryOp,
     left: *heap.OwnedValue,
     right: *heap.OwnedValue,
     report: FaultReport,
@@ -2426,67 +2505,16 @@ fn startTypedBinary(
     const left_class = left_leaf orelse left_scalar.?;
     const right_class = right_leaf orelse right_scalar.?;
 
-    inline for (number_classes) |candidate_left| {
-        inline for (number_classes) |candidate_right| {
-            inline for (binary_shapes) |candidate_shape| {
-                if (candidate_left == left_class and
-                    candidate_right == right_class and
-                    candidate_shape == shape)
-                {
-                    // `min`/`max` on a mixed pair has no single result width; that
-                    // combination is classified generic and never reaches here.
-                    const maybe_out = comptime binaryResult(operation, candidate_left, candidate_right);
-                    if (maybe_out == null) return false;
-                    const out = comptime maybe_out.?;
-                    // Reuse only the left leaf, and only when it is not also the
-                    // right operand: a shared list refuses the claim, which is
-                    // what makes self-aliasing safe without a special case.
-                    const reuse: ?*heap.OwnedValue = if (candidate_shape == .leaf_scalar) left else null;
-                    const acquired = try acquireOutput(evaluator, out, reuse, length);
-                    var state = TypedState{
-                        .left = .absent,
-                        .right = .absent,
-                        .output = acquired.output,
-                        .cursor = flat.FlatCursor.init(length),
-                        .report = report,
-                        .root = acquired.root,
-                    };
-                    // Local ownership ends the moment the driver takes the
-                    // state: a failing `startDriver` retires the copy it was
-                    // handed, so retiring this one too would release the same
-                    // capabilities twice.
-                    var held_locally = true;
-                    errdefer if (held_locally) state.retire(evaluator.releaseDomain());
-                    state.left = if (acquired.aliased)
-                        .aliased
-                    else switch (candidate_shape) {
-                        .leaf_leaf, .leaf_scalar => acquireOperand(candidate_left, left_item),
-                        .scalar_leaf => TypedOperand{ .scalar = left_item },
-                        .leaf_only => unreachable,
-                    };
-                    state.right = switch (candidate_shape) {
-                        .leaf_leaf, .scalar_leaf => acquireOperand(candidate_right, right_item),
-                        .leaf_scalar => TypedOperand{ .scalar = right_item },
-                        .leaf_only => unreachable,
-                    };
-                    const step = comptime binaryStep(
-                        operation,
-                        candidate_left,
-                        candidate_right,
-                        candidate_shape,
-                    );
-                    held_locally = false;
-                    return startTypedDriver(evaluator, state, step);
-                }
-            }
-        }
-    }
-    return rejectUnsupportedFlatBinary(evaluator, operation, left_item, right_item, report);
+    // Mixed min/max stays on the generic route without acquiring storage.
+    const plan = NumericBinaryPlan.select(operation, left_class, right_class, shape) orelse return false;
+    const typed = try plan.prepare(evaluator, left_item, right_item, left, length, report);
+    // startDriver consumes the payload on both success and failure.
+    return startTypedDriver(evaluator, typed.numeric.state, typed.numeric.step);
 }
 
 fn startTypedUnary(
     evaluator: *Machine,
-    comptime operation: UnaryOp,
+    operation: UnaryOp,
     operand: *heap.OwnedValue,
     report: FaultReport,
 ) MachineError!bool {
@@ -2495,28 +2523,9 @@ fn startTypedUnary(
         return rejectUnsupportedFlatUnary(evaluator, operation, item, report);
     const length: usize = @intCast(item.list.length());
     if (length == 0) return false;
-    inline for (number_classes) |candidate| {
-        if (candidate == class) {
-            const out = comptime unaryResult(operation, candidate);
-            const acquired = try acquireOutput(evaluator, out, operand, length);
-            var state = TypedState{
-                .left = .absent,
-                .right = .absent,
-                .output = acquired.output,
-                .cursor = flat.FlatCursor.init(length),
-                .report = report,
-                .root = acquired.root,
-            };
-            // See the binary entry: local ownership ends at the hand-off.
-            var held_locally = true;
-            errdefer if (held_locally) state.retire(evaluator.releaseDomain());
-            state.left = if (acquired.aliased) .aliased else acquireOperand(candidate, item);
-            const step = comptime unaryStep(operation, candidate);
-            held_locally = false;
-            return startTypedDriver(evaluator, state, step);
-        }
-    }
-    return false;
+    const typed = try NumericUnaryPlan.select(operation, class).prepare(evaluator, item, operand, length, report);
+    // startDriver consumes the state on both success and failure.
+    return startTypedDriver(evaluator, typed.numeric.state, typed.numeric.step);
 }
 
 /// Recognized-idiom entries.
@@ -2748,21 +2757,69 @@ pub fn typedReduceCandidate(operation: BinaryOp, input: Value, initial: Value) b
     const element_class = leafNumber(input) orelse return false;
     const accumulator_class = scalarNumber(initial) orelse return false;
     if (input.list.length() == 0) return false;
-    var stable = false;
-    inline for (number_classes) |candidate_accumulator| {
-        inline for (number_classes) |candidate_element| {
-            if (candidate_accumulator == accumulator_class and candidate_element == element_class) {
-                switch (operation) {
-                    inline else => |selected| {
-                        const result = comptime binaryResult(selected, candidate_accumulator, candidate_element);
-                        stable = result != null and result.? == candidate_accumulator;
-                    },
-                }
-            }
-        }
-    }
-    return stable;
+    return NumericReducePlan.select(operation, accumulator_class, element_class, false) != null;
 }
+
+/// Only fixpoint accumulator/element pairs can construct a reduction plan.
+/// The plan owns classification for both the guard and the entry point.
+const NumericReducePlan = opaque {
+    const Data = struct { accumulator: Number, element: Number, scan: bool, step: TypedReduceStep };
+
+    fn select(operation: BinaryOp, accumulator: Number, element: Number, scan: bool) ?*const NumericReducePlan {
+        return switch (operation) {
+            inline else => |selected| blk: {
+                // Scalar accumulators have no byte storage class.
+                inline for ([_]Number{ .integer, .real }) |candidate_accumulator| {
+                    inline for (number_classes) |candidate_element| {
+                        const out = comptime binaryResult(selected, candidate_accumulator, candidate_element);
+                        if (comptime out == null or out.? != candidate_accumulator) continue;
+                        inline for ([_]bool{ false, true }) |candidate_scan| {
+                            if (accumulator == candidate_accumulator and element == candidate_element and scan == candidate_scan) {
+                                const data = comptime Data{
+                                    .accumulator = candidate_accumulator,
+                                    .element = candidate_element,
+                                    .scan = candidate_scan,
+                                    .step = reduceStep(selected, candidate_accumulator, candidate_element, candidate_scan),
+                                };
+                                break :blk @ptrCast(&data);
+                            }
+                        }
+                    }
+                }
+                break :blk null;
+            },
+        };
+    }
+
+    /// Borrows the caller's values. Acquired readers and output are consumed
+    /// locally on preparation failure, and by startDriver on either outcome.
+    fn start(self: *const NumericReducePlan, evaluator: *Machine, input: Value, initial: Value, cursor_start: usize, consumed: usize) MachineError!void {
+        const data: *const Data = @ptrCast(@alignCast(self));
+        const length: usize = @intCast(input.list.length());
+        var state = TypedReduceState{
+            .input = acquireOperand(data.element, input),
+            .output = null,
+            .accumulator = switch (data.accumulator) {
+                .byte => unreachable,
+                .integer => .{ .integer = initial.int },
+                .real => .{ .real = initial.float },
+            },
+            .cursor = .{ .index = cursor_start, .length = length },
+        };
+        var held_locally = true;
+        errdefer if (held_locally) state.retire(evaluator.releaseDomain());
+        if (data.scan) state.output = switch (data.accumulator) {
+            .byte => unreachable,
+            inline else => |out| (try acquireOutput(evaluator, out, null, length)).output,
+        };
+        held_locally = false;
+        return evaluator.startDriver(TypedReduceDriver{
+            .state = .init(state),
+            .step = data.step,
+            .consumed = consumed,
+        });
+    }
+};
 
 /// Reached only if a guard and a dispatch disagreed, which the candidate
 /// predicate exists to prevent; it is a domain error rather than a silent
@@ -2789,65 +2846,9 @@ pub fn idiomReduceStart(operation: BinaryOp) IdiomReduceStart {
             ) MachineError!void {
                 const element_class = leafNumber(input).?;
                 const accumulator_class = scalarNumber(initial).?;
-                const length: usize = @intCast(input.list.length());
-                inline for (number_classes) |candidate_accumulator| {
-                    inline for (number_classes) |candidate_element| {
-                        if (candidate_accumulator == accumulator_class and
-                            candidate_element == element_class)
-                        {
-                            // Only the fixpoint combinations exist; the guard
-                            // above is what guarantees one of them is reached.
-                            const maybe_out = comptime binaryResult(
-                                selected,
-                                candidate_accumulator,
-                                candidate_element,
-                            );
-                            if (comptime maybe_out == null) return unexpectedReduceShape(evaluator);
-                            const out = comptime maybe_out.?;
-                            if (comptime out != candidate_accumulator) return unexpectedReduceShape(evaluator);
-                            var state = TypedReduceState{
-                                .input = acquireOperand(candidate_element, input),
-                                .output = null,
-                                .accumulator = switch (candidate_accumulator) {
-                                    .byte => unreachable,
-                                    .integer => .{ .integer = initial.int },
-                                    .real => .{ .real = initial.float },
-                                },
-                                .cursor = .{ .index = start, .length = length },
-                            };
-                            var held_locally = true;
-                            errdefer if (held_locally) state.retire(evaluator.releaseDomain());
-                            inline for ([_]bool{ false, true }) |candidate_scan| {
-                                if (candidate_scan == scan) {
-                                    if (candidate_scan) {
-                                        const writer = try heap.LeafWriter(out.kind()).init(
-                                            evaluator.allocator(),
-                                            length,
-                                        );
-                                        state.output = switch (out) {
-                                            .byte => .{ .fresh_bytes = writer },
-                                            .integer => .{ .fresh_ints = writer },
-                                            .real => .{ .fresh_reals = writer },
-                                        };
-                                    }
-                                    const step = comptime reduceStep(
-                                        selected,
-                                        candidate_accumulator,
-                                        candidate_element,
-                                        candidate_scan,
-                                    );
-                                    held_locally = false;
-                                    return evaluator.startDriver(TypedReduceDriver{
-                                        .state = .init(state),
-                                        .step = step,
-                                        .consumed = consumed,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-                unreachable;
+                const plan = NumericReducePlan.select(selected, accumulator_class, element_class, scan) orelse
+                    return unexpectedReduceShape(evaluator);
+                return plan.start(evaluator, input, initial, start, consumed);
             }
         }.run,
     };

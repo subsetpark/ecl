@@ -898,6 +898,18 @@ The registry is a closed, compile-time-validated table over the operation and
 representation enums. Every added operation or leaf kind must classify each
 reachable combination for the program to compile.
 
+Unary and binary kernel selection produce opaque static plans binding operand
+classes, result storage, and the specialized loop. Shared preparation acquires the
+readers and output from that plan for both direct and nested pervasion; callers
+cannot choose a loop independently of its storage contract. Only reachable
+class and shape combinations instantiate loops. Allocation, ownership transfer,
+and driver setup stay outside the operation-by-representation expansion, while
+the bounded element loops retain their concrete types.
+Sequential reductions use the same separation: a static plan admits only
+accumulator classes that remain stable under the operation, and owns selection
+for both the recognition guard and entry. Shared preparation acquires storage
+without changing the reduction order, scan publication, or consumed inputs.
+
 ### Scalar semantics remain the oracle
 
 Typed loops implement the same conversions, overflow rules, fault indices,
@@ -910,6 +922,12 @@ Flat inputs are borrowed through retaining `LeafReader` capabilities. Outputs
 are built through single-publication `LeafWriter`s or through a claimed unique
 input whose element width is compatible. Mutable access and its ownership proof
 arrive together as one capability.
+
+Faulted blocks replay through shared scalar semantics before any block output
+is published. Replay reads retained input capabilities in logical order; a
+reused buffer's owned root preserves its original representation until final
+publication, even when the result changes numeric kind at the same byte width.
+Sharing this cold path does not add work outside the already charged block.
 
 Scalar broadcasting reads a repeated operand in stride-zero style, avoiding an
 array of copies. SIMD is permitted only behind a closed policy whose scalar
@@ -1341,6 +1359,10 @@ metadata directly; primitive families own their declarations, and kernel
 spellings remain owned by their closed operation enums. The source audit
 checks semantic spelling conventions across all classified production sources;
 documentation completeness and effect syntax are compile-time requirements.
+Validated static descriptors carry those declarations into a shared runtime
+installation path. Effect token storage is specialized by its required capacity,
+not by the spelling of each word; installation retains declaration order and
+the same ownership and failure cleanup contract.
 
 Port operation declarations bind documentation, typed handlers, lanes, and
 supported exchange endpoints together. Built-in and extension bridges derive
