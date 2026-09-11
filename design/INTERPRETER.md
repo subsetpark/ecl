@@ -999,6 +999,13 @@ Setup publishes the wait only after all registrations are ready. Completion,
 cancellation, and timeout contend through one arbitration state, so exactly one
 result owns delivery and cleanup.
 
+A parked root owns a separate completion rendezvous with exactly one observer.
+Publishing its resume and returning to the observer synchronize on that
+rendezvous's lock, so publication finishes before waiter storage can be reused.
+Idle executor threads cannot consume its notification.
+Worker-pool roots wait for completion without competing for the executor queue,
+while cooperative roots continue servicing bounded work until completion.
+
 External readiness uses the same arbitration rather than a parallel scheduler.
 `external.zig` supplies nominal type-erased readiness and scope-membership
 handles whose callbacks state ownership on registration, failed registration,

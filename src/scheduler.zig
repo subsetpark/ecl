@@ -212,9 +212,33 @@ const ParentMembership = union(enum) {
 };
 
 const RootWaiter = struct {
-    scheduler: *const WorkerScheduler,
     unit: *machine.Unit,
-    ready: std.atomic.Value(bool) = .init(false),
+    mutex: std.Io.Mutex = .init,
+    changed: std.Io.Condition = .init,
+    ready: bool = false,
+
+    // Completion has one observer. Sharing the worker queue's condition lets
+    // idle workers consume a notification intended for this parked root.
+    // The mutex also keeps the stack-owned waiter alive through publication.
+    fn publish(self: *RootWaiter, result: machine.ParkResume) void {
+        std.Io.Threaded.mutexLock(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        self.unit.installParkResume(result);
+        self.ready = true;
+        self.changed.signal(blockingIo());
+    }
+
+    fn completed(self: *RootWaiter) bool {
+        std.Io.Threaded.mutexLock(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        return self.ready;
+    }
+
+    fn awaitCompletion(self: *RootWaiter) void {
+        std.Io.Threaded.mutexLock(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        while (!self.ready) self.changed.waitUncancelable(blockingIo(), &self.mutex);
+    }
 };
 
 const WaitOwner = union(enum) {
@@ -1050,20 +1074,7 @@ const WaitSet = struct {
                 std.debug.assert(decision.command == .enqueue);
                 self.scheduler.enqueueTask(cell);
             },
-            .root => |root| {
-                // `ready` publishes a stack-owned RootWaiter back to the main
-                // thread. Capture every field first and make the release store
-                // the final access, so the next root park cannot reuse this
-                // stack slot while an old selector still dereferences it.
-                const scheduler = root.scheduler;
-                const unit = root.unit;
-                const scheduler_state = scheduler.privateState();
-                unit.installParkResume(park_result);
-                std.Io.Threaded.mutexLock(&scheduler_state.queue_mutex);
-                root.ready.store(true, .release);
-                scheduler_state.queue_condition.broadcast(blockingIo());
-                std.Io.Threaded.mutexUnlock(&scheduler_state.queue_mutex);
-            },
+            .root => |root| root.publish(park_result),
         }
     }
 
@@ -1974,7 +1985,7 @@ pub const WorkerScheduler = enum(usize) {
                 return;
             },
         };
-        var root = RootWaiter{ .scheduler = self, .unit = unit };
+        var root = RootWaiter{ .unit = unit };
         const wait = try WaitSet.create(
             self,
             .{ .root = &root },
@@ -1983,26 +1994,12 @@ pub const WorkerScheduler = enum(usize) {
         _ = unit.takeParkRequest();
         while (!wait.advanceSetup()) std.Thread.yield() catch
             @panic("scheduler root wait setup yield failed");
-        while (!root.ready.load(.acquire)) {
-            if (state_.config.isCooperative()) {
+        if (state_.config.isCooperative()) {
+            while (!root.completed()) {
                 if (!self.runNextCooperative())
                     std.Thread.yield() catch @panic("cooperative scheduler yield failed");
-                continue;
             }
-            var queued = false;
-            std.Io.Threaded.mutexLock(&state_.queue_mutex);
-            if (!root.ready.load(.acquire) and state_.queue_first == null and !state_.stopping) {
-                state_.queue_condition.waitUncancelable(blockingIo(), &state_.queue_mutex);
-            } else if (state_.queue_first != null) {
-                // The root is not an executor in worker-pool mode. Do not let
-                // its observation loop repeatedly reacquire the queue mutex
-                // ahead of the one worker that can deliver this wait.
-                state_.queue_condition.signal(blockingIo());
-                queued = true;
-            }
-            std.Io.Threaded.mutexUnlock(&state_.queue_mutex);
-            if (queued) std.Thread.yield() catch @panic("root wait queue yield failed");
-        }
+        } else root.awaitCompletion();
     }
 
     pub fn cancelOwned(

@@ -206,13 +206,17 @@ test "native: media pipeline drains output and diagnostics concurrently under pr
 }
 
 test "native: input finish preserves an accepted writer through its final byte" {
-    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.factory [] port.open 'p set p portprobe.echo [] port.begin 'x set " ++
+    // Repeat root readiness handoffs while the other pool workers are idle.
+    // A root completion must not compete with their queue notifications.
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "0 (dup 32 <) (portprobe.reset " ++
+        "portprobe.factory [] port.open 'p set p portprobe.echo [] port.begin 'x set " ++
         "x portprobe.input port.endpoint 'w set x portprobe.output port.endpoint 'r set " ++
         "w wrap ([1] 32 take port.write) @spawn 'a set r 8 port.read 'prefix set w port.finish " ++
         "prefix (dup len 32 <) (r 8 port.read cat) while [1] 32 take match? " ++
         "r 8 port.read len a task.await 'ok at pop " ++
         "w wrap ([] port.write) @attempt 'err at 'kind at " ++
-        "x port.await x port.close p port.close portprobe.cleaned", "1 0 'io 1");
+        "x port.await x port.close p port.close portprobe.cleaned " ++
+        "4 pack [1 0 'io 1] match? 'contract error.new assert 1 +) while", "32");
 }
 
 test "native: concurrent writes remain contiguous through repeated byte pressure" {

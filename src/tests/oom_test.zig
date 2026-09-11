@@ -370,6 +370,7 @@ fn checkPostInitAllocationFailureShard(
     var failure_offset = ordinal_shard_index + worker_index * ordinal_shard_count;
     const stride = allocation_failure_shard_count * ordinal_shard_count;
     while (failure_offset < needed_alloc_count) : (failure_offset += stride) {
+        errdefer std.debug.print("\nOOM failure offset {d}/{d}\n", .{ failure_offset, needed_alloc_count });
         var failing = std.testing.FailingAllocator.init(backing_allocator, .{});
 
         if (probe(&failing, failure_offset)) |_| {
@@ -475,6 +476,7 @@ fn checkPostInitAllocationFailureOrdinalShard(
                 context.worker_index,
                 shape,
             ) catch |err| {
+                std.debug.print("OOM worker {d}: {s}\n", .{ context.worker_index, @errorName(err) });
                 context.result = err;
             };
         }
@@ -1077,9 +1079,9 @@ fn stdlibSessionAllocationProbe(
                 "0 time.from-unix 1 time.from-unix time.cmp pop 3 time.seconds pop " ++
                 "[] (\"2024-02-30T00:00:00Z\" time.parse) @attempt pop",
         ),
-        // The pure words once each, then a serving unit whose acceptor parks
-        // with no peer and is cancelled at once, so every ordinal is
-        // deterministic (a live exchange cannot be an allocation oracle).
+        // The pure words once each, then a serving unit with no peer that is
+        // cancelled at once. Listener startup and cancellation can elide wait
+        // allocations even without a live exchange.
         .http_server => try runOk(
             &runtime,
             "oom-http-server.ecl",
@@ -1340,7 +1342,7 @@ const HttpMemoryIo = struct {
 fn checkStdlibSurface(comptime surface: StdlibSurface) !void {
     // Registered network startup and operations can finish before a waiter
     // allocates its readiness storage; allocation counts depend on progress.
-    if (surface == .net or surface == .net_connection or surface == .net_give or surface == .http)
+    if (surface == .net or surface == .net_connection or surface == .net_give or surface == .http or surface == .http_server)
         return checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, SurfaceProbe(surface).run);
     try checkAllPostInitAllocationFailuresParallel(
         std.heap.smp_allocator,

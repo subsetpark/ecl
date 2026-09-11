@@ -30,7 +30,10 @@ pub fn main(init: std.process.Init) void {
         else => {
             if (result.stderr.len != 0) writeFile(init.io, .stderr, result.stderr) catch
                 std.process.exit(1);
-            fail(init.io, "captured test runner: test executable terminated abnormally\n");
+            var buffer: [256]u8 = undefined;
+            const message = std.fmt.bufPrint(&buffer, "captured test runner: test executable terminated abnormally: {any}\n", .{result.term}) catch
+                fail(init.io, "captured test runner: test executable terminated abnormally\n");
+            fail(init.io, message);
         },
     }
 }
