@@ -117,9 +117,19 @@ jobs:
             ubuntu:24.04 tail -f /dev/null
           # PANT_VERSION is intentionally expanded inside the container.
           # shellcheck disable=SC2016
-          timeout 15m docker exec --env OPTIMIZE="$OPTIMIZE" --env PANT_VERSION="$PANT_VERSION" ecl-ci sh -euxc '
+          timeout 20m docker exec --env OPTIMIZE="$OPTIMIZE" --env PANT_VERSION="$PANT_VERSION" ecl-ci sh -euxc '
             export DEBIAN_FRONTEND=noninteractive
-            timeout 5m apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3 update
+            # Retry the whole update if a slow mirror exhausts its wall-clock
+            # budget; APT download retries cannot recover from that timeout.
+            for attempt in 1 2; do
+              if timeout 5m apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3 update; then
+                break
+              else
+                apt_status=$?
+              fi
+              if [ "$attempt" -eq 2 ]; then exit "$apt_status"; fi
+              echo "APT update failed with status $apt_status; retrying once" >&2
+            done
             timeout 5m apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3 install -y --no-install-recommends \
               ca-certificates curl expect git libc6-dev python3 xz-utils z3
             curl -fsSLo /tmp/zig.tar.xz https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
