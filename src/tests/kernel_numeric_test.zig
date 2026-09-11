@@ -135,6 +135,32 @@ test "numeric: fault blocks report first index before aliased stores" {
     });
 }
 
+test "numeric: aliased fault replay retains source representation across retags" {
+    try helper.expectErrors(&.{
+        .{
+            .name = "float input reused for integer output",
+            .source = "[1.0 1.0e100] floor",
+            .kind = "overflow",
+            .word = "floor",
+            .data = &.{.{ .name = "index", .expected = .{ .int = 1 } }},
+        },
+        .{
+            .name = "integer input reused for float output",
+            .source = "[0 9223372036854775807] 1024 pow",
+            .kind = "overflow",
+            .word = "pow",
+            .data = &.{.{ .name = "index", .expected = .{ .int = 1 } }},
+        },
+        .{
+            .name = "unary integer input reused for float output",
+            .source = "[1 -1] sqrt",
+            .kind = "domain",
+            .word = "sqrt",
+            .data = &.{.{ .name = "index", .expected = .{ .int = 1 } }},
+        },
+    });
+}
+
 test "numeric: conform and depth diagnostics are bounded" {
     try helper.expectError(.{
         .name = "nonconforming leading axes",

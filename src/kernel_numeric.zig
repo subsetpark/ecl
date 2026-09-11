@@ -1443,17 +1443,6 @@ fn fixedCharStep(
                 state.right.slice(right_class)[index];
         }
 
-        fn replay(state: *FixedCharState, context: support.Context, piece: flat.Chunk) MachineError {
-            for (piece.start..piece.end) |index| {
-                _ = scalarBinary(
-                    operation,
-                    left_class.boxed(leftValue(state, index)),
-                    right_class.boxed(rightValue(state, index)),
-                ) catch |fault| return failTypedScalar(context, state.report, fault, index);
-            }
-            unreachable;
-        }
-
         fn step(state: *FixedCharState, context: support.Context) MachineError!void {
             const range = try state.cursor.nextRange(context) orelse return;
             var block = Loops.Staging.init();
@@ -1484,7 +1473,7 @@ fn fixedCharStep(
                     ),
                     .leaf_only => unreachable,
                 };
-                if (status == .faulted) return replay(state, context, piece);
+                if (status == .faulted) return replayCharacterBinary(&state.left, &state.right, state.report, context, piece, selectScalar(operation));
                 state.output.writeRange(piece.start, block.written());
                 offset += piece.len();
             }
@@ -1583,17 +1572,6 @@ fn dynamicCharStep(
                 state.right.slice(right_class)[index];
         }
 
-        fn replay(state: *DynamicCharState, context: support.Context, piece: flat.Chunk) MachineError {
-            for (piece.start..piece.end) |index| {
-                _ = scalarBinary(
-                    operation,
-                    left_class.boxed(leftValue(state, index)),
-                    right_class.boxed(rightValue(state, index)),
-                ) catch |fault| return failTypedScalar(context, state.report, fault, index);
-            }
-            unreachable;
-        }
-
         fn step(state: *DynamicCharState, context: support.Context) MachineError!void {
             const range = try state.cursor.nextRange(context) orelse return;
             var block = Loops.Staging.init();
@@ -1624,7 +1602,7 @@ fn dynamicCharStep(
                     ),
                     .leaf_only => unreachable,
                 };
-                if (status == .faulted) return replay(state, context, piece);
+                if (status == .faulted) return replayCharacterBinary(&state.left, &state.right, state.report, context, piece, selectScalar(operation));
                 if (state.phase == .profile) {
                     for (block.written()) |codepoint| state.max_codepoint = @max(state.max_codepoint, codepoint);
                 } else state.writer.?.borrowMut().writeCodepoints(piece.start, block.written());
@@ -1724,6 +1702,62 @@ const NestedTyped = union(enum) {
         };
     }
 };
+
+/// Fault replay reads the still-unpublished block through retained capabilities.
+/// Its runtime operand tags and scalar callback avoid operation/width/shape
+/// expansion in this cold path. The caller has already charged this block.
+fn replayNumericValue(operand: *const TypedOperand, state: *const TypedState, index: usize) Value {
+    return switch (operand.*) {
+        .absent => unreachable,
+        .scalar => |item| item,
+        .bytes => |*reader| .{ .int = reader.slice()[index] },
+        .ints => |*reader| .{ .int = reader.slice()[index] },
+        .reals => |*reader| .{ .float = reader.slice()[index] },
+        // Same-width reuse may retag integers as floats or vice versa. The
+        // owned root still has the source kind until output publication.
+        .aliased => switch (leafNumber(state.root.?).?) {
+            .byte => .{ .int = state.output.aliasedSlice(.byte)[index] },
+            .integer => .{ .int = state.output.aliasedSlice(.integer)[index] },
+            .real => .{ .float = state.output.aliasedSlice(.real)[index] },
+        },
+    };
+}
+
+noinline fn replayNumericBinary(state: *TypedState, context: support.Context, piece: flat.Chunk, scalar: ScalarBinary) MachineError {
+    for (piece.start..piece.end) |index| {
+        _ = scalar(replayNumericValue(&state.left, state, index), replayNumericValue(&state.right, state, index)) catch |fault|
+            return state.faultAt(context, fault, index);
+    }
+    unreachable;
+}
+
+noinline fn replayNumericUnary(state: *TypedState, context: support.Context, piece: flat.Chunk, scalar: ScalarUnary) MachineError {
+    for (piece.start..piece.end) |index| {
+        _ = scalar(replayNumericValue(&state.left, state, index)) catch |fault|
+            return state.faultAt(context, fault, index);
+    }
+    unreachable;
+}
+
+fn replayCharacterValue(operand: *const FlatScalarOperand, index: usize) Value {
+    return switch (operand.*) {
+        .absent => unreachable,
+        .scalar => |item| item,
+        .bytes => |*reader| .{ .int = reader.slice()[index] },
+        .ints => |*reader| .{ .int = reader.slice()[index] },
+        .char1 => |*reader| .{ .char = reader.slice()[index] },
+        .char2 => |*reader| .{ .char = reader.slice()[index] },
+        .char4 => |*reader| .{ .char = @intCast(reader.slice()[index]) },
+    };
+}
+
+noinline fn replayCharacterBinary(left: *const FlatScalarOperand, right: *const FlatScalarOperand, report: FaultReport, context: support.Context, piece: flat.Chunk, scalar: ScalarBinary) MachineError {
+    for (piece.start..piece.end) |index| {
+        _ = scalar(replayCharacterValue(left, index), replayCharacterValue(right, index)) catch |fault|
+            return failTypedScalar(context, report, fault, index);
+    }
+    unreachable;
+}
 
 /// One charged chunk of a binary typed operation.
 fn binaryStep(
@@ -1858,27 +1892,6 @@ fn binaryStep(
                 state.right.slice(right_class);
         }
 
-        /// Replays one faulted block through the shared scalar semantics to find
-        /// the first failing logical index. The mask proved something in this
-        /// block faults, so the walk always finds it.
-        fn replay(state: *TypedState, context: support.Context, piece: flat.Chunk) MachineError {
-            for (piece.start..piece.end) |index| {
-                const a = switch (shape) {
-                    .leaf_leaf, .leaf_scalar => leftSlice(state)[index],
-                    .scalar_leaf => left_class.unboxed(state.left.scalar),
-                    .leaf_only => unreachable,
-                };
-                const b = switch (shape) {
-                    .leaf_leaf, .scalar_leaf => rightSlice(state)[index],
-                    .leaf_scalar => right_class.unboxed(state.right.scalar),
-                    .leaf_only => unreachable,
-                };
-                _ = scalarBinary(operation, left_class.boxed(a), right_class.boxed(b)) catch |fault|
-                    return state.faultAt(context, fault, index);
-            }
-            unreachable;
-        }
-
         fn step(state: *TypedState, context: support.Context) MachineError!void {
             const range = try state.cursor.nextRange(context) orelse return;
             var block = flat.Block(out.Element()).init();
@@ -1919,7 +1932,7 @@ fn binaryStep(
                 };
                 // Nothing is stored until the whole block is known clean: a
                 // reused input buffer still holds the operands the replay reads.
-                if (status == .faulted) return replay(state, context, piece);
+                if (status == .faulted) return replayNumericBinary(state, context, piece, selectScalar(operation));
                 state.output.store(out, piece.start, block.written());
                 offset += piece.len();
             }
@@ -1964,15 +1977,6 @@ fn unaryStep(comptime operation: UnaryOp, comptime operand_class: Number) TypedS
                 state.left.slice(operand_class);
         }
 
-        fn replay(state: *TypedState, context: support.Context, piece: flat.Chunk) MachineError {
-            for (piece.start..piece.end) |index| {
-                const a = operandSlice(state)[index];
-                _ = scalarUnary(operation, operand_class.boxed(a)) catch |fault|
-                    return state.faultAt(context, fault, index);
-            }
-            unreachable;
-        }
-
         fn step(state: *TypedState, context: support.Context) MachineError!void {
             const range = try state.cursor.nextRange(context) orelse return;
             var block = flat.Block(out.Element()).init();
@@ -1987,7 +1991,7 @@ fn unaryStep(comptime operation: UnaryOp, comptime operand_class: Number) TypedS
                     .scalar_checked => Checked.unary(checked_body, operandSlice(state), piece, &block),
                     .vector_checked, .scalar_infallible => unreachable,
                 };
-                if (status == .faulted) return replay(state, context, piece);
+                if (status == .faulted) return replayNumericUnary(state, context, piece, selectUnary(operation));
                 state.output.store(out, piece.start, block.written());
                 offset += piece.len();
             }

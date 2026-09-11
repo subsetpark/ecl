@@ -17,6 +17,7 @@ The baseline's isolated build was 256.6 seconds with 159.19 MiB of IR.
 |---|---:|---:|
 | Shared validated builtin installation | 246.0 | 155.89 |
 | Shared unary and sequential reduction preparation | 243.8 | 154.16 |
+| Shared cold scalar fault replay | 237.7 | 148.47 |
 
 The builtin installer preserves static declaration validation and runtime
 installation/allocation order. Effect builders specialize by token count instead
@@ -35,6 +36,16 @@ small fold 97/97, large fold 119/120, and large scan 25/25. Small batches execut
 over a retained million-element integer range, and scan uses 100,000 elements.
 Unary uses `neg`; fold and scan use seed `0` and quotation `(+)`. Corresponding
 p95 pairs are 135/136, 170/173, 108/110, 140/143, and 32/34 ms.
+
+Shared fault replay removes 873 numeric-kernel IR definitions (3,548 to 2,675).
+Numeric-kernel machine code increases by 22,058 bytes, so the improvement is in
+the input to LLVM rather than final code size. The 31-pair warmed-batch method
+gives small numeric addition p50 79/79 ms and p95 89/87 ms, and character offset
+p50 94/96 ms and p95 106/110 ms. Each batch performs 20,000 iterations of
+`[1 2 3] 1 + pop` or `"aλ🙂" 1 + pop`, respectively. A public regression test
+covers fault kind and first index when unique-buffer reuse changes integer and
+float representation; a deliberately wrong index was confirmed to fail the
+77-test kernel slice before restoration.
 
 A separate build-only cache-splitting experiment compiled the existing runtime
 aggregation module as a static library. Its 2,710-byte archive contained no

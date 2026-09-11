@@ -923,6 +923,12 @@ are built through single-publication `LeafWriter`s or through a claimed unique
 input whose element width is compatible. Mutable access and its ownership proof
 arrive together as one capability.
 
+Faulted blocks replay through shared scalar semantics before any block output
+is published. Replay reads retained input capabilities in logical order; a
+reused buffer's owned root preserves its original representation until final
+publication, even when the result changes numeric kind at the same byte width.
+Sharing this cold path does not add work outside the already charged block.
+
 Scalar broadcasting reads a repeated operand in stride-zero style, avoiding an
 array of copies. SIMD is permitted only behind a closed policy whose scalar
 prologue, vector blocks, tail, and fault reporting preserve the same contract.
