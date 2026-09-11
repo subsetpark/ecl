@@ -2350,12 +2350,12 @@ fn rejectUnsupportedFlatBinary(
 
 fn rejectUnsupportedFlatUnary(
     evaluator: *Machine,
-    comptime operation: UnaryOp,
+    operation: UnaryOp,
     operand: Value,
     report: FaultReport,
 ) MachineError!bool {
     const first = firstFlatElement(operand) orelse return false;
-    _ = scalarUnary(operation, first) catch |fault|
+    _ = selectUnary(operation)(first) catch |fault|
         return scalarFailure(evaluator, fault, if (report.index) 0 else null);
     return false;
 }
@@ -2401,9 +2401,60 @@ fn buildNestedTypedBinary(
     return null;
 }
 
-fn buildNestedTypedUnaryFor(
+/// A closed operation/class pair binds the loop and its output representation.
+/// Both nested and direct pervasion share preparation and ownership transfer.
+const NumericUnaryPlan = opaque {
+    const Data = struct { input: Number, out: Number, step: TypedStep };
+
+    fn select(operation: UnaryOp, input: Number) *const NumericUnaryPlan {
+        return switch (operation) {
+            inline else => |selected| blk: {
+                inline for (number_classes) |candidate| {
+                    if (candidate == input) {
+                        const data = comptime Data{
+                            .input = candidate,
+                            .out = unaryResult(selected, candidate),
+                            .step = unaryStep(selected, candidate),
+                        };
+                        break :blk @ptrCast(&data);
+                    }
+                }
+                unreachable;
+            },
+        };
+    }
+
+    /// Failure borrows the input; success transfers the acquired output and
+    /// reader into the returned state. Reader acquisition cannot fail.
+    fn prepare(
+        self: *const NumericUnaryPlan,
+        evaluator: *Machine,
+        operand: Value,
+        reuse: ?*heap.OwnedValue,
+        length: usize,
+        report: FaultReport,
+    ) error{OutOfMemory}!NestedTyped {
+        const data: *const Data = @ptrCast(@alignCast(self));
+        const acquired = switch (data.out) {
+            inline else => |out| try acquireOutput(evaluator, out, reuse, length),
+        };
+        return .{ .numeric = .{
+            .state = .{
+                .left = if (acquired.aliased) .aliased else acquireOperand(data.input, operand),
+                .right = .absent,
+                .output = acquired.output,
+                .cursor = .init(length),
+                .report = report,
+                .root = acquired.root,
+            },
+            .step = data.step,
+        } };
+    }
+};
+
+fn buildNestedTypedUnary(
     evaluator: *Machine,
-    comptime operation: UnaryOp,
+    operation: UnaryOp,
     operand: Value,
     report: FaultReport,
 ) MachineError!?NestedTyped {
@@ -2413,38 +2464,7 @@ fn buildNestedTypedUnaryFor(
     };
     const length: usize = @intCast(operand.list.length());
     if (length == 0) return null;
-    inline for (number_classes) |candidate| {
-        if (candidate == class) {
-            const out = comptime unaryResult(operation, candidate);
-            const acquired = try acquireOutput(evaluator, out, null, length);
-            var state = TypedState{
-                .left = .absent,
-                .right = .absent,
-                .output = acquired.output,
-                .cursor = .init(length),
-                .report = report,
-                .root = null,
-            };
-            var held_locally = true;
-            errdefer if (held_locally) state.retire(evaluator.releaseDomain());
-            state.left = acquireOperand(candidate, operand);
-            const step = comptime unaryStep(operation, candidate);
-            held_locally = false;
-            return .{ .numeric = .{ .state = state, .step = step } };
-        }
-    }
-    unreachable;
-}
-
-fn buildNestedTypedUnary(
-    evaluator: *Machine,
-    operation: UnaryOp,
-    operand: Value,
-    report: FaultReport,
-) MachineError!?NestedTyped {
-    return switch (operation) {
-        inline else => |selected| buildNestedTypedUnaryFor(evaluator, selected, operand, report),
-    };
+    return try NumericUnaryPlan.select(operation, class).prepare(evaluator, operand, null, length, report);
 }
 
 /// Dispatches one binary operation. Returns false when the operand shapes belong
@@ -2490,7 +2510,7 @@ fn startTypedBinary(
 
 fn startTypedUnary(
     evaluator: *Machine,
-    comptime operation: UnaryOp,
+    operation: UnaryOp,
     operand: *heap.OwnedValue,
     report: FaultReport,
 ) MachineError!bool {
@@ -2499,28 +2519,9 @@ fn startTypedUnary(
         return rejectUnsupportedFlatUnary(evaluator, operation, item, report);
     const length: usize = @intCast(item.list.length());
     if (length == 0) return false;
-    inline for (number_classes) |candidate| {
-        if (candidate == class) {
-            const out = comptime unaryResult(operation, candidate);
-            const acquired = try acquireOutput(evaluator, out, operand, length);
-            var state = TypedState{
-                .left = .absent,
-                .right = .absent,
-                .output = acquired.output,
-                .cursor = flat.FlatCursor.init(length),
-                .report = report,
-                .root = acquired.root,
-            };
-            // See the binary entry: local ownership ends at the hand-off.
-            var held_locally = true;
-            errdefer if (held_locally) state.retire(evaluator.releaseDomain());
-            state.left = if (acquired.aliased) .aliased else acquireOperand(candidate, item);
-            const step = comptime unaryStep(operation, candidate);
-            held_locally = false;
-            return startTypedDriver(evaluator, state, step);
-        }
-    }
-    return false;
+    const typed = try NumericUnaryPlan.select(operation, class).prepare(evaluator, item, operand, length, report);
+    // startDriver consumes the state on both success and failure.
+    return startTypedDriver(evaluator, typed.numeric.state, typed.numeric.step);
 }
 
 /// Recognized-idiom entries.
@@ -2752,21 +2753,69 @@ pub fn typedReduceCandidate(operation: BinaryOp, input: Value, initial: Value) b
     const element_class = leafNumber(input) orelse return false;
     const accumulator_class = scalarNumber(initial) orelse return false;
     if (input.list.length() == 0) return false;
-    var stable = false;
-    inline for (number_classes) |candidate_accumulator| {
-        inline for (number_classes) |candidate_element| {
-            if (candidate_accumulator == accumulator_class and candidate_element == element_class) {
-                switch (operation) {
-                    inline else => |selected| {
-                        const result = comptime binaryResult(selected, candidate_accumulator, candidate_element);
-                        stable = result != null and result.? == candidate_accumulator;
-                    },
-                }
-            }
-        }
-    }
-    return stable;
+    return NumericReducePlan.select(operation, accumulator_class, element_class, false) != null;
 }
+
+/// Only fixpoint accumulator/element pairs can construct a reduction plan.
+/// The plan owns classification for both the guard and the entry point.
+const NumericReducePlan = opaque {
+    const Data = struct { accumulator: Number, element: Number, scan: bool, step: TypedReduceStep };
+
+    fn select(operation: BinaryOp, accumulator: Number, element: Number, scan: bool) ?*const NumericReducePlan {
+        return switch (operation) {
+            inline else => |selected| blk: {
+                // Scalar accumulators have no byte storage class.
+                inline for ([_]Number{ .integer, .real }) |candidate_accumulator| {
+                    inline for (number_classes) |candidate_element| {
+                        const out = comptime binaryResult(selected, candidate_accumulator, candidate_element);
+                        if (comptime out == null or out.? != candidate_accumulator) continue;
+                        inline for ([_]bool{ false, true }) |candidate_scan| {
+                            if (accumulator == candidate_accumulator and element == candidate_element and scan == candidate_scan) {
+                                const data = comptime Data{
+                                    .accumulator = candidate_accumulator,
+                                    .element = candidate_element,
+                                    .scan = candidate_scan,
+                                    .step = reduceStep(selected, candidate_accumulator, candidate_element, candidate_scan),
+                                };
+                                break :blk @ptrCast(&data);
+                            }
+                        }
+                    }
+                }
+                break :blk null;
+            },
+        };
+    }
+
+    /// Borrows the caller's values. Acquired readers and output are consumed
+    /// locally on preparation failure, and by startDriver on either outcome.
+    fn start(self: *const NumericReducePlan, evaluator: *Machine, input: Value, initial: Value, cursor_start: usize, consumed: usize) MachineError!void {
+        const data: *const Data = @ptrCast(@alignCast(self));
+        const length: usize = @intCast(input.list.length());
+        var state = TypedReduceState{
+            .input = acquireOperand(data.element, input),
+            .output = null,
+            .accumulator = switch (data.accumulator) {
+                .byte => unreachable,
+                .integer => .{ .integer = initial.int },
+                .real => .{ .real = initial.float },
+            },
+            .cursor = .{ .index = cursor_start, .length = length },
+        };
+        var held_locally = true;
+        errdefer if (held_locally) state.retire(evaluator.releaseDomain());
+        if (data.scan) state.output = switch (data.accumulator) {
+            .byte => unreachable,
+            inline else => |out| (try acquireOutput(evaluator, out, null, length)).output,
+        };
+        held_locally = false;
+        return evaluator.startDriver(TypedReduceDriver{
+            .state = .init(state),
+            .step = data.step,
+            .consumed = consumed,
+        });
+    }
+};
 
 /// Reached only if a guard and a dispatch disagreed, which the candidate
 /// predicate exists to prevent; it is a domain error rather than a silent
@@ -2793,65 +2842,9 @@ pub fn idiomReduceStart(operation: BinaryOp) IdiomReduceStart {
             ) MachineError!void {
                 const element_class = leafNumber(input).?;
                 const accumulator_class = scalarNumber(initial).?;
-                const length: usize = @intCast(input.list.length());
-                inline for (number_classes) |candidate_accumulator| {
-                    inline for (number_classes) |candidate_element| {
-                        if (candidate_accumulator == accumulator_class and
-                            candidate_element == element_class)
-                        {
-                            // Only the fixpoint combinations exist; the guard
-                            // above is what guarantees one of them is reached.
-                            const maybe_out = comptime binaryResult(
-                                selected,
-                                candidate_accumulator,
-                                candidate_element,
-                            );
-                            if (comptime maybe_out == null) return unexpectedReduceShape(evaluator);
-                            const out = comptime maybe_out.?;
-                            if (comptime out != candidate_accumulator) return unexpectedReduceShape(evaluator);
-                            var state = TypedReduceState{
-                                .input = acquireOperand(candidate_element, input),
-                                .output = null,
-                                .accumulator = switch (candidate_accumulator) {
-                                    .byte => unreachable,
-                                    .integer => .{ .integer = initial.int },
-                                    .real => .{ .real = initial.float },
-                                },
-                                .cursor = .{ .index = start, .length = length },
-                            };
-                            var held_locally = true;
-                            errdefer if (held_locally) state.retire(evaluator.releaseDomain());
-                            inline for ([_]bool{ false, true }) |candidate_scan| {
-                                if (candidate_scan == scan) {
-                                    if (candidate_scan) {
-                                        const writer = try heap.LeafWriter(out.kind()).init(
-                                            evaluator.allocator(),
-                                            length,
-                                        );
-                                        state.output = switch (out) {
-                                            .byte => .{ .fresh_bytes = writer },
-                                            .integer => .{ .fresh_ints = writer },
-                                            .real => .{ .fresh_reals = writer },
-                                        };
-                                    }
-                                    const step = comptime reduceStep(
-                                        selected,
-                                        candidate_accumulator,
-                                        candidate_element,
-                                        candidate_scan,
-                                    );
-                                    held_locally = false;
-                                    return evaluator.startDriver(TypedReduceDriver{
-                                        .state = .init(state),
-                                        .step = step,
-                                        .consumed = consumed,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-                unreachable;
+                const plan = NumericReducePlan.select(selected, accumulator_class, element_class, scan) orelse
+                    return unexpectedReduceShape(evaluator);
+                return plan.start(evaluator, input, initial, start, consumed);
             }
         }.run,
     };

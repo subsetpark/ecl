@@ -16,6 +16,7 @@ The baseline's isolated build was 256.6 seconds with 159.19 MiB of IR.
 | Change | Build, seconds | Unoptimized IR, MiB |
 |---|---:|---:|
 | Shared validated builtin installation | 246.0 | 155.89 |
+| Shared unary and sequential reduction preparation | 243.8 | 154.16 |
 
 The builtin installer preserves static declaration validation and runtime
 installation/allocation order. Effect builders specialize by token count instead
@@ -24,6 +25,23 @@ of authored spelling. Environment object-function code falls from 107,474 to
 `1 2 +`, with `ECL_WORKERS=1` and no concurrent build/test workload, whole-process
 p50 was 33.42/32.96 ms and p95 was 36.33/35.29 ms. This includes startup and
 teardown; it does not establish a runtime speedup.
+
+Shared unary/reduction plans reduce numeric-kernel object-function code from
+952,822 to 857,853 bytes without changing the element loops. The same
+31-alternating-pair method, timing warmed batches inside the CLI, gives these
+before/after p50 milliseconds: small unary 113/115, large unary 153/153,
+small fold 97/97, large fold 119/120, and large scan 25/25. Small batches execute
+20,000 iterations over `[1 2 3]`; large unary/fold batches execute 20 iterations
+over a retained million-element integer range, and scan uses 100,000 elements.
+Unary uses `neg`; fold and scan use seed `0` and quotation `(+)`. Corresponding
+p95 pairs are 135/136, 170/173, 108/110, 140/143, and 32/34 ms.
+
+A separate build-only cache-splitting experiment compiled the existing runtime
+aggregation module as a static library. Its 2,710-byte archive contained no
+text symbols: public Zig declarations remain source imports, not independently
+linked definitions. That shortcut was rejected. Reusable runtime machine code
+would require an explicit external boundary; merely adding another build module
+or library does not provide it.
 
 ## Binary kernel specialization — 2026-09-11
 

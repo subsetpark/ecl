@@ -898,13 +898,17 @@ The registry is a closed, compile-time-validated table over the operation and
 representation enums. Every added operation or leaf kind must classify each
 reachable combination for the program to compile.
 
-Binary kernel selection produces an opaque static plan binding operand classes,
-result storage, and the specialized loop. Shared preparation acquires the
+Unary and binary kernel selection produce opaque static plans binding operand
+classes, result storage, and the specialized loop. Shared preparation acquires the
 readers and output from that plan for both direct and nested pervasion; callers
 cannot choose a loop independently of its storage contract. Only reachable
 class and shape combinations instantiate loops. Allocation, ownership transfer,
 and driver setup stay outside the operation-by-representation expansion, while
 the bounded element loops retain their concrete types.
+Sequential reductions use the same separation: a static plan admits only
+accumulator classes that remain stable under the operation, and owns selection
+for both the recognition guard and entry. Shared preparation acquires storage
+without changing the reduction order, scan publication, or consumed inputs.
 
 ### Scalar semantics remain the oracle
 
