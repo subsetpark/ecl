@@ -2147,6 +2147,8 @@ pub const BuildingEnv = struct {
                     const count = countEffectTokens(source);
                     var tokens: [count][]const u8 = undefined;
                     var iterator = std.mem.tokenizeScalar(u8, source, ' ');
+                    // SAFETY: assertStaticBuiltin guarantees exactly one `--`
+                    // token, so the loop assigns separator before it is read.
                     var separator: usize = undefined;
                     for (&tokens, 0..) |*token, index| {
                         token.* = iterator.next().?;
