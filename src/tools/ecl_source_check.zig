@@ -12,7 +12,7 @@ const std = @import("std");
 const ecl = @import("ecl-internal");
 
 /// Every checked-in ECL source, wherever it lives, is canonically formatted.
-const format_roots = [_][]const u8{ "src", "test" };
+const format_roots = [_][]const u8{ "src", "test", "apps" };
 
 /// The parser fixture is deliberately invalid input, so it has no canonical
 /// form and the formatter is expected to reject it.
