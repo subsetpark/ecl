@@ -34,6 +34,42 @@ fn expectDisplay(runtime: *session.Session, source: []const u8, expected: []cons
     try std.testing.expectEqualStrings(expected, display.bytes());
 }
 
+test "stdlib: source inspection is inert and reports only literal top-level declarations" {
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{}), .cooperative, .evaluate);
+    defer runtime.deinit();
+    try expectOk(&runtime, "(0) 'inspection-side-effect def");
+    try expectDisplay(&runtime,
+        \\(99 'inspection-side-effect def
+        \\ [] () 'sample.one @defm
+        \\ ([] () 'nested @defm)
+        \\ [@defm 'list-only @defm]
+        \\ {'code ('dict-only @defm)}
+        \\ "'string-only @defm"
+        \\ # 'comment-only @defm
+        \\ [] () "computed" symbol @defm
+        \\ [] () 'sample.two @defm
+        \\ [] () 'sample.one @defm) source.declarations
+    , "('sample.one 'sample.two 'sample.one)");
+    try expectDisplay(&runtime, "pop inspection-side-effect", "0");
+    try expectDisplay(&runtime, "pop () source.declarations", "()");
+    try expectDisplay(&runtime, "pop \"[] () 'parsed @defm\" parse source.declarations", "('parsed)");
+    try expectDisplay(&runtime, "pop (" ++ ("'many @defm " ** 4097) ++ ") source.declarations len", "4097");
+    try support.expectError(.{
+        .name = "source inspection rejects non-list input",
+        .source = "42 source.declarations",
+        .kind = "type",
+    });
+    try support.expectError(.{
+        .name = "source inspection does not hide parse errors",
+        .source = "\")\" parse source.declarations",
+        .kind = "parse",
+    });
+}
+
 test "stdlib: embedded module resolves via import with no ECL_PATH" {
     // No search path is configured; embedded modules resolve independently
     // of the isolated filesystem inputs.
@@ -48,6 +84,7 @@ test "stdlib: embedded module resolves via import with no ECL_PATH" {
         "io.print",
         "csv.parse",
         "json.parse",
+        "source.declarations",
         "table.valid?",
         "http.get-bytes",
         "http.server.route",

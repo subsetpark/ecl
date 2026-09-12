@@ -23,6 +23,27 @@ pub const LexicalContext = implementation.LexicalContext;
 /// it, rather than re-deriving the answer from a second scanner.
 pub const PendingUnit = implementation.PendingUnit;
 
+/// Inert inspection of already parsed top-level forms. Feed each form once,
+/// in source order. Only a literal symbol immediately preceding `@defm` is
+/// discoverable; nested quotations and computed names are not declarations
+/// visible to discovery. Names are returned verbatim, including duplicates:
+/// namespace and export validation belong to the consumer's schema.
+/// This scanner owns no values and does no evaluation or nested traversal.
+pub const DeclarationScan = struct {
+    previous_symbol: ?u32 = null,
+
+    pub fn feed(self: *DeclarationScan, form: Value) ?u32 {
+        const previous = self.previous_symbol;
+        self.previous_symbol = if (form == .symbol) form.symbol else null;
+        if (form == .word and @import("std").mem.eql(
+            u8,
+            @import("intern.zig").get(form.word.name),
+            "@defm",
+        )) return previous;
+        return null;
+    }
+};
+
 /// Synchronous hosts drive the same explicit continuation to completion.
 /// Scheduler callers retain the cursor and advance it in bounded slices.
 pub fn read(

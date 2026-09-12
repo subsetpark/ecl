@@ -264,14 +264,14 @@ const Builder = struct {
         var names: std.ArrayList(intern.ModuleName) = .empty;
         defer names.deinit(self.allocator);
         const forms = parsed.values();
-        for (forms, 0..) |form, index| {
-            if (form != .word or !std.mem.eql(u8, intern.get(form.word.name), "@defm")) continue;
+        var declarations: reader.DeclarationScan = .{};
+        for (forms) |form| {
             // Dynamic declarations are file-private. Only exports require
             // a literal name that discovery can identify without evaluation.
-            if (index == 0 or forms[index - 1] != .symbol) continue;
-            const name_bytes = intern.get(forms[index - 1].symbol);
+            const symbol = declarations.feed(form) orelse continue;
+            const name_bytes = intern.get(symbol);
             const export_entry = manifest.export_index.get(name_bytes) orelse continue;
-            const name = intern.moduleName(forms[index - 1].symbol) catch return self.fail(
+            const name = intern.moduleName(symbol) catch return self.fail(
                 "package `{s}` artifact `{s}` declares an invalid module name",
                 .{ input.name, claim.relative_path },
             );

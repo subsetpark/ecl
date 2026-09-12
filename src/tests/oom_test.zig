@@ -754,6 +754,7 @@ fn projectSessionInitializationProbe(allocator: std.mem.Allocator) !void {
 }
 
 const StdlibSurface = enum {
+    source_declarations,
     locked_project_module,
     root_source_preload,
     random,
@@ -1025,6 +1026,11 @@ fn stdlibSessionAllocationProbe(
                 "\"a//b/../c\" path.normalize pop (\"a\" \"b\") path.join pop " ++
                 "\"a/b.c\" path.dirname pop \"a/b.c\" path.basename pop \"a/b.c\" path.extension pop " ++
                 "\"a/b\" path.components pop \"a/b\" path.valid-relative? pop",
+        ),
+        .source_declarations => try runOk(
+            &runtime,
+            "oom-source.ecl",
+            "('one @defm 'two @defm) source.declarations pop",
         ),
         .clock => try runOk(
             &runtime,
@@ -1687,6 +1693,11 @@ test "oom: standard-library and host: package: locked project module propagates 
 test "oom: standard-library and host: package: root source preload propagates every allocation failure" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.root_source_preload);
+}
+
+test "oom: standard-library and host: stdlib: source declarations propagate every allocation failure" {
+    try requireSelectedOomTest(@src());
+    try checkStdlibSurface(.source_declarations);
 }
 
 test "oom: standard-library and host: stdlib: clock propagates every allocation failure" {

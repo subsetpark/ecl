@@ -640,6 +640,14 @@ Export verification retains its cursor across scheduler steps and charges each
 constant-time membership lookup
 against the caller's work budget, independently of the catalog's module count.
 
+Source inspection and catalog construction share the reader's inert declaration
+scanner. It observes adjacent top-level parsed forms without executing code or
+descending into containers. Literal names retain source order and duplicates;
+the consuming catalog schema owns namespace and export validation. The public
+inspection word counts and materializes in bounded passes over an owned
+quotation, so cancellation retires both input and partial output through the
+ordinary driver lifetime protocol.
+
 A cataloged source has one Session-owned file identity and private registry.
 The catalog separates source selection from exact public exports; the shared
 registry contains exported registrations while each file owns its private
