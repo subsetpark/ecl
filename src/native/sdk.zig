@@ -31,6 +31,105 @@ pub const BulkKind = abi.BulkKind;
 pub const UnitRead = union(enum) { units: struct { count: u32, bytes: bool }, yield_required, invalid };
 pub const Reschedule = capability.Reschedule;
 pub const CallbackResult = error{ OutOfMemory, InvalidValue }!Outcome;
+pub const InstanceProgress = enum { complete, pending };
+pub const InstanceResult = error{ OutOfMemory, Failed }!InstanceProgress;
+
+/// Instance-owned native storage authority. May be retained in extension state
+/// until its final retirement slice; it exposes no interpreter allocator.
+pub const NativeMemory = opaque {
+    fn wire(self: *const NativeMemory) *const abi.NativeMemory {
+        return @ptrCast(@alignCast(self));
+    }
+    pub fn allocate(self: *const NativeMemory, length: usize) error{OutOfMemory}![]align(64) u8 {
+        const handle = self.wire();
+        const pointer = handle.allocate(handle.context, length) orelse return error.OutOfMemory;
+        return pointer[0..length];
+    }
+    /// Consumes a slice allocated by this authority, on every return.
+    pub fn release(self: *const NativeMemory, bytes: []align(64) u8) void {
+        const handle = self.wire();
+        handle.release(handle.context, bytes.ptr, bytes.len);
+    }
+};
+
+/// Borrowed only during one lifecycle slice. Native storage belongs to the
+/// issuing instance, whose retirement follows every call and resource pin.
+pub const InstanceContext = opaque {
+    const Adapter = struct { table: *const abi.InstanceTable, context: *anyopaque, budget: u32 };
+    fn adapter(self: *InstanceContext) *Adapter {
+        return @ptrCast(@alignCast(self));
+    }
+    pub fn configuration(self: *InstanceContext) []const u8 {
+        const table = self.adapter().table;
+        return table.configuration_ptr[0..@intCast(table.configuration_len)];
+    }
+    pub fn consume(self: *InstanceContext) bool {
+        const state = self.adapter();
+        if (state.budget == 0) return false;
+        state.budget -= 1;
+        return true;
+    }
+    pub fn allocate(self: *InstanceContext, length: usize) error{OutOfMemory}![]align(64) u8 {
+        return self.memory().allocate(length);
+    }
+    /// Consumes storage allocated by this instance; release cannot fail.
+    pub fn release(self: *InstanceContext, bytes: []align(64) u8) void {
+        self.memory().release(bytes);
+    }
+    pub fn memory(self: *InstanceContext) *const NativeMemory {
+        return @ptrCast(self.adapter().table.memory);
+    }
+};
+
+/// Lifecycle supplies State, init(), initialize(*State, *InstanceContext),
+/// and retire(*State, *InstanceContext). Every slice must obey consume().
+/// Retirement also runs after failed or cancelled initialization, and returns
+/// true only after all extension-owned storage has been released.
+pub fn Instance(comptime Lifecycle: type) type {
+    return struct {
+        pub const State = Lifecycle.State;
+        var identity_storage: u8 = 0;
+        pub fn identity() *const anyopaque {
+            return &identity_storage;
+        }
+        fn initState(raw: *anyopaque) callconv(.c) void {
+            const state: *State = @ptrCast(@alignCast(raw));
+            state.* = Lifecycle.init();
+        }
+        fn initialize(raw: *anyopaque, table: *const abi.InstanceTable, context: *anyopaque, budget: u32) callconv(.c) abi.InstanceProgress {
+            var adapter: InstanceContext.Adapter = .{ .table = table, .context = context, .budget = budget };
+            const progress = Lifecycle.initialize(@ptrCast(@alignCast(raw)), @as(*InstanceContext, @ptrCast(&adapter))) catch |err| return switch (err) {
+                error.OutOfMemory => .out_of_memory,
+                error.Failed => .failed,
+            };
+            return switch (progress) {
+                .complete => .complete,
+                .pending => .pending,
+            };
+        }
+        fn retire(raw: *anyopaque, table: *const abi.InstanceTable, context: *anyopaque, budget: u32) callconv(.c) bool {
+            var adapter: InstanceContext.Adapter = .{ .table = table, .context = context, .budget = budget };
+            return Lifecycle.retire(@ptrCast(@alignCast(raw)), @as(*InstanceContext, @ptrCast(&adapter)));
+        }
+        var definition_storage: abi.InstanceDefinition = .{
+            .state_size = @sizeOf(State),
+            .state_alignment = @alignOf(State),
+            .identity = &identity_storage,
+            .init_state = initState,
+            .initialize = initialize,
+            .retire = retire,
+        };
+        pub fn definition() *const abi.InstanceDefinition {
+            if (@TypeOf(Lifecycle.init) != fn () State or
+                @TypeOf(Lifecycle.initialize) != fn (*State, *InstanceContext) InstanceResult or
+                @TypeOf(Lifecycle.retire) != fn (*State, *InstanceContext) bool)
+                @compileError("ecl-native: invalid instance lifecycle signatures");
+            if (@sizeOf(State) == 0 or @sizeOf(State) > abi.max_port_state_bytes or @alignOf(State) > 64)
+                @compileError("ecl-native: invalid instance state size or alignment");
+            return &definition_storage;
+        }
+    };
+}
 
 pub fn factory(comptime name: []const u8, comptime doc: []const u8, comptime P: type) type {
     return portBinding(name, doc, P, .{ .kind = .factory });
@@ -139,6 +238,12 @@ pub fn Call(comptime effect_source: []const u8) type {
             if (index >= EffectSpec.inputs.len)
                 @compileError("ecl-native: input index exceeds the declared effect");
             return @ptrCast(&self.state().views[index].?);
+        }
+
+        pub fn instance(self: *Self, comptime I: type) ?*I.State {
+            const invocation = &self.state().invocation;
+            const get = invocation.host.instance_state orelse return null;
+            return @ptrCast(@alignCast(get(invocation.context, I.identity()) orelse return null));
         }
 
         /// Copies a bounded run of Unicode scalar values or bytes into caller
@@ -564,6 +669,7 @@ pub fn module(comptime spec: anytype) type {
             .invoke = invoke,
             .port_count = Ports.len,
             .ports_ptr = &ports_storage,
+            .instance = if (@hasField(@TypeOf(spec), "instance")) spec.instance.definition() else null,
         };
 
         pub fn descriptor() *const abi.Descriptor {

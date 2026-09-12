@@ -203,6 +203,10 @@ pub const MessageBuilder = opaque {
 /// Available only on the controller. Streams may block this private thread;
 /// cancellation interrupts host stream waits. No ECL values are accessible.
 pub const Controller = opaque {
+    pub fn instance(self: *Controller, comptime I: type) ?*I.State {
+        const owned = self.state();
+        return @ptrCast(@alignCast(owned.table.instance_state(owned.context, I.identity()) orelse return null));
+    }
     fn state(self: *Controller) *ControllerState {
         return @ptrCast(@alignCast(self));
     }

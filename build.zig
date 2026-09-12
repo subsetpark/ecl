@@ -50,6 +50,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     native_sample.addImport("ecl-native", native_sdk);
+    const native_instance = b.createModule(.{
+        .root_source_file = b.path("test/native/instance.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    native_instance.addImport("ecl-native", native_sdk);
 
     const fixture = native_build.addExtension(b, .{
         .name = "sample",
@@ -89,6 +95,16 @@ pub fn build(b: *std.Build) void {
     tutorial.root_module.link_libc = true;
     native_fixture_step.dependOn(native_build.installExtension(b, tutorial, "native-fixture"));
     _ = fixture_files.addCopyFile(tutorial.getEmittedBin(), "tutorial.eclmod");
+    const instance_fixture = native_build.addExtension(b, .{
+        .name = "instanceprobe",
+        .root_source_file = b.path("test/native/instance_dynamic.zig"),
+        .target = target,
+        .optimize = optimize,
+        .ecl_native = native_sdk,
+    });
+    instance_fixture.root_module.link_libc = true;
+    native_fixture_step.dependOn(native_build.installExtension(b, instance_fixture, "native-fixture"));
+    _ = fixture_files.addCopyFile(instance_fixture.getEmittedBin(), "instanceprobe.eclmod");
     const native_fixture_options = b.addOptions();
     native_fixture_options.addOptionPath(
         "directory",
@@ -166,6 +182,7 @@ pub fn build(b: *std.Build) void {
     }
 
     const negative_cases = [_]struct { file: []const u8, message: []const u8 }{
+        .{ .file = "invalid_instance_callbacks", .message = "ecl-native: invalid instance lifecycle signatures" },
         .{ .file = "missing_port_recovery", .message = "ecl-native: recoverable cancellation requires fn cancelOperation(*State, Lane) void" },
         .{ .file = "wrong_controller_direction", .message = "has no member named 'read'" },
         .{ .file = "resource_operation_endpoint", .message = "port: operation endpoints must belong to the exchange" },
@@ -354,6 +371,7 @@ pub fn build(b: *std.Build) void {
     const test_imports = [_]std.Build.Module.Import{
         .{ .name = "minish", .module = minish },
         .{ .name = "native-sample", .module = native_sample },
+        .{ .name = "native-instance", .module = native_instance },
     };
     const host_fixture_inputs = [_]FixtureInput{
         .{ .name = "native_fixture_options", .options = native_fixture_options },

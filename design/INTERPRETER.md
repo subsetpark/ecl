@@ -1576,6 +1576,26 @@ requested capabilities before constructing immutable binding snapshots. A
 native library remains loaded for the Session lifetime; there is no native hot
 reload.
 
+Each loaded descriptor may own typed extension state. Initialization advances
+through bounded loader slices before any binding becomes visible. Its image
+and native memory authority are reserved before initialization begins; failed
+or cancelled construction transfers that same ownership to retirement. Final
+instance retirement follows all invocation, resource, controller-join, and
+registered-capability pins. State retirement uses the common bounded retirement
+domain, including for instances that never published a binding; it admits no new
+native allocations. The host joins that work before unloading the image.
+
+Host configuration is copied during Session construction and bound to a loaded
+instance by the host registration policy. An extension sees only its immutable
+configuration bytes and its own native storage authority; no extension-facing
+lookup accepts a module name. Resource-open arguments cannot replace this
+configuration. Native storage accounting is serialized by its issuing instance.
+An explicit instance resource policy owns independent capacity and controller
+storage; instances without a policy retain the shared native-extension budget.
+Both policies use the same resource lifecycle and return capacity after joining.
+Instance budgets inherit the Session's admission gate, so shutdown also closes
+child creation. The shared gate outlives every instance resource owner.
+
 The exact wire ABI is the callback's sole interpreter surface. It contains:
 
 - read-only value and nested-path views;

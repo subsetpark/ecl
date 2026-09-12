@@ -92,6 +92,7 @@ pub const RuntimeInputs = struct {
     /// Capacity for trusted native-defined resources; validated at creation
     /// of the Session, independently of filesystem, process, and network limits.
     native_port_limits: native_port.Limits = .{},
+    native_instances: []const native_module.Configuration = &.{},
     io: std.Io,
     output: *std.Io.Writer,
     diagnostics: *std.Io.Writer,
@@ -340,9 +341,9 @@ pub const Session = enum(usize) {
         try prims.install(&building);
         var registry = try modules.Registry.init(host_owner.cleanup());
         errdefer registry.deinit();
-        const native_owner = native_module.Owner.initWithPortLimits(host_owner.cleanup(), host.native_port_limits) catch |err| return switch (err) {
+        const native_owner = native_module.Owner.initConfigured(host_owner.cleanup(), host.native_port_limits, host.native_instances) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
-            error.InvalidLimits => error.InvalidHostConfig,
+            error.InvalidLimits, error.InvalidConfiguration => error.InvalidHostConfig,
         };
         errdefer native_owner.closeCalls().settle().deinit();
         // A Session builds exactly one archive on its own reclamation root, so

@@ -13,6 +13,154 @@ const native_sample = @import("native-sample");
 const native_fixture = @import("native_fixture_options");
 const ecl = @import("ecl-native");
 
+fn instanceConstructionProbe(allocator: std.mem.Allocator) !void {
+    try instanceConstructionWithCutoff(allocator, null);
+}
+
+fn instanceConstructionWithCutoff(allocator: std.mem.Allocator, cutoff: ?usize) !void {
+    var host = heap.HostOwner.init(allocator);
+    defer host.cleanup().drain();
+    const owner = try native_module.Owner.initConfigured(host.cleanup(), .{}, &.{.{
+        .name = "instanceprobe",
+        .bytes = if (cutoff == null) "copied" else "x" ** 2048,
+        .port_limits = .{ .max_live_ports = 1 },
+    }});
+    defer owner.closeCalls().settle().deinit();
+    const requested = try intern.internModuleName("instanceprobe");
+    var cursor = owner.loader().startStatic(requested, @import("native-instance").Extension.descriptor()).loading;
+    defer cursor.deinit();
+    var advances: usize = 0;
+    while (cutoff == null or advances < cutoff.?) : (advances += 1) switch (try cursor.advance(1)) {
+        .pending => {},
+        .loaded => |instance| {
+            instance.releasePin();
+            return;
+        },
+        .failure => return error.UnexpectedNativeLoadFailure,
+    };
+}
+
+test "native: instance abandoned initialization unwinds reserved state" {
+    for ([_]usize{ 0, 1, 64, 512, 1024 }) |cutoff|
+        try instanceConstructionWithCutoff(std.testing.allocator, cutoff);
+}
+
+test "native: instance policies reject duplicate names and invalid limits" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    const invalid = [_][]const native_module.Configuration{
+        &.{.{ .name = "" }},
+        &.{.{ .name = "instanceprobe", .memory_limit = 0 }},
+        &.{.{ .name = "instanceprobe", .bytes = "x" ** (64 * 1024 + 1) }},
+        &.{.{ .name = "instanceprobe", .port_limits = .{ .max_live_ports = 0 } }},
+        &.{ .{ .name = "instanceprobe" }, .{ .name = "instanceprobe" } },
+    };
+    for (invalid) |configuration| try std.testing.expectError(error.InvalidHostConfig, session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+        .native_instances = configuration,
+    }), .cooperative, .evaluate));
+}
+
+test "native: instance static initialization unwinds every allocation failure" {
+    try instanceConstructionProbe(std.testing.allocator);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, instanceConstructionProbe, .{});
+}
+
+test "native: instance descriptor validation rejects invalid state layout" {
+    var host = heap.HostOwner.init(std.testing.allocator);
+    defer host.cleanup().drain();
+    var raw = @import("native-instance").Extension.descriptor().*;
+    var definition = raw.instance.?.*;
+    raw.instance = &definition;
+    const requested = try intern.internModuleName("instanceprobe");
+    definition.state_alignment = 3;
+    try expectReject(error.InvalidInstanceDefinition, host.cleanup(), requested, &raw);
+    definition = @import("native-instance").Extension.descriptor().instance.?.*;
+    definition.state_size = 0;
+    try expectReject(error.InvalidInstanceDefinition, host.cleanup(), requested, &raw);
+}
+
+test "native: instance ECL acceptance runs through language tests" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+        .ecl_path = native_fixture.directory,
+        .native_instances = &.{.{ .name = "instanceprobe", .bytes = "C", .port_limits = .{ .max_live_ports = 1 } }},
+    }), .cooperative, .language_tests);
+    defer runtime.deinit();
+    try expectOk(&runtime, "[] ((" ++
+        "instanceprobe.next 67 = {'kind 'user 'msg \"configured state\"} assert " ++
+        "instanceprobe.allocate 42 = {'kind 'user 'msg \"native allocation\"} assert " ++
+        "instanceprobe.resource {'configuration \"replacement\"} port.open (|p| " ++
+        "p instanceprobe.value [] port.call 68 = {'kind 'user 'msg \"controller instance\"} assert " ++
+        "[] (instanceprobe.resource [] port.open) @attempt 'err at 'kind at 'domain match? " ++
+        "{'kind 'user 'msg \"instance capacity\"} assert p port.close) call" ++
+        ") 'instance test) 'native.acceptance @defm " ++
+        "tests first @test dup 'ok dict.has? (pop) ('err at raise) if");
+}
+
+test "native: instance configuration state memory and resource budgets are isolated" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    var configuration = [_]u8{'A'};
+    var first = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+        .ecl_path = native_fixture.directory,
+        .native_port_limits = .{ .max_live_ports = 1 },
+        .native_instances = &.{.{ .name = "instanceprobe", .bytes = &configuration, .port_limits = .{ .max_live_ports = 2 } }},
+    }), .{ .worker_pool = 1 }, .evaluate);
+    defer first.deinit();
+    configuration[0] = 'Z';
+    try expectOk(&first, "instanceprobe.next instanceprobe.allocate instanceprobe.retirements");
+    const baseline = first.stackItems()[2].int;
+    try std.testing.expectEqual(@as(i64, 65), first.stackItems()[0].int);
+    try std.testing.expectEqual(@as(i64, 42), first.stackItems()[1].int);
+    {
+        var second = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+            .ecl_path = native_fixture.directory,
+            .native_instances = &.{.{ .name = "instanceprobe", .bytes = "B" }},
+        }), .{ .worker_pool = 1 }, .evaluate);
+        defer second.deinit();
+        try expectOk(&second, "instanceprobe.next instanceprobe.next");
+        try std.testing.expectEqual(@as(i64, 66), second.stackItems()[0].int);
+        try std.testing.expectEqual(@as(i64, 67), second.stackItems()[1].int);
+    }
+    try expectOk(&first, "instanceprobe.retirements instanceprobe.next");
+    try std.testing.expectEqual(baseline + 1, first.stackItems()[3].int);
+    try std.testing.expectEqual(@as(i64, 66), first.stackItems()[4].int);
+    try expectOk(&first, "portprobe.factory [] port.open 'p set " ++
+        "instanceprobe.resource {'configuration \"override\"} port.open 'a set " ++
+        "instanceprobe.resource [] port.open 'b set " ++
+        "[] (instanceprobe.resource [] port.open) @attempt 'err at 'kind at " ++
+        "a instanceprobe.value [] port.call a port.close b port.close p port.close");
+    var display = try first.stackDisplay();
+    defer display.deinit();
+    try std.testing.expect(std.mem.endsWith(u8, display.bytes(), "'domain 67"));
+}
+
+test "native: instance failed initialization retires native storage" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    var observer = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{ .ecl_path = native_fixture.directory }), .cooperative, .evaluate);
+    defer observer.deinit();
+    try expectOk(&observer, "instanceprobe.retirements");
+    const baseline = observer.stackItems()[0].int;
+    for ([_][]const u8{ "fail", "memory" }, 0..) |configuration, index| {
+        var failing = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+            .ecl_path = native_fixture.directory,
+            .native_instances = &.{.{ .name = "instanceprobe", .bytes = configuration, .memory_limit = if (std.mem.eql(u8, configuration, "memory")) 1 else 1024 }},
+        }), .cooperative, .evaluate);
+        defer failing.deinit();
+        if (std.mem.eql(u8, configuration, "fail")) {
+            try expectErrorContains(&failing, "instanceprobe.next", &.{"native instance initialization failed"});
+        } else {
+            try std.testing.expectError(error.OutOfMemory, failing.runUnit("instance-oom.ecl", "instanceprobe.next"));
+        }
+        try expectOk(&observer, "instanceprobe.retirements");
+        try std.testing.expectEqual(baseline + @as(i64, @intCast(index)) + 1, observer.stackItems()[index + 1].int);
+    }
+    try expectOk(&observer, "instanceprobe.retirements");
+    try std.testing.expectEqual(baseline + 2, observer.stackItems()[3].int);
+}
+
 fn expectPortProgram(workers: u32, max_operations: u32, source: []const u8, expected: []const u8) !void {
     try expectPortProgramAtCapacity(workers, max_operations, 8, source, expected);
 }

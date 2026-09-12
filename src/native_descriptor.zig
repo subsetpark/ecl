@@ -33,6 +33,7 @@ pub const ValidateError = error{
     DuplicateDefinition,
     InvalidContinuation,
     InvalidPortDefinition,
+    InvalidInstanceDefinition,
     ModuleNameMismatch,
     MissingInvoke,
 };
@@ -115,6 +116,7 @@ const DescriptorState = struct {
     callback_count: u32,
     ports: PortDefinitions,
     endpoints: []EndpointSlot,
+    instance: ?abi.InstanceDefinition,
 
     fn deinit(self: *DescriptorState) void {
         const allocator = self.host.allocator();
@@ -161,6 +163,10 @@ pub const ValidatedDescriptor = opaque {
 
     pub fn invoke(self: *const ValidatedDescriptor) abi.Invoke {
         return self.state().invoke;
+    }
+
+    pub fn instance(self: *const ValidatedDescriptor) ?abi.InstanceDefinition {
+        return self.state().instance;
     }
 
     pub fn port(self: *const ValidatedDescriptor, index: u32) ?abi.PortDefinition {
@@ -583,6 +589,12 @@ pub const ValidateCursor = struct {
         try validateRecordSize(declared_size, @sizeOf(abi.Descriptor));
         const descriptor = self.descriptor_ptr.*;
         if (descriptor.abi_version != abi.abi_version) return error.AbiVersionMismatch;
+        if (descriptor.instance) |instance| {
+            try validateRecordSize(instance.size, @sizeOf(abi.InstanceDefinition));
+            if (instance.state_size == 0 or instance.state_size > abi.max_port_state_bytes or
+                instance.state_alignment == 0 or instance.state_alignment > 64 or
+                !std.math.isPowerOfTwo(instance.state_alignment)) return error.InvalidInstanceDefinition;
+        }
         if (descriptor.definition_count > max_definitions or
             descriptor.capability_count > max_capabilities)
             return error.CountOverflow;
@@ -831,6 +843,7 @@ pub const ValidateCursor = struct {
             .callback_count = module.descriptor.callback_count,
             .ports = module.ports,
             .endpoints = module.endpoints,
+            .instance = if (module.descriptor.instance) |instance| instance.* else null,
         };
         self.state = .complete;
         return .{ .complete = @ptrCast(state) };

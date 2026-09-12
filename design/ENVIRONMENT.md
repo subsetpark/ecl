@@ -32,7 +32,7 @@ Session's runtime I/O state.
 The public `net` and `proc` modules are ECL compositions over these registered
 capabilities and `port.*`. Their operation and endpoint selectors expose only
 their corresponding resources and streams. First-party adapters use typed backend calls;
-the extension adapter translates ABI v7 calls into the same runtime interfaces
+the extension adapter translates ABI v8 calls into the same runtime interfaces
 for controller execution, transport, cancellation, ownership, and cleanup.
 
 Embedded names have precedence over filesystem modules. A file on `ECL_PATH`
@@ -128,7 +128,7 @@ loader. The complete word table validates before publication, and publication
 is atomic.
 
 The current pre-release native ABI is version 7, with entry symbol
-`ecl_module_abi_v7`. Native modules built for earlier versions must be rebuilt;
+`ecl_module_abi_v8`. Native modules built for earlier versions must be rebuilt;
 the loader provides no legacy adapter.
 
 Each native word has a declared effect and nonempty documentation. Native
@@ -139,6 +139,29 @@ other error kinds remain reserved to the runtime.
 
 A loaded native module remains loaded for the session. Repeated resolution
 uses its existing registration.
+
+Hosts may supply `RuntimeInputs.native_instances` entries containing a module
+name, immutable configuration bytes, a native-memory ceiling, and optional
+resource limits. The Session copies the bytes. Duplicate names, invalid limits,
+zero memory ceilings, and configurations larger than 64 KiB are rejected.
+Unconfigured modules receive empty configuration and a 64 MiB native-memory
+ceiling. Explicit resource limits give that instance independent capacity;
+otherwise resources use `native_port_limits`.
+
+An SDK module can declare `.instance = ecl.Instance(Lifecycle)`. The lifecycle
+provides `State`, `init()`, `initialize(*State, *ecl.InstanceContext)`, and
+`retire(*State, *ecl.InstanceContext)`. Initialization returns `ecl.InstanceResult`
+(`complete`, `pending`, `OutOfMemory`, or `Failed`); retirement returns whether cleanup is complete.
+Each slice obeys `context.consume()`. Initialization may yield before publication;
+retirement runs even after failed initialization. `context.configuration()`
+borrows immutable bytes until instance retirement. `context.memory()` returns
+an opaque, retainable native-storage authority with allocation and consuming
+release operations. Allocations must be released through their issuing authority
+before final retirement. Callback and controller `instance(Instance)` access
+checks the declared type's identity and returns only that module's state.
+Concurrent callbacks must synchronize their shared extension state.
+Native allocation is closed once final instance retirement begins; cleanup
+must release its existing storage without allocating.
 
 Native modules may declare typed port kinds with persistent private state.
 The SDK's `Port` spec declares named endpoints and operations. Each operation

@@ -5,8 +5,8 @@
 
 const builtin = @import("builtin");
 
-pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v7";
-pub const abi_version: u32 = 7;
+pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v8";
+pub const abi_version: u32 = 8;
 
 pub const max_error_message_bytes: u32 = 4096;
 pub const max_guest_scalar_bytes: u32 = 4096;
@@ -74,6 +74,28 @@ pub const ValueKindWire = enum(u32) {
 
 pub const Candidate = u64;
 
+pub const InstanceProgress = enum(u32) { complete, pending, failed, out_of_memory, _ };
+pub const InstanceTable = extern struct {
+    configuration_ptr: [*]const u8,
+    configuration_len: u64,
+    memory: *const NativeMemory,
+};
+pub const NativeMemory = extern struct {
+    context: *anyopaque,
+    allocate: *const fn (*anyopaque, u64) callconv(.c) ?[*]align(64) u8,
+    release: *const fn (*anyopaque, [*]align(64) u8, u64) callconv(.c) void,
+};
+pub const InstanceDefinition = extern struct {
+    size: u32 = @sizeOf(InstanceDefinition),
+    state_size: u32,
+    state_alignment: u32,
+    identity: *const anyopaque,
+    init_state: StateInitFn,
+    initialize: *const fn (*anyopaque, *const InstanceTable, *anyopaque, u32) callconv(.c) InstanceProgress,
+    retire: *const fn (*anyopaque, *const InstanceTable, *anyopaque, u32) callconv(.c) bool,
+};
+pub const InstanceStateFn = *const fn (*anyopaque, *const anyopaque) callconv(.c) ?*anyopaque;
+
 pub const max_port_definitions = 64;
 pub const max_port_state_bytes = 1 << 20;
 pub const max_port_lanes = 16;
@@ -97,6 +119,7 @@ pub const MessageBuildRequest = extern struct {
 pub const ControllerStatus = enum(u32) { ok, eof, cancelled, failed, out_of_memory, invalid, _ };
 pub const ControllerRead = extern struct { status: ControllerStatus, count: u32 = 0 };
 pub const ControllerTable = extern struct {
+    instance_state: InstanceStateFn,
     parent_state: *const fn (*anyopaque, *const anyopaque) callconv(.c) ?*anyopaque,
     build_message: *const fn (*anyopaque, *const MessageBuildRequest) callconv(.c) HostStatus,
     fail_allocation: *const fn (*anyopaque) callconv(.c) void,
@@ -331,6 +354,7 @@ pub const HostTable = extern struct {
     forward_path: ?ForwardPathFn = null,
     read_units: ?ReadUnitsFn = null,
     bulk_build: ?BulkBuildFn = null,
+    instance_state: ?InstanceStateFn = null,
 };
 
 pub const Invoke = *const fn (
@@ -358,6 +382,7 @@ pub const Descriptor = extern struct {
     port_count: u32 = 0,
     port_record_size: u32 = @sizeOf(PortDefinition),
     ports_ptr: ?[*]const PortDefinition = null,
+    instance: ?*const InstanceDefinition = null,
 };
 
 pub const EntryResult = extern struct {
@@ -419,7 +444,7 @@ fn assertRecord(comptime T: type, comptime expected_size: usize, comptime expect
 
 comptime {
     @setEvalBranchQuota(8000);
-    if (@sizeOf(usize) != 8) @compileError("native ABI v7 supports 64-bit targets only");
+    if (@sizeOf(usize) != 8) @compileError("native ABI v8 supports 64-bit targets only");
 
     assertRecord(CapabilityRequirement, 8, 4);
     assertRecord(EffectSlot, 24, 8);
@@ -428,11 +453,14 @@ comptime {
     assertRecord(ValueView, 40, 8);
     assertRecord(Scalar, 32, 8);
     assertRecord(InvokeResult, 16, 8);
-    assertRecord(HostTable, 152, 8);
-    assertRecord(Descriptor, 104, 8);
+    assertRecord(HostTable, 160, 8);
+    assertRecord(Descriptor, 112, 8);
     assertRecord(PortDefinition, 96, 8);
     assertRecord(MessageBuildRequest, 72, 8);
-    assertRecord(ControllerTable, 136, 8);
+    assertRecord(ControllerTable, 144, 8);
+    assertRecord(InstanceTable, 24, 8);
+    assertRecord(NativeMemory, 24, 8);
+    assertRecord(InstanceDefinition, 48, 8);
     assertRecord(ControllerRead, 8, 4);
     assertRecord(EntryResult, 32, 8);
 

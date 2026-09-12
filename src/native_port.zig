@@ -132,7 +132,8 @@ const OwnerState = struct {
     host: *const heap.HostCleanup,
     limits: Limits,
     mutex: std.Io.Mutex = .init,
-    closing: bool = false,
+    closing: std.atomic.Value(bool) = .init(false),
+    root_admission: ?*const std.atomic.Value(bool) = null,
     live: u32 = 0,
     identity: u64 = 1,
     executor: *controllers.Owner,
@@ -143,7 +144,8 @@ const OwnerState = struct {
     fn reserveLive(self: *OwnerState) error{ Closed, Limit }!void {
         lock(&self.mutex);
         defer unlock(&self.mutex);
-        if (self.closing) return error.Closed;
+        if (self.closing.load(.acquire) or
+            (if (self.root_admission) |root| root.load(.acquire) else false)) return error.Closed;
         if (self.live == self.limits.max_live_ports) return error.Limit;
         self.live += 1;
     }
@@ -168,10 +170,17 @@ pub const Owner = opaque {
     pub fn access(self: *Owner) *Access {
         return @ptrCast(self);
     }
+    /// The parent closes admission for every instance. The returned owner
+    /// must be joined and destroyed before its parent owner is destroyed.
+    pub fn initInstance(self: *Owner, limits: Limits) error{ OutOfMemory, InvalidLimits }!*Owner {
+        const instance = try init(self.state().host, limits);
+        instance.state().root_admission = self.state().root_admission orelse &self.state().closing;
+        return instance;
+    }
     pub fn closeCreation(self: *Owner) void {
         const state_value = self.state();
         lock(&state_value.mutex);
-        state_value.closing = true;
+        state_value.closing.store(true, .release);
         unlock(&state_value.mutex);
     }
     pub fn deinit(self: *Owner) void {
@@ -710,6 +719,10 @@ fn controllerParent(raw: *anyopaque, identity: *const anyopaque) callconv(.c) ?*
     return parent.adapter.backend.ptr;
 }
 
+fn controllerInstance(raw: *anyopaque, identity: *const anyopaque) callconv(.c) ?*anyopaque {
+    return context(raw).cell.adapter.instance.instanceState(identity);
+}
+
 fn controllerInput(raw: *anyopaque, path: [*]const u64, depth: u32, output: *abi.ValueView) callconv(.c) bool {
     if (depth > abi.max_read_path_depth or output.size != @sizeOf(abi.ValueView)) return false;
     const ctx = context(raw);
@@ -1102,7 +1115,7 @@ fn storeControllerFailure(destination: *?Failure, failure: Failure) void {
     if (destination.* != null and failure != .out_of_memory) return;
     destination.* = failure;
 }
-const controller_table: abi.ControllerTable = .{ .resolve_endpoint = controllerResolveEndpoint, .read_bytes = controllerReadBytes, .write_bytes = controllerWriteBytes, .receive_event = controllerReceiveEvent, .fail_resource = controllerFailResource, .parent_state = controllerParent, .discard_message = controllerDiscardMessage, .build_message = controllerBuildMessage, .fail_allocation = controllerFailAllocation, .received_message = controllerReceivedMessage, .forward_message = controllerForwardMessage, .result_message = controllerResultMessage, .input = controllerInput, .finish_endpoint = controllerFinishEndpoint, .cancelled = controllerCancelled, .acknowledge_cancellation = controllerAcknowledge, .fail = controllerFail };
+const controller_table: abi.ControllerTable = .{ .instance_state = controllerInstance, .resolve_endpoint = controllerResolveEndpoint, .read_bytes = controllerReadBytes, .write_bytes = controllerWriteBytes, .receive_event = controllerReceiveEvent, .fail_resource = controllerFailResource, .parent_state = controllerParent, .discard_message = controllerDiscardMessage, .build_message = controllerBuildMessage, .fail_allocation = controllerFailAllocation, .received_message = controllerReceivedMessage, .forward_message = controllerForwardMessage, .result_message = controllerResultMessage, .input = controllerInput, .finish_endpoint = controllerFinishEndpoint, .cancelled = controllerCancelled, .acknowledge_cancellation = controllerAcknowledge, .fail = controllerFail };
 
 pub fn fromValue(value: Value, instance: *native.ModuleInstance, kind: u32) ?*Cell {
     const handle = switch (value) {

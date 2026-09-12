@@ -57,5 +57,6 @@ pub const Options = struct {
     http_limits: ?@FieldType(session.RuntimeInputs, "http_limits") = null,
     net_limits: ?@FieldType(session.RuntimeInputs, "net_limits") = null,
     native_port_limits: ?@FieldType(session.RuntimeInputs, "native_port_limits") = null,
+    native_instances: ?@FieldType(session.RuntimeInputs, "native_instances") = null,
     clock: ?@FieldType(session.RuntimeInputs, "clock") = null,
 };

@@ -728,6 +728,7 @@ pub fn begin(
 }
 
 const full_host_table = abi.HostTable{
+    .instance_state = hostInstanceState,
     .input = hostInput,
     .forward = hostForward,
     .scalar = hostScalar,
@@ -747,6 +748,10 @@ const full_host_table = abi.HostTable{
     .build_dict_finish = hostBuildDictFinish,
     .forward_path = hostForwardPath,
 };
+
+fn hostInstanceState(context: *anyopaque, identity: *const anyopaque) callconv(.c) ?*anyopaque {
+    return transactionFrom(context).instance.instanceState(identity);
+}
 
 fn transactionFrom(context: *anyopaque) *Transaction {
     return @ptrCast(@alignCast(context));
