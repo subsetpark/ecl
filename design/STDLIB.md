@@ -1727,7 +1727,7 @@ Resolution is descriptor-relative beneath the root's retained handle. An
 intermediate symlink is followed only while its target stays within the root;
 an absolute target, a relative target that would pop above the root, more than
 40 followed links, or more than 64 KiB of expanded resolver input is refused.
-`child-dir`, `read-bytes`, `read-text`, `stat`, `list`, and the source side of `copy`
+`child-dir`, `open-list`, `read-bytes`, `read-text`, `stat`, `list`, and the source side of `copy`
 follow a final link under the same rule; every other word acts on the final
 entry itself. Containment is never a lexical prefix check.
 
@@ -1791,6 +1791,23 @@ and return a scope-owned directory resource. The destination parent must exist.
 Filesystem operations accept the stage as a root. `port.close` or scope exit
 joins descendant closure and recursive rollback; no destination is published.
 The staging directory uses mode `0700` under the process umask.
+
+### open-list
+`( root path -- cursor )` — Open a scope-owned incremental enumeration of a
+confined directory. The cursor is a port resource, distinct from a directory
+root. It owns its descriptor until `port.close` or scope exit. An enumeration
+opened through staging or its descendants also closes when staging seals.
+
+### next-entry
+`( cursor -- entry )` — Return the next `{'name string 'kind symbol}` dictionary,
+or `{}` at stable end. Kinds are `'file`, `'directory`, `'symlink`, and `'other`;
+dot entries are omitted and symlinks are described without following them.
+Names must be UTF-8. Order and visibility of concurrent namespace changes follow
+the host filesystem; this is not a directory snapshot. Concurrent calls reserve
+distinct entries, though their results may complete out of order. Each result
+owns its name independently of subsequent calls or cursor closure. A closed
+cursor raises `'io`. Reading does not materialize the whole directory or apply
+the aggregate limits of `list`; callers can stop and close at any entry.
 
 ### commit-dir
 `( stage -- )` — Seal the stage, reject further operations, close its descendant

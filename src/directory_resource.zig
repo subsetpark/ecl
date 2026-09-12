@@ -217,6 +217,52 @@ fn Handle(comptime Object: type) type {
 }
 const DirectoryCell = Handle(std.Io.Dir);
 const StageCell = Handle(*Stage);
+const Enumeration = struct {
+    dir: std.Io.Dir,
+    iterator: std.Io.Dir.Iterator,
+    pub fn close(self: Enumeration, io: std.Io) void {
+        self.dir.close(io);
+    }
+};
+const EnumerationCell = Handle(Enumeration);
+pub const Entry = struct { name: [std.Io.Dir.max_name_bytes]u8, length: usize, kind: fs.EntryKind };
+pub const Next = union(enum) { pending, end, entry: Entry, failed: fs.Reason, closed };
+
+pub fn isEnumeration(item: Value) bool {
+    return resource.Resource.project(EnumerationCell, item) != null;
+}
+
+/// Consumes dir on either outcome. A staging owner's closure also joins any
+/// enumeration opened through its roots or dependent descendants.
+pub fn adoptEnumeration(access: *external.FilesystemAccess, scope: *scheduler.TaskScope, dir: std.Io.Dir, parent: Value) error{ OutOfMemory, ScopeClosing }!Value {
+    const group = dependentGroup(parent, scope) catch |err| {
+        dir.close(fs.hostIo(access));
+        return err;
+    };
+    defer if (group) |g| g.release();
+    return adoptHandle(Enumeration, access, scope, .{ .dir = dir, .iterator = dir.iterate() }, group);
+}
+
+/// Advances at most one directory entry. Names are copied before unlocking;
+/// callers own their result independently of later reads or resource closure.
+pub fn next(item: Value) Next {
+    const cell = resource.Resource.project(EnumerationCell, item) orelse return .closed;
+    std.Io.Threaded.mutexLock(&cell.mutex);
+    defer std.Io.Threaded.mutexUnlock(&cell.mutex);
+    if (cell.phase != .open) return .closed;
+    const cursor = &cell.phase.open.object;
+    const entry = (cursor.iterator.next(cell.io) catch |err| return .{ .failed = fs.reasonForError(err) }) orelse return .end;
+    if (std.mem.eql(u8, entry.name, ".") or std.mem.eql(u8, entry.name, "..")) return .pending;
+    if (entry.name.len > std.Io.Dir.max_name_bytes) return .{ .failed = .limit };
+    if (!std.unicode.utf8ValidateSlice(entry.name)) return .{ .failed = .invalid_utf8 };
+    const kind = if (entry.kind == .unknown) kind: {
+        const info = cursor.dir.statFile(cell.io, entry.name, .{ .follow_symlinks = false }) catch |err| return .{ .failed = fs.reasonForError(err) };
+        break :kind fs.EntryKind.fromHost(info.kind);
+    } else fs.EntryKind.fromHost(entry.kind);
+    var result: Entry = .{ .name = undefined, .length = entry.name.len, .kind = kind };
+    @memcpy(result.name[0..entry.name.len], entry.name);
+    return .{ .entry = result };
+}
 
 /// Consumes the directory on success and failure. The issuer survives escaped
 /// closed language values; operational scope membership ends only after close.

@@ -502,6 +502,25 @@ test "fs: staging directories publish atomically and join descendant cleanup" {
     try std.testing.expectEqual(@as(usize, 3), try scratch.entryCount("."));
 }
 
+test "fs: incremental enumeration owns its cursor and joins staging closure" {
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    try scratch.write("a", "a");
+    try scratch.write("b", "b");
+    try runCase(scratch.filesystem(), .{ .worker_pool = 4 }, "'root \".\" fs.open-list 'cursor set " ++
+        "[] (cursor fs.next-entry 'name at) @spawn 'a set " ++
+        "[] (cursor fs.next-entry 'name at) @spawn 'b set " ++
+        "a task.await 'ok at first b task.await 'ok at first 2 pack sort " ++
+        "cursor fs.next-entry cursor fs.next-entry cursor port.close " ++
+        "[] (cursor fs.next-entry) @attempt 'err at 'kind at", .{ .stack = "(\"a\" \"b\") {} {} 'io" });
+    try expectStack(scratch.filesystem(), "'root \"published\" fs.stage-dir 's set \"x\" s \"file\" fs.publish-text " ++
+        "s \".\" fs.open-list 'cursor set cursor fs.next-entry " ++
+        "s fs.commit-dir [] (cursor fs.next-entry) @attempt 'err at 'kind at", "{'name \"file\" 'kind 'file} 'io");
+    try scratch.directory.dir.symLink(io, "../outside", "link", .{});
+    try expectStack(scratch.filesystem(), "'root \".\" fs.open-list 'cursor set " ++
+        "4 (cursor fs.next-entry 'kind at) times 4 pack (str) each sort cursor port.close", "(\"'directory\" \"'file\" \"'file\" \"'symlink\")");
+}
+
 test "fs: cold worker pools join scope-owned filesystem resources" {
     var scratch = try Scratch.init();
     defer scratch.deinit();

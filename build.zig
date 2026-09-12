@@ -725,6 +725,7 @@ pub fn build(b: *std.Build) void {
             "fs: directory closure joins admitted descriptor leases",
             "fs: staging directories publish atomically and join descendant cleanup",
             "fs: cold worker pools join scope-owned filesystem resources",
+            "fs: incremental enumeration owns its cursor and joins staging closure",
             "fs: directory resources own confined descriptors and close with their scope",
             "fs: concurrent creates have exactly one winner and no staging residue",
             "fs: cancellation before commit leaves the destination unchanged",

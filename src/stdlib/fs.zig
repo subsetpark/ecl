@@ -29,6 +29,8 @@ const Value = value.Value;
 const work_quantum = machine.kernel_poll_quantum;
 
 pub const words = [_]env.BuiltinWord{
+    .{ .name = "open-list", .doc = "( root path -- cursor ) Open a scope-owned incremental directory enumeration.", .primitive = openList },
+    .{ .name = "next-entry", .doc = "( cursor -- entry ) Read the next name/kind dictionary, or an empty dictionary at end.", .primitive = nextEntry },
     .{ .name = "stage-dir", .doc = "( root destination -- stage ) Own a private directory until commit or joined rollback.", .primitive = stageDirectory },
     .{ .name = "commit-dir", .doc = "( stage -- ) Seal and atomically publish a directory to its absent destination.", .primitive = commitDirectory },
     .{ .name = "mkdirs", .doc = "( root path -- ) Create missing directories, preserving existing directories.", .primitive = makeDirectories },
@@ -56,6 +58,7 @@ pub const words = [_]env.BuiltinWord{
 };
 
 const Operation = enum {
+    open_list,
     stage_dir,
     mkdirs,
     remove_tree,
@@ -82,6 +85,7 @@ const Operation = enum {
 
     fn name(self: Operation) []const u8 {
         return switch (self) {
+            .open_list => "open-list",
             .stage_dir => "stage-dir",
             .open_dir => "open-dir",
             .child_dir => "child-dir",
@@ -119,7 +123,7 @@ const Operation = enum {
 
     fn resolveMode(self: Operation) fsport.ResolveMode {
         return switch (self) {
-            .mkdirs, .child_dir, .read_bytes, .read_text, .stat, .list, .copy => .follow_final,
+            .open_list, .mkdirs, .child_dir, .read_bytes, .read_text, .stat, .list, .copy => .follow_final,
             else => .no_follow_final,
         };
     }
@@ -128,7 +132,61 @@ const Operation = enum {
     fn requiresEntry(self: Operation) bool {
         return switch (self) {
             .stage_dir, .create_bytes, .create_text, .replace_bytes, .replace_text, .publish_bytes, .publish_text, .lock, .mkdir, .rename, .remove_tree, .remove_file, .remove_dir => true,
-            .mkdirs, .open_dir, .child_dir, .read_bytes, .read_text, .stat, .lstat, .exists, .list, .copy => false,
+            .open_list, .mkdirs, .open_dir, .child_dir, .read_bytes, .read_text, .stat, .lstat, .exists, .list, .copy => false,
+        };
+    }
+};
+
+fn openList(evaluator: *Machine) MachineError!void {
+    return begin(evaluator, .open_list);
+}
+fn nextEntry(evaluator: *Machine) MachineError!void {
+    var cursor = try evaluator.popValue();
+    errdefer cursor.deinit();
+    if (!directory.isEnumeration(cursor.borrow())) return evaluator.typeError("a directory enumeration resource");
+    const driver = try evaluator.allocator().create(NextEntry);
+    driver.* = .{ .cursor = cursor.take() };
+    evaluator.adoptDriver(driver);
+}
+const NextEntry = struct {
+    pub const address_stable_driver = {};
+    pub const ownership: heap.DriverOwnership = .self_owned;
+    cursor: Value,
+    entry: directory.Entry = undefined,
+    state: union(enum) { reading, name: kernel_storage.Utf8Materializer, complete } = .reading,
+    pub fn deinit(self: *@This(), releases: *heap.ReleaseDomain, _: std.mem.Allocator) void {
+        if (self.state == .name) self.state.name.retire(releases);
+        releases.releaseValue(self.cursor);
+    }
+    pub fn advance(evaluator: *Machine, self: *@This()) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        if (self.state == .reading) switch (directory.next(self.cursor)) {
+            .pending => return .yielded,
+            .closed => return evaluator.fail(.io, "directory enumeration is closed"),
+            .failed => |reason| return evaluator.fail(errorKindFor(reason), reason.message()),
+            .end => {
+                self.state = .complete;
+                return .{ .output = try dict.fromUniquePairs(evaluator.allocator(), evaluator.releaseDomain(), &.{}) };
+            },
+            .entry => |entry| {
+                self.entry = entry;
+                self.state = .{ .name = .init(evaluator.allocator(), self.entry.name[0..self.entry.length]) };
+            },
+        };
+        return switch (self.state.name.advance(work_quantum) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidUtf8 => return evaluator.fail(.io, "directory entry is not UTF-8"),
+        }) {
+            .pending => .yielded,
+            .complete => |name| result: {
+                self.state.name.deinit();
+                self.state = .complete;
+                defer evaluator.releaseDomain().releaseValue(name);
+                break :result .{ .output = try dict.fromUniquePairs(evaluator.allocator(), evaluator.releaseDomain(), &.{
+                    .{ .{ .symbol = try intern.intern("name") }, name },
+                    .{ .{ .symbol = try intern.intern("kind") }, .{ .symbol = try intern.intern(self.entry.kind.symbol()) } },
+                }) };
+            },
         };
     }
 };
@@ -829,7 +887,11 @@ const Driver = struct {
             dir.close(self.io);
             return evaluator.fail(.cancelled, "directory scope is closing");
         }));
-        const result = directory.adoptChild(self.access, scope, dir, self.inputs.root) catch |err| switch (err) {
+        const adoption = if (self.operation == .open_list)
+            directory.adoptEnumeration(self.access, scope, dir, self.inputs.root)
+        else
+            directory.adoptChild(self.access, scope, dir, self.inputs.root);
+        const result = adoption catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.ScopeClosing => return evaluator.fail(.cancelled, "directory scope is closing"),
         };
@@ -852,7 +914,7 @@ const Driver = struct {
             .remove_tree => self.beginRemoveTree(evaluator),
             .lock => self.beginLock(evaluator),
             .open_dir => unreachable,
-            .child_dir => self.acquireDirectory(evaluator),
+            .child_dir, .open_list => self.acquireDirectory(evaluator),
             .read_bytes, .read_text => self.beginRead(evaluator),
             .stat => self.inspect(evaluator, true),
             .lstat => self.inspect(evaluator, false),

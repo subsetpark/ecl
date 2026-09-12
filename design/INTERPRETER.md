@@ -226,6 +226,13 @@ when a configured worker pool has not started. Cleanup never depends on lazily
 allocating workers: a root-only program can own filesystem resources without
 having spawned a task or parked, and cancellation must still join every member.
 
+Incremental enumerations share directory-resource scope ownership and permanent
+staging dependencies. The cursor owns a fixed-size host iterator; advancing it
+reserves one entry and copies its bounded name under the lifetime lock. Result
+materialization then owns that copy, so neither another reader nor closure can
+invalidate its bytes. Enumeration performs no directory-sized collection or
+cleanup, and its nominal resource type cannot be used as a directory root.
+
 Advisory locks share the fixed-handle resource lifetime with directory handles,
 while their nominal backend types keep lock values out of root acquisition.
 An acquisition driver owns an unlocked descriptor while waiting; nonblocking

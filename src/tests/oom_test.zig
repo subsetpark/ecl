@@ -754,6 +754,7 @@ fn projectSessionInitializationProbe(allocator: std.mem.Allocator) !void {
 }
 
 const StdlibSurface = enum {
+    directory_enumeration,
     directory_staging,
     file_publication,
     directory_resource,
@@ -1012,6 +1013,13 @@ fn stdlibSessionAllocationProbe(
             "\"probe\" io.eprint 1 \"probe\" io.debug pop " ++
                 "\"ECL_OOM_PROBE\" getenv pop " ++
                 "[] (\"ECL_OOM_ABSENT\" getenv) @attempt pop [] (io.stdin) @attempt pop",
+        ),
+        .directory_enumeration => try runOk(
+            &runtime,
+            "oom-enumeration.ecl",
+            "'cwd \"enumerated\" fs.mkdirs \"x\" 'cwd \"enumerated/file\" fs.publish-text " ++
+                "'cwd \"enumerated\" fs.open-list 'cursor set cursor fs.next-entry pop " ++
+                "cursor fs.next-entry pop cursor port.close",
         ),
         .directory_staging => try runOk(
             &runtime,
@@ -2158,4 +2166,9 @@ test "oom: standard-library and host: stdlib: recursive directories propagate ev
 test "oom: standard-library and host: stdlib: directory staging propagates every allocation failure" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.directory_staging);
+}
+
+test "oom: standard-library and host: stdlib: directory enumeration propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
+    try checkStdlibSurface(.directory_enumeration);
 }
