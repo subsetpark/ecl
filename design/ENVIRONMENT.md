@@ -104,6 +104,16 @@ scopes and artifacts, 65,536 exports, 16 MiB per discovered source, and 64 MiB
 of discovered source text. Names and paths are at most 4,096 UTF-8 bytes and
 contain no control characters.
 
+`ecl check-map FILE` validates a document using the same parser, limits,
+reference resolution, and inert source discovery as Session startup. It exits
+zero with no output on success, one with a diagnostic for an invalid map or
+usage, and two on allocation failure. The filename resolves against the
+caller's working directory; paths inside the document resolve against that
+document. Validation does not construct a Session, inspect the caller's map,
+execute source or native artifacts, or write files. An explicit
+`--module-map` does not affect this command. This operation validates resolution
+metadata; artifact content verification remains the publisher's responsibility.
+
 ### Native modules
 
 A `<name>.eclmod` file is a target-specific shared library containing one

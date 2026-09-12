@@ -1151,6 +1151,11 @@ pub fn build(b: *std.Build) void {
     const package_transactions_step = b.step("test-package-transactions", "Verify application-owned lock and generation publication recovery");
     package_transactions_step.dependOn(&package_transactions.step);
 
+    const module_maps = b.addSystemCommand(&.{ "python3", "test/module_maps.py" });
+    module_maps.addArtifactArg(exe);
+    const module_maps_step = b.step("test-module-maps", "Verify public inert module-map validation without project startup");
+    module_maps_step.dependOn(&module_maps.step);
+
     const precommit_step = b.step(
         "precommit",
         "The local gate: formatting, architecture audit, whole-tree analysis, and the fast test tier",
@@ -1169,6 +1174,7 @@ pub fn build(b: *std.Build) void {
     // behavior without adding an external service or an ambient input stream.
     precommit_step.dependOn(&installed_apps.step);
     precommit_step.dependOn(&package_transactions.step);
+    precommit_step.dependOn(&module_maps.step);
 }
 
 fn addCapturedTestRun(

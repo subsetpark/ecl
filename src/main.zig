@@ -11,6 +11,7 @@ const help =
     \\    ecl <SOURCE> [ARGS...]     Evaluate source and print the stack
     \\    ecl fmt <FILE|->           Format source to standard output
     \\    ecl fmt -w <FILE>          Format and atomically rewrite a file
+    \\    ecl check-map <FILE>       Validate an inert module map
     \\    ecl pkg <SUBCOMMAND>       Manage the current project's packages
     \\    ecl test [OPTIONS] [-- ARGS...]  Run the root project's tests
     \\
@@ -90,6 +91,7 @@ fn dispatch(startup: Startup) AppError!u8 {
         return 0;
     }
     if (std.mem.eql(u8, first, "fmt")) return formatCommand(init, cli[1..]);
+    if (std.mem.eql(u8, first, "check-map")) return checkMapCommand(init, cli[1..]);
     if (std.mem.eql(u8, first, "pkg")) return packageCommand(init, cli[1..]);
     if (std.mem.eql(u8, first, "test")) return testCommand(init, cli[1..]);
     const worker_count = try configuredWorkers(init) orelse return 2;
@@ -140,6 +142,23 @@ const ApplicationDescriptor = struct {
     entry: []const u8,
     module_map: []const u8,
 };
+
+fn checkMapCommand(init: Startup, arguments: []const []const u8) AppError!u8 {
+    if (arguments.len != 1) {
+        try writeFile(init.process.io, .stderr, "ecl check-map: usage: ecl check-map <FILE>\n");
+        return 1;
+    }
+    const path = try std.fs.path.resolve(init.process.gpa, &.{ init.cwd, arguments[0] });
+    defer init.process.gpa.free(path);
+    var host = ecl.heap.HostOwner.init(init.process.gpa);
+    defer host.cleanup().drain();
+    const map = ecl.module_map.load(host.cleanup(), init.process.io, path) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Invalid => return emitSyntheticError(init, .io, "invalid module map", null),
+    };
+    defer map.deinit();
+    return 0;
+}
 
 fn applicationName(name: []const u8) bool {
     if (name.len == 0 or name.len > 64 or !std.ascii.isAlphabetic(name[0])) return false;

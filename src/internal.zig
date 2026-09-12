@@ -27,6 +27,7 @@ pub const native_descriptor = @import("native_descriptor.zig");
 pub const native_module = @import("native_module.zig");
 pub const native_call = @import("native_call.zig");
 pub const modules = @import("modules.zig");
+pub const module_map = @import("module_map.zig");
 pub const machine = @import("machine.zig");
 pub const prims = @import("prims.zig");
 pub const combinators = @import("combinators.zig");
