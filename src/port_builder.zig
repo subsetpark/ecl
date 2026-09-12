@@ -281,12 +281,15 @@ pub const Builder = opaque {
     /// Seal only the top value as a child configuration. Earlier completed
     /// values stay owned by the builder, allowing atomic multi-child results.
     pub fn prepareChild(self: *Builder) Error!void {
+        try self.beginPrepareChild();
+        try self.drive();
+    }
+    fn beginPrepareChild(self: *Builder) Error!void {
         const owned = self.state();
         try owned.requireIdle();
         if (owned.depth == 0) return error.InvalidState;
         const validating = try message.Message.create(owned.host.allocator(), owned.stack.values()[owned.depth - 1], limits);
         owned.phase = .{ .validating = .{ .message = validating, .purpose = .child } };
-        try self.drive();
     }
     pub fn childConfiguration(self: *Builder) ?*const message.Validated {
         const owned = self.state();
@@ -400,6 +403,15 @@ pub const ResumableBuilder = opaque {
     }
     pub fn finish(self: *ResumableBuilder) Error!void {
         return self.builder().beginFinish();
+    }
+    pub fn prepareChild(self: *ResumableBuilder) Error!void {
+        return self.builder().beginPrepareChild();
+    }
+    pub fn childConfiguration(self: *ResumableBuilder) ?*const message.Validated {
+        return self.builder().childConfiguration();
+    }
+    pub fn replaceChild(self: *ResumableBuilder, child: Value) Error!void {
+        return self.builder().replaceChild(child);
     }
     pub fn advance(self: *ResumableBuilder) Error!poll.Progress(void) {
         if (self.builder().state().cancelled()) return error.Cancelled;

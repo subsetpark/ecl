@@ -540,6 +540,21 @@ const OperationAdapter = struct {
         }
     }
     fn stageChild(self: *OperationAdapter, operation: *Operation, kind: u32, configuration: *const port_message.Validated, dependency: abi.ChildDependency) CreateError!Value {
+        const item = try self.startChild(operation, kind, configuration, dependency, .controller);
+        errdefer heap.hostDomain(self.cell.adapter.owner.host).releaseValue(item);
+        const cell = resource_api.Resource.project(Cell, item).?;
+        std.Io.Threaded.mutexLock(&cell.mutex);
+        defer std.Io.Threaded.mutexUnlock(&cell.mutex);
+        while (cell.phase == .reserved or cell.phase == .initializing) cell.changed.waitUncancelable(io(), &cell.mutex);
+        if (cell.initialization_failure) |failure| if (failure == .out_of_memory) return error.OutOfMemory;
+        if (cell.phase != .open or cell.initialization_failure != null) return error.Io;
+        return item;
+    }
+    const ChildMode = enum { controller, cooperative };
+    fn StartedChild(comptime mode: ChildMode) type {
+        return if (mode == .controller) Value else struct { value: Value, readiness: external.RegisterResult };
+    }
+    fn startChild(self: *OperationAdapter, operation: *Operation, kind: u32, configuration: *const port_message.Validated, dependency: abi.ChildDependency, comptime mode: ChildMode) CreateError!StartedChild(mode) {
         const parent = self.cell;
         const owner = parent.adapter.owner;
         const provisional = try operation.childGroup();
@@ -565,17 +580,34 @@ const OperationAdapter = struct {
             return err;
         };
         errdefer heap.hostDomain(owner.host).releaseValue(item);
+        const waiting = if (mode == .cooperative) try cell.prepareInitializationWait(external.wakeTarget(ChildWake, ChildWake.borrow(operation))) else {};
+        errdefer if (mode == .cooperative) waiting.discard();
         cell.controllers.start(.{ provisional, dependent }, Cell.prepareChildStartup, Cell.run, Cell.abortStartup) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.ScopeClosing => error.ScopeClosing,
             error.Io, error.Closed => error.Io,
         };
-        std.Io.Threaded.mutexLock(&cell.mutex);
-        defer std.Io.Threaded.mutexUnlock(&cell.mutex);
-        while (cell.phase == .reserved or cell.phase == .initializing) cell.changed.waitUncancelable(io(), &cell.mutex);
-        if (cell.initialization_failure) |failure| if (failure == .out_of_memory) return error.OutOfMemory;
-        if (cell.phase != .open or cell.initialization_failure != null) return error.Io;
-        return item;
+        return if (mode == .controller) item else .{ .value = item, .readiness = waiting.register() };
+    }
+};
+
+/// A child readiness notification can only schedule its parent invocation;
+/// cancellation of the registration joins callbacks before releasing that pin.
+const ChildWake = opaque {
+    fn borrow(owned: *Operation) *ChildWake {
+        return @ptrCast(owned);
+    }
+    fn operation(self: *ChildWake) *Operation {
+        return @ptrCast(@alignCast(self));
+    }
+    pub fn retainExternalWake(self: *ChildWake) void {
+        self.operation().retainReadiness();
+    }
+    pub fn releaseExternalWake(self: *ChildWake) void {
+        self.operation().releaseReadiness();
+    }
+    pub fn wakeExternal(self: *ChildWake, _: external.Wake) void {
+        self.operation().adapter.cell.controllers.wake();
     }
 };
 
@@ -733,9 +765,9 @@ const ControllerContext = struct {
     builder: union(enum) {
         none,
         controller: *message_builder.Builder,
-        cooperative: struct { value: *message_builder.ResumableBuilder, phase: enum { idle, working, result } = .idle },
+        cooperative: CooperativeConstruction,
     } = .none,
-    cooperative: ?struct { budget: u32 = 256, deadline: ?scheduler.Deadline = null } = null,
+    cooperative: ?struct { budget: u32 = 256, wait: union(enum) { none, timer: scheduler.Deadline, readiness } = .none } = null,
     symbol_bytes: [256]u8 = @splat(0),
     fn cancellation(self: *ControllerContext) *const std.atomic.Value(bool) {
         return if (self.operation()) |op| &op.transport_cancelled else &self.cell.closed;
@@ -746,7 +778,7 @@ const ControllerContext = struct {
         switch (self.builder) {
             .none => {},
             .controller => |builder| builder.retire(),
-            .cooperative => |builder| builder.value.retire(),
+            .cooperative => |*builder| builder.retire(self.cell.adapter.owner.host),
         }
         self.builder = .none;
     }
@@ -757,6 +789,47 @@ const ControllerContext = struct {
         };
     }
 };
+
+const ChildRequest = struct { kind: u32, dependency: abi.ChildDependency };
+const CooperativeConstruction = struct {
+    value: *message_builder.ResumableBuilder,
+    phase: union(enum) { idle, working, result, child_configuration: ChildRequest, child: OperationAdapter.StartedChild(.cooperative) } = .idle,
+    fn retire(self: *CooperativeConstruction, host: *const heap.HostCleanup) void {
+        if (self.phase == .child) {
+            switch (self.phase.child.readiness) {
+                .ready => {},
+                .registered => |*registration| registration.cancel(),
+            }
+            heap.hostDomain(host).releaseValue(self.phase.child.value);
+        }
+        self.value.retire();
+    }
+};
+
+fn childRequest(ctx: *ControllerContext, request: *const abi.MessageBuildRequest) message_builder.Error!ChildRequest {
+    const identity = request.kind_identity orelse return error.InvalidValue;
+    const dependency: abi.ChildDependency = @enumFromInt(request.count);
+    switch (dependency) {
+        .independent, .dependent => {},
+        _ => return error.InvalidState,
+    }
+    var index: u32 = 0;
+    while (ctx.cell.adapter.instance.validated().port(index)) |definition| : (index += 1) {
+        if (definition.wire.identity == identity) return .{ .kind = index, .dependency = dependency };
+    }
+    return error.InvalidState;
+}
+
+fn childCreationFailure(ctx: *ControllerContext, err: CreateError) abi.HostStatus {
+    recordControllerFailure(ctx, switch (err) {
+        error.OutOfMemory => .out_of_memory,
+        error.Limit => .init(.overflow, "native child resource limit exceeded"),
+        error.Closed, error.ScopeClosing => .init(.io, "native child owner is closing"),
+        error.InsufficientLanes => .init(.domain, "native child requires more controller lanes"),
+        error.Io => .init(.io, "native child initialization failed"),
+    });
+    return if (err == error.OutOfMemory) .out_of_memory else .invalid;
+}
 fn context(raw: *anyopaque) *ControllerContext {
     return @ptrCast(@alignCast(raw));
 }
@@ -908,26 +981,8 @@ fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest
             try builder.prepareChild();
 
             const configuration = builder.childConfiguration() orelse return error.InvalidState;
-            const identity = request.kind_identity orelse return error.InvalidValue;
-            const dependency: abi.ChildDependency = @enumFromInt(request.count);
-            switch (dependency) {
-                .independent, .dependent => {},
-                _ => return error.InvalidState,
-            }
-            var index: u32 = 0;
-            const kind = while (ctx.cell.adapter.instance.validated().port(index)) |definition| : (index += 1) {
-                if (definition.wire.identity == identity) break index;
-            } else return error.InvalidState;
-            const child = op.adapter.stageChild(op, kind, configuration, dependency) catch |err| {
-                recordControllerFailure(ctx, switch (err) {
-                    error.OutOfMemory => .out_of_memory,
-                    error.Limit => .init(.overflow, "native child resource limit exceeded"),
-                    error.Closed, error.ScopeClosing => .init(.io, "native child owner is closing"),
-                    error.InsufficientLanes => .init(.domain, "native child requires more controller lanes"),
-                    error.Io => .init(.io, "native child initialization failed"),
-                });
-                return if (err == error.OutOfMemory) .out_of_memory else .invalid;
-            };
+            const selected = try childRequest(ctx, request);
+            const child = op.adapter.stageChild(op, selected.kind, configuration, selected.dependency) catch |err| return childCreationFailure(ctx, err);
             defer heap.hostDomain(ctx.cell.adapter.owner.host).releaseValue(child);
             try builder.replaceChild(child);
         },
@@ -1201,11 +1256,20 @@ pub fn fromValue(value: Value, instance: *native.ModuleInstance, kind: u32) ?*Ce
     return if (cell.adapter.instance == instance and cell.adapter.kind == kind) cell else null;
 }
 
-fn cooperativeBuildMessage(raw: *anyopaque, request: *const abi.MessageBuildRequest) callconv(.c) abi.HostStatus {
-    const ctx = context(raw);
-    return buildCooperative(ctx, request) catch |err| constructionFailure(ctx, err);
+fn cooperativeStatus(status: abi.HostStatus) abi.CooperativeBuildStatus {
+    return switch (status) {
+        .ok => .ok,
+        .out_of_memory => .out_of_memory,
+        .invalid => .invalid,
+        .yield_required => .yield_required,
+        _ => .invalid,
+    };
 }
-fn buildCooperative(ctx: *ControllerContext, request: *const abi.MessageBuildRequest) message_builder.Error!abi.HostStatus {
+fn cooperativeBuildMessage(raw: *anyopaque, request: *const abi.MessageBuildRequest) callconv(.c) abi.CooperativeBuildStatus {
+    const ctx = context(raw);
+    return buildCooperative(ctx, request) catch |err| cooperativeStatus(constructionFailure(ctx, err));
+}
+fn buildCooperative(ctx: *ControllerContext, request: *const abi.MessageBuildRequest) message_builder.Error!abi.CooperativeBuildStatus {
     if (request.size != @sizeOf(abi.MessageBuildRequest)) return error.InvalidState;
     const operation = ctx.operation() orelse return error.InvalidState;
     if (controllerCancelled(ctx)) return error.Cancelled;
@@ -1219,7 +1283,36 @@ fn buildCooperative(ctx: *ControllerContext, request: *const abi.MessageBuildReq
     const builder = building.value;
     if (request.action == .advance) {
         if (building.phase == .idle) return .ok;
+        if (building.phase == .child) {
+            const child = &building.phase.child;
+            const cell = resource_api.Resource.project(Cell, child.value).?;
+            switch (cell.initialized()) {
+                .pending => {
+                    ctx.cooperative.?.wait = .readiness;
+                    return .parked;
+                },
+                .failed => |failure| {
+                    cell.close();
+                    return cooperativeStatus(childCreationFailure(ctx, if (failure == .out_of_memory) error.OutOfMemory else error.Io));
+                },
+                .ready => {},
+            }
+            try builder.replaceChild(child.value);
+            switch (child.readiness) {
+                .ready => {},
+                .registered => |*registration| registration.cancel(),
+            }
+            heap.hostDomain(ctx.cell.adapter.owner.host).releaseValue(child.value);
+            building.phase = .idle;
+            return .ok;
+        }
         if (try builder.advance() == .pending) return .yield_required;
+        if (building.phase == .child_configuration) {
+            const selected = building.phase.child_configuration;
+            const child = operation.adapter.startChild(operation, selected.kind, builder.childConfiguration() orelse return error.InvalidState, selected.dependency, .cooperative) catch |err| return cooperativeStatus(childCreationFailure(ctx, err));
+            building.phase = .{ .child = child };
+            return .yield_required;
+        }
         if (building.phase == .result) {
             const item = try message_transport.Envelope.create(ctx.cell.adapter.owner.host, builder.validated() orelse return error.InvalidState);
             if (!operation.terminal_result.replace(item)) {
@@ -1275,7 +1368,12 @@ fn buildCooperative(ctx: *ControllerContext, request: *const abi.MessageBuildReq
             try builder.clear();
             building.phase = .working;
         },
-        .copy_received, .send, .reply_endpoint, .child, .advance => return error.InvalidState,
+        .child => {
+            const selected = try childRequest(ctx, request);
+            try builder.prepareChild();
+            building.phase = .{ .child_configuration = selected };
+        },
+        .copy_received, .send, .reply_endpoint, .advance => return error.InvalidState,
         _ => return error.InvalidState,
     }
     return .ok;
@@ -1292,10 +1390,11 @@ fn cooperativePark(raw: *anyopaque, milliseconds: u64) callconv(.c) bool {
     const ctx = context(raw);
     if (milliseconds > std.math.maxInt(u63)) return false;
     if (ctx.cooperative) |*work| {
-        work.deadline = ctx.cell.scheduler.deadlineAfter(@intCast(milliseconds)) catch {
+        const deadline = ctx.cell.scheduler.deadlineAfter(@intCast(milliseconds)) catch {
             recordControllerFailure(ctx, .init(.overflow, "cooperative timer deadline overflow"));
             return false;
         };
+        work.wait = .{ .timer = deadline };
         return true;
     }
     return false;
@@ -1304,9 +1403,13 @@ fn cooperativeProgress(ctx: *ControllerContext, progress: abi.CooperativeProgres
     return switch (progress) {
         .completed => .completed,
         .yielded => .yielded,
-        .parked => if (controllerCancelled(ctx)) .yielded else if (ctx.cooperative.?.deadline) |deadline| .{ .parked = deadline } else blk: {
-            recordControllerFailure(ctx, .init(.contract, "cooperative callback parked without a timer"));
-            break :blk .completed;
+        .parked => if (controllerCancelled(ctx)) .yielded else switch (ctx.cooperative.?.wait) {
+            .timer => |deadline| .{ .parked = deadline },
+            .readiness => .waiting,
+            .none => blk: {
+                recordControllerFailure(ctx, .init(.contract, "cooperative callback parked without a registered wait"));
+                break :blk .completed;
+            },
         },
         _ => blk: {
             recordControllerFailure(ctx, .init(.contract, "invalid cooperative callback progress"));
@@ -1359,7 +1462,7 @@ const CooperativeInvocation = struct {
                     if (!failed and ctx.builder == .cooperative) switch (ctx.builder.cooperative.phase) {
                         .idle => {},
                         .result => self.phase = .publishing,
-                        .working => recordControllerFailure(ctx, .init(.contract, "cooperative callback completed unfinished construction")),
+                        .working, .child_configuration, .child => recordControllerFailure(ctx, .init(.contract, "cooperative callback completed unfinished construction")),
                     };
                     return .yielded;
                 }
@@ -1389,7 +1492,7 @@ const CooperativeInvocation = struct {
             .yielded => .yielded,
             .parked => |deadline| .{ .parked = deadline },
             .completed => .completed,
-            .waiting => unreachable,
+            .waiting => .waiting,
         };
     }
 };

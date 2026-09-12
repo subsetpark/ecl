@@ -114,7 +114,7 @@ pub fn Resource(comptime Adapter: type) type {
                     if (selected) |lane| {
                         unlock(&self.mutex);
                         return switch (lane.advanceNext(Adapter.Exchange.advanceCooperative)) {
-                            .idle => .waiting,
+                            .idle, .waiting => .waiting,
                             .yielded, .completed => .yielded,
                             .parked => |deadline| .{ .parked = deadline },
                         };
@@ -281,6 +281,9 @@ pub fn Resource(comptime Adapter: type) type {
         }
         pub fn registerReadiness(self: *Cell, key: u64, target: external.WakeTarget) external.RegisterError!external.RegisterResult {
             return external.WaitList(Cell).register(self, key, target);
+        }
+        pub fn prepareInitializationWait(self: *Cell, target: external.WakeTarget) external.RegisterError!*external.WaitList(Cell).Prepared {
+            return external.WaitList(Cell).prepare(self, 0, target);
         }
         pub fn readyLocked(self: *Cell, key: u64) bool {
             return switch (key) {

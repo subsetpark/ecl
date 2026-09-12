@@ -32,7 +32,7 @@ Session's runtime I/O state.
 The public `net` and `proc` modules are ECL compositions over these registered
 capabilities and `port.*`. Their operation and endpoint selectors expose only
 their corresponding resources and streams. First-party adapters use typed backend calls;
-the extension adapter translates ABI v10 calls into the same runtime interfaces
+the extension adapter translates ABI v11 calls into the same runtime interfaces
 for controller execution, transport, cancellation, ownership, and cleanup.
 
 Embedded names have precedence over filesystem modules. A file on `ECL_PATH`
@@ -127,8 +127,8 @@ module. Its descriptor declares the same canonical name requested by the
 loader. The complete word table validates before publication, and publication
 is atomic.
 
-The current pre-release native ABI is version 10, with entry symbol
-`ecl_module_abi_v10`. Resource authors choose `ecl.Port(.{ .controller = Spec })`
+The current pre-release native ABI is version 11, with entry symbol
+`ecl_module_abi_v11`. Resource authors choose `ecl.Port(.{ .controller = Spec })`
 or `ecl.Port(.{ .cooperative = Spec })`. Cooperative callbacks receive bounded
 work accounting and cancellable timer parking. Their persistent builder begins
 aggregate construction and advances it explicitly; it has no blocking endpoints.
@@ -220,7 +220,11 @@ provisional ownership until ECL receives or claims the containing value; failed
 creation retains the configuration and cleans up partial startup. The dependency
 argument is explicit: dependent children retire before the parent backend,
 while independent children can survive it. Cancellation interrupts blocked child
-startup. No child handle grants native code ECL storage or interpreter access.
+startup. Cooperative builders expose the same child construction and ownership
+contract. Their `advance()` returns completed, yielded, or parked; callbacks
+propagate pending progress until construction completes. A parked child uses a
+reserved readiness registration rather than polling or a controller thread.
+No child handle grants native code ECL storage or interpreter access.
 `Controller.parent(Port)` borrows the issuing parent's native state only for a
 dependent child of that registered kind in the same module instance. Roots,
 independent children, and wrong kinds return null. The borrow remains valid

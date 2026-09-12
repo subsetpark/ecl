@@ -2267,3 +2267,54 @@ test "native: cooperative builders preserve scalars aggregates copies and cleare
         ") 'structured-message test) 'native.acceptance @defm " ++
         "tests first @test dup 'ok dict.has? (pop) ('err at raise) if");
 }
+
+fn expectCooperativeAcceptance(program: []const u8) !void {
+    const source = try std.fmt.allocPrint(std.testing.allocator, "[] (({s}) 'scenario test) 'native.acceptance @defm " ++
+        "tests first @test dup 'ok dict.has? (pop) ('err at raise) if", .{program});
+    defer std.testing.allocator.free(source);
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    for ([_]session.Config{ .cooperative, .{ .worker_pool = 1 }, .{ .worker_pool = 4 } }) |configuration| {
+        var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+            .ecl_path = native_fixture.directory,
+            .native_instances = &.{.{ .name = "instanceprobe", .bytes = "A", .port_limits = .{ .max_live_ports = 2 } }},
+        }), configuration, .language_tests);
+        defer runtime.deinit();
+        try expectOk(&runtime, source);
+    }
+}
+
+test "native: cooperative children publish independently and preserve transferred dependencies" {
+    try expectCooperativeAcceptance(
+        "instanceprobe.cooperative [] port.open (|p| " ++
+            "p instanceprobe.cooperative-spawn 0 port.call p port.close " ++
+            "dup instanceprobe.borrowed [] port.call 66 = {'kind 'user 'msg \"independent child\"} assert port.close) call " ++
+            "instanceprobe.cooperative [] port.open (|p| " ++
+            "p instanceprobe.cooperative-dependent 0 port.call wrap [] (instanceprobe.park [] port.call pop) @give " ++
+            "(instanceprobe.started 1 = not) (0 clock.sleep) while " ++
+            "p port.close task.await 'err dict.has? {'kind 'user 'msg \"transferred dependency\"} assert) call",
+    );
+}
+
+test "native: cooperative children park initialization and join cancellation without polling" {
+    try expectCooperativeAcceptance(
+        "instanceprobe.cooperative [] port.open (|p| " ++
+            "p wrap (instanceprobe.cooperative-spawn 2 port.call pop) @spawn " ++
+            "(instanceprobe.started 2 = not) (0 clock.sleep) while " ++
+            "(instanceprobe.child-advances 2 <) (0 clock.sleep) while " ++
+            "100 (0 clock.sleep) times instanceprobe.child-advances 2 = {'kind 'user 'msg \"parked child does not poll\"} assert " ++
+            "dup task.cancel task.await 'err dict.has? {'kind 'user 'msg \"cancelled construction\"} assert " ++
+            "p instanceprobe.values 2 port.call [0 1] match? {'kind 'user 'msg \"parent admission recovered\"} assert " ++
+            "p port.close) call instanceprobe.next 22065 = {'kind 'user 'msg \"joined private cleanup\"} assert",
+    );
+}
+
+test "native: cooperative children retain failed initialization for joined cleanup" {
+    try expectCooperativeAcceptance(
+        "instanceprobe.cooperative [] port.open (|p| " ++
+            "p wrap (instanceprobe.cooperative-spawn 1 port.call) @attempt 'err at 'kind at 'io match? " ++
+            "{'kind 'user 'msg \"child initialization failure\"} assert " ++
+            "instanceprobe.next 11065 = {'kind 'user 'msg \"failed child cleanup\"} assert " ++
+            "p instanceprobe.cooperative-spawn 0 port.call port.close p port.close) call",
+    );
+}

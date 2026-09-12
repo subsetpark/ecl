@@ -1915,6 +1915,13 @@ borrows require a dependent child and remain valid through its retirement.
 Neither scope transfer nor an independent child's publication can upgrade the
 temporary borrow into a lifetime dependency.
 
+Cooperative child construction reserves a readiness registration before child
+publication. The suspended invocation owns both that registration and its
+provisional child through initialization, replacement, or failed construction.
+Its distinct parked state waits for readiness through the common activity group;
+it does not retain a controller or repeatedly dispatch an unfinished child.
+Cancellation joins notification before releasing either lifetime pin.
+
 All registered resources bind scope ownership and terminal publication to a
 runtime-owned activity group. Its provisional state owns startup rollback; successful submission transfers the root into the
 executor. Draining owns the root outcome and every outstanding activity until

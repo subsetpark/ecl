@@ -1530,6 +1530,14 @@ test "oom: standard-library and host: cooperative native message construction" {
     ).run);
 }
 
+test "oom: standard-library and host: cooperative native child publication" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortProbe(
+        "instanceprobe.cooperative [] port.open dup instanceprobe.cooperative-spawn 0 port.call port.close port.close",
+        "",
+    ).run);
+}
+
 test "oom: standard-library and host: native port registered concurrent allocation accounting" {
     try requireSelectedOomTest(@src());
     const Probe = struct {

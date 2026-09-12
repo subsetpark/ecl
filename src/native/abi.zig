@@ -5,8 +5,8 @@
 
 const builtin = @import("builtin");
 
-pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v10";
-pub const abi_version: u32 = 10;
+pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v11";
+pub const abi_version: u32 = 11;
 
 pub const max_error_message_bytes: u32 = 4096;
 pub const max_guest_scalar_bytes: u32 = 4096;
@@ -143,12 +143,13 @@ pub const PortControllerFn = *const fn (*anyopaque, *const ControllerTable, *any
 pub const PortOperationFn = *const fn (*anyopaque, u32, *const ControllerTable, *anyopaque) callconv(.c) void;
 pub const ResourceExecution = enum(u32) { controller, cooperative, _ };
 pub const CooperativeProgress = enum(u32) { completed, yielded, parked, _ };
+pub const CooperativeBuildStatus = enum(u32) { ok, out_of_memory, invalid, yield_required, parked, _ };
 pub const CooperativeTable = extern struct {
     instance_state: InstanceStateFn,
     initialization_parent: InstanceStateFn,
     parent_state: @FieldType(ControllerTable, "parent_state"),
     input: @FieldType(ControllerTable, "input"),
-    build_message: @FieldType(ControllerTable, "build_message"),
+    build_message: *const fn (*anyopaque, *const MessageBuildRequest) callconv(.c) CooperativeBuildStatus,
     fail_allocation: @FieldType(ControllerTable, "fail_allocation"),
     cancelled: @FieldType(ControllerTable, "cancelled"),
     fail: @FieldType(ControllerTable, "fail"),

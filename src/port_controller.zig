@@ -426,8 +426,8 @@ const CancellationPolicy = enum { release, acknowledge, close_resource };
 pub const CancelAction = enum { retired, interrupt, close_resource, settled };
 pub const Completion = enum { retired, close_resource };
 /// One bounded callback slice either retains its queue ownership or completes.
-pub const Progress = union(enum) { yielded, parked: scheduler.Deadline, completed };
-pub const Dispatch = union(enum) { idle, yielded, parked: scheduler.Deadline, completed };
+pub const Progress = union(enum) { yielded, waiting, parked: scheduler.Deadline, completed };
+pub const Dispatch = union(enum) { idle, yielded, waiting, parked: scheduler.Deadline, completed };
 pub const ExecutionState = enum { preparing, queued, active, cancelling, reusable, cancelled, done };
 
 /// Invocation-local execution authority, minted only while lending a callback.
@@ -721,7 +721,7 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
         pub fn runNext(self: *Self) bool {
             return switch (self.advanceNext(executeToCompletion)) {
                 .idle => false,
-                .yielded, .parked, .completed => true,
+                .yielded, .waiting, .parked, .completed => true,
             };
         }
         /// One lane executor owns dispatch. A yielded callback retains its FIFO
@@ -751,18 +751,19 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
             } else @as(Progress, .completed);
             std.Io.Threaded.mutexLock(&cell.mutex);
             node.invocation = switch (progress) {
-                .yielded, .parked => .suspended,
+                .yielded, .waiting, .parked => .suspended,
                 .completed => .returned,
             };
             std.Io.Threaded.mutexUnlock(&cell.mutex);
             std.Io.Threaded.mutexLock(mutex);
             std.Io.Threaded.mutexLock(&cell.mutex);
             switch (progress) {
-                .yielded, .parked => {
+                .yielded, .waiting, .parked => {
                     std.Io.Threaded.mutexUnlock(&cell.mutex);
                     std.Io.Threaded.mutexUnlock(mutex);
                     return switch (progress) {
                         .yielded => .yielded,
+                        .waiting => .waiting,
                         .parked => |deadline| .{ .parked = deadline },
                         .completed => unreachable,
                     };

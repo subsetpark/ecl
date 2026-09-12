@@ -7,6 +7,19 @@ pub const Cancellation = declarations.Cancellation;
 
 const ControllerState = struct { table: *const abi.ControllerTable, context: *anyopaque, input_view: abi.ValueView = .{ .kind = .list } };
 pub const ControllerError = declarations.ControllerError;
+const ChildDependency = enum { independent, dependent };
+
+fn childRequest(comptime P: type, dependency: ChildDependency) abi.MessageBuildRequest {
+    if (!@hasDecl(P, "ecl_port_marker")) @compileError("ecl-native: child requires a declared Port type");
+    return .{
+        .action = .child,
+        .kind_identity = P.kindIdentity(),
+        .count = @intFromEnum(switch (dependency) {
+            .independent => abi.ChildDependency.independent,
+            .dependent => abi.ChildDependency.dependent,
+        }),
+    };
+}
 
 fn require(status: abi.ControllerStatus) ControllerError!void {
     return switch (status) {
@@ -171,16 +184,8 @@ pub const MessageBuilder = opaque {
     /// the host cleans up any failed child. Dependent children close and join
     /// before their issuing parent's backend is destroyed; scope transfer
     /// never detaches that dependency.
-    pub fn child(self: *MessageBuilder, comptime P: type, dependency: enum { independent, dependent }) ControllerError!void {
-        if (!@hasDecl(P, "ecl_port_marker")) @compileError("ecl-native: child requires a declared Port type");
-        return self.apply(.{
-            .action = .child,
-            .kind_identity = P.kindIdentity(),
-            .count = @intFromEnum(switch (dependency) {
-                .independent => abi.ChildDependency.independent,
-                .dependent => abi.ChildDependency.dependent,
-            }),
-        });
+    pub fn child(self: *MessageBuilder, comptime P: type, dependency: ChildDependency) ControllerError!void {
+        return self.apply(childRequest(P, dependency));
     }
     pub fn list(self: *MessageBuilder, count: u32) ControllerError!void {
         return self.apply(.{ .action = .list, .count = count });
@@ -520,11 +525,21 @@ pub const CooperativeBuilder = opaque {
     pub fn clear(self: *CooperativeBuilder) ControllerError!void {
         return self.apply(.{ .action = .clear });
     }
-    pub fn advance(self: *CooperativeBuilder) ControllerError!bool {
+    /// Begin replacing the top configuration with a provisionally owned child.
+    /// Advance validates, initializes, and waits without blocking a controller.
+    /// Failure retains private construction for joined cleanup.
+    pub fn child(self: *CooperativeBuilder, comptime P: type, dependency: ChildDependency) ControllerError!void {
+        return self.apply(childRequest(P, dependency));
+    }
+    /// Propagate yielded or parked progress from the callback. Only completed
+    /// permits the next construction command. Child parking owns a registered
+    /// readiness wait and does not poll or require a timer.
+    pub fn advance(self: *CooperativeBuilder) ControllerError!CooperativeProgress {
         const owned = self.state();
         return switch (owned.table.build_message(owned.context, &.{ .action = .advance })) {
-            .ok => true,
-            .yield_required => false,
+            .ok => .completed,
+            .yield_required => .yielded,
+            .parked => .parked,
             .out_of_memory => error.OutOfMemory,
             else => if (owned.table.cancelled(owned.context)) error.Cancelled else error.Failed,
         };

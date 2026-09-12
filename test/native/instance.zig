@@ -10,6 +10,7 @@ const Lifecycle = struct {
         copied: usize = 0,
         value: std.atomic.Value(i64) = .init(0),
         cooperative_started: std.atomic.Value(i64) = .init(0),
+        child_advances: std.atomic.Value(i64) = .init(0),
     };
     pub fn init() State {
         return .{};
@@ -108,6 +109,10 @@ fn cooperativeStarted(call: *ecl.Call("-- value")) ecl.CallbackResult {
     const state = call.instance(Instance) orelse return call.fail(.contract, "missing instance");
     return call.complete(.{ecl.Scalar.int(state.cooperative_started.load(.acquire))});
 }
+fn childAdvances(call: *ecl.Call("-- value")) ecl.CallbackResult {
+    const state = call.instance(Instance) orelse return call.fail(.contract, "missing instance");
+    return call.complete(.{ecl.Scalar.int(state.child_advances.load(.acquire))});
+}
 const CooperativeResource = ecl.Port(.{ .cooperative = struct {
     pub const name = "cooperative";
     pub const State = struct {
@@ -121,12 +126,16 @@ const CooperativeResource = ecl.Port(.{ .cooperative = struct {
         cleanup_remaining: u32 = 513,
         copied_parent: ?i64 = null,
         construction: enum { start, clear, key, scalars, dictionary, input, list } = .start,
+        creating: enum { start, configuration, child } = .start,
+        initialization_parked: bool = false,
     };
     pub const operations = .{
         .values = .{ .doc = "Build a result over several bounded slices.", .handler = values, .lane = .operation, .endpoints = .{} },
         .park = .{ .doc = "Park until cancelled, then join private retirement.", .handler = park, .lane = .operation, .endpoints = .{} },
         .borrowed = .{ .doc = "Read an independently copied initialization value.", .handler = borrowed, .lane = .operation, .endpoints = .{} },
         .message = .{ .doc = "Construct a heterogeneous message using bounded SDK builders.", .handler = message, .lane = .operation, .endpoints = .{} },
+        .spawn = .{ .name = "cooperative-spawn", .doc = "Create an independent child through resumable construction.", .handler = spawn, .lane = .operation, .endpoints = .{} },
+        .dependent = .{ .name = "cooperative-dependent", .doc = "Create a dependent child through resumable construction.", .handler = dependent, .lane = .operation, .endpoints = .{} },
     };
     pub fn init() State {
         return .{};
@@ -138,12 +147,22 @@ const CooperativeResource = ecl.Port(.{ .cooperative = struct {
             if (context.parent(Resource) != null) return error.InvalidValue;
             state.copied_parent = parent.value + 20;
         }
+        if (context.initializationParent(CooperativeResource)) |parent| {
+            state.copied_parent = parent.copied_parent.? + 1;
+        }
+        if (state.copied_parent == null) state.copied_parent = instance.value.load(.monotonic);
         if (state.bytes == null) state.bytes = try state.memory.?.allocate(1024);
         while (state.initialized < state.bytes.?.len and context.consume(1)) {
             state.bytes.?[state.initialized] = @truncate(state.initialized);
             state.initialized += 1;
         }
         if (state.initialized != state.bytes.?.len) return .yielded;
+        if (context.input(&.{}).?.int() == 2 and !state.initialization_parked) {
+            state.initialization_parked = true;
+            instance.cooperative_started.store(2, .release);
+            if (!context.park(3_600_000)) return error.InvalidValue;
+            return .parked;
+        }
         if (context.input(&.{}).?.int() == 1) context.fail(.io, "requested cooperative initialization failure");
         return .completed;
     }
@@ -168,7 +187,8 @@ const CooperativeResource = ecl.Port(.{ .cooperative = struct {
                 return .yielded;
             },
             .aggregate => {
-                if (!try builder.advance()) return .yielded;
+                const progress = try builder.advance();
+                if (progress != .completed) return progress;
                 try builder.result();
                 state.phase = .completed;
                 return .completed;
@@ -185,13 +205,49 @@ const CooperativeResource = ecl.Port(.{ .cooperative = struct {
     }
     fn borrowed(state: *State, context: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
         if (context.initializationParent(Resource) != null or context.parent(Resource) != null) return error.InvalidValue;
+        if (context.initializationParent(CooperativeResource) != null or context.parent(CooperativeResource) != null) return error.InvalidValue;
         try context.builder().int(state.copied_parent orelse return error.InvalidValue);
         try context.builder().result();
         return .completed;
     }
+    fn spawn(state: *State, context: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
+        return createChild(state, context, false);
+    }
+    fn dependent(state: *State, context: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
+        return createChild(state, context, true);
+    }
+    fn createChild(state: *State, context: *ecl.Cooperative, comptime dependent_child: bool) ecl.ControllerError!ecl.CooperativeProgress {
+        const builder = context.builder();
+        const instance = context.instance(Instance).?;
+        if (state.creating == .start) instance.child_advances.store(0, .release);
+        if (state.creating == .child) _ = instance.child_advances.fetchAdd(1, .acq_rel);
+        if (state.creating != .start) {
+            const progress = try builder.advance();
+            if (progress != .completed) return progress;
+        }
+        switch (state.creating) {
+            .start => {
+                state.retire_remaining = 513;
+                try builder.input(&.{});
+                state.creating = .configuration;
+            },
+            .configuration => {
+                try builder.child(CooperativeResource, if (dependent_child) .dependent else .independent);
+                state.creating = .child;
+            },
+            .child => {
+                try builder.result();
+                return .completed;
+            },
+        }
+        return .yielded;
+    }
     fn message(state: *State, context: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
         const builder = context.builder();
-        if (state.construction != .start and !try builder.advance()) return .yielded;
+        if (state.construction != .start) {
+            const progress = try builder.advance();
+            if (progress != .completed) return progress;
+        }
         switch (state.construction) {
             .start => {
                 try builder.int(99);
@@ -232,6 +288,7 @@ const CooperativeResource = ecl.Port(.{ .cooperative = struct {
         if (state.retire_remaining != 0) return .yielded;
         state.phase = .start;
         state.construction = .start;
+        state.creating = .start;
         state.index = 0;
         const instance = context.instance(Instance).?;
         _ = instance.value.fetchAdd(1000, .monotonic);
@@ -260,6 +317,7 @@ pub const Extension = ecl.module(.{
         ecl.factory("resource", "Open a configured resource.", Resource),
         ecl.factory("cooperative", "Open a resumable resource.", CooperativeResource),
         ecl.word("started", "Observe cooperative operation startup.", cooperativeStarted),
+        ecl.word("child-advances", "Observe cooperative child initialization dispatches.", childAdvances),
     },
 });
 

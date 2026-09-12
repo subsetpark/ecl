@@ -17,7 +17,7 @@ pub fn WaitList(comptime Cell: type) type {
     return struct {
         const Self = @This();
 
-        pub const Wait = struct {
+        const Wait = struct {
             allocator: std.mem.Allocator,
             cell: *Cell,
             key: u64,
@@ -42,31 +42,52 @@ pub fn WaitList(comptime Cell: type) type {
         first: ?*Wait = null,
         last: ?*Wait = null,
 
+        /// Owns an unregistered wait and both lifetime pins. Register and
+        /// discard consume it on every return, without allocating.
+        pub const Prepared = opaque {
+            fn state(self: *Prepared) *Wait {
+                return @ptrCast(@alignCast(self));
+            }
+            pub fn discard(self: *Prepared) void {
+                self.state().cancelReadiness();
+            }
+            pub fn register(self: *Prepared) RegisterResult {
+                const wait = self.state();
+                const cell = wait.cell;
+                std.Io.Threaded.mutexLock(&cell.mutex);
+                if (cell.readyLocked(wait.key)) {
+                    const reason = cell.wakeReasonLocked(wait.key);
+                    std.Io.Threaded.mutexUnlock(&cell.mutex);
+                    self.discard();
+                    return .{ .ready = reason };
+                }
+                cell.waits.linkLocked(wait);
+                std.Io.Threaded.mutexUnlock(&cell.mutex);
+                return .{ .registered = readinessRegistration(Wait, wait) };
+            }
+        };
+
         pub fn register(
             cell: *Cell,
             key: u64,
             target: WakeTarget,
         ) RegisterError!RegisterResult {
+            return (try prepare(cell, key, target)).register();
+        }
+
+        /// Reservation precedes publication of work that will require a wait.
+        /// Failure retains both caller-owned inputs without publishing anything.
+        pub fn prepare(cell: *Cell, key: u64, target: WakeTarget) RegisterError!*Prepared {
             const wait = try cell.allocator.create(Wait);
-            errdefer cell.allocator.destroy(wait);
             wait.* = .{
                 .allocator = cell.allocator,
                 .cell = cell,
                 .key = key,
                 .target = target,
             };
-            std.Io.Threaded.mutexLock(&cell.mutex);
-            if (cell.readyLocked(key)) {
-                const reason = cell.wakeReasonLocked(key);
-                std.Io.Threaded.mutexUnlock(&cell.mutex);
-                cell.allocator.destroy(wait);
-                return .{ .ready = reason };
-            }
             target.retain();
             cell.retainReadiness();
-            cell.waits.linkLocked(wait);
-            std.Io.Threaded.mutexUnlock(&cell.mutex);
-            return .{ .registered = readinessRegistration(Wait, wait) };
+            return @ptrCast(wait);
         }
 
         fn linkLocked(self: *Self, wait: *Wait) void {
