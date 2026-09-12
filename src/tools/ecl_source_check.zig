@@ -18,9 +18,9 @@ const format_roots = [_][]const u8{ "src", "test", "apps" };
 /// form and the formatter is expected to reject it.
 const format_exempt = [_][]const u8{"acceptance/load-parse-error.ecl"};
 
-/// Every source under here is an embedded standard-library module, and a
-/// module definition's terminal form is `@defm`.
-const module_root = "src/stdlib";
+/// Maintained library and application module sources end in `@defm`.
+/// Application entry scripts live outside these module directories.
+const module_roots = [_][]const u8{ "src/stdlib", "apps/pkg/src" };
 
 const registration_word = "@defm";
 
@@ -89,40 +89,42 @@ fn checkFormatting(init: std.process.Init) !bool {
 fn checkModuleRegistration(init: std.process.Init) !bool {
     var failed = false;
     var checked: usize = 0;
-    var directory = std.Io.Dir.cwd().openDir(init.io, module_root, .{ .iterate = true }) catch |err| {
-        std.log.err("standard modules: cannot open {s}: {s}", .{ module_root, @errorName(err) });
-        return error.EclSourceCheckFailed;
-    };
-    defer directory.close(init.io);
-    var walker = try directory.walk(init.gpa);
-    defer walker.deinit();
-    while (try walker.next(init.io)) |entry| {
-        if (!isEclSource(entry)) continue;
-        const source = readSource(init, directory, module_root, entry.path) catch {
-            failed = true;
-            continue;
+    for (module_roots) |module_root| {
+        var directory = std.Io.Dir.cwd().openDir(init.io, module_root, .{ .iterate = true }) catch |err| {
+            std.log.err("standard modules: cannot open {s}: {s}", .{ module_root, @errorName(err) });
+            return error.EclSourceCheckFailed;
         };
-        defer init.gpa.free(source);
-        checked += 1;
-        if (try terminalWord(init, module_root, entry.path, source)) |word| {
-            if (std.mem.eql(u8, word, registration_word)) continue;
-            std.log.err(
-                "standard modules: {s}/{s} ends in `{s}`; a module definition ends in `{s}`",
-                .{ module_root, entry.path, word, registration_word },
-            );
-        } else {
-            std.log.err(
-                "standard modules: {s}/{s} does not end in an executable word; expected `{s}`",
-                .{ module_root, entry.path, registration_word },
-            );
+        defer directory.close(init.io);
+        var walker = try directory.walk(init.gpa);
+        defer walker.deinit();
+        while (try walker.next(init.io)) |entry| {
+            if (!isEclSource(entry)) continue;
+            const source = readSource(init, directory, module_root, entry.path) catch {
+                failed = true;
+                continue;
+            };
+            defer init.gpa.free(source);
+            checked += 1;
+            if (try terminalWord(init, module_root, entry.path, source)) |word| {
+                if (std.mem.eql(u8, word, registration_word)) continue;
+                std.log.err(
+                    "standard modules: {s}/{s} ends in `{s}`; a module definition ends in `{s}`",
+                    .{ module_root, entry.path, word, registration_word },
+                );
+            } else {
+                std.log.err(
+                    "standard modules: {s}/{s} does not end in an executable word; expected `{s}`",
+                    .{ module_root, entry.path, registration_word },
+                );
+            }
+            failed = true;
         }
-        failed = true;
     }
     if (checked == 0) {
         std.log.err("standard modules: no module sources were found", .{});
         return error.EclSourceCheckFailed;
     }
-    std.log.info("standard modules: {d} registrations verified", .{checked});
+    std.log.info("maintained modules: {d} registrations verified", .{checked});
     return failed;
 }
 

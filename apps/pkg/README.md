@@ -49,6 +49,35 @@ runner against the application's test map; package policy assertions live in
 ECL. Separate-process orchestration and controlled external services remain
 host integration fixtures.
 
+## Commands and installation
+
+The distribution ships the entry script, inert application descriptor, module
+map, ECL module sources, and `git.eclmod` together beneath `share/ecl/apps/pkg/`.
+The entry passes ordinary process arguments to `pkg.command.main`. Application
+loading uses its own map, so project-local modules cannot replace package
+application modules and broken project runtime state does not prevent startup.
+
+- `init [name]` creates `src/`, `ecl.pkg`, an empty portable `ecl.lock`, and a
+  usable local-source `ecl.modules`. Existing project state is not overwritten.
+- `add <name> <version> <https-url>` validates an archive and records its exact
+  source and hash in the manifest. `add <https-git-url> --tag|--commit <revision>`
+  obtains the package identity from its source manifest and records the resolved
+  full commit and archive hash. A dependency edit requires `update` to select
+  the new graph.
+- `sync [--offline]` honors an existing lock. `update [--offline]` explicitly
+  reruns dependency selection. `vendor [--offline]` requires a lock and activates
+  an equivalent generation beneath `vendor/`, preserving the portable lock.
+- `verify` reads the active generation without recovery or repair. `tree` shows
+  sorted direct selected edges; `why <module>` shows one canonical shortest
+  root-to-owner path, using a search bounded by the selected graph.
+- `gc <retained-lock>...` collects only unretained regular files in the shared
+  download cache. Inputs may be absolute or caller-relative portable lock paths.
+  Unrecognized entries are preserved; project generations are never collected.
+
+`zig build test-pkg-application` owns a temporary caller directory and cache,
+then invokes the built-in ECL test runner for command assertions. The host
+fixture supplies process isolation and does not duplicate package policy tests.
+
 ## Source package archives
 
 `pkg.bundle` applies package rules through `archive.open-tgz`, member metadata,

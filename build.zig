@@ -255,6 +255,15 @@ pub fn build(b: *std.Build) void {
         exe.forceUndefinedSymbol("__tsan_atomic32_load");
     }
     b.installArtifact(exe);
+    b.installDirectory(.{
+        .source_dir = b.path("apps/pkg/src"),
+        .install_dir = .prefix,
+        .install_subdir = "share/ecl/apps/pkg/src",
+    });
+    b.installFile("apps/pkg/main.ecl", "share/ecl/apps/pkg/main.ecl");
+    b.installFile("apps/pkg/application.json", "share/ecl/apps/pkg/application.json");
+    b.installFile("apps/pkg/installed.modules", "share/ecl/apps/pkg/ecl.modules");
+    b.getInstallStep().dependOn(native_build.installExtension(b, git_extension, "share/ecl/apps/pkg"));
     b.installFile("THIRD_PARTY_NOTICES.md", "share/doc/ecl/THIRD_PARTY_NOTICES.md");
     const git_acceptance = b.addSystemCommand(&.{ "python3", "test/pkg_git_https.py" });
     git_acceptance.addArtifactArg(exe);
@@ -394,6 +403,11 @@ pub fn build(b: *std.Build) void {
     const pkg_generation_step = b.step("test-pkg-generation", "Run offline generation, lock selection, and verification acceptance in ECL");
     pkg_generation_step.dependOn(&run_pkg_generations.step);
     test_step.dependOn(&run_pkg_generations.step);
+    const pkg_command_acceptance = b.addSystemCommand(&.{ "python3", "test/package_application.py" });
+    pkg_command_acceptance.addArtifactArg(exe);
+    const pkg_command_step = b.step("test-pkg-application", "Run the package application's command acceptance through ECL tests");
+    pkg_command_step.dependOn(&pkg_command_acceptance.step);
+    test_step.dependOn(&pkg_command_acceptance.step);
     const native_runtime_tests = b.addTest(.{
         .root_module = test_mod,
         .filters = &.{ "native:", "concurrency: native shutdown" },

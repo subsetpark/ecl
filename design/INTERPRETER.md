@@ -2197,6 +2197,11 @@ The order of preference is:
 3. use the AST-aware source audit for rules Zig's type system cannot express;
 4. test behavior through public or production-connected interfaces.
 
+Maintained ECL module directories, including application libraries, share the
+parser-based terminal-registration check. Entry scripts live outside those
+directories. Canonical formatting applies to both application and library
+sources.
+
 Behavioral tests exercise runtime or public interfaces. Source audits prove
 source shape.
 
