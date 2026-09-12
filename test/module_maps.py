@@ -13,9 +13,9 @@ with tempfile.TemporaryDirectory(prefix="ecl-module-maps-") as temporary:
     binary.parent.mkdir()
     shutil.copy2(sys.argv[1], binary)
 
-    def run(*arguments):
+    def run(*arguments, input_text=""):
         return subprocess.run(
-            [str(binary), *arguments], cwd=root, stdin=subprocess.DEVNULL,
+            [str(binary), *arguments], cwd=root, input=input_text,
             capture_output=True, text=True, timeout=10,
         )
 
@@ -42,6 +42,22 @@ with tempfile.TemporaryDirectory(prefix="ecl-module-maps-") as temporary:
         assert result.stdout == "", repr(result.stdout)
     assert not (root / "executed").exists()
 
+    # A not-yet-published document uses its eventual path as the relative base.
+    candidate = complete.replace("'root \".\"", "'root \"..\"")
+    result = run("check-map", "--document", "maps/future/ecl.modules", "-", input_text=candidate)
+    assert result.returncode == 0, result.stderr
+    assert not (maps / "future").exists()
+    assert not (root / "executed").exists()
+    result = run("check-map", "--document", "maps/future/ecl.modules", "-", input_text="broken")
+    assert result.returncode == 1 and "invalid module map" in result.stderr
+    reference = "{'format 1 'map \"complete\"}"
+    result = run("check-map", "--document", "maps/unpublished", "-", input_text=reference)
+    assert result.returncode == 0, result.stderr
+    result = run("check-map", "--document", "maps/unpublished", "-", input_text=reference.replace("complete", "reference"))
+    assert result.returncode == 1 and "invalid module map" in result.stderr
+    result = run("check-map", "--document", "maps/unpublished", "-", input_text=" " * (16 * 1024 * 1024 + 1))
+    assert result.returncode == 1 and "bounded module map input" in result.stderr
+
     # Validation discovers new sources with the same rules as startup.
     duplicate = maps / "src" / "duplicate.ecl"
     duplicate.write_text("[] () 'localmod @defm")
@@ -53,7 +69,7 @@ with tempfile.TemporaryDirectory(prefix="ecl-module-maps-") as temporary:
     for path in ["maps/chain", "ecl.modules", "missing"]:
         result = run("check-map", path)
         assert result.returncode == 1 and "invalid module map" in result.stderr
-    for arguments in [(), ("maps/complete", "extra")]:
+    for arguments in [(), ("maps/complete", "extra"), ("-",), ("--document", "maps/new")]:
         result = run("check-map", *arguments)
         assert result.returncode == 1 and "usage:" in result.stderr
 

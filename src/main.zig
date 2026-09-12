@@ -144,15 +144,25 @@ const ApplicationDescriptor = struct {
 };
 
 fn checkMapCommand(init: Startup, arguments: []const []const u8) AppError!u8 {
-    if (arguments.len != 1) {
-        try writeFile(init.process.io, .stderr, "ecl check-map: usage: ecl check-map <FILE>\n");
+    const from_stdin = arguments.len == 3 and std.mem.eql(u8, arguments[0], "--document") and std.mem.eql(u8, arguments[2], "-");
+    if (!from_stdin and (arguments.len != 1 or std.mem.eql(u8, arguments[0], "-"))) {
+        try writeFile(init.process.io, .stderr, "ecl check-map: usage: ecl check-map <FILE> | --document <FILE> -\n");
         return 1;
     }
-    const path = try std.fs.path.resolve(init.process.gpa, &.{ init.cwd, arguments[0] });
+    const path = try std.fs.path.resolve(init.process.gpa, &.{ init.cwd, arguments[if (from_stdin) 1 else 0] });
     defer init.process.gpa.free(path);
     var host = ecl.heap.HostOwner.init(init.process.gpa);
     defer host.cleanup().drain();
-    const map = ecl.module_map.load(host.cleanup(), init.process.io, path) catch |err| switch (err) {
+    const map = (if (from_stdin) input: {
+        var buffer: [8192]u8 = undefined;
+        var stream = std.Io.File.stdin().reader(init.process.io, &buffer);
+        const source = stream.interface.allocRemaining(init.process.gpa, .limited(16 * 1024 * 1024)) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return emitIoError(init, "cannot read bounded module map input", err),
+        };
+        defer init.process.gpa.free(source);
+        break :input ecl.module_map.validate(host.cleanup(), init.process.io, source, path, true);
+    } else ecl.module_map.load(host.cleanup(), init.process.io, path)) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Invalid => return emitSyntheticError(init, .io, "invalid module map", null),
     };

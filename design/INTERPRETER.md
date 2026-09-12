@@ -718,6 +718,12 @@ artifacts commit through their loading lease before another loader can observe
 completion. The native artifact's source provenance carries its publication
 identity; it has no separate independently correlated commitment flag.
 
+Standalone validation owns bounded input and the validated map through a host
+cleanup owner without constructing a Session. An unpublished document supplies
+its intended filename as the relative-path base; validation does not require
+or publish that file. The same validator handles file and stdin input, including
+the one-reference limit and inert discovery of live sources.
+
 Installed-application dispatch resolves a descriptor only from the executable's
 installation prefix, before Session construction. The descriptor selects the
 entry source and complete map; the startup directory remains the caller's.

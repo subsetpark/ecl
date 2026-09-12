@@ -114,6 +114,14 @@ execute source or native artifacts, or write files. An explicit
 `--module-map` does not affect this command. This operation validates resolution
 metadata; artifact content verification remains the publisher's responsibility.
 
+`ecl check-map --document FILE -` reads at most 16 MiB from standard input and
+uses `FILE` as the containing document's path. Neither that file nor its parent
+directory needs to exist. Relative roots and a single map reference use the
+same rules as a file-backed map. This supports validation before publishing a
+staged document; validation never creates or replaces the named file. An input
+read or size failure exits one with a diagnostic. Plain `check-map -` is invalid
+because stdin alone does not identify a relative-path base.
+
 ### Native modules
 
 A `<name>.eclmod` file is a target-specific shared library containing one
