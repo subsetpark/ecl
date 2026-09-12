@@ -23,5 +23,7 @@
         "LICENSE",
         "THIRD_PARTY_NOTICES.md",
         "src",
+        "extensions",
+        "apps",
     },
 }

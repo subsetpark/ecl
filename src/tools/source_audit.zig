@@ -10,6 +10,9 @@ const SourceGroup = struct {
 };
 
 const source_groups = [_]SourceGroup{
+    // Distribution extensions compile against only the public SDK and native
+    // dependencies; they remain production inputs to every applicable audit.
+    .{ .production = true, .files = &.{"../extensions/git/git.zig"}, .sources = &.{source_audit_options.git_extension_source} },
     // Exact, non-rehashing map construction and resumable interning keep
     // user-sized storage work outside scheduler-native stacks.
     .{ .production = true, .files = &.{
@@ -254,6 +257,7 @@ pub fn main(init: std.process.Init) !void {
         if (component.files.len != component.sources.len) return error.SourceAuditFailed;
     }
     failed = auditSourceCoverage(init) or failed;
+    failed = auditExtensionImports() or failed;
     failed = auditSourceBodies() or failed;
     failed = auditFilesystemAuthority() or failed;
     failed = auditUnsafeCasts() or failed;
@@ -317,40 +321,41 @@ fn auditFormalValueKinds() bool {
 }
 
 fn auditSourceCoverage(init: std.process.Init) bool {
-    var directory = std.Io.Dir.cwd().openDir(init.io, "src", .{ .iterate = true }) catch |err| {
-        std.log.err("source coverage: cannot open src: {s}", .{@errorName(err)});
-        return true;
-    };
-    defer directory.close(init.io);
-    var walker = directory.walk(std.heap.page_allocator) catch |err| {
-        std.log.err("source coverage: cannot walk src: {s}", .{@errorName(err)});
-        return true;
-    };
-    defer walker.deinit();
     var failed = false;
     var production_count: usize = 0;
     var verification_count: usize = 0;
-    while (walker.next(init.io) catch |err| {
-        std.log.err("source coverage: cannot enumerate src: {s}", .{@errorName(err)});
-        return true;
-    }) |entry| {
-        if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig")) continue;
-        var matches: usize = 0;
-        var is_production = false;
-        for (source_groups) |component| for (component.files) |file| {
-            if (!sameSourcePath(entry.path, file)) continue;
-            matches += 1;
-            is_production = component.production;
+    for ([_][]const u8{ "src", "extensions", "apps" }) |root| {
+        var directory = std.Io.Dir.cwd().openDir(init.io, root, .{ .iterate = true }) catch |err| {
+            std.log.err("source coverage: cannot open {s}: {s}", .{ root, @errorName(err) });
+            return true;
         };
-        for (test_files) |file| matches += @intFromBool(sameSourcePath(entry.path, file));
-        if (matches != 1) {
-            std.log.err("source coverage: {s} belongs to {d} source groups; expected exactly one", .{
-                entry.path, matches,
-            });
-            failed = true;
-            continue;
+        defer directory.close(init.io);
+        var walker = directory.walk(std.heap.page_allocator) catch return true;
+        defer walker.deinit();
+        while (walker.next(init.io) catch |err| {
+            std.log.err("source coverage: cannot enumerate src: {s}", .{@errorName(err)});
+            return true;
+        }) |entry| {
+            if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig")) continue;
+            var path_buffer: [4096]u8 = undefined;
+            const path = if (std.mem.eql(u8, root, "src")) entry.path else std.fmt.bufPrint(&path_buffer, "../{s}/{s}", .{ root, entry.path }) catch return true;
+            var matches: usize = 0;
+            var is_production = false;
+            for (source_groups) |component| for (component.files) |file| {
+                if (!sameSourcePath(path, file)) continue;
+                matches += 1;
+                is_production = component.production;
+            };
+            for (test_files) |file| matches += @intFromBool(sameSourcePath(path, file));
+            if (matches != 1) {
+                std.log.err("source coverage: {s} belongs to {d} source groups; expected exactly one", .{
+                    path, matches,
+                });
+                failed = true;
+                continue;
+            }
+            if (is_production) production_count += 1 else verification_count += 1;
         }
-        if (is_production) production_count += 1 else verification_count += 1;
     }
     std.log.info("source coverage: {d} production and {d} verification inputs classified", .{
         production_count, verification_count,
@@ -364,10 +369,34 @@ fn auditSourceCoverage(init: std.process.Init) bool {
             expected_verification += component.files.len;
     }
     if (production_count != expected_production or verification_count != expected_verification) {
-        std.log.err("source coverage: manifest contains missing src inputs", .{});
+        std.log.err("source coverage: manifest contains missing production or src verification inputs", .{});
         failed = true;
     }
     failed = auditRepositoryVerification(init) or failed;
+    return failed;
+}
+
+fn auditExtensionImports() bool {
+    var failed = false;
+    for (source_groups) |group| for (group.files, group.sources) |file, source| {
+        if (!std.mem.startsWith(u8, file, "../extensions/")) continue;
+        var tokenizer = std.zig.Tokenizer.init(source);
+        while (true) {
+            const token = tokenizer.next();
+            if (token.tag == .eof) break;
+            if (token.tag != .builtin or !std.mem.eql(u8, source[token.loc.start..token.loc.end], "@import")) continue;
+            const open = tokenizer.next();
+            const argument = tokenizer.next();
+            const close = tokenizer.next();
+            const spelling = source[argument.loc.start..argument.loc.end];
+            if (open.tag != .l_paren or argument.tag != .string_literal or close.tag != .r_paren or
+                (!std.mem.eql(u8, spelling, "\"std\"") and !std.mem.eql(u8, spelling, "\"ecl-native\"")))
+            {
+                std.log.err("extension boundary: {s} may import only std and ecl-native", .{file});
+                failed = true;
+            }
+        }
+    };
     return failed;
 }
 

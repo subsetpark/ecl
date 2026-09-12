@@ -151,7 +151,7 @@ jobs:
           set +e
           # OPTIMIZE is passed into the container.
           # shellcheck disable=SC2016
-          timeout 25m docker run --rm --platform linux/amd64 \
+          timeout 35m docker run --rm --platform linux/amd64 \
             --env OPTIMIZE="$OPTIMIZE" \
             --volume "$GITHUB_WORKSPACE:/work:ro" \
             --volume "$ZIG_GLOBAL_CACHE_HOST:/root/.cache/zig" \
@@ -170,6 +170,8 @@ jobs:
               timeout 20m /opt/zig/zig build test-tsan \
               -Doptimize="$OPTIMIZE" --summary all --test-timeout 10m \
                 < /dev/null
+              timeout 10m /opt/zig/zig build test-git-extension -Dgit-tsan=true \
+                -Doptimize="$OPTIMIZE" --summary all < /dev/null
           '
           tsan_status=$?
           set -e
@@ -270,6 +272,13 @@ jobs:
           docker exec --env OPTIMIZE="$OPTIMIZE" ecl-ci sh -euxc
           'cd /build; timeout 10m zig build test-native-acceptance
           -Doptimize="$OPTIMIZE" --summary all --test-timeout 5m < /dev/null'
+
+      - name: Standalone Git snapshot acceptance
+        if: inputs.run_native_acceptance
+        run: >-
+          docker exec --env OPTIMIZE="$OPTIMIZE" ecl-ci sh -euxc
+          'cd /build; timeout 10m zig build test-git-extension
+          -Doptimize="$OPTIMIZE" --summary all < /dev/null'
 
       - name: Fuzz campaigns
         if: inputs.run_fuzz

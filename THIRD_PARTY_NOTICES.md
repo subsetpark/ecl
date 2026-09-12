@@ -33,9 +33,10 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-## Embedded libgit2
+## libgit2 in the distribution
 
-libgit2 1.9.0 is statically linked, with SSH disabled. The pinned build package
+The Git snapshot extension statically links libgit2 1.9.0 with SSH disabled.
+The pinned build package
 and source hashes are recorded in `build.zig.zon`. Upstream source is available
 at https://github.com/libgit2/libgit2/tree/v1.9.0.
 

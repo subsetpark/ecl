@@ -49,7 +49,7 @@ jobs:
       run_snapshots: true
 
   git-macos:
-    name: Git packages on macOS
+    name: Git packages and snapshot extension on macOS
     runs-on: macos-14
     timeout-minutes: 20
     steps:
@@ -73,4 +73,5 @@ jobs:
           python3 - <<'PYTHON'
           import subprocess
           subprocess.run(['/tmp/zig/zig', 'build', 'test-pkg-git', '-Doptimize=ReleaseSafe'], stdin=subprocess.DEVNULL, timeout=900, check=True)
+          subprocess.run(['/tmp/zig/zig', 'build', 'test-git-extension', '-Doptimize=ReleaseSafe'], stdin=subprocess.DEVNULL, timeout=900, check=True)
           PYTHON

@@ -4,6 +4,7 @@ const native_build = @import("src/native/build_helper.zig");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const git_tsan = b.option(bool, "git-tsan", "Instrument the executable and Git extension for the Docker TSan gate") orelse false;
     const runtime_linkage: ?std.builtin.LinkMode =
         if (target.result.os.tag == .linux) .dynamic else null;
     const minish = b.dependency("minish", .{}).module("minish");
@@ -42,6 +43,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     configureRuntime(internal_mod, native_abi, native_sdk, runtime_options);
+    internal_mod.sanitize_thread = git_tsan;
     const native_sample = b.createModule(.{
         .root_source_file = b.path("test/native/sample.zig"),
         .target = target,
@@ -204,8 +206,38 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .sanitize_thread = git_tsan,
     });
     const libgit2 = b.dependency("libgit2", .{ .target = target, .optimize = optimize, .@"enable-ssh" = false, .@"tls-backend" = .mbedtls });
+    const ordinary_git = native_build.addExtension(b, .{
+        .name = "git",
+        .root_source_file = b.path("extensions/git/git.zig"),
+        .target = target,
+        .optimize = optimize,
+        .ecl_native = native_sdk,
+    });
+    const git_source = ordinary_git.root_module;
+    git_source.link_libc = true;
+    git_source.pic = true;
+    git_source.sanitize_thread = git_tsan;
+    git_source.addIncludePath(b.path("extensions/git"));
+    git_source.addIncludePath(libgit2.artifact("git2").getEmittedIncludeTree());
+    git_source.addCSourceFile(.{ .file = b.path("extensions/git/snapshot.c"), .flags = &.{ "-std=c11", "-D_POSIX_C_SOURCE=200809L", "-Wall", "-Wextra", "-Werror" } });
+    const git_extension = if (git_tsan) instrumented: {
+        // Compile instrumentation into an object, then link the DSO without
+        // another TSan runtime. Zig otherwise bundles a second runtime whose
+        // static TLS cannot be acquired by dlopen. The executable exports the
+        // one runtime that owns all instrumented threads and loaded code.
+        const object = b.addObject(.{ .name = "git-instrumented", .root_module = git_source });
+        object.use_llvm = true;
+        object.linkage = .dynamic;
+        const linker = b.createModule(.{ .target = target, .optimize = optimize, .sanitize_thread = false });
+        linker.addObject(object);
+        break :instrumented b.addLibrary(.{ .name = "git", .root_module = linker, .linkage = .dynamic });
+    } else ordinary_git;
+    git_extension.root_module.linkLibrary(libgit2.artifact("git2"));
+    const git_extension_step = b.step("git-extension", "Build the SDK-only HTTPS Git snapshot extension");
+    git_extension_step.dependOn(native_build.installExtension(b, git_extension, "extensions/git"));
     exe_mod.linkLibrary(libgit2.artifact("git2"));
     exe_mod.addCSourceFile(.{ .file = b.path("src/git_helper.c"), .flags = &.{ "-std=c99", "-D_POSIX_C_SOURCE=200809L" } });
     exe_mod.addImport("ecl-internal", internal_mod);
@@ -214,12 +246,25 @@ pub fn build(b: *std.Build) void {
         .root_module = exe_mod,
         .linkage = runtime_linkage,
     });
+    if (git_tsan) {
+        exe.use_llvm = true;
+        exe.use_lld = true;
+        exe.rdynamic = true;
+        // The loaded C backend needs the atomic interface archive member even
+        // when the interpreter's own instrumentation does not reference it.
+        exe.forceUndefinedSymbol("__tsan_atomic32_load");
+    }
     b.installArtifact(exe);
     b.installFile("THIRD_PARTY_NOTICES.md", "share/doc/ecl/THIRD_PARTY_NOTICES.md");
     const git_acceptance = b.addSystemCommand(&.{ "python3", "test/pkg_git_https.py" });
     git_acceptance.addArtifactArg(exe);
     const git_step = b.step("test-pkg-git", "Run public Git package acceptance over controlled HTTPS");
     git_step.dependOn(&git_acceptance.step);
+    const git_native_acceptance = b.addSystemCommand(&.{ "python3", "test/git_extension.py" });
+    git_native_acceptance.addArtifactArg(exe);
+    git_native_acceptance.addArtifactArg(git_extension);
+    const git_native_step = b.step("test-git-extension", "Verify the standalone Git snapshot port over controlled HTTPS");
+    git_native_step.dependOn(&git_native_acceptance.step);
     const native_runtime_options = b.addOptions();
     native_runtime_options.addOptionPath("ecl_exe", exe.getEmittedBin());
     native_runtime_options.addOptionPath(
@@ -508,6 +553,7 @@ pub fn build(b: *std.Build) void {
         .optimize = .Debug,
     });
     const audit_options = b.addOptions();
+    audit_options.addOption([:0]const u8, "git_extension_source", @embedFile("extensions/git/git.zig"));
     audit_options.addOption(
         []const u8,
         "formal_values",
@@ -959,7 +1005,7 @@ pub fn build(b: *std.Build) void {
     // and every standard module still ends in `@defm`. All of it is cheap
     // enough that there is no reason to discover it in CI instead.
     const check_zig_fmt = b.addFmt(.{
-        .paths = &.{ "build.zig", "src", "test" },
+        .paths = &.{ "build.zig", "src", "test", "extensions" },
         .check = true,
     });
     const ecl_source_mod = b.createModule(.{
@@ -1175,6 +1221,7 @@ pub fn build(b: *std.Build) void {
     precommit_step.dependOn(&installed_apps.step);
     precommit_step.dependOn(&package_transactions.step);
     precommit_step.dependOn(&module_maps.step);
+    precommit_step.dependOn(git_extension_step);
 }
 
 fn addCapturedTestRun(

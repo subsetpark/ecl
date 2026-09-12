@@ -1597,6 +1597,17 @@ and joins that scope before returning or raising an error.
 
 ### The native ABI is narrow and transactional
 
+Distribution extensions participate in the exhaustive production-source audit.
+Their build graph supplies only the public SDK and native dependencies; the
+import audit rejects interpreter imports. The Git snapshot extension runs as an
+ordinary registered port. Its controller invocation owns the complete native
+object graph and private scratch repository through joined teardown. One
+library admission lock covers libgit2 initialization, global configuration and
+allocator selection, fetch, export, and destruction. Cancellation is checked
+while waiting for admission and throughout cooperative backend work; it never
+releases ownership before the controller has joined. Backend allocation budgets
+and deadlines do not establish process isolation or hard termination bounds.
+
 A native artifact describes one module. The loader validates its descriptor,
 module name, exported definitions, effects, documentation, callbacks, and
 requested capabilities before constructing immutable binding snapshots. A
