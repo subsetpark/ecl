@@ -14,7 +14,7 @@ pub const Claim = union(enum) { pending, claimed, value: Value, cancelled, faile
 const State = struct {
     host: *const heap.HostCleanup,
     mutex: std.Io.Mutex = .init,
-    phase: union(enum) { running, terminal: Terminal } = .running,
+    phase: union(enum) { running, frozen, terminal: Terminal } = .running,
     value: union(enum) { available: *messages.Envelope, claimed, discarded, rejected },
 
     fn capability(self: *State) *Result {
@@ -56,20 +56,43 @@ pub const Result = opaque {
         previous.release();
         return true;
     }
+    /// Reserve immutable, capability-free output before irreversible work.
+    /// Rejection preserves the current result. No allocation or publication of
+    /// provisional resource attachments can follow this transition.
+    pub fn freeze(self: *Result) bool {
+        const owned = self.state();
+        std.Io.Threaded.mutexLock(&owned.mutex);
+        if (owned.phase == .terminal or owned.value != .available) {
+            std.Io.Threaded.mutexUnlock(&owned.mutex);
+            return false;
+        }
+        const view = owned.value.available.borrow();
+        const permitted = view.attachments().len == 0;
+        if (permitted) owned.phase = .frozen;
+        std.Io.Threaded.mutexUnlock(&owned.mutex);
+        view.release();
+        return permitted;
+    }
+    pub fn mutable(self: *Result) bool {
+        const owned = self.state();
+        std.Io.Threaded.mutexLock(&owned.mutex);
+        defer std.Io.Threaded.mutexUnlock(&owned.mutex);
+        return owned.phase == .running and owned.value == .available;
+    }
     /// Called only after controller return and cancellation acknowledgement.
     /// The first terminal fact wins; repeating observation cannot revise it.
     pub fn complete(self: *Result, terminal: Terminal) void {
         const owned = self.state();
         std.Io.Threaded.mutexLock(&owned.mutex);
         defer std.Io.Threaded.mutexUnlock(&owned.mutex);
-        if (owned.phase == .running) owned.phase = .{ .terminal = terminal };
+        if (owned.phase != .terminal) owned.phase = .{ .terminal = terminal };
     }
     pub fn completion(self: *Result) Completion {
         const owned = self.state();
         std.Io.Threaded.mutexLock(&owned.mutex);
         defer std.Io.Threaded.mutexUnlock(&owned.mutex);
         return switch (owned.phase) {
-            .running => .pending,
+            .running, .frozen => .pending,
             .terminal => |terminal| switch (terminal) {
                 .success => .ready,
                 .cancelled => .cancelled,
@@ -115,7 +138,7 @@ const ResultPublication = struct {
     }
     pub fn validate(self: *@This()) bool {
         switch (self.state.phase) {
-            .running => return false,
+            .running, .frozen => return false,
             .terminal => |terminal| switch (terminal) {
                 .success => {},
                 .cancelled => {

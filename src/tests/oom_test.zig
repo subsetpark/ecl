@@ -2061,3 +2061,11 @@ const MetadataMemoryIo = struct {
         return bytes.len;
     }
 };
+
+test "oom: standard-library and host: cooperative finalizer result reservation" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortProbe(
+        "instanceprobe.cooperative [] port.open dup instanceprobe.seal 0 port.call pop port.close",
+        "",
+    ).run);
+}

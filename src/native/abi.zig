@@ -5,8 +5,8 @@
 
 const builtin = @import("builtin");
 
-pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v11";
-pub const abi_version: u32 = 11;
+pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v12";
+pub const abi_version: u32 = 12;
 
 pub const max_error_message_bytes: u32 = 4096;
 pub const max_guest_scalar_bytes: u32 = 4096;
@@ -155,6 +155,7 @@ pub const CooperativeTable = extern struct {
     fail: @FieldType(ControllerTable, "fail"),
     consume: *const fn (*anyopaque, u32) callconv(.c) bool,
     park: *const fn (*anyopaque, u64) callconv(.c) bool,
+    begin_commit: *const fn (*anyopaque) callconv(.c) bool,
 };
 pub const CooperativeFn = *const fn (*anyopaque, *const CooperativeTable, *anyopaque) callconv(.c) CooperativeProgress;
 pub const CooperativeOperationFn = *const fn (*anyopaque, u32, *const CooperativeTable, *anyopaque) callconv(.c) CooperativeProgress;
@@ -196,6 +197,7 @@ pub const EffectSlot = extern struct {
     name_len: u64,
 };
 
+pub const OperationMode = enum(u32) { ordinary, finalizer, _ };
 pub const BindingKind = enum(u32) { call, factory, operation, endpoint, _ };
 pub const EndpointTransport = enum(u32) { bytes, messages, _ };
 pub const EndpointDirection = enum(u32) { input, output, _ };
@@ -212,6 +214,7 @@ pub const PortBinding = extern struct {
     transport: EndpointTransport = .bytes,
     direction: EndpointDirection = .input,
     owner: EndpointOwner = .exchange,
+    operation_mode: OperationMode = .ordinary,
 };
 
 pub const Definition = extern struct {
@@ -475,8 +478,8 @@ comptime {
 
     assertRecord(CapabilityRequirement, 8, 4);
     assertRecord(EffectSlot, 24, 8);
-    assertRecord(Definition, 136, 8);
-    assertRecord(PortBinding, 40, 8);
+    assertRecord(Definition, 144, 8);
+    assertRecord(PortBinding, 48, 8);
     assertRecord(ValueView, 40, 8);
     assertRecord(Scalar, 32, 8);
     assertRecord(InvokeResult, 16, 8);
@@ -484,7 +487,7 @@ comptime {
     assertRecord(Descriptor, 112, 8);
     assertRecord(PortDefinition, 112, 8);
     assertRecord(CooperativeDefinition, 40, 8);
-    assertRecord(CooperativeTable, 80, 8);
+    assertRecord(CooperativeTable, 88, 8);
     assertRecord(MessageBuildRequest, 72, 8);
     assertRecord(ControllerTable, 152, 8);
     assertRecord(InstanceTable, 24, 8);

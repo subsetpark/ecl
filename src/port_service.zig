@@ -59,6 +59,7 @@ pub fn Resource(comptime Adapter: type) type {
         children: ?*scheduler.ExternalGroup = null,
         phase: enum { reserved, reserved_closed, initializing, open, closing, waiting_children, cleaning, cleaned, joined } = .reserved,
         initialization_failure: ?Failure = null,
+        admission: enum { open, sealing_work, sealing_children, sealing_execution, sealed } = .open,
         shutdown_state: union(enum) { idle, requested, running, completed: ?Failure, aborted } = .idle,
         lanes: [max_lanes]Operations,
 
@@ -112,8 +113,35 @@ pub fn Resource(comptime Adapter: type) type {
                         }
                     }
                     if (selected) |lane| {
+                        const finalizer = lane.front().?.owner().mode == .finalizer;
+                        if (finalizer and phase == .open) {
+                            switch (self.admission) {
+                                .sealing_work => {
+                                    self.admission = .sealing_children;
+                                    const children = self.children;
+                                    unlock(&self.mutex);
+                                    if (children) |group| group.close();
+                                    return .yielded;
+                                },
+                                .sealing_children => {
+                                    if (self.children) |children| if (!children.closed()) {
+                                        unlock(&self.mutex);
+                                        return .waiting;
+                                    };
+                                    self.admission = .sealing_execution;
+                                },
+                                .sealing_execution => {},
+                                .open, .sealed => unreachable,
+                            }
+                        }
                         unlock(&self.mutex);
-                        return switch (lane.advanceNext(Adapter.Exchange.advanceCooperative)) {
+                        const progress = lane.advanceNext(Adapter.Exchange.advanceCooperative);
+                        if (finalizer and progress == .completed) {
+                            lock(&self.mutex);
+                            self.admission = .sealed;
+                            unlock(&self.mutex);
+                        }
+                        return switch (progress) {
                             .idle, .waiting => .waiting,
                             .yielded, .completed => .yielded,
                             .parked => |deadline| .{ .parked = deadline },
@@ -289,7 +317,7 @@ pub fn Resource(comptime Adapter: type) type {
             return switch (key) {
                 0 => self.phase != .reserved and self.phase != .initializing,
                 1 => self.phase == .joined,
-                else => self.closed.load(.acquire) or self.shutdown_state != .idle or key - 2 >= self.lane_count or
+                else => self.closed.load(.acquire) or self.shutdown_state != .idle or self.admission != .open or key - 2 >= self.lane_count or
                     self.lanes[key - 2].hasCapacity(self.laneCapacity(@intCast(key - 2))),
             };
         }
@@ -477,7 +505,7 @@ pub fn Resource(comptime Adapter: type) type {
         }
         pub fn admitOnLane(self: *Cell, selected: Adapter.Request, scope: *scheduler.TaskScope, request: *const port_message.Validated) error{ OutOfMemory, ScopeClosing }!Admission {
             lock(&self.mutex);
-            const closed = self.closed.load(.acquire) or self.shutdown_state != .idle;
+            const closed = self.closed.load(.acquire) or self.shutdown_state != .idle or self.admission != .open;
             const lane = self.adapter.operationLane(selected);
             const invalid = lane >= self.lane_count;
             const full = !invalid and !self.lanes[lane].hasCapacity(self.laneCapacity(lane));
@@ -490,8 +518,11 @@ pub fn Resource(comptime Adapter: type) type {
             const op = admit: {
                 lock(&self.mutex);
                 defer unlock(&self.mutex);
-                if (self.closed.load(.acquire) or self.shutdown_state != .idle) return .closed;
+                if (self.closed.load(.acquire) or self.shutdown_state != .idle or self.admission != .open) return .closed;
+                const mode = candidate.operationMode();
                 const admitted = candidate.admit(self.laneCapacity(lane)) orelse return .{ .pending = self.source(2 + @as(u64, lane)) };
+                if (mode == .finalizer) self.admission = .sealing_work;
+                self.waits.notifyLocked(self);
                 self.changed.broadcast(io());
                 break :admit admitted;
             };

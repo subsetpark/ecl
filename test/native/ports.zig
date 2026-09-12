@@ -679,6 +679,7 @@ const Duplex = struct {
     pub const LaneType = DuplexSdk.LaneType;
     pub const Endpoints = DuplexSdk.Endpoints;
     pub const Operations = DuplexSdk.Operations;
+    pub const operationMode = DuplexSdk.operationMode;
     pub fn kindIdentity() *const anyopaque {
         return DuplexSdk.definition().identity.?;
     }

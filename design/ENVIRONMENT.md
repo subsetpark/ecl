@@ -32,7 +32,7 @@ Session's runtime I/O state.
 The public `net` and `proc` modules are ECL compositions over these registered
 capabilities and `port.*`. Their operation and endpoint selectors expose only
 their corresponding resources and streams. First-party adapters use typed backend calls;
-the extension adapter translates ABI v11 calls into the same runtime interfaces
+the extension adapter translates ABI v12 calls into the same runtime interfaces
 for controller execution, transport, cancellation, ownership, and cleanup.
 
 Embedded names have precedence over filesystem modules. A file on `ECL_PATH`
@@ -127,11 +127,20 @@ module. Its descriptor declares the same canonical name requested by the
 loader. The complete word table validates before publication, and publication
 is atomic.
 
-The current pre-release native ABI is version 11, with entry symbol
-`ecl_module_abi_v11`. Resource authors choose `ecl.Port(.{ .controller = Spec })`
+The current pre-release native ABI is version 12, with entry symbol
+`ecl_module_abi_v12`. Resource authors choose `ecl.Port(.{ .controller = Spec })`
 or `ecl.Port(.{ .cooperative = Spec })`. Cooperative callbacks receive bounded
 work accounting and cancellable timer parking. Their persistent builder begins
 aggregate construction and advances it explicitly; it has no blocking endpoints.
+A cooperative operation whose typed handler accepts `*ecl.Finalizer` seals its
+resource when admitted. Earlier admitted work and dependent children settle before
+the callback runs. It constructs and advances its result, then calls `beginCommit`
+before irreversible work. Commit freezes capability-free output; subsequent result
+mutation fails. Cancellation before commit joins resource cleanup. Cancellation
+after commit preserves the terminal result and joins the remaining bounded work.
+Success or failure leaves admission sealed until the caller closes the resource.
+A finalizer cannot create child resources or acquire streaming endpoints.
+
 Native modules built for earlier versions must be rebuilt;
 the loader provides no legacy adapter.
 

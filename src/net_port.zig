@@ -2089,7 +2089,7 @@ const ServiceAdapter = struct {
         const terminal = try port_result.Result.create(cell.adapter.owner.host);
         errdefer terminal.release();
         const request_value = request.value();
-        return Exchange.prepare(.{ .cell = cell, .operation = operation, .valid_request = request_value == .list and request_value.list.length() == 0 }, terminal, lane);
+        return Exchange.prepare(.{ .cell = cell, .operation = operation, .valid_request = request_value == .list and request_value.list.length() == 0 }, terminal, lane, .ordinary);
     }
     pub fn retire(_: *ServiceAdapter, cell: *Service) void {
         ServiceStorage.retire(cell);

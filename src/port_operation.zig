@@ -18,6 +18,8 @@ fn unlock(mutex: *std.Io.Mutex) void {
     std.Io.Threaded.mutexUnlock(mutex);
 }
 
+pub const Mode = enum { ordinary, finalizer };
+
 /// Adapters supply typed execution and transport. This owner alone carries
 /// cancellation settlement, terminal result publication, and scope lifetime.
 pub fn Exchange(comptime Adapter: type) type {
@@ -45,11 +47,12 @@ pub fn Exchange(comptime Adapter: type) type {
         children: ?*scheduler.ExternalGroup = null,
         lifetime: enum { open, closing, closed } = .open,
         terminal_result: *results.Result,
+        mode: Mode,
 
         const Preparation = struct {
             allocator: std.mem.Allocator,
             node: *Lane.Prepared,
-            phase: union(enum) { ready: struct { adapter: Adapter, result: *results.Result }, admitted },
+            phase: union(enum) { ready: struct { adapter: Adapter, result: *results.Result, mode: Mode }, admitted },
         };
         pub const Prepared = opaque {
             fn state(self: *Prepared) *Preparation {
@@ -61,9 +64,12 @@ pub fn Exchange(comptime Adapter: type) type {
             pub fn admit(self: *Prepared, limit: usize) ?*Operation {
                 const owned = self.state();
                 const ready = owned.phase.ready;
-                const ticket = owned.node.admit(limit, .{ ready.adapter, ready.result }, initialize) orelse return null;
+                const ticket = owned.node.admit(limit, .{ ready.adapter, ready.result, ready.mode }, initialize) orelse return null;
                 owned.phase = .admitted;
                 return ticket.owner();
+            }
+            pub fn operationMode(self: *Prepared) Mode {
+                return self.state().phase.ready.mode;
             }
             pub fn deinit(self: *Prepared) void {
                 const owned = self.state();
@@ -80,16 +86,16 @@ pub fn Exchange(comptime Adapter: type) type {
         };
         /// Success consumes the adapter and result and pins the resource.
         /// Failure retains both. All allocation precedes admission locking.
-        pub fn prepare(adapter: Adapter, result: *results.Result, lane: *Lane) error{OutOfMemory}!*Prepared {
+        pub fn prepare(adapter: Adapter, result: *results.Result, lane: *Lane, mode: Mode) error{OutOfMemory}!*Prepared {
             const owned = try adapter.allocator().create(Preparation);
             errdefer adapter.allocator().destroy(owned);
             const node = try lane.prepare(adapter.allocator());
-            owned.* = .{ .allocator = adapter.allocator(), .node = node, .phase = .{ .ready = .{ .adapter = adapter, .result = result } } };
+            owned.* = .{ .allocator = adapter.allocator(), .node = node, .phase = .{ .ready = .{ .adapter = adapter, .result = result, .mode = mode } } };
             owned.phase.ready.adapter.retainResource();
             return @ptrCast(owned);
         }
-        fn initialize(self: *Operation, ticket: *Lane.Ticket, adapter: Adapter, result: *results.Result) void {
-            self.* = .{ .allocator = adapter.allocator(), .adapter = adapter, .ticket = ticket, .terminal_result = result };
+        fn initialize(self: *Operation, ticket: *Lane.Ticket, adapter: Adapter, result: *results.Result, mode: Mode) void {
+            self.* = .{ .allocator = adapter.allocator(), .adapter = adapter, .ticket = ticket, .terminal_result = result, .mode = mode };
         }
         /// Consumes the admitted observer on every path. Success publishes both
         /// the capability and scope membership before making the lane runnable;
@@ -127,10 +133,10 @@ pub fn Exchange(comptime Adapter: type) type {
             self.adapter.completeResourceLocked(outcome);
         }
         fn cancelPolicy(self: *Operation) controllers.CallbackCancellation {
-            return self.adapter.cancelPolicy();
+            return if (self.mode == .finalizer) .close_resource else self.adapter.cancelPolicy();
         }
         fn cancelResourceLocked(self: *Operation, action: controllers.CancelAction) void {
-            self.adapter.cancelResourceLocked(action);
+            self.adapter.cancelResourceLocked(if (self.mode == .finalizer and action == .retired) .close_resource else action);
         }
         fn deinit(self: *Operation) void {
             if (self.children) |children| children.release();
@@ -273,6 +279,10 @@ pub fn Exchange(comptime Adapter: type) type {
         }
         pub fn markCancelled(self: *Operation) void {
             lock(&self.mutex);
+            if (self.ticket.committed()) {
+                unlock(&self.mutex);
+                return;
+            }
             // The resource's lane list contains only outstanding exchanges.
             // Abort their ownership explicitly; a completed exchange has its own
             // scope lifetime and must not infer abortion from resource closure.

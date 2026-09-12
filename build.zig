@@ -184,7 +184,9 @@ pub fn build(b: *std.Build) void {
     const negative_cases = [_]struct { file: []const u8, message: []const u8 }{
         .{ .file = "invalid_instance_callbacks", .message = "ecl-native: invalid instance lifecycle signatures" },
         .{ .file = "cooperative_blocking_endpoint", .message = "no field or member function named 'endpoint' in 'ports.Cooperative'" },
-        .{ .file = "invalid_cooperative_handler", .message = "ecl-native: cooperative handler requires resource state and cooperative context" },
+        .{ .file = "cooperative_commit_authority", .message = "no field or member function named 'beginCommit' in 'ports.Cooperative'" },
+        .{ .file = "finalizer_child_creation", .message = "no field or member function named 'child' in 'ports.FinalizerBuilder'" },
+        .{ .file = "invalid_cooperative_handler", .message = "ecl-native: cooperative initialization requires cooperative context" },
         .{ .file = "missing_port_recovery", .message = "ecl-native: recoverable cancellation requires fn cancelOperation(*State, Lane) void" },
         .{ .file = "wrong_controller_direction", .message = "has no member named 'read'" },
         .{ .file = "resource_operation_endpoint", .message = "port: operation endpoints must belong to the exchange" },

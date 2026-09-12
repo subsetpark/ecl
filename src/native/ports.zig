@@ -365,6 +365,9 @@ fn ControllerPort(comptime Spec: type) type {
         pub const ecl_port_marker = void;
         pub const StateType = Spec.State;
         pub const LaneType = Lane;
+        pub fn operationMode(comptime _: Operations.Name) abi.OperationMode {
+            return .ordinary;
+        }
         pub const name = Spec.name;
         // A mutable object's address supplies nominal identity even when two
         // specs have identical names or the linker folds identical callbacks.
@@ -554,6 +557,80 @@ fn applyBuild(table: anytype, context: *anyopaque, request: *const abi.MessageBu
     };
 }
 
+/// A sealing callback runs only after earlier work and dependent children join.
+/// Prepare and advance the complete result before requesting commit authority.
+pub const Finalizer = opaque {
+    fn cooperative(self: *Finalizer) *Cooperative {
+        return @ptrCast(self);
+    }
+    pub fn consume(self: *Finalizer, units: u32) bool {
+        return self.cooperative().consume(units);
+    }
+    pub fn input(self: *Finalizer, path: []const u64) ?*const MessageView {
+        return self.cooperative().input(path);
+    }
+    pub fn instance(self: *Finalizer, comptime I: type) ?*I.State {
+        return self.cooperative().instance(I);
+    }
+    pub fn parent(self: *Finalizer, comptime P: type) ?*P.StateType {
+        return self.cooperative().parent(P);
+    }
+    pub fn cancelled(self: *Finalizer) bool {
+        return self.cooperative().cancelled();
+    }
+    pub fn fail(self: *Finalizer, kind: capability.ErrorKind, message: []const u8) void {
+        self.cooperative().fail(kind, message);
+    }
+    pub fn failOutOfMemory(self: *Finalizer) void {
+        self.cooperative().failOutOfMemory();
+    }
+    pub fn builder(self: *Finalizer) *FinalizerBuilder {
+        return @ptrCast(self);
+    }
+    pub fn beginCommit(self: *Finalizer) ControllerError!void {
+        const owned = self.cooperative().state();
+        if (!owned.table.begin_commit(owned.context)) return if (self.cancelled()) error.Cancelled else error.InvalidValue;
+    }
+};
+
+/// Capability-free result construction. Finalizers cannot create descendants or
+/// transport endpoints; committing freezes further result mutation at the host.
+pub const FinalizerBuilder = opaque {
+    fn builder(self: *FinalizerBuilder) *CooperativeBuilder {
+        return @ptrCast(self);
+    }
+    pub fn int(self: *FinalizerBuilder, value: i64) ControllerError!void {
+        return self.builder().int(value);
+    }
+    pub fn float(self: *FinalizerBuilder, value: f64) ControllerError!void {
+        return self.builder().float(value);
+    }
+    pub fn char(self: *FinalizerBuilder, value: u32) ControllerError!void {
+        return self.builder().char(value);
+    }
+    pub fn symbol(self: *FinalizerBuilder, value: []const u8) ControllerError!void {
+        return self.builder().symbol(value);
+    }
+    pub fn input(self: *FinalizerBuilder, value: []const u64) ControllerError!void {
+        return self.builder().input(value);
+    }
+    pub fn list(self: *FinalizerBuilder, value: u32) ControllerError!void {
+        return self.builder().list(value);
+    }
+    pub fn dictionary(self: *FinalizerBuilder, value: u32) ControllerError!void {
+        return self.builder().dictionary(value);
+    }
+    pub fn result(self: *FinalizerBuilder) ControllerError!void {
+        return self.builder().result();
+    }
+    pub fn clear(self: *FinalizerBuilder) ControllerError!void {
+        return self.builder().clear();
+    }
+    pub fn advance(self: *FinalizerBuilder) ControllerError!CooperativeProgress {
+        return self.builder().advance();
+    }
+};
+
 fn CooperativePort(comptime Spec: type) type {
     const Lane = enum { operation };
     const EndpointSet = declarations.Endpoints(.{});
@@ -567,7 +644,9 @@ fn CooperativePort(comptime Spec: type) type {
             @TypeOf(Spec.retireOperation) != fn (*Spec.State, *Cooperative) CooperativeProgress or
             @TypeOf(Spec.retire) != fn (*Spec.State, *Cooperative) CooperativeProgress)
             @compileError("ecl-native: cooperative Port callbacks have invalid signatures");
-        for (.{Spec.open}) |handler| validateCooperativeHandler(Spec.State, handler);
+        if (@TypeOf(Spec.open) != fn (*Spec.State, *Cooperative) CooperativeProgress and
+            @TypeOf(Spec.open) != fn (*Spec.State, *Cooperative) ControllerError!CooperativeProgress)
+            @compileError("ecl-native: cooperative initialization requires cooperative context");
         for (@import("std").meta.tags(OperationSet.Name)) |name|
             validateCooperativeHandler(Spec.State, OperationSet.get(name).handler);
     }
@@ -577,6 +656,9 @@ fn CooperativePort(comptime Spec: type) type {
         pub const LaneType = Lane;
         pub const Endpoints = EndpointSet;
         pub const Operations = OperationSet;
+        pub fn operationMode(comptime operation: Operations.Name) abi.OperationMode {
+            return if (@typeInfo(@TypeOf(Operations.get(operation).handler)).@"fn".params[1].type.? == *Finalizer) .finalizer else .ordinary;
+        }
         pub const name = Spec.name;
         var identity: u8 = 0;
         fn kindIdentity() *const anyopaque {
@@ -623,10 +705,12 @@ fn CooperativePort(comptime Spec: type) type {
         fn invoke(comptime handler: anytype, raw: *anyopaque, table: *const abi.CooperativeTable, context: *anyopaque) abi.CooperativeProgress {
             var state: CooperativeState = .{ .table = table, .context = context };
             const call: *Cooperative = @ptrCast(&state);
+            const Context = @typeInfo(@TypeOf(handler)).@"fn".params[1].type.?;
+            const typed_call: Context = @ptrCast(&state);
             const progress = if (@typeInfo(@TypeOf(handler)).@"fn".return_type.? == CooperativeProgress)
-                handler(@as(*Spec.State, @ptrCast(@alignCast(raw))), call)
+                handler(@as(*Spec.State, @ptrCast(@alignCast(raw))), typed_call)
             else
-                handler(@as(*Spec.State, @ptrCast(@alignCast(raw))), call) catch |err| blk: {
+                handler(@as(*Spec.State, @ptrCast(@alignCast(raw))), typed_call) catch |err| blk: {
                     switch (err) {
                         error.OutOfMemory => call.failOutOfMemory(),
                         error.Cancelled => if (!call.cancelled()) call.fail(.contract, "cooperative callback reported cancellation without a request"),
@@ -646,6 +730,8 @@ fn CooperativePort(comptime Spec: type) type {
 
 fn validateCooperativeHandler(comptime State: type, comptime handler: anytype) void {
     if (@TypeOf(handler) != fn (*State, *Cooperative) CooperativeProgress and
-        @TypeOf(handler) != fn (*State, *Cooperative) ControllerError!CooperativeProgress)
+        @TypeOf(handler) != fn (*State, *Cooperative) ControllerError!CooperativeProgress and
+        @TypeOf(handler) != fn (*State, *Finalizer) CooperativeProgress and
+        @TypeOf(handler) != fn (*State, *Finalizer) ControllerError!CooperativeProgress)
         @compileError("ecl-native: cooperative handler requires resource state and cooperative context");
 }

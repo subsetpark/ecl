@@ -1943,7 +1943,12 @@ Queue and observer ownership independently keep that allocation alive; only
 their final release destroys the payload and ticket. A writer allocation pins
 its admitted resource until both its turn and permit ownership end. A resumable
 callback retains its queue position and execution ownership between slices.
-Suspended work remains cancellable and must resume to settle its private state
+An active invocation owns a reversible or committed phase independently of its
+slice progress. Granting commit authority and accepting cancellation share the
+lane lock order. Committed execution keeps its terminal fact while yielded
+retirement remains joined; cancellation cannot convert it into an aborted
+invocation or release its queue ownership early.
+Reversible suspended work remains cancellable and must resume to settle its private state
 before queue retirement; dropping an observer does not discard that work.
 Invocation state distinguishes suspended work from returned callbacks, so
 cancellation cannot mistake a scheduling boundary for terminal completion.
@@ -1963,6 +1968,13 @@ children before cleanup becomes observable. Adapter state supplies typed
 backend work and transport; ABI descriptors and operation codes remain outside
 this lifecycle. Admission preparation owns its result and resource pin before
 acquiring the publication lock, and rejection retires them after unlocking.
+A sealing operation atomically ends admission when it takes its queue position.
+The common service settles earlier work and dependent children before dispatching
+its finalizer. Sealing never reopens on failure; failed private state remains
+owned until joined resource cleanup. Finalizers reserve immutable, capability-free
+result storage before the lane grants irreversible-work authority. Result mutation
+is unavailable after reservation, and resource cancellation preserves committed
+execution and its terminal result while joining all remaining slices.
 The native descriptor selects controller or cooperative execution exhaustively.
 Cooperative resources use one serial resumable lane and reserve their scheduler
 continuation before publication. Operation state retains its construction owner

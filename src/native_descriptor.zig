@@ -55,7 +55,7 @@ pub const CallDefinition = struct {
 
 pub const PortCapability = union(enum) {
     factory: u32,
-    operation: struct { resource: u32, code: u32, lane: u32, endpoints: u64 },
+    operation: struct { resource: u32, code: u32, lane: u32, endpoints: u64, mode: @import("port_operation.zig").Mode },
     endpoint: EndpointDefinition,
 
     pub fn resource(self: PortCapability) u32 {
@@ -93,7 +93,11 @@ const PortDefinitions = [abi.max_port_definitions]?PortDefinition;
 fn portCapability(binding: abi.PortBinding) PortCapability {
     return switch (binding.kind) {
         .factory => .{ .factory = binding.resource },
-        .operation => .{ .operation = .{ .resource = binding.resource, .code = binding.operation, .lane = binding.lane, .endpoints = binding.endpoints } },
+        .operation => .{ .operation = .{ .resource = binding.resource, .code = binding.operation, .lane = binding.lane, .endpoints = binding.endpoints, .mode = switch (binding.operation_mode) {
+            .ordinary => .ordinary,
+            .finalizer => .finalizer,
+            _ => unreachable,
+        } } },
         .endpoint => .{ .endpoint = .{
             .resource = binding.resource,
             .id = @intCast(binding.endpoint),
@@ -829,8 +833,14 @@ pub const ValidateCursor = struct {
             return error.InvalidPortDefinition;
         switch (binding.kind) {
             .factory => {},
-            .operation => if (binding.lane >= module.ports[binding.resource].?.wire.lane_count)
-                return error.InvalidPortDefinition,
+            .operation => {
+                if (binding.lane >= module.ports[binding.resource].?.wire.lane_count) return error.InvalidPortDefinition;
+                switch (binding.operation_mode) {
+                    .ordinary => {},
+                    .finalizer => if (module.ports[binding.resource].?.execution != .cooperative) return error.InvalidPortDefinition,
+                    _ => return error.InvalidPortDefinition,
+                }
+            },
             .endpoint => {
                 if (module.ports[binding.resource].?.execution != .controller) return error.InvalidPortDefinition;
                 if (binding.endpoint >= 64) return error.InvalidPortDefinition;

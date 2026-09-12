@@ -113,196 +113,263 @@ fn childAdvances(call: *ecl.Call("-- value")) ecl.CallbackResult {
     const state = call.instance(Instance) orelse return call.fail(.contract, "missing instance");
     return call.complete(.{ecl.Scalar.int(state.child_advances.load(.acquire))});
 }
-const CooperativeResource = ecl.Port(.{ .cooperative = struct {
-    pub const name = "cooperative";
-    pub const State = struct {
-        memory: ?*const ecl.NativeMemory = null,
-        bytes: ?[]align(64) u8 = null,
-        initialized: usize = 0,
-        phase: enum { start, values, aggregate, completed } = .start,
-        index: u32 = 0,
-        target: u32 = 1024,
-        retire_remaining: u32 = 513,
-        cleanup_remaining: u32 = 513,
-        copied_parent: ?i64 = null,
-        construction: enum { start, clear, key, scalars, dictionary, input, list } = .start,
-        creating: enum { start, configuration, child } = .start,
-        initialization_parked: bool = false,
-    };
-    pub const operations = .{
-        .values = .{ .doc = "Build a result over several bounded slices.", .handler = values, .lane = .operation, .endpoints = .{} },
-        .park = .{ .doc = "Park until cancelled, then join private retirement.", .handler = park, .lane = .operation, .endpoints = .{} },
-        .borrowed = .{ .doc = "Read an independently copied initialization value.", .handler = borrowed, .lane = .operation, .endpoints = .{} },
-        .message = .{ .doc = "Construct a heterogeneous message using bounded SDK builders.", .handler = message, .lane = .operation, .endpoints = .{} },
-        .spawn = .{ .name = "cooperative-spawn", .doc = "Create an independent child through resumable construction.", .handler = spawn, .lane = .operation, .endpoints = .{} },
-        .dependent = .{ .name = "cooperative-dependent", .doc = "Create a dependent child through resumable construction.", .handler = dependent, .lane = .operation, .endpoints = .{} },
-    };
-    pub fn init() State {
-        return .{};
-    }
-    pub fn open(state: *State, context: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
-        const instance = context.instance(Instance) orelse return error.InvalidValue;
-        state.memory = instance.memory;
-        if (context.initializationParent(Resource)) |parent| {
-            if (context.parent(Resource) != null) return error.InvalidValue;
-            state.copied_parent = parent.value + 20;
+const CooperativeResource = ecl.Port(.{
+    .cooperative = struct {
+        pub const name = "cooperative";
+        pub const State = struct {
+            memory: ?*const ecl.NativeMemory = null,
+            bytes: ?[]align(64) u8 = null,
+            initialized: usize = 0,
+            phase: enum { start, values, aggregate, completed } = .start,
+            index: u32 = 0,
+            target: u32 = 1024,
+            retire_remaining: u32 = 513,
+            cleanup_remaining: u32 = 513,
+            copied_parent: ?i64 = null,
+            construction: enum { start, clear, key, scalars, dictionary, input, list } = .start,
+            creating: enum { start, configuration, child } = .start,
+            initialization_parked: bool = false,
+            finalization: enum { start, result, commit, retiring } = .start,
+            final_slices: u32 = 8,
+        };
+        pub const operations = .{
+            .seal = .{ .doc = "Seal admission and commit a prepared result.", .handler = seal, .lane = .operation, .endpoints = .{} },
+            .values = .{ .doc = "Build a result over several bounded slices.", .handler = values, .lane = .operation, .endpoints = .{} },
+            .park = .{ .doc = "Park until cancelled, then join private retirement.", .handler = park, .lane = .operation, .endpoints = .{} },
+            .borrowed = .{ .doc = "Read an independently copied initialization value.", .handler = borrowed, .lane = .operation, .endpoints = .{} },
+            .message = .{ .doc = "Construct a heterogeneous message using bounded SDK builders.", .handler = message, .lane = .operation, .endpoints = .{} },
+            .spawn = .{ .name = "cooperative-spawn", .doc = "Create an independent child through resumable construction.", .handler = spawn, .lane = .operation, .endpoints = .{} },
+            .dependent = .{ .name = "cooperative-dependent", .doc = "Create a dependent child through resumable construction.", .handler = dependent, .lane = .operation, .endpoints = .{} },
+        };
+        pub fn init() State {
+            return .{};
         }
-        if (context.initializationParent(CooperativeResource)) |parent| {
-            state.copied_parent = parent.copied_parent.? + 1;
+        pub fn open(state: *State, context: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
+            const instance = context.instance(Instance) orelse return error.InvalidValue;
+            state.memory = instance.memory;
+            if (context.initializationParent(Resource)) |parent| {
+                if (context.parent(Resource) != null) return error.InvalidValue;
+                state.copied_parent = parent.value + 20;
+            }
+            if (context.initializationParent(CooperativeResource)) |parent| {
+                state.copied_parent = parent.copied_parent.? + 1;
+            }
+            if (state.copied_parent == null) state.copied_parent = instance.value.load(.monotonic);
+            if (state.bytes == null) state.bytes = try state.memory.?.allocate(1024);
+            while (state.initialized < state.bytes.?.len and context.consume(1)) {
+                state.bytes.?[state.initialized] = @truncate(state.initialized);
+                state.initialized += 1;
+            }
+            if (state.initialized != state.bytes.?.len) return .yielded;
+            if (context.input(&.{}).?.int() == 2 and !state.initialization_parked) {
+                state.initialization_parked = true;
+                instance.cooperative_started.store(2, .release);
+                if (!context.park(3_600_000)) return error.InvalidValue;
+                return .parked;
+            }
+            if (context.input(&.{}).?.int() == 1) context.fail(.io, "requested cooperative initialization failure");
+            return .completed;
         }
-        if (state.copied_parent == null) state.copied_parent = instance.value.load(.monotonic);
-        if (state.bytes == null) state.bytes = try state.memory.?.allocate(1024);
-        while (state.initialized < state.bytes.?.len and context.consume(1)) {
-            state.bytes.?[state.initialized] = @truncate(state.initialized);
-            state.initialized += 1;
+        fn values(state: *State, context: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
+            const builder = context.builder();
+            switch (state.phase) {
+                .start => {
+                    const requested = context.input(&.{}).?.int();
+                    state.target = if (requested) |count| @intCast(@max(0, @min(count, 1024))) else 1024;
+                    state.phase = .values;
+                    state.retire_remaining = 513;
+                    return .yielded;
+                },
+                .values => {
+                    while (state.index < state.target and context.consume(1)) {
+                        try builder.int(state.index);
+                        state.index += 1;
+                    }
+                    if (state.index != state.target) return .yielded;
+                    try builder.list(state.index);
+                    state.phase = .aggregate;
+                    return .yielded;
+                },
+                .aggregate => {
+                    const progress = try builder.advance();
+                    if (progress != .completed) return progress;
+                    try builder.result();
+                    state.phase = .completed;
+                    return .completed;
+                },
+                .completed => unreachable,
+            }
         }
-        if (state.initialized != state.bytes.?.len) return .yielded;
-        if (context.input(&.{}).?.int() == 2 and !state.initialization_parked) {
-            state.initialization_parked = true;
-            instance.cooperative_started.store(2, .release);
+        fn park(state: *State, context: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
+            const instance = context.instance(Instance) orelse return error.InvalidValue;
+            state.retire_remaining = 513;
+            instance.cooperative_started.store(1, .release);
             if (!context.park(3_600_000)) return error.InvalidValue;
             return .parked;
         }
-        if (context.input(&.{}).?.int() == 1) context.fail(.io, "requested cooperative initialization failure");
-        return .completed;
-    }
-    fn values(state: *State, context: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
-        const builder = context.builder();
-        switch (state.phase) {
-            .start => {
-                const requested = context.input(&.{}).?.int();
-                state.target = if (requested) |count| @intCast(@max(0, @min(count, 1024))) else 1024;
-                state.phase = .values;
-                state.retire_remaining = 513;
-                return .yielded;
-            },
-            .values => {
-                while (state.index < state.target and context.consume(1)) {
-                    try builder.int(state.index);
-                    state.index += 1;
-                }
-                if (state.index != state.target) return .yielded;
-                try builder.list(state.index);
-                state.phase = .aggregate;
-                return .yielded;
-            },
-            .aggregate => {
+        fn borrowed(state: *State, context: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
+            if (context.initializationParent(Resource) != null or context.parent(Resource) != null) return error.InvalidValue;
+            if (context.initializationParent(CooperativeResource) != null or context.parent(CooperativeResource) != null) return error.InvalidValue;
+            try context.builder().int(state.copied_parent orelse return error.InvalidValue);
+            try context.builder().result();
+            return .completed;
+        }
+        fn spawn(state: *State, context: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
+            return createChild(state, context, false);
+        }
+        fn dependent(state: *State, context: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
+            return createChild(state, context, true);
+        }
+        fn createChild(state: *State, context: *ecl.Cooperative, comptime dependent_child: bool) ecl.ControllerError!ecl.CooperativeProgress {
+            const builder = context.builder();
+            const instance = context.instance(Instance).?;
+            if (state.creating == .start) instance.child_advances.store(0, .release);
+            if (state.creating == .child) _ = instance.child_advances.fetchAdd(1, .acq_rel);
+            if (state.creating != .start) {
                 const progress = try builder.advance();
                 if (progress != .completed) return progress;
-                try builder.result();
-                state.phase = .completed;
-                return .completed;
-            },
-            .completed => unreachable,
+            }
+            switch (state.creating) {
+                .start => {
+                    state.retire_remaining = 513;
+                    try builder.input(&.{});
+                    state.creating = .configuration;
+                },
+                .configuration => {
+                    try builder.child(CooperativeResource, if (dependent_child) .dependent else .independent);
+                    state.creating = .child;
+                },
+                .child => {
+                    try builder.result();
+                    return .completed;
+                },
+            }
+            return .yielded;
         }
-    }
-    fn park(state: *State, context: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
-        const instance = context.instance(Instance) orelse return error.InvalidValue;
-        state.retire_remaining = 513;
-        instance.cooperative_started.store(1, .release);
-        if (!context.park(3_600_000)) return error.InvalidValue;
-        return .parked;
-    }
-    fn borrowed(state: *State, context: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
-        if (context.initializationParent(Resource) != null or context.parent(Resource) != null) return error.InvalidValue;
-        if (context.initializationParent(CooperativeResource) != null or context.parent(CooperativeResource) != null) return error.InvalidValue;
-        try context.builder().int(state.copied_parent orelse return error.InvalidValue);
-        try context.builder().result();
-        return .completed;
-    }
-    fn spawn(state: *State, context: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
-        return createChild(state, context, false);
-    }
-    fn dependent(state: *State, context: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
-        return createChild(state, context, true);
-    }
-    fn createChild(state: *State, context: *ecl.Cooperative, comptime dependent_child: bool) ecl.ControllerError!ecl.CooperativeProgress {
-        const builder = context.builder();
-        const instance = context.instance(Instance).?;
-        if (state.creating == .start) instance.child_advances.store(0, .release);
-        if (state.creating == .child) _ = instance.child_advances.fetchAdd(1, .acq_rel);
-        if (state.creating != .start) {
-            const progress = try builder.advance();
-            if (progress != .completed) return progress;
+        fn message(state: *State, context: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
+            return constructMessage(state, context);
         }
-        switch (state.creating) {
-            .start => {
-                state.retire_remaining = 513;
-                try builder.input(&.{});
-                state.creating = .configuration;
-            },
-            .configuration => {
-                try builder.child(CooperativeResource, if (dependent_child) .dependent else .independent);
-                state.creating = .child;
-            },
-            .child => {
-                try builder.result();
-                return .completed;
-            },
+        fn constructMessage(state: *State, context: anytype) ecl.ControllerError!ecl.CooperativeProgress {
+            const builder = context.builder();
+            if (state.construction != .start) {
+                const progress = try builder.advance();
+                if (progress != .completed) return progress;
+            }
+            switch (state.construction) {
+                .start => {
+                    try builder.int(99);
+                    try builder.clear();
+                    state.construction = .clear;
+                },
+                .clear => {
+                    try builder.symbol("answer");
+                    state.construction = .key;
+                },
+                .key => {
+                    try builder.float(0.5);
+                    try builder.char(955);
+                    try builder.list(2);
+                    state.construction = .scalars;
+                },
+                .scalars => {
+                    try builder.dictionary(1);
+                    state.construction = .dictionary;
+                },
+                .dictionary => {
+                    try builder.input(&.{});
+                    state.construction = .input;
+                },
+                .input => {
+                    try builder.list(2);
+                    state.construction = .list;
+                },
+                .list => {
+                    try builder.result();
+                    return .completed;
+                },
+            }
+            return .yielded;
         }
-        return .yielded;
-    }
-    fn message(state: *State, context: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
-        const builder = context.builder();
-        if (state.construction != .start) {
-            const progress = try builder.advance();
-            if (progress != .completed) return progress;
+        fn seal(state: *State, context: *ecl.Finalizer) ecl.ControllerError!ecl.CooperativeProgress {
+            const instance = context.instance(Instance) orelse return error.InvalidValue;
+            const mode = context.input(&.{}).?.int() orelse return error.InvalidValue;
+            if (context.parent(Resource) != null) return error.InvalidValue;
+            if (!context.consume(1)) return .yielded;
+            switch (state.finalization) {
+                .start => {
+                    instance.cooperative_started.store(3, .release);
+                    if (mode == 1) return .yielded;
+                    if (mode == 2) {
+                        context.fail(.io, "requested finalizer failure");
+                        return .completed;
+                    }
+                    if (mode == 4) return .completed;
+                    if (mode == 8) {
+                        context.failOutOfMemory();
+                        return .completed;
+                    }
+                    if (mode == 7) {
+                        const progress = try constructMessage(state, context);
+                        if (progress != .completed) return progress;
+                        state.finalization = .result;
+                        return .yielded;
+                    }
+                    try context.builder().int(42);
+                    try context.builder().result();
+                    state.finalization = .result;
+                },
+                .result => {
+                    const progress = try context.builder().advance();
+                    if (progress != .completed) return progress;
+                    state.finalization = .commit;
+                },
+                .commit => {
+                    if (mode == 5 and instance.value.load(.monotonic) != 11065) return error.InvalidValue;
+                    if (mode == 6 and instance.value.load(.monotonic) != 1065) return error.InvalidValue;
+                    try context.beginCommit();
+                    _ = instance.value.fetchAdd(100000, .monotonic);
+                    instance.cooperative_started.store(4, .release);
+                    state.finalization = .retiring;
+                },
+                .retiring => {
+                    // Bounded private retirement keeps committed execution alive.
+                    if (state.final_slices != 0) {
+                        state.final_slices -= 1;
+                        return .yielded;
+                    }
+                    if (mode == 3) {
+                        context.builder().int(99) catch |err| {
+                            if (err == error.InvalidValue) return .completed;
+                            return err;
+                        };
+                        return error.InvalidValue;
+                    }
+                    return .completed;
+                },
+            }
+            return .yielded;
         }
-        switch (state.construction) {
-            .start => {
-                try builder.int(99);
-                try builder.clear();
-                state.construction = .clear;
-            },
-            .clear => {
-                try builder.symbol("answer");
-                state.construction = .key;
-            },
-            .key => {
-                try builder.float(0.5);
-                try builder.char(955);
-                try builder.list(2);
-                state.construction = .scalars;
-            },
-            .scalars => {
-                try builder.dictionary(1);
-                state.construction = .dictionary;
-            },
-            .dictionary => {
-                try builder.input(&.{});
-                state.construction = .input;
-            },
-            .input => {
-                try builder.list(2);
-                state.construction = .list;
-            },
-            .list => {
-                try builder.result();
-                return .completed;
-            },
+        pub fn retireOperation(state: *State, context: *ecl.Cooperative) ecl.CooperativeProgress {
+            while (state.retire_remaining != 0 and context.consume(1)) state.retire_remaining -= 1;
+            if (state.retire_remaining != 0) return .yielded;
+            state.phase = .start;
+            state.construction = .start;
+            state.creating = .start;
+            state.index = 0;
+            const instance = context.instance(Instance).?;
+            _ = instance.value.fetchAdd(1000, .monotonic);
+            return .completed;
         }
-        return .yielded;
-    }
-    pub fn retireOperation(state: *State, context: *ecl.Cooperative) ecl.CooperativeProgress {
-        while (state.retire_remaining != 0 and context.consume(1)) state.retire_remaining -= 1;
-        if (state.retire_remaining != 0) return .yielded;
-        state.phase = .start;
-        state.construction = .start;
-        state.creating = .start;
-        state.index = 0;
-        const instance = context.instance(Instance).?;
-        _ = instance.value.fetchAdd(1000, .monotonic);
-        return .completed;
-    }
-    pub fn retire(state: *State, context: *ecl.Cooperative) ecl.CooperativeProgress {
-        while (state.cleanup_remaining != 0 and context.consume(1)) state.cleanup_remaining -= 1;
-        if (state.cleanup_remaining != 0) return .yielded;
-        if (state.bytes) |bytes| state.memory.?.release(bytes);
-        state.bytes = null;
-        _ = context.instance(Instance).?.value.fetchAdd(10000, .monotonic);
-        return .completed;
-    }
-} });
+        pub fn retire(state: *State, context: *ecl.Cooperative) ecl.CooperativeProgress {
+            while (state.cleanup_remaining != 0 and context.consume(1)) state.cleanup_remaining -= 1;
+            if (state.cleanup_remaining != 0) return .yielded;
+            if (state.bytes) |bytes| state.memory.?.release(bytes);
+            state.bytes = null;
+            _ = context.instance(Instance).?.value.fetchAdd(10000, .monotonic);
+            return .completed;
+        }
+    },
+});
 
 pub const Extension = ecl.module(.{
     .linkage = .static,

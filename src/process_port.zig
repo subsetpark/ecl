@@ -1354,7 +1354,7 @@ const ServiceAdapter = struct {
     pub fn prepareOperation(_: *ServiceAdapter, cell: *Service, operation: RegisteredOperation, request: *const port_message.Validated, lane: *ProcessExchange.Lane) error{OutOfMemory}!*ProcessExchange.Prepared {
         const terminal = try results.Result.create(cell.adapter.owner.host);
         errdefer terminal.release();
-        return ProcessExchange.prepare(.{ .cell = cell, .operation = operation, .valid_request = request.value() == .list and request.value().list.length() == 0 }, terminal, lane);
+        return ProcessExchange.prepare(.{ .cell = cell, .operation = operation, .valid_request = request.value() == .list and request.value().list.length() == 0 }, terminal, lane, .ordinary);
     }
     pub fn retire(_: *ServiceAdapter, cell: *Service) void {
         ServiceStorage.retire(cell);

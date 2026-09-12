@@ -8,6 +8,7 @@ pub const declarations = @import("port-declarations");
 pub const Port = ports.Port;
 pub const Controller = ports.Controller;
 pub const Cooperative = ports.Cooperative;
+pub const Finalizer = ports.Finalizer;
 pub const CooperativeProgress = ports.CooperativeProgress;
 pub const ControllerError = ports.ControllerError;
 pub const MessageView = ports.MessageView;
@@ -142,6 +143,7 @@ fn portOperation(comptime P: type, comptime name: P.Operations.Name) type {
     return portBinding(P.Operations.publicName(name), entry.doc, P, .{
         .kind = .operation,
         .operation = @intFromEnum(name),
+        .operation_mode = P.operationMode(name),
         .lane = @intFromEnum(P.Operations.lane(name)),
         .endpoints = P.Operations.endpointMask(name),
     });

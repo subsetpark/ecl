@@ -50,7 +50,7 @@ pub const RegisteredCapability = opaque {
     pub fn beginOperation(self: *RegisteredCapability, source: Value, scope: *scheduler.TaskScope, request: *const port_message.Validated) exchanges.AdmitError!exchanges.Admission {
         const operation = self.definition().operation;
         const cell = fromValue(source, self.instance(), operation.resource) orelse return error.WrongKind;
-        return cell.admitOnLane(.{ .code = operation.code, .lane = operation.lane, .endpoints = operation.endpoints }, scope, request);
+        return cell.admitOnLane(.{ .code = operation.code, .lane = operation.lane, .endpoints = operation.endpoints, .mode = operation.mode }, scope, request);
     }
     pub fn openResource(self: *RegisteredCapability, opening: factories.Context, config: *const port_message.Validated) error{OutOfMemory}!factories.Start {
         const issuer = self.instance();
@@ -231,7 +231,7 @@ pub const Access = opaque {
 pub const Cell = @import("port_service.zig").Resource(ResourceAdapter);
 const ResourceAdapter = struct {
     pub const Exchange = @import("port_operation.zig").Exchange(OperationAdapter);
-    pub const Request = struct { code: u32, lane: u32, endpoints: u64 };
+    pub const Request = struct { code: u32, lane: u32, endpoints: u64, mode: @import("port_operation.zig").Mode };
     owner: *OwnerState,
     instance: *native.ModuleInstance,
     kind: u32,
@@ -257,7 +257,7 @@ const ResourceAdapter = struct {
         return selected.lane;
     }
     pub fn prepareOperation(_: *ResourceAdapter, cell: *Cell, selected: Request, request: *const port_message.Validated, lane: *Operation.Lane) error{OutOfMemory}!*Operation.Prepared {
-        return OperationAdapter.prepare(cell, selected.code, selected.lane, selected.endpoints, request, lane);
+        return OperationAdapter.prepare(cell, selected.code, selected.lane, selected.endpoints, selected.mode, request, lane);
     }
     pub fn retire(_: *ResourceAdapter, cell: *Cell) void {
         Resource.retire(cell);
@@ -465,7 +465,7 @@ const OperationAdapter = struct {
             .bytes => {},
         };
     }
-    pub fn prepare(cell: *Cell, code: u32, lane: u32, endpoints: u64, parameters: *const port_message.Validated, queue: *Operation.Lane) error{OutOfMemory}!*Operation.Prepared {
+    pub fn prepare(cell: *Cell, code: u32, lane: u32, endpoints: u64, mode: @import("port_operation.zig").Mode, parameters: *const port_message.Validated, queue: *Operation.Lane) error{OutOfMemory}!*Operation.Prepared {
         var protocol = try Protocol.init(cell, endpoints, parameters);
         errdefer protocol.deinit(cell);
         const terminal_value = try results.Result.create(cell.adapter.owner.host);
@@ -479,7 +479,7 @@ const OperationAdapter = struct {
             },
         };
         errdefer if (continuation) |owned| cell.allocator.destroy(owned);
-        return Operation.prepare(.{ .cell = cell, .code = code, .lane = lane, .protocol = protocol, .endpoints = endpoints, .continuation = continuation }, terminal_value, queue);
+        return Operation.prepare(.{ .cell = cell, .code = code, .lane = lane, .protocol = protocol, .endpoints = endpoints, .continuation = continuation }, terminal_value, queue, mode);
     }
     pub fn runnable(self: *OperationAdapter) bool {
         return !self.cell.closed.load(.acquire);
@@ -1023,11 +1023,10 @@ fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest
 }
 fn controllerCancelled(raw: *anyopaque) callconv(.c) bool {
     const ctx = context(raw);
-    if (ctx.cell.closed.load(.acquire)) return true;
-    const op = ctx.operation() orelse return false;
+    const op = ctx.operation() orelse return ctx.cell.closed.load(.acquire);
     lock(&op.mutex);
     defer unlock(&op.mutex);
-    return op.ticket.isCancelled();
+    return op.ticket.isCancelled() or (!op.ticket.committed() and ctx.cell.closed.load(.acquire));
 }
 
 fn controllerEndpointParent(ctx: *ControllerContext, owner: abi.EndpointOwner) ?EndpointParent {
@@ -1273,6 +1272,10 @@ fn buildCooperative(ctx: *ControllerContext, request: *const abi.MessageBuildReq
     if (request.size != @sizeOf(abi.MessageBuildRequest)) return error.InvalidState;
     const operation = ctx.operation() orelse return error.InvalidState;
     if (controllerCancelled(ctx)) return error.Cancelled;
+    if (ctx.operation()) |op| {
+        if (!op.terminal_result.mutable()) return error.InvalidState;
+        if (op.mode == .finalizer and request.action == .child) return error.InvalidState;
+    }
     if (ctx.builder == .none) {
         // Allocate before publishing the union tag: result-location semantics
         // may otherwise expose a partial payload to the failure unwinder.
@@ -1417,7 +1420,22 @@ fn cooperativeProgress(ctx: *ControllerContext, progress: abi.CooperativeProgres
         },
     };
 }
+fn cooperativeBeginCommit(raw: *anyopaque) callconv(.c) bool {
+    const ctx = context(raw);
+    const op = ctx.operation() orelse return false;
+    if (op.mode != .finalizer) return false;
+    lock(&op.mutex);
+    const failed = op.adapter.failure != null;
+    unlock(&op.mutex);
+    if (failed) return false;
+    if (ctx.builder == .cooperative and ctx.builder.cooperative.phase != .idle) return false;
+    const running = ctx.invocation.operation.running orelse return false;
+    if (!op.terminal_result.freeze()) return false;
+    return running.beginCommit();
+}
+
 const cooperative_table: abi.CooperativeTable = .{
+    .begin_commit = cooperativeBeginCommit,
     .instance_state = controllerInstance,
     .initialization_parent = controllerInitializationParent,
     .parent_state = controllerParent,
@@ -1456,8 +1474,11 @@ const CooperativeInvocation = struct {
                 const progress = cooperativeProgress(ctx, callbacks.execute(adapter.cell.adapter.backend.ptr, adapter.code, &cooperative_table, ctx));
                 lock(&operation.mutex);
                 const failed = adapter.failure != null;
+                const committed = operation.ticket.committed();
                 unlock(&operation.mutex);
                 if (failed or progress == .completed) {
+                    if (!failed and operation.mode == .finalizer and !committed)
+                        recordControllerFailure(ctx, .init(.contract, "finalizer completed without committing"));
                     self.phase = .retiring;
                     if (!failed and ctx.builder == .cooperative) switch (ctx.builder.cooperative.phase) {
                         .idle => {},

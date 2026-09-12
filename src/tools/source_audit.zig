@@ -243,6 +243,8 @@ const repository_verification_files = [_][]const u8{
     "test/native/negative/empty_doc.zig",
     "test/native/negative/invalid_port_callbacks.zig",
     "test/native/negative/cooperative_blocking_endpoint.zig",
+    "test/native/negative/cooperative_commit_authority.zig",
+    "test/native/negative/finalizer_child_creation.zig",
     "test/native/negative/invalid_cooperative_handler.zig",
     "test/native/negative/missing_port_recovery.zig",
     "test/native/negative/invalid_port_lanes.zig",

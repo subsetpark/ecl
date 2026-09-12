@@ -2318,3 +2318,101 @@ test "native: cooperative children retain failed initialization for joined clean
             "p instanceprobe.cooperative-spawn 0 port.call port.close p port.close) call",
     );
 }
+
+test "native: cooperative finalizers seal admission and preserve committed cancellation results" {
+    try expectCooperativeAcceptance(
+        "instanceprobe.cooperative [] port.open dup instanceprobe.seal 0 port.begin (|p x| " ++
+            "p wrap (instanceprobe.values 2 port.call) @attempt 'err dict.has? {'kind 'user 'msg \"sealed admission\"} assert " ++
+            "(instanceprobe.started 4 = not) (0 clock.sleep) while " ++
+            "x port.cancel x port.result 42 = {'kind 'user 'msg \"committed result\"} assert x port.close " ++
+            "p port.close) call instanceprobe.next 111065 = {'kind 'user 'msg \"joined committed retirement\"} assert",
+    );
+}
+
+test "native: uncommitted finalizer cancellation joins resource cleanup" {
+    try expectCooperativeAcceptance(
+        "instanceprobe.cooperative [] port.open dup instanceprobe.seal 1 port.begin (|p x| " ++
+            "(instanceprobe.started 3 = not) (0 clock.sleep) while " ++
+            "x port.cancel x wrap (port.result) @attempt 'err dict.has? {'kind 'user 'msg \"uncommitted cancellation\"} assert " ++
+            "x port.close p port.close) call " ++
+            "instanceprobe.next 11065 = {'kind 'user 'msg \"no commit and joined cleanup\"} assert",
+    );
+}
+
+test "native: failed finalizers retain sealed state until joined close" {
+    try expectCooperativeAcceptance(
+        "instanceprobe.cooperative [] port.open (|p| " ++
+            "p wrap (instanceprobe.seal 2 port.call) @attempt 'err at 'kind at 'io match? {'kind 'user 'msg \"native failure\"} assert " ++
+            "p wrap (instanceprobe.values 2 port.call) @attempt 'err dict.has? {'kind 'user 'msg \"failed resource remains sealed\"} assert " ++
+            "instanceprobe.next 1065 = {'kind 'user 'msg \"private state retained\"} assert p port.close) call " ++
+            "instanceprobe.next 11066 = {'kind 'user 'msg \"private cleanup joined\"} assert",
+    );
+}
+
+test "native: finalizer settles dependent children before irreversible work" {
+    try expectCooperativeAcceptance(
+        "instanceprobe.cooperative [] port.open (|p| " ++
+            "p instanceprobe.cooperative-dependent 0 port.call " ++
+            "p instanceprobe.seal 5 port.call 42 = {'kind 'user 'msg \"finalized result\"} assert " ++
+            "dup wrap (instanceprobe.borrowed [] port.call) @attempt 'err dict.has? {'kind 'user 'msg \"dependent child closed\"} assert " ++
+            "port.close instanceprobe.next 112065 = {'kind 'user 'msg \"child settled before commit\"} assert p port.close) call",
+    );
+}
+
+test "native: finalizer rejects missing commit and mutation of reserved output" {
+    try expectCooperativeAcceptance(
+        "instanceprobe.cooperative [] port.open (|p| " ++
+            "p wrap (instanceprobe.seal 4 port.call) @attempt 'err at 'kind at 'contract match? {'kind 'user 'msg \"commit required\"} assert p port.close) call " ++
+            "instanceprobe.cooperative [] port.open (|p| " ++
+            "p wrap (instanceprobe.seal 3 port.call) @attempt 'err at 'kind at 'domain match? {'kind 'user 'msg \"reserved output immutable\"} assert p port.close) call",
+    );
+}
+
+test "native: resource closure preserves a committed finalizer result" {
+    try expectCooperativeAcceptance(
+        "instanceprobe.cooperative [] port.open dup instanceprobe.seal 0 port.begin (|p x| " ++
+            "(instanceprobe.started 4 = not) (0 clock.sleep) while " ++
+            "p port.close x port.result 42 = {'kind 'user 'msg \"committed result survives resource closure\"} assert x port.close) call",
+    );
+}
+
+test "native: finalizer descriptors reject controller and unknown operation modes" {
+    var host = heap.HostOwner.init(std.testing.allocator);
+    defer host.cleanup().drain();
+    const extension = @import("native-instance").Extension.descriptor();
+    var raw = extension.*;
+    const definitions = try std.testing.allocator.dupe(abi.Definition, extension.definitions_ptr[0..extension.definition_count]);
+    defer std.testing.allocator.free(definitions);
+    raw.definitions_ptr = definitions.ptr;
+    const requested = try intern.internModuleName("instanceprobe");
+    for (definitions) |*definition| {
+        if (definition.binding.kind != .operation or definition.binding.resource != 0) continue;
+        definition.binding.operation_mode = .finalizer;
+        try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &raw);
+        definition.binding.operation_mode = @enumFromInt(1234);
+        try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &raw);
+        return;
+    }
+    return error.TestUnexpectedResult;
+}
+
+test "native: finalizer waits for earlier admitted work and builds structured output" {
+    try expectCooperativeAcceptance(
+        "instanceprobe.cooperative [] port.open (|p| " ++
+            "p instanceprobe.values 2 port.begin p instanceprobe.seal 6 port.begin " ++
+            "dup port.result 42 = {'kind 'user 'msg \"earlier retirement precedes commit\"} assert port.close " ++
+            "dup port.result [0 1] match? {'kind 'user 'msg \"earlier result\"} assert port.close p port.close) call " ++
+            "instanceprobe.cooperative [] port.open dup instanceprobe.seal 7 port.call " ++
+            "dup first 'answer at first 0.5 = {'kind 'user 'msg \"finalizer float\"} assert " ++
+            "dup first 'answer at 1 at int 955 = {'kind 'user 'msg \"finalizer character\"} assert " ++
+            "1 at 7 = {'kind 'user 'msg \"finalizer copied input\"} assert port.close",
+    );
+}
+
+test "native: finalizer allocation failure joins private cleanup" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{ .ecl_path = native_fixture.directory }), .cooperative, .language_tests);
+    defer runtime.deinit();
+    try std.testing.expectError(error.OutOfMemory, runtime.runUnit("native-finalizer-oom.ecl", "instanceprobe.cooperative [] port.open instanceprobe.seal 8 port.call"));
+}
