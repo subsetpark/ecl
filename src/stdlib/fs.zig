@@ -522,24 +522,9 @@ const EntryList = poll.ChunkList(Listed);
 const Orderer = directory_order.Orderer(Listed, Listed.lessThan);
 
 fn validRoot(item: Value) bool {
-    return item == .symbol or directory.isDirectory(item);
+    return fsport.isRoot(item);
 }
-const RootSelection = union(enum) {
-    named: fsport.RootHandle,
-    resource: *directory.Lease,
-    fn dir(self: RootSelection) std.Io.Dir {
-        return switch (self) {
-            .named => |root| root.dir(),
-            .resource => |lease| lease.dir(),
-        };
-    }
-    fn deinit(self: RootSelection) void {
-        switch (self) {
-            .named => {},
-            .resource => |lease| lease.deinit(),
-        }
-    }
-};
+const RootSelection = fsport.RootSelection;
 
 const Driver = struct {
     pub const address_stable_driver = {};
@@ -874,12 +859,12 @@ const Driver = struct {
     }
 
     fn acquireRoot(self: *Driver, evaluator: *Machine, item: Value) MachineError!RootSelection {
-        if (item == .symbol) return .{ .named = fsport.findRoot(self.access, item.symbol) orelse return self.fail(evaluator, .unknown_root) };
-        return .{ .resource = directory.acquire(item) catch |err| switch (err) {
+        return fsport.selectRoot(self.access, item) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
+            error.UnknownRoot => return self.fail(evaluator, .unknown_root),
             error.Closed => return self.failMessage(evaluator, .io, .io, "directory resource is closed"),
             error.Io => return self.fail(evaluator, .changed),
-        } };
+        };
     }
 
     fn publishDirectory(self: *Driver, evaluator: *Machine, dir: std.Io.Dir) MachineError!machine.WorkProgress {

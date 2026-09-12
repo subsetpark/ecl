@@ -198,6 +198,12 @@ operations subject to operating-system permissions. Units receive opaque
 `FilesystemAccess` for root lookup and operation admission. Root-relative path
 resolution enforces containment; module loading remains a separate operation.
 
+Named roots are opaque factory-issued identities. The shared root-selection
+boundary accepts those identities or independently leased directory resources;
+filesystem operations and archive extraction use that same tagged selection.
+Archive extraction holds its selection through parser, publication, and rollback
+retirement, so closing a staging root cannot invalidate an admitted extraction.
+
 Explicit host-directory acquisition mints a scope-owned resource through the
 same atomic membership and transfer protocol as other ports. Its lifetime
 state owns open admission, closure waiting for admitted leases, queued backend

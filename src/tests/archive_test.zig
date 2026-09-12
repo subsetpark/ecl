@@ -83,6 +83,10 @@ fn appendString(writer: *std.Io.Writer, text: []const u8) !void {
 /// `[bytes] 'root "destination" archive.unpack-tgz` for a root-relative
 /// destination path.
 fn unpackSource(bytes: []const u8, destination: []const u8) ![]u8 {
+    return unpackSourceAt(bytes, "'root", destination);
+}
+
+fn unpackSourceAt(bytes: []const u8, root: []const u8, destination: []const u8) ![]u8 {
     var source = std.Io.Writer.Allocating.init(allocator);
     defer source.deinit();
     try source.writer.writeByte('[');
@@ -90,7 +94,7 @@ fn unpackSource(bytes: []const u8, destination: []const u8) ![]u8 {
         if (index != 0) try source.writer.writeByte(' ');
         try source.writer.print("{d}", .{byte});
     }
-    try source.writer.writeAll("] 'root ");
+    try source.writer.print("] {s} ", .{root});
     try appendString(&source.writer, destination);
     try source.writer.writeAll(" archive.unpack-tgz");
     return allocator.dupe(u8, source.written());
@@ -203,6 +207,32 @@ fn expectIoError(scratch: *Scratch, source: []const u8, expected: support.ErrorC
     };
     defer runtime.release(failure);
     try support.expectLanguageError(failure, expected);
+}
+
+test "archive: unpack-tgz uses directory leases inside staged generations" {
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    const bytes = try decodeHex(.valid);
+    defer allocator.free(bytes);
+    const extraction = try unpackSourceAt(bytes, "stage", "contents");
+    defer allocator.free(extraction);
+    const source = try std.fmt.allocPrint(allocator, "'root \"generation\" fs.stage-dir 'stage set {s} pop " ++
+        "stage fs.commit-dir 'root \"generation/contents/lib/main.ecl\" fs.read-text", .{extraction});
+    defer allocator.free(source);
+    try expectIoStack(&scratch, source, "\"42\\n\"");
+    try scratch.expectEntryCount(1);
+    const discarded = try std.fmt.allocPrint(allocator, "'root \"discarded\" fs.stage-dir 'stage set {s} pop stage port.close", .{extraction});
+    defer allocator.free(discarded);
+    try expectIoStack(&scratch, discarded, "");
+    try scratch.expectEntryCount(1);
+    const bad = try decodeHex(.parent_path);
+    defer allocator.free(bad);
+    const bad_extraction = try unpackSourceAt(bad, "stage", "contents");
+    defer allocator.free(bad_extraction);
+    const rejected = try std.fmt.allocPrint(allocator, "'root \"rejected\" fs.stage-dir 'stage set [] ({s}) @attempt 'err at 'kind at stage port.close", .{bad_extraction});
+    defer allocator.free(rejected);
+    try expectIoStack(&scratch, rejected, "'domain");
+    try scratch.expectEntryCount(1);
 }
 
 test "archive: unpack-tgz atomically extracts regular files and returns paths" {

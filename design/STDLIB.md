@@ -1402,8 +1402,9 @@ and are not coerced.
 ### unpack-tgz
 `( bytes root destination -- regular-file-paths )` — Validate and atomically
 unpack a gzip-compressed tar byte list beneath a previously absent
-`destination`, a canonical relative path under the named Session filesystem
-`root` (see [`fs`](#fs)). The destination must
+`destination`, a canonical relative path under a named Session filesystem root
+or scope-owned directory resource (see [`fs`](#fs)). Extraction owns its
+directory lease until publication or rollback completes. The destination must
 name a child entry, not `.`. Return normalized regular-file paths in archive
 order. Unsafe, linked, special, duplicate, malformed, or over-limit members
 are `'domain`; invalid byte items are `'domain`; wrong container kinds are

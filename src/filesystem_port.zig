@@ -18,6 +18,7 @@ const builtin = @import("builtin");
 const external = @import("external.zig");
 const intern = @import("intern.zig");
 const heap = @import("heap.zig");
+const Value = @import("value.zig").Value;
 
 pub const Limits = struct {
     max_transfer_bytes: u64 = 1 << 30,
@@ -225,31 +226,56 @@ pub fn openHostDirectory(access_value: *external.FilesystemAccess, path: []const
     return .{ .directory = std.Io.Dir.cwd().openDir(owner.io, path, .{ .iterate = true }) catch |err| return .{ .failed = reasonForError(err) } };
 }
 
-/// A resolved root selection: an index into the owner's table. It carries no
-/// handle authority of its own beyond the borrowed directory it names.
-pub const RootHandle = struct {
-    owner: *FilesystemOwner,
-    index: usize,
-
-    pub fn dir(self: RootHandle) std.Io.Dir {
-        return self.owner.roots[self.index].dir;
+/// A borrowed, factory-issued root identity. Its descriptor remains owned by
+/// the Session filesystem owner throughout admitted operation cleanup.
+pub const RootHandle = opaque {
+    fn state(self: *RootHandle) *OwnedRoot {
+        return @ptrCast(@alignCast(self));
     }
-
-    pub fn name(self: RootHandle) []const u8 {
-        return self.owner.roots[self.index].name;
+    pub fn dir(self: *RootHandle) std.Io.Dir {
+        return self.state().dir;
     }
-
-    pub fn same(self: RootHandle, other: RootHandle) bool {
-        return self.owner == other.owner and self.index == other.index;
+    pub fn name(self: *RootHandle) []const u8 {
+        return self.state().name;
+    }
+    pub fn same(self: *RootHandle, other: *RootHandle) bool {
+        return self == other;
     }
 };
+fn rootHandle(root: *OwnedRoot) *RootHandle {
+    return @ptrCast(root);
+}
 
-pub fn findRoot(access_value: *external.FilesystemAccess, symbol: u32) ?RootHandle {
+pub fn findRoot(access_value: *external.FilesystemAccess, symbol: u32) ?*RootHandle {
     const owner = ownerFromAccess(access_value);
-    for (owner.roots, 0..) |root, index| {
-        if (root.symbol == symbol) return .{ .owner = owner, .index = index };
-    }
+    for (owner.roots) |*root| if (root.symbol == symbol) return rootHandle(root);
     return null;
+}
+
+/// A tagged selection contains only already authenticated root capabilities.
+/// Consuming deinit releases an independently leased directory resource.
+pub const RootSelection = union(enum) {
+    named: *RootHandle,
+    resource: *@import("directory_resource.zig").Lease,
+    pub fn dir(self: RootSelection) std.Io.Dir {
+        return switch (self) {
+            .named => |root| root.dir(),
+            .resource => |lease| lease.dir(),
+        };
+    }
+    pub fn deinit(self: RootSelection) void {
+        switch (self) {
+            .named => {},
+            .resource => |lease| lease.deinit(),
+        }
+    }
+};
+pub fn isRoot(item: Value) bool {
+    return item == .symbol or @import("directory_resource.zig").isDirectory(item);
+}
+pub fn selectRoot(access_value: *external.FilesystemAccess, item: Value) error{ OutOfMemory, UnknownRoot, Closed, Io }!RootSelection {
+    if (item == .symbol) return .{ .named = findRoot(access_value, item.symbol) orelse return error.UnknownRoot };
+    return .{ .resource = try @import("directory_resource.zig").acquire(item) };
 }
 
 pub fn limitsOf(access_value: *external.FilesystemAccess) Limits {

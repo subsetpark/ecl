@@ -38,7 +38,7 @@ pub const words = [_]env.BuiltinWord{
     .{
         .name = "unpack-tgz",
         .doc = "( bytes root destination -- regular-file-paths ) Validate and atomically " ++
-            "extract a gzip tar into a previously absent destination beneath a named root.",
+            "extract a gzip tar into a previously absent destination beneath a root.",
         .primitive = unpackTgz,
     },
 };
@@ -105,7 +105,7 @@ fn unpackTgz(evaluator: *Machine) MachineError!void {
     if (!destination.borrow().isString()) return evaluator.typeError("a string destination path");
     var root = try evaluator.popValue();
     errdefer root.deinit();
-    if (root.borrow() != .symbol) return evaluator.typeError("a root symbol");
+    if (!fsport.isRoot(root.borrow())) return evaluator.typeError("a root symbol or directory resource");
     var bytes_value = try evaluator.popValue();
     errdefer bytes_value.deinit();
     if (bytes_value.borrow() != .list) return evaluator.typeError("an integer byte list");
@@ -283,7 +283,7 @@ fn observeCleanupError(action: []const u8, err: anyerror) void {
 }
 
 /// Where a publication is allowed to land. Generic extraction is confined to
-/// a named Session filesystem root; package installation to a package store
+/// a named or scope-owned filesystem root; package installation to a package store
 /// handle the Session's package authority retained. Inspection publishes
 /// nothing.
 const Authority = union(enum) {
@@ -310,6 +310,7 @@ const UnpackDriver = struct {
     /// The live-operation reservation an extraction holds from authorization
     /// through terminal cleanup.
     slot: ?fsport.OperationSlot = null,
+    root: ?fsport.RootSelection = null,
 
     const Staged = struct {
         result: Value,
@@ -851,8 +852,12 @@ const UnpackDriver = struct {
         if (class == .root)
             return self.failReason(evaluator, .domain, .invalid_path, "destination must name a child entry, not the root");
         const root_value = self.source.borrow().unpack.root.borrow();
-        _ = fsport.findRoot(access, root_value.symbol) orelse
-            return self.failReason(evaluator, .domain, .unknown_root, "unknown filesystem root");
+        self.root = fsport.selectRoot(access, root_value) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.UnknownRoot => return self.failReason(evaluator, .domain, .unknown_root, "unknown filesystem root"),
+            error.Closed => return self.failReason(evaluator, .io, .io, "directory resource is closed"),
+            error.Io => return self.failReason(evaluator, .io, .changed, "directory resource changed"),
+        };
         self.slot = fsport.reserveOperation(access) orelse
             return self.failReason(evaluator, .overflow, .limit, "filesystem operation limit reached");
     }
@@ -1407,7 +1412,7 @@ const UnpackDriver = struct {
         // retirement releases.
         const publication: Publication = switch (self.authority) {
             .filesystem => |access| publication: {
-                const root = fsport.findRoot(access, self.source.borrow().unpack.root.borrow().symbol).?;
+                const root = self.root.?;
                 const resolver = fsport.Resolver.init(
                     self.allocator,
                     self.io.?,
@@ -2233,6 +2238,7 @@ const UnpackDriver = struct {
         self.source.deinit(releases, allocator);
         self.entries.deinit(releases, allocator);
         if (self.destination) |*destination| destination.deinit(allocator, self.io.?);
+        if (self.root) |root| root.deinit();
         if (self.slot) |*slot| slot.release();
         allocator.destroy(self);
         return true;

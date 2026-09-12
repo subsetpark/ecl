@@ -53,6 +53,15 @@ fn archiveSource(allocator: std.mem.Allocator) ![]u8 {
     return allocator.dupe(u8, source.written());
 }
 
+fn archiveResourceSource(allocator: std.mem.Allocator) ![]u8 {
+    var source = std.Io.Writer.Allocating.init(allocator);
+    defer source.deinit();
+    try source.writer.writeAll("'cwd \"generation\" fs.stage-dir 'stage set ");
+    try appendFixtureBytes(&source.writer, archive_fixtures.valid);
+    try source.writer.writeAll(" stage \"archive\" archive.unpack-tgz pop stage fs.commit-dir");
+    return allocator.dupe(u8, source.written());
+}
+
 const package_a_key = "a-1.0.0-a623bf09cb12068dc16b81c4a4a4e28f9eea52b6dadd88344708502f3a992465";
 /// The lock hash of package `a` in the sync probes; the store probe verifies
 /// the seal it just installed, so it needs the fixture's real digest.
@@ -754,6 +763,7 @@ fn projectSessionInitializationProbe(allocator: std.mem.Allocator) !void {
 }
 
 const StdlibSurface = enum {
+    archive_resource,
     directory_enumeration,
     directory_staging,
     file_publication,
@@ -986,6 +996,11 @@ fn stdlibSessionAllocationProbe(
             "oom-archive-hash.ecl",
             "[97] archive.sha256 pop",
         ),
+        .archive_resource => {
+            const archive_source = try archiveResourceSource(scaffold_allocator);
+            defer scaffold_allocator.free(archive_source);
+            try runOk(&runtime, "oom-archive-resource.ecl", archive_source);
+        },
         .archive_unpack => {
             const archive_source = try archiveSource(scaffold_allocator);
             defer scaffold_allocator.free(archive_source);
@@ -2171,4 +2186,9 @@ test "oom: standard-library and host: stdlib: directory staging propagates every
 test "oom: standard-library and host: stdlib: directory enumeration propagates every allocation failure" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.directory_enumeration);
+}
+
+test "oom: standard-library and host: stdlib: archive directory resources propagate every allocation failure" {
+    try requireSelectedOomTest(@src());
+    try checkStdlibSurface(.archive_resource);
 }
