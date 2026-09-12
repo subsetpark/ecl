@@ -1573,6 +1573,24 @@ const WorkerState = struct {
     cooperative_arbitration: ExecutorArbitration = .{},
 };
 
+/// Scope-owned resources derive allocation and bounded retirement from one
+/// scheduler root. Membership must end before that root is destroyed; closed
+/// resource values retain only independently owned issuer metadata.
+pub const ResourceCleanup = opaque {
+    fn worker(self: *ResourceCleanup) *const WorkerScheduler {
+        return @ptrCast(@alignCast(self));
+    }
+    pub fn allocator(self: *ResourceCleanup) std.mem.Allocator {
+        return self.worker().allocator();
+    }
+    pub fn retire(self: *ResourceCleanup, owner: anytype, node: *heap.ReleaseDomain.Retirement) void {
+        self.worker().releaseDomain().retire(owner, node);
+    }
+    pub fn releaseValue(self: *ResourceCleanup, item: Value) void {
+        self.worker().releaseDomain().releaseValue(item);
+    }
+};
+
 pub const WorkerScheduler = enum(usize) {
     invalid = 0,
     _,
@@ -1588,6 +1606,10 @@ pub const WorkerScheduler = enum(usize) {
 
     fn releaseDomain(self: *const WorkerScheduler) *heap.ReleaseDomain {
         return self.privateState().releases;
+    }
+
+    pub fn resourceCleanup(self: *const WorkerScheduler) *ResourceCleanup {
+        return @ptrCast(@constCast(self));
     }
 
     /// The scheduler's monotonic clock. Every deadline capture, timer wake,

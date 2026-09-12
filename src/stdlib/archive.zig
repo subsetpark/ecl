@@ -4,6 +4,7 @@
 //! internal byte leaf when available and validates any equivalent list, so the
 //! module never assigns language semantics to a storage representation.
 const std = @import("std");
+const document = @import("../archive_document.zig");
 const value = @import("../value.zig");
 const heap = @import("../heap.zig");
 const env = @import("../env.zig");
@@ -30,6 +31,9 @@ const tar_block_bytes = 512;
 pub const package_seal_name = ".ecl-package.tgz";
 
 pub const words = [_]env.BuiltinWord{
+    .{ .name = "open-tgz", .doc = "( bytes -- archive ) Validate a gzip tar for scope-owned member inspection.", .primitive = openTgz },
+    .{ .name = "next-member", .doc = "( archive -- metadata ) Advance to the next member, or return an empty dictionary at end.", .primitive = nextMember },
+    .{ .name = "read-member", .doc = "( archive maximum -- bytes ) Stream up to 65536 bytes from the selected member; empty bytes denote end.", .primitive = readMember },
     .{
         .name = "sha256",
         .doc = "( bytes -- lowercase-hex ) Hash an integer byte list with SHA-256.",
@@ -41,6 +45,113 @@ pub const words = [_]env.BuiltinWord{
             "extract a gzip tar into a previously absent destination beneath a root.",
         .primitive = unpackTgz,
     },
+};
+
+fn openTgz(evaluator: *Machine) MachineError!void {
+    var bytes = try evaluator.popValue();
+    errdefer bytes.deinit();
+    if (bytes.borrow() != .list) return evaluator.typeError("an integer byte list");
+    const encoder = storage.ByteVectorEncoder.init(evaluator.allocator(), bytes.borrow());
+    try evaluator.startDriver(UnpackDriver{
+        .allocator = evaluator.allocator(),
+        .io = null,
+        .authority = .none,
+        .bytes_value = .init(bytes.take()),
+        .source = .init(.view),
+        .entries = .init(.init(evaluator.allocator())),
+        .state = .{ .parsing = .{ .encode_bytes = .{ .byte = .init(encoder), .target = .view } } },
+    });
+}
+fn nextMember(evaluator: *Machine) MachineError!void {
+    var archive = try evaluator.popValue();
+    errdefer archive.deinit();
+    if (!document.isArchive(archive.borrow())) return evaluator.typeError("an archive resource");
+    const driver = try evaluator.allocator().create(MemberDriver);
+    driver.* = .{ .archive = archive.take() };
+    evaluator.adoptDriver(driver);
+}
+const MemberDriver = struct {
+    pub const address_stable_driver = {};
+    pub const ownership: heap.DriverOwnership = .self_owned;
+    archive: Value,
+    path: [document.path_limit]u8 = undefined,
+    metadata: document.Metadata = undefined,
+    state: union(enum) { reading, text: storage.Utf8Materializer, complete } = .reading,
+    pub fn deinit(self: *@This(), releases: *heap.ReleaseDomain, _: std.mem.Allocator) void {
+        if (self.state == .text) self.state.text.retire(releases);
+        releases.releaseValue(self.archive);
+    }
+    pub fn advance(evaluator: *Machine, self: *@This()) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        if (self.state == .reading) {
+            self.metadata = (document.next(self.archive, &self.path) catch |err| switch (err) {
+                error.Closed => return evaluator.fail(.io, "archive resource is closed"),
+                error.Invalid => return evaluator.fail(.domain, "archive member range is invalid"),
+            }) orelse {
+                self.state = .complete;
+                return .{ .output = try @import("../dict.zig").fromUniquePairs(evaluator.allocator(), evaluator.releaseDomain(), &.{}) };
+            };
+            self.state = .{ .text = .init(evaluator.allocator(), self.path[0..self.metadata.length]) };
+        }
+        return switch (self.state.text.advance(work_quantum) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidUtf8 => return evaluator.fail(.domain, "archive member path is not UTF-8"),
+        }) {
+            .pending => .yielded,
+            .complete => |path| result: {
+                self.state.text.deinit();
+                self.state = .complete;
+                defer evaluator.releaseDomain().releaseValue(path);
+                break :result .{ .output = try @import("../dict.zig").fromUniquePairs(evaluator.allocator(), evaluator.releaseDomain(), &.{
+                    .{ .{ .symbol = try intern.intern("path") }, path },
+                    .{ .{ .symbol = try intern.intern("kind") }, .{ .symbol = try intern.intern(@tagName(self.metadata.kind)) } },
+                    .{ .{ .symbol = try intern.intern("size") }, .{ .int = @intCast(self.metadata.size) } },
+                }) };
+            },
+        };
+    }
+};
+fn readMember(evaluator: *Machine) MachineError!void {
+    var maximum_value = try evaluator.popValue();
+    defer maximum_value.deinit();
+    if (maximum_value.borrow() != .int) return evaluator.typeError("an integer read maximum");
+    const maximum = maximum_value.borrow().int;
+    if (maximum < 1 or maximum > document.read_limit) return evaluator.fail(.domain, "archive read maximum must be from 1 through 65536");
+    var archive = try evaluator.popValue();
+    errdefer archive.deinit();
+    if (!document.isArchive(archive.borrow())) return evaluator.typeError("an archive resource");
+    const driver = try evaluator.allocator().create(MemberReadDriver);
+    errdefer evaluator.allocator().destroy(driver);
+    const buffer = try evaluator.allocator().alloc(u8, @intCast(maximum));
+    driver.* = .{ .archive = archive.take(), .buffer = buffer };
+    evaluator.adoptDriver(driver);
+}
+const MemberReadDriver = struct {
+    pub const address_stable_driver = {};
+    pub const ownership: heap.DriverOwnership = .self_owned;
+    archive: Value,
+    buffer: []u8,
+    state: union(enum) { reading, bytes: list.ByteListMaterializer, complete } = .reading,
+    pub fn deinit(self: *@This(), releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+        if (self.state == .bytes) self.state.bytes.retire(releases);
+        allocator.free(self.buffer);
+        releases.releaseValue(self.archive);
+    }
+    pub fn advance(evaluator: *Machine, self: *@This()) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        if (self.state == .reading) {
+            const count = document.read(self.archive, self.buffer) catch return evaluator.fail(.io, "archive resource is closed");
+            self.state = .{ .bytes = .init(evaluator.allocator(), self.buffer[0..count]) };
+        }
+        return switch (try self.state.bytes.advance(work_quantum)) {
+            .pending => .yielded,
+            .complete => |bytes| result: {
+                self.state.bytes.deinit();
+                self.state = .complete;
+                break :result .{ .output = bytes };
+            },
+        };
+    }
 };
 
 fn sha256(evaluator: *Machine) MachineError!void {
@@ -229,16 +340,9 @@ pub fn installPackage(evaluator: *Machine) MachineError!void {
     });
 }
 
-const EntryKind = enum { file, directory };
-
-const Entry = struct {
-    path: []u8,
-    kind: EntryKind,
-    data_offset: usize,
-    size: usize,
-};
-
-const EntryList = poll.ChunkList(Entry);
+const EntryKind = document.Kind;
+const Entry = document.Member;
+const EntryList = document.Members;
 
 const GzipDecoder = struct {
     pub const owned_disposal: heap.OwnedDisposal = .deinit;
@@ -273,7 +377,7 @@ const GzipDecoder = struct {
     }
 };
 
-const Mode = enum { unpack, package_inspect, package_install };
+const Mode = enum { view, unpack, package_inspect, package_install };
 
 fn observeCleanupError(action: []const u8, err: anyerror) void {
     switch (err) {
@@ -320,6 +424,7 @@ const UnpackDriver = struct {
     const SourceTarget = union(enum) {
         pub const owned_disposal: heap.OwnedDisposal = .deinit;
 
+        view,
         unpack: struct { root: heap.Owned(Value), destination: heap.Owned(Value) },
         inspect: struct { package: heap.Owned(Value) },
         install: struct {
@@ -333,6 +438,7 @@ const UnpackDriver = struct {
             allocator: std.mem.Allocator,
         ) void {
             switch (self.*) {
+                .view => {},
                 .unpack => |*source| {
                     source.root.deinit(releases, allocator);
                     source.destination.deinit(releases, allocator);
@@ -346,6 +452,7 @@ const UnpackDriver = struct {
         }
     };
     const EncodeTarget = union(enum) {
+        view,
         unpack: heap.Owned(storage.StringEncoder),
         inspect: heap.Owned(storage.StringEncoder),
         install: struct {
@@ -354,6 +461,7 @@ const UnpackDriver = struct {
         },
     };
     const EncodedTarget = union(enum) {
+        view,
         unpack: heap.Owned([]u8),
         inspect: heap.Owned([]u8),
         install: struct {
@@ -399,6 +507,7 @@ const UnpackDriver = struct {
         text: storage.Utf8Materializer,
     };
     const ScanWork = union(enum) {
+        publish_view,
         tar_header,
         insert_member: struct {
             entry: Entry,
@@ -622,6 +731,7 @@ const UnpackDriver = struct {
     ) MachineError!machine.WorkProgress {
         return switch (active.work) {
             .scanning => |*scanning| switch (scanning.work) {
+                .publish_view => self.publishView(evaluator, &active.archive),
                 .tar_header => self.readTarHeader(evaluator, &active.archive, scanning),
                 .insert_member => |*insertion| self.insertMember(
                     evaluator,
@@ -657,6 +767,7 @@ const UnpackDriver = struct {
 
     fn takeEncodeTarget(target: *EncodeTarget) EncodeTarget {
         return switch (target.*) {
+            .view => .view,
             .unpack => |*cursor| .{ .unpack = .init(cursor.take()) },
             .inspect => |*cursor| .{ .inspect = .init(cursor.take()) },
             .install => |*install| .{ .install = .{
@@ -668,6 +779,7 @@ const UnpackDriver = struct {
 
     fn takeEncodedTarget(target: *EncodedTarget) EncodedTarget {
         return switch (target.*) {
+            .view => .view,
             .unpack => |*path| .{ .unpack = .init(path.take()) },
             .inspect => |*name| .{ .inspect = .init(name.take()) },
             .install => |*install| .{ .install = .{
@@ -699,7 +811,7 @@ const UnpackDriver = struct {
         return switch (archive.target) {
             .unpack => |*path| path.borrow(),
             .install => |*install| install.destination.borrow(),
-            .inspect => unreachable,
+            .view, .inspect => unreachable,
         };
     }
 
@@ -716,7 +828,7 @@ const UnpackDriver = struct {
     fn installPackageValue(self: *const UnpackDriver) Value {
         return switch (self.source.borrow()) {
             .install => |*install| install.package.borrow(),
-            .inspect, .unpack => unreachable,
+            .view, .inspect, .unpack => unreachable,
         };
     }
 
@@ -724,12 +836,13 @@ const UnpackDriver = struct {
         return switch (archive.target) {
             .inspect => |*name| name.borrow(),
             .install => |*install| install.package.borrow(),
-            .unpack => unreachable,
+            .view, .unpack => unreachable,
         };
     }
 
     fn operationMode(self: *const UnpackDriver) Mode {
         return switch (self.source.borrow()) {
+            .view => .view,
             .unpack => .unpack,
             .inspect => .package_inspect,
             .install => .package_install,
@@ -740,7 +853,7 @@ const UnpackDriver = struct {
         return switch (self.source.borrow()) {
             .unpack => |*source| source.destination.borrow(),
             .install => |*source| source.destination.borrow(),
-            .inspect => unreachable,
+            .view, .inspect => unreachable,
         };
     }
 
@@ -762,6 +875,7 @@ const UnpackDriver = struct {
                 const target = takeEncodeTarget(&encoding.target);
                 encoding.byte.deinit(evaluator.releaseDomain(), self.allocator);
                 self.state = .{ .parsing = switch (target) {
+                    .view => .{ .allocate_tar = .{ .bytes = .init(bytes), .target = .view } },
                     .unpack => |path| .{ .encode_destination = .{
                         .bytes = .init(bytes),
                         .destination = path,
@@ -1023,6 +1137,21 @@ const UnpackDriver = struct {
         return .yielded;
     }
 
+    fn publishView(self: *UnpackDriver, evaluator: *Machine, archive: *Archive) MachineError!machine.WorkProgress {
+        const scope: *@import("../scheduler.zig").TaskScope = @ptrCast(@alignCast(evaluator.unit.task_scope orelse return evaluator.fail(.cancelled, "archive scope is closing")));
+        const result = document.adopt(scope, archive.tar.borrow(), self.entries.borrow()) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.ScopeClosing => return evaluator.fail(.cancelled, "archive scope is closing"),
+        };
+        // Scope publication consumes both inputs. Replace them without any
+        // allocation or cancellation point before driver retirement can run.
+        _ = archive.tar.take();
+        archive.tar = .init(&.{});
+        _ = self.entries.take();
+        self.entries = .init(.init(self.allocator));
+        return .{ .output = result };
+    }
+
     fn readTarHeader(
         self: *UnpackDriver,
         evaluator: *Machine,
@@ -1033,7 +1162,11 @@ const UnpackDriver = struct {
         const tar = archive.tar.borrow();
         if (context.tar_offset == tar.len) {
             if (context.zero_blocks < 2) return self.failDomain(evaluator, "tar archive has no end marker");
-            scanning.work = if (self.operationMode() == .unpack) .allocate_results else .materialize_manifest;
+            scanning.work = switch (self.operationMode()) {
+                .view => .publish_view,
+                .unpack => .allocate_results,
+                .package_inspect, .package_install => .materialize_manifest,
+            };
             return .yielded;
         }
         if (context.tar_offset + tar_block_bytes > tar.len)
@@ -1110,7 +1243,10 @@ const UnpackDriver = struct {
             .data_offset = data_offset,
             .size = @intCast(effective_size),
         };
-        if (self.operationMode() != .unpack) try self.validatePackageEntry(evaluator, archive, context, entry);
+        switch (self.operationMode()) {
+            .view, .unpack => {},
+            .package_inspect, .package_install => try self.validatePackageEntry(evaluator, archive, context, entry),
+        }
         if (kind == .file) context.file_count += 1;
         const hash = std.hash.Wyhash.hash(0, path);
         scanning.work = .{ .insert_member = .{
@@ -1254,7 +1390,11 @@ const UnpackDriver = struct {
             return self.failDomain(evaluator, "tar data follows its end marker");
         scanning.context.tar_offset = end;
         if (end != tar.len) return .yielded;
-        scanning.work = if (self.operationMode() == .unpack) .allocate_results else .materialize_manifest;
+        scanning.work = switch (self.operationMode()) {
+            .view => .publish_view,
+            .unpack => .allocate_results,
+            .package_inspect, .package_install => .materialize_manifest,
+        };
         return .yielded;
     }
 
@@ -2016,6 +2156,7 @@ const UnpackDriver = struct {
         allocator: std.mem.Allocator,
     ) void {
         switch (target.*) {
+            .view => {},
             .unpack, .inspect => |*cursor| cursor.deinit(releases, allocator),
             .install => |*install| {
                 install.destination.deinit(releases, allocator);
@@ -2030,6 +2171,7 @@ const UnpackDriver = struct {
         allocator: std.mem.Allocator,
     ) void {
         switch (target.*) {
+            .view => {},
             .unpack, .inspect => |*text| text.deinit(releases, allocator),
             .install => |*install| {
                 install.destination.deinit(releases, allocator);

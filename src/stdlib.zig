@@ -158,6 +158,7 @@ const modules = [_]Module{
 };
 
 comptime {
+    @setEvalBranchQuota(100000);
     for (modules, 0..) |module, index| {
         env.assertStaticModuleName(module.name);
         for (modules[0..index]) |prior| {

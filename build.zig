@@ -714,6 +714,7 @@ pub fn build(b: *std.Build) void {
             "native:",
             "archive: unpack-tgz preserves existing destinations and has one concurrent winner",
             "archive: unpack-tgz uses directory leases inside staged generations",
+            "archive: open-tgz exposes metadata and bounded member contents without package rules",
             "pkg store: existing immutable entry wins concurrent install",
             "pkg store: concurrent catalog repairs publish complete metadata",
             "process:",

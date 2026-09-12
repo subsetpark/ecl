@@ -62,6 +62,16 @@ fn archiveResourceSource(allocator: std.mem.Allocator) ![]u8 {
     return allocator.dupe(u8, source.written());
 }
 
+fn archiveViewSource(allocator: std.mem.Allocator) ![]u8 {
+    var source = std.Io.Writer.Allocating.init(allocator);
+    defer source.deinit();
+    try appendFixtureBytes(&source.writer, archive_fixtures.valid);
+    try source.writer.writeAll(" archive.open-tgz 'view set " ++
+        "view archive.next-member pop view archive.next-member pop " ++
+        "view 1 archive.read-member pop view port.close");
+    return allocator.dupe(u8, source.written());
+}
+
 const package_a_key = "a-1.0.0-a623bf09cb12068dc16b81c4a4a4e28f9eea52b6dadd88344708502f3a992465";
 /// The lock hash of package `a` in the sync probes; the store probe verifies
 /// the seal it just installed, so it needs the fixture's real digest.
@@ -763,6 +773,7 @@ fn projectSessionInitializationProbe(allocator: std.mem.Allocator) !void {
 }
 
 const StdlibSurface = enum {
+    archive_view,
     archive_resource,
     directory_enumeration,
     directory_staging,
@@ -996,6 +1007,11 @@ fn stdlibSessionAllocationProbe(
             "oom-archive-hash.ecl",
             "[97] archive.sha256 pop",
         ),
+        .archive_view => {
+            const archive_source = try archiveViewSource(scaffold_allocator);
+            defer scaffold_allocator.free(archive_source);
+            try runOk(&runtime, "oom-archive-view.ecl", archive_source);
+        },
         .archive_resource => {
             const archive_source = try archiveResourceSource(scaffold_allocator);
             defer scaffold_allocator.free(archive_source);
@@ -2191,4 +2207,9 @@ test "oom: standard-library and host: stdlib: directory enumeration propagates e
 test "oom: standard-library and host: stdlib: archive directory resources propagate every allocation failure" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.archive_resource);
+}
+
+test "oom: standard-library and host: stdlib: archive inspection propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
+    try checkStdlibSurface(.archive_view);
 }

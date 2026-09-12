@@ -239,6 +239,15 @@ materialization then owns that copy, so neither another reader nor closure can
 invalidate its bytes. Enumeration performs no directory-sized collection or
 cleanup, and its nominal resource type cannot be used as a directory root.
 
+Archive inspection publishes the shared parser's validated document directly
+into scope ownership. Resource metadata is allocated before a guarded scope
+publication consumes the document, so every failed publication leaves parser
+ownership intact. Its cleanup capability derives allocation and bounded
+retirement from the owning scheduler; closed identities retain no operational
+scheduler reference. Cursor operations copy at most one bounded path or content
+chunk under the lifetime lock. Result construction owns those copies independently
+of closure, and document retirement frees member paths one step at a time.
+
 Advisory locks share the fixed-handle resource lifetime with directory handles,
 while their nominal backend types keep lock values out of root acquisition.
 An acquisition driver owns an unlocked descriptor while waiting; nonblocking
