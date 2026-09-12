@@ -603,17 +603,8 @@ test "module sources: formatter and standard modules use @defm" {
         "archive.sha256",
         "clock.now",
         "time.parse",
-        "pkg.store.inspect",
         "rng.float",
         "rand.float",
-        "pkg.version.less?",
-        "pkg.name.valid?",
-        "pkg.data.read-one",
-        "pkg.manifest.read",
-        "pkg.lock.read",
-        "pkg.mvs.resolve",
-        "pkg.sync.run",
-        "pkg.cli.init",
         "test.default.run",
     };
     for (stdlib.names(), exports) |name, qualified| {
@@ -634,14 +625,6 @@ test "module sources: formatter and standard modules use @defm" {
     try expectStack(&runtime, "\"ab\" str.upper", "\"AB\"");
     try expectStack(&runtime, "[\"n\"] [[1] [2]] table.from-rows table.height", "2");
     try expectStack(&runtime, "7 rng.seed 6 rng.int type", "'int");
-    try expectStack(
-        &runtime,
-        "'pkg.store.inspect doc len 0 > 'pkg.store.install doc len 0 > " ++
-            "'pkg.store.present? doc len 0 > 'pkg.store.verify doc len 0 > " ++
-            "'pkg.store.manifest doc len 0 >",
-        "1 1 1 1 1",
-    );
-    try expectStack(&runtime, "\"1.2.0\" \"1.10.0\" pkg.version.less?", "1");
 }
 
 test "module values: a pushed quotation resolves in the image it was written in" {

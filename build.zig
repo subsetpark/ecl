@@ -208,38 +208,40 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .sanitize_thread = git_tsan,
     });
-    const libgit2 = b.dependency("libgit2", .{ .target = target, .optimize = optimize, .@"enable-ssh" = false, .@"tls-backend" = .mbedtls });
-    const ordinary_git = native_build.addExtension(b, .{
-        .name = "git",
-        .root_source_file = b.path("extensions/git/git.zig"),
-        .target = target,
-        .optimize = optimize,
-        .ecl_native = native_sdk,
-    });
-    const git_source = ordinary_git.root_module;
-    git_source.link_libc = true;
-    git_source.pic = true;
-    git_source.sanitize_thread = git_tsan;
-    git_source.addIncludePath(b.path("extensions/git"));
-    git_source.addIncludePath(libgit2.artifact("git2").getEmittedIncludeTree());
-    git_source.addCSourceFile(.{ .file = b.path("extensions/git/snapshot.c"), .flags = &.{ "-std=c11", "-D_POSIX_C_SOURCE=200809L", "-Wall", "-Wextra", "-Werror" } });
-    const git_extension = if (git_tsan) instrumented: {
-        // Compile instrumentation into an object, then link the DSO without
-        // another TSan runtime. Zig otherwise bundles a second runtime whose
-        // static TLS cannot be acquired by dlopen. The executable exports the
-        // one runtime that owns all instrumented threads and loaded code.
-        const object = b.addObject(.{ .name = "git-instrumented", .root_module = git_source });
-        object.use_llvm = true;
-        object.linkage = .dynamic;
-        const linker = b.createModule(.{ .target = target, .optimize = optimize, .sanitize_thread = false });
-        linker.addObject(object);
-        break :instrumented b.addLibrary(.{ .name = "git", .root_module = linker, .linkage = .dynamic });
-    } else ordinary_git;
-    git_extension.root_module.linkLibrary(libgit2.artifact("git2"));
+    const apps = b.option(bool, "apps", "Build and install maintained applications and their native extensions") orelse true;
+    const git_extension: ?*std.Build.Step.Compile = if (apps) extension: {
+        const libgit2 = b.lazyDependency("libgit2", .{ .target = target, .optimize = optimize, .@"enable-ssh" = false, .@"tls-backend" = .mbedtls }) orelse break :extension null;
+        const ordinary_git = native_build.addExtension(b, .{
+            .name = "git",
+            .root_source_file = b.path("extensions/git/git.zig"),
+            .target = target,
+            .optimize = optimize,
+            .ecl_native = native_sdk,
+        });
+        const git_source = ordinary_git.root_module;
+        git_source.link_libc = true;
+        git_source.pic = true;
+        git_source.sanitize_thread = git_tsan;
+        git_source.addIncludePath(b.path("extensions/git"));
+        git_source.addIncludePath(libgit2.artifact("git2").getEmittedIncludeTree());
+        git_source.addCSourceFile(.{ .file = b.path("extensions/git/snapshot.c"), .flags = &.{ "-std=c11", "-D_POSIX_C_SOURCE=200809L", "-Wall", "-Wextra", "-Werror" } });
+        const git_extension = if (git_tsan) instrumented: {
+            // Compile instrumentation into an object, then link the DSO without
+            // another TSan runtime. Zig otherwise bundles a second runtime whose
+            // static TLS cannot be acquired by dlopen. The executable exports the
+            // one runtime that owns all instrumented threads and loaded code.
+            const object = b.addObject(.{ .name = "git-instrumented", .root_module = git_source });
+            object.use_llvm = true;
+            object.linkage = .dynamic;
+            const linker = b.createModule(.{ .target = target, .optimize = optimize, .sanitize_thread = false });
+            linker.addObject(object);
+            break :instrumented b.addLibrary(.{ .name = "git", .root_module = linker, .linkage = .dynamic });
+        } else ordinary_git;
+        git_extension.root_module.linkLibrary(libgit2.artifact("git2"));
+        break :extension git_extension;
+    } else null;
     const git_extension_step = b.step("git-extension", "Build the SDK-only HTTPS Git snapshot extension");
-    git_extension_step.dependOn(native_build.installExtension(b, git_extension, "extensions/git"));
-    exe_mod.linkLibrary(libgit2.artifact("git2"));
-    exe_mod.addCSourceFile(.{ .file = b.path("src/git_helper.c"), .flags = &.{ "-std=c99", "-D_POSIX_C_SOURCE=200809L" } });
+    if (git_extension) |extension| git_extension_step.dependOn(native_build.installExtension(b, extension, "extensions/git"));
     exe_mod.addImport("ecl-internal", internal_mod);
     const exe = b.addExecutable(.{
         .name = "ecl",
@@ -255,32 +257,34 @@ pub fn build(b: *std.Build) void {
         exe.forceUndefinedSymbol("__tsan_atomic32_load");
     }
     b.installArtifact(exe);
-    b.installDirectory(.{
-        .source_dir = b.path("apps/pkg/src"),
-        .install_dir = .prefix,
-        .install_subdir = "share/ecl/apps/pkg/src",
-    });
-    b.installFile("apps/pkg/main.ecl", "share/ecl/apps/pkg/main.ecl");
-    b.installFile("apps/pkg/application.json", "share/ecl/apps/pkg/application.json");
-    b.installFile("apps/pkg/installed.modules", "share/ecl/apps/pkg/ecl.modules");
-    b.getInstallStep().dependOn(native_build.installExtension(b, git_extension, "share/ecl/apps/pkg"));
+    var git_native_run: ?*std.Build.Step = null;
+    var pkg_fetch_run: ?*std.Build.Step = null;
+    if (git_extension) |extension| {
+        b.installDirectory(.{
+            .source_dir = b.path("apps/pkg/src"),
+            .install_dir = .prefix,
+            .install_subdir = "share/ecl/apps/pkg/src",
+        });
+        b.installFile("apps/pkg/main.ecl", "share/ecl/apps/pkg/main.ecl");
+        b.installFile("apps/pkg/application.json", "share/ecl/apps/pkg/application.json");
+        b.installFile("apps/pkg/installed.modules", "share/ecl/apps/pkg/ecl.modules");
+        b.getInstallStep().dependOn(native_build.installExtension(b, extension, "share/ecl/apps/pkg"));
+        const git_native_acceptance = b.addSystemCommand(&.{ "python3", "test/git_extension.py" });
+        git_native_acceptance.addArtifactArg(exe);
+        git_native_acceptance.addArtifactArg(extension);
+        const git_native_step = b.step("test-git-extension", "Verify the standalone Git snapshot port over controlled HTTPS");
+        git_native_step.dependOn(&git_native_acceptance.step);
+        const pkg_fetch_acceptance = b.addSystemCommand(&.{ "python3", "test/git_extension.py" });
+        pkg_fetch_acceptance.addArtifactArg(exe);
+        pkg_fetch_acceptance.addArtifactArg(extension);
+        pkg_fetch_acceptance.addArg("--application");
+        pkg_fetch_acceptance.addFileArg(b.path("apps/pkg/test/acceptance/fetch.ecl"));
+        git_native_run = &git_native_acceptance.step;
+        pkg_fetch_run = &pkg_fetch_acceptance.step;
+        const pkg_fetch_step = b.step("test-pkg-fetch", "Run ECL application fetch assertions against a controlled HTTPS Git server");
+        pkg_fetch_step.dependOn(&pkg_fetch_acceptance.step);
+    }
     b.installFile("THIRD_PARTY_NOTICES.md", "share/doc/ecl/THIRD_PARTY_NOTICES.md");
-    const git_acceptance = b.addSystemCommand(&.{ "python3", "test/pkg_git_https.py" });
-    git_acceptance.addArtifactArg(exe);
-    const git_step = b.step("test-pkg-git", "Run public Git package acceptance over controlled HTTPS");
-    git_step.dependOn(&git_acceptance.step);
-    const git_native_acceptance = b.addSystemCommand(&.{ "python3", "test/git_extension.py" });
-    git_native_acceptance.addArtifactArg(exe);
-    git_native_acceptance.addArtifactArg(git_extension);
-    const git_native_step = b.step("test-git-extension", "Verify the standalone Git snapshot port over controlled HTTPS");
-    git_native_step.dependOn(&git_native_acceptance.step);
-    const pkg_fetch_acceptance = b.addSystemCommand(&.{ "python3", "test/git_extension.py" });
-    pkg_fetch_acceptance.addArtifactArg(exe);
-    pkg_fetch_acceptance.addArtifactArg(git_extension);
-    pkg_fetch_acceptance.addArg("--application");
-    pkg_fetch_acceptance.addFileArg(b.path("apps/pkg/test/acceptance/fetch.ecl"));
-    const pkg_fetch_step = b.step("test-pkg-fetch", "Run ECL application fetch assertions against a controlled HTTPS Git server");
-    pkg_fetch_step.dependOn(&pkg_fetch_acceptance.step);
     const native_runtime_options = b.addOptions();
     native_runtime_options.addOptionPath("ecl_exe", exe.getEmittedBin());
     native_runtime_options.addOptionPath(
@@ -375,8 +379,8 @@ pub fn build(b: *std.Build) void {
     run_tests.step.dependOn(&fixture_files.step);
     const test_step = b.step("test", "Run the ecl test suite");
     test_step.dependOn(&run_tests.step);
-    test_step.dependOn(&git_acceptance.step);
-    test_step.dependOn(&pkg_fetch_acceptance.step);
+    if (git_native_run) |step| test_step.dependOn(step);
+    if (pkg_fetch_run) |step| test_step.dependOn(step);
     test_step.dependOn(native_negative_step);
     const run_ecl_tests = b.addRunArtifact(exe);
     run_ecl_tests.addArg("test");
@@ -396,6 +400,13 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_pkg_tests.step);
     // Full generation verification repeatedly inspects sealed archives. Keep this
     // public ECL acceptance outside the fast precommit policy-test tier.
+    // Ported format and SemVer property corpora retain their full-suite budget.
+    const run_pkg_contracts = b.addRunArtifact(exe);
+    run_pkg_contracts.addArg("--module-map");
+    run_pkg_contracts.addFileArg(b.path("apps/pkg/test/contracts/ecl.modules"));
+    run_pkg_contracts.addArg("test");
+    b.step("test-pkg-contracts", "Run the package manifest, version, and solver contract corpora in ECL").dependOn(&run_pkg_contracts.step);
+    test_step.dependOn(&run_pkg_contracts.step);
     const run_pkg_generations = b.addRunArtifact(exe);
     run_pkg_generations.addArg("--module-map");
     run_pkg_generations.addFileArg(b.path("apps/pkg/test/acceptance/ecl.modules"));
@@ -686,10 +697,6 @@ pub fn build(b: *std.Build) void {
         "native_fixture_dir",
         fixture_files.getDirectory(),
     );
-    e2e_options.addOption([]const u8, "pkg_example_manifest", @embedFile("examples/pkg-smoke/ecl.pkg"));
-    e2e_options.addOption([]const u8, "pkg_example_lock", @embedFile("examples/pkg-smoke/ecl.lock"));
-    e2e_options.addOption([]const u8, "pkg_example_program", @embedFile("examples/pkg-smoke/main.ecl"));
-    e2e_options.addOption([]const u8, "pkg_runtime_archive", @embedFile("test/fixtures/pkg/runtime-valid.tgz.hex"));
     const e2e_mod = b.createModule(.{
         .root_source_file = b.path("test/e2e.zig"),
         .target = target,

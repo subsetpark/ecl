@@ -13,7 +13,7 @@ import tempfile
 import threading
 
 sys.dont_write_bytecode = True
-from pkg_git_https import Handler, Server, run
+from git_https_fixture import Handler, Server, run
 
 
 class SnapshotHandler(Handler):

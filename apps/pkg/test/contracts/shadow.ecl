@@ -1,7 +1,7 @@
-### module stdlib.test.pkg-shadow
+### module pkg.test.shadow
 []
 (
- 'stdlib.test.support ('equal) import
+ 'pkg.test.support ('equal) import
  'table ('where) import
 
  ### test caller-shadowing
@@ -9,4 +9,4 @@
  ("1.2.0" "1.10.0" pkg.version.less? 1 equal
   ["1.0.0-a" "1.0.0"] pkg.version.max "1.0.0" equal)
  'caller-shadowing test
-) 'stdlib.test.pkg-shadow @defm
+) 'pkg.test.shadow @defm

@@ -1,4 +1,4 @@
-//! Exact hashing and hostile-input-safe package archive extraction.
+//! Exact hashing, archive inspection, and hostile-input-safe extraction.
 //!
 //! Binary payloads remain ordinary ECL integer lists. The encoder borrows an
 //! internal byte leaf when available and validates any equivalent list, so the
@@ -12,12 +12,9 @@ const external = @import("../external.zig");
 const fsport = @import("../filesystem_port.zig");
 const intern = @import("../intern.zig");
 const machine = @import("../machine.zig");
-const package_authority = @import("../package_authority.zig");
 const storage = @import("../kernel_storage.zig");
 const list = @import("../list.zig");
 const poll = @import("../poll.zig");
-const pkg_catalog = @import("../pkg_catalog.zig");
-const pkg_lock = @import("../pkg_lock.zig");
 
 const Value = value.Value;
 const Machine = machine.Machine;
@@ -28,7 +25,6 @@ const max_members: usize = 100_000;
 const max_path_bytes: usize = 4096;
 const member_slots = 1 << 18;
 const tar_block_bytes = 512;
-pub const package_seal_name = ".ecl-package.tgz";
 
 pub const words = [_]env.BuiltinWord{
     .{ .name = "open-tgz", .doc = "( bytes -- archive ) Validate a gzip tar for scope-owned member inspection.", .primitive = openTgz },
@@ -241,105 +237,6 @@ fn unpackTgz(evaluator: *Machine) MachineError!void {
     });
 }
 
-/// Package inspection shares the complete gzip/tar scanner with unpack-tgz,
-/// but stops before any filesystem mutation and returns the exact root
-/// manifest text. The active word remains pkg.store.inspect for diagnostics.
-pub fn inspectPackage(evaluator: *Machine) MachineError!void {
-    try evaluator.require(2);
-    var package = try evaluator.popValue();
-    errdefer package.deinit();
-    if (!package.borrow().isString()) return evaluator.typeError("a string package name");
-    var bytes_value = try evaluator.popValue();
-    errdefer bytes_value.deinit();
-    if (bytes_value.borrow() != .list) return evaluator.typeError("an integer byte list");
-    const byte_encoder = storage.ByteVectorEncoder.init(evaluator.allocator(), bytes_value.borrow());
-    const package_encoder = storage.StringEncoder.init(evaluator.allocator(), package.borrow());
-    const entries = poll.ChunkList(Entry).init(evaluator.allocator());
-    try evaluator.startDriver(UnpackDriver{
-        .allocator = evaluator.allocator(),
-        .io = null,
-        .authority = .none,
-        .bytes_value = .init(bytes_value.take()),
-        .source = .init(.{ .inspect = .{ .package = .init(package.take()) } }),
-        .entries = .init(entries),
-        .state = .{ .parsing = .{ .encode_bytes = .{
-            .byte = .init(byte_encoder),
-            .target = .{ .inspect = .init(package_encoder) },
-        } } },
-    });
-}
-
-/// Resolves the `'cache`/`'vendor` store symbol a package word names against
-/// the Session's package authority. Absence of the authority, an unknown store
-/// symbol, and an unavailable store are distinct failures.
-pub fn packageStore(evaluator: *Machine, store: Value, path_value: Value) MachineError!std.Io.Dir {
-    const access = evaluator.unit.inherited.package_access orelse {
-        const failure = evaluator.fail(.domain, "package store authority is unavailable");
-        evaluator.addErrorPath(path_value);
-        return failure;
-    };
-    const kind = storeKind(store) orelse return evaluator.fail(.domain, "package store must be 'cache or 'vendor");
-    return package_authority.storeDir(access, kind) orelse {
-        const failure = evaluator.fail(
-            .io,
-            "package store is unavailable; set ECL_CACHE, XDG_CACHE_HOME, or HOME",
-        );
-        evaluator.addErrorPath(path_value);
-        return failure;
-    };
-}
-
-fn storeKind(store: Value) ?package_authority.Store {
-    if (store != .symbol) return null;
-    const name = intern.get(store.symbol);
-    inline for (std.enums.values(package_authority.Store)) |kind| {
-        if (std.mem.eql(u8, name, kind.symbol())) return kind;
-    }
-    return null;
-}
-
-/// Package installation repeats the package scan at the mutation sink before
-/// staging any member. The active word remains pkg.store.install.
-pub fn installPackage(evaluator: *Machine) MachineError!void {
-    try evaluator.require(4);
-    var key = try evaluator.popValue();
-    errdefer key.deinit();
-    if (!key.borrow().isString()) return evaluator.typeError("a string store key");
-    var store = try evaluator.popValue();
-    errdefer store.deinit();
-    if (store.borrow() != .symbol) return evaluator.typeError("a store symbol");
-    var package = try evaluator.popValue();
-    errdefer package.deinit();
-    if (!package.borrow().isString()) return evaluator.typeError("a string package name");
-    var bytes_value = try evaluator.popValue();
-    errdefer bytes_value.deinit();
-    if (bytes_value.borrow() != .list) return evaluator.typeError("an integer byte list");
-    const store_dir = try packageStore(evaluator, store.borrow(), key.borrow());
-    const access = evaluator.unit.inherited.package_access.?;
-    const byte_encoder = storage.ByteVectorEncoder.init(evaluator.allocator(), bytes_value.borrow());
-    const package_encoder = storage.StringEncoder.init(evaluator.allocator(), package.borrow());
-    const path_encoder = storage.StringEncoder.init(evaluator.allocator(), key.borrow());
-    const entries = poll.ChunkList(Entry).init(evaluator.allocator());
-    try evaluator.startDriver(UnpackDriver{
-        .allocator = evaluator.allocator(),
-        .io = package_authority.hostIo(access),
-        .authority = .{ .package = store_dir },
-        .bytes_value = .init(bytes_value.take()),
-        .source = .init(.{ .install = .{
-            .package = .init(package.take()),
-            .destination = .init(key.take()),
-        } }),
-        .entries = .init(entries),
-        .state = .{ .parsing = .{ .encode_bytes = .{
-            .byte = .init(byte_encoder),
-            .target = .{ .install = .{
-                .destination = .init(path_encoder),
-                .package = .init(package_encoder),
-            } },
-        } } },
-    });
-}
-
 const EntryKind = document.Kind;
 const Entry = document.Member;
 const EntryList = document.Members;
@@ -377,7 +274,7 @@ const GzipDecoder = struct {
     }
 };
 
-const Mode = enum { view, unpack, package_inspect, package_install };
+const Mode = enum { view, unpack };
 
 fn observeCleanupError(action: []const u8, err: anyerror) void {
     switch (err) {
@@ -387,13 +284,10 @@ fn observeCleanupError(action: []const u8, err: anyerror) void {
 }
 
 /// Where a publication is allowed to land. Generic extraction is confined to
-/// a named or scope-owned filesystem root; package installation to a package store
-/// handle the Session's package authority retained. Inspection publishes
-/// nothing.
+/// a named or scope-owned filesystem root. Inspection publishes no files.
 const Authority = union(enum) {
     none,
     filesystem: *external.FilesystemAccess,
-    package: std.Io.Dir,
 };
 
 const UnpackDriver = struct {
@@ -408,8 +302,7 @@ const UnpackDriver = struct {
     entries: heap.Owned(EntryList),
     state: State,
     /// The resolved parent directory and final name the publication targets.
-    /// Set by the resolver phase for extraction and directly from the store
-    /// handle for installation; every namespace operation is relative to it.
+    /// Set by the resolver phase; every namespace operation is relative to it.
     destination: ?fsport.Resolved = null,
     /// The live-operation reservation an extraction holds from authorization
     /// through terminal cleanup.
@@ -426,11 +319,6 @@ const UnpackDriver = struct {
 
         view,
         unpack: struct { root: heap.Owned(Value), destination: heap.Owned(Value) },
-        inspect: struct { package: heap.Owned(Value) },
-        install: struct {
-            package: heap.Owned(Value),
-            destination: heap.Owned(Value),
-        },
 
         pub fn deinit(
             self: *SourceTarget,
@@ -443,31 +331,16 @@ const UnpackDriver = struct {
                     source.root.deinit(releases, allocator);
                     source.destination.deinit(releases, allocator);
                 },
-                .inspect => |*source| source.package.deinit(releases, allocator),
-                .install => |*source| {
-                    source.package.deinit(releases, allocator);
-                    source.destination.deinit(releases, allocator);
-                },
             }
         }
     };
     const EncodeTarget = union(enum) {
         view,
         unpack: heap.Owned(storage.StringEncoder),
-        inspect: heap.Owned(storage.StringEncoder),
-        install: struct {
-            destination: heap.Owned(storage.StringEncoder),
-            package: heap.Owned(storage.StringEncoder),
-        },
     };
     const EncodedTarget = union(enum) {
         view,
         unpack: heap.Owned([]u8),
-        inspect: heap.Owned([]u8),
-        install: struct {
-            destination: heap.Owned([]u8),
-            package: heap.Owned([]u8),
-        },
     };
     const EncodedInputs = struct {
         bytes: heap.Owned(storage.ByteVector),
@@ -486,7 +359,6 @@ const UnpackDriver = struct {
         file_count: usize = 0,
         pending_path: ?heap.Owned([]u8) = null,
         pending_size: ?u64 = null,
-        manifest_data: ?struct { offset: usize, size: usize } = null,
     };
     const Pax = struct {
         offset: usize,
@@ -523,8 +395,7 @@ const UnpackDriver = struct {
             scan_offset: usize,
         },
         trailing_zeroes,
-        materialize_manifest,
-        materialize_manifest_text: storage.Utf8Materializer,
+
         allocate_results,
         materialize_paths: struct {
             inputs: ResultInputs,
@@ -553,12 +424,6 @@ const UnpackDriver = struct {
         encode_destination: struct {
             bytes: heap.Owned(storage.ByteVector),
             destination: heap.Owned(storage.StringEncoder),
-            package: ?heap.Owned(storage.StringEncoder),
-        },
-        encode_package: struct {
-            bytes: heap.Owned(storage.ByteVector),
-            destination: ?heap.Owned([]u8),
-            package: heap.Owned(storage.StringEncoder),
         },
         allocate_tar: EncodedInputs,
         allocate_decoder: struct { inputs: EncodedInputs, tar: heap.Owned([]u8) },
@@ -603,31 +468,6 @@ const UnpackDriver = struct {
             created_count: usize = 0,
             work: ExtractWork = .next,
         },
-        validate_package: struct {
-            staged: Staged,
-            dir: std.Io.Dir,
-            created_count: usize,
-            catalog: ?pkg_catalog.Build,
-            diagnostic: ?[]u8 = null,
-        },
-        seal: struct {
-            catalog: pkg_catalog.Catalog,
-            hasher: std.crypto.hash.sha2.Sha256 = .init(.{}),
-            staged: Staged,
-            dir: std.Io.Dir,
-            file: std.Io.File,
-            written: usize = 0,
-            created_count: usize,
-        },
-        metadata: struct {
-            staged: Staged,
-            dir: std.Io.Dir,
-            created_count: usize,
-            catalog: pkg_catalog.Catalog,
-            encoder: pkg_catalog.Encoder,
-            hash: [71]u8,
-            work: union(enum) { encode, write: struct { file: std.Io.File, written: usize = 0 } } = .encode,
-        },
         commit: struct { staged: Staged, created_count: usize },
         published: heap.Owned([]u8),
     };
@@ -644,10 +484,8 @@ const UnpackDriver = struct {
     };
     const RollbackPlan = union(enum) {
         entries: usize,
-        seal_then_entries: usize,
     };
     const RollbackWork = union(enum) {
-        seal: usize,
         skip: struct { iterator: EntryList.ReverseIterator, remaining: usize },
         entries: EntryList.ReverseIterator,
         parents: struct {
@@ -714,7 +552,6 @@ const UnpackDriver = struct {
         return switch (parsing.*) {
             .encode_bytes => |*encoding| self.encodeBytes(evaluator, encoding),
             .encode_destination => |*encoding| self.encodeDestination(evaluator, encoding),
-            .encode_package => |*encoding| self.encodePackage(evaluator, encoding),
             .allocate_tar => |*allocation| self.allocateTar(evaluator, allocation),
             .allocate_decoder => |*allocation| self.allocateDecoder(allocation),
             .decompress => |*decompression| self.decompress(evaluator, decompression),
@@ -742,12 +579,6 @@ const UnpackDriver = struct {
                 .parse_pax => |*pax| self.parsePaxRecord(evaluator, &active.archive, scanning, pax),
                 .scan_pax => |*scan| self.scanPaxRecord(evaluator, &active.archive, scanning, scan),
                 .trailing_zeroes => self.trailingZeroes(evaluator, &active.archive, scanning),
-                .materialize_manifest => self.materializeManifest(evaluator, &active.archive, scanning),
-                .materialize_manifest_text => |*materializer| self.materializeManifestText(
-                    evaluator,
-                    scanning,
-                    materializer,
-                ),
                 .allocate_results => self.allocateResults(scanning),
                 .materialize_paths => |*paths| self.materializePaths(evaluator, scanning, paths),
                 .materialize_result => |*materialization| materializeResult(
@@ -769,11 +600,6 @@ const UnpackDriver = struct {
         return switch (target.*) {
             .view => .view,
             .unpack => |*cursor| .{ .unpack = .init(cursor.take()) },
-            .inspect => |*cursor| .{ .inspect = .init(cursor.take()) },
-            .install => |*install| .{ .install = .{
-                .destination = .init(install.destination.take()),
-                .package = .init(install.package.take()),
-            } },
         };
     }
 
@@ -781,11 +607,6 @@ const UnpackDriver = struct {
         return switch (target.*) {
             .view => .view,
             .unpack => |*path| .{ .unpack = .init(path.take()) },
-            .inspect => |*name| .{ .inspect = .init(name.take()) },
-            .install => |*install| .{ .install = .{
-                .destination = .init(install.destination.take()),
-                .package = .init(install.package.take()),
-            } },
         };
     }
 
@@ -805,13 +626,11 @@ const UnpackDriver = struct {
         };
     }
 
-    /// The canonical path text the caller supplied: a root-relative path for
-    /// extraction, a store key for installation.
+    /// The canonical root-relative destination path supplied by the caller.
     fn archiveDestination(archive: *Archive) []u8 {
         return switch (archive.target) {
             .unpack => |*path| path.borrow(),
-            .install => |*install| install.destination.borrow(),
-            .view, .inspect => unreachable,
+            .view => unreachable,
         };
     }
 
@@ -823,37 +642,17 @@ const UnpackDriver = struct {
         };
     }
 
-    /// The package value an install carries, for the failures raised against
-    /// its staged tree. Only the install target reaches package validation.
-    fn installPackageValue(self: *const UnpackDriver) Value {
-        return switch (self.source.borrow()) {
-            .install => |*install| install.package.borrow(),
-            .view, .inspect, .unpack => unreachable,
-        };
-    }
-
-    fn archivePackageName(archive: *Archive) []u8 {
-        return switch (archive.target) {
-            .inspect => |*name| name.borrow(),
-            .install => |*install| install.package.borrow(),
-            .view, .unpack => unreachable,
-        };
-    }
-
     fn operationMode(self: *const UnpackDriver) Mode {
         return switch (self.source.borrow()) {
             .view => .view,
             .unpack => .unpack,
-            .inspect => .package_inspect,
-            .install => .package_install,
         };
     }
 
     fn sourceDestination(self: *const UnpackDriver) Value {
         return switch (self.source.borrow()) {
             .unpack => |*source| source.destination.borrow(),
-            .install => |*source| source.destination.borrow(),
-            .view, .inspect => unreachable,
+            .view => unreachable,
         };
     }
 
@@ -879,17 +678,6 @@ const UnpackDriver = struct {
                     .unpack => |path| .{ .encode_destination = .{
                         .bytes = .init(bytes),
                         .destination = path,
-                        .package = null,
-                    } },
-                    .inspect => |package| .{ .encode_package = .{
-                        .bytes = .init(bytes),
-                        .destination = null,
-                        .package = package,
-                    } },
-                    .install => |install| .{ .encode_destination = .{
-                        .bytes = .init(bytes),
-                        .destination = install.destination,
-                        .package = install.package,
                     } },
                 } };
                 return .yielded;
@@ -917,37 +705,14 @@ const UnpackDriver = struct {
                         self.allocator.free(path);
                         return err;
                     },
-                    .package => |store_dir| {
-                        if (!pkg_lock.validStoreKey(path)) {
-                            self.allocator.free(path);
-                            return self.failDomain(evaluator, "package destination is not a canonical store key");
-                        }
-                        const name = self.allocator.dupe(u8, path) catch |err| {
-                            self.allocator.free(path);
-                            return err;
-                        };
-                        self.destination = .{ .entry = .{
-                            .parent = .{ .dir = store_dir, .owned = false },
-                            .name = name,
-                        } };
-                    },
                     .none => unreachable,
                 }
                 const bytes = encoding.bytes.take();
                 encoding.destination.deinit(evaluator.releaseDomain(), self.allocator);
-                if (encoding.package) |*package| {
-                    const package_cursor = package.take();
-                    self.state = .{ .parsing = .{ .encode_package = .{
-                        .bytes = .init(bytes),
-                        .destination = .init(path),
-                        .package = .init(package_cursor),
-                    } } };
-                } else {
-                    self.state = .{ .parsing = .{ .allocate_tar = .{
-                        .bytes = .init(bytes),
-                        .target = .{ .unpack = .init(path) },
-                    } } };
-                }
+                self.state = .{ .parsing = .{ .allocate_tar = .{
+                    .bytes = .init(bytes),
+                    .target = .{ .unpack = .init(path) },
+                } } };
                 return .yielded;
             },
         }
@@ -974,39 +739,6 @@ const UnpackDriver = struct {
         };
         self.slot = fsport.reserveOperation(access) orelse
             return self.failReason(evaluator, .overflow, .limit, "filesystem operation limit reached");
-    }
-
-    fn encodePackage(
-        self: *UnpackDriver,
-        evaluator: *Machine,
-        encoding: *@FieldType(Parsing, "encode_package"),
-    ) MachineError!machine.WorkProgress {
-        switch (encoding.package.borrowMut().advance(work_quantum) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidCodepoint => return self.failDomain(evaluator, "package name contains an invalid Unicode scalar"),
-        }) {
-            .pending => return .yielded,
-            .complete => |name| {
-                if (!validPackageName(name)) {
-                    self.allocator.free(name);
-                    return self.failDomain(evaluator, "package name is not canonical");
-                }
-                const bytes = encoding.bytes.take();
-                encoding.package.deinit(evaluator.releaseDomain(), self.allocator);
-                const target: EncodedTarget = if (encoding.destination) |*destination|
-                    .{ .install = .{
-                        .destination = .init(destination.take()),
-                        .package = .init(name),
-                    } }
-                else
-                    .{ .inspect = .init(name) };
-                self.state = .{ .parsing = .{ .allocate_tar = .{
-                    .bytes = .init(bytes),
-                    .target = target,
-                } } };
-                return .yielded;
-            },
-        }
     }
 
     fn allocateTar(
@@ -1165,7 +897,6 @@ const UnpackDriver = struct {
             scanning.work = switch (self.operationMode()) {
                 .view => .publish_view,
                 .unpack => .allocate_results,
-                .package_inspect, .package_install => .materialize_manifest,
             };
             return .yielded;
         }
@@ -1243,10 +974,6 @@ const UnpackDriver = struct {
             .data_offset = data_offset,
             .size = @intCast(effective_size),
         };
-        switch (self.operationMode()) {
-            .view, .unpack => {},
-            .package_inspect, .package_install => try self.validatePackageEntry(evaluator, archive, context, entry),
-        }
         if (kind == .file) context.file_count += 1;
         const hash = std.hash.Wyhash.hash(0, path);
         scanning.work = .{ .insert_member = .{
@@ -1393,74 +1120,8 @@ const UnpackDriver = struct {
         scanning.work = switch (self.operationMode()) {
             .view => .publish_view,
             .unpack => .allocate_results,
-            .package_inspect, .package_install => .materialize_manifest,
         };
         return .yielded;
-    }
-
-    fn validatePackageEntry(
-        self: *UnpackDriver,
-        evaluator: *Machine,
-        archive: *Archive,
-        context: *ScanContext,
-        entry: Entry,
-    ) MachineError!void {
-        if (std.mem.eql(u8, entry.path, package_seal_name) or std.mem.eql(u8, entry.path, pkg_catalog.filename))
-            return self.failPackageMember(evaluator, archive, "package archive uses a reserved store member", entry.path);
-        if (entry.kind == .directory) return;
-        if (std.mem.eql(u8, entry.path, "ecl.pkg")) {
-            if (context.manifest_data != null)
-                return self.failPackageMember(
-                    evaluator,
-                    archive,
-                    "package archive contains more than one root manifest",
-                    entry.path,
-                );
-            context.manifest_data = .{ .offset = entry.data_offset, .size = entry.size };
-            return;
-        }
-        if (std.mem.endsWith(u8, entry.path, ".eclmod"))
-            return self.failPackageMember(evaluator, archive, "native package members are not permitted", entry.path);
-    }
-
-    fn materializeManifest(
-        self: *UnpackDriver,
-        evaluator: *Machine,
-        archive: *Archive,
-        scanning: *Scanning,
-    ) MachineError!machine.WorkProgress {
-        const manifest = scanning.context.manifest_data orelse
-            return self.failDomain(evaluator, "package archive has no root ecl.pkg manifest");
-        const tar = archive.tar.borrow();
-        scanning.work = .{ .materialize_manifest_text = .init(
-            self.allocator,
-            tar[manifest.offset .. manifest.offset + manifest.size],
-        ) };
-        return .yielded;
-    }
-
-    fn materializeManifestText(
-        self: *UnpackDriver,
-        evaluator: *Machine,
-        scanning: *Scanning,
-        materializer: *storage.Utf8Materializer,
-    ) MachineError!machine.WorkProgress {
-        return switch (materializer.advance(work_quantum) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidUtf8 => return self.failDomain(evaluator, "package root ecl.pkg is not valid UTF-8"),
-        }) {
-            .pending => .yielded,
-            .complete => |text| result: {
-                materializer.deinit();
-                if (self.operationMode() == .package_inspect) {
-                    scanning.work = .complete;
-                    break :result .{ .output = text };
-                }
-                evaluator.releaseDomain().releaseValue(text);
-                scanning.work = .allocate_results;
-                break :result .yielded;
-            },
-        };
     }
 
     fn allocateResults(self: *UnpackDriver, scanning: *Scanning) MachineError!machine.WorkProgress {
@@ -1566,7 +1227,6 @@ const UnpackDriver = struct {
                 };
                 break :publication .{ .resolve = .{ .result = release.result, .resolver = resolver } };
             },
-            .package => .{ .destination_check = release.result },
             .none => unreachable,
         };
         self.allocator.free(release.release.values);
@@ -1656,38 +1316,13 @@ const UnpackDriver = struct {
             .extract => |*extraction| switch (extraction.work) {
                 .next => {
                     const entry = extraction.iterator.next() orelse {
-                        if (self.operationMode() == .package_install) {
-                            const staged = extraction.staged;
-                            const dir = extraction.dir;
-                            const created_count = extraction.created_count;
-                            publication.* = .{
-                                .validate_package = .{
-                                    .staged = staged,
-                                    .dir = dir,
-                                    .created_count = created_count,
-                                    .catalog = null,
-                                },
-                            };
-                            const validation = &publication.validate_package;
-                            // The staged tree is validated through its own
-                            // open handle; the catalog it produces is
-                            // retained for portable metadata publication.
-                            validation.catalog = try evaluator.beginPackageTreeValidation(
-                                io,
-                                archivePackageName(archive),
-                                ".",
-                                validation.dir,
-                                &validation.diagnostic,
-                            );
-                        } else {
-                            extraction.dir.close(io);
-                            const staged = extraction.staged;
-                            const created_count = extraction.created_count;
-                            publication.* = .{ .commit = .{
-                                .staged = staged,
-                                .created_count = created_count,
-                            } };
-                        }
+                        extraction.dir.close(io);
+                        const staged = extraction.staged;
+                        const created_count = extraction.created_count;
+                        publication.* = .{ .commit = .{
+                            .staged = staged,
+                            .created_count = created_count,
+                        } };
                         return .yielded;
                     };
                     extraction.created_count += 1;
@@ -1714,116 +1349,6 @@ const UnpackDriver = struct {
                         file_state.file.close(io);
                         extraction.work = .next;
                     }
-                },
-            },
-            .validate_package => |*validation| {
-                const catalog_cursor = if (validation.catalog) |*catalog| catalog else unreachable;
-                switch (catalog_cursor.advance(work_quantum) catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    error.Invalid => {
-                        const message = validation.diagnostic;
-                        defer if (message) |owned| self.allocator.free(owned);
-                        validation.diagnostic = null;
-                        const failure = evaluator.failFmt(
-                            .domain,
-                            "invalid package catalog: {s}",
-                            .{message orelse "validation failed"},
-                        );
-                        evaluator.addErrorPackage(self.installPackageValue());
-                        return failure;
-                    },
-                }) {
-                    .pending => return .yielded,
-                    .done => {},
-                }
-                var catalog = catalog_cursor.take() catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    error.Invalid => return evaluator.failFmt(
-                        .domain,
-                        "invalid package catalog: {s}",
-                        .{validation.diagnostic orelse "validation failed"},
-                    ),
-                };
-                errdefer catalog.deinit();
-                catalog_cursor.deinit();
-                validation.catalog = null;
-                const seal = validation.dir.createFile(
-                    io,
-                    package_seal_name,
-                    .{ .exclusive = true },
-                ) catch |err| return self.failIo(
-                    evaluator,
-                    "cannot create package archive seal",
-                    err,
-                );
-                const staged = validation.staged;
-                const dir = validation.dir;
-                const created_count = validation.created_count;
-                publication.* = .{ .seal = .{
-                    .staged = staged,
-                    .dir = dir,
-                    .file = seal,
-                    .catalog = catalog,
-                    .created_count = created_count,
-                } };
-            },
-            .seal => |*seal| {
-                const compressed = archive.bytes.borrow().bytes();
-                if (seal.written != compressed.len) {
-                    const end = @min(seal.written + work_quantum, compressed.len);
-                    seal.file.writePositionalAll(
-                        io,
-                        compressed[seal.written..end],
-                        seal.written,
-                    ) catch |err| return self.failIo(evaluator, "cannot write package archive seal", err);
-                    seal.hasher.update(compressed[seal.written..end]);
-                    seal.written = end;
-                } else {
-                    seal.file.sync(io) catch |err|
-                        return self.failIo(evaluator, "cannot synchronize package archive seal", err);
-                    seal.file.close(io);
-                    var digest: [32]u8 = undefined;
-                    seal.hasher.final(&digest);
-                    const hash = "sha256-".* ++ std.fmt.bytesToHex(digest, .lower);
-                    const moved = seal.*;
-                    publication.* = .{ .metadata = .{
-                        .staged = moved.staged,
-                        .dir = moved.dir,
-                        .created_count = moved.created_count,
-                        .catalog = moved.catalog,
-                        .encoder = .init(self.allocator),
-                        .hash = hash,
-                    } };
-                }
-            },
-            .metadata => |*metadata| switch (metadata.work) {
-                .encode => {
-                    if (metadata.encoder.advance(&metadata.catalog, &metadata.hash) catch |err| switch (err) {
-                        error.OutOfMemory => return error.OutOfMemory,
-                        error.Invalid => return evaluator.fail(.domain, "package catalog exceeds its byte limit"),
-                    } == .pending) return .yielded;
-                    const file = metadata.dir.createFile(io, pkg_catalog.filename, .{ .exclusive = true }) catch |err|
-                        return self.failIo(evaluator, "cannot create package catalog", err);
-                    metadata.work = .{ .write = .{ .file = file } };
-                },
-                .write => |*writing| {
-                    const bytes = metadata.encoder.output.written();
-                    if (writing.written < bytes.len) {
-                        const end = @min(writing.written + work_quantum, bytes.len);
-                        writing.file.writePositionalAll(io, bytes[writing.written..end], writing.written) catch |err|
-                            return self.failIo(evaluator, "cannot write package catalog", err);
-                        writing.written = end;
-                        return .yielded;
-                    }
-                    if (!metadata.catalog.retireStep()) return .yielded;
-                    writing.file.sync(io) catch |err| return self.failIo(evaluator, "cannot synchronize package catalog", err);
-                    writing.file.close(io);
-                    metadata.encoder.deinit();
-                    metadata.catalog.deinit();
-                    metadata.dir.close(io);
-                    const staged = metadata.staged;
-                    const created_count = metadata.created_count;
-                    publication.* = .{ .commit = .{ .staged = staged, .created_count = created_count } };
                 },
             },
             .commit => |*commit_state| {
@@ -1877,21 +1402,6 @@ const UnpackDriver = struct {
         return failure;
     }
 
-    fn failPackageMember(
-        self: *UnpackDriver,
-        evaluator: *Machine,
-        archive: *Archive,
-        message: []const u8,
-        member: []const u8,
-    ) MachineError {
-        _ = self;
-        return evaluator.failFmt(
-            .domain,
-            "{s}: package `{s}`, member `{s}`",
-            .{ message, archivePackageName(archive), member },
-        );
-    }
-
     fn failIo(self: *UnpackDriver, evaluator: *Machine, message: []const u8, err: anyerror) MachineError {
         const failure = evaluator.failFmt(.io, "{s}: {s}", .{ message, @errorName(err) });
         evaluator.addErrorPath(self.sourceDestination());
@@ -1921,11 +1431,6 @@ const UnpackDriver = struct {
         active: *Active,
         publication: *Publication,
     ) void {
-        switch (publication.*) {
-            .seal => |*seal| if (!seal.catalog.retireStep()) return,
-            .metadata => |*metadata| if (!metadata.catalog.retireStep()) return,
-            else => {},
-        }
         const archive = takeArchive(&active.archive);
         switch (publication.*) {
             .resolve => |*resolving| {
@@ -1975,60 +1480,10 @@ const UnpackDriver = struct {
                     .work = work,
                 } };
             },
-            .validate_package => |*validation| {
-                // The cursor holds the staged tree's open directory and walk
-                // across steps, so abandoning this state has to release them.
-                if (validation.catalog) |*catalog| catalog.deinit();
-                if (validation.diagnostic) |message| self.allocator.free(message);
-                validation.diagnostic = null;
-                releases.releaseValue(validation.staged.result);
-                const path = validation.staged.path.take();
-                const dir = validation.dir;
-                const work = rollbackEntries(self, validation.created_count);
-                self.state = .{ .rollback = .{
-                    .archive = archive,
-                    .context = .{ .path = .init(path) },
-                    .dir = dir,
-                    .work = work,
-                } };
-            },
-            .seal => |*seal| {
-                seal.catalog.deinit();
-                seal.file.close(self.io.?);
-                releases.releaseValue(seal.staged.result);
-                const path = seal.staged.path.take();
-                const context: RollbackContext = .{
-                    .path = .init(path),
-                };
-                const dir = seal.dir;
-                const created_count = seal.created_count;
-                self.state = .{ .rollback = .{
-                    .archive = archive,
-                    .context = context,
-                    .dir = dir,
-                    .work = .{ .seal = created_count },
-                } };
-            },
-            .metadata => |*metadata| {
-                switch (metadata.work) {
-                    .encode => {},
-                    .write => |writing| writing.file.close(self.io.?),
-                }
-                metadata.encoder.deinit();
-                metadata.catalog.deinit();
-                releases.releaseValue(metadata.staged.result);
-                const path = metadata.staged.path.take();
-                const dir = metadata.dir;
-                const created_count = metadata.created_count;
-                self.state = .{ .rollback = .{ .archive = archive, .context = .{ .path = .init(path) }, .dir = dir, .work = .{ .seal = created_count } } };
-            },
             .commit => |*commit_state| {
                 releases.releaseValue(commit_state.staged.result);
                 const path = commit_state.staged.path.take();
-                const plan: RollbackPlan = if (self.operationMode() == .package_install)
-                    .{ .seal_then_entries = commit_state.created_count }
-                else
-                    .{ .entries = commit_state.created_count };
+                const plan: RollbackPlan = .{ .entries = commit_state.created_count };
                 self.state = .{ .rollback_reopen = .{
                     .archive = archive,
                     .context = .{
@@ -2071,7 +1526,6 @@ const UnpackDriver = struct {
         const moved = context.*;
         const work = switch (reopening.plan) {
             .entries => |created_count| rollbackEntries(self, created_count),
-            .seal_then_entries => |created_count| RollbackWork{ .seal = created_count },
         };
         const archive = takeArchive(&reopening.archive);
         self.state = .{ .rollback = .{
@@ -2090,15 +1544,6 @@ const UnpackDriver = struct {
         rollback: *@FieldType(State, "rollback"),
     ) bool {
         switch (rollback.work) {
-            .seal => |created_count| {
-                rollback.dir.deleteFile(self.io.?, pkg_catalog.filename) catch |err| switch (err) {
-                    error.FileNotFound => {},
-                    else => observeCleanupError("remove the package catalog", err),
-                };
-                rollback.dir.deleteFile(self.io.?, package_seal_name) catch |err|
-                    observeCleanupError("remove the package archive seal", err);
-                rollback.work = rollbackEntries(self, created_count);
-            },
             .skip => |*skip| {
                 if (skip.remaining != 0) {
                     _ = skip.iterator.next();
@@ -2157,11 +1602,7 @@ const UnpackDriver = struct {
     ) void {
         switch (target.*) {
             .view => {},
-            .unpack, .inspect => |*cursor| cursor.deinit(releases, allocator),
-            .install => |*install| {
-                install.destination.deinit(releases, allocator);
-                install.package.deinit(releases, allocator);
-            },
+            .unpack => |*cursor| cursor.deinit(releases, allocator),
         }
     }
 
@@ -2172,11 +1613,7 @@ const UnpackDriver = struct {
     ) void {
         switch (target.*) {
             .view => {},
-            .unpack, .inspect => |*text| text.deinit(releases, allocator),
-            .install => |*install| {
-                install.destination.deinit(releases, allocator);
-                install.package.deinit(releases, allocator);
-            },
+            .unpack => |*text| text.deinit(releases, allocator),
         }
     }
 
@@ -2208,10 +1645,6 @@ const UnpackDriver = struct {
         const retirement: ScanningRetirement = switch (scanning.work) {
             .insert_member => |insertion| result: {
                 allocator.free(insertion.entry.path);
-                break :result .plain;
-            },
-            .materialize_manifest_text => |*materializer| result: {
-                materializer.retire(releases);
                 break :result .plain;
             },
             .materialize_paths => |*paths| result: {
@@ -2255,12 +1688,6 @@ const UnpackDriver = struct {
             .encode_destination => |*encoding| {
                 encoding.bytes.deinit(releases, allocator);
                 encoding.destination.deinit(releases, allocator);
-                if (encoding.package) |*package| package.deinit(releases, allocator);
-            },
-            .encode_package => |*encoding| {
-                encoding.bytes.deinit(releases, allocator);
-                if (encoding.destination) |*destination| destination.deinit(releases, allocator);
-                encoding.package.deinit(releases, allocator);
             },
             .allocate_tar => |*allocation| retireEncodedInputs(allocation, releases, allocator),
             .allocate_decoder => |*allocation| {
@@ -2433,17 +1860,6 @@ fn validMemberPath(path: []const u8) bool {
             std.mem.eql(u8, component, "..") or
             std.mem.indexOfScalar(u8, component, '\\') != null)
             return false;
-    }
-    return true;
-}
-
-fn validPackageName(name: []const u8) bool {
-    if (name.len == 0) return false;
-    var segments = std.mem.splitScalar(u8, name, '.');
-    while (segments.next()) |segment| {
-        if (segment.len == 0 or segment[0] < 'a' or segment[0] > 'z') return false;
-        for (segment[1..]) |byte| if (!((byte >= 'a' and byte <= 'z') or
-            (byte >= '0' and byte <= '9') or byte == '-')) return false;
     }
     return true;
 }

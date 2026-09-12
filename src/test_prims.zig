@@ -8,7 +8,7 @@ const intern = @import("intern.zig");
 const machine = @import("machine.zig");
 const modules = @import("modules.zig");
 const poll = @import("poll.zig");
-const pkg_catalog = @import("pkg_catalog.zig");
+const module_snapshot = @import("module_snapshot.zig");
 const scheduler_api = @import("scheduler.zig");
 
 const Value = value.Value;
@@ -43,7 +43,7 @@ const DescriptorKeys = struct {
 
 const Collected = struct {
     module: intern.ModuleName,
-    source: ?pkg_catalog.ArtifactId,
+    source: ?module_snapshot.ArtifactId,
     metadata: modules.ModuleTestMetadata,
 
     fn retain(self: Collected) void {
@@ -247,7 +247,7 @@ const InvocationDriver = struct {
     scan_index: usize = 0,
     module_id: ?u32 = null,
     name_id: ?u32 = null,
-    source_id: ?pkg_catalog.ArtifactId = null,
+    source_id: ?module_snapshot.ArtifactId = null,
     module_validation: ?intern.ModuleNameCursor = null,
     name_validation: ?intern.NamespaceCursor = null,
     module_name: ?intern.ModuleName = null,

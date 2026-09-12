@@ -120,11 +120,6 @@ pub const FilesystemAccess = opaque {};
 /// limits, and accounting remain private to `net_port.zig`.
 pub const NetAccess = opaque {};
 
-/// Nominal proof that a Session was constructed for a package command. It
-/// carries the package store handles that `pkg.store` needs and nothing an
-/// ordinary evaluation Session ever mints; see `package_authority.zig`.
-pub const PackageAccess = opaque {};
-
 pub const Wake = enum {
     ready,
     io,

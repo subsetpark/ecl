@@ -1,7 +1,7 @@
-### module stdlib.test.pkg-manifest
+### module pkg.test.manifest
 []
 (
- 'stdlib.test.support
+ 'pkg.test.support
  ('equal 'raises 'raises-containing 'raises-data 'documented)
  import
 
@@ -118,21 +118,18 @@
  (("{'format 2 'name \"a\" 'version \"0.1.0\" 'requires ((\"pwned\" 'cwd \"pkg-pwned\" fs.create-text))}"
    pkg.manifest.read)
   'domain
-  'key
-  'requires
-  raises-data
+  "only inert data"
+  raises-containing
   ("{'format 2 'name \"a\" 'version \"0.1.0\" 'requires exit}"
    pkg.manifest.read)
   'domain
-  'key
-  'requires
-  raises-data
+  "only inert data"
+  raises-containing
   ("{'format 2 'name \"a\" 'version \"0.1.0\" 'requires {\"foo\" {'version \"1.0.0\" 'source {'kind 'archive 'url \"https://e.com/f.tgz\"} 'hash exit}}}"
    pkg.manifest.read)
   'domain
-  'key
-  'requires
-  raises-data)
+  "only inert data"
+  raises-containing)
  'inert-data test
 
  ### test immutable-sources
@@ -157,4 +154,4 @@
    'pkg.manifest.read 'pkg.manifest.write)
   documented)
  'documentation test
-) 'stdlib.test.pkg-manifest @defm
+) 'pkg.test.manifest @defm

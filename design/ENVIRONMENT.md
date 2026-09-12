@@ -45,9 +45,8 @@ replace a registration explicitly with `register` or `@defm`.
 tries `<module-name>.ecl` and then `<module-name>.eclmod`. The first existing
 candidate is authoritative, including any error raised while loading it.
 
-Filesystem search applies only when the current session has no discovered
-project. A project uses its lock-derived catalog as described under
-[Runtime module resolution](#runtime-module-resolution).
+Filesystem search applies only when the current Session has no module map.
+With a map, resolution uses only its visible artifacts and embedded modules.
 
 An ECL source candidate may register several modules. Successful loading
 requires the requested registration to exist after the source unit completes.
@@ -57,8 +56,7 @@ All registrations from a failing source unit remain unavailable.
 
 An `ecl.modules` document supplies inert module-resolution metadata. It contains
 no package versions, fetching instructions, or cache policy. The nearest such
-file, searching upward from the startup directory, takes precedence over
-project-lock discovery. `ecl --module-map FILE ...` selects a map explicitly;
+file is discovered by searching upward from the startup directory. `ecl --module-map FILE ...` selects a map explicitly;
 its path is relative to the caller's working directory. A malformed discovered
 or explicitly selected map fails Session construction, without falling back.
 
@@ -469,418 +467,19 @@ configuration.
 
 ## Projects and packages
 
-A project declares dependencies in `ecl.pkg` and records a resolved selection
-in `ecl.lock`. Both files contain one ECL data form. Readers parse and validate
-them without evaluation.
-
-Module references continue to use module and binding names. Package paths,
-URLs, and versions stay in project data and the derived catalog.
-
-### Project discovery
-
-The `ecl` command discovers a project by walking upward from the process
-working directory. The first directory containing `ecl.pkg` is the project
-root. Discovery stops at the filesystem root. `ecl.lock` is read only from
-the project root.
-
-The CLI captures its absolute startup directory once and uses it for project
-discovery across scripts, expressions, stdin evaluation, the REPL, and `ecl test`.
-
-Discovery runs once per session. The resulting project, lock, and catalog
-state remains fixed for the lifetime of the session and all its units. A
-missing manifest or missing lock produces an
-absent project tier. An unreadable or invalid sibling lock is retained as a
-session error and is reported by the first non-embedded module lookup.
-
-### Versions
-
-A package version is a string with this grammar:
-
-```text
-version     := core ("-" prerelease)?
-core        := num "." num "." num
-num         := "0" | [1-9] [0-9]*
-prerelease  := ident ("." ident)*
-ident       := [0-9A-Za-z-]+
-```
-
-A numeric prerelease identifier has no leading zero. Build metadata is outside
-the grammar, so any `+` makes the version malformed.
-
-Precedence follows Semantic Versioning 2.0.0 section 11:
-
-1. Compare major, minor, and patch numerically.
-2. A prerelease precedes the same core version without a prerelease.
-3. Compare prerelease identifiers from left to right. Numeric identifiers
-   precede alphanumeric identifiers; numeric identifiers compare numerically;
-   alphanumeric identifiers compare by ECL string order.
-4. When every shared identifier is equal, the shorter prerelease precedes the
-   longer one.
-
-The admitted grammar has a strict total order. Minimal version selection
-chooses among minimum versions declared by reachable manifests.
-
-### Manifest
-
-`ecl.pkg` has this shape:
-
-```ecl
-{'format 2
- 'name "my.proj"
- 'version "0.1.0"
- 'sources ["src/**/*.ecl"]
- 'exports ["my.proj"]
- 'requires
- {"statistics" {'package "foo"
-                 'version "1.2.0"
-                 'source {'kind 'archive 'url "https://example.com/foo-1.2.0.tgz"}
-                 'hash "sha256-<64 lowercase hex digits>"}}}
-```
-
-`'format` is the integer `2`. `'name` is the package's canonical name, and
-`'version` is its version. `'sources` lists portable source-file globs, and
-`'exports` lists exact public module names. `'requires` maps consumer-local aliases to requirements.
-
-A requirement contains exactly `'package`, `'version`, `'source`, and `'hash`.
-The version is a minimum. Sources are tagged dictionaries: an archive has
-`'kind 'archive` and `'url`; Git has `'kind 'git`, `'url`, and `'commit`.
-URLs use HTTPS without credentials. Git commits are full 40-character lowercase
-hexadecimal identifiers. The hash has the
-form `sha256-` followed by 64 lowercase hexadecimal digits. Aliases do not
-change ECL module names.
-
-Format 1 is rejected. To migrate, wrap each former URL in an archive source
-dictionary, set the manifest format to 2, and regenerate the lock with sync.
-
-Every dictionary key is declared by the format. A requirement cannot target
-the containing manifest's package. One consumer cannot target the same
-package through multiple aliases. Selected package names cannot overlap under
-the ownership rule below.
-
-Manifest values may contain ints, floats, chars, symbols, strings, lists, and
-dictionaries. An executable word anywhere in the value raises `'domain`.
-Comments are accepted by the reader and omitted by manifest rewrites.
-
-### Package names and exports
-
-A canonical package name contains dot-separated segments. Each segment
-matches `[a-z][a-z0-9-]*`. Every package name is also a valid module name.
-
-Package `foo` owns module namespaces `foo` and `foo.<rest>`. The ownership
-boundary is a dot, so `foo` owns `foo.bar` and excludes `foobar`.
-
-The source list contains distinct portable globs. Globs use relative
-`/`-separated paths and support `*`, `?`, and a whole-segment
-`**`. They exclude absolute paths, backslashes, and empty, `.`, or `..`
-segments. A glob may match no files; overlapping globs
-select a file only once. An empty source list is valid.
-
-Exports are distinct, exact, package-owned module names. Exporting a module
-does not export its dotted children. Each export must have one top-level
-literal declaration in the selected source files: a module-name symbol
-followed by `@defm`. A source file may export several modules, and every
-export maps to exactly one source file. File and directory names do not
-determine module names.
-
-Other registrations in a selected file are private to that file. They may
-use unrelated names and may be constructed dynamically with `@module` and
-`register`. Modules and their tests can use their defining file's private
-registrations. Other files cannot access those registrations, including files
-in the same package. Two files may independently register the same private
-name.
-
-Calling an exported module preserves the called code's defining-file
-visibility. Loading another file does not add its private registrations to
-the caller's environment. Module-authored quotations and module handles keep
-their defining-file context when passed elsewhere; passing such a value
-explicitly is distinct from making its private module name public.
-
-### Resolution
-
-`pkg.mvs.resolve` receives a validated root manifest and an exact-version
-manifest catalog:
-
-```ecl
-{"foo" {"1.2.0" <foo 1.2.0 manifest>
-        "1.5.0" <foo 1.5.0 manifest>}
- "bar" {"2.0.0" <bar 2.0.0 manifest>}}
-```
-
-Each outer key is a package name. Each inner key is a version, and the stored
-manifest has the same name and version. The root manifest is supplied
-separately.
-
-Resolution visits every exact `(package, version)` node reachable from the
-root requirements. It selects the greatest reachable declared minimum for each
-package and rejects an active-path requirement cycle. Unreachable catalog
-entries are ignored.
-
-The lock records the selected packages and every requirement edge from the
-root and selected manifests. Each selected version satisfies every recorded
-minimum.
-
-Traversal and diagnostics use canonical package, version, and requirer order.
-For declarations sharing a name, version, and hash, the lexicographically
-least canonical source encoding is recorded. Different hashes conflict, as do
-differing Git commits for that identity, even when an archive mirror sorts
-first. A cycle reports its sorted distinct package names.
-
-Resolver failures use these messages and data fields:
-
-- malformed reachable version: `a reachable package version is malformed`,
-  with `'package`, `'required-package`, and `'version`;
-- missing manifest: `pkg.mvs.resolve is missing a declared manifest`, with
-  `'package`, `'required-package`, and `'version`;
-- hash conflict: `one package version has conflicting hashes`, with
-  `'package`, `'version`, `'left-package`, `'left-hash`, `'right-package`, and
-  `'right-hash`;
-- selected-prefix collision: `selected packages have overlapping prefixes`,
-  with `'left-package` and `'right-package`;
-- requirement cycle: `the package requirement graph has a cycle`, with
-  `'packages`.
-
-Wrong root and catalog containers retain their type diagnostics. Catalog
-identity mismatch reports `a catalog manifest must match its name and version
-keys`.
-
-### Lock file
-
-`ecl.lock` is derived project data with this shape:
-
-```ecl
-{'format 2
- 'root "my.proj"
- 'packages
- {"bar" {'version "0.3.0" 'source {'kind 'archive 'url "https://…"} 'hash "sha256-…"}
-  "foo" {'version "1.2.0" 'source {'kind 'archive 'url "https://…"} 'hash "sha256-…"}}
- 'requires
- {"foo" {"database" {'package "bar" 'version "0.3.0"}}
-  "my.proj" {"statistics" {'package "foo" 'version "1.2.0"}}}}
-```
-
-A cache-backed lock has exactly `'format`, `'root`, `'packages`, and
-`'requires`. A vendored lock also has `'store 'vendor`. No other store value
-is valid.
-
-`'packages` maps each selected package name to its version, URL, and hash.
-`'requires` maps each requiring package to its alias-to-minimum edges. The root
-always appears under its own name. A selected package with no requirements may
-be omitted from `'requires`.
-
-Package maps, requirer maps, and inner requirement maps use ascending key
-order. The writer uses canonical scalar spellings, places top-level and map
-entries on stable lines, and ends the file with a newline. Reading and writing
-a canonical lock reproduces its bytes. Lock rewrites omit comments.
-
-### Store and cache selection
-
-A store entry is the immutable directory
-`<name>-<version>-<hex>`, where `<hex>` is the package hash without its
-`sha256-` prefix. A present entry is reused and never overwritten.
-
-The shared store root is selected by the host, not by evaluated code, from
-the process environment at command startup:
-
-1. nonempty `ECL_CACHE` supplies the complete root;
-2. nonempty `XDG_CACHE_HOME` supplies `$XDG_CACHE_HOME/ecl/pkg`;
-3. nonempty `HOME` supplies `$HOME/.cache/ecl/pkg`;
-4. absence of all three leaves the `'cache` store unavailable, and the first
-   store operation that needs it fails with `'io` naming the three variables.
-
-An empty environment value is treated as absent. A relative selection is
-resolved once against the working directory captured at command startup.
-Package commands that may install (`add`, `sync`) create an absent cache
-directory at startup; read-only commands leave absence visible. A
-package-command Session holds the selected cache and the project's `vendor`
-directory as retained handles behind an opaque package authority; `pkg.store`
-words name a store as `'cache` or `'vendor` and an entry by canonical key. The
-vendor store is always the entry named `vendor` directly inside the discovered
-project root, opened without following a symlink; a project whose `vendor` is
-a link is rejected when the command starts, and no store is ever opened
-behind it. `pkg.store.present?` returns `0` for an absent
-entry and `1` for a real directory. Symlinks, other node kinds, access denial,
-and probe failures raise `'io` with the key as `'path`.
-
-### Package archives and publication
-
-A package artifact is a gzip-compressed tar byte list satisfying the archive
-rules above and these additional rules:
-
-- exactly one regular root file is named `ecl.pkg`;
-- the manifest is valid UTF-8 and valid format-2 package data;
-- ordinary directories and data files are allowed;
-- `.eclmod` files, links, and special nodes are forbidden;
-- the root names `.ecl-package.tgz` and `.ecl-package.catalog` are reserved;
-- every exported source file satisfies the manifest's glob, namespace,
-  uniqueness, and parse requirements.
-
-Installation parses package source to build the module catalog and never
-evaluates it. It writes `.ecl-package.catalog` into the staging directory before
-publication. The deterministic inert record carries its format, package name
-and version, actual archive SHA-256, selected relative source paths, and exact
-export mappings, including selected files without exports. Absolute paths and
-Session identities are never stored.
-
-`pkg.store.inspect` performs the full archive and package-layout scan and
-returns the exact root manifest text without creating a destination.
-`pkg.store.install` repeats validation at the mutation boundary, extracts to a
-unique sibling staging directory, and publishes with an absent-destination
-rename. It returns regular-file paths after commit. A destination conflict
-raises `'io` with `'destination-exists 1`; a caller may accept a concurrent
-winner after `present?` confirms a real directory.
-
-Each installed entry retains its source archive as a reserved seal.
-`pkg.store.verify` streams the seal, compares its SHA-256 with the lock, and
-compares the persisted catalog with one freshly derived from installed sources.
-It is read-only. `pkg.store.read-seal` verifies and returns the exact seal bytes
-independently of catalog metadata. It accepts no caller-selected child path.
-
-`pkg.store.ensure-catalog` accepts a store, key, package name, and expected hash.
-A valid current-format catalog requires no rebuild. Otherwise it verifies the
-retained archive seal and validates the installed source tree before atomically
-replacing the metadata. Failure or cancellation preserves prior metadata.
-Synchronization ensures catalogs for every selected existing cache or vendor
-entry before publishing the lock, including offline synchronization. Concurrent
-repairs publish complete equivalent metadata; dependency sources remain immutable.
-
-Project files are published through the `'project` filesystem root:
-`pkg.sync.write-project-file` uses `fs.create-text` for an absent file and the
-strict `fs.replace-text` otherwise, so a racing collision surfaces as the `fs`
-failure rather than becoming an upsert. Both publish through a private staging
-entry and preserve the prior file until the atomic commit.
-
-The package store exposes no general filesystem handles, recursive deletion,
-copy, rename, absolute path, or caller-selected garbage-collection root.
-
-### Synchronization
-
-`pkg.sync.run` receives a root manifest and performs a discovery pass followed
-by an installation pass inside a package-command Session, using the store the
-project lock selects.
-
-The discovery pass visits exact requirements in canonical order. A present
-store entry supplies its manifest locally through `pkg.store.manifest`. A
-missing entry is fetched with
-`http.get-bytes`; synchronization requires a successful status, computes the
-archive hash before inspection, validates the archive manifest, checks its
-exact package identity, and follows its requirements.
-
-HTTP status failure raises `'io` with `'package`, `'url`, and `'status`. Hash
-mismatch raises `'domain` with `'package`, `'declared-hash`, and
-`'actual-hash`. Manifest identity mismatch raises `'domain` with requested and
-actual names and versions. Archive errors carry the package and member when
-available. Discovery failure installs nothing and leaves the lock unchanged.
-
-After resolution, the installation pass visits selected packages in canonical
-order. It re-fetches each missing selection, repeats status, hash, archive, and
-identity validation, and installs the entry. Repeating verification at the
-publication boundary limits retained archive memory and makes the installer
-independent of discovery state.
-
-Synchronization writes `ecl.lock` only after every selected entry is present.
-It renders the lock once and publishes it with `pkg.sync.write-project-file`.
-Failure preserves the previous lock. Immutable entries installed before a later
-failure remain available for a subsequent run.
-
-`pkg.sync.run-offline` performs the same discovery, resolution, and
-publication using present store entries. It opens no network request.
-
-### Runtime module resolution
-
-A session without a discovered project resolves embedded modules and then
-uses `ECL_PATH`.
-
-A session with a discovered project resolves embedded modules and then uses
-its immutable lock-derived catalog. `ECL_PATH` is excluded from project
-resolution. A cache-backed lock uses the selected shared store; a vendored
-lock uses `<project-root>/vendor` and ignores cache environment variables.
-
-Session startup imports dependency catalogs after checking format and identity
-against the lock, assigning fresh package and artifact identities. Only root
-project sources are discovered dynamically. Missing, malformed, or incompatible
-metadata raises a package-specific error directing the user to `ecl pkg sync`;
-startup never scans dependency sources, writes repairs, or uses a legacy format.
-Source execution remains lazy: first use opens the required source artifact.
-
-The catalog maps each module to an exact package entry and source path. A
-missing selected directory raises `'io` and directs the user to `ecl pkg
-sync`. A module unavailable in the defining file and public catalog, or an
-export outside the current package's direct requirements, raises `'undefined-word`. Package lookup never falls through to
-`ECL_PATH` and never performs network or package writes.
-
-Runtime package visibility is lexical. Root and package code can resolve exports from their
-own package and packages named by their direct requirement edges. Loading a
-transitive package into the shared registry does not grant visibility to an
-unrelated caller.
-
-One source artifact is evaluated once. Its cataloged registrations and package
-provenance are verified before commit. Other files cannot resolve
-exports from an uncommitted artifact; the file being evaluated can use its
-own registrations as they are created.
-
-Runtime lookup uses these stable diagnostics:
-
-- missing entry: `locked package <package> is missing from the package store;
-  run ecl pkg sync`;
-- unavailable cache root: `locked package <package> has no package store; set
-  ECL_CACHE, XDG_CACHE_HOME, or HOME before running ecl pkg sync`;
-- failed entry probe: `cannot inspect locked package <package> in the package
-  store: <host-error>; run ecl pkg sync`;
-- invalid entry node: `locked package <package> is not a real package-store
-  directory; run ecl pkg sync`;
-- absent source: `locked module <module> is absent from package <package>`.
-
-The first four raise `'io`; the final message raises `'undefined-word`. An
-invalid discovered lock raises `'io` prefixed by `invalid project lock
-<path>:`.
-
-### Vendoring and cache collection
-
-`ecl pkg vendor` verifies every selected entry's seal and installs it at
-`<project-root>/vendor/<store-key>`. Existing vendor entries have their catalogs ensured, then their seals and
-catalog mappings verified; their source trees are preserved. After every entry is present, the command atomically rewrites the
-lock with `'store 'vendor`. Failure preserves the prior lock and may leave
-valid immutable entries for reuse. Repetition is idempotent.
-
-`ecl pkg gc <lock-file> [lock-file ...]` parses each named lock without
-evaluation and retains the union of their selected store keys. Each lock file
-is a canonical relative path beneath the working directory; an absolute or
-escaping path is a `'domain` error. Collection uses the shared cache the host
-selected at startup and preserves retained keys, symlinks, non-directory
-nodes, and unknown child names.
-
-An unretained real directory with a canonical store-key name is renamed to a
-private `.ecl-gc-*` name and deleted through bounded work without following
-links. A later collection finishes interrupted private entries. The reported
-count includes live entries detached by the current invocation.
-
-### Package commands
-
-`ecl pkg` dispatches to the ordinary `pkg.*` modules inside a package-command
-Session. Every command except `init` and `gc` uses project discovery and
-grants the discovered root to evaluated code as the `'project` filesystem root
-with `read-data`, `inspect`, `create`, and `replace`; the discovered path
-itself never enters evaluated code. `init` acts on the `'cwd` root.
-
-- `init [name]` creates `src/` and a format-2 manifest at version `0.1.0`, with
-  `sources ["src/**/*.ecl"]` and no exports. An existing source directory is
-  preserved. The working directory basename supplies the default name.
-  Manifest creation never replaces an existing or racing file.
-- `add <name> <version> <url>` fetches and validates an exact package, derives
-  its hash, and records the requirement through an atomic manifest rewrite.
-- `sync` performs network-enabled synchronization. `sync --offline` uses only
-  immutable store entries.
-- `tree` prints the lock root and dependency edges in requirer/package order.
-- `why <module>` prints one deterministic root-to-owner path.
-- `verify` streams and hashes every selected package seal and compares its
-  catalog with installed sources, without writes or network access.
-- `vendor` creates or verifies the project-local store and marks the lock as
-  vendored.
-- `gc <lock-file> [lock-file ...]` collects the shared cache against one or
-  more explicitly named locks.
-
-Successful package commands produce stable line-oriented output. Package and
-host failures remain structured ECL errors rendered by the process boundary.
+The maintained application in `apps/pkg/` implements `ecl pkg` through the
+installed-application dispatch described below. It owns `ecl.pkg`, the portable
+version-controlled `ecl.lock`, source acquisition, dependency selection, cache
+policy, immutable generations, verification, and publication recovery.
+See its [application contract](../apps/pkg/README.md) and
+[manifest format](../apps/pkg/FORMATS.md).
+
+The interpreter reads only `ecl.modules`. A hand-written map supports imports
+and tests without a package application. A fresh checkout with a manifest and
+lock reproduces the exact locked graph through `ecl pkg sync`; updates require
+`ecl pkg update`. Each published generation retains its own resolution snapshot,
+so separate atomic updates of the root lock and active map never mix dependency
+state inside an existing runnable generation.
 
 ## Installed applications
 
@@ -948,15 +547,13 @@ The command reads these environment variables at startup:
 - `ECL_WORKERS` supplies a positive base-10 worker count and defaults to the
   CPU count;
 - `ECL_NATIVE_DIAGNOSTICS` enables native-loading diagnostics when present;
-- `ECL_CACHE`, `XDG_CACHE_HOME`, and `HOME` participate in package cache
-  selection as described above;
-- `HOME` also selects the REPL history path `.ecl_history`.
+- `HOME` selects the REPL history path `.ecl_history`.
 
 ### Standard input
 
 `io.stdin` is available in `-e` and script-file modes. It reads the complete
 input stream once. There is no ambient file access: file words live in `fs`
-and act beneath the `'cwd` root. Standard input carries program source in `ecl -` and in
+and act beneath the selected named root or directory resource. Standard input carries program source in `ecl -` and in
 non-terminal invocation with no arguments, so `io.stdin` raises `'io` in those
 modes. A second read also raises `'io`.
 
@@ -973,9 +570,8 @@ editor remains usable.
 
 ### Test command
 
-`ecl test` requires a lock-backed root project. It loads every source file
-selected by the root package's `sources`, including files with no exported
-modules, discovers their declared tests, and invokes the selected runner in a
+`ecl test` requires a module map with a designated local scope. It loads every
+ECL artifact in that scope, including files with no exported modules, discovers their declared tests, and invokes the selected runner in a
 Test Session. Each source artifact is loaded once, including when an earlier
 source already loaded it through an exported module. Private modules keep
 their defining-file visibility. Dependency sources are loaded only as needed.
@@ -1024,20 +620,8 @@ The canonical layout follows these rules:
 
 ### Git dependency acquisition
 
-`ecl pkg add <https-url> --tag <tag>` resolves lightweight or annotated tags to
-commits. `--commit <40-digit-lowercase-id>` selects an immutable commit directly.
-Exactly one selector is required; branches and abbreviated IDs are unsupported.
-The root `ecl.pkg` supplies package identity. Add validates the deterministic
-artifact and records its hash and commit without installing or publishing a
-lock. Synchronization follows pinned commits for direct and transitive Git
-requirements, preserving archive sources in mixed graphs. An unavailable commit
-fails explicitly; it never falls back to a moved tag. HTTPS verification is
-mandatory, redirects cannot downgrade to HTTP, and credentials are unsupported.
-`ECL_GIT_CA_FILE` optionally selects a host-provided PEM trust bundle.
-
-Export includes ordinary tracked regular files and excludes Git storage.
-Symlinks, submodules, and entries rejected by package inspection are errors.
-The helper bounds fetching to 180 seconds, 512 MiB received, and 200,000 Git
-objects. Export permits at most 100,000 regular files and 1 GiB of tar data;
-existing package inspection limits also apply. Installed Git artifacts use the
-same seals, catalogs, verification, vendoring, and offline behavior as archives.
+Git snapshot acquisition is provided by the independently loaded
+[Git extension](../extensions/git/README.md), built against the public native
+SDK. It accepts HTTPS source requests and streams deterministic archives. It
+has no package or installation policy; the package application validates the
+result using public archive and source-inspection facilities.

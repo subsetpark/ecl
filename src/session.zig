@@ -20,14 +20,13 @@ const poll = @import("poll.zig");
 const reflection = @import("reflection.zig");
 const scheduler_api = @import("scheduler.zig");
 const console_api = @import("console.zig");
-const pkg_lock = @import("pkg_lock.zig");
+const map_state = @import("module_snapshot.zig");
 const session_options = @import("session_options");
 const stdlib = @import("stdlib.zig");
 const process_port = @import("process_port.zig");
 const filesystem_port = @import("filesystem_port.zig");
 const net_port = @import("net_port.zig");
 const http_service = @import("http_service.zig");
-const package_authority = @import("package_authority.zig");
 pub const Value = value.Value;
 /// Session construction distinguishes invalid runtime configuration from
 /// allocation failure: a misnamed root, a relative or missing directory, or an
@@ -51,10 +50,9 @@ pub const Config = union(enum) {
         };
     }
 };
-pub const CommandMode = union(enum) {
+pub const CommandMode = enum {
     evaluate,
     language_tests,
-    package: package_authority.PackageGrant,
 };
 
 pub const default_worker_count: usize = session_options.default_worker_count;
@@ -91,7 +89,7 @@ pub const ClockPolicy = struct {
 /// mode — from turning `init` into a positional checklist whose arguments
 /// only differ by type.
 pub const RuntimeInputs = struct {
-    /// Capacity for trusted package-defined resources; validated at creation
+    /// Capacity for trusted native-defined resources; validated at creation
     /// of the Session, independently of filesystem, process, and network limits.
     native_port_limits: native_port.Limits = .{},
     io: std.Io,
@@ -232,7 +230,6 @@ const SessionCore = struct {
     filesystem_owner: *filesystem_port.FilesystemOwner,
     net_owner: *net_port.NetOwner,
     http_owner: *http_service.Owner,
-    package_owner: ?*package_authority.PackageOwner,
     stack: std.ArrayList(Value) = .empty,
     archive_owner: spans.SpanArchiveOwner,
     archive: spans.SpanArchive,
@@ -240,8 +237,8 @@ const SessionCore = struct {
     tls_trust: ?machine.TlsTrust,
     wall_clock: machine.WallClock,
     ecl_path: ?[]u8,
-    project_lock: ?*pkg_lock.ProjectLock,
-    root_preload: RootPreloadState = .idle,
+    module_snapshot: ?*map_state.Snapshot,
+    local_preload: LocalPreloadState = .idle,
     environ: EnvironSnapshot,
     standard_input: machine.StandardInput,
     arguments: Value,
@@ -274,12 +271,12 @@ comptime {
     heap.requireSingleHostOwner(SessionCore);
 }
 const OpaqueSessionCore = opaque {};
-const RootPreloadState = union(enum) {
+const LocalPreloadState = union(enum) {
     idle,
-    cursor: pkg_lock.RootSourceCursor,
+    cursor: map_state.LocalSourceCursor,
     complete,
 
-    fn deinit(self: *RootPreloadState) void {
+    fn deinit(self: *LocalPreloadState) void {
         switch (self.*) {
             .cursor => |*cursor| cursor.deinit(),
             .idle, .complete => {},
@@ -288,10 +285,10 @@ const RootPreloadState = union(enum) {
     }
 };
 
-pub const RootPreloadProgress = union(enum) {
+pub const LocalPreloadProgress = union(enum) {
     pending,
     complete,
-    no_project,
+    no_map,
     invalid: []const u8,
     err: Value,
 };
@@ -326,10 +323,6 @@ pub const Session = enum(usize) {
         config: Config,
         mode: CommandMode,
     ) InitError!Session {
-        const package_grant: ?package_authority.PackageGrant = switch (mode) {
-            .evaluate, .language_tests => null,
-            .package => |grant| grant,
-        };
         if (!std.fs.path.isAbsolute(host.initial_cwd) or std.mem.indexOfScalar(u8, host.initial_cwd, 0) != null)
             return error.InvalidHostConfig;
         const scheduler_config = config.schedulerConfig();
@@ -377,7 +370,7 @@ pub const Session = enum(usize) {
             error.InvalidConfig => return error.InvalidHostConfig,
         };
         errdefer http_owner.deinit();
-        const owned_project_lock = discovery: {
+        const owned_module_snapshot = discovery: {
             const maps = @import("module_map.zig");
             const map_path = maps.discover(allocator, host.io, host.initial_cwd, host.module_map) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -389,23 +382,14 @@ pub const Session = enum(usize) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.Invalid => return error.InvalidHostConfig,
                 };
-                defer map.deinit();
-                break :discovery try pkg_lock.ProjectLock.fromMap(host_owner.cleanup(), map, host.initial_cwd);
+                errdefer map.deinit();
+                break :discovery try map_state.Snapshot.fromMap(host_owner.cleanup(), map, host.initial_cwd);
             }
-            break :discovery try pkg_lock.ProjectLock.discover(
-                host_owner.cleanup(),
-                host.io,
-                host.initial_cwd,
-                .{
-                    .ecl_cache = environValue(host.environ, "ECL_CACHE"),
-                    .xdg_cache_home = environValue(host.environ, "XDG_CACHE_HOME"),
-                    .home = environValue(host.environ, "HOME"),
-                },
-            );
+            break :discovery null;
         };
-        errdefer if (owned_project_lock) |project_lock| project_lock.deinit();
+        errdefer if (owned_module_snapshot) |module_snapshot| module_snapshot.deinit();
         var test_authority = if (mode == .language_tests)
-            @as(?modules.TestAuthority, try registry.createTestAuthority(owned_project_lock))
+            @as(?modules.TestAuthority, try registry.createTestAuthority(owned_module_snapshot))
         else
             null;
         errdefer if (test_authority) |*authority| authority.deinit();
@@ -462,19 +446,6 @@ pub const Session = enum(usize) {
             net_owner.deinit();
             allocator.destroy(net_owner);
         }
-        const package_owner = if (package_grant) |grant| owner: {
-            const owned = try allocator.create(package_authority.PackageOwner);
-            errdefer allocator.destroy(owned);
-            owned.* = package_authority.PackageOwner.init(allocator, host.io, grant) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.InvalidPolicy => return error.InvalidHostConfig,
-            };
-            break :owner owned;
-        } else null;
-        errdefer if (package_owner) |owner| {
-            owner.deinit();
-            allocator.destroy(owner);
-        };
         var argv = heap.OwnedValue.init(
             release_domain,
             try argumentsValue(allocator, release_domain, arguments),
@@ -499,7 +470,6 @@ pub const Session = enum(usize) {
             .filesystem_owner = filesystem_owner,
             .net_owner = net_owner,
             .http_owner = http_owner,
-            .package_owner = package_owner,
             .archive_owner = archive_owner,
             .archive = archive,
             .host_io = host.io,
@@ -510,7 +480,7 @@ pub const Session = enum(usize) {
                 .anchored => |base| .{ .anchored = base },
             },
             .ecl_path = owned_ecl_path,
-            .project_lock = owned_project_lock,
+            .module_snapshot = owned_module_snapshot,
             .environ = snapshot,
             .standard_input = .init(
                 host.standard_input,
@@ -543,14 +513,10 @@ pub const Session = enum(usize) {
         core.http_owner.deinit();
         core.filesystem_owner.deinit();
         core.allocator().destroy(core.filesystem_owner);
-        if (core.package_owner) |owner| {
-            owner.deinit();
-            core.allocator().destroy(owner);
-        }
         if (core.ecl_path) |path| core.allocator().free(path);
         if (core.tls_trust) |trust| core.allocator().free(trust.ca_file);
-        core.root_preload.deinit();
-        if (core.project_lock) |project_lock| project_lock.deinit();
+        core.local_preload.deinit();
+        if (core.module_snapshot) |module_snapshot| module_snapshot.deinit();
         if (core.test_authority) |*authority| authority.deinit();
         core.registry.deinit();
         core.archive_owner.deinit();
@@ -630,10 +596,9 @@ pub const Session = enum(usize) {
                 .native_diagnostics = core.native_diagnostics,
                 .tls_trust = core.tls_trust,
                 .ecl_path = core.ecl_path,
-                .project_lock = core.project_lock,
+                .module_snapshot = core.module_snapshot,
                 .idiom_mode = core.idiom_mode,
                 .phrase_recognizer = idioms.tryApply,
-                .package_access = if (core.package_owner) |owner| owner.access() else null,
                 .phase = .{ .runtime = .{
                     .native_loader = core.native_owner.loader(),
                     .console = &core.console,
@@ -683,12 +648,12 @@ pub const Session = enum(usize) {
             lease.deinit();
             return .ok;
         }
-        return self.loadCatalogTarget(.{ .module = name });
+        return self.loadTarget(.{ .module = name });
     }
 
-    const CatalogTarget = union(enum) { module: intern.ModuleName, source: *const pkg_lock.SourceScope };
+    const LoadTarget = union(enum) { module: intern.ModuleName, source: *const map_state.SourceScope };
 
-    fn loadCatalogTarget(self: *Session, target: CatalogTarget) error{OutOfMemory}!UnitOutcome {
+    fn loadTarget(self: *Session, target: LoadTarget) error{OutOfMemory}!UnitOutcome {
         const core = self.coreState();
         if (core.root_scope == null)
             core.root_scope = try core.environment.createSessionRoot(core.allocator());
@@ -733,37 +698,32 @@ pub const Session = enum(usize) {
         return .ok;
     }
 
-    /// Advance root-project preload by at most one catalog observation and one
+    /// Advance local-scope preload by at most one artifact observation and one
     /// ordinary source load. Cursor authority remains inside SessionCore, so a
-    /// host cannot retain a ProjectLock borrow past Session teardown.
-    pub fn advanceRootPreload(self: *Session) error{OutOfMemory}!RootPreloadProgress {
+    /// host cannot retain a Snapshot borrow past Session teardown.
+    pub fn advanceLocalPreload(self: *Session) error{OutOfMemory}!LocalPreloadProgress {
         const core = self.coreState();
-        if (core.root_preload == .idle) {
-            const project_lock = core.project_lock orelse {
-                core.root_preload = .complete;
-                return .no_project;
+        if (core.local_preload == .idle) {
+            const module_snapshot = core.module_snapshot orelse {
+                core.local_preload = .complete;
+                return .no_map;
             };
-            core.root_preload = .{ .cursor = project_lock.rootSourceCursor() };
+            core.local_preload = .{ .cursor = module_snapshot.localSourceCursor() };
         }
-        return switch (core.root_preload) {
+        return switch (core.local_preload) {
             .idle => unreachable,
             .complete => .complete,
             .cursor => |*cursor| switch (cursor.advance()) {
                 .pending => .pending,
                 .complete => result: {
                     cursor.deinit();
-                    core.root_preload = .complete;
+                    core.local_preload = .complete;
                     break :result .complete;
                 },
-                .invalid => |message| result: {
-                    cursor.deinit();
-                    core.root_preload = .complete;
-                    break :result .{ .invalid = message };
-                },
-                .item => |source| switch (try self.loadCatalogTarget(.{ .source = source })) {
+                .item => |source| switch (try self.loadTarget(.{ .source = source })) {
                     .ok => .pending,
                     .err => |failure| .{ .err = failure },
-                    .incomplete => .{ .invalid = "root project source loader returned incomplete source" },
+                    .incomplete => .{ .invalid = "local-scope source loader returned incomplete source" },
                 },
             },
         };

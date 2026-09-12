@@ -72,97 +72,27 @@ fn archiveViewSource(allocator: std.mem.Allocator) ![]u8 {
     return allocator.dupe(u8, source.written());
 }
 
-const package_a_key = "a-1.0.0-a623bf09cb12068dc16b81c4a4a4e28f9eea52b6dadd88344708502f3a992465";
-/// The lock hash of package `a` in the sync probes; the store probe verifies
-/// the seal it just installed, so it needs the fixture's real digest.
-const package_a_hash = "sha256-1f9aefdfdd91996e4f2f80b7f89f1ac3d8907616b74f1cf55a1a48042556738a";
-const package_valid_seal_hash = "sha256-a623bf09cb12068dc16b81c4a4a4e28f9eea52b6dadd88344708502f3a992465";
-
-fn packageStoreSource(allocator: std.mem.Allocator) ![]u8 {
-    var source = std.Io.Writer.Allocating.init(allocator);
-    defer source.deinit();
-    try appendFixtureBytes(&source.writer, archive_fixtures.package_valid);
-    try source.writer.writeAll(" \"a\" pkg.store.inspect pop ");
-    try appendFixtureBytes(&source.writer, archive_fixtures.package_valid);
-    try source.writer.writeAll(" \"a\" 'cache \"" ++ package_a_key ++ "\" pkg.store.install pop ");
-    try source.writer.writeAll("'cache \"" ++ package_a_key ++ "\" pkg.store.present? pop ");
-    try source.writer.writeAll("'cache \"" ++ package_a_key ++ "\" pkg.store.manifest pop ");
-    try source.writer.writeAll("'cache \"" ++ package_a_key ++ "\" \"a\" \"" ++ package_valid_seal_hash ++ "\" pkg.store.verify ");
-    try source.writer.writeAll("'cache \"" ++ package_a_key ++ "\" \"a\" \"" ++ package_valid_seal_hash ++ "\" pkg.store.read-seal pop");
-    return allocator.dupe(u8, source.written());
-}
-
-const package_sync_source =
-    "{'format 2 'name \"r\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires " ++
-    "{\"a\" {'package \"a\" 'version \"1.0.0\" 'source {'kind 'archive 'url \"https://e.com/a.tgz\"} " ++
-    "'hash \"" ++ package_a_hash ++ "\"}}} pkg.sync.run pop";
-
-const package_cli_source = "[] pkg.cli.tree";
-
-const PackageScratch = struct {
+const MapScratch = struct {
     directory: std.testing.TmpDir,
     path: [:0]u8,
-
-    fn init() !PackageScratch {
-        const allocator = std.testing.allocator;
+    fn init() !MapScratch {
         var directory = std.testing.tmpDir(.{});
         errdefer directory.cleanup();
-        const path = try directory.dir.realPathFileAlloc(std.testing.io, ".", allocator);
-        errdefer allocator.free(path);
-        const lock_probe_hash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        const path = try directory.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+        errdefer std.testing.allocator.free(path);
         try directory.dir.writeFile(std.testing.io, .{
-            .sub_path = "ecl.pkg",
-            .data = "{'format 2 'name \"root\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires {}}\n",
+            .sub_path = "ecl.modules",
+            .data = "{'format 1 'local \"root\" 'scopes {\"root\" {'root \".\" 'visible [] 'sources [] 'artifacts [{'path \"probe.ecl\" 'kind 'ecl 'exports [\"mapprobe\"]}]}}}",
         });
         try directory.dir.writeFile(std.testing.io, .{
-            .sub_path = "ecl.lock",
-            .data = "{'format 2 'root \"root\" 'packages {\"lockprobe\" {'version \"1.0.0\" 'source {'kind 'archive 'url \"https://e.com/p.tgz\"} 'hash \"sha256-" ++ lock_probe_hash ++ "\"}} 'requires {\"lockprobe\" {} \"root\" {\"lockprobe\" {'package \"lockprobe\" 'version \"1.0.0\"}}}}\n",
-        });
-        try directory.dir.createDir(
-            std.testing.io,
-            "lockprobe-1.0.0-" ++ lock_probe_hash,
-            .default_dir,
-        );
-        try directory.dir.writeFile(std.testing.io, .{
-            .sub_path = "lockprobe-1.0.0-" ++ lock_probe_hash ++ "/lockprobe.ecl",
-            .data = "[] ((42) 'answer def) @module 'helper register\n" ++
-                "[] ((helper.answer) 'answer def) 'lockprobe @defm\n",
-        });
-        try directory.dir.writeFile(std.testing.io, .{
-            .sub_path = "lockprobe-1.0.0-" ++ lock_probe_hash ++ "/ecl.pkg",
-            .data = "{'format 2 'name \"lockprobe\" 'version \"1.0.0\" 'sources [\"**/*\"] 'exports [\"lockprobe\"] 'requires {}}\n",
-        });
-        try directory.dir.writeFile(std.testing.io, .{
-            .sub_path = "lockprobe-1.0.0-" ++ lock_probe_hash ++ "/.ecl-package.catalog",
-            .data = "{'format 1 'name \"lockprobe\" 'version \"1.0.0\" 'hash \"sha256-" ++ lock_probe_hash ++ "\" 'sources [{'path \"lockprobe.ecl\" 'exports [\"lockprobe\"]}]}\n",
+            .sub_path = "probe.ecl",
+            .data = "[] ((42) 'answer def) @module 'helper register [] ((helper.answer) 'answer def) 'mapprobe @defm",
         });
         return .{ .directory = directory, .path = path };
     }
-
-    fn deinit(self: *PackageScratch) void {
+    fn deinit(self: *MapScratch) void {
         std.testing.allocator.free(self.path);
         self.directory.cleanup();
-    }
-
-    /// Materialize the already-verified package fixture as sync's offline
-    /// prerequisite. `pkg.store.install` has its own exhaustive failure window
-    /// in the package-store probe; running it through the injected Session for
-    /// every `pkg.sync.run` ordinal made setup dominate the release gate.
-    fn installPackageA(self: *PackageScratch) !void {
-        const key = "a-1.0.0-1f9aefdfdd91996e4f2f80b7f89f1ac3d8907616b74f1cf55a1a48042556738a";
-        try self.directory.dir.createDir(std.testing.io, key, .default_dir);
-        try self.directory.dir.writeFile(std.testing.io, .{
-            .sub_path = key ++ "/a.ecl",
-            .data = "[] (() 'noop def) 'a @defm\n",
-        });
-        try self.directory.dir.writeFile(std.testing.io, .{
-            .sub_path = key ++ "/ecl.pkg",
-            .data = "{'format 2 'name \"a\" 'version \"1.0.0\" 'sources [\"**/*\"] 'exports [\"a\"] 'requires {}}\n",
-        });
-        try self.directory.dir.writeFile(std.testing.io, .{
-            .sub_path = key ++ "/.ecl-package.catalog",
-            .data = "{'format 1 'name \"a\" 'version \"1.0.0\" 'hash \"" ++ package_a_hash ++ "\" 'sources [{'path \"a.ecl\" 'exports [\"a\"]}]}\n",
-        });
     }
 };
 
@@ -744,13 +674,13 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     }
 }
 
-/// Exhausts the project-lock discovery branch of Session initialization once.
+/// Exhausts the module-map discovery branch of Session initialization once.
 /// Every standard-library and package probe below uses the same host shape, so
 /// their post-init windows do not need to replay these ordinals independently.
 fn projectSessionInitializationProbe(allocator: std.mem.Allocator) !void {
     var locked_allocator = LockedAllocator{ .child = allocator };
     const thread_safe_allocator = locked_allocator.allocator();
-    var scratch = try PackageScratch.init();
+    var scratch = try MapScratch.init();
     defer scratch.deinit();
     var output_buffer: [1024]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
@@ -765,7 +695,6 @@ fn projectSessionInitializationProbe(allocator: std.mem.Allocator) !void {
         .initial_cwd = scratch.path,
         .environ = &.{
             .{ .name = "ECL_OOM_PROBE", .value = "probe" },
-            .{ .name = "ECL_CACHE", .value = scratch.path },
         },
         .standard_input = .program_source,
     }), .cooperative, .evaluate);
@@ -783,7 +712,7 @@ const StdlibSurface = enum {
     tree_operations,
     source_declarations,
     host_metadata,
-    locked_project_module,
+    mapped_module,
     root_source_preload,
     random,
     dict,
@@ -796,9 +725,6 @@ const StdlibSurface = enum {
     table,
     archive_hash,
     archive_unpack,
-    package_store,
-    package_catalog_repair,
-    package_store_gc,
     host_io,
     filesystem,
     clock,
@@ -809,11 +735,6 @@ const StdlibSurface = enum {
     net,
     net_connection,
     net_give,
-    package_git,
-    package_sync_module,
-    package_sync,
-    package_cli_module,
-    package_cli,
 };
 
 fn stdlibSessionAllocationProbe(
@@ -824,24 +745,12 @@ fn stdlibSessionAllocationProbe(
     const allocator = failing.allocator();
     var locked_allocator = LockedAllocator{ .child = allocator };
     const thread_safe_allocator = locked_allocator.allocator();
-    var scratch = try PackageScratch.init();
+    var scratch = try MapScratch.init();
     defer scratch.deinit();
-    if (surface == .package_sync) try scratch.installPackageA();
-    if (surface == .package_catalog_repair) {
-        try scratch.directory.dir.createDir(std.testing.io, package_a_key, .default_dir);
-        try scratch.directory.dir.writeFile(std.testing.io, .{ .sub_path = package_a_key ++ "/ecl.pkg", .data = "{'format 2 'name \"a\" 'version \"1.0.0\" 'sources [\"**/*\"] 'exports [\"a\"] 'requires {}}\n" });
-        try scratch.directory.dir.writeFile(std.testing.io, .{ .sub_path = package_a_key ++ "/a.ecl", .data = "[] (() 'noop def) 'a @defm\n" });
-        const hex = std.mem.trim(u8, archive_fixtures.package_valid, " \r\n\t");
-        const bytes = try std.testing.allocator.alloc(u8, hex.len / 2);
-        defer std.testing.allocator.free(bytes);
-        _ = try std.fmt.hexToBytes(bytes, hex);
-        try scratch.directory.dir.writeFile(std.testing.io, .{ .sub_path = package_a_key ++ "/.ecl-package.tgz", .data = bytes });
-        try scratch.directory.dir.writeFile(std.testing.io, .{ .sub_path = package_a_key ++ "/.ecl-package.catalog", .data = "invalid metadata" });
-    }
     if (surface == .root_source_preload) {
         try scratch.directory.dir.writeFile(std.testing.io, .{
-            .sub_path = "ecl.pkg",
-            .data = "{'format 2 'name \"root\" 'version \"0.1.0\" 'sources [\"suite.ecl\"] 'exports [] 'requires {}}\n",
+            .sub_path = "ecl.modules",
+            .data = "{'format 1 'local \"root\" 'scopes {\"root\" {'root \".\" 'visible [] 'sources [\"suite.ecl\"] 'artifacts []}}}",
         });
         try scratch.directory.dir.writeFile(std.testing.io, .{
             .sub_path = "suite.ecl",
@@ -853,11 +762,11 @@ fn stdlibSessionAllocationProbe(
     // the sweep enumerates live Session paths rather than this helper's writer.
     const scaffold_allocator = std.testing.allocator;
     const scratch_path = scratch.path;
-    const process_path = if (surface == .process or surface == .package_git)
+    const process_path = if (surface == .process)
         try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, process_fixture.process_exe, scaffold_allocator)
     else
         null;
-    defer if (surface == .process or surface == .package_git) scaffold_allocator.free(process_path);
+    defer if (surface == .process) scaffold_allocator.free(process_path);
     var output_buffer: [16384]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
     var diagnostics_buffer: [1024]u8 = undefined;
@@ -877,7 +786,6 @@ fn stdlibSessionAllocationProbe(
         .initial_cwd = scratch_path,
         .environ = &.{
             .{ .name = "ECL_OOM_PROBE", .value = "probe" },
-            .{ .name = "ECL_CACHE", .value = scratch_path },
         },
         .standard_input = .program_source,
         .process_limits = .{
@@ -889,51 +797,26 @@ fn stdlibSessionAllocationProbe(
             .{ .name = "cwd", .absolute_path = scratch_path },
             .{ .name = "project", .absolute_path = scratch_path },
         } },
-    }), .cooperative, if (surface == .root_source_preload) .language_tests else .{ .package = .{ .synchronize = .{ .cache = scratch_path, .project = scratch.directory.dir, .git = if (surface == .package_git) .{ .executable = process_path } else null } } });
-    defer if (surface == .package_git) {
-        var directory = scratch.directory.dir.openDir(std.testing.io, ".", .{ .iterate = true }) catch @panic("cannot inspect Git cleanup");
-        defer directory.close(std.testing.io);
-        var entries = directory.iterate();
-        while (entries.next(std.testing.io) catch @panic("cannot inspect Git cleanup")) |entry| {
-            if (std.mem.startsWith(u8, entry.name, ".git-fetch-")) @panic("Git staging survived allocation failure");
-        }
-    };
+    }), .cooperative, if (surface == .root_source_preload) .language_tests else .evaluate);
     defer runtime.deinit();
-
-    // Loading these large embedded modules has its own failure window. Their
-    // public operation probes start after publication so definitions added to
-    // either module do not multiply the expensive operation's replay count.
-    switch (surface) {
-        .package_sync => try runOk(
-            &runtime,
-            "oom-pkg-sync-setup.ecl",
-            "'pkg.sync ('run) import",
-        ),
-        .package_cli => try runOk(
-            &runtime,
-            "oom-pkg-cli-setup.ecl",
-            "'pkg.cli ('tree) import",
-        ),
-        else => {},
-    }
 
     const first_failure_index = failing.alloc_index;
     if (failure_offset) |offset| failing.fail_index = first_failure_index + offset;
 
     switch (surface) {
         .root_source_preload => {
-            while (true) switch (try runtime.advanceRootPreload()) {
+            while (true) switch (try runtime.advanceLocalPreload()) {
                 .pending => {},
                 .complete => break,
                 .err => |failure| return reportUnexpectedFailure(&runtime, "root source preload", failure),
-                .invalid, .no_project => return error.UnexpectedPreloadFailure,
+                .invalid, .no_map => return error.UnexpectedPreloadFailure,
             };
             try runOk(&runtime, "oom-private-tests.ecl", "tests first @test pop");
         },
-        .locked_project_module => try runOk(
+        .mapped_module => try runOk(
             &runtime,
             "oom-lock-tier.ecl",
-            "lockprobe.answer pop",
+            "mapprobe.answer pop",
         ),
         .random => try runOk(
             &runtime,
@@ -1025,21 +908,6 @@ fn stdlibSessionAllocationProbe(
             defer scaffold_allocator.free(archive_source);
             try runOk(&runtime, "oom-archive.ecl", archive_source);
         },
-        .package_store => {
-            const package_source = try packageStoreSource(scaffold_allocator);
-            defer scaffold_allocator.free(package_source);
-            try runOk(&runtime, "oom-pkg-store.ecl", package_source);
-        },
-        .package_catalog_repair => try runOk(
-            &runtime,
-            "oom-pkg-catalog.ecl",
-            "'cache \"" ++ package_a_key ++ "\" \"a\" \"" ++ package_valid_seal_hash ++ "\" pkg.store.ensure-catalog",
-        ),
-        .package_store_gc => try runOk(
-            &runtime,
-            "oom-pkg-gc.ecl",
-            "[\"a-1.0.0-1f9aefdfdd91996e4f2f80b7f89f1ac3d8907616b74f1cf55a1a48042556738a\"] pkg.store.gc pop",
-        ),
         .host_io => try runOk(
             &runtime,
             "oom-hostio.ecl",
@@ -1209,19 +1077,6 @@ fn stdlibSessionAllocationProbe(
             defer scaffold_allocator.free(process_source);
             try runExpectedLanguageError(&runtime, "oom-process.ecl", process_source);
         },
-        .package_git => try runOk(&runtime, "oom-pkg-git.ecl", "\"https://example.invalid/repo\" \"commit\" \"" ++ ("a" ** 40) ++ "\" pkg.store.git-fetch pop"),
-        .package_sync_module => try runOk(
-            &runtime,
-            "oom-pkg-sync-module.ecl",
-            "'pkg.sync ('run) import",
-        ),
-        .package_sync => try runOk(&runtime, "oom-pkg-sync.ecl", package_sync_source),
-        .package_cli_module => try runOk(
-            &runtime,
-            "oom-pkg-cli-module.ecl",
-            "'pkg.cli ('tree) import",
-        ),
-        .package_cli => try runOk(&runtime, "oom-pkg-cli.ecl", package_cli_source),
     }
     return first_failure_index;
 }
@@ -1432,7 +1287,7 @@ const HttpMemoryIo = struct {
 fn checkStdlibSurface(comptime surface: StdlibSurface) !void {
     // Network operations and the private Git process can finish before a waiter
     // allocates its readiness storage; allocation counts depend on progress.
-    if (surface == .net or surface == .net_connection or surface == .net_give or surface == .http or surface == .http_server or surface == .package_git)
+    if (surface == .net or surface == .net_connection or surface == .net_give or surface == .http or surface == .http_server)
         return checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, SurfaceProbe(surface).run);
     try checkAllPostInitAllocationFailuresParallel(
         std.heap.smp_allocator,
@@ -1759,12 +1614,12 @@ fn checkStdlibSurfaceOrdinalShard(
     );
 }
 
-test "oom: standard-library and host: package: locked project module propagates every allocation failure" {
+test "oom: standard-library and host: module map: artifact loading propagates every allocation failure" {
     try requireSelectedOomTest(@src());
-    try checkStdlibSurface(.locked_project_module);
+    try checkStdlibSurface(.mapped_module);
 }
 
-test "oom: standard-library and host: package: root source preload propagates every allocation failure" {
+test "oom: standard-library and host: module map: local source preload propagates every allocation failure" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.root_source_preload);
 }
@@ -1849,16 +1704,6 @@ test "oom: standard-library and host: stdlib: archive unpack propagates every al
     try checkStdlibSurface(.archive_unpack);
 }
 
-test "oom: standard-library and host: package: store propagates every allocation failure" {
-    try requireSelectedOomTest(@src());
-    try checkStdlibSurface(.package_store);
-}
-
-test "oom: standard-library and host: package: store GC propagates every allocation failure" {
-    try requireSelectedOomTest(@src());
-    try checkStdlibSurface(.package_store_gc);
-}
-
 test "oom: standard-library and host: host: IO propagates every allocation failure" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.host_io);
@@ -1929,46 +1774,6 @@ test "oom: standard-library and host: host: HTTP propagates every allocation fai
 test "oom: standard-library and host: stdlib: http server propagates every allocation failure" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.http_server);
-}
-
-test "oom: standard-library and host: package: sync module propagates every allocation failure" {
-    try requireSelectedOomTest(@src());
-    try checkStdlibSurface(.package_sync_module);
-}
-
-test "oom: standard-library and host: sync: operation ordinal shard 1 of 4" {
-    try requireSelectedOomTest(@src());
-    try checkStdlibSurfaceOrdinalShard(.package_sync, 0, 4);
-}
-
-test "oom: standard-library and host: sync: operation ordinal shard 2 of 4" {
-    try requireSelectedOomTest(@src());
-    try checkStdlibSurfaceOrdinalShard(.package_sync, 1, 4);
-}
-
-test "oom: standard-library and host: sync: operation ordinal shard 3 of 4" {
-    try requireSelectedOomTest(@src());
-    try checkStdlibSurfaceOrdinalShard(.package_sync, 2, 4);
-}
-
-test "oom: standard-library and host: sync: operation ordinal shard 4 of 4" {
-    try requireSelectedOomTest(@src());
-    try checkStdlibSurfaceOrdinalShard(.package_sync, 3, 4);
-}
-
-test "oom: standard-library and host: package: CLI module propagates every allocation failure" {
-    try requireSelectedOomTest(@src());
-    try checkStdlibSurface(.package_cli_module);
-}
-
-test "oom: standard-library and host: package: CLI operation propagates every allocation failure" {
-    try requireSelectedOomTest(@src());
-    try checkStdlibSurface(.package_cli);
-}
-test "oom: standard-library and host: process port lifecycle" {
-    try requireSelectedOomTest(@src());
-    // Concurrent readers and controller results may avoid wait allocations.
-    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, SurfaceProbe(.process).run);
 }
 
 test "oom: standard-library and host: native port multiplexed channel publication" {
@@ -2171,16 +1976,6 @@ fn startupSessionAllocationProbe(allocator: std.mem.Allocator) !void {
 test "oom: standard-library and host: host: startup snapshot and Session initialization" {
     try requireSelectedOomTest(@src());
     try checkAllAllocationFailuresParallel(std.heap.smp_allocator, startupSessionAllocationProbe);
-}
-
-test "oom: standard-library and host: package: catalog repair propagates every allocation failure" {
-    try requireSelectedOomTest(@src());
-    try checkStdlibSurface(.package_catalog_repair);
-}
-
-test "oom: standard-library and host: package: Git helper propagates every allocation failure" {
-    try requireSelectedOomTest(@src());
-    try checkStdlibSurface(.package_git);
 }
 
 test "oom: standard-library and host: stdlib: directory resources propagate every allocation failure" {

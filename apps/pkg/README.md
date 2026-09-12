@@ -5,6 +5,9 @@ source selection, fetching, installation, verification, and publication. The
 interpreter consumes only `ecl.modules`; it never discovers or interprets
 `ecl.pkg`, `ecl.lock`, or application recovery records.
 
+See [manifest and source conventions](FORMATS.md) and the
+[pure data API reference](API.md).
+
 ## Portable project state
 
 `ecl.pkg` remains the project manifest. The root `ecl.lock` is portable project
@@ -46,7 +49,8 @@ bypasses this discovery and selection entirely.
 `pkg.resolution` owns validation, canonical serialization, compatibility, and
 sealed-manifest checks. `zig build test-pkg-app` invokes ECL's built-in test
 runner against the application's test map; package policy assertions live in
-ECL. Separate-process orchestration and controlled external services remain
+ECL. The larger manifest, SemVer, and solver corpora run under
+`zig build test-pkg-contracts` in the full suite. Separate-process orchestration and controlled external services remain
 host integration fixtures.
 
 ## Commands and installation

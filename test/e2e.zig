@@ -1,32 +1,13 @@
 const std = @import("std");
-const pkg_lock_fixture = @import("pkg_lock_fixture.zig");
-const pkg_example_hash = "315c772a16778673e205ae556185d25b4109ad40641e60e6b5d96d1f7db99745";
-const pkg_runtime_hash = "50e119dd9bfcff3d9eacc68977d5792f4bd3448d3b23e654838b2add0c5a48e0";
-const pkg_runtime_key = "a-1.0.0-" ++ pkg_runtime_hash;
-const pkg_runtime_manifest =
-    "{'format 2 'name \"root\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires " ++
-    "{\"a\" {'package \"a\" 'version \"1.0.0\" 'source {'kind 'archive 'url \"https://example.invalid/a.tgz\"} " ++
-    "'hash \"sha256-" ++ pkg_runtime_hash ++ "\"}}}\n";
-const pkg_runtime_lock =
-    "{'format 2\n" ++
-    " 'root \"root\"\n" ++
-    " 'packages\n" ++
-    " {\"a\" {'version \"1.0.0\" 'source {'kind 'archive 'url \"https://example.invalid/a.tgz\"} 'hash \"sha256-" ++ pkg_runtime_hash ++ "\"}}\n" ++
-    " 'requires\n" ++
-    " {\"a\" {}\n" ++
-    "  \"root\" {\"a\" {'package \"a\" 'version \"1.0.0\"}}}}\n";
-const pkg_runtime_vendor_lock =
-    "{'format 2\n" ++
-    " 'root \"root\"\n" ++
-    " 'store 'vendor\n" ++
-    " 'packages\n" ++
-    " {\"a\" {'version \"1.0.0\" 'source {'kind 'archive 'url \"https://example.invalid/a.tgz\"} 'hash \"sha256-" ++ pkg_runtime_hash ++ "\"}}\n" ++
-    " 'requires\n" ++
-    " {\"a\" {}\n" ++
-    "  \"root\" {\"a\" {'package \"a\" 'version \"1.0.0\"}}}}\n";
+const builtin = @import("builtin");
+const build_options = @import("build_options");
+const cli = @import("cli_test_support.zig");
+const allocator = std.testing.allocator;
+const io = std.testing.io;
 
-const test_project_lock =
-    "{'format 2 'root \"app\" 'packages {} 'requires {\"app\" {}}}\n";
+test {
+    _ = @import("scheduler_shell_property.zig");
+}
 
 test "e2e: proc direct execution preserves argv cwd environment and policy" {
     const ecl_exe = try absoluteExe();
@@ -558,11 +539,9 @@ fn processStatus(pid: std.posix.pid_t) ?ProcessStatus {
 
 fn writeTestProject(
     directory: std.Io.Dir,
-    manifest: []const u8,
     files: []const struct { path: []const u8, source: []const u8 },
 ) !void {
-    try directory.writeFile(io, .{ .sub_path = "ecl.pkg", .data = manifest });
-    try directory.writeFile(io, .{ .sub_path = "ecl.lock", .data = test_project_lock });
+    try directory.writeFile(io, .{ .sub_path = "ecl.modules", .data = "{'format 1 'local \"app\" 'scopes {\"app\" {'root \".\" 'visible [] 'sources [\"*.ecl\" \"z-*.ecl\"] 'artifacts []}}}" });
     for (files) |file| try directory.writeFile(io, .{
         .sub_path = file.path,
         .data = file.source,
@@ -574,8 +553,6 @@ test "e2e: ecl test runs the default stateful runner" {
     defer scratch.cleanup();
     try writeTestProject(
         scratch.dir,
-        "{'format 2 'name \"app\" 'version \"0.1.0\" " ++
-            "'sources [\"suite.ecl\"] 'exports [\"app.suite\"] 'requires {}}\n",
         &.{.{
             .path = "suite.ecl",
             .source = "[] (0 " ++
@@ -608,8 +585,7 @@ test "e2e: ecl test runs the default stateful runner" {
 test "e2e: tests retain file-private module visibility" {
     var scratch = std.testing.tmpDir(.{});
     defer scratch.cleanup();
-    try writeTestProject(scratch.dir, "{'format 2 'name \"app\" 'version \"0.1.0\" 'sources [\"*.ecl\"] " ++
-        "'exports [\"app.foo\" \"app.bar\"] 'requires {}}\n", &.{
+    try writeTestProject(scratch.dir, &.{
         .{ .path = "bar.ecl", .source = "[] ((42) 'answer def) @module 'baz register\n" ++
             "[] ((baz.answer 42 = {'kind 'user} assert) 'local test) 'app.bar @defm\n" ++
             "baz.answer 42 = {'kind 'user} assert\n" },
@@ -635,12 +611,11 @@ test "e2e: tests retain file-private module visibility" {
 test "e2e: ecl test discovers private-only sources and loads each artifact once" {
     var scratch = std.testing.tmpDir(.{});
     defer scratch.cleanup();
-    try writeTestProject(scratch.dir, "{'format 2 'name \"app\" 'version \"0.1.0\" " ++
-        "'sources [\"*.ecl\" \"private.ecl\"] 'exports [] 'requires {}}\n", &.{
-        .{ .path = "private.ecl", .source = "[] ((42) 'answer def) 'helper @defm\n" ++
-            "[] ((helper.answer 42 = {'kind 'user} assert) 'answer test) 'suite @defm\n" },
-        .{ .path = "other.ecl", .source = "[] ((7) 'answer def) 'helper @defm\n" ++
-            "[] ((helper.answer 7 = {'kind 'user} assert) 'answer test) 'suite @defm\n" },
+    try writeTestProject(scratch.dir, &.{
+        .{ .path = "private.ecl", .source = "[] ((42) 'answer def) @module 'helper register\n" ++
+            "[] ((helper.answer 42 = {'kind 'user} assert) 'answer test) @module 'suite register\n" },
+        .{ .path = "other.ecl", .source = "[] ((7) 'answer def) @module 'helper register\n" ++
+            "[] ((helper.answer 7 = {'kind 'user} assert) 'answer test) @module 'suite register\n" },
     });
     const exe = try absoluteExe();
     defer allocator.free(exe);
@@ -650,8 +625,7 @@ test "e2e: ecl test discovers private-only sources and loads each artifact once"
 
     // The first source loads the later source through an export. Preload must
     // reuse that committed artifact, including with overlapping source globs.
-    try writeTestProject(scratch.dir, "{'format 2 'name \"app\" 'version \"0.1.0\" " ++
-        "'sources [\"*.ecl\" \"z-public.ecl\"] 'exports [\"app.public\"] 'requires {}}\n", &.{
+    try writeTestProject(scratch.dir, &.{
         .{ .path = "a-consumer.ecl", .source = "app.public.answer 42 = {'kind 'user} assert\n" ++
             "[] (([] (helper.answer) @attempt 'err at 'kind at 'undefined-word match? " ++
             "{'kind 'user} assert) 'isolated test) 'consumer @defm\n" },
@@ -668,9 +642,6 @@ test "e2e: ecl test accepts a userland runner" {
     defer scratch.cleanup();
     try writeTestProject(
         scratch.dir,
-        "{'format 2 'name \"app\" 'version \"0.1.0\" " ++
-            "'sources [\"suite.ecl\" \"custom.ecl\"] 'exports [\"app.suite\" \"app.custom.runner\"] " ++
-            "'requires {}}\n",
         &.{
             .{
                 .path = "suite.ecl",
@@ -708,16 +679,12 @@ test "e2e: ecl test reports project and runner failures" {
     try absent.expect(.{
         .exit_code = 1,
         .stdout = "",
-        .stderr_contains = &.{"lock-backed root project"},
+        .stderr_contains = &.{"map with a designated local scope"},
     });
 
     var invalid = std.testing.tmpDir(.{});
     defer invalid.cleanup();
-    try invalid.dir.writeFile(io, .{
-        .sub_path = "ecl.pkg",
-        .data = "{'format 2 'name \"app\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires {}}\n",
-    });
-    try invalid.dir.writeFile(io, .{ .sub_path = "ecl.lock", .data = "not a lock\n" });
+    try invalid.dir.writeFile(io, .{ .sub_path = "ecl.modules", .data = "broken" });
     var invalid_result = try cli.runOptions(.{
         .argv = &.{ exe, "test" },
         .cwd = .{ .dir = invalid.dir },
@@ -726,15 +693,13 @@ test "e2e: ecl test reports project and runner failures" {
     try invalid_result.expect(.{
         .exit_code = 1,
         .stdout = "",
-        .stderr_contains = &.{"invalid project lock"},
+        .stderr_contains = &.{"runtime directories, module map, or limits are invalid"},
     });
 
     var project = std.testing.tmpDir(.{});
     defer project.cleanup();
     try writeTestProject(
         project.dir,
-        "{'format 2 'name \"app\" 'version \"0.1.0\" " ++
-            "'sources [\"suite.ecl\"] 'exports [\"app.suite\"] 'requires {}}\n",
         &.{.{ .path = "suite.ecl", .source = "[] ((1) 'one test) 'app.suite @defm\n" }},
     );
     var unqualified = try cli.runOptions(.{
@@ -758,608 +723,6 @@ test "e2e: ecl test reports project and runner failures" {
         .stderr_contains = &.{ "missing.runner", "'kind 'undefined-word" },
     });
 }
-
-test "e2e: package lock resolves import by name with ECL PATH unset" {
-    var fixture = try pkg_lock_fixture.Fixture.init(allocator, io, true);
-    defer fixture.deinit();
-    var nested = try fixture.openNested();
-    defer nested.close(io);
-    const exe = try absoluteExe();
-    defer allocator.free(exe);
-    var environment = std.process.Environ.Map.init(allocator);
-    defer environment.deinit();
-    try environment.put("ECL_CACHE", fixture.cache);
-    var result = try cli.runOptions(.{
-        .argv = &.{ exe, "-e", "smoke.answer io.pp" },
-        .cwd = .{ .dir = nested },
-        .environ_map = &environment,
-    });
-    defer result.deinit();
-    try result.expect(.{ .exit_code = 0, .stdout = "42\n", .stderr = "" });
-}
-
-test "e2e: locked missing store entry never fetches or falls back" {
-    var fixture = try pkg_lock_fixture.Fixture.init(allocator, io, false);
-    defer fixture.deinit();
-    var nested = try fixture.openNested();
-    defer nested.close(io);
-    const exe = try absoluteExe();
-    defer allocator.free(exe);
-    var environment = std.process.Environ.Map.init(allocator);
-    defer environment.deinit();
-    try environment.put("ECL_CACHE", fixture.cache);
-    try environment.put("ECL_PATH", fixture.search);
-    var result = try cli.runOptions(.{
-        .argv = &.{ exe, "-e", "smoke.answer io.pp" },
-        .cwd = .{ .dir = nested },
-        .environ_map = &environment,
-    });
-    defer result.deinit();
-    try result.expect(.{
-        .exit_code = 1,
-        .stdout = "",
-        .stderr_contains = &.{ "'kind 'io", "locked package `smoke`", "ecl pkg sync" },
-    });
-}
-
-test "e2e: pkg CLI reports usage without a subcommand" {
-    var result = try run(&.{ build_options.ecl_exe, "pkg" });
-    defer result.deinit();
-    try result.expect(.{
-        .exit_code = 1,
-        .stdout = "",
-        .stderr_contains = &.{
-            "ecl pkg <init|add|sync|tree|why|verify|vendor|gc>",
-            "sync [--offline]",
-        },
-    });
-}
-
-test "e2e: pkg init derives a canonical root manifest without overwriting" {
-    var scratch = std.testing.tmpDir(.{});
-    defer scratch.cleanup();
-    try scratch.dir.createDir(io, "sample", .default_dir);
-    var project = try scratch.dir.openDir(io, "sample", .{});
-    defer project.close(io);
-    const exe = try absoluteExe();
-    defer allocator.free(exe);
-
-    var initialized = try cli.runOptions(.{
-        .argv = &.{ exe, "pkg", "init" },
-        .cwd = .{ .dir = project },
-    });
-    defer initialized.deinit();
-    try initialized.expect(.{
-        .exit_code = 0,
-        .stdout = "initialized ecl.pkg for sample\n",
-        .stderr = "",
-    });
-    const manifest = try project.readFileAlloc(io, "ecl.pkg", allocator, .unlimited);
-    defer allocator.free(manifest);
-    try std.testing.expectEqualStrings(
-        "{'format 2 'name \"sample\" 'version \"0.1.0\" 'sources (\"src/**/*.ecl\") 'exports () 'requires {}}\n",
-        manifest,
-    );
-    var sources = try project.openDir(io, "src", .{});
-    defer sources.close(io);
-    var synced = try cli.runOptions(.{
-        .argv = &.{ exe, "pkg", "sync", "--offline" },
-        .cwd = .{ .dir = project },
-    });
-    defer synced.deinit();
-    try synced.expect(.{ .exit_code = 0, .stdout = "synced 0 packages\n", .stderr = "" });
-    var empty_tests = try cli.runOptions(.{ .argv = &.{ exe, "test" }, .cwd = .{ .dir = project } });
-    defer empty_tests.deinit();
-    try empty_tests.expect(.{ .exit_code = 0, .stdout = "", .stderr = "" });
-    try sources.createDir(io, "nested", .default_dir);
-    try sources.writeFile(io, .{
-        .sub_path = "nested/suite.ecl",
-        .data = "[] ((42 42 = {'kind 'user} assert) 'answer test) 'suite @defm\n",
-    });
-    var tests = try cli.runOptions(.{ .argv = &.{ exe, "test" }, .cwd = .{ .dir = project } });
-    defer tests.deinit();
-    try tests.expect(.{ .exit_code = 0, .stdout = "ok suite.answer\n", .stderr = "" });
-
-    var repeated = try cli.runOptions(.{
-        .argv = &.{ exe, "pkg", "init" },
-        .cwd = .{ .dir = project },
-    });
-    defer repeated.deinit();
-    try repeated.expect(.{
-        .exit_code = 1,
-        .stdout = "",
-        .stderr_contains = &.{ "ecl.pkg", "already exists" },
-    });
-
-    try scratch.dir.createDir(io, "Bad_Name", .default_dir);
-    var invalid_project = try scratch.dir.openDir(io, "Bad_Name", .{});
-    defer invalid_project.close(io);
-    var invalid_derived = try cli.runOptions(.{
-        .argv = &.{ exe, "pkg", "init" },
-        .cwd = .{ .dir = invalid_project },
-    });
-    defer invalid_derived.deinit();
-    try invalid_derived.expect(.{
-        .exit_code = 1,
-        .stdout = "",
-        .stderr_contains = &.{ "Bad_Name", "ecl pkg init <name>" },
-    });
-    try invalid_project.createDir(io, "src", .default_dir);
-    try invalid_project.writeFile(io, .{ .sub_path = "src/existing.ecl", .data = "42\n" });
-    var named = try cli.runOptions(.{
-        .argv = &.{ exe, "pkg", "init", "valid.name" },
-        .cwd = .{ .dir = invalid_project },
-    });
-    defer named.deinit();
-    try named.expect(.{
-        .exit_code = 0,
-        .stdout = "initialized ecl.pkg for valid.name\n",
-        .stderr = "",
-    });
-    const existing = try invalid_project.readFileAlloc(io, "src/existing.ecl", allocator, .unlimited);
-    defer allocator.free(existing);
-    try std.testing.expectEqualStrings("42\n", existing);
-
-    try scratch.dir.createDir(io, "collision", .default_dir);
-    var collision = try scratch.dir.openDir(io, "collision", .{});
-    defer collision.close(io);
-    try collision.writeFile(io, .{ .sub_path = "src", .data = "keep me\n" });
-    var blocked = try cli.runOptions(.{ .argv = &.{ exe, "pkg", "init" }, .cwd = .{ .dir = collision } });
-    defer blocked.deinit();
-    try blocked.expect(.{ .exit_code = 1, .stdout = "", .stderr_contains = &.{"src to be a directory"} });
-    try std.testing.expectError(error.FileNotFound, collision.access(io, "ecl.pkg", .{}));
-}
-
-test "e2e: pkg tree and why explain the locked graph from a nested directory" {
-    var fixture = try pkg_lock_fixture.Fixture.init(allocator, io, false);
-    defer fixture.deinit();
-    var nested = try fixture.openNested();
-    defer nested.close(io);
-    const exe = try absoluteExe();
-    defer allocator.free(exe);
-    var environment = std.process.Environ.Map.init(allocator);
-    defer environment.deinit();
-    try environment.put("ECL_CACHE", fixture.cache);
-
-    var tree = try cli.runOptions(.{
-        .argv = &.{ exe, "pkg", "tree" },
-        .cwd = .{ .dir = nested },
-        .environ_map = &environment,
-    });
-    defer tree.deinit();
-    try tree.expect(.{
-        .exit_code = 0,
-        .stdout = "root\nroot -> smoke 1.0.0\n",
-        .stderr = "",
-    });
-
-    var why = try cli.runOptions(.{
-        .argv = &.{ exe, "pkg", "why", "smoke.answer" },
-        .cwd = .{ .dir = nested },
-        .environ_map = &environment,
-    });
-    defer why.deinit();
-    try why.expect(.{
-        .exit_code = 0,
-        .stdout = "smoke.answer: root -> smoke 1.0.0\n",
-        .stderr = "",
-    });
-}
-
-test "e2e: pkg offline sync and verify use sealed immutable store entries" {
-    var fixture = try pkg_lock_fixture.Fixture.init(allocator, io, true);
-    defer fixture.deinit();
-    var nested = try fixture.openNested();
-    defer nested.close(io);
-    const exe = try absoluteExe();
-    defer allocator.free(exe);
-    var environment = std.process.Environ.Map.init(allocator);
-    defer environment.deinit();
-    try environment.put("ECL_CACHE", fixture.cache);
-
-    var sync = try cli.runOptions(.{
-        .argv = &.{ exe, "pkg", "sync", "--offline" },
-        .cwd = .{ .dir = nested },
-        .environ_map = &environment,
-    });
-    defer sync.deinit();
-    try sync.expect(.{
-        .exit_code = 0,
-        .stdout = "synced 1 packages\n",
-        .stderr = "",
-    });
-
-    var verified = try cli.runOptions(.{
-        .argv = &.{ exe, "pkg", "verify" },
-        .cwd = .{ .dir = nested },
-        .environ_map = &environment,
-    });
-    defer verified.deinit();
-    try verified.expect(.{
-        .exit_code = 0,
-        .stdout = "verified 1 packages\n",
-        .stderr = "",
-    });
-
-    try fixture.directory.dir.writeFile(io, .{
-        .sub_path = "cache/smoke-1.0.0-" ++ pkg_lock_fixture.package_hash[7..] ++ "/.ecl-package.tgz",
-        .data = "tampered fixture\n",
-    });
-    var tampered = try cli.runOptions(.{
-        .argv = &.{ exe, "pkg", "verify" },
-        .cwd = .{ .dir = nested },
-        .environ_map = &environment,
-    });
-    defer tampered.deinit();
-    try tampered.expect(.{
-        .exit_code = 1,
-        .stdout = "",
-        .stderr_contains = &.{"package `smoke` archive seal does not match lock hash"},
-    });
-}
-
-test "e2e: pkg sync regenerates a corrupt lock from the explicit project" {
-    var scratch = std.testing.tmpDir(.{});
-    defer scratch.cleanup();
-    try scratch.dir.createDir(io, "project", .default_dir);
-    try scratch.dir.createDir(io, "cache", .default_dir);
-    try scratch.dir.writeFile(io, .{
-        .sub_path = "project/ecl.pkg",
-        .data = "{'format 2 'name \"root\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires {}}\n",
-    });
-    try scratch.dir.writeFile(io, .{
-        .sub_path = "project/ecl.lock",
-        .data = "not a lock\n",
-    });
-    var project = try scratch.dir.openDir(io, "project", .{});
-    defer project.close(io);
-    const cache = try scratch.dir.realPathFileAlloc(io, "cache", allocator);
-    defer allocator.free(cache);
-    const exe = try absoluteExe();
-    defer allocator.free(exe);
-    var environment = std.process.Environ.Map.init(allocator);
-    defer environment.deinit();
-    try environment.put("ECL_CACHE", cache);
-
-    var synced = try cli.runOptions(.{
-        .argv = &.{ exe, "pkg", "sync", "--offline" },
-        .cwd = .{ .dir = project },
-        .environ_map = &environment,
-    });
-    defer synced.deinit();
-    try synced.expect(.{ .exit_code = 0, .stdout = "synced 0 packages\n", .stderr = "" });
-    const lock = try project.readFileAlloc(io, "ecl.lock", allocator, .unlimited);
-    defer allocator.free(lock);
-    try std.testing.expectEqualStrings(
-        "{'format 2\n 'root \"root\"\n 'packages\n {}\n 'requires\n {\"root\" {}}}\n",
-        lock,
-    );
-}
-
-test "e2e: pkg offline sync names an absent immutable store entry without fetching" {
-    var fixture = try pkg_lock_fixture.Fixture.init(allocator, io, false);
-    defer fixture.deinit();
-    var nested = try fixture.openNested();
-    defer nested.close(io);
-    const exe = try absoluteExe();
-    defer allocator.free(exe);
-    var environment = std.process.Environ.Map.init(allocator);
-    defer environment.deinit();
-    try environment.put("ECL_CACHE", fixture.cache);
-
-    var result = try cli.runOptions(.{
-        .argv = &.{ exe, "pkg", "sync", "--offline" },
-        .cwd = .{ .dir = nested },
-        .environ_map = &environment,
-    });
-    defer result.deinit();
-    try result.expect(.{
-        .exit_code = 1,
-        .stdout = "",
-        .stderr_contains = &.{
-            "offline synchronization is missing a package store entry",
-            "'package \"smoke\"",
-        },
-    });
-}
-
-test "e2e: checked-in package consumer executes and remains byte-stable offline" {
-    var scratch = std.testing.tmpDir(.{});
-    defer scratch.cleanup();
-    try scratch.dir.createDir(io, "project", .default_dir);
-    try scratch.dir.createDir(io, "cache", .default_dir);
-    try scratch.dir.createDir(
-        io,
-        "cache/smoke-1.0.0-" ++ pkg_example_hash,
-        .default_dir,
-    );
-    try scratch.dir.writeFile(io, .{ .sub_path = "project/ecl.pkg", .data = build_options.pkg_example_manifest });
-    try scratch.dir.writeFile(io, .{ .sub_path = "project/ecl.lock", .data = build_options.pkg_example_lock });
-    try scratch.dir.writeFile(io, .{ .sub_path = "project/main.ecl", .data = build_options.pkg_example_program });
-    try scratch.dir.writeFile(io, .{
-        .sub_path = "cache/smoke-1.0.0-" ++ pkg_example_hash ++ "/ecl.pkg",
-        .data = "{'format 2 'name \"smoke\" 'version \"1.0.0\" 'sources [\"**/*\"] 'exports [\"smoke\"] 'requires {}}\n",
-    });
-    try scratch.dir.writeFile(io, .{
-        .sub_path = "cache/smoke-1.0.0-" ++ pkg_example_hash ++ "/smoke.ecl",
-        .data = "[] ((42) 'answer def) 'smoke @defm\n",
-    });
-    try scratch.dir.writeFile(io, .{
-        .sub_path = "cache/smoke-1.0.0-" ++ pkg_example_hash ++ "/.ecl-package.catalog",
-        .data = "{'format 1 'name \"smoke\" 'version \"1.0.0\" 'hash \"sha256-" ++ pkg_example_hash ++ "\" 'sources [{'path \"smoke.ecl\" 'exports [\"smoke\"]}]}\n",
-    });
-    const cache = try scratch.dir.realPathFileAlloc(io, "cache", allocator);
-    defer allocator.free(cache);
-    var project = try scratch.dir.openDir(io, "project", .{});
-    defer project.close(io);
-    const exe = try absoluteExe();
-    defer allocator.free(exe);
-    var environment = std.process.Environ.Map.init(allocator);
-    defer environment.deinit();
-    try environment.put("ECL_CACHE", cache);
-
-    var execution = try cli.runOptions(.{
-        .argv = &.{ exe, "main.ecl" },
-        .cwd = .{ .dir = project },
-        .environ_map = &environment,
-    });
-    defer execution.deinit();
-    try execution.expect(.{ .exit_code = 0, .stdout = "42\n", .stderr = "" });
-
-    var offline = try cli.runOptions(.{
-        .argv = &.{ exe, "pkg", "sync", "--offline" },
-        .cwd = .{ .dir = project },
-        .environ_map = &environment,
-    });
-    defer offline.deinit();
-    try offline.expect(.{ .exit_code = 0, .stdout = "synced 1 packages\n", .stderr = "" });
-    const rewritten_lock = try project.readFileAlloc(io, "ecl.lock", allocator, .unlimited);
-    defer allocator.free(rewritten_lock);
-    try std.testing.expectEqualStrings(build_options.pkg_example_lock, rewritten_lock);
-
-    var why = try cli.runOptions(.{
-        .argv = &.{ exe, "pkg", "why", "smoke.answer" },
-        .cwd = .{ .dir = project },
-        .environ_map = &environment,
-    });
-    defer why.deinit();
-    try why.expect(.{
-        .exit_code = 0,
-        .stdout = "smoke.answer: example.pkg-smoke -> smoke 1.0.0\n",
-        .stderr = "",
-    });
-}
-
-test "e2e: pkg vendor makes locked execution and verification cache-independent" {
-    var scratch = std.testing.tmpDir(.{});
-    defer scratch.cleanup();
-    try scratch.dir.createDir(io, "project", .default_dir);
-    try scratch.dir.createDir(io, "project/nested", .default_dir);
-    try scratch.dir.createDir(io, "cache", .default_dir);
-    try scratch.dir.createDir(io, "cache/" ++ pkg_runtime_key, .default_dir);
-    try scratch.dir.writeFile(io, .{ .sub_path = "project/ecl.pkg", .data = pkg_runtime_manifest });
-    try scratch.dir.writeFile(io, .{ .sub_path = "project/ecl.lock", .data = pkg_runtime_lock });
-    try scratch.dir.writeFile(io, .{
-        .sub_path = "cache/" ++ pkg_runtime_key ++ "/ecl.pkg",
-        .data = "{'format 2 'name \"a\" 'version \"1.0.0\" 'sources [\"**/*\"] 'exports [\"a\"] 'requires {}}\n",
-    });
-    try scratch.dir.writeFile(io, .{
-        .sub_path = "cache/" ++ pkg_runtime_key ++ "/a.ecl",
-        .data = "[] ((42) 'answer def) 'a @defm\n",
-    });
-    const archive = try decodeHex(build_options.pkg_runtime_archive);
-    defer allocator.free(archive);
-    try scratch.dir.writeFile(io, .{
-        .sub_path = "cache/" ++ pkg_runtime_key ++ "/.ecl-package.tgz",
-        .data = archive[0 .. archive.len - 1],
-    });
-    const cache = try scratch.dir.realPathFileAlloc(io, "cache", allocator);
-    defer allocator.free(cache);
-    var nested = try scratch.dir.openDir(io, "project/nested", .{});
-    defer nested.close(io);
-    const exe = try absoluteExe();
-    defer allocator.free(exe);
-    var environment = std.process.Environ.Map.init(allocator);
-    defer environment.deinit();
-    try environment.put("ECL_CACHE", cache);
-
-    var rejected = try cli.runOptions(.{
-        .argv = &.{ exe, "pkg", "vendor" },
-        .cwd = .{ .dir = nested },
-        .environ_map = &environment,
-    });
-    defer rejected.deinit();
-    try rejected.expect(.{
-        .exit_code = 1,
-        .stdout = "",
-        .stderr_contains = &.{"archive seal does not match lock hash"},
-    });
-    const unchanged = try scratch.dir.readFileAlloc(io, "project/ecl.lock", allocator, .unlimited);
-    defer allocator.free(unchanged);
-    try std.testing.expectEqualStrings(pkg_runtime_lock, unchanged);
-    try std.testing.expectError(
-        error.FileNotFound,
-        scratch.dir.statFile(io, "project/vendor/" ++ pkg_runtime_key, .{ .follow_symlinks = false }),
-    );
-    try scratch.dir.writeFile(io, .{
-        .sub_path = "cache/" ++ pkg_runtime_key ++ "/.ecl-package.tgz",
-        .data = archive,
-    });
-
-    var vendored = try cli.runOptions(.{
-        .argv = &.{ exe, "pkg", "vendor" },
-        .cwd = .{ .dir = nested },
-        .environ_map = &environment,
-    });
-    defer vendored.deinit();
-    try vendored.expect(.{ .exit_code = 0, .stdout = "vendored 1 packages\n", .stderr = "" });
-    const rewritten = try scratch.dir.readFileAlloc(io, "project/ecl.lock", allocator, .unlimited);
-    defer allocator.free(rewritten);
-    try std.testing.expectEqualStrings(pkg_runtime_vendor_lock, rewritten);
-
-    try scratch.dir.deleteTree(io, "cache");
-    var execution = try cli.runOptions(.{
-        .argv = &.{ exe, "-e", "a.answer io.pp" },
-        .cwd = .{ .dir = nested },
-        .environ_map = &environment,
-    });
-    defer execution.deinit();
-    try execution.expect(.{ .exit_code = 0, .stdout = "42\n", .stderr = "" });
-
-    var verified = try cli.runOptions(.{
-        .argv = &.{ exe, "pkg", "verify" },
-        .cwd = .{ .dir = nested },
-        .environ_map = &environment,
-    });
-    defer verified.deinit();
-    try verified.expect(.{ .exit_code = 0, .stdout = "verified 1 packages\n", .stderr = "" });
-
-    try scratch.dir.deleteFile(io, "project/vendor/" ++ pkg_runtime_key ++ "/.ecl-package.catalog");
-    var synced = try cli.runOptions(.{
-        .argv = &.{ exe, "pkg", "sync", "--offline" },
-        .cwd = .{ .dir = nested },
-        .environ_map = &environment,
-    });
-    defer synced.deinit();
-    try synced.expect(.{ .exit_code = 0, .stdout = "synced 1 packages\n", .stderr = "" });
-    var repaired_run = try cli.runOptions(.{
-        .argv = &.{ exe, "-e", "a.answer" },
-        .cwd = .{ .dir = nested },
-        .environ_map = &environment,
-    });
-    defer repaired_run.deinit();
-    try repaired_run.expect(.{ .exit_code = 0, .stdout = "42\n", .stderr = "" });
-    const preserved = try scratch.dir.readFileAlloc(io, "project/ecl.lock", allocator, .unlimited);
-    defer allocator.free(preserved);
-    try std.testing.expectEqualStrings(pkg_runtime_vendor_lock, preserved);
-
-    try scratch.dir.writeFile(io, .{ .sub_path = "project/vendor/" ++ pkg_runtime_key ++ "/.ecl-package.catalog", .data = "invalid metadata" });
-    var repeated = try cli.runOptions(.{
-        .argv = &.{ exe, "pkg", "vendor" },
-        .cwd = .{ .dir = nested },
-        .environ_map = &environment,
-    });
-    defer repeated.deinit();
-    try repeated.expect(.{ .exit_code = 0, .stdout = "vendored 1 packages\n", .stderr = "" });
-}
-
-test "e2e: pkg gc retains the union of named locks and preserves unknown cache nodes" {
-    const hash_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const hash_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    const hash_c = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
-    const hash_d = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
-    const hash_e = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-    const key_a = "a-1.0.0-" ++ hash_a;
-    const key_b = "b-2.0.0-" ++ hash_b;
-    const key_c = "c-3.0.0-" ++ hash_c;
-    const key_d = "d-4.0.0-" ++ hash_d;
-    const key_e = "e-5.0.0-" ++ hash_e;
-    const lock_a = "{'format 2 'root \"one\" 'packages {\"a\" {'version \"1.0.0\" " ++
-        "'source {'kind 'archive 'url \"https://example.invalid/a.tgz\"} 'hash \"sha256-" ++ hash_a ++
-        "\"}} 'requires {\"a\" {} \"one\" {\"a\" {'package \"a\" 'version \"1.0.0\"}}}}\n";
-    const lock_b = "{'format 2 'root \"two\" 'packages {\"b\" {'version \"2.0.0\" " ++
-        "'source {'kind 'archive 'url \"https://example.invalid/b.tgz\"} 'hash \"sha256-" ++ hash_b ++
-        "\"}} 'requires {\"b\" {} \"two\" {\"b\" {'package \"b\" 'version \"2.0.0\"}}}}\n";
-
-    var scratch = std.testing.tmpDir(.{});
-    defer scratch.cleanup();
-    try scratch.dir.createDir(io, "cache", .default_dir);
-    try scratch.dir.createDir(io, "cache/" ++ key_a, .default_dir);
-    try scratch.dir.createDir(io, "cache/" ++ key_b, .default_dir);
-    try scratch.dir.createDir(io, "cache/" ++ key_c, .default_dir);
-    try scratch.dir.createDir(io, "cache/" ++ key_c ++ "/nested", .default_dir);
-    try scratch.dir.createDir(io, "cache/" ++ key_c ++ "/nested/deep", .default_dir);
-    try scratch.dir.writeFile(io, .{
-        .sub_path = "cache/" ++ key_c ++ "/nested/deep/payload",
-        .data = "garbage\n",
-    });
-    try scratch.dir.createDir(io, "cache/.ecl-gc-interrupted", .default_dir);
-    try scratch.dir.writeFile(io, .{
-        .sub_path = "cache/.ecl-gc-interrupted/payload",
-        .data = "stale\n",
-    });
-    try scratch.dir.createDir(io, "cache/.ecl-gc-1-" ++ key_c, .default_dir);
-    try scratch.dir.writeFile(io, .{
-        .sub_path = "cache/.ecl-gc-1-" ++ key_c ++ "/payload",
-        .data = "collision\n",
-    });
-    try scratch.dir.createDir(io, "cache/operator-notes", .default_dir);
-    try scratch.dir.writeFile(io, .{ .sub_path = "cache/" ++ key_d, .data = "not a directory\n" });
-    try scratch.dir.symLink(io, "operator-notes", "cache/" ++ key_e, .{});
-    try scratch.dir.writeFile(io, .{ .sub_path = "one.lock", .data = lock_a });
-    try scratch.dir.writeFile(io, .{ .sub_path = "two.lock", .data = lock_b });
-    const cache = try scratch.dir.realPathFileAlloc(io, "cache", allocator);
-    defer allocator.free(cache);
-    const exe = try absoluteExe();
-    defer allocator.free(exe);
-    var environment = std.process.Environ.Map.init(allocator);
-    defer environment.deinit();
-    try environment.put("ECL_CACHE", cache);
-
-    var collected = try cli.runOptions(.{
-        .argv = &.{ exe, "pkg", "gc", "one.lock", "two.lock" },
-        .cwd = .{ .dir = scratch.dir },
-        .environ_map = &environment,
-    });
-    defer collected.deinit();
-    try collected.expect(.{ .exit_code = 0, .stdout = "removed 1 packages\n", .stderr = "" });
-    _ = try scratch.dir.statFile(io, "cache/" ++ key_a, .{ .follow_symlinks = false });
-    _ = try scratch.dir.statFile(io, "cache/" ++ key_b, .{ .follow_symlinks = false });
-    try std.testing.expectError(
-        error.FileNotFound,
-        scratch.dir.statFile(io, "cache/" ++ key_c, .{ .follow_symlinks = false }),
-    );
-    try std.testing.expectError(
-        error.FileNotFound,
-        scratch.dir.statFile(io, "cache/.ecl-gc-interrupted", .{ .follow_symlinks = false }),
-    );
-    try std.testing.expectError(
-        error.FileNotFound,
-        scratch.dir.statFile(io, "cache/.ecl-gc-1-" ++ key_c, .{ .follow_symlinks = false }),
-    );
-    _ = try scratch.dir.statFile(io, "cache/operator-notes", .{ .follow_symlinks = false });
-    const preserved_file = try scratch.dir.statFile(io, "cache/" ++ key_d, .{ .follow_symlinks = false });
-    try std.testing.expectEqual(std.Io.File.Kind.file, preserved_file.kind);
-    const preserved_link = try scratch.dir.statFile(io, "cache/" ++ key_e, .{ .follow_symlinks = false });
-    try std.testing.expectEqual(std.Io.File.Kind.sym_link, preserved_link.kind);
-
-    var repeated = try cli.runOptions(.{
-        .argv = &.{ exe, "pkg", "gc", "one.lock", "two.lock" },
-        .cwd = .{ .dir = scratch.dir },
-        .environ_map = &environment,
-    });
-    defer repeated.deinit();
-    try repeated.expect(.{ .exit_code = 0, .stdout = "removed 0 packages\n", .stderr = "" });
-
-    // A relative ECL_CACHE keeps its meaning: it is resolved once against the
-    // startup working directory, so a fresh unreferenced entry there is
-    // collected exactly as through the absolute spelling.
-    try scratch.dir.createDir(io, "cache/f-6.0.0-" ++ hash_a, .default_dir);
-    var relative_environment = std.process.Environ.Map.init(allocator);
-    defer relative_environment.deinit();
-    try relative_environment.put("ECL_CACHE", "cache");
-    var relative = try cli.runOptions(.{
-        .argv = &.{ exe, "pkg", "gc", "one.lock", "two.lock" },
-        .cwd = .{ .dir = scratch.dir },
-        .environ_map = &relative_environment,
-    });
-    defer relative.deinit();
-    try relative.expect(.{ .exit_code = 0, .stdout = "removed 1 packages\n", .stderr = "" });
-    try std.testing.expectError(
-        error.FileNotFound,
-        scratch.dir.statFile(io, "cache/f-6.0.0-" ++ hash_a, .{ .follow_symlinks = false }),
-    );
-}
-const builtin = @import("builtin");
-const build_options = @import("build_options");
-const cli = @import("cli_test_support.zig");
-
-test {
-    _ = @import("scheduler_shell_property.zig");
-}
-
-const allocator = std.testing.allocator;
-const io = std.testing.io;
 
 fn run(arguments: []const []const u8) !cli.Result {
     return cli.run(arguments);
@@ -1393,22 +756,6 @@ fn absoluteProcessExe() ![:0]u8 {
         build_options.process_exe,
         allocator,
     );
-}
-
-fn decodeHex(encoded: []const u8) ![]u8 {
-    var bytes = std.Io.Writer.Allocating.init(allocator);
-    defer bytes.deinit();
-    var high: ?u8 = null;
-    for (encoded) |byte| {
-        if (std.ascii.isWhitespace(byte)) continue;
-        const nibble = try std.fmt.charToDigit(byte, 16);
-        if (high) |first| {
-            try bytes.writer.writeByte(first << 4 | nibble);
-            high = null;
-        } else high = nibble;
-    }
-    if (high != null) return error.InvalidFixture;
-    return allocator.dupe(u8, bytes.written());
 }
 
 fn runWithInput(arguments: []const []const u8, input: []const u8) !cli.Result {

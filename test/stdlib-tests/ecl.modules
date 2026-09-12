@@ -1,0 +1,1 @@
+{'format 1 'local "stdlib.test" 'scopes {"stdlib.test" {'root "." 'visible [] 'sources ["archive.ecl" "csv.ecl" "dict.ecl" "error.ecl" "host-surfaces.ecl" "http-request.ecl" "http-response.ecl" "http-server.ecl" "json.ecl" "random.ecl" "result.ecl" "str.ecl" "support.ecl" "table.ecl" "time.ecl"] 'artifacts []}}}

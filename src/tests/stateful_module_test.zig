@@ -12,14 +12,13 @@ const std = @import("std");
 const session = @import("../session.zig");
 const machine = @import("../machine.zig");
 
-test "concurrency: lock-tier auto-loads converge through one loading lease" {
-    var fixture = try ConcurrentLockFixture.init();
+test "concurrency: map artifact auto-loads converge through one loading lease" {
+    var fixture = try ConcurrentMapFixture.init();
     defer fixture.deinit();
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer diagnostics.deinit();
-    const environ = [_]machine.Environ.Entry{.{ .name = "ECL_CACHE", .value = fixture.cache }};
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{
@@ -27,7 +26,6 @@ test "concurrency: lock-tier auto-loads converge through one loading lease" {
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
         .initial_cwd = fixture.nested,
-        .environ = &environ,
     }), .{ .worker_pool = 8 }, .evaluate);
     defer runtime.deinit();
     try expectStack(
@@ -37,15 +35,12 @@ test "concurrency: lock-tier auto-loads converge through one loading lease" {
     );
 }
 
-const concurrent_hash = "sha256-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
-
-const ConcurrentLockFixture = struct {
+const ConcurrentMapFixture = struct {
     directory: std.testing.TmpDir,
     root: [:0]u8,
     nested: []u8,
-    cache: []u8,
 
-    fn init() !ConcurrentLockFixture {
+    fn init() !ConcurrentMapFixture {
         const allocator = std.testing.allocator;
         var directory = std.testing.tmpDir(.{});
         errdefer directory.cleanup();
@@ -53,41 +48,21 @@ const ConcurrentLockFixture = struct {
         errdefer allocator.free(root);
         try directory.dir.createDir(std.testing.io, "project", .default_dir);
         try directory.dir.createDir(std.testing.io, "project/nested", .default_dir);
-        try directory.dir.createDir(std.testing.io, "cache", .default_dir);
-        try directory.dir.createDir(
-            std.testing.io,
-            "cache/race-1.0.0-" ++ concurrent_hash[7..],
-            .default_dir,
-        );
         try directory.dir.writeFile(std.testing.io, .{
-            .sub_path = "project/ecl.pkg",
-            .data = "{'format 2 'name \"root\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires {}}\n",
+            .sub_path = "project/ecl.modules",
+            .data = "{'format 1 'local \"root\" 'scopes {\"root\" {'root \".\" 'visible [] 'sources [] 'artifacts [{'path \"race.ecl\" 'kind 'ecl 'exports [\"race\"]}]}}}",
         });
         try directory.dir.writeFile(std.testing.io, .{
-            .sub_path = "project/ecl.lock",
-            .data = "{'format 2\n 'root \"root\"\n 'packages\n {\"race\" {'version \"1.0.0\" 'source {'kind 'archive 'url \"https://example.invalid/race.tgz\"} 'hash \"" ++ concurrent_hash ++ "\"}}\n 'requires\n {\"race\" {} \"root\" {\"race\" {'package \"race\" 'version \"1.0.0\"}}}}\n",
-        });
-        try directory.dir.writeFile(std.testing.io, .{
-            .sub_path = "cache/race-1.0.0-" ++ concurrent_hash[7..] ++ "/race.ecl",
+            .sub_path = "project/race.ecl",
             .data = "[] ((pop 42) 'answer def) 'race @defm\n",
-        });
-        try directory.dir.writeFile(std.testing.io, .{
-            .sub_path = "cache/race-1.0.0-" ++ concurrent_hash[7..] ++ "/ecl.pkg",
-            .data = "{'format 2 'name \"race\" 'version \"1.0.0\" 'sources [\"**/*\"] 'exports [\"race\"] 'requires {}}\n",
-        });
-        try directory.dir.writeFile(std.testing.io, .{
-            .sub_path = "cache/race-1.0.0-" ++ concurrent_hash[7..] ++ "/.ecl-package.catalog",
-            .data = "{'format 1 'name \"race\" 'version \"1.0.0\" 'hash \"" ++ concurrent_hash ++ "\" 'sources [{'path \"race.ecl\" 'exports [\"race\"]}]}\n",
         });
         const nested = try std.fs.path.join(allocator, &.{ root, "project", "nested" });
         errdefer allocator.free(nested);
-        const cache = try std.fs.path.join(allocator, &.{ root, "cache" });
-        return .{ .directory = directory, .root = root, .nested = nested, .cache = cache };
+        return .{ .directory = directory, .root = root, .nested = nested };
     }
 
-    fn deinit(self: *ConcurrentLockFixture) void {
+    fn deinit(self: *ConcurrentMapFixture) void {
         const allocator = std.testing.allocator;
-        allocator.free(self.cache);
         allocator.free(self.nested);
         allocator.free(self.root);
         self.directory.cleanup();

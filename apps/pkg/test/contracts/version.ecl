@@ -1,7 +1,7 @@
-### module stdlib.test.pkg-version
+### module pkg.test.version
 []
 (
- 'stdlib.test.support
+ 'pkg.test.support
  ('equal 'raises 'raises-containing 'documented)
  import
 
@@ -114,4 +114,4 @@
  (-- : "Require documentation for every package-version export.")
  (('pkg.version.validate 'pkg.version.less? 'pkg.version.max) documented)
  'documentation test
-) 'stdlib.test.pkg-version @defm
+) 'pkg.test.version @defm

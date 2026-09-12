@@ -1,7 +1,7 @@
-### module stdlib.test.pkg-mvs
+### module pkg.test.mvs
 []
 (
- 'stdlib.test.support
+ 'pkg.test.support
  ('equal 'raises-containing 'raises-data 'documented)
  import
 
@@ -85,21 +85,21 @@
  ### test pinned-git
  (-- : "Preserve pinned sources and reject differing commits despite equal artifact hashes.")
  ("0123456789abcdef0123456789abcdef01234567"
-  dup git-graph pkg.mvs.resolve
+  dup git-graph pkg.solver.resolve
   ['packages "c" 'source 'commit] at-path
   "0123456789abcdef0123456789abcdef01234567" equal
   ("0123456789abcdef0123456789abcdef01234567"
    "1123456789abcdef0123456789abcdef01234567"
-   git-graph pkg.mvs.resolve)
+   git-graph pkg.solver.resolve)
   'domain "conflicting Git commits" raises-containing)
  'pinned-git test
 
  ### test resolution
  (-- : "Select every reachable maximum and record all declared minimums.")
- (root catalog pkg.mvs.resolve
+ (root catalog pkg.solver.resolve
   dup 'packages at dup dict.size 2 equal
   ["c" 'version] at-path "1.5.0" equal
-  root catalog pkg.mvs.resolve
+  root catalog pkg.solver.resolve
   dup 'requires at dict.vals (dict.pairs) each raze
   swap 'packages at
   (|entry packages|
@@ -112,7 +112,7 @@
 
  ### test deterministic-input-order
  (-- : "Ignore graph insertion order and unreachable catalog versions.")
- (root catalog pkg.mvs.resolve pkg.lock.write
+ (root catalog pkg.solver.resolve pkg.resolution.write
   "app" "0.1.0" {} "c" req-c-12 put "b" req-b put manifest
   {}
   "c"
@@ -122,11 +122,11 @@
   "1.2.0" manifest-c-12 put
   put
   "b" {} "1.0.0" manifest-b put put
-  pkg.mvs.resolve pkg.lock.write
+  pkg.solver.resolve pkg.resolution.write
   match?
   1 equal
-  root-without-c catalog pkg.mvs.resolve 'packages at
-  root catalog pkg.mvs.resolve
+  root-without-c catalog pkg.solver.resolve 'packages at
+  root catalog pkg.solver.resolve
   (|packages lock|
    packages lock 'packages at match? 1 equal
    lock ['requires "app" "c"] at-path
@@ -142,7 +142,7 @@
    "c" "c" "1.5.0" "https://mirror.example/c.tgz" hash-a requirement put
    manifest
    catalog
-   pkg.mvs.resolve)
+   pkg.solver.resolve)
   'domain
   "conflicting hashes"
   raises-containing
@@ -167,7 +167,7 @@
    put put
    "foo" {} "1.0.0" "foo" "1.0.0" {} manifest put put
    "foo.bar" {} "1.0.0" "foo.bar" "1.0.0" {} manifest put put
-   pkg.mvs.resolve)
+   pkg.solver.resolve)
   'domain
   "overlapping prefixes"
   raises-containing
@@ -183,7 +183,7 @@
   "b" "1.0.0"
   {} "a" "a" "1.0.0" "https://e.com/a.tgz" hash-a requirement put
   manifest put put
-  2 pack (pkg.mvs.resolve) @attempt
+  2 pack (pkg.solver.resolve) @attempt
   'err at
   dup 'kind at 'domain equal
   'data at 'packages at ("a" "b") equal)
@@ -195,12 +195,12 @@
    {} "b" "b" "not-a-version" "https://e.com/b.tgz" hash-a requirement put
    manifest
    {}
-   pkg.mvs.resolve)
+   pkg.solver.resolve)
   'domain
   'version
   "not-a-version"
   raises-data
-  (root-without-c {} pkg.mvs.resolve)
+  (root-without-c {} pkg.solver.resolve)
   'domain
   'version
   "1.0.0"
@@ -209,6 +209,6 @@
 
  ### test documentation
  (-- : "Require documentation for package resolution.")
- (('pkg.mvs.resolve) documented)
+ (('pkg.solver.resolve) documented)
  'documentation test
-) 'stdlib.test.pkg-mvs @defm
+) 'pkg.test.mvs @defm

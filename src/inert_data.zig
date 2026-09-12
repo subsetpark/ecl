@@ -1,5 +1,5 @@
-//! Host-side decoding of inert package records. These helpers are blocking:
-//! catalog discovery and lock loading own their input limits and schemas.
+//! Host-side decoding of inert records. These helpers are blocking:
+//! each startup metadata schema owns its input limits and validation.
 //! Borrowed values remain owned by the input; ownedUtf8 transfers its buffer
 //! on success and frees unfinished conversion storage on every failure.
 const std = @import("std");

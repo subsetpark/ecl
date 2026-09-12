@@ -1,7 +1,7 @@
-### module stdlib.test.pkg-name
+### module pkg.test.name
 []
 (
- 'stdlib.test.support ('equal 'raises-containing 'documented) import
+ 'pkg.test.support ('equal 'raises-containing 'documented) import
 
  ### test ownership
  (-- : "Recognize only a package's own name and dotted descendants.")
@@ -29,4 +29,4 @@
    'pkg.name.owns? 'pkg.name.collides?)
   documented)
  'documentation test
-) 'stdlib.test.pkg-name @defm
+) 'pkg.test.name @defm
