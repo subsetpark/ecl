@@ -76,6 +76,11 @@ cache optimization. Git trust uses optional `ECL_GIT_CA_FILE`, and scratch uses
 `TMPDIR` or `/tmp`. These are application choices passed explicitly to the
 independent native port; the extension does not read package configuration.
 
+The download cache is flat, with `<archive-sha256>.tgz` entries. Reads verify
+contents against the requested hash; missing, unavailable, or corrupt entries
+are cache misses. Writes atomically publish verified bytes. Cache availability
+never determines package selection, and cancellation is not treated as a miss.
+
 `pkg.fetch` drains bounded Git byte output before observing its resolved commit,
 joins the exchange and resource, and verifies a selected artifact's exact hash.
 Only explicit tag selection requests a tag. A locked requirement always requests
@@ -95,6 +100,11 @@ installed dependencies, sealed artifacts, and a complete relative module map.
 The snapshot supplements the root lock: a running generation always uses its own
 snapshot, even while the root lock is being updated. Neither synchronization nor
 recovery deletes previous project generations.
+
+Application generation references use `.ecl/generations/<64 lowercase hex>` or
+`vendor/<64 lowercase hex>`. Both locations use the same publication protocol;
+the complete map locates live project sources relative to its own document.
+The root lock contains neither location.
 
 ## Publication and recovery
 
@@ -145,6 +155,10 @@ artifact seals, without repairing or resolving sources. The transaction module
 also independently checks the generation's exact resolution-snapshot bytes.
 Records contain data only; recovery never executes their contents. The ordinary
 coordination guarantee covers writers participating in the application lock.
+The ECL test suite checks initial publication, every root-write boundary,
+idempotent replay, and conflicting edits through public directory resources.
+The host fixture checks separate interpreter processes loading the old or new
+generation at those boundaries.
 
 ## Required publication acceptance
 

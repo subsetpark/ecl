@@ -19,11 +19,6 @@
  (dup type 'list match?
   ((len 1 <=) ((str.str?) all?) bi and) (pop 0) if) 'snapshot? defp
 
- ### defp generation?
- (value -- bool : "Accept a single lowercase hexadecimal generation identifier.")
- (dup str.str?
-  ((len 64 =) (("0123456789abcdef" in?) all?) bi and) (pop 0) if) 'generation? defp
-
  ### defp validate
  (record -- record : "Validate the closed recovery-record schema.")
  (|record|
@@ -36,16 +31,16 @@
   record 'lock-before at snapshot? require
   record 'map-before at snapshot? require
   record 'lock-after at str.str? require
-  record 'generation at generation? require
+  record 'generation at pkg.layout.generation? require
   record) 'validate defp
 
  ### defp generation-path
  (record -- path : "Resolve the immutable generation beneath the project.")
- ('generation at ".ecl/generations/" swap cat) 'generation-path defp
+ ('generation at) 'generation-path defp
 
  ### defp reference
  (record -- text : "Render the complete root module-map reference.")
- (generation-path "/ecl.modules" cat str wrap "{{'format 1 'map {}}}\n" str.format) 'reference defp
+ (generation-path pkg.layout.reference) 'reference defp
 
  ### defp expected
  (actual previous proposed -- : "Refuse unrelated edits while allowing idempotent replay.")
