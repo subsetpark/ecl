@@ -5,7 +5,7 @@
  ### defp inert?
  (value -- bool : "Return 1 when a value recursively contains no executable words.")
  ([(type 'word match?) (pop 0)
-   (type 'dict match?) (dict.vals (inert?) all?)
+   (type 'dict match?) (dict.pairs (inert?) all?)
    (type 'list match?) ((inert?) all?)
    (pop 1)]
   cond) 'inert? defp
@@ -30,6 +30,8 @@
   text parse
   dup len 1 =
   'shape error.new "a package file is exactly one form" error.with-message assert
+  dup (inert?) all?
+  'domain error.new "a package file holds only inert data" error.with-message assert
   first) 'read-one def
 
  ### defp entry-of

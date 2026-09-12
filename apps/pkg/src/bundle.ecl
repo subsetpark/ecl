@@ -19,6 +19,10 @@
   archive maximum [] 0 archive 65536 archive.read-member
   (dup empty? not) (read-step) while pop pop rollup pop pop raze) 'contents defp
 
+ ### def member-bytes
+ (archive maximum -- bytes : "Collect one package member through bounded shared-parser reads.")
+ (contents) 'member-bytes def
+
  ### defp member-policy
  (metadata -- : "Reject native artifacts and reserve package control-file names.")
  (|metadata|

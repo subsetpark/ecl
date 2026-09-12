@@ -20,4 +20,11 @@
   [".ecl/generations/../escape" "vendor/../../outside" "/absolute" "vendor/short" "bare"]
   (pkg.layout.generation? 0 equal) for)
  'generation-locations test
+
+ ### test inert-metadata
+ (-- : "Reject executable metadata before any downstream helper can observe a word value.")
+ (["exit" "{'format exit 'map \"vendor/bare/ecl.modules\"}" "[exit]" "{exit 1}"]
+  (wrap (pkg.data.read-one) @attempt 'err at 'kind at 'domain equal) for
+  "exit" wrap (pkg.layout.from-reference) @attempt 'err at 'kind at 'domain equal)
+ 'inert-metadata test
 ) 'pkg.test.layout @defm

@@ -39,7 +39,7 @@
 
  ### def from-reference
  (text -- generation : "Read a root reference to one application-owned immutable generation.")
- (pkg.data.read-one dup ['format 'map] dict.keys-exactly? require
+ (pkg.data.read-one dup type 'dict match? require dup ['format 'map] dict.keys-exactly? require
   dup 'format at 1 match? require
   'map at dup str.str? require dup "/ecl.modules" str.ends? require
   dup len 12 - take dup generation? require) 'from-reference def

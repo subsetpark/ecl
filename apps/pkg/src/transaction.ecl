@@ -8,7 +8,7 @@
 
  ### defp read-one
  (text -- data : "Parse exactly one inert record without executing source.")
- (parse dup len 1 = require first) 'read-one defp
+ (pkg.data.read-one) 'read-one defp
 
  ### defp snapshot
  (project path -- snapshot : "Observe absence or the exact bytes of a text file.")

@@ -385,6 +385,15 @@ pub fn build(b: *std.Build) void {
     const pkg_test_step = b.step("test-pkg-app", "Run package application policy through ECL's built-in test runner");
     pkg_test_step.dependOn(&run_pkg_tests.step);
     test_step.dependOn(&run_pkg_tests.step);
+    // Full generation verification repeatedly inspects sealed archives. Keep this
+    // public ECL acceptance outside the fast precommit policy-test tier.
+    const run_pkg_generations = b.addRunArtifact(exe);
+    run_pkg_generations.addArg("--module-map");
+    run_pkg_generations.addFileArg(b.path("apps/pkg/test/acceptance/ecl.modules"));
+    run_pkg_generations.addArgs(&.{ "test", "--runner", "pkg.test.generation.run" });
+    const pkg_generation_step = b.step("test-pkg-generation", "Run offline generation, lock selection, and verification acceptance in ECL");
+    pkg_generation_step.dependOn(&run_pkg_generations.step);
+    test_step.dependOn(&run_pkg_generations.step);
     const native_runtime_tests = b.addTest(.{
         .root_module = test_mod,
         .filters = &.{ "native:", "concurrency: native shutdown" },

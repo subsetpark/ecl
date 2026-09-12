@@ -37,6 +37,12 @@ version equals a declaration's minimum, its source and hash must match that
 declaration exactly. Every selected manifest must match its locked identity and
 direct edges.
 
+Initial resolution and explicit updates inspect the reachable declared minimum
+artifacts and select the highest reached version of each package. The resulting
+lock retains only packages reachable through the selected manifests; dependencies
+used solely by superseded minima are removed. Normal locked synchronization
+bypasses this discovery and selection entirely.
+
 `pkg.resolution` owns validation, canonical serialization, compatibility, and
 sealed-manifest checks. `zig build test-pkg-app` invokes ECL's built-in test
 runner against the application's test map; package policy assertions live in
@@ -105,6 +111,28 @@ Application generation references use `.ecl/generations/<64 lowercase hex>` or
 `vendor/<64 lowercase hex>`. Both locations use the same publication protocol;
 the complete map locates live project sources relative to its own document.
 The root lock contains neither location.
+
+`pkg.obtain` retains each verified artifact in the private generation before
+releasing its bytes or populating the shared cache. It tries private pins, the
+captured active generation's seals, the optional download cache, and finally
+the exact network source. Offline mode omits that last step. Cache collection
+cannot remove a private pin needed by an in-progress installation.
+
+`pkg.generation` validates selected manifests, extracts source packages, records
+their exact archives under `archives/`, and writes `ecl.pkg`, `ecl.lock`, and
+the complete map before publishing the staged directory. `pkg.verify` checks
+the closed generation layout, every seal, installed regular-file contents, and
+the reconstructed map against that generation's own inputs. It rejects links,
+special objects, missing files, and extra installed files without repair.
+Publication validation additionally requires the root manifest to match the
+generation's manifest snapshot. `pkg.install` coordinates recovery, lock
+selection, construction, and activation under the project mutation lock.
+
+`zig build test-pkg-generation` runs this full acceptance through ECL's test
+runner, including initial resolution, exact lock preservation, explicit update
+selection, offline reproduction, activation, and independent verification of
+older generations. It is included in the full test suite; the fast precommit
+tier retains the smaller policy cases in `test-pkg-app`.
 
 ## Publication and recovery
 
