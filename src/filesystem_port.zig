@@ -66,7 +66,7 @@ const OwnedRoot = struct {
 /// Session-owned authority. Units never receive this owner; they receive the
 /// opaque `external.FilesystemAccess` and the narrow functions below.
 pub const FilesystemOwner = struct {
-    allocator: std.mem.Allocator,
+    host: *const heap.HostCleanup,
     io: std.Io,
     roots: []OwnedRoot,
     limits: Limits,
@@ -74,10 +74,11 @@ pub const FilesystemOwner = struct {
     directory_issuer: *@import("module_bindings.zig").Identity,
 
     pub fn init(
-        allocator: std.mem.Allocator,
+        host: *const heap.HostCleanup,
         io: std.Io,
         config: Config,
     ) InitError!FilesystemOwner {
+        const allocator = host.allocator();
         if (comptime !backendSupported()) return error.InvalidConfig;
         try validateLimits(config.limits);
         const cwd = if (config.roots.len == 0)
@@ -128,7 +129,7 @@ pub const FilesystemOwner = struct {
         }
         const directory_issuer = try @import("module_bindings.zig").Identity.create(allocator);
         return .{
-            .allocator = allocator,
+            .host = host,
             .io = io,
             .roots = roots,
             .limits = config.limits,
@@ -141,9 +142,9 @@ pub const FilesystemOwner = struct {
         std.debug.assert(self.live.load(.acquire) == 0);
         for (self.roots) |*root| {
             root.dir.close(self.io);
-            self.allocator.free(root.name);
+            self.host.allocator().free(root.name);
         }
-        self.allocator.free(self.roots);
+        self.host.allocator().free(self.roots);
         self.* = undefined;
     }
 
@@ -167,6 +168,10 @@ pub const FilesystemOwner = struct {
         std.debug.assert(old != 0);
     }
 };
+
+comptime {
+    heap.requireSingleHostCapability(FilesystemOwner);
+}
 
 fn validateLimits(limits: Limits) InitError!void {
     if (limits.max_transfer_bytes == 0 or limits.max_directory_entries == 0 or
@@ -193,14 +198,22 @@ fn ownerFromAccess(access_value: *external.FilesystemAccess) *FilesystemOwner {
 
 /// Consumes an independently opened directory on both success and failure.
 pub fn adoptDirectory(access_value: *external.FilesystemAccess, scope: *@import("scheduler.zig").TaskScope, dir: std.Io.Dir) error{ OutOfMemory, ScopeClosing }!@import("value.zig").Value {
-    const owner = ownerFromAccess(access_value);
-    return @import("directory_resource.zig").adopt(owner.directory_issuer, owner.io, scope, dir);
+    return @import("directory_resource.zig").adopt(access_value, scope, dir);
 }
 
 /// Consumes an acquired advisory lock on both success and failure.
 pub fn adoptLock(access_value: *external.FilesystemAccess, scope: *@import("scheduler.zig").TaskScope, file: std.Io.File) error{ OutOfMemory, ScopeClosing }!@import("value.zig").Value {
-    const owner = ownerFromAccess(access_value);
-    return @import("directory_resource.zig").adoptLock(owner.directory_issuer, owner.io, scope, file);
+    return @import("directory_resource.zig").adoptLock(access_value, scope, file);
+}
+
+/// Borrow allocator and identity metadata from the operational issuer.
+pub fn resourceIssuer(access_value: *external.FilesystemAccess) *@import("module_bindings.zig").Identity {
+    return ownerFromAccess(access_value).directory_issuer;
+}
+
+/// Queue backend cleanup in the issuing Session's bounded retirement domain.
+pub fn retireHandle(access_value: *external.FilesystemAccess, resource: anytype, node: *heap.ReleaseDomain.Retirement) void {
+    heap.hostDomain(ownerFromAccess(access_value).host).retire(resource, node);
 }
 
 /// Explicit host paths establish a new root; subsequent access is confined
@@ -1125,24 +1138,26 @@ test "resolver refuses an initial path over the byte limit before opening anythi
 }
 
 test "filesystem config rejects relative roots, duplicate names, and zero limits" {
+    var cleanup = heap.HostOwner.init(std.testing.allocator);
+    defer cleanup.cleanup().drain();
     var scratch = std.testing.tmpDir(.{});
     defer scratch.cleanup();
     const path = try scratch.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(path);
-    try std.testing.expectError(error.InvalidConfig, FilesystemOwner.init(std.testing.allocator, std.testing.io, .{
+    try std.testing.expectError(error.InvalidConfig, FilesystemOwner.init(cleanup.cleanup(), std.testing.io, .{
         .roots = &.{.{ .name = "cwd", .absolute_path = "relative/dir" }},
     }));
-    try std.testing.expectError(error.InvalidConfig, FilesystemOwner.init(std.testing.allocator, std.testing.io, .{
+    try std.testing.expectError(error.InvalidConfig, FilesystemOwner.init(cleanup.cleanup(), std.testing.io, .{
         .roots = &.{
             .{ .name = "cwd", .absolute_path = path },
             .{ .name = "cwd", .absolute_path = path },
         },
     }));
-    try std.testing.expectError(error.InvalidConfig, FilesystemOwner.init(std.testing.allocator, std.testing.io, .{
+    try std.testing.expectError(error.InvalidConfig, FilesystemOwner.init(cleanup.cleanup(), std.testing.io, .{
         .roots = &.{.{ .name = "cwd", .absolute_path = path }},
         .limits = .{ .max_live_operations = 0 },
     }));
-    var owner = try FilesystemOwner.init(std.testing.allocator, std.testing.io, .{
+    var owner = try FilesystemOwner.init(cleanup.cleanup(), std.testing.io, .{
         .roots = &.{.{ .name = "cwd", .absolute_path = path }},
     });
     defer owner.deinit();
@@ -1152,11 +1167,13 @@ test "filesystem config rejects relative roots, duplicate names, and zero limits
 }
 
 test "live-operation reservations are exhausted and released exactly" {
+    var cleanup = heap.HostOwner.init(std.testing.allocator);
+    defer cleanup.cleanup().drain();
     var scratch = std.testing.tmpDir(.{});
     defer scratch.cleanup();
     const path = try scratch.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(path);
-    var owner = try FilesystemOwner.init(std.testing.allocator, std.testing.io, .{
+    var owner = try FilesystemOwner.init(cleanup.cleanup(), std.testing.io, .{
         .roots = &.{.{ .name = "cwd", .absolute_path = path }},
         .limits = .{ .max_live_operations = 2 },
     });

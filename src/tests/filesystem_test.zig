@@ -472,6 +472,39 @@ test "fs: advisory locks serialize mutations and release after cancellation" {
     try scratch.expectNoStaging(".");
 }
 
+test "fs: directory closure joins admitted descriptor leases" {
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    try scratch.write("file", "x");
+    var memory: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&memory);
+    var output_buffer: [64]u8 = undefined;
+    var output = std.Io.Writer.Discarding.init(&output_buffer);
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    var runtime = try session.Session.init(memory.allocator(), &.{}, inputs.inputs(.{
+        .io = io,
+        .output = &output.writer,
+        .diagnostics = &output.writer,
+        .filesystem = scratch.filesystem(),
+    }), .cooperative, .evaluate);
+    defer runtime.deinit();
+    try std.testing.expect((try runtime.runUnit("<directory>", "'root \".\" fs.child-dir")) == .ok);
+    const item = runtime.stackItems()[0];
+    const resource = @import("../port_resource.zig").Resource.fromValue(item).?;
+    var lease: ?*@import("../directory_resource.zig").Lease = try @import("../directory_resource.zig").acquire(item);
+    defer if (lease) |owned| owned.deinit();
+    resource.close();
+    try std.testing.expect((try runtime.runUnit("<pending-close>", "")) == .ok);
+    try std.testing.expect(!resource.joined());
+    try std.testing.expectError(error.Closed, @import("../directory_resource.zig").acquire(item));
+    try std.testing.expectEqual(@as(u64, 1), (try lease.?.dir().statFile(io, "file", .{})).size);
+    lease.?.deinit();
+    lease = null;
+    try std.testing.expect((try runtime.runUnit("<settle>", "")) == .ok);
+    try std.testing.expect(resource.joined());
+}
+
 test "fs: directory resources own confined descriptors and close with their scope" {
     var scratch = try Scratch.init();
     defer scratch.deinit();

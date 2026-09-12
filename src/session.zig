@@ -439,7 +439,7 @@ pub const Session = enum(usize) {
         const filesystem_owner = owner: {
             const owned = try allocator.create(filesystem_port.FilesystemOwner);
             errdefer allocator.destroy(owned);
-            owned.* = filesystem_port.FilesystemOwner.init(allocator, host.io, host.filesystem) catch |err| switch (err) {
+            owned.* = filesystem_port.FilesystemOwner.init(host_owner.cleanup(), host.io, host.filesystem) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.InvalidConfig => return error.InvalidHostConfig,
             };

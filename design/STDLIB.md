@@ -1762,8 +1762,9 @@ the source's permission bits under the umask.
 OS permissions, and return a scope-owned port resource. Host symlinks may be
 followed while opening this explicit root. Relative paths are rejected.
 `port.close` closes the resource and joins cleanup; scope exit does the same.
-A closed directory rejects new operations with `'io`. Operations already
-admitted own independent descriptors until their scheduler cleanup completes.
+A closing directory rejects new operations with `'io`. Closure waits for
+admitted operations to release their independent descriptor leases, then joins
+backend cleanup.
 
 ### lock
 `( root path -- lock )` — Acquire an exclusive advisory lock on a regular file,
