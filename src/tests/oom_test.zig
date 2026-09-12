@@ -757,6 +757,7 @@ const StdlibSurface = enum {
     file_publication,
     directory_resource,
     advisory_lock,
+    tree_operations,
     source_declarations,
     locked_project_module,
     root_source_preload,
@@ -1010,6 +1011,11 @@ fn stdlibSessionAllocationProbe(
             "\"probe\" io.eprint 1 \"probe\" io.debug pop " ++
                 "\"ECL_OOM_PROBE\" getenv pop " ++
                 "[] (\"ECL_OOM_ABSENT\" getenv) @attempt pop [] (io.stdin) @attempt pop",
+        ),
+        .tree_operations => try runOk(
+            &runtime,
+            "oom-tree.ecl",
+            "'cwd \"a/b\" fs.mkdirs \"x\" 'cwd \"a/b/file\" fs.publish-text 'cwd \"a\" fs.remove-tree",
         ),
         .advisory_lock => try runOk(
             &runtime,
@@ -2135,4 +2141,9 @@ test "oom: standard-library and host: stdlib: directory resources propagate ever
 test "oom: standard-library and host: stdlib: advisory locks propagate every allocation failure" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.advisory_lock);
+}
+
+test "oom: standard-library and host: stdlib: recursive directories propagate every allocation failure" {
+    try requireSelectedOomTest(@src());
+    try checkStdlibSurface(.tree_operations);
 }

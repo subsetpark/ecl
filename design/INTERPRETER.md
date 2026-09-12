@@ -1192,6 +1192,18 @@ Every failure maps a host error to one closed reason vocabulary at the
 ends of a transfer), and reason to the pending failure, so programs branch on
 stable symbols and never on errno names.
 
+Recursive creation extends the existing resolver's policy: missing parents are
+created and reinspected before traversal. Recursive removal owns an iterable
+directory and advances without depth-dependent storage or cleanup allocations.
+Its destructive cursor moves a selected child's entries into the removal root
+before removing that child, using the shared no-clobber rename boundary. Every
+step stays descriptor-relative and the driver retains all open handles through
+bounded retirement. Resolver storage reserves its retirement node before opening
+any parent, so completion and cancellation both transfer the remaining handle
+stack to one-descriptor retirement steps without allocating. Only host cleanup
+authority can request blocking resolver disposal. Cancellation promises
+confinement, not rollback of removal.
+
 ### Network resources use registered controllers
 
 Session construction validates network resource limits and creates a network

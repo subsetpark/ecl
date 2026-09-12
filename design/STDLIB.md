@@ -1820,6 +1820,20 @@ nothing is silently omitted.
 `{'kind 'file 'size n}` for a regular file, `{'kind 'directory}`,
 `{'kind 'symlink}`, or `{'kind 'other}`. An absent entry is `'not-found`.
 
+### mkdirs
+`( root path -- )` — Create missing intermediate and final directories. Existing
+directories are preserved, including contained symlink targets. `.` is a no-op.
+Every component uses the ordinary confined resolver. Failure or cancellation
+may leave directories created before that point.
+
+### remove-tree
+`( root path -- )` — Recursively remove a directory and its contents. The final
+entry must be a directory, and `.` is rejected. Symlinks inside the tree are
+removed without following their targets. Work is incremental and cancellable;
+failure may leave partially removed contents with temporary entry names.
+Removal uses bounded descriptor storage and needs no new allocations once the
+selected directory has been opened.
+
 ### mkdir
 `( root path -- )` — Create exactly one absent directory beneath an existing
 parent. There is no recursive parent creation; an existing entry of any kind is

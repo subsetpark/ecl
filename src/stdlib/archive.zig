@@ -1446,7 +1446,7 @@ const UnpackDriver = struct {
                     reason.message(),
                 ),
                 .complete => |resolved| {
-                    resolving.resolver.deinit();
+                    resolving.resolver.retire(evaluator.releaseDomain());
                     const result = resolving.result;
                     switch (resolved) {
                         .entry => self.destination = resolved,
@@ -1784,7 +1784,7 @@ const UnpackDriver = struct {
         const archive = takeArchive(&active.archive);
         switch (publication.*) {
             .resolve => |*resolving| {
-                resolving.resolver.deinit();
+                resolving.resolver.retire(releases);
                 releases.releaseValue(resolving.result);
                 self.state = .{ .cleanup_archive = archive };
             },

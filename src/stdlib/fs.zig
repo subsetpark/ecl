@@ -29,6 +29,8 @@ const Value = value.Value;
 const work_quantum = machine.kernel_poll_quantum;
 
 pub const words = [_]env.BuiltinWord{
+    .{ .name = "mkdirs", .doc = "( root path -- ) Create missing directories, preserving existing directories.", .primitive = makeDirectories },
+    .{ .name = "remove-tree", .doc = "( root path -- ) Recursively remove a directory without following contained symlinks.", .primitive = removeTree },
     .{ .name = "lock", .doc = "( root path -- lock ) Acquire a cancellable exclusive advisory lock on a regular file, creating it if absent.", .primitive = advisoryLock },
     .{ .name = "open-dir", .doc = "( host-path -- directory ) Open an absolute host directory as a scope-owned resource.", .primitive = openDirectory },
     .{ .name = "child-dir", .doc = "( root path -- directory ) Acquire a directory confined beneath a root.", .primitive = childDirectory },
@@ -52,6 +54,8 @@ pub const words = [_]env.BuiltinWord{
 };
 
 const Operation = enum {
+    mkdirs,
+    remove_tree,
     lock,
     open_dir,
     child_dir,
@@ -86,9 +90,10 @@ const Operation = enum {
             .publish_bytes => "publish-bytes",
             .publish_text => "publish-text",
             .exists => "exists?",
+            .remove_tree => "remove-tree",
             .remove_file => "remove-file",
             .remove_dir => "remove-dir",
-            .lock, .stat, .lstat, .list, .mkdir, .copy, .rename => @tagName(self),
+            .mkdirs, .lock, .stat, .lstat, .list, .mkdir, .copy, .rename => @tagName(self),
         };
     }
 
@@ -110,7 +115,7 @@ const Operation = enum {
 
     fn resolveMode(self: Operation) fsport.ResolveMode {
         return switch (self) {
-            .child_dir, .read_bytes, .read_text, .stat, .list, .copy => .follow_final,
+            .mkdirs, .child_dir, .read_bytes, .read_text, .stat, .list, .copy => .follow_final,
             else => .no_follow_final,
         };
     }
@@ -118,12 +123,18 @@ const Operation = enum {
     /// Words that act on a child entry reject `.`, which names the root.
     fn requiresEntry(self: Operation) bool {
         return switch (self) {
-            .create_bytes, .create_text, .replace_bytes, .replace_text, .publish_bytes, .publish_text, .lock, .mkdir, .rename, .remove_file, .remove_dir => true,
-            .open_dir, .child_dir, .read_bytes, .read_text, .stat, .lstat, .exists, .list, .copy => false,
+            .create_bytes, .create_text, .replace_bytes, .replace_text, .publish_bytes, .publish_text, .lock, .mkdir, .rename, .remove_tree, .remove_file, .remove_dir => true,
+            .mkdirs, .open_dir, .child_dir, .read_bytes, .read_text, .stat, .lstat, .exists, .list, .copy => false,
         };
     }
 };
 
+fn makeDirectories(evaluator: *Machine) MachineError!void {
+    return begin(evaluator, .mkdirs);
+}
+fn removeTree(evaluator: *Machine) MachineError!void {
+    return begin(evaluator, .remove_tree);
+}
 fn advisoryLock(evaluator: *Machine) MachineError!void {
     return begin(evaluator, .lock);
 }
@@ -511,6 +522,7 @@ const Driver = struct {
         resolve: fsport.Resolver,
         resolve_second: fsport.Resolver,
         act,
+        removing_tree: fsport.TreeRemoval,
         waiting_lock: std.Io.File,
         read: Read,
         bytes_value: struct { buffer: []u8, materializer: list.ByteListMaterializer },
@@ -543,6 +555,7 @@ const Driver = struct {
             .resolve_second => |*resolver| self.resolve(evaluator, resolver, .second),
             .act => self.act(evaluator),
             .waiting_lock => |file| self.waitForLock(evaluator, file),
+            .removing_tree => |*tree| self.removeTreeStep(evaluator, tree),
             .read => |*read| self.readStep(evaluator, read),
             .bytes_value => |*building| self.materializeBytes(building),
             .text_value => |*building| self.materializeText(evaluator, building),
@@ -693,7 +706,7 @@ const Driver = struct {
         // Built into a local first: writing `try` straight into the union
         // could tag the state before the payload exists, and retirement would
         // then retire a resolver that was never constructed.
-        const resolver = fsport.Resolver.init(
+        var resolver = fsport.Resolver.init(
             self.allocator,
             self.io,
             root.dir(),
@@ -704,6 +717,7 @@ const Driver = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.PathTooLong => return self.fail(evaluator, .limit),
         };
+        if (self.operation == .mkdirs) resolver.createParents();
         self.state = .{ .resolve = resolver };
         return .yielded;
     }
@@ -739,16 +753,16 @@ const Driver = struct {
                                     error.PathTooLong => self.fail(evaluator, .limit),
                                 };
                             };
-                            resolver.deinit();
+                            resolver.retire(evaluator.releaseDomain());
                             self.resolved = resolved;
                             self.state = .{ .resolve_second = next };
                             return .yielded;
                         }
-                        resolver.deinit();
+                        resolver.retire(evaluator.releaseDomain());
                         self.resolved = resolved;
                     },
                     .second => {
-                        resolver.deinit();
+                        resolver.retire(evaluator.releaseDomain());
                         self.second = resolved;
                     },
                 }
@@ -790,6 +804,8 @@ const Driver = struct {
 
     fn act(self: *Driver, evaluator: *Machine) MachineError!machine.WorkProgress {
         return switch (self.operation) {
+            .mkdirs => self.makeDirectories(evaluator),
+            .remove_tree => self.beginRemoveTree(evaluator),
             .lock => self.beginLock(evaluator),
             .open_dir => unreachable,
             .child_dir => self.acquireDirectory(evaluator),
@@ -1109,6 +1125,48 @@ const Driver = struct {
         return .completed;
     }
 
+    fn makeDirectories(self: *Driver, evaluator: *Machine) MachineError!machine.WorkProgress {
+        switch (self.resolved.?) {
+            .directory => {},
+            .entry => |entry| entry.parent.dir.createDir(self.io, entry.name, .default_dir) catch |err| switch (err) {
+                error.PathAlreadyExists => {
+                    const dir = entry.parent.dir.openDir(self.io, entry.name, .{ .follow_symlinks = false }) catch |open_err| return self.fail(evaluator, fsport.reasonForError(open_err));
+                    dir.close(self.io);
+                },
+                else => return self.fail(evaluator, fsport.reasonForError(err)),
+            },
+        }
+        self.state = .complete;
+        return .completed;
+    }
+
+    fn beginRemoveTree(self: *Driver, evaluator: *Machine) MachineError!machine.WorkProgress {
+        const entry = try self.requireEntry(evaluator, self.resolved.?);
+        const dir = entry.parent.dir.openDir(self.io, entry.name, .{ .iterate = true, .follow_symlinks = false }) catch |err| return self.fail(evaluator, fsport.reasonForError(err));
+        self.state = .{ .removing_tree = .init(self.io, dir) };
+        return .yielded;
+    }
+
+    fn removeTreeStep(self: *Driver, evaluator: *Machine, tree: *fsport.TreeRemoval) MachineError!machine.WorkProgress {
+        switch (tree.step()) {
+            .pending => return .yielded,
+            .failed => |reason| return self.fail(evaluator, reason),
+            .complete => {
+                const entry = try self.requireEntry(evaluator, self.resolved.?);
+                entry.parent.dir.deleteDir(self.io, entry.name) catch |err| switch (err) {
+                    error.DirNotEmpty => {
+                        tree.restart();
+                        return .yielded;
+                    },
+                    else => return self.fail(evaluator, fsport.reasonForError(err)),
+                };
+                tree.deinit();
+                self.state = .complete;
+                return .completed;
+            },
+        }
+    }
+
     const RemoveKind = enum { file, directory };
 
     fn removeEntry(self: *Driver, evaluator: *Machine, kind: RemoveKind) MachineError!machine.WorkProgress {
@@ -1287,7 +1345,8 @@ const Driver = struct {
             .encode_bytes => |*encoder| encoder.deinit(),
             .authorize, .act, .complete => {},
             .waiting_lock => |file| file.close(self.io),
-            .resolve, .resolve_second => |*resolver| resolver.deinit(),
+            .removing_tree => |*tree| tree.deinit(),
+            .resolve, .resolve_second => |*resolver| resolver.retire(releases),
             .read => |*read| {
                 read.file.close(self.io);
                 allocator.free(read.buffer);

@@ -430,6 +430,25 @@ test "fs: text and byte reads round trip exactly across chunk boundaries" {
     try scratch.expectAbsent("nine");
 }
 
+test "fs: recursive directory operations preserve containment and existing parents" {
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    const options = scratch.filesystem();
+    try expectStack(options, "'root \"a/b/c\" fs.mkdirs 'root \"a/b/c\" fs.mkdirs " ++
+        "\"x\" 'root \"a/b/c/file\" fs.publish-text 'root \"a\" fs.remove-tree 'root \"a\" fs.exists?", "0");
+    try scratch.write("outside", "preserved");
+    try scratch.directory.dir.createDir(io, "tree", .default_dir);
+    try scratch.directory.dir.createDir(io, "tree/child", .default_dir);
+    try scratch.directory.dir.symLink(io, "../../outside", "tree/child/link", .{});
+    try expectStack(options, "'root \".\" fs.child-dir \"tree\" fs.remove-tree 'root \"outside\" fs.read-text", "\"preserved\"");
+    try scratch.directory.dir.symLink(io, "/", "escape", .{});
+    try expectFsFailure(options, "'root \"escape/forbidden\" fs.mkdirs", "io", "fs.mkdirs", "symlink-escape");
+    try expectFsFailure(options, "'root \"outside/child\" fs.mkdirs", "io", "fs.mkdirs", "not-directory");
+    try expectFsFailure(options, "'root \".\" fs.remove-tree", "domain", "fs.remove-tree", "invalid-path");
+    try expectStack(options, "'root \".\" fs.mkdirs", "");
+    try scratch.expectNoStaging(".");
+}
+
 test "fs: advisory locks serialize mutations and release after cancellation" {
     var scratch = try Scratch.init();
     defer scratch.deinit();
