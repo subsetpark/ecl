@@ -62,6 +62,34 @@ artifact map; all declared exports must occur exactly once. Other registrations
 remain file-private, including duplicate private names in different artifacts.
 Unselected regular data files are retained by installation.
 
+## Application orchestration
+
+`pkg.project` searches upward from the captured startup directory for `ecl.pkg`.
+Discovery reads neither a project lock nor a runtime map. All subsequent project
+access uses an explicitly opened directory resource. Mutations coordinate with
+the advisory lock at `.ecl/mutation.lock`.
+
+Download-cache selection belongs to the application: nonempty `ECL_CACHE`, then
+`XDG_CACHE_HOME/ecl/pkg`, then `HOME/.cache/ecl/pkg`. Relative settings resolve
+against the captured startup directory; absence of all settings disables the
+cache optimization. Git trust uses optional `ECL_GIT_CA_FILE`, and scratch uses
+`TMPDIR` or `/tmp`. These are application choices passed explicitly to the
+independent native port; the extension does not read package configuration.
+
+`pkg.fetch` drains bounded Git byte output before observing its resolved commit,
+joins the exchange and resource, and verifies a selected artifact's exact hash.
+Only explicit tag selection requests a tag. A locked requirement always requests
+its full commit. Archive requests use the public bounded HTTP facility.
+`zig build test-pkg-fetch` provides a controlled HTTPS service and runs the
+application's fetch assertions with `ecl test`.
+
+`pkg.map` projects direct dependency edges and inspected artifact exports into a
+general module map. It keeps the project's source patterns live. Before any
+directory publication, it sends the candidate map to the current executable's
+public validator, with the eventual document path and a bounded subprocess
+deadline. Neither project state nor executable search through `PATH` participates
+in that validation.
+
 Each immutable generation contains its own complete resolution snapshot,
 installed dependencies, sealed artifacts, and a complete relative module map.
 The snapshot supplements the root lock: a running generation always uses its own

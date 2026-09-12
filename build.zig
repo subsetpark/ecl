@@ -265,6 +265,13 @@ pub fn build(b: *std.Build) void {
     git_native_acceptance.addArtifactArg(git_extension);
     const git_native_step = b.step("test-git-extension", "Verify the standalone Git snapshot port over controlled HTTPS");
     git_native_step.dependOn(&git_native_acceptance.step);
+    const pkg_fetch_acceptance = b.addSystemCommand(&.{ "python3", "test/git_extension.py" });
+    pkg_fetch_acceptance.addArtifactArg(exe);
+    pkg_fetch_acceptance.addArtifactArg(git_extension);
+    pkg_fetch_acceptance.addArg("--application");
+    pkg_fetch_acceptance.addFileArg(b.path("apps/pkg/test/acceptance/fetch.ecl"));
+    const pkg_fetch_step = b.step("test-pkg-fetch", "Run ECL application fetch assertions against a controlled HTTPS Git server");
+    pkg_fetch_step.dependOn(&pkg_fetch_acceptance.step);
     const native_runtime_options = b.addOptions();
     native_runtime_options.addOptionPath("ecl_exe", exe.getEmittedBin());
     native_runtime_options.addOptionPath(
@@ -360,6 +367,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run the ecl test suite");
     test_step.dependOn(&run_tests.step);
     test_step.dependOn(&git_acceptance.step);
+    test_step.dependOn(&pkg_fetch_acceptance.step);
     test_step.dependOn(native_negative_step);
     const run_ecl_tests = b.addRunArtifact(exe);
     run_ecl_tests.addArg("test");

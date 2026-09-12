@@ -170,7 +170,7 @@ jobs:
               timeout 20m /opt/zig/zig build test-tsan \
               -Doptimize="$OPTIMIZE" --summary all --test-timeout 10m \
                 < /dev/null
-              timeout 10m /opt/zig/zig build test-git-extension -Dgit-tsan=true \
+              timeout 10m /opt/zig/zig build test-git-extension test-pkg-fetch -Dgit-tsan=true \
                 -Doptimize="$OPTIMIZE" --summary all < /dev/null
           '
           tsan_status=$?
@@ -277,7 +277,7 @@ jobs:
         if: inputs.run_native_acceptance
         run: >-
           docker exec --env OPTIMIZE="$OPTIMIZE" ecl-ci sh -euxc
-          'cd /build; timeout 10m zig build test-git-extension
+          'cd /build; timeout 10m zig build test-git-extension test-pkg-fetch
           -Doptimize="$OPTIMIZE" --summary all < /dev/null'
 
       - name: Fuzz campaigns

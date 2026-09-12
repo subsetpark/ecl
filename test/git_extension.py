@@ -30,6 +30,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('ecl', type=Path)
     parser.add_argument('extension', type=Path)
+    parser.add_argument('--application', type=Path)
     args = parser.parse_args()
     binary = str(args.ecl.resolve())
     extension = args.extension.resolve()
@@ -72,6 +73,31 @@ def main():
                 + json.dumps(extension.name) + " 'kind 'native 'exports [\"git\"]}]}}}"
             )
             origin = f'https://127.0.0.1:{server.server_port}'
+
+            if args.application:
+                entry = args.application.resolve()
+                module_map.write_text(
+                    "{'format 1 'local \"application\" 'scopes {\"application\" {'root "
+                    + json.dumps(str(entry.parents[2]))
+                    + " 'visible [\"native\"] 'sources [\"src/**/*.ecl\" "
+                    + json.dumps(str(entry.relative_to(entry.parents[2])))
+                    + "] 'artifacts []} \"native\" {'root "
+                    + json.dumps(str(extension.parent))
+                    + " 'visible [] 'sources [] 'artifacts [{'path "
+                    + json.dumps(extension.name) + " 'kind 'native 'exports [\"git\"]}]}}}"
+                )
+                for name in ['ecl.pkg', 'ecl.lock', 'ecl.modules']:
+                    (caller / name).write_text('corrupt caller state')
+                result = subprocess.run(
+                    [binary, '--module-map', str(module_map), 'test', '--runner', 'pkg.test.fetch.run', '--', origin + '/repo.git', commit],
+                    cwd=caller, env={**os.environ, 'ECL_WORKERS': '4', 'ECL_GIT_CA_FILE': str(certs / 'ca.pem'), 'TMPDIR': str(scratch)},
+                    stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30,
+                )
+                assert result.returncode == 0, (result.stdout, result.stderr)
+                assert 'ThreadSanitizer' not in result.stderr, result.stderr
+                assert list(scratch.iterdir()) == [], 'scratch survived joined application completion'
+                print(result.stdout, end='')
+                return
 
             def request(selector='commit', revision=commit, **overrides):
                 values = {'url': origin + '/repo.git', 'selector': "'" + selector,

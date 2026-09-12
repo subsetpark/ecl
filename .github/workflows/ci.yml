@@ -73,5 +73,5 @@ jobs:
           python3 - <<'PYTHON'
           import subprocess
           subprocess.run(['/tmp/zig/zig', 'build', 'test-pkg-git', '-Doptimize=ReleaseSafe'], stdin=subprocess.DEVNULL, timeout=900, check=True)
-          subprocess.run(['/tmp/zig/zig', 'build', 'test-git-extension', '-Doptimize=ReleaseSafe'], stdin=subprocess.DEVNULL, timeout=900, check=True)
+          subprocess.run(['/tmp/zig/zig', 'build', 'test-git-extension', 'test-pkg-fetch', '-Doptimize=ReleaseSafe'], stdin=subprocess.DEVNULL, timeout=900, check=True)
           PYTHON
