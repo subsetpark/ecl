@@ -370,6 +370,13 @@ pub fn build(b: *std.Build) void {
     );
     ecl_test_step.dependOn(&run_ecl_tests.step);
     test_step.dependOn(&run_ecl_tests.step);
+    const run_pkg_tests = b.addRunArtifact(exe);
+    run_pkg_tests.addArg("--module-map");
+    run_pkg_tests.addFileArg(b.path("apps/pkg/test/ecl.modules"));
+    run_pkg_tests.addArg("test");
+    const pkg_test_step = b.step("test-pkg-app", "Run package application policy through ECL's built-in test runner");
+    pkg_test_step.dependOn(&run_pkg_tests.step);
+    test_step.dependOn(&run_pkg_tests.step);
     const native_runtime_tests = b.addTest(.{
         .root_module = test_mod,
         .filters = &.{ "native:", "concurrency: native shutdown" },
@@ -1227,6 +1234,7 @@ pub fn build(b: *std.Build) void {
     precommit_step.dependOn(&package_transactions.step);
     precommit_step.dependOn(&module_maps.step);
     precommit_step.dependOn(&host_metadata.step);
+    precommit_step.dependOn(&run_pkg_tests.step);
     precommit_step.dependOn(git_extension_step);
 }
 

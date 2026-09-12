@@ -19,6 +19,30 @@ dependency updates require an explicit update operation. An initial sync may
 resolve a graph when no lock exists. Offline sync applies the same selection
 rules and fails when the exact pinned artifacts are unavailable.
 
+The portable lock uses format 3 with exactly `format`, `root`, `root-requires`,
+`packages`, and `requires`. `root-requires` retains the manifest's complete
+dependency declarations, including local aliases and exact source pins.
+`packages` records each selected version, tagged source identity, and archive
+hash. `requires` records the direct alias-to-package minimum-version edges for
+the root and every selected package, including packages with no dependencies.
+Every selection is reachable from the root, and the graph is acyclic. Sources
+remain HTTPS archives or Git repositories pinned to full commits.
+
+Changing the root's version, exports, or local source patterns does not itself
+update dependencies. Changing its name or dependency declarations makes the
+lock incompatible and requires `pkg update`. When minimal version selection
+raises a dependency above a declared minimum, ordinary sync fetches the selected
+pin; it does not need to fetch superseded minimum artifacts. If the selected
+version equals a declaration's minimum, its source and hash must match that
+declaration exactly. Every selected manifest must match its locked identity and
+direct edges.
+
+`pkg.resolution` owns validation, canonical serialization, compatibility, and
+sealed-manifest checks. `zig build test-pkg-app` invokes ECL's built-in test
+runner against the application's test map; package policy assertions live in
+ECL. Separate-process orchestration and controlled external services remain
+host integration fixtures.
+
 Each immutable generation contains its own complete resolution snapshot,
 installed dependencies, sealed artifacts, and a complete relative module map.
 The snapshot supplements the root lock: a running generation always uses its own
