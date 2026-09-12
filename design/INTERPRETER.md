@@ -1936,7 +1936,9 @@ publication. Ready slices share the scheduler's normal arbitration; parking
 owns a cancellable timer pin, and notifications during execution survive the
 transition to a wait. Completion returns the reservation before releasing the
 execution pin. Retained, finished resource values therefore do not retain
-scheduler authority or require it for destruction.
+scheduler authority or require it for destruction. Startup rollback
+also relinquishes unused reservations before retiring the group's publication;
+failed publication has the same post-retirement lifetime as completed work.
 
 The common controller service validates lane capacity, admits prepared
 exchanges, supplies admission readiness, sequences initialization and graceful

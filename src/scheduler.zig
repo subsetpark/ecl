@@ -1674,6 +1674,20 @@ pub const Cooperative = opaque {
         }
         owned.allocator.destroy(owned);
     }
+    /// Consumes an unstarted reservation without invoking parent callbacks.
+    /// Startup rollback calls this before releasing its published lifetime.
+    pub fn abandon(self: *Cooperative) void {
+        const owned = self.state();
+        std.Io.Threaded.mutexLock(&owned.mutex);
+        defer std.Io.Threaded.mutexUnlock(&owned.mutex);
+        switch (owned.phase) {
+            .reserved => {
+                self.releaseReservation();
+                owned.phase = .finished;
+            },
+            .queued, .running, .waiting, .finished => @panic("abandoning started cooperative work"),
+        }
+    }
     pub fn start(self: *Cooperative) void {
         const owned = self.state();
         std.Io.Threaded.mutexLock(&owned.mutex);
