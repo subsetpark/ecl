@@ -659,6 +659,12 @@ artifacts commit through their loading lease before another loader can observe
 completion. The native artifact's source provenance carries its publication
 identity; it has no separate independently correlated commitment flag.
 
+Installed-application dispatch resolves a descriptor only from the executable's
+installation prefix, before Session construction. The descriptor selects the
+entry source and complete map; the startup directory remains the caller's.
+This keeps application resolution independent of project discovery without
+granting a separate execution mode or application-specific runtime authority.
+
 The catalog separates source selection from exact public exports; the shared
 registry contains exported registrations while each file owns its private
 registrations. Private names therefore cannot collide across files or become

@@ -34,7 +34,7 @@ pub fn main(init: std.process.Init) void {
             break :failure 1;
         },
         error.InvalidHostConfig => failure: {
-            writeFile(init.io, .stderr, "ecl: runtime directories, package store, or limits are invalid\n") catch
+            writeFile(init.io, .stderr, "ecl: runtime directories, module map, package store, or limits are invalid\n") catch
                 std.process.exit(1);
             break :failure 1;
         },
@@ -103,6 +103,7 @@ fn dispatch(startup: Startup) AppError!u8 {
         return executeSource(init, "<command>", cli[1], cli[2..], true, .data, worker_count);
     }
     if (std.mem.eql(u8, first, "-")) return runStdin(init, cli[1..], worker_count);
+    if (try installedApplication(init, first, cli[1..], worker_count)) |status| return status;
     const is_file: bool = file: {
         std.Io.Dir.cwd().access(init.process.io, first, .{ .read = true }) catch |err| switch (err) {
             error.FileNotFound, error.NameTooLong, error.BadPathName => break :file false,
@@ -130,6 +131,72 @@ fn dispatch(startup: Startup) AppError!u8 {
         return emitSyntheticError(init, .io, message, null);
     }
     return executeSource(init, "<command>", first, cli[1..], true, .data, worker_count);
+}
+
+/// Installation-owned descriptors are inert JSON, parsed before constructing
+/// a Session. Application startup therefore does not inspect the caller's map.
+const ApplicationDescriptor = struct {
+    format: u32,
+    entry: []const u8,
+    module_map: []const u8,
+};
+
+fn applicationName(name: []const u8) bool {
+    if (name.len == 0 or name.len > 64 or !std.ascii.isAlphabetic(name[0])) return false;
+    for (name) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '-') return false;
+    return true;
+}
+
+fn applicationRelativePath(path: []const u8) bool {
+    if (path.len == 0 or path.len > 4096 or !std.unicode.utf8ValidateSlice(path)) return false;
+    for (path) |byte| if (byte < 32 or byte == 127 or byte == '\\' or byte == ':') return false;
+    var parts = std.mem.splitScalar(u8, path, '/');
+    while (parts.next()) |part| {
+        if (part.len == 0 or std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, "..")) return false;
+    }
+    return true;
+}
+
+fn installedApplication(init: Startup, name: []const u8, arguments: []const []const u8, worker_count: usize) AppError!?u8 {
+    if (!applicationName(name)) return null;
+    const allocator = init.process.gpa;
+    const executable = std.process.executablePathAlloc(init.process.io, allocator) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.Io,
+    };
+    defer allocator.free(executable);
+    const bin = std.fs.path.dirname(executable) orelse return null;
+    const prefix = std.fs.path.dirname(bin) orelse return null;
+    const app_dir = try std.fs.path.join(allocator, &.{ prefix, "share", "ecl", "apps", name });
+    defer allocator.free(app_dir);
+    const descriptor_path = try std.fs.path.join(allocator, &.{ app_dir, "application.json" });
+    defer allocator.free(descriptor_path);
+    const bytes = std.Io.Dir.cwd().readFileAlloc(init.process.io, descriptor_path, allocator, .limited(16 * 1024)) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return null,
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return try emitIoError(init, "cannot read installed application descriptor", err),
+    };
+    defer allocator.free(bytes);
+    const parsed = std.json.parseFromSlice(ApplicationDescriptor, allocator, bytes, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return try emitSyntheticError(init, .io, "invalid installed application descriptor", null),
+    };
+    defer parsed.deinit();
+    const descriptor = parsed.value;
+    if (descriptor.format != 1 or !applicationRelativePath(descriptor.entry) or !applicationRelativePath(descriptor.module_map))
+        return try emitSyntheticError(init, .io, "invalid installed application descriptor", null);
+    const entry_path = try std.fs.path.join(allocator, &.{ app_dir, descriptor.entry });
+    defer allocator.free(entry_path);
+    const map = try std.fs.path.join(allocator, &.{ app_dir, descriptor.module_map });
+    defer allocator.free(map);
+    const source = std.Io.Dir.cwd().readFileAlloc(init.process.io, entry_path, allocator, .limited(16 * 1024 * 1024)) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return try emitIoError(init, "cannot read installed application entry", err),
+    };
+    defer allocator.free(source);
+    var application = init;
+    application.module_map = map;
+    return try executeSource(application, entry_path, source, arguments, false, .data, worker_count);
 }
 
 const test_help =

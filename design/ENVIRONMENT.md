@@ -864,6 +864,33 @@ itself never enters evaluated code. `init` acts on the `'cwd` root.
 Successful package commands produce stable line-oriented output. Package and
 host failures remain structured ECL errors rendered by the process boundary.
 
+## Installed applications
+
+An installation may provide applications beneath `share/ecl/apps/<name>/`,
+relative to the prefix containing `bin/ecl`. A name starts with an ASCII letter
+and contains only ASCII letters, digits, and hyphens, up to 64 bytes. Built-in
+CLI commands take precedence. Otherwise `ecl <name> ...` consults only that
+installation directory, never the project or `PATH`.
+
+Each application's `application.json` has exactly these fields:
+
+```json
+{"format": 1, "entry": "main.ecl", "module_map": "ecl.modules"}
+```
+
+Both paths are nonempty UTF-8 paths beneath the application's directory,
+without empty, dot, parent, drive, or backslash components. Descriptors are
+limited to 16 KiB and entry source to 16 MiB. Unknown fields and unsupported
+formats are errors. A descriptor is data and executes no code.
+
+The entry script runs in an ordinary Session using the application's map.
+The caller's working directory, trailing arguments, environment, and standard
+streams are preserved, including standard input as data. The caller's project
+map, including an explicitly selected map, does not replace the application
+map. A malformed project therefore cannot prevent application startup. The
+application and its artifacts must be installed directly; startup does not
+fetch, synchronize, or bootstrap them through a package manager.
+
 ## The `ecl` command
 
 ```text

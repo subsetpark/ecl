@@ -1131,6 +1131,11 @@ pub fn build(b: *std.Build) void {
         ).step);
     }
 
+    const installed_apps = b.addSystemCommand(&.{ "python3", "test/installed_apps.py" });
+    installed_apps.addArtifactArg(exe);
+    const installed_apps_step = b.step("test-installed-apps", "Verify installation-only application dispatch through a relocated distribution");
+    installed_apps_step.dependOn(&installed_apps.step);
+
     const precommit_step = b.step(
         "precommit",
         "The local gate: formatting, architecture audit, whole-tree analysis, and the fast test tier",
@@ -1145,6 +1150,9 @@ pub fn build(b: *std.Build) void {
     precommit_step.dependOn(analysis_step);
     precommit_step.dependOn(native_negative_step);
     precommit_step.dependOn(&run_precommit_tests.step);
+    // A small isolated CLI fixture proves descriptor, cwd, argument, and stream
+    // behavior without adding an external service or an ambient input stream.
+    precommit_step.dependOn(&installed_apps.step);
 }
 
 fn addCapturedTestRun(
