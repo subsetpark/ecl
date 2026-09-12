@@ -53,6 +53,57 @@ An ECL source candidate may register several modules. Successful loading
 requires the requested registration to exist after the source unit completes.
 All registrations from a failing source unit remain unavailable.
 
+### Module maps
+
+An `ecl.modules` document supplies inert module-resolution metadata. It contains
+no package versions, fetching instructions, or cache policy. The nearest such
+file, searching upward from the startup directory, takes precedence over
+project-lock discovery. `ecl --module-map FILE ...` selects a map explicitly;
+its path is relative to the caller's working directory. A malformed discovered
+or explicitly selected map fails Session construction, without falling back.
+
+```ecl
+{'format 1 'local "project" 'scopes {
+ "project" {'root "." 'visible ["library"]
+            'sources ["src/**/*.ecl"] 'artifacts []}
+ "library" {'root "installed/library" 'visible [] 'sources []
+            'artifacts [{'path "library.ecl" 'kind 'ecl
+                         'exports ["library"]}]}}}
+```
+
+Every scope has exactly `root`, `visible`, `sources`, and `artifacts` fields.
+Scope names are nonempty strings. Visibility includes the scope itself and
+only the explicitly listed direct edges; it is checked even for loaded
+modules. Missing, duplicate, or self visibility edges are invalid. Exported
+module names and artifact paths must be unique across the map. Artifacts in
+different scopes may reuse relative filenames when their roots differ.
+Artifact paths are relative, without empty, dot, parent, glob, or drive
+components. Scope roots resolve relative to the document containing them.
+
+Source patterns use `/` separators, `*` and `?` within segments, and `**` as a
+whole segment. Selected regular `.ecl` files are parsed without execution at
+Session startup. Literal top-level module declarations become exports;
+computed and nested registrations remain file-private. Explicit artifacts
+name their exports directly and are read only on first use. Kinds are `ecl`
+and `native`; a native artifact exports exactly one module and executes
+trusted native code through the ordinary extension boundary. Test discovery
+enumerates ECL artifacts from the designated `local` scope.
+
+A reference document has exactly this shape:
+
+```ecl
+{'format 1 'map ".ecl/generations/current/ecl.modules"}
+```
+
+The referenced document must be a complete map, never another reference.
+Its paths resolve relative to that document. Each Session captures its map
+once; later file additions appear in new Sessions without synchronization.
+Source execution remains lazy, once per artifact, with atomic registration.
+Startup performs no fetching or repair. Maps are bounded to 16 MiB, 4,096
+scopes and artifacts, 65,536 exports, 16 MiB per discovered source, and 64 MiB
+of discovered source text. Names and paths are at most 4,096 UTF-8 bytes and
+contain no control characters.
+
 ### Native modules
 
 A `<name>.eclmod` file is a target-specific shared library containing one

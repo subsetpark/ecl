@@ -18,6 +18,122 @@ const intern = @import("../intern.zig");
 const session = @import("../session.zig");
 const test_heap = @import("test_heap.zig");
 
+const standalone_map =
+    \\{'format 1 'local "local" 'scopes {
+    \\ "local" {'root "." 'visible ["direct"] 'sources ["local/*.ecl"] 'artifacts []}
+    \\ "direct" {'root "." 'visible ["indirect"] 'sources [] 'artifacts [
+    \\   {'path "direct.ecl" 'kind 'ecl 'exports ["direct" "sibling"]}]}
+    \\ "indirect" {'root "." 'visible [] 'sources [] 'artifacts [
+    \\   {'path "indirect.ecl" 'kind 'ecl 'exports ["indirect"]}]}}}
+;
+
+test "loader: standalone maps capture local discovery and enforce direct lexical visibility" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    const dir = inputs.temporary.dir;
+    try dir.createDir(std.testing.io, "local", .default_dir);
+    try dir.writeFile(std.testing.io, .{ .sub_path = "ecl.modules", .data = standalone_map });
+    try dir.writeFile(std.testing.io, .{ .sub_path = "local/one.ecl", .data = "[] ((10) 'answer def) 'localmod @defm" });
+    try dir.writeFile(std.testing.io, .{ .sub_path = "direct.ecl", .data = "[] ((indirect.answer) 'answer def) 'direct @defm [] ((7) 'answer def) 'sibling @defm" });
+    try dir.writeFile(std.testing.io, .{ .sub_path = "indirect.ecl", .data = "[] ((42) 'answer def) 'indirect @defm" });
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{}), .cooperative, .evaluate);
+    defer runtime.deinit();
+    try expectOk(&runtime, "localmod.answer direct.answer sibling.answer");
+    try std.testing.expectEqual(@as(i64, 10), runtime.stackItems()[0].int);
+    try std.testing.expectEqual(@as(i64, 42), runtime.stackItems()[1].int);
+    try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[2].int);
+    try expectErrorContains(&runtime, "indirect.answer", &.{"does not require it"});
+    // An already committed source is not executed again, even after removal.
+    try dir.deleteFile(std.testing.io, "direct.ecl");
+    try expectOk(&runtime, "direct.answer sibling.answer");
+    try dir.writeFile(std.testing.io, .{ .sub_path = "local/two.ecl", .data = "[] ((20) 'answer def) 'newlocal @defm" });
+    try expectErrorContains(&runtime, "newlocal.answer", &.{"not exported"});
+    var next = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{}), .cooperative, .evaluate);
+    defer next.deinit();
+    try expectOk(&next, "newlocal.answer");
+    try std.testing.expectEqual(@as(i64, 20), next.stackItems()[0].int);
+}
+
+test "loader: map references relocate and malformed nearest maps fail closed" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    const dir = inputs.temporary.dir;
+    try dir.createDir(std.testing.io, "local", .default_dir);
+    try dir.createDir(std.testing.io, "maps", .default_dir);
+    const complete = "{'format 1 'local \"root\" 'scopes {\"root\" {'root \"..\" 'visible [] 'sources [\"local/*.ecl\"] 'artifacts []}}}";
+    try dir.writeFile(std.testing.io, .{ .sub_path = "maps/complete", .data = complete });
+    try dir.writeFile(std.testing.io, .{ .sub_path = "ecl.modules", .data = "{'format 1 'map \"maps/complete\"}" });
+    try dir.writeFile(std.testing.io, .{ .sub_path = "local/entry.ecl", .data = "[] ((3) 'answer def) 'mapped @defm" });
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{}), .cooperative, .evaluate);
+    defer runtime.deinit();
+    try expectOk(&runtime, "mapped.answer");
+    try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[0].int);
+    try dir.writeFile(std.testing.io, .{ .sub_path = "ecl.modules", .data = "broken" });
+    try std.testing.expectError(error.InvalidHostConfig, session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{}), .cooperative, .evaluate));
+    var explicit = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{ .module_map = "maps/complete" }), .cooperative, .evaluate);
+    defer explicit.deinit();
+    try expectOk(&explicit, "mapped.answer");
+    try dir.writeFile(std.testing.io, .{ .sub_path = "maps/chained", .data = "{'format 1 'map \"complete\"}" });
+    try dir.writeFile(std.testing.io, .{ .sub_path = "maps/complete", .data = "{'format 1 'map \"chained\"}" });
+    try std.testing.expectError(error.InvalidHostConfig, session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{ .module_map = "maps/complete" }), .cooperative, .evaluate));
+}
+
+test "loader: map validation and snapshot construction clean up every allocation failure" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    try inputs.temporary.dir.createDir(std.testing.io, "local", .default_dir);
+    try inputs.temporary.dir.writeFile(std.testing.io, .{ .sub_path = "local/one.ecl", .data = "[] () 'localmod @defm" });
+    const path = try std.fs.path.join(std.testing.allocator, &.{ inputs.cwd, "ecl.modules" });
+    defer std.testing.allocator.free(path);
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator, filename: []const u8, cwd: []const u8) !void {
+            var owner = @import("../heap.zig").HostOwner.init(allocator);
+            defer owner.cleanup().drain();
+            const map = try @import("../module_map.zig").validate(owner.cleanup(), std.testing.io, standalone_map, filename, true);
+            defer map.deinit();
+            const snapshot = try @import("../pkg_lock.zig").ProjectLock.fromMap(owner.cleanup(), map, cwd);
+            defer snapshot.deinit();
+            var lookup = snapshot.lookupCursor(snapshot.rootPackage(), "direct");
+            defer lookup.deinit();
+            while (true) switch (lookup.advance()) {
+                .pending => {},
+                .complete => |outcome| {
+                    try std.testing.expect(outcome == .matched);
+                    break;
+                },
+            };
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{ path, inputs.cwd });
+}
+
+test "loader: maps load native artifacts through concurrent public requests" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    const native_root = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, @import("native_fixture_options").directory, std.testing.allocator);
+    defer std.testing.allocator.free(native_root);
+    const source = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{{'format 1 'local \"local\" 'scopes {{" ++
+            "\"local\" {{'root \".\" 'visible [\"native\"] 'sources [] 'artifacts []}} " ++
+            "\"native\" {{'root \"{s}\" 'visible [] 'sources [] 'artifacts [" ++
+            "{{'path \"sample.eclmod\" 'kind 'native 'exports [\"sample\"]}}]}}}}}}",
+        .{native_root},
+    );
+    defer std.testing.allocator.free(source);
+    try inputs.temporary.dir.writeFile(std.testing.io, .{ .sub_path = "ecl.modules", .data = source });
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{}), .{ .worker_pool = 4 }, .evaluate);
+    defer runtime.deinit();
+    try expectOk(&runtime, "[] (40 sample.increment) @spawn [] (41 sample.increment) @spawn task.await 'ok at pop task.await 'ok at pop 9 sample.increment");
+    try std.testing.expectEqual(@as(i64, 10), runtime.stackItems()[0].int);
+}
+
 const CatalogIoObservation = struct {
     var catalog_reads: usize = 0;
     var source_reads: usize = 0;

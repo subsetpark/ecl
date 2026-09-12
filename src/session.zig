@@ -99,6 +99,8 @@ pub const RuntimeInputs = struct {
     diagnostics: *std.Io.Writer,
     tls_trust: ?TlsTrustOverride = null,
     ecl_path: ?[]const u8 = null,
+    /// An explicit map overrides nearest-map discovery, relative to initial_cwd.
+    module_map: ?[]const u8 = null,
     /// Borrowed name/value pairs; the Session owns its own copy.
     environ: []const machine.Environ.Entry,
     /// Whether the process has already claimed stdin as the program source.
@@ -375,16 +377,32 @@ pub const Session = enum(usize) {
             error.InvalidConfig => return error.InvalidHostConfig,
         };
         errdefer http_owner.deinit();
-        const owned_project_lock = try pkg_lock.ProjectLock.discover(
-            host_owner.cleanup(),
-            host.io,
-            host.initial_cwd,
-            .{
-                .ecl_cache = environValue(host.environ, "ECL_CACHE"),
-                .xdg_cache_home = environValue(host.environ, "XDG_CACHE_HOME"),
-                .home = environValue(host.environ, "HOME"),
-            },
-        );
+        const owned_project_lock = discovery: {
+            const maps = @import("module_map.zig");
+            const map_path = maps.discover(allocator, host.io, host.initial_cwd, host.module_map) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Invalid => return error.InvalidHostConfig,
+            };
+            if (map_path) |path| {
+                defer allocator.free(path);
+                const map = maps.load(host_owner.cleanup(), host.io, path) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.Invalid => return error.InvalidHostConfig,
+                };
+                defer map.deinit();
+                break :discovery try pkg_lock.ProjectLock.fromMap(host_owner.cleanup(), map, host.initial_cwd);
+            }
+            break :discovery try pkg_lock.ProjectLock.discover(
+                host_owner.cleanup(),
+                host.io,
+                host.initial_cwd,
+                .{
+                    .ecl_cache = environValue(host.environ, "ECL_CACHE"),
+                    .xdg_cache_home = environValue(host.environ, "XDG_CACHE_HOME"),
+                    .home = environValue(host.environ, "HOME"),
+                },
+            );
+        };
         errdefer if (owned_project_lock) |project_lock| project_lock.deinit();
         var test_authority = if (mode == .language_tests)
             @as(?modules.TestAuthority, try registry.createTestAuthority(owned_project_lock))

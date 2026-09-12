@@ -23,8 +23,8 @@ fn moduleNameLessThan(_: void, left: intern.ModuleName, right: intern.ModuleName
     return @intFromEnum(left) < @intFromEnum(right);
 }
 
-pub const PackageId = enum(u32) { _ };
-pub const ArtifactId = enum(u32) { _ };
+pub const PackageId = @import("module_map.zig").ScopeId;
+pub const ArtifactId = @import("module_map.zig").ArtifactId;
 
 pub const PackageInput = struct {
     id: PackageId,
@@ -46,6 +46,7 @@ pub const PackageInput = struct {
 
 pub const Artifact = struct {
     package: PackageId,
+    kind: @import("module_map.zig").Kind = .ecl,
     relative_path: []u8,
     absolute_path: []u8,
     modules: []intern.ModuleName,
@@ -790,68 +791,8 @@ pub fn build(
     return cursor.take();
 }
 
-fn validGlob(glob: []const u8) bool {
-    if (glob.len == 0 or glob[0] == '/' or std.mem.indexOfScalar(u8, glob, '\\') != null)
-        return false;
-    if (glob.len >= 2 and std.ascii.isAlphabetic(glob[0]) and glob[1] == ':') return false;
-    var segments = std.mem.splitScalar(u8, glob, '/');
-    while (segments.next()) |segment| {
-        if (segment.len == 0 or std.mem.eql(u8, segment, ".") or std.mem.eql(u8, segment, ".."))
-            return false;
-        if (std.mem.indexOf(u8, segment, "**") != null and !std.mem.eql(u8, segment, "**"))
-            return false;
-    }
-    return true;
-}
-
-fn globMatches(glob: []const u8, path: []const u8) bool {
-    return matchSegments(glob, 0, path, 0);
-}
-
-fn matchSegments(glob: []const u8, glob_start: usize, path: []const u8, path_start: usize) bool {
-    const glob_end = std.mem.indexOfScalarPos(u8, glob, glob_start, '/') orelse glob.len;
-    const path_end = std.mem.indexOfScalarPos(u8, path, path_start, '/') orelse path.len;
-    const glob_segment = glob[glob_start..glob_end];
-    if (std.mem.eql(u8, glob_segment, "**")) {
-        if (glob_end == glob.len) return true;
-        const next_glob = glob_end + 1;
-        var next_path = path_start;
-        while (true) {
-            if (matchSegments(glob, next_glob, path, next_path)) return true;
-            const slash = std.mem.indexOfScalarPos(u8, path, next_path, '/') orelse return false;
-            next_path = slash + 1;
-        }
-    }
-    if (!matchSegment(glob_segment, path[path_start..path_end])) return false;
-    if (glob_end == glob.len or path_end == path.len)
-        return glob_end == glob.len and path_end == path.len;
-    return matchSegments(glob, glob_end + 1, path, path_end + 1);
-}
-
-fn matchSegment(pattern: []const u8, text: []const u8) bool {
-    var pattern_index: usize = 0;
-    var text_index: usize = 0;
-    var star: ?usize = null;
-    var star_text: usize = 0;
-    while (text_index < text.len) {
-        if (pattern_index < pattern.len and
-            (pattern[pattern_index] == '?' or pattern[pattern_index] == text[text_index]))
-        {
-            pattern_index += 1;
-            text_index += 1;
-        } else if (pattern_index < pattern.len and pattern[pattern_index] == '*') {
-            star = pattern_index;
-            pattern_index += 1;
-            star_text = text_index;
-        } else if (star) |star_index| {
-            pattern_index = star_index + 1;
-            star_text += 1;
-            text_index = star_text;
-        } else return false;
-    }
-    while (pattern_index < pattern.len and pattern[pattern_index] == '*') pattern_index += 1;
-    return pattern_index == pattern.len;
-}
+const validGlob = @import("module_map.zig").validGlob;
+const globMatches = @import("module_map.zig").globMatches;
 
 /// Two package names collide when either owns the other as a dotted prefix.
 fn related(left: []const u8, right: []const u8) bool {

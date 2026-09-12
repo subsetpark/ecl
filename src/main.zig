@@ -16,6 +16,7 @@ const help =
     \\
     \\OPTIONS:
     \\    -e, --eval <SOURCE>        Evaluate source text
+    \\    --module-map <FILE>       Load an explicit module map (before command)
     \\    -h, --help                 Show this help
     \\    -V, --version              Show the version
     \\
@@ -44,6 +45,7 @@ const Startup = struct {
     process: std.process.Init,
     cwd: []const u8,
     environ: []const ecl.machine.Environ.Entry,
+    module_map: ?[]const u8 = null,
 };
 
 extern "c" fn ecl_git_helper(url: [*:0]const u8, selector: [*:0]const u8, revision: [*:0]const u8, ca_file: [*:0]const u8) c_int;
@@ -60,10 +62,16 @@ fn entry(process: std.process.Init) AppError!u8 {
     return dispatch(init);
 }
 
-fn dispatch(init: Startup) AppError!u8 {
+fn dispatch(startup: Startup) AppError!u8 {
+    var init = startup;
     const arguments = init.process.minimal.args.toSlice(init.process.arena.allocator()) catch
         return error.OutOfMemory;
-    const cli = arguments[1..];
+    var cli = arguments[1..];
+    if (cli.len != 0 and std.mem.eql(u8, cli[0], "--module-map")) {
+        if (cli.len < 2) return emitSyntheticError(init, .io, "--module-map requires a file", null);
+        init.module_map = cli[1];
+        cli = cli[2..];
+    }
     if (cli.len == 0) {
         const worker_count = try configuredWorkers(init) orelse return 2;
         const tty = std.Io.File.stdin().isTty(init.process.io) catch return error.Io;
@@ -186,6 +194,7 @@ const CliRuntime = struct {
                 .output = &self.output_writer.interface,
                 .diagnostics = &self.diagnostic_writer.interface,
                 .ecl_path = startup.process.environ_map.get("ECL_PATH"),
+                .module_map = startup.module_map,
                 .environ = startup.environ,
                 .standard_input = standard_input,
                 .initial_cwd = startup.cwd,

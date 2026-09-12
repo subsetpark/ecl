@@ -13,6 +13,7 @@ const intern = @import("intern.zig");
 const project = @import("project.zig");
 const pkg_catalog = @import("pkg_catalog.zig");
 const modules = @import("modules.zig");
+const module_map = @import("module_map.zig");
 
 const Value = value.Value;
 const max_lock_bytes = 16 * 1024 * 1024;
@@ -88,6 +89,7 @@ pub const SourceScope = opaque {
             .relative_path = artifact.relative_path,
             .package_id = artifact.package,
             .artifact_id = source.artifact,
+            .kind = artifact.kind,
         };
     }
 
@@ -117,6 +119,61 @@ comptime {
 /// Opaque, immutable capability. Only Session can obtain one from discovery;
 /// Units can borrow it for lookup but cannot construct, retarget, or mutate it.
 pub const ProjectLock = opaque {
+    /// Import validated map metadata into the existing artifact publication
+    /// boundary. Borrows the map; owns all copied state on success.
+    pub fn fromMap(host: *const heap.HostCleanup, map: *const module_map.Validated, start: []const u8) error{OutOfMemory}!*ProjectLock {
+        const allocator = host.allocator();
+        const entries = try allocator.alloc(Entry, map.scopes().len);
+        var built: usize = 0;
+        errdefer {
+            for (entries[0..built]) |*entry| entry.deinit(allocator);
+            allocator.free(entries);
+        }
+        for (map.scopes(), 0..) |scope, index| {
+            const name = try allocator.dupe(u8, scope.name);
+            errdefer allocator.free(name);
+            const version = try allocator.dupe(u8, "");
+            errdefer allocator.free(version);
+            const root = try allocator.dupe(u8, scope.root);
+            errdefer allocator.free(root);
+            const visible = try allocator.dupe(pkg_catalog.PackageId, scope.visible);
+            entries[index] = .{ .name = name, .version = version, .store_dir = root, .requires = visible };
+            built += 1;
+        }
+        var artifacts: std.ArrayList(pkg_catalog.Artifact) = .empty;
+        errdefer {
+            for (artifacts.items) |artifact| {
+                allocator.free(artifact.relative_path);
+                allocator.free(artifact.absolute_path);
+                allocator.free(artifact.modules);
+            }
+            artifacts.deinit(allocator);
+        }
+        var exports: std.ArrayList(pkg_catalog.Module) = .empty;
+        defer exports.deinit(allocator);
+        for (map.artifacts(), 0..) |artifact, index| {
+            const relative = try allocator.dupe(u8, artifact.path);
+            errdefer allocator.free(relative);
+            const absolute = try std.fs.path.join(allocator, &.{ map.scopes()[@intFromEnum(artifact.scope)].root, artifact.path });
+            errdefer allocator.free(absolute);
+            const names = try allocator.dupe(intern.ModuleName, artifact.exports);
+            errdefer allocator.free(names);
+            for (names) |name| try exports.append(allocator, .{ .name = name, .artifact = @enumFromInt(@as(u32, @intCast(index))) });
+            try artifacts.append(allocator, .{ .package = artifact.scope, .kind = artifact.kind, .relative_path = relative, .absolute_path = absolute, .modules = names });
+        }
+        const owned_exports = try exports.toOwnedSlice(allocator);
+        errdefer allocator.free(owned_exports);
+        const owned_artifacts = try artifacts.toOwnedSlice(allocator);
+        errdefer {
+            for (owned_artifacts) |artifact| {
+                allocator.free(artifact.relative_path);
+                allocator.free(artifact.absolute_path);
+                allocator.free(artifact.modules);
+            }
+            allocator.free(owned_artifacts);
+        }
+        return createSnapshot(host, entries, .{ .allocator = allocator, .artifacts = owned_artifacts, .modules = owned_exports }, start, map.local());
+    }
     pub fn sourceScope(self: *const ProjectLock, artifact: pkg_catalog.ArtifactId) *const SourceScope {
         return @ptrCast(&backingConst(self).state.valid.sources[@intFromEnum(artifact)]);
     }
@@ -298,7 +355,7 @@ pub const RootSourceCursor = struct {
         const index = self.artifact_index;
         self.artifact_index += 1;
         const artifact = valid.catalog.artifacts[index];
-        if (artifact.package != valid.root_id) return .pending;
+        if (artifact.package != valid.root_id or artifact.kind != .ecl) return .pending;
         return .{ .item = @ptrCast(&valid.sources[index]) };
     }
 
@@ -313,6 +370,7 @@ pub const Match = struct {
     relative_path: []const u8,
     package_id: pkg_catalog.PackageId,
     artifact_id: pkg_catalog.ArtifactId,
+    kind: module_map.Kind,
 };
 
 pub const LookupOutcome = union(enum) {
@@ -378,6 +436,7 @@ pub const LookupCursor = struct {
                 .relative_path = artifact.relative_path,
                 .package_id = artifact.package,
                 .artifact_id = module.artifact,
+                .kind = artifact.kind,
             } } };
         }
         return .pending;
@@ -584,34 +643,7 @@ fn discoverLock(
                 var cleanup = catalog;
                 cleanup.deinit();
             }
-            const committed = try allocator.alloc(std.atomic.Value(bool), catalog.artifacts.len);
-            errdefer allocator.free(committed);
-            for (committed) |*state| state.* = .init(false);
-            const owned = try allocator.create(Backing);
-            errdefer allocator.destroy(owned);
-            const owned_start = try allocator.dupe(u8, start_dir);
-            errdefer allocator.free(owned_start);
-            const sources = try allocator.alloc(SourceState, catalog.artifacts.len);
-            errdefer allocator.free(sources);
-            var sources_built: usize = 0;
-            errdefer for (sources[0..sources_built]) |*entry| entry.private_registry.deinit();
-            for (sources, 0..) |*entry, index| {
-                entry.* = .{
-                    .owner = owned,
-                    .artifact = @enumFromInt(@as(u32, @intCast(index))),
-                    .private_registry = try modules.Registry.init(host),
-                };
-                sources_built += 1;
-            }
-            owned.* = .{ .host = host, .state = .{ .valid = .{
-                .entries = entries,
-                .catalog = catalog,
-                .committed = committed,
-                .sources = sources,
-                .start_dir = owned_start,
-                .root_id = @enumFromInt(@as(u32, @intCast(entries.len - 1))),
-            } } };
-            break :result projectLock(owned);
+            break :result try createSnapshot(host, entries, catalog, start_dir, @enumFromInt(@as(u32, @intCast(entries.len - 1))));
         },
     };
 }
@@ -913,4 +945,37 @@ test "cache root selection prefers ECL_CACHE then XDG_CACHE_HOME then HOME" {
     try std.testing.expectEqualStrings("/home/u/.cache/ecl/pkg", home);
     try std.testing.expect((try cacheRoot(allocator, .{ .ecl_cache = "", .xdg_cache_home = "", .home = "" })) == null);
     try std.testing.expect((try cacheRoot(allocator, .{})) == null);
+}
+
+/// Consumes entries and catalog on success; caller retains both on failure.
+fn createSnapshot(host: *const heap.HostCleanup, entries: []Entry, catalog: pkg_catalog.Catalog, start_dir: []const u8, root_id: pkg_catalog.PackageId) error{OutOfMemory}!*ProjectLock {
+    const allocator = host.allocator();
+    const committed = try allocator.alloc(std.atomic.Value(bool), catalog.artifacts.len);
+    errdefer allocator.free(committed);
+    for (committed) |*state| state.* = .init(false);
+    const owned = try allocator.create(Backing);
+    errdefer allocator.destroy(owned);
+    const owned_start = try allocator.dupe(u8, start_dir);
+    errdefer allocator.free(owned_start);
+    const sources = try allocator.alloc(SourceState, catalog.artifacts.len);
+    errdefer allocator.free(sources);
+    var sources_built: usize = 0;
+    errdefer for (sources[0..sources_built]) |*entry| entry.private_registry.deinit();
+    for (sources, 0..) |*entry, index| {
+        entry.* = .{
+            .owner = owned,
+            .artifact = @enumFromInt(@as(u32, @intCast(index))),
+            .private_registry = try modules.Registry.init(host),
+        };
+        sources_built += 1;
+    }
+    owned.* = .{ .host = host, .state = .{ .valid = .{
+        .entries = entries,
+        .catalog = catalog,
+        .committed = committed,
+        .sources = sources,
+        .start_dir = owned_start,
+        .root_id = root_id,
+    } } };
+    return projectLock(owned);
 }

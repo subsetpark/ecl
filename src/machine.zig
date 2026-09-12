@@ -3504,6 +3504,7 @@ pub const Machine = struct {
                     .relative_path = location.relative_path,
                     .package_id = location.package_id,
                     .artifact_id = location.artifact_id,
+                    .kind = location.kind,
                 },
                 .cursor = self.unit.inherited.registry.beginArtifactLoadingCursor(location.artifact_id, .of(self.unit)),
             } }),
@@ -3559,7 +3560,7 @@ pub const Machine = struct {
                 provenance: modules.RegistrationProvenance,
                 artifact: ?pkg_catalog.ArtifactId,
             },
-            native,
+            native: ?pkg_catalog.ArtifactId,
             embedded: stdlib.Entry,
             fail: []const u8,
         };
@@ -3569,6 +3570,7 @@ pub const Machine = struct {
             relative_path: []const u8,
             package_id: pkg_catalog.PackageId,
             artifact_id: pkg_catalog.ArtifactId,
+            kind: @import("module_map.zig").Kind,
         };
         const State = union(enum) {
             begin: modules.Registry.BeginLoadingCursor,
@@ -3898,6 +3900,7 @@ pub const Machine = struct {
                                     .relative_path = match.relative_path,
                                     .package_id = match.package_id,
                                     .artifact_id = match.artifact_id,
+                                    .kind = match.kind,
                                 };
                                 self.state.borrowMut().* = .{ .artifact_begin = .{
                                     .target = target,
@@ -3990,7 +3993,7 @@ pub const Machine = struct {
                         .loading = .init(loading.take()),
                         .filename = .init(filename_bytes),
                         .index = filename_bytes.len,
-                        .kind = .source,
+                        .kind = if (locked.target.kind == .ecl) .source else .native,
                         .target = .{ .candidate = origin },
                     };
                     self.state.borrowMut().* = .{ .filename = filename };
@@ -4106,7 +4109,10 @@ pub const Machine = struct {
                                 .artifact = locked.artifact_id,
                             },
                         } },
-                        .native => .native,
+                        .native => .{ .native = switch (access.origin) {
+                            .legacy => null,
+                            .locked => |locked| locked.artifact_id,
+                        } },
                     };
                     std.Io.Dir.cwd().access(
                         evaluator.unit.inherited.runtime().host_io,
@@ -4303,7 +4309,7 @@ pub const Machine = struct {
             const next = NativeLoadDriver{
                 .name = self.request.module.name,
                 .request = self.request.module.operation,
-                .provenance = .ordinary,
+                .provenance = if (transfer.disposition.native) |id| .{ .package = evaluator.unit.inherited.project_lock.?.sourceScope(id) } else .ordinary,
                 .loading = .init(transfer.loading.take()),
                 .path = .init(transfer.path.take()),
                 .state = .init(.{ .validate = .init(loader) }),
@@ -4497,6 +4503,7 @@ pub const Machine = struct {
                         var cursor = commit.cursor;
                         self.state.borrowMut().* = next;
                         cursor.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        if (self.provenance == .package) evaluator.unit.inherited.project_lock.?.commitArtifact(self.loading.borrowMut().artifactCommit());
                         return verifyPublishedModule(
                             evaluator,
                             self,

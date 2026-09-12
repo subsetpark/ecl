@@ -649,6 +649,16 @@ quotation, so cancellation retires both input and partial output through the
 ordinary driver lifetime protocol.
 
 A cataloged source has one Session-owned file identity and private registry.
+Module-map validation mints an opaque immutable configuration whose scopes,
+direct visibility edges, and artifact exports have already been checked.
+Construction of a Session copies that metadata into the same source-identity
+and publication boundary as catalog discovery. Discovery and explicit map
+selection share the validator; reference resolution is limited to one hop,
+and each document owns the base directory of its paths. ECL and native map
+artifacts commit through their loading lease before another loader can observe
+completion. The native artifact's source provenance carries its publication
+identity; it has no separate independently correlated commitment flag.
+
 The catalog separates source selection from exact public exports; the shared
 registry contains exported registrations while each file owns its private
 registrations. Private names therefore cannot collide across files or become
