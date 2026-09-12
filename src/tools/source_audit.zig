@@ -81,14 +81,14 @@ const source_groups = [_]SourceGroup{
     // Builtin-backed stdlib modules hold host authority the SDK withholds, so
     // they are ordinary production sources under the bounded-traversal rules.
     .{ .production = true, .files = &.{
-        "stdlib/dict.zig",  "stdlib/rand.zig", "stdlib/json.zig", "stdlib/http.zig", "stdlib/archive.zig", "stdlib/pkg_store.zig", "stdlib/fs.zig",
+        "stdlib/dict.zig",  "stdlib/rand.zig", "stdlib/json.zig", "stdlib/http.zig", "stdlib/archive.zig", "stdlib/pkg_store.zig", "stdlib/pkg_git.zig", "stdlib/fs.zig",
         "stdlib/clock.zig", "stdlib/time.zig",
     }, .sources = &.{
         @embedFile("../stdlib/dict.zig"),    @embedFile("../stdlib/rand.zig"),
         @embedFile("../stdlib/json.zig"),    @embedFile("../stdlib/http.zig"),
         @embedFile("../stdlib/archive.zig"), @embedFile("../stdlib/pkg_store.zig"),
-        @embedFile("../stdlib/fs.zig"),      @embedFile("../stdlib/clock.zig"),
-        @embedFile("../stdlib/time.zig"),
+        @embedFile("../stdlib/pkg_git.zig"), @embedFile("../stdlib/fs.zig"),
+        @embedFile("../stdlib/clock.zig"),   @embedFile("../stdlib/time.zig"),
     } },
     .{ .production = true, .files = &.{
         "combinators.zig",
@@ -743,23 +743,19 @@ fn auditFilesystemAuthority() bool {
     const ambient_cwd = [_][]const []const u8{
         &.{ "Dir", ".", "cwd", "(", ")" },
     };
-    const confined_sources = [_]struct { name: []const u8, text: [:0]const u8 }{
-        .{ .name = "fs module", .text = @embedFile("../stdlib/fs.zig") },
-        .{ .name = "archive module", .text = @embedFile("../stdlib/archive.zig") },
-        .{ .name = "package store module", .text = @embedFile("../stdlib/pkg_store.zig") },
-    };
-    for (confined_sources) |source| {
-        failed = auditTokens(source.name, source.text, &ambient_cwd) or failed;
-    }
-    // User-sized ordering inside a scheduler driver goes through the
-    // resumable directory orderer; a general sort call would run a whole
-    // listing in one step.
+    // Derive stdlib confinement from exhaustive production classification;
+    // adding another builtin cannot silently evade this boundary.
     const unbounded_sorting = [_][]const []const u8{
         &.{ "std", ".", "mem", ".", "sort" },
         &.{ "std", ".", "sort", "." },
     };
-    for (confined_sources) |source| {
-        failed = auditTokens(source.name, source.text, &unbounded_sorting) or failed;
+    for (source_groups) |group| {
+        if (!group.production) continue;
+        for (group.files, group.sources) |name, text| {
+            if (!std.mem.startsWith(u8, name, "stdlib/")) continue;
+            failed = auditTokens(name, text, &ambient_cwd) or failed;
+            failed = auditTokens(name, text, &unbounded_sorting) or failed;
+        }
     }
     // The filesystem port opens configured roots by their trusted host path
     // exactly once, inside the owner's constructor, and nowhere else.

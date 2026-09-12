@@ -1454,6 +1454,27 @@ source serialization orders equivalent mirrors independently of dictionary
 insertion order; conflicting hashes or Git commits for one package version
 are rejected. Store catalog metadata has an independent format version.
 
+Git fetching requires an explicit package synchronization grant containing the
+trusted executable and optional trust roots. Ordinary evaluation cannot mint
+that grant. A private process receives only its request and a private staging
+working directory, with an empty inherited environment. Blocking libgit2 work
+runs there under absolute time, memory, object-count, transfer, and artifact
+limits. It reads bare Git objects without checkout or ambient configuration.
+A helper handle is returned without fallible publication after controller
+startup; failed startup reaps the provisional child. The parent owns the child
+through scope cancellation and reaping, then retires
+staging entries in bounded, allocation-free steps. Partial output never grants
+installation authority: artifacts pass the existing inspection, hash, and
+immutable-store publication boundary before lock publication.
+
+Git artifacts have a platform-independent encoding: byte-sorted regular paths,
+mode 0644, zero owners and timestamps, ustar headers and deterministic pax path
+records for names longer than 100 bytes. Gzip uses fixed headers and stored
+blocks, partitioned at each tar header, payload, and padding boundary with a
+maximum block length of 65535 bytes. Export excludes Git administrative storage
+and rejects symlinks and submodules. Identical trees therefore produce identical
+artifact bytes regardless of tag spelling or executable file mode.
+
 Package discovery and synchronization are
 described in `ENVIRONMENT.md`; they enter the evaluator through the same module
 loader and bounded-driver conventions as other sources. Host-side lock and

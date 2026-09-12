@@ -205,6 +205,9 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const libgit2 = b.dependency("libgit2", .{ .target = target, .optimize = optimize, .@"enable-ssh" = false, .@"tls-backend" = .mbedtls });
+    exe_mod.linkLibrary(libgit2.artifact("git2"));
+    exe_mod.addCSourceFile(.{ .file = b.path("src/git_helper.c"), .flags = &.{ "-std=c99", "-D_POSIX_C_SOURCE=200809L" } });
     exe_mod.addImport("ecl-internal", internal_mod);
     const exe = b.addExecutable(.{
         .name = "ecl",
@@ -212,6 +215,11 @@ pub fn build(b: *std.Build) void {
         .linkage = runtime_linkage,
     });
     b.installArtifact(exe);
+    b.installFile("THIRD_PARTY_NOTICES.md", "share/doc/ecl/THIRD_PARTY_NOTICES.md");
+    const git_acceptance = b.addSystemCommand(&.{ "python3", "test/pkg_git_https.py" });
+    git_acceptance.addArtifactArg(exe);
+    const git_step = b.step("test-pkg-git", "Run public Git package acceptance over controlled HTTPS");
+    git_step.dependOn(&git_acceptance.step);
     const native_runtime_options = b.addOptions();
     native_runtime_options.addOptionPath("ecl_exe", exe.getEmittedBin());
     native_runtime_options.addOptionPath(
@@ -306,6 +314,7 @@ pub fn build(b: *std.Build) void {
     run_tests.step.dependOn(&fixture_files.step);
     const test_step = b.step("test", "Run the ecl test suite");
     test_step.dependOn(&run_tests.step);
+    test_step.dependOn(&git_acceptance.step);
     test_step.dependOn(native_negative_step);
     const run_ecl_tests = b.addRunArtifact(exe);
     run_ecl_tests.addArg("test");

@@ -60,15 +60,47 @@
    body)
   with call) 'hash-checked defp
 
+ ### defp archive-body
+ (package source -- body : "Fetch one HTTPS archive source.")
+ (|package source|
+  'target source 'url at pair dict.from-flat http.get-bytes
+  package source 'url at success-response 'body at) 'archive-body defp
+
+ ### defp git-body
+ (package source -- body : "Export an already pinned commit without resolving any tag.")
+ (nip dup 'url at swap 'commit at "commit" swap pkg.store.git-fetch 2 at) 'git-body defp
+
  ### defp fetch-body
- (package requirement -- body : "Fetch and hash-check one exact package archive.")
+ (package requirement -- body : "Fetch and hash-check one immutable package artifact.")
  (|package requirement|
-  requirement 'source at 'kind at 'archive match?
-  'domain error.new "Git package fetching is not available in this build" error.with-message assert
-  'target requirement 'source at 'url at pair dict.from-flat http.get-bytes
-  package requirement 'source at 'url at success-response
-  'body at
+  package requirement 'source at
+  requirement 'source at 'kind at 'archive match? (archive-body) (git-body) if
   package requirement 'hash at hash-checked) 'fetch-body defp
+
+ ### def git-requirement
+ (url selector revision -- requirement :
+  "Resolve a Git tag or full commit and infer its package identity.")
+ (|url selector revision|
+  url selector revision pkg.store.git-fetch url git-requirement-result) 'git-requirement def
+
+ ### defp git-requirement-result
+ (result url -- requirement :
+  "Inspect exported bytes before recording their commit, identity, and hash.")
+ (|result url|
+  result 1 at pkg.manifest.read result url git-requirement-manifest) 'git-requirement-result defp
+
+ ### defp git-requirement-manifest
+ (manifest result url -- requirement :
+  "Validate the exported artifact and construct its immutable declaration.")
+ (|manifest result url|
+  result 2 at manifest 'name at inspect-checked pkg.manifest.read
+  manifest 'name at manifest 'version at matching-manifest pop
+  manifest result url 3 pack
+  (|manifest result url|
+   'package manifest 'name at 'version manifest 'version at
+   'source {'kind 'git} 'url url put 'commit result first put
+   'hash result 2 at archive.sha256 "sha256-" swap cat)
+  infra dict.from-flat pkg.manifest.validate-requirement) 'git-requirement-manifest defp
 
  ### def requirement
  (package version url -- requirement :

@@ -780,6 +780,7 @@ const StdlibSurface = enum {
     net,
     net_connection,
     net_give,
+    package_git,
     package_sync_module,
     package_sync,
     package_cli_module,
@@ -823,11 +824,11 @@ fn stdlibSessionAllocationProbe(
     // the sweep enumerates live Session paths rather than this helper's writer.
     const scaffold_allocator = std.testing.allocator;
     const scratch_path = scratch.path;
-    const process_path = if (surface == .process)
+    const process_path = if (surface == .process or surface == .package_git)
         try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, process_fixture.process_exe, scaffold_allocator)
     else
         null;
-    defer if (surface == .process) scaffold_allocator.free(process_path);
+    defer if (surface == .process or surface == .package_git) scaffold_allocator.free(process_path);
     var output_buffer: [16384]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
     var diagnostics_buffer: [1024]u8 = undefined;
@@ -857,7 +858,15 @@ fn stdlibSessionAllocationProbe(
             .{ .name = "cwd", .absolute_path = scratch_path },
             .{ .name = "project", .absolute_path = scratch_path },
         } },
-    }), .cooperative, if (surface == .root_source_preload) .language_tests else .{ .package = .{ .synchronize = .{ .cache = scratch_path, .project = scratch.directory.dir } } });
+    }), .cooperative, if (surface == .root_source_preload) .language_tests else .{ .package = .{ .synchronize = .{ .cache = scratch_path, .project = scratch.directory.dir, .git = if (surface == .package_git) .{ .executable = process_path } else null } } });
+    defer if (surface == .package_git) {
+        var directory = scratch.directory.dir.openDir(std.testing.io, ".", .{ .iterate = true }) catch @panic("cannot inspect Git cleanup");
+        defer directory.close(std.testing.io);
+        var entries = directory.iterate();
+        while (entries.next(std.testing.io) catch @panic("cannot inspect Git cleanup")) |entry| {
+            if (std.mem.startsWith(u8, entry.name, ".git-fetch-")) @panic("Git staging survived allocation failure");
+        }
+    };
     defer runtime.deinit();
 
     // Loading these large embedded modules has its own failure window. Their
@@ -1120,6 +1129,7 @@ fn stdlibSessionAllocationProbe(
             defer scaffold_allocator.free(process_source);
             try runExpectedLanguageError(&runtime, "oom-process.ecl", process_source);
         },
+        .package_git => try runOk(&runtime, "oom-pkg-git.ecl", "\"https://example.invalid/repo\" \"commit\" \"" ++ ("a" ** 40) ++ "\" pkg.store.git-fetch pop"),
         .package_sync_module => try runOk(
             &runtime,
             "oom-pkg-sync-module.ecl",
@@ -1340,9 +1350,9 @@ const HttpMemoryIo = struct {
 };
 
 fn checkStdlibSurface(comptime surface: StdlibSurface) !void {
-    // Registered network startup and operations can finish before a waiter
+    // Network operations and the private Git process can finish before a waiter
     // allocates its readiness storage; allocation counts depend on progress.
-    if (surface == .net or surface == .net_connection or surface == .net_give or surface == .http or surface == .http_server)
+    if (surface == .net or surface == .net_connection or surface == .net_give or surface == .http or surface == .http_server or surface == .package_git)
         return checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, SurfaceProbe(surface).run);
     try checkAllPostInitAllocationFailuresParallel(
         std.heap.smp_allocator,
@@ -2076,4 +2086,9 @@ test "oom: standard-library and host: host: startup snapshot and Session initial
 test "oom: standard-library and host: package: catalog repair propagates every allocation failure" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.package_catalog_repair);
+}
+
+test "oom: standard-library and host: package: Git helper propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
+    try checkStdlibSurface(.package_git);
 }

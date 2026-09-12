@@ -925,3 +925,23 @@ The canonical layout follows these rules:
 - Navigation headers are derived from structural terminators. Existing header
   text is normalized. Dictionary-contained forms are excluded from header
   recognition.
+
+### Git dependency acquisition
+
+`ecl pkg add <https-url> --tag <tag>` resolves lightweight or annotated tags to
+commits. `--commit <40-digit-lowercase-id>` selects an immutable commit directly.
+Exactly one selector is required; branches and abbreviated IDs are unsupported.
+The root `ecl.pkg` supplies package identity. Add validates the deterministic
+artifact and records its hash and commit without installing or publishing a
+lock. Synchronization follows pinned commits for direct and transitive Git
+requirements, preserving archive sources in mixed graphs. An unavailable commit
+fails explicitly; it never falls back to a moved tag. HTTPS verification is
+mandatory, redirects cannot downgrade to HTTP, and credentials are unsupported.
+`ECL_GIT_CA_FILE` optionally selects a host-provided PEM trust bundle.
+
+Export includes ordinary tracked regular files and excludes Git storage.
+Symlinks, submodules, and entries rejected by package inspection are errors.
+The helper bounds fetching to 180 seconds, 512 MiB received, and 200,000 Git
+objects. Export permits at most 100,000 regular files and 1 GiB of tar data;
+existing package inspection limits also apply. Installed Git artifacts use the
+same seals, catalogs, verification, vendoring, and offline behavior as archives.

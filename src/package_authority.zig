@@ -36,10 +36,14 @@ pub const PackageGrant = union(enum) {
     verify: struct { cache: ?[]const u8, project: std.Io.Dir },
     /// `add` and `sync`: the cache is created when absent; a present vendor
     /// store serves a vendored lock.
-    synchronize: struct { cache: ?[]const u8, project: std.Io.Dir },
+    synchronize: struct { cache: ?[]const u8, project: std.Io.Dir, git: ?GitConfig = null },
     /// `vendor`: the cache is read and the vendor store is created.
     vendor: struct { cache: ?[]const u8, project: std.Io.Dir },
 };
+
+/// Trusted executable and optional custom trust roots, selected by the host.
+/// Borrowed strings must remain valid until the receiving Session is destroyed.
+pub const GitConfig = struct { executable: []const u8, ca_file: ?[]const u8 = null };
 
 pub const PolicyError = error{ OutOfMemory, InvalidPolicy };
 
@@ -48,6 +52,7 @@ pub const PackageOwner = struct {
     io: std.Io,
     cache: ?std.Io.Dir,
     vendor: ?std.Io.Dir,
+    git: ?GitConfig,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, grant: PackageGrant) PolicyError!PackageOwner {
         if (comptime !filesystem_port.backendSupported()) return error.InvalidPolicy;
@@ -65,7 +70,10 @@ pub const PackageOwner = struct {
             .synchronize => |sync| try openVendor(io, sync.project, false),
             .vendor => |vendor| try openVendor(io, vendor.project, true),
         };
-        return .{ .allocator = allocator, .io = io, .cache = cache, .vendor = vendor };
+        return .{ .allocator = allocator, .io = io, .cache = cache, .vendor = vendor, .git = switch (grant) {
+            .synchronize => |sync| sync.git,
+            else => null,
+        } };
     }
 
     pub fn deinit(self: *PackageOwner) void {
@@ -186,4 +194,9 @@ fn countEntries(dir: std.Io.Dir, name: []const u8) usize {
     var count: usize = 0;
     while (iterator.next(std.testing.io) catch return std.math.maxInt(usize)) |_| count += 1;
     return count;
+}
+
+/// Only synchronization grants can launch the package helper.
+pub fn gitConfig(access: *external.PackageAccess) ?GitConfig {
+    return ownerFromAccess(access).git;
 }

@@ -130,6 +130,22 @@ them to `exports`.
 
 To add a dependency, run `ecl pkg add <name> <version> <https-url>` with the
 package's name, version, and archive URL, then run `ecl pkg sync` again.
+Public HTTPS Git repositories can also supply packages:
+
+```sh
+ecl pkg add https://example.com/author/library.git --tag v1.2.0
+# Or: ecl pkg add https://example.com/author/library.git --commit <full-commit-id>
+ecl pkg sync
+```
+
+The repository must contain `ecl.pkg` at its root. `add` infers its name and
+version and records the resolved commit and artifact hash; `sync` installs it
+without resolving the tag again. Exactly one tag or full lowercase 40-digit
+commit is required. Branches, credentials, symlinks, and submodules are rejected.
+Ordinary tracked data files are included. Git need not be installed.
+For a private certificate authority, set `ECL_GIT_CA_FILE` to an absolute PEM
+certificate bundle path; certificate verification remains enabled.
+
 Commit both `ecl.pkg` and `ecl.lock`.
 
 Installation stores dependency module catalogs alongside the sealed archives.

@@ -46,7 +46,14 @@ const Startup = struct {
     environ: []const ecl.machine.Environ.Entry,
 };
 
+extern "c" fn ecl_git_helper(url: [*:0]const u8, selector: [*:0]const u8, revision: [*:0]const u8, ca_file: [*:0]const u8) c_int;
+
 fn entry(process: std.process.Init) AppError!u8 {
+    const args = process.minimal.args.toSlice(process.arena.allocator()) catch return error.OutOfMemory;
+    if (args.len > 1 and std.mem.eql(u8, args[1], "--ecl-private-git-helper")) {
+        if (args.len != 6) return 2;
+        return @intCast(ecl_git_helper(args[2], args[3], args[4], args[5]));
+    }
     const cwd = std.Io.Dir.cwd().realPathFileAlloc(process.io, ".", process.gpa) catch return error.Io;
     defer process.gpa.free(cwd);
     const init: Startup = .{ .process = process, .cwd = cwd, .environ = try environSnapshot(process) };
@@ -272,6 +279,7 @@ const package_help =
     \\    ecl pkg <init|add|sync|tree|why|verify|vendor|gc>
     \\    ecl pkg init [name]
     \\    ecl pkg add <name> <version> <https-url>
+    \\    ecl pkg add <https-git-url> <--tag tag|--commit full-id>
     \\    ecl pkg sync [--offline]
     \\    ecl pkg tree
     \\    ecl pkg why <module>
@@ -352,8 +360,10 @@ fn packageCommand(init: Startup, arguments: []const []const u8) AppError!u8 {
         );
     }
 
+    const git_add = std.mem.eql(u8, command, "add") and arguments.len >= 2 and
+        std.mem.startsWith(u8, arguments[1], "https://");
     const valid_shape = if (std.mem.eql(u8, command, "add"))
-        arguments.len == 4
+        arguments.len == 4 and (!git_add or std.mem.eql(u8, arguments[2], "--tag") or std.mem.eql(u8, arguments[2], "--commit"))
     else if (std.mem.eql(u8, command, "sync"))
         arguments.len == 1 or
             (arguments.len == 2 and std.mem.eql(u8, arguments[1], "--offline"))
@@ -392,9 +402,11 @@ fn packageCommand(init: Startup, arguments: []const []const u8) AppError!u8 {
     defer project_handle.close(init.process.io);
     // Each command names exactly the stores it may touch. Mutating commands
     // may create an absent cache; read-only commands leave absence visible.
+    const executable = std.process.executablePathAlloc(init.process.io, init.process.gpa) catch return error.Io;
+    defer init.process.gpa.free(executable);
     const grant: ecl.package_authority.PackageGrant = if (std.mem.eql(u8, command, "add") or
         std.mem.eql(u8, command, "sync"))
-        .{ .synchronize = .{ .cache = cache, .project = project_handle } }
+        .{ .synchronize = .{ .cache = cache, .project = project_handle, .git = .{ .executable = executable, .ca_file = init.process.environ_map.get("ECL_GIT_CA_FILE") } } }
     else if (std.mem.eql(u8, command, "vendor"))
         .{ .vendor = .{ .cache = cache, .project = project_handle } }
     else if (std.mem.eql(u8, command, "verify"))
@@ -402,7 +414,7 @@ fn packageCommand(init: Startup, arguments: []const []const u8) AppError!u8 {
     else
         .inspect;
     const source = if (std.mem.eql(u8, command, "add"))
-        "args pkg.cli.add"
+        if (git_add) "args pkg.cli.add-git" else "args pkg.cli.add"
     else if (std.mem.eql(u8, command, "sync"))
         if (arguments.len == 2) "args pkg.cli.sync-offline" else "args pkg.cli.sync"
     else if (std.mem.eql(u8, command, "tree"))

@@ -66,6 +66,20 @@
    package version pair "added {} {}" str.format io.print)
   call) 'add def
 
+ ### def add-git
+ (arguments -- : "Resolve a Git revision and record the identity from its root manifest.")
+ (|arguments|
+  read-manifest
+  arguments first arguments 1 at 2 drop arguments 2 at pkg.sync.git-requirement
+  record-git-requirement) 'add-git def
+
+ ### defp record-git-requirement
+ (manifest requirement -- : "Publish a validated Git dependency declaration without installing it.")
+ (|manifest requirement|
+  manifest requirement requirement 'package at record-requirement
+  requirement 'package at requirement 'version at pair "added {} {}" str.format io.print)
+ 'record-git-requirement defp
+
  ### defp sync-result
  (operation -- : "Run one synchronization mode and report its selected package count.")
  (read-manifest swap call

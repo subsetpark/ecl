@@ -26,6 +26,7 @@ const work_quantum = machine.kernel_poll_quantum;
 const max_manifest_bytes: u64 = 16 * 1024 * 1024;
 
 pub const words = [_]env.BuiltinWord{
+    .{ .name = "git-fetch", .doc = "( url selector revision -- result ) Fetch a pinned Git artifact through package authority; return commit, manifest text, and archive bytes.", .primitive = @import("pkg_git.zig").fetch },
     .{
         .name = "inspect",
         .doc = "( bytes package-name -- manifest-text ) Validate a source package and return its exact root manifest.",

@@ -2915,6 +2915,15 @@ whose host selected no cache reports `'io` naming `ECL_CACHE`,
 `'domain`. Every traversal, write, rollback, and output materialization
 advances through bounded scheduler work.
 
+### git-fetch
+
+`( url selector revision -- result )` — Fetch a Git revision using explicit
+package synchronization authority. Selector is `"tag"` or `"commit"`. Return
+`[resolved-commit manifest-text artifact-bytes]` after the isolated helper exits.
+This primitive neither installs nor publishes a lock; `pkg.sync` validates the
+manifest, artifact, identity, and hash. Ordinary evaluation lacks Git authority.
+Failure and cancellation reap the helper and retire its staging directory.
+
 ### gc
 `( retained-store-keys -- removed-count )` — Preserve the supplied canonical
 keys and every unknown cache node, and remove other canonical real-directory

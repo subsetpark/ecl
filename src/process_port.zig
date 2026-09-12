@@ -37,6 +37,7 @@ pub const ProcessSpec = struct {
     args: []const []const u8 = &.{},
     cwd: ?[]const u8 = null,
     environment: []const EnvironmentEntry = &.{},
+    environment_mode: enum { inherit, isolated } = .inherit,
 };
 
 pub const Termination = union(enum) {
@@ -178,6 +179,10 @@ pub const ProcessOwner = struct {
         scope: *scheduler_api.TaskScope,
         spec: ProcessSpec,
     ) SpawnError!Value {
+        return self.spawnScoped(scope, spec);
+    }
+
+    fn spawnCellScoped(self: *ProcessOwner, scope: *scheduler_api.TaskScope, spec: ProcessSpec) SpawnError!*ProcessCell {
         if (comptime !backendSupported()) return error.Unsupported;
         try self.validateSpec(spec);
         self.executor.access().prepare() catch |err| return switch (err) {
@@ -192,6 +197,12 @@ pub const ProcessOwner = struct {
             error.Io, error.Closed => error.Io,
         };
 
+        return cell;
+    }
+
+    fn spawnScoped(self: *ProcessOwner, scope: *scheduler_api.TaskScope, spec: ProcessSpec) SpawnError!Value {
+        const cell = try self.spawnCellScoped(scope, spec);
+        errdefer cell.releasePort();
         const port = @import("port_resource.zig").Resource.create(ProcessCell, .direct, cell.identity, cell) catch {
             cell.kill();
             return error.OutOfMemory;
@@ -405,8 +416,10 @@ pub const ProcessCell = struct {
     fn initializeAllocation(cell: *ProcessCell, owner: *ProcessOwner, spec: ProcessSpec) SpawnError!void {
         var environment = std.process.Environ.Map.init(owner.allocator);
         defer environment.deinit();
-        for (owner.environment.entries) |entry| environment.put(entry.name, entry.value) catch
-            return error.OutOfMemory;
+        if (spec.environment_mode == .inherit) {
+            for (owner.environment.entries) |entry| environment.put(entry.name, entry.value) catch
+                return error.OutOfMemory;
+        }
         for (spec.environment) |entry| environment.put(entry.name, entry.value) catch
             return error.OutOfMemory;
         const argv = try owner.allocator.alloc([]const u8, spec.args.len + 1);
@@ -1221,6 +1234,40 @@ test "scope shutdown cancels a blocked controller independently of port referenc
     owner.deinit();
 }
 
+test "process: isolated helper is reaped on scope shutdown with a retained port" {
+    const fixture_options = @import("process_fixture_options");
+    const fixture_path = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        fixture_options.process_exe,
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(fixture_path);
+    var host = heap.HostOwner.init(std.testing.allocator);
+    defer host.cleanup().drain();
+    var runtime_scheduler = try scheduler_api.Scheduler.init(host.cleanup(), .cooperative, .host);
+    runtime_scheduler.attachRetirement();
+    var root_scope = scheduler_api.TaskScope.init(runtime_scheduler.worker());
+    var snapshot = try startup_environment.Snapshot.capture(std.testing.allocator, &.{});
+    defer snapshot.deinit();
+    var owner = try ProcessOwner.init(
+        host.cleanup(),
+        std.testing.io,
+        "/",
+        .{},
+        snapshot.view(),
+    );
+
+    const port = try spawnIsolated(
+        owner.access(),
+        &root_scope,
+        .{ .executable = fixture_path, .args = &.{"block"} },
+    );
+    runtime_scheduler.deinit(&root_scope);
+    try std.testing.expect(port.termination() != null);
+    port.release();
+    owner.deinit();
+}
+
 const resource_api = @import("port_resource.zig");
 const port_message = @import("port_message.zig");
 const results = @import("port_result.zig");
@@ -1536,4 +1583,39 @@ pub fn serviceFromValue(item: Value) ?*Service {
 
 pub fn serviceInstance(service: *Service) *@import("module_bindings.zig").Identity {
     return service.adapter.owner.instance;
+}
+
+/// A private helper reference is allocated before controller startup. Success
+/// transfers it to the caller; failure reaps the provisional child. There is
+/// no fallible value publication between startup and returning this handle.
+pub const IsolatedChild = opaque {
+    fn cell(self: *IsolatedChild) *ProcessCell {
+        return @ptrCast(@alignCast(self));
+    }
+    pub fn closeInput(self: *IsolatedChild) void {
+        self.cell().closeInput();
+    }
+    pub fn termination(self: *IsolatedChild) ?Termination {
+        return self.cell().termination();
+    }
+    pub fn waitSource(self: *IsolatedChild) external.ReadinessSource {
+        return self.cell().waitSource();
+    }
+    pub fn readStderr(self: *IsolatedChild, buffer: []u8) ReadProgress {
+        return self.cell().read(.stderr, buffer);
+    }
+    pub fn cancel(self: *IsolatedChild) void {
+        self.cell().kill();
+    }
+    /// Consumes the reference; the controller retains its own execution pin.
+    pub fn release(self: *IsolatedChild) void {
+        self.cell().releasePort();
+    }
+};
+
+/// Launch a host-selected private helper using the same scope-owned lifecycle.
+pub fn spawnIsolated(access: *external.ProcessAccess, scope: *scheduler_api.TaskScope, spec: ProcessSpec) SpawnError!*IsolatedChild {
+    var isolated = spec;
+    isolated.environment_mode = .isolated;
+    return @ptrCast(try ownerFromAccess(access).spawnCellScoped(scope, isolated));
 }
