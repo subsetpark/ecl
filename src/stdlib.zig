@@ -77,6 +77,7 @@ const modules = [_]Module{
     .{ .name = "io", .entry = .{ .builtin = &io_module.words } },
     .{ .name = "csv", .entry = .{ .native = Csv.descriptor() } },
     .{ .name = "json", .entry = .{ .builtin = &json_module.words } },
+    .{ .name = "host", .entry = .{ .builtin = &@import("stdlib/host.zig").words } },
     .{ .name = "source", .entry = .{ .builtin = &@import("stdlib/source.zig").words } },
     .{ .name = "table", .entry = .{ .source = .{
         .name = "<stdlib:table>",

@@ -236,6 +236,12 @@ fn ownerFromAccess(access_value: *external.ProcessAccess) *ProcessOwner {
     return @ptrCast(@alignCast(access_value));
 }
 
+/// Borrow immutable startup metadata for the lifetime of the issuing Session.
+/// This observation grants no process launch or filesystem mutation authority.
+pub fn startupDirectory(access_value: *external.ProcessAccess) []const u8 {
+    return ownerFromAccess(access_value).initial_cwd;
+}
+
 /// Borrow the library identity already owned by the Session's process service.
 pub fn registeredInstance(access_value: *external.ProcessAccess) *@import("module_bindings.zig").Identity {
     return ownerFromAccess(access_value).instance;

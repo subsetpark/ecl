@@ -1187,6 +1187,13 @@ overtake an earlier call while it yields. An optional process deadline stores
 presence separately from its duration: absence is unlimited, while a present
 zero duration expires immediately.
 
+The `host` builtin is classified with host-backed standard-library primitives.
+Startup-directory observation borrows immutable storage from the Session's
+process owner; it cannot mint launch authority. Executable-path observation
+uses the host I/O interface and a fixed path buffer. A self-owned, address-stable
+driver retains either borrow while bounded UTF-8 materialization is pending,
+and retires partial output through the ordinary scheduler release domain.
+
 ### Filesystem operations are bounded drivers over confined handles
 
 Every `fs` word, generic archive extraction, and package-store operation runs

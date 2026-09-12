@@ -86,14 +86,14 @@ const source_groups = [_]SourceGroup{
     // they are ordinary production sources under the bounded-traversal rules.
     .{ .production = true, .files = &.{
         "stdlib/dict.zig",  "stdlib/rand.zig", "stdlib/json.zig",   "stdlib/http.zig", "stdlib/archive.zig", "stdlib/pkg_store.zig", "stdlib/pkg_git.zig", "stdlib/fs.zig",
-        "stdlib/clock.zig", "stdlib/time.zig", "stdlib/source.zig",
+        "stdlib/clock.zig", "stdlib/time.zig", "stdlib/source.zig", "stdlib/host.zig",
     }, .sources = &.{
         @embedFile("../stdlib/dict.zig"),    @embedFile("../stdlib/rand.zig"),
         @embedFile("../stdlib/json.zig"),    @embedFile("../stdlib/http.zig"),
         @embedFile("../stdlib/archive.zig"), @embedFile("../stdlib/pkg_store.zig"),
         @embedFile("../stdlib/pkg_git.zig"), @embedFile("../stdlib/fs.zig"),
         @embedFile("../stdlib/clock.zig"),   @embedFile("../stdlib/time.zig"),
-        @embedFile("../stdlib/source.zig"),
+        @embedFile("../stdlib/source.zig"),  @embedFile("../stdlib/host.zig"),
     } },
     .{ .production = true, .files = &.{
         "combinators.zig",

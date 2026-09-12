@@ -84,6 +84,7 @@ test "stdlib: embedded module resolves via import with no ECL_PATH" {
         "io.print",
         "csv.parse",
         "json.parse",
+        "host.cwd",
         "source.declarations",
         "table.valid?",
         "http.get-bytes",

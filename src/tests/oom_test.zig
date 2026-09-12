@@ -782,6 +782,7 @@ const StdlibSurface = enum {
     advisory_lock,
     tree_operations,
     source_declarations,
+    host_metadata,
     locked_project_module,
     root_source_preload,
     random,
@@ -867,8 +868,10 @@ fn stdlibSessionAllocationProbe(
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     const http_vtable = HttpMemoryIo.vtable();
+    var metadata_vtable = std.testing.io.vtable.*;
+    metadata_vtable.processExecutablePath = MetadataMemoryIo.path;
     var runtime = try session.Session.init(thread_safe_allocator, &.{"argument"}, runtime_inputs.inputs(.{
-        .io = if (surface == .http) .{ .userdata = std.testing.io.userdata, .vtable = &http_vtable } else std.testing.io,
+        .io = if (surface == .http) .{ .userdata = std.testing.io.userdata, .vtable = &http_vtable } else if (surface == .host_metadata) .{ .userdata = std.testing.io.userdata, .vtable = &metadata_vtable } else std.testing.io,
         .output = &output,
         .diagnostics = &diagnostics,
         .initial_cwd = scratch_path,
@@ -1097,6 +1100,7 @@ fn stdlibSessionAllocationProbe(
                 "\"a/b.c\" path.dirname pop \"a/b.c\" path.basename pop \"a/b.c\" path.extension pop " ++
                 "\"a/b\" path.components pop \"a/b\" path.valid-relative? pop",
         ),
+        .host_metadata => try runOk(&runtime, "oom-host.ecl", "host.cwd pop host.executable pop"),
         .source_declarations => try runOk(
             &runtime,
             "oom-source.ecl",
@@ -2213,3 +2217,16 @@ test "oom: standard-library and host: stdlib: archive inspection propagates ever
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.archive_view);
 }
+
+test "oom: standard-library and host: stdlib: host metadata propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
+    try checkStdlibSurface(.host_metadata);
+}
+
+const MetadataMemoryIo = struct {
+    fn path(_: ?*anyopaque, buffer: []u8) std.process.ExecutablePathError!usize {
+        const bytes = "/λ/ecl";
+        @memcpy(buffer[0..bytes.len], bytes);
+        return bytes.len;
+    }
+};

@@ -587,6 +587,7 @@ test "module sources: formatter and standard modules use @defm" {
         "io.print",
         "csv.parse",
         "json.parse",
+        "host.cwd",
         "source.declarations",
         "table.valid?",
         "http.get-bytes",
