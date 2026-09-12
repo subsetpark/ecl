@@ -43,6 +43,25 @@ runner against the application's test map; package policy assertions live in
 ECL. Separate-process orchestration and controlled external services remain
 host integration fixtures.
 
+## Source package archives
+
+`pkg.bundle` applies package rules through `archive.open-tgz`, member metadata,
+bounded member reads, and `source.declarations`. The shared archive parser owns
+path safety, duplicate-member checks, and rejection of links and special files.
+The application requires one regular root `ecl.pkg`, rejects `.eclmod` payloads
+and reserved `.ecl-package.tgz` / `.ecl-package.catalog` control files, and limits
+the package to 100,000 members and 64 MiB of member contents.
+
+Manifest patterns select at most 4,096 source artifacts, each at most 16 MiB.
+`*` and `?` match bytes within a path component; `**` matches zero or more whole
+components. The application matcher uses dynamic programming through ordinary
+ECL evaluation, so pattern processing remains cancellable without exponential
+backtracking. Selected files are parsed without execution. Only literal
+top-level module declarations named by the manifest's exports enter the
+artifact map; all declared exports must occur exactly once. Other registrations
+remain file-private, including duplicate private names in different artifacts.
+Unselected regular data files are retained by installation.
+
 Each immutable generation contains its own complete resolution snapshot,
 installed dependencies, sealed artifacts, and a complete relative module map.
 The snapshot supplements the root lock: a running generation always uses its own
