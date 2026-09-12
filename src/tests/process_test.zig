@@ -18,6 +18,10 @@ fn expectStack(program: []const u8, limits: process.Limits, expected: []const u8
 }
 
 fn expectStackWithWorkers(program: []const u8, limits: process.Limits, expected: []const u8, workers: u32) !void {
+    return expectStackForMode(program, limits, expected, workers, .evaluate);
+}
+
+fn expectStackForMode(program: []const u8, limits: process.Limits, expected: []const u8, workers: u32, mode: session.CommandMode) !void {
     var heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&heap);
     var output_buffer: [256]u8 = undefined;
@@ -31,7 +35,7 @@ fn expectStackWithWorkers(program: []const u8, limits: process.Limits, expected:
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
         .process_limits = limits,
-    }), .{ .worker_pool = workers }, .evaluate);
+    }), .{ .worker_pool = workers }, mode);
     defer runtime.deinit();
     switch (try runtime.runUnit("<process-test>", program)) {
         .ok => {},
@@ -421,4 +425,18 @@ test "process: Sessions share captured values with children and isolate override
         defer allocator.free(wanted);
         try std.testing.expectEqualStrings(wanted, display.bytes());
     }
+}
+
+test "process: natural exit preserves backpressured output until readers drain" {
+    const fixture_path = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, fixture.process_exe, allocator);
+    defer allocator.free(fixture_path);
+    const program = try source(
+        "[] (({{'executable \"{s}\" 'args (\"large\" \"16\" \"0\")}} proc.spawn dup proc.wait 'kind at 'exited match? {{'kind 'user 'msg \"leader termination\"}} assert " ++
+            "[] over 16 proc.read-stdout (dup len 0 >) (|p bytes chunk| p bytes chunk cat p 16 proc.read-stdout) while pop swap port.close " ++
+            "[111] 16 take match? {{'kind 'user 'msg \"natural-exit output preserved\"}} assert) " ++
+            "'delayed-drain test) 'process.acceptance @defm tests first @test dup 'ok dict.has? (pop) ('err at raise) if",
+        .{fixture_path},
+    );
+    defer allocator.free(program);
+    for ([_]u32{ 1, 8 }) |workers| try expectStackForMode(program, .{ .stdout_capacity = 1, .stderr_capacity = 1 }, "", workers, .language_tests);
 }

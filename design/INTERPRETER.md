@@ -1134,7 +1134,13 @@ publishes one immutable `Child.Term`. POSIX children are created as
 process-group leaders. The supervisor observes leader termination with
 `waitid(..., WNOWAIT)`, performs the consuming TERM-to-KILL cleanup, and reaps
 the leader only afterward. The waitable leader pins its PID slot, so the PGID
-cannot be reused while cleanup retains it. The runtime activity group owns one process-cell pin across startup,
+cannot be reused while cleanup retains it.
+Descendant cleanup and abortive resource closure are distinct termination requests.
+An escalation carries its nominal identity without acquiring authority to discard
+output. Natural-exit output remains backpressured until readers drain it. The
+immutable leader result becomes observable after accepted stdin settles, without
+waiting for output consumers; joined resource retirement still waits for every
+pipe activity. The runtime activity group owns one process-cell pin across startup,
 all joined jobs, and synchronous cancellation setup. Callback return retires
 borrowed activity; backends never receive a separately releasable lease.
 Root retirement closes activity admission and carries the completed outcome

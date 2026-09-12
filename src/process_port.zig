@@ -311,6 +311,8 @@ const ProcessPhase = union(enum) {
 };
 
 const EscalationId = enum(u64) { _ };
+const TerminationRequest = enum { resource, descendants };
+const KillRequest = union(enum) { resource, escalation: EscalationId };
 
 const OwnedGroup = struct {
     child: std.process.Child,
@@ -577,11 +579,11 @@ pub const ProcessCell = struct {
     }
 
     pub fn cancelExternalMember(self: *ProcessCell, scope: *external.ScopeIdentity) void {
-        self.controllers.with(.{ true, @as(?*external.ScopeIdentity, scope) }, ProcessCell.startGrace);
+        self.controllers.with(.{ TerminationRequest.resource, @as(?*external.ScopeIdentity, scope) }, ProcessCell.startGrace);
     }
 
-    fn startGrace(self: *ProcessCell, discard: bool, scope: ?*external.ScopeIdentity) void {
-        const escalation = self.beginGrace(discard, scope) orelse return;
+    fn startGrace(self: *ProcessCell, request: TerminationRequest, scope: ?*external.ScopeIdentity) void {
+        const escalation = self.beginGrace(request, scope) orelse return;
         self.controllers.spawn(.{escalation}, escalationMain) catch {
             self.escalateKill(escalation);
         };
@@ -678,9 +680,17 @@ pub const ProcessCell = struct {
     pub fn termination(self: *ProcessCell) ?Termination {
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        return self.terminationLocked();
+    }
+
+    fn terminationLocked(self: *ProcessCell) ?Termination {
+        // Accepted stdin settles before reporting success, so a broken final
+        // write cannot be hidden by an already exited leader. Output remains
+        // independently readable and need not drain before a waiter completes.
         return switch (self.phase) {
+            .terminal => |term| if (self.stdin_done) term else null,
             .reaped => |term| term,
-            .constructing, .running, .closing, .terminal => null,
+            .constructing, .running, .closing => null,
         };
     }
 
@@ -693,18 +703,18 @@ pub const ProcessCell = struct {
     }
 
     pub fn terminate(self: *ProcessCell) void {
-        self.controllers.with(.{ true, @as(?*external.ScopeIdentity, null) }, ProcessCell.startGrace);
+        self.controllers.with(.{ TerminationRequest.resource, @as(?*external.ScopeIdentity, null) }, ProcessCell.startGrace);
     }
 
     pub fn kill(self: *ProcessCell) void {
-        self.issueKill(null);
+        self.issueKill(.resource);
     }
 
-    fn beginGrace(self: *ProcessCell, close_process: bool, scope: ?*external.ScopeIdentity) ?EscalationId {
+    fn beginGrace(self: *ProcessCell, request: TerminationRequest, scope: ?*external.ScopeIdentity) ?EscalationId {
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
         if (scope) |identity| if (!self.ownership.authorizesCancellation(identity)) return null;
-        if (close_process) switch (self.phase) {
+        if (request == .resource) switch (self.phase) {
             .constructing, .running => self.phase = .{ .closing = .terminate },
             .closing, .terminal, .reaped => {},
         };
@@ -736,7 +746,7 @@ pub const ProcessCell = struct {
             },
             .grace, .kill_issued, .retired => null,
         };
-        if (close_process) {
+        if (request == .resource) {
             if (self.input == .open) self.input = .closing;
             self.discard_outputs = true;
             self.changed.broadcast(blockingIo());
@@ -745,16 +755,16 @@ pub const ProcessCell = struct {
         return escalation;
     }
 
-    fn issueKill(self: *ProcessCell, escalation: ?EscalationId) void {
+    fn issueKill(self: *ProcessCell, request: KillRequest) void {
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
         var group_to_signal: ?*OwnedGroup = null;
         switch (self.group_state) {
-            .running => |group| if (escalation == null) {
+            .running => |group| if (request == .resource) {
                 self.group_state = .{ .kill_issued = group };
                 group_to_signal = group;
             },
-            .grace => |grace| if (escalation == null or escalation.? == grace.escalation) {
+            .grace => |grace| if (request == .resource or request.escalation == grace.escalation) {
                 self.group_state = .{ .kill_issued = grace.group };
                 group_to_signal = grace.group;
             },
@@ -768,9 +778,9 @@ pub const ProcessCell = struct {
             if (signal_result == .denied and !group.leader_observed)
                 self.recordSignalFailureLocked();
             self.changed.broadcast(blockingIo());
-        } else if (escalation != null) return;
+        } else if (request == .escalation) return;
         switch (self.phase) {
-            .constructing, .running => {
+            .constructing, .running => if (request == .resource) {
                 self.phase = .{ .closing = .kill };
             },
             .closing => |closing| if (closing == .terminate) {
@@ -778,18 +788,20 @@ pub const ProcessCell = struct {
             },
             .terminal, .reaped => {},
         }
-        if (self.input == .open) self.input = .closing;
-        self.discard_outputs = true;
+        if (request == .resource) {
+            if (self.input == .open) self.input = .closing;
+            self.discard_outputs = true;
+        }
         self.changed.broadcast(blockingIo());
         self.notifyReadyLocked();
     }
 
     fn beginPostLeaderCleanup(self: *ProcessCell) void {
-        self.controllers.with(.{ false, @as(?*external.ScopeIdentity, null) }, ProcessCell.startGrace);
+        self.controllers.with(.{ TerminationRequest.descendants, @as(?*external.ScopeIdentity, null) }, ProcessCell.startGrace);
     }
 
     fn escalateKill(self: *ProcessCell, escalation: EscalationId) void {
-        self.issueKill(escalation);
+        self.issueKill(.{ .escalation = escalation });
     }
 
     fn waitForFinalGroupSignal(self: *ProcessCell) void {
@@ -826,7 +838,7 @@ pub const ProcessCell = struct {
         return switch (key) {
             readiness_stdout => self.stdout.len != 0 or self.stdout_phase.terminal(),
             readiness_stderr => self.stderr.len != 0 or self.stderr_phase.terminal(),
-            readiness_terminal => self.phase == .reaped,
+            readiness_terminal => self.terminationLocked() != null,
             else => {
                 const node: *WritePermit = @ptrFromInt(key);
                 return self.writeReadyLocked(node);
@@ -876,14 +888,14 @@ pub const ProcessCell = struct {
             self.beginPostLeaderCleanup();
             self.waitForFinalGroupSignal();
             const term = group.child.wait(self.io) catch {
-                self.issueKill(null);
+                self.issueKill(.resource);
                 group.child.kill(self.io);
                 self.recordIoFailure();
                 break :translated .{ .unknown = 0 };
             };
             break :translated translateTerm(term);
         } else translated: {
-            self.issueKill(null);
+            self.issueKill(.resource);
             group.child.kill(self.io);
             self.recordIoFailure();
             break :translated .{ .unknown = 0 };
@@ -1511,7 +1523,7 @@ const OperationAdapter = struct {
             .kill => backend.kill(),
             .wait => {
                 std.Io.Threaded.mutexLock(&backend.mutex);
-                while (backend.phase != .reaped and !backend.io_failed and backend.input != .broken and !exchange.transport_cancelled.load(.acquire)) backend.changed.waitUncancelable(blockingIo(), &backend.mutex);
+                while (backend.terminationLocked() == null and !backend.io_failed and backend.input != .broken and !exchange.transport_cancelled.load(.acquire)) backend.changed.waitUncancelable(blockingIo(), &backend.mutex);
                 const failed = backend.io_failed or backend.input == .broken;
                 std.Io.Threaded.mutexUnlock(&backend.mutex);
                 if (failed) {
