@@ -1731,7 +1731,7 @@ an absolute target, a relative target that would pop above the root, more than
 follow a final link under the same rule; every other word acts on the final
 entry itself. Containment is never a lexical prefix check.
 
-Every failure carries a data dictionary with `'operation` (the word's own
+Path-taking failures carry a data dictionary with `'operation` (the word's own
 symbol), `'root` and `'path` (or `'source-root`, `'source-path`,
 `'destination-root`, and `'destination-path` for `copy`), and a closed
 `'reason` symbol: `'invalid-path`, `'unknown-root`,
@@ -1781,7 +1781,25 @@ does not prevent other filesystem access.
 `( root path -- directory )` — Acquire an independent directory resource beneath
 an existing root. Resolution, including final symlinks, is confined to that
 root. The acquired directory becomes the new containment boundary; closing
-its parent resource does not close it. `.` acquires the root itself.
+its ordinary parent resource does not close it. Children of a staging resource,
+including further descendants, close when staging is sealed or closed even
+after task ownership transfer. `.` acquires the root itself.
+
+### stage-dir
+`( root destination -- stage )` — Create a private sibling of the destination
+and return a scope-owned directory resource. The destination parent must exist.
+Filesystem operations accept the stage as a root. `port.close` or scope exit
+joins descendant closure and recursive rollback; no destination is published.
+The staging directory uses mode `0700` under the process umask.
+
+### commit-dir
+`( stage -- )` — Seal the stage, reject further operations, close its descendant
+resources, and wait for admitted operations before atomically publishing to the
+absent destination. Any existing entry causes an `'io` failure and is preserved;
+failure retains the sealed staging resource for joined cleanup with `port.close`.
+Success joins descriptor closure and keeps the published tree even if the task
+is subsequently cancelled. Namespace publication is atomic; directory-entry
+durability across a host crash is not promised.
 
 ### copy
 `( source-root source-path destination-root destination-path -- )` — Copy a

@@ -754,6 +754,7 @@ fn projectSessionInitializationProbe(allocator: std.mem.Allocator) !void {
 }
 
 const StdlibSurface = enum {
+    directory_staging,
     file_publication,
     directory_resource,
     advisory_lock,
@@ -1011,6 +1012,12 @@ fn stdlibSessionAllocationProbe(
             "\"probe\" io.eprint 1 \"probe\" io.debug pop " ++
                 "\"ECL_OOM_PROBE\" getenv pop " ++
                 "[] (\"ECL_OOM_ABSENT\" getenv) @attempt pop [] (io.stdin) @attempt pop",
+        ),
+        .directory_staging => try runOk(
+            &runtime,
+            "oom-staging.ecl",
+            "'cwd \"published\" fs.stage-dir 's set s \".\" fs.child-dir pop s fs.commit-dir " ++
+                "'cwd \"rollback\" fs.stage-dir 's set s \"a\" fs.mkdirs s port.close",
         ),
         .tree_operations => try runOk(
             &runtime,
@@ -2146,4 +2153,9 @@ test "oom: standard-library and host: stdlib: advisory locks propagate every all
 test "oom: standard-library and host: stdlib: recursive directories propagate every allocation failure" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.tree_operations);
+}
+
+test "oom: standard-library and host: stdlib: directory staging propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
+    try checkStdlibSurface(.directory_staging);
 }

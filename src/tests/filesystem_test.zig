@@ -472,6 +472,36 @@ test "fs: advisory locks serialize mutations and release after cancellation" {
     try scratch.expectNoStaging(".");
 }
 
+test "fs: staging directories publish atomically and join descendant cleanup" {
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    const options = scratch.filesystem();
+    try runCase(options, .{ .worker_pool = 4 }, "'root \"published\" fs.stage-dir 's set s \"a\" fs.mkdirs " ++
+        "s \"a\" fs.child-dir 'child set child \".\" fs.child-dir 'grandchild set " ++
+        "\"contents\" grandchild \"file\" fs.publish-text s fs.commit-dir " ++
+        "'root \"published/a/file\" fs.read-text " ++
+        "[] (child \".\" fs.stat) @attempt 'err at 'kind at " ++
+        "[] (grandchild \".\" fs.stat) @attempt 'err at 'kind at", .{ .stack = "\"contents\" 'io 'io" });
+    try std.testing.expectEqual(@as(usize, 1), try scratch.entryCount("."));
+    try expectStack(options, "'root \"published\" fs.stage-dir 's set \"new\" s \"file\" fs.publish-text " ++
+        "[] (s fs.commit-dir) @attempt 'err at 'kind at s port.close " ++
+        "'root \"published/a/file\" fs.read-text", "'io \"contents\"");
+    try std.testing.expectEqual(@as(usize, 1), try scratch.entryCount("."));
+    try expectStack(options, "'root \"abandoned\" fs.stage-dir 's set s \"a/b\" fs.mkdirs " ++
+        "s \"a\" fs.child-dir 'child set \"x\" child \"file\" fs.publish-text " ++
+        "s port.close [] (child \".\" fs.stat) @attempt 'err at 'kind at", "'io");
+    try std.testing.expectEqual(@as(usize, 1), try scratch.entryCount("."));
+    try expectStack(options, "'root \"scoped\" fs.stage-dir \"a/b\" fs.mkdirs", "");
+    try std.testing.expectEqual(@as(usize, 1), try scratch.entryCount("."));
+    try runCase(options, .{ .worker_pool = 4 }, "'root \"transferred\" fs.stage-dir 's set s \".\" fs.child-dir 'child set " ++
+        "child wrap [] (10000 clock.sleep pop) @give 't set " ++
+        "s fs.commit-dir t task.cancel t task.await pop " ++
+        "[] (child \".\" fs.stat) @attempt 'err at 'kind at", .{ .stack = "'io" });
+    try expectStack(options, "'root \"nested\" fs.stage-dir 's set s \"unpublished\" fs.stage-dir 'inner set " ++
+        "inner \"a/b\" fs.mkdirs s fs.commit-dir 'root \"nested\" fs.list len", "0");
+    try std.testing.expectEqual(@as(usize, 3), try scratch.entryCount("."));
+}
+
 test "fs: directory closure joins admitted descriptor leases" {
     var scratch = try Scratch.init();
     defer scratch.deinit();

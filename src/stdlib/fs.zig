@@ -29,6 +29,8 @@ const Value = value.Value;
 const work_quantum = machine.kernel_poll_quantum;
 
 pub const words = [_]env.BuiltinWord{
+    .{ .name = "stage-dir", .doc = "( root destination -- stage ) Own a private directory until commit or joined rollback.", .primitive = stageDirectory },
+    .{ .name = "commit-dir", .doc = "( stage -- ) Seal and atomically publish a directory to its absent destination.", .primitive = commitDirectory },
     .{ .name = "mkdirs", .doc = "( root path -- ) Create missing directories, preserving existing directories.", .primitive = makeDirectories },
     .{ .name = "remove-tree", .doc = "( root path -- ) Recursively remove a directory without following contained symlinks.", .primitive = removeTree },
     .{ .name = "lock", .doc = "( root path -- lock ) Acquire a cancellable exclusive advisory lock on a regular file, creating it if absent.", .primitive = advisoryLock },
@@ -54,6 +56,7 @@ pub const words = [_]env.BuiltinWord{
 };
 
 const Operation = enum {
+    stage_dir,
     mkdirs,
     remove_tree,
     lock,
@@ -79,6 +82,7 @@ const Operation = enum {
 
     fn name(self: Operation) []const u8 {
         return switch (self) {
+            .stage_dir => "stage-dir",
             .open_dir => "open-dir",
             .child_dir => "child-dir",
             .read_bytes => "read-bytes",
@@ -123,9 +127,48 @@ const Operation = enum {
     /// Words that act on a child entry reject `.`, which names the root.
     fn requiresEntry(self: Operation) bool {
         return switch (self) {
-            .create_bytes, .create_text, .replace_bytes, .replace_text, .publish_bytes, .publish_text, .lock, .mkdir, .rename, .remove_tree, .remove_file, .remove_dir => true,
+            .stage_dir, .create_bytes, .create_text, .replace_bytes, .replace_text, .publish_bytes, .publish_text, .lock, .mkdir, .rename, .remove_tree, .remove_file, .remove_dir => true,
             .mkdirs, .open_dir, .child_dir, .read_bytes, .read_text, .stat, .lstat, .exists, .list, .copy => false,
         };
+    }
+};
+
+fn stageDirectory(evaluator: *Machine) MachineError!void {
+    return begin(evaluator, .stage_dir);
+}
+fn commitDirectory(evaluator: *Machine) MachineError!void {
+    var stage = try evaluator.popValue();
+    errdefer stage.deinit();
+    if (!directory.isStage(stage.borrow())) return evaluator.typeError("a directory staging resource");
+    const driver = try evaluator.allocator().create(CommitDirectory);
+    driver.* = .{ .stage = stage.take() };
+    evaluator.adoptDriver(driver);
+}
+const CommitDirectory = struct {
+    pub const address_stable_driver = {};
+    pub const ownership: heap.DriverOwnership = .self_owned;
+    stage: Value,
+    state: enum { sealing, joining } = .sealing,
+    pub fn deinit(self: *@This(), releases: *heap.ReleaseDomain, _: std.mem.Allocator) void {
+        releases.releaseValue(self.stage);
+    }
+    pub fn advance(evaluator: *Machine, self: *@This()) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        if (self.state == .sealing) switch (directory.commit(self.stage)) {
+            .closed => return evaluator.fail(.io, "directory staging resource is closed"),
+            .failed => |reason| return evaluator.fail(.io, reason.message()),
+            .pending => |source| {
+                try evaluator.park(.{ .external = source });
+                return .yielded;
+            },
+            .committed => self.state = .joining,
+        };
+        const port = @import("../port_resource.zig").Resource.fromValue(self.stage).?;
+        if (!port.joined()) {
+            try evaluator.park(.{ .external = port.source() });
+            return .yielded;
+        }
+        return .completed;
     }
 };
 
@@ -786,7 +829,7 @@ const Driver = struct {
             dir.close(self.io);
             return evaluator.fail(.cancelled, "directory scope is closing");
         }));
-        const result = fsport.adoptDirectory(self.access, scope, dir) catch |err| switch (err) {
+        const result = directory.adoptChild(self.access, scope, dir, self.inputs.root) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.ScopeClosing => return evaluator.fail(.cancelled, "directory scope is closing"),
         };
@@ -804,6 +847,7 @@ const Driver = struct {
 
     fn act(self: *Driver, evaluator: *Machine) MachineError!machine.WorkProgress {
         return switch (self.operation) {
+            .stage_dir => self.stageDirectory(evaluator),
             .mkdirs => self.makeDirectories(evaluator),
             .remove_tree => self.beginRemoveTree(evaluator),
             .lock => self.beginLock(evaluator),
@@ -823,6 +867,21 @@ const Driver = struct {
             .publish_bytes, .publish_text => self.beginStage(evaluator, .publish),
             .copy => self.beginCopy(evaluator),
         };
+    }
+
+    fn stageDirectory(self: *Driver, evaluator: *Machine) MachineError!machine.WorkProgress {
+        const entry = try self.requireEntry(evaluator, self.resolved.?);
+        const scope: *@import("../scheduler.zig").TaskScope = @ptrCast(@alignCast(evaluator.unit.task_scope orelse return evaluator.fail(.cancelled, "directory scope is closing")));
+        const stage = @import("../directory_stage.zig").Stage.create(self.access, entry.parent.dir, entry.name) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            return self.fail(evaluator, fsport.reasonForError(err));
+        };
+        const result = directory.adoptStage(self.access, scope, stage, self.inputs.root) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.ScopeClosing => return evaluator.fail(.cancelled, "directory scope is closing"),
+        };
+        self.state = .complete;
+        return .{ .output = result };
     }
 
     fn beginLock(self: *Driver, evaluator: *Machine) MachineError!machine.WorkProgress {

@@ -210,6 +210,17 @@ retirement domain from one host authority. Closed values retain
 only issuer metadata, which outlives the Session's operational filesystem owner.
 Child acquisition uses the shared confined resolver and establishes a new root.
 
+Directory staging extends this lifetime with sealed admission and private versus
+published backend ownership. Descendants carry permanent membership in the
+staging owner's external group independently of task ownership. Sealing closes
+that group and waits for its completion callback and all descriptor leases
+before the atomic absent-destination rename. Group publication precedes the
+child lifetime lock; group closure and membership detachment occur outside it.
+Private backend retirement empties the tree in allocation-free bounded steps;
+published retirement only closes handles. Factory failure transfers the already
+allocated staging owner directly into the same retirement domain, so cleanup
+does not depend on resource publication succeeding.
+
 Advisory locks share the fixed-handle resource lifetime with directory handles,
 while their nominal backend types keep lock values out of root acquisition.
 An acquisition driver owns an unlocked descriptor while waiting; nonblocking
