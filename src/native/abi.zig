@@ -5,8 +5,8 @@
 
 const builtin = @import("builtin");
 
-pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v8";
-pub const abi_version: u32 = 8;
+pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v9";
+pub const abi_version: u32 = 9;
 
 pub const max_error_message_bytes: u32 = 4096;
 pub const max_guest_scalar_bytes: u32 = 4096;
@@ -103,7 +103,7 @@ pub const PortCancellation = enum(u32) { close_resource, acknowledge, _ };
 
 /// Controller streams block only their private host controller. Zero bytes
 /// denotes request EOF or cancellation; failure is reported separately.
-pub const MessageBuildAction = enum(u32) { scalar = 0, copy_input = 1, copy_received = 2, list = 3, dictionary = 4, send = 7, result = 8, clear = 9, reply_endpoint = 10, child = 11, _ };
+pub const MessageBuildAction = enum(u32) { scalar = 0, copy_input = 1, copy_received = 2, list = 3, dictionary = 4, send = 7, result = 8, clear = 9, reply_endpoint = 10, child = 11, advance = 12, _ };
 pub const ChildDependency = enum(u32) { independent, dependent, _ };
 pub const MessageBuildRequest = extern struct {
     size: u32 = @sizeOf(MessageBuildRequest),
@@ -140,6 +140,28 @@ pub const ControllerTable = extern struct {
 };
 pub const PortControllerFn = *const fn (*anyopaque, *const ControllerTable, *anyopaque) callconv(.c) void;
 pub const PortOperationFn = *const fn (*anyopaque, u32, *const ControllerTable, *anyopaque) callconv(.c) void;
+pub const ResourceExecution = enum(u32) { controller, cooperative, _ };
+pub const CooperativeProgress = enum(u32) { completed, yielded, parked, _ };
+pub const CooperativeTable = extern struct {
+    instance_state: InstanceStateFn,
+    parent_state: @FieldType(ControllerTable, "parent_state"),
+    input: @FieldType(ControllerTable, "input"),
+    build_message: @FieldType(ControllerTable, "build_message"),
+    fail_allocation: @FieldType(ControllerTable, "fail_allocation"),
+    cancelled: @FieldType(ControllerTable, "cancelled"),
+    fail: @FieldType(ControllerTable, "fail"),
+    consume: *const fn (*anyopaque, u32) callconv(.c) bool,
+    park: *const fn (*anyopaque, u64) callconv(.c) bool,
+};
+pub const CooperativeFn = *const fn (*anyopaque, *const CooperativeTable, *anyopaque) callconv(.c) CooperativeProgress;
+pub const CooperativeOperationFn = *const fn (*anyopaque, u32, *const CooperativeTable, *anyopaque) callconv(.c) CooperativeProgress;
+pub const CooperativeDefinition = extern struct {
+    size: u32 = @sizeOf(CooperativeDefinition),
+    initialize: ?CooperativeFn,
+    execute: ?CooperativeOperationFn,
+    retire_operation: ?CooperativeFn,
+    retire: ?CooperativeFn,
+};
 pub const PortDefinition = extern struct {
     size: u32 = @sizeOf(PortDefinition),
     state_size: u32,
@@ -156,6 +178,8 @@ pub const PortDefinition = extern struct {
     cancel_operation: ?*const fn (*anyopaque, u32) callconv(.c) void = null,
     shutdown: ?PortControllerFn = null,
     identity: ?*const anyopaque = null,
+    execution: ResourceExecution = .controller,
+    cooperative: ?*const CooperativeDefinition = null,
 };
 
 pub const CapabilityRequirement = extern struct {
@@ -443,8 +467,8 @@ fn assertRecord(comptime T: type, comptime expected_size: usize, comptime expect
 }
 
 comptime {
-    @setEvalBranchQuota(8000);
-    if (@sizeOf(usize) != 8) @compileError("native ABI v8 supports 64-bit targets only");
+    @setEvalBranchQuota(16000);
+    if (@sizeOf(usize) != 8) @compileError("native ABI v9 supports 64-bit targets only");
 
     assertRecord(CapabilityRequirement, 8, 4);
     assertRecord(EffectSlot, 24, 8);
@@ -455,7 +479,9 @@ comptime {
     assertRecord(InvokeResult, 16, 8);
     assertRecord(HostTable, 160, 8);
     assertRecord(Descriptor, 112, 8);
-    assertRecord(PortDefinition, 96, 8);
+    assertRecord(PortDefinition, 112, 8);
+    assertRecord(CooperativeDefinition, 40, 8);
+    assertRecord(CooperativeTable, 72, 8);
     assertRecord(MessageBuildRequest, 72, 8);
     assertRecord(ControllerTable, 144, 8);
     assertRecord(InstanceTable, 24, 8);

@@ -117,6 +117,9 @@ pub fn Exchange(comptime Adapter: type) type {
         fn runnable(self: *Operation) bool {
             return self.adapter.runnable();
         }
+        pub fn advanceCooperative(self: *Operation, running: *controllers.Running) controllers.Progress {
+            return self.adapter.advanceCooperative(self, running);
+        }
         fn execute(self: *Operation, running: *controllers.Running) void {
             self.adapter.execute(self, running);
         }

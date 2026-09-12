@@ -288,17 +288,19 @@ const Request = struct {
         operation: struct { resource: Value, selector: *exchanges.Selector },
     },
     message: *message.Message,
-    state: union(enum) { validating, ready, preparing: *factories.Opening, opening: Value, consumed } = .validating,
+    state: union(enum) { validating, ready, preparing: *factories.Opening, opening: Value, failed_open: struct { resource: Value, failure: bytes.Failure }, consumed } = .validating,
 
     pub fn deinit(self: *Request, releases: *heap.ReleaseDomain, _: std.mem.Allocator) void {
-        switch (self.state) {
-            .opening => |item| {
-                Resource.fromValue(item).?.close();
-                releases.releaseValue(item);
-            },
-            .preparing => |opening| opening.release(),
-            .validating, .ready, .consumed => {},
+        const pending: ?Value = switch (self.state) {
+            .opening => |item| item,
+            .failed_open => |failed| failed.resource,
+            .preparing, .validating, .ready, .consumed => null,
+        };
+        if (pending) |item| {
+            Resource.fromValue(item).?.close();
+            releases.releaseValue(item);
         }
+        if (self.state == .preparing) self.state.preparing.release();
         self.message.retire(releases);
         releases.releaseValue(self.capability);
         switch (self.kind) {
@@ -332,6 +334,15 @@ const Request = struct {
             }
             return .yielded;
         }
+        if (self.state == .failed_open) {
+            const failed = self.state.failed_open;
+            const resource = Resource.fromValue(failed.resource).?;
+            if (!resource.joined()) {
+                try evaluator.park(.{ .external = resource.source() });
+                return .yielded;
+            }
+            return transportFailure(evaluator, failed.failure);
+        }
         if (self.state == .opening) {
             const item = self.state.opening;
             const resource = Resource.fromValue(item).?;
@@ -340,7 +351,11 @@ const Request = struct {
                     try evaluator.park(.{ .external = source });
                     return .yielded;
                 },
-                .failed => |failure| return transportFailure(evaluator, failure),
+                .failed => |failure| {
+                    resource.close();
+                    self.state = .{ .failed_open = .{ .resource = item, .failure = failure } };
+                    return .yielded;
+                },
                 .ready => {
                     const output = try evaluator.reserveStack(1);
                     self.state = .consumed;

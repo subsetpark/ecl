@@ -1498,6 +1498,14 @@ test "oom: standard-library and host: native instance initialization and storage
     try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortProbe("instanceprobe.next instanceprobe.allocate pop pop", "").run);
 }
 
+test "oom: standard-library and host: cooperative native resource construction and retirement" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortProbe(
+        "instanceprobe.cooperative [] port.open dup instanceprobe.values 2 port.call pop port.close",
+        "",
+    ).run);
+}
+
 test "oom: standard-library and host: native port registered vocabulary publication" {
     try requireSelectedOomTest(@src());
     try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortProbe(

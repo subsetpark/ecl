@@ -90,7 +90,7 @@ fn Spec(comptime label: []const u8) type {
         }
     };
 }
-const Counter = ecl.Port(struct {
+const Counter = ecl.Port(.{ .controller = struct {
     const Base = Spec("counter");
     pub const name = Base.name;
     pub const State = Base.State;
@@ -126,8 +126,8 @@ const Counter = ecl.Port(struct {
     fn on_counter_echo(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
         try Base.run(Counter, state, .echo, .operation, controller);
     }
-});
-const Other = ecl.Port(struct {
+} });
+const Other = ecl.Port(.{ .controller = struct {
     const Base = Spec("other");
     pub const name = Base.name;
     pub const State = Base.State;
@@ -144,7 +144,7 @@ const Other = ecl.Port(struct {
     fn on_other_step(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
         try Base.run(Other, state, .step, .operation, controller);
     }
-});
+} });
 fn DuplexSpec(comptime acknowledge: bool) type {
     return struct {
         const Base = Spec("lane");
@@ -468,205 +468,207 @@ fn checkParameters(controller: *ecl.Controller) bool {
     if ((controller.input(&.{6}) orelse return false).kind() != .port) return false;
     return controller.input(&.{7}) == null;
 }
-const DuplexSdk = ecl.Port(struct {
-    const Base = DuplexSpec(true);
-    pub const name = Base.name;
-    pub const State = Base.State;
-    pub const Lane = if (@hasDecl(Base, "Lane")) Base.Lane else enum { operation };
-    pub const cancellation = if (@hasDecl(Base, "cancellation")) Base.cancellation else ecl.PortCancellation.close_resource;
-    pub const init = Base.init;
-    pub const open = Base.open;
-    pub const cancel = Base.cancel;
-    pub const deinit = Base.deinit;
-    pub const shutdown = Base.shutdown;
-    pub const cancelOperation = Base.cancelOperation;
-    pub const endpoints = .{
-        .resource_input = ecl.declarations.Endpoint{ .name = "resource-input", .doc = "Resource byte input.", .transport = .bytes, .direction = .input, .owner = .resource },
-        .resource_output = ecl.declarations.Endpoint{ .name = "resource-output", .doc = "Resource byte output.", .transport = .bytes, .direction = .output, .owner = .resource },
-        .resource_sender = ecl.declarations.Endpoint{ .name = "resource-sender", .doc = "Resource structured input.", .transport = .messages, .direction = .input, .owner = .resource },
-        .resource_receiver = ecl.declarations.Endpoint{ .name = "resource-receiver", .doc = "Resource structured output.", .transport = .messages, .direction = .output, .owner = .resource },
-        .input = ecl.declarations.Endpoint{ .name = "input", .doc = "Exchange byte input.", .transport = .bytes, .direction = .input, .owner = .exchange },
-        .output = ecl.declarations.Endpoint{ .name = "output", .doc = "Exchange byte output.", .transport = .bytes, .direction = .output, .owner = .exchange },
-        .diagnostics = ecl.declarations.Endpoint{ .name = "diagnostics", .doc = "Independent pipeline diagnostic bytes.", .transport = .bytes, .direction = .output, .owner = .exchange },
-        .sender = ecl.declarations.Endpoint{ .name = "sender", .doc = "Structured message input.", .transport = .messages, .direction = .input, .owner = .exchange },
-        .receiver = ecl.declarations.Endpoint{ .name = "receiver", .doc = "Structured message output.", .transport = .messages, .direction = .output, .owner = .exchange },
-    };
-    pub const operations = .{
-        .step = .{ .name = "step", .doc = "Apply an increment on the send lane.", .handler = on_step, .lane = .send, .endpoints = .{} },
-        .receive_step = .{ .name = "receive-step", .doc = "Apply an increment on the receive lane.", .handler = on_receive_step, .lane = .receive, .endpoints = .{} },
-        .block = .{ .name = "block", .doc = "Block a recoverable receive operation.", .handler = on_block, .lane = .receive, .endpoints = .{} },
-        .block_send = .{ .name = "block-send", .doc = "Block a recoverable send operation.", .handler = on_block_send, .lane = .send, .endpoints = .{} },
-        .echo = .{ .name = "echo", .doc = "Echo accepted input bytes.", .handler = on_echo, .lane = .receive, .endpoints = .{ .input, .output } },
-        .checksum = .{ .name = "checksum", .doc = "Sum accepted input bytes.", .handler = on_checksum, .lane = .send, .endpoints = .{ .input, .output } },
-        .failure = .{ .name = "failure", .doc = "Fail with a deterministic terminal error.", .handler = on_failure, .lane = .receive, .endpoints = .{} },
-        .inspect = .{ .name = "inspect", .doc = "Validate structured parameters without additional streaming.", .handler = on_inspect, .lane = .receive, .endpoints = .{} },
-        .allocation_failure = .{ .name = "allocation-failure", .doc = "Report asynchronous allocation exhaustion.", .handler = on_allocation_failure, .lane = .receive, .endpoints = .{ .output, .sender, .receiver } },
-        .noop = .{ .name = "noop", .doc = "Complete without additional streaming.", .handler = on_noop, .lane = .receive, .endpoints = .{} },
-        .buffered_failure = .{ .name = "buffered-failure", .doc = "Fail after accepting output bytes.", .handler = on_buffered_failure, .lane = .receive, .endpoints = .{.output} },
-        .finished_failure = .{ .name = "finished-failure", .doc = "Fail after finishing the output endpoint.", .handler = on_finished_failure, .lane = .receive, .endpoints = .{.output} },
-        .pipeline = .{ .name = "pipeline", .doc = "Stream input, output, and independent diagnostics.", .handler = on_pipeline, .lane = .receive, .endpoints = .{ .input, .output, .diagnostics } },
-        .early_exit = .{ .name = "early-exit", .doc = "Stop consuming input after one byte.", .handler = on_early_exit, .lane = .receive, .endpoints = .{ .input, .output } },
-        .resource_messages = .{ .name = "resource-messages", .doc = "Forward through resource-owned message channels.", .handler = on_resource_messages, .lane = .receive, .endpoints = .{} },
-        .resource_bytes = .{ .name = "resource-bytes", .doc = "Forward through resource-owned byte streams.", .handler = on_resource_bytes, .lane = .receive, .endpoints = .{} },
-        .resource_notify = .{ .name = "resource-notify", .doc = "Produce a resource event independently of exchange output.", .handler = on_resource_notify, .lane = .receive, .endpoints = .{} },
-        .rpc = .{ .name = "rpc", .doc = "Request ECL replies through opaque sender endpoints.", .handler = on_rpc, .lane = .receive, .endpoints = .{ .sender, .receiver } },
-        .invalid_reply = .{ .name = "invalid-reply", .doc = "Reject reply authority for an output endpoint.", .handler = on_invalid_reply, .lane = .receive, .endpoints = .{.receiver} },
-        .resource_reply = .{ .name = "resource-reply", .doc = "Return a reply sender borrowed from the resource.", .handler = on_resource_reply, .lane = .send, .endpoints = .{} },
-        .reply_result = .{ .name = "reply-result", .doc = "Return a retained endpoint after completion.", .handler = on_reply_result, .lane = .receive, .endpoints = .{.sender} },
-        .resource_compete_messages = .{ .name = "resource-compete-messages", .doc = "Read resource messages on an independent lane.", .handler = on_resource_compete_messages, .lane = .send, .endpoints = .{} },
-        .resource_compete_bytes = .{ .name = "resource-compete-bytes", .doc = "Read resource bytes on an independent lane.", .handler = on_resource_compete_bytes, .lane = .send, .endpoints = .{} },
-        .datagram = .{ .name = "datagram", .doc = "Report packet metadata and explicit native loss.", .handler = on_datagram, .lane = .receive, .endpoints = .{ .sender, .receiver } },
-        .watch = .{ .name = "watch", .doc = "Emit watcher events and a deterministic disconnect.", .handler = on_watch, .lane = .receive, .endpoints = .{ .sender, .receiver } },
-        .watch_config = .{ .name = "watch-config", .doc = "Configure a watcher on an independent controller lane.", .handler = on_watch_config, .lane = .send, .endpoints = .{} },
-        .transform_message = .{ .name = "transform-message", .doc = "Release consumed input while retaining a constructed response.", .handler = on_transform_message, .lane = .receive, .endpoints = .{ .sender, .receiver } },
-        .child = .{ .name = "child", .doc = "Return an independent child resource.", .handler = on_child, .lane = .receive, .endpoints = .{} },
-        .dependent_child = .{ .name = "dependent-child", .doc = "Return a dependent child resource.", .handler = on_dependent_child, .lane = .receive, .endpoints = .{} },
-        .child_event_blocked = .{ .name = "child-event-blocked", .doc = "Queue a child and wait for the controller gate.", .handler = on_child_event_blocked, .lane = .receive, .endpoints = .{.receiver} },
-        .child_result_blocked = .{ .name = "child-result-blocked", .doc = "Set a child result and wait for the controller gate.", .handler = on_child_result_blocked, .lane = .receive, .endpoints = .{} },
-        .child_event = .{ .name = "child-event", .doc = "Send an independent child resource.", .handler = on_child_event, .lane = .receive, .endpoints = .{.receiver} },
-        .discard_child = .{ .name = "discard-child", .doc = "Discard a provisional child before returning a scalar result.", .handler = on_discard_child, .lane = .receive, .endpoints = .{} },
-        .child_pair = .{ .name = "child-pair", .doc = "Return two children in one atomic result publication.", .handler = on_child_pair, .lane = .receive, .endpoints = .{} },
-        .events = .{ .name = "events", .doc = "Produce unsolicited structured events under pressure.", .handler = on_events, .lane = .receive, .endpoints = .{.receiver} },
-        .build_result = .{ .name = "build-result", .doc = "Construct a nested structured result with a capability.", .handler = on_build_result, .lane = .receive, .endpoints = .{} },
-        .duplicate_result = .{ .name = "duplicate-result", .doc = "Reject duplicate structured keys.", .handler = on_duplicate_result, .lane = .receive, .endpoints = .{} },
-        .oversize_event = .{ .name = "oversize-event", .doc = "Reject oversize construction before output.", .handler = on_oversize_event, .lane = .receive, .endpoints = .{.receiver} },
-        .build_received = .{ .name = "build-received", .doc = "Copy received values and construct empty aggregates.", .handler = on_build_received, .lane = .receive, .endpoints = .{ .sender, .receiver } },
-        .messages = .{ .name = "messages", .doc = "Forward complete structured messages.", .handler = on_messages, .lane = .receive, .endpoints = .{ .sender, .receiver } },
-        .message_result = .{ .name = "message-result", .doc = "Return one structured message as the terminal result.", .handler = on_message_result, .lane = .receive, .endpoints = .{.sender} },
-        .message_failure = .{ .name = "message-failure", .doc = "Fail after accepting one output message.", .handler = on_message_failure, .lane = .receive, .endpoints = .{ .sender, .receiver } },
-        .blocked = .{ .name = "blocked", .doc = "Wait for an explicit controller gate.", .handler = on_blocked, .lane = .receive, .endpoints = .{ .input, .output } },
-    };
-    fn on_step(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .step, .send, controller);
-    }
-    fn on_receive_step(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .receive_step, .receive, controller);
-    }
-    fn on_block(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .block, .receive, controller);
-    }
-    fn on_block_send(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .block_send, .send, controller);
-    }
-    fn on_echo(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .echo, .receive, controller);
-    }
-    fn on_checksum(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .checksum, .send, controller);
-    }
-    fn on_failure(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .failure, .receive, controller);
-    }
-    fn on_inspect(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .inspect, .receive, controller);
-    }
-    fn on_allocation_failure(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .allocation_failure, .receive, controller);
-    }
-    fn on_noop(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .noop, .receive, controller);
-    }
-    fn on_buffered_failure(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .buffered_failure, .receive, controller);
-    }
-    fn on_finished_failure(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .finished_failure, .receive, controller);
-    }
-    fn on_pipeline(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .pipeline, .receive, controller);
-    }
-    fn on_early_exit(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .early_exit, .receive, controller);
-    }
-    fn on_resource_messages(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .resource_messages, .receive, controller);
-    }
-    fn on_resource_bytes(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .resource_bytes, .receive, controller);
-    }
-    fn on_resource_notify(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .resource_notify, .receive, controller);
-    }
-    fn on_rpc(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .rpc, .receive, controller);
-    }
-    fn on_invalid_reply(_: *State, _: *ecl.Controller) void {
-        unreachable; // Exercised by the malformed ABI callback below.
-    }
-    fn on_resource_reply(_: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        const input = try controller.endpoint(Duplex, .resource_sender);
-        try input.reply();
-        try controller.builder().result();
-    }
-    fn on_reply_result(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .reply_result, .receive, controller);
-    }
-    fn on_resource_compete_messages(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .resource_compete_messages, .send, controller);
-    }
-    fn on_resource_compete_bytes(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .resource_compete_bytes, .send, controller);
-    }
-    fn on_datagram(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .datagram, .receive, controller);
-    }
-    fn on_watch(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .watch, .receive, controller);
-    }
-    fn on_watch_config(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .watch_config, .send, controller);
-    }
-    fn on_transform_message(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .transform_message, .receive, controller);
-    }
-    fn on_child(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .child, .receive, controller);
-    }
-    fn on_dependent_child(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .dependent_child, .receive, controller);
-    }
-    fn on_child_event_blocked(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .child_event_blocked, .receive, controller);
-    }
-    fn on_child_result_blocked(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .child_result_blocked, .receive, controller);
-    }
-    fn on_child_event(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .child_event, .receive, controller);
-    }
-    fn on_discard_child(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .discard_child, .receive, controller);
-    }
-    fn on_child_pair(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .child_pair, .receive, controller);
-    }
-    fn on_events(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .events, .receive, controller);
-    }
-    fn on_build_result(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .build_result, .receive, controller);
-    }
-    fn on_duplicate_result(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .duplicate_result, .receive, controller);
-    }
-    fn on_oversize_event(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .oversize_event, .receive, controller);
-    }
-    fn on_build_received(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .build_received, .receive, controller);
-    }
-    fn on_messages(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .messages, .receive, controller);
-    }
-    fn on_message_result(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .message_result, .receive, controller);
-    }
-    fn on_message_failure(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .message_failure, .receive, controller);
-    }
-    fn on_blocked(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
-        try Base.run(Duplex, state, .blocked, .receive, controller);
-    }
+const DuplexSdk = ecl.Port(.{
+    .controller = struct {
+        const Base = DuplexSpec(true);
+        pub const name = Base.name;
+        pub const State = Base.State;
+        pub const Lane = if (@hasDecl(Base, "Lane")) Base.Lane else enum { operation };
+        pub const cancellation = if (@hasDecl(Base, "cancellation")) Base.cancellation else ecl.PortCancellation.close_resource;
+        pub const init = Base.init;
+        pub const open = Base.open;
+        pub const cancel = Base.cancel;
+        pub const deinit = Base.deinit;
+        pub const shutdown = Base.shutdown;
+        pub const cancelOperation = Base.cancelOperation;
+        pub const endpoints = .{
+            .resource_input = ecl.declarations.Endpoint{ .name = "resource-input", .doc = "Resource byte input.", .transport = .bytes, .direction = .input, .owner = .resource },
+            .resource_output = ecl.declarations.Endpoint{ .name = "resource-output", .doc = "Resource byte output.", .transport = .bytes, .direction = .output, .owner = .resource },
+            .resource_sender = ecl.declarations.Endpoint{ .name = "resource-sender", .doc = "Resource structured input.", .transport = .messages, .direction = .input, .owner = .resource },
+            .resource_receiver = ecl.declarations.Endpoint{ .name = "resource-receiver", .doc = "Resource structured output.", .transport = .messages, .direction = .output, .owner = .resource },
+            .input = ecl.declarations.Endpoint{ .name = "input", .doc = "Exchange byte input.", .transport = .bytes, .direction = .input, .owner = .exchange },
+            .output = ecl.declarations.Endpoint{ .name = "output", .doc = "Exchange byte output.", .transport = .bytes, .direction = .output, .owner = .exchange },
+            .diagnostics = ecl.declarations.Endpoint{ .name = "diagnostics", .doc = "Independent pipeline diagnostic bytes.", .transport = .bytes, .direction = .output, .owner = .exchange },
+            .sender = ecl.declarations.Endpoint{ .name = "sender", .doc = "Structured message input.", .transport = .messages, .direction = .input, .owner = .exchange },
+            .receiver = ecl.declarations.Endpoint{ .name = "receiver", .doc = "Structured message output.", .transport = .messages, .direction = .output, .owner = .exchange },
+        };
+        pub const operations = .{
+            .step = .{ .name = "step", .doc = "Apply an increment on the send lane.", .handler = on_step, .lane = .send, .endpoints = .{} },
+            .receive_step = .{ .name = "receive-step", .doc = "Apply an increment on the receive lane.", .handler = on_receive_step, .lane = .receive, .endpoints = .{} },
+            .block = .{ .name = "block", .doc = "Block a recoverable receive operation.", .handler = on_block, .lane = .receive, .endpoints = .{} },
+            .block_send = .{ .name = "block-send", .doc = "Block a recoverable send operation.", .handler = on_block_send, .lane = .send, .endpoints = .{} },
+            .echo = .{ .name = "echo", .doc = "Echo accepted input bytes.", .handler = on_echo, .lane = .receive, .endpoints = .{ .input, .output } },
+            .checksum = .{ .name = "checksum", .doc = "Sum accepted input bytes.", .handler = on_checksum, .lane = .send, .endpoints = .{ .input, .output } },
+            .failure = .{ .name = "failure", .doc = "Fail with a deterministic terminal error.", .handler = on_failure, .lane = .receive, .endpoints = .{} },
+            .inspect = .{ .name = "inspect", .doc = "Validate structured parameters without additional streaming.", .handler = on_inspect, .lane = .receive, .endpoints = .{} },
+            .allocation_failure = .{ .name = "allocation-failure", .doc = "Report asynchronous allocation exhaustion.", .handler = on_allocation_failure, .lane = .receive, .endpoints = .{ .output, .sender, .receiver } },
+            .noop = .{ .name = "noop", .doc = "Complete without additional streaming.", .handler = on_noop, .lane = .receive, .endpoints = .{} },
+            .buffered_failure = .{ .name = "buffered-failure", .doc = "Fail after accepting output bytes.", .handler = on_buffered_failure, .lane = .receive, .endpoints = .{.output} },
+            .finished_failure = .{ .name = "finished-failure", .doc = "Fail after finishing the output endpoint.", .handler = on_finished_failure, .lane = .receive, .endpoints = .{.output} },
+            .pipeline = .{ .name = "pipeline", .doc = "Stream input, output, and independent diagnostics.", .handler = on_pipeline, .lane = .receive, .endpoints = .{ .input, .output, .diagnostics } },
+            .early_exit = .{ .name = "early-exit", .doc = "Stop consuming input after one byte.", .handler = on_early_exit, .lane = .receive, .endpoints = .{ .input, .output } },
+            .resource_messages = .{ .name = "resource-messages", .doc = "Forward through resource-owned message channels.", .handler = on_resource_messages, .lane = .receive, .endpoints = .{} },
+            .resource_bytes = .{ .name = "resource-bytes", .doc = "Forward through resource-owned byte streams.", .handler = on_resource_bytes, .lane = .receive, .endpoints = .{} },
+            .resource_notify = .{ .name = "resource-notify", .doc = "Produce a resource event independently of exchange output.", .handler = on_resource_notify, .lane = .receive, .endpoints = .{} },
+            .rpc = .{ .name = "rpc", .doc = "Request ECL replies through opaque sender endpoints.", .handler = on_rpc, .lane = .receive, .endpoints = .{ .sender, .receiver } },
+            .invalid_reply = .{ .name = "invalid-reply", .doc = "Reject reply authority for an output endpoint.", .handler = on_invalid_reply, .lane = .receive, .endpoints = .{.receiver} },
+            .resource_reply = .{ .name = "resource-reply", .doc = "Return a reply sender borrowed from the resource.", .handler = on_resource_reply, .lane = .send, .endpoints = .{} },
+            .reply_result = .{ .name = "reply-result", .doc = "Return a retained endpoint after completion.", .handler = on_reply_result, .lane = .receive, .endpoints = .{.sender} },
+            .resource_compete_messages = .{ .name = "resource-compete-messages", .doc = "Read resource messages on an independent lane.", .handler = on_resource_compete_messages, .lane = .send, .endpoints = .{} },
+            .resource_compete_bytes = .{ .name = "resource-compete-bytes", .doc = "Read resource bytes on an independent lane.", .handler = on_resource_compete_bytes, .lane = .send, .endpoints = .{} },
+            .datagram = .{ .name = "datagram", .doc = "Report packet metadata and explicit native loss.", .handler = on_datagram, .lane = .receive, .endpoints = .{ .sender, .receiver } },
+            .watch = .{ .name = "watch", .doc = "Emit watcher events and a deterministic disconnect.", .handler = on_watch, .lane = .receive, .endpoints = .{ .sender, .receiver } },
+            .watch_config = .{ .name = "watch-config", .doc = "Configure a watcher on an independent controller lane.", .handler = on_watch_config, .lane = .send, .endpoints = .{} },
+            .transform_message = .{ .name = "transform-message", .doc = "Release consumed input while retaining a constructed response.", .handler = on_transform_message, .lane = .receive, .endpoints = .{ .sender, .receiver } },
+            .child = .{ .name = "child", .doc = "Return an independent child resource.", .handler = on_child, .lane = .receive, .endpoints = .{} },
+            .dependent_child = .{ .name = "dependent-child", .doc = "Return a dependent child resource.", .handler = on_dependent_child, .lane = .receive, .endpoints = .{} },
+            .child_event_blocked = .{ .name = "child-event-blocked", .doc = "Queue a child and wait for the controller gate.", .handler = on_child_event_blocked, .lane = .receive, .endpoints = .{.receiver} },
+            .child_result_blocked = .{ .name = "child-result-blocked", .doc = "Set a child result and wait for the controller gate.", .handler = on_child_result_blocked, .lane = .receive, .endpoints = .{} },
+            .child_event = .{ .name = "child-event", .doc = "Send an independent child resource.", .handler = on_child_event, .lane = .receive, .endpoints = .{.receiver} },
+            .discard_child = .{ .name = "discard-child", .doc = "Discard a provisional child before returning a scalar result.", .handler = on_discard_child, .lane = .receive, .endpoints = .{} },
+            .child_pair = .{ .name = "child-pair", .doc = "Return two children in one atomic result publication.", .handler = on_child_pair, .lane = .receive, .endpoints = .{} },
+            .events = .{ .name = "events", .doc = "Produce unsolicited structured events under pressure.", .handler = on_events, .lane = .receive, .endpoints = .{.receiver} },
+            .build_result = .{ .name = "build-result", .doc = "Construct a nested structured result with a capability.", .handler = on_build_result, .lane = .receive, .endpoints = .{} },
+            .duplicate_result = .{ .name = "duplicate-result", .doc = "Reject duplicate structured keys.", .handler = on_duplicate_result, .lane = .receive, .endpoints = .{} },
+            .oversize_event = .{ .name = "oversize-event", .doc = "Reject oversize construction before output.", .handler = on_oversize_event, .lane = .receive, .endpoints = .{.receiver} },
+            .build_received = .{ .name = "build-received", .doc = "Copy received values and construct empty aggregates.", .handler = on_build_received, .lane = .receive, .endpoints = .{ .sender, .receiver } },
+            .messages = .{ .name = "messages", .doc = "Forward complete structured messages.", .handler = on_messages, .lane = .receive, .endpoints = .{ .sender, .receiver } },
+            .message_result = .{ .name = "message-result", .doc = "Return one structured message as the terminal result.", .handler = on_message_result, .lane = .receive, .endpoints = .{.sender} },
+            .message_failure = .{ .name = "message-failure", .doc = "Fail after accepting one output message.", .handler = on_message_failure, .lane = .receive, .endpoints = .{ .sender, .receiver } },
+            .blocked = .{ .name = "blocked", .doc = "Wait for an explicit controller gate.", .handler = on_blocked, .lane = .receive, .endpoints = .{ .input, .output } },
+        };
+        fn on_step(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .step, .send, controller);
+        }
+        fn on_receive_step(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .receive_step, .receive, controller);
+        }
+        fn on_block(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .block, .receive, controller);
+        }
+        fn on_block_send(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .block_send, .send, controller);
+        }
+        fn on_echo(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .echo, .receive, controller);
+        }
+        fn on_checksum(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .checksum, .send, controller);
+        }
+        fn on_failure(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .failure, .receive, controller);
+        }
+        fn on_inspect(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .inspect, .receive, controller);
+        }
+        fn on_allocation_failure(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .allocation_failure, .receive, controller);
+        }
+        fn on_noop(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .noop, .receive, controller);
+        }
+        fn on_buffered_failure(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .buffered_failure, .receive, controller);
+        }
+        fn on_finished_failure(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .finished_failure, .receive, controller);
+        }
+        fn on_pipeline(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .pipeline, .receive, controller);
+        }
+        fn on_early_exit(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .early_exit, .receive, controller);
+        }
+        fn on_resource_messages(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .resource_messages, .receive, controller);
+        }
+        fn on_resource_bytes(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .resource_bytes, .receive, controller);
+        }
+        fn on_resource_notify(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .resource_notify, .receive, controller);
+        }
+        fn on_rpc(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .rpc, .receive, controller);
+        }
+        fn on_invalid_reply(_: *State, _: *ecl.Controller) void {
+            unreachable; // Exercised by the malformed ABI callback below.
+        }
+        fn on_resource_reply(_: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            const input = try controller.endpoint(Duplex, .resource_sender);
+            try input.reply();
+            try controller.builder().result();
+        }
+        fn on_reply_result(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .reply_result, .receive, controller);
+        }
+        fn on_resource_compete_messages(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .resource_compete_messages, .send, controller);
+        }
+        fn on_resource_compete_bytes(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .resource_compete_bytes, .send, controller);
+        }
+        fn on_datagram(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .datagram, .receive, controller);
+        }
+        fn on_watch(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .watch, .receive, controller);
+        }
+        fn on_watch_config(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .watch_config, .send, controller);
+        }
+        fn on_transform_message(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .transform_message, .receive, controller);
+        }
+        fn on_child(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .child, .receive, controller);
+        }
+        fn on_dependent_child(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .dependent_child, .receive, controller);
+        }
+        fn on_child_event_blocked(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .child_event_blocked, .receive, controller);
+        }
+        fn on_child_result_blocked(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .child_result_blocked, .receive, controller);
+        }
+        fn on_child_event(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .child_event, .receive, controller);
+        }
+        fn on_discard_child(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .discard_child, .receive, controller);
+        }
+        fn on_child_pair(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .child_pair, .receive, controller);
+        }
+        fn on_events(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .events, .receive, controller);
+        }
+        fn on_build_result(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .build_result, .receive, controller);
+        }
+        fn on_duplicate_result(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .duplicate_result, .receive, controller);
+        }
+        fn on_oversize_event(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .oversize_event, .receive, controller);
+        }
+        fn on_build_received(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .build_received, .receive, controller);
+        }
+        fn on_messages(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .messages, .receive, controller);
+        }
+        fn on_message_result(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .message_result, .receive, controller);
+        }
+        fn on_message_failure(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .message_failure, .receive, controller);
+        }
+        fn on_blocked(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .blocked, .receive, controller);
+        }
+    },
 });
 // Deliberately bypass the SDK to test hostile wire metadata. Ordinary fixture
 // operations still use the generated bridge and the same resource identity.
@@ -692,7 +694,7 @@ const Duplex = struct {
     }
 };
 
-const Unacknowledged = ecl.Port(struct {
+const Unacknowledged = ecl.Port(.{ .controller = struct {
     const Base = DuplexSpec(false);
     pub const name = Base.name;
     pub const State = Base.State;
@@ -715,7 +717,7 @@ const Unacknowledged = ecl.Port(struct {
     fn on_unrecoverable_send(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
         try Base.run(Unacknowledged, state, .block_send, .send, controller);
     }
-});
+} });
 
 const Schedule = ecl.Reschedule(struct {
     pub const State = u8;
@@ -824,7 +826,7 @@ const StorageSpec = struct {
         _ = cleaned.fetchAdd(1, .release);
     }
 };
-const Storage = ecl.Port(struct {
+const Storage = ecl.Port(.{ .controller = struct {
     const Base = StorageSpec;
     pub const name = Base.name;
     pub const State = Base.State;
@@ -861,7 +863,7 @@ const Storage = ecl.Port(struct {
     fn on_lookalike_child(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
         try Base.run(Storage, state, .lookalike_child, .operation, controller);
     }
-});
+} });
 
 const LookalikeStorageBackend = struct {
     pub const name = StorageSpec.name;
@@ -874,7 +876,7 @@ const LookalikeStorageBackend = struct {
     pub fn cancel(_: *State) void {}
     pub fn deinit(_: *State) void {}
 };
-const LookalikeStorage = ecl.Port(struct {
+const LookalikeStorage = ecl.Port(.{ .controller = struct {
     const Base = LookalikeStorageBackend;
     pub const name = Base.name;
     pub const State = Base.State;
@@ -886,7 +888,7 @@ const LookalikeStorage = ecl.Port(struct {
     pub const deinit = Base.deinit;
     pub const endpoints = .{};
     pub const operations = .{};
-});
+} });
 
 const CursorBackend = struct {
     pub const name = "cursor";
@@ -932,7 +934,7 @@ const CursorBackend = struct {
         _ = cleaned.fetchAdd(1, .release);
     }
 };
-const Cursor = ecl.Port(struct {
+const Cursor = ecl.Port(.{ .controller = struct {
     const Base = CursorBackend;
     pub const name = Base.name;
     pub const State = Base.State;
@@ -955,7 +957,7 @@ const Cursor = ecl.Port(struct {
     fn on_position(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
         try Base.run(Cursor, state, .position, .operation, controller);
     }
-});
+} });
 
 const TransactionPortBackend = struct {
     pub const name = "transaction";
@@ -1003,7 +1005,7 @@ const TransactionPortBackend = struct {
         _ = cleaned.fetchAdd(1, .release);
     }
 };
-const TransactionPort = ecl.Port(struct {
+const TransactionPort = ecl.Port(.{ .controller = struct {
     const Base = TransactionPortBackend;
     pub const name = Base.name;
     pub const State = Base.State;
@@ -1030,7 +1032,7 @@ const TransactionPort = ecl.Port(struct {
     fn on_transaction_wait(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
         try Base.run(TransactionPort, state, .transaction_wait, .operation, controller);
     }
-});
+} });
 
 const BrokerSpec = struct {
     pub const name = "broker";
@@ -1101,7 +1103,7 @@ const BrokerSpec = struct {
         _ = cleaned.fetchAdd(1, .release);
     }
 };
-const Broker = ecl.Port(struct {
+const Broker = ecl.Port(.{ .controller = struct {
     const Base = BrokerSpec;
     pub const name = Base.name;
     pub const State = Base.State;
@@ -1128,7 +1130,7 @@ const Broker = ecl.Port(struct {
     fn on_broker_status(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
         try Base.run(Broker, state, .broker_status, .operation, controller);
     }
-});
+} });
 
 const DeliveryBackend = struct {
     pub const name = "delivery";
@@ -1176,7 +1178,7 @@ const DeliveryBackend = struct {
         _ = cleaned.fetchAdd(1, .release);
     }
 };
-const Delivery = ecl.Port(struct {
+const Delivery = ecl.Port(.{ .controller = struct {
     const Base = DeliveryBackend;
     pub const name = Base.name;
     pub const State = Base.State;
@@ -1197,7 +1199,7 @@ const Delivery = ecl.Port(struct {
     fn on_delivery_info(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
         try Base.run(Delivery, state, .delivery_info, .operation, controller);
     }
-});
+} });
 
 const DeviceSpec = struct {
     pub const name = "device";
@@ -1234,7 +1236,7 @@ const DeviceSpec = struct {
         _ = cleaned.fetchAdd(1, .release);
     }
 };
-const Device = ecl.Port(struct {
+const Device = ecl.Port(.{ .controller = struct {
     const Base = DeviceSpec;
     pub const name = Base.name;
     pub const State = Base.State;
@@ -1255,7 +1257,7 @@ const Device = ecl.Port(struct {
     fn on_device_status(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
         try Base.run(Device, state, .device_status, .operation, controller);
     }
-});
+} });
 
 const BufferSpec = struct {
     pub const name = "buffer";
@@ -1351,7 +1353,7 @@ const BufferSpec = struct {
         _ = cleaned.fetchAdd(1, .release);
     }
 };
-const Buffer = ecl.Port(struct {
+const Buffer = ecl.Port(.{ .controller = struct {
     const Base = BufferSpec;
     pub const name = Base.name;
     pub const State = Base.State;
@@ -1377,7 +1379,7 @@ const Buffer = ecl.Port(struct {
     fn on_buffer_update(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
         try Base.run(Buffer, state, .buffer_update, .control, controller);
     }
-});
+} });
 
 const MultiplexSpec = struct {
     pub const name = "multiplex";
@@ -1419,7 +1421,7 @@ const MultiplexSpec = struct {
         _ = cleaned.fetchAdd(1, .release);
     }
 };
-const Multiplex = ecl.Port(struct {
+const Multiplex = ecl.Port(.{ .controller = struct {
     const Base = MultiplexSpec;
     pub const name = Base.name;
     pub const State = Base.State;
@@ -1450,7 +1452,7 @@ const Multiplex = ecl.Port(struct {
     fn on_fatal_allocation_failure(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
         try Base.run(Multiplex, state, .fatal_allocation_failure, .operation, controller);
     }
-});
+} });
 const ChannelBackend = struct {
     pub const name = "channel";
     pub const Lane = enum(u32) { operation };
@@ -1490,7 +1492,7 @@ const ChannelBackend = struct {
         _ = cleaned.fetchAdd(1, .release);
     }
 };
-const Channel = ecl.Port(struct {
+const Channel = ecl.Port(.{ .controller = struct {
     const Base = ChannelBackend;
     pub const name = Base.name;
     pub const State = Base.State;
@@ -1511,9 +1513,9 @@ const Channel = ecl.Port(struct {
     fn on_channel_stream(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
         try Base.run(Channel, state, .operation, controller);
     }
-});
+} });
 
-const Declared = ecl.Port(struct {
+const Declared = ecl.Port(.{ .controller = struct {
     pub const name = "declared";
     pub const State = u8;
     pub const Lane = enum { data, control };
@@ -1579,7 +1581,7 @@ const Declared = ecl.Port(struct {
     pub fn deinit(_: *State) void {
         _ = cleaned.fetchAdd(1, .release);
     }
-});
+} });
 
 pub const Extension = extension: {
     @setEvalBranchQuota(20_000);

@@ -235,7 +235,7 @@ const ResourceAdapter = struct {
     owner: *OwnerState,
     instance: *native.ModuleInstance,
     kind: u32,
-    definition: abi.PortDefinition,
+    definition: descriptor.PortDefinition,
     backend: []align(64) u8,
     configuration: ?Value = null,
     message_budget: *message_transport.Budget,
@@ -271,15 +271,28 @@ const ResourceAdapter = struct {
         Resource.destroy(cell);
     }
     pub fn initState(self: *ResourceAdapter) void {
-        self.definition.init_state.?(self.backend.ptr);
+        self.definition.wire.init_state.?(self.backend.ptr);
     }
     pub fn initializeBackend(self: *ResourceAdapter, cell: *Cell) void {
         var ctx: ControllerContext = .{ .cell = cell, .invocation = .initialize };
         defer ctx.deinit();
-        self.definition.initialize.?(self.backend.ptr, &controller_table, &ctx);
+        self.definition.wire.initialize.?(self.backend.ptr, &controller_table, &ctx);
+    }
+    pub fn advanceInitialize(self: *ResourceAdapter, cell: *Cell) scheduler.Cooperative.Progress {
+        var ctx: ControllerContext = .{ .cell = cell, .invocation = .initialize, .cooperative = .{} };
+        defer ctx.deinit();
+        return cooperativeProgress(&ctx, self.definition.execution.cooperative.initialize(self.backend.ptr, &cooperative_table, &ctx));
+    }
+    pub fn advanceCleanup(self: *ResourceAdapter, cell: *Cell) scheduler.Cooperative.Progress {
+        var ctx: ControllerContext = .{ .cell = cell, .invocation = .cleanup, .cooperative = .{} };
+        defer ctx.deinit();
+        return cooperativeProgress(&ctx, self.definition.execution.cooperative.retire(self.backend.ptr, &cooperative_table, &ctx));
     }
     pub fn cancel(self: *ResourceAdapter) void {
-        self.definition.cancel.?(self.backend.ptr);
+        switch (self.definition.execution) {
+            .controller => self.definition.wire.cancel.?(self.backend.ptr),
+            .cooperative => {},
+        }
     }
     pub fn failTransport(self: *ResourceAdapter) void {
         for (self.resource_pipes) |pipe| if (pipe) |transport| transport.fail(.init(.io, "native resource is closed"), true);
@@ -288,22 +301,26 @@ const ResourceAdapter = struct {
         for (self.resource_pipes) |pipe| if (pipe) |transport| transport.abort();
     }
     pub fn cleanup(self: *ResourceAdapter) void {
-        self.definition.cleanup.?(self.backend.ptr);
+        self.definition.wire.cleanup.?(self.backend.ptr);
     }
     pub fn shutdown(self: *ResourceAdapter, cell: *Cell) ?byte_transport.Failure {
         var ctx: ControllerContext = .{ .cell = cell, .invocation = .{ .shutdown = null } };
         defer ctx.deinit();
-        self.definition.shutdown.?(self.backend.ptr, &controller_table, &ctx);
+        self.definition.wire.shutdown.?(self.backend.ptr, &controller_table, &ctx);
         return if (ctx.invocation.shutdown) |failure| semanticFailure(failure) else null;
     }
-    fn initializeAllocation(cell: *Cell, owner: *OwnerState, instance: *native.ModuleInstance, kind: u32, config: *const port_message.Validated, worker: *const scheduler.WorkerScheduler) error{ OutOfMemory, InvalidLimits }!void {
+    fn initializeAllocation(cell: *Cell, owner: *OwnerState, instance: *native.ModuleInstance, kind: u32, config: *const port_message.Validated, worker: *const scheduler.WorkerScheduler) error{ OutOfMemory, InvalidLimits, Io }!void {
         const memory = owner.host.allocator();
         const definition = instance.validated().port(kind).?;
-        const state = try memory.alignedAlloc(u8, .@"64", definition.state_size);
+        const state = try memory.alignedAlloc(u8, .@"64", definition.wire.state_size);
         errdefer memory.free(state);
         const message_budget = try message_transport.Budget.create(owner.host, owner.limits.message_queue_bytes);
         errdefer message_budget.release();
-        try cell.initialize(.{ .owner = owner, .instance = instance, .kind = kind, .definition = definition, .backend = state, .message_budget = message_budget }, worker, definition.lane_count, owner.limits.max_operations, definition.shutdown != null);
+        const adapter: ResourceAdapter = .{ .owner = owner, .instance = instance, .kind = kind, .definition = definition, .backend = state, .message_budget = message_budget };
+        switch (definition.execution) {
+            .controller => try cell.initialize(adapter, worker, definition.wire.lane_count, owner.limits.max_operations, definition.wire.shutdown != null),
+            .cooperative => try cell.initializeCooperative(adapter, worker, definition.wire.lane_count, owner.limits.max_operations),
+        }
         errdefer cell.controllers.deinit();
         errdefer for (cell.adapter.resource_pipes) |pipe| if (pipe) |transport| transport.release();
         for (&cell.adapter.resource_pipes, 0..) |*slot, index| {
@@ -411,6 +428,7 @@ const OperationAdapter = struct {
     protocol: Protocol,
     failure: ?ControllerFailure = null,
     endpoints: u64,
+    continuation: ?*CooperativeInvocation = null,
     pub fn allocator(self: *const OperationAdapter) std.mem.Allocator {
         return self.cell.allocator;
     }
@@ -422,6 +440,7 @@ const OperationAdapter = struct {
     }
     pub fn admittedLocked(self: *OperationAdapter) void {
         self.cell.changed.broadcast(io());
+        self.cell.controllers.wake();
     }
     pub fn retireValue(self: *OperationAdapter, item: Value) void {
         heap.hostDomain(self.cell.adapter.owner.host).releaseValue(item);
@@ -430,6 +449,10 @@ const OperationAdapter = struct {
         self.cell.retainReadiness();
     }
     pub fn deinit(self: *OperationAdapter) void {
+        if (self.continuation) |continuation| {
+            continuation.deinit();
+            self.allocator().destroy(continuation);
+        }
         self.protocol.deinit(self.cell);
         self.cell.releaseReadiness();
     }
@@ -447,7 +470,16 @@ const OperationAdapter = struct {
         errdefer protocol.deinit(cell);
         const terminal_value = try results.Result.create(cell.adapter.owner.host);
         errdefer terminal_value.release();
-        return Operation.prepare(.{ .cell = cell, .code = code, .lane = lane, .protocol = protocol, .endpoints = endpoints }, terminal_value, queue);
+        const continuation = switch (cell.adapter.definition.execution) {
+            .controller => null,
+            .cooperative => blk: {
+                const owned = try cell.allocator.create(CooperativeInvocation);
+                owned.* = .{};
+                break :blk owned;
+            },
+        };
+        errdefer if (continuation) |owned| cell.allocator.destroy(owned);
+        return Operation.prepare(.{ .cell = cell, .code = code, .lane = lane, .protocol = protocol, .endpoints = endpoints, .continuation = continuation }, terminal_value, queue);
     }
     pub fn runnable(self: *OperationAdapter) bool {
         return !self.cell.closed.load(.acquire);
@@ -455,14 +487,17 @@ const OperationAdapter = struct {
     pub fn execute(self: *OperationAdapter, operation: *Operation, running: *controllers.Running) void {
         var ctx: ControllerContext = .{ .cell = self.cell, .invocation = .{ .operation = .{ .value = operation, .running = running } } };
         defer ctx.deinit();
-        self.cell.adapter.definition.execute.?(self.cell.adapter.backend.ptr, self.code, &controller_table, &ctx);
+        self.cell.adapter.definition.wire.execute.?(self.cell.adapter.backend.ptr, self.code, &controller_table, &ctx);
+    }
+    pub fn advanceCooperative(self: *OperationAdapter, operation: *Operation, running: *controllers.Running) controllers.Progress {
+        return self.continuation.?.advance(self, operation, running);
     }
     pub fn completeResourceLocked(self: *OperationAdapter, outcome: controllers.Completion) void {
         if (outcome == .close_resource or (self.failure != null and self.failure.?.disposition == .resource)) self.cell.closeLocked();
         self.cell.waits.notifyLocked(self.cell);
     }
     pub fn cancelPolicy(self: *OperationAdapter) controllers.CallbackCancellation {
-        return switch (self.cell.adapter.definition.cancellation) {
+        return switch (self.cell.adapter.definition.wire.cancellation) {
             .close_resource => .close_resource,
             .acknowledge => .acknowledge,
             _ => unreachable,
@@ -472,8 +507,12 @@ const OperationAdapter = struct {
         const cell = self.cell;
         switch (action) {
             .close_resource => cell.closeLocked(),
-            .interrupt => cell.adapter.definition.cancel_operation.?(cell.adapter.backend.ptr, self.lane),
+            .interrupt => switch (cell.adapter.definition.execution) {
+                .controller => cell.adapter.definition.wire.cancel_operation.?(cell.adapter.backend.ptr, self.lane),
+                .cooperative => cell.controllers.wake(),
+            },
             .retired => {
+                cell.controllers.wake();
                 cell.changed.broadcast(io());
                 cell.waits.notifyLocked(cell);
             },
@@ -685,20 +724,32 @@ fn createEndpoint(source: EndpointParent, spec: descriptor.EndpointDefinition) e
 
 const ControllerContext = struct {
     cell: *Cell,
-    invocation: union(enum) { initialize, operation: struct { value: *Operation, running: *controllers.Running }, shutdown: ?Failure },
+    invocation: union(enum) { initialize, operation: struct { value: *Operation, running: ?*controllers.Running }, shutdown: ?Failure, cleanup },
     received: ?*message_transport.Envelope = null,
-    builder: ?*message_builder.Builder = null,
+    builder: union(enum) {
+        none,
+        controller: *message_builder.Builder,
+        cooperative: struct { value: *message_builder.ResumableBuilder, phase: enum { idle, working, result } = .idle },
+    } = .none,
+    cooperative: ?struct { budget: u32 = 256, deadline: ?scheduler.Deadline = null } = null,
+    symbol_bytes: [256]u8 = @splat(0),
     fn cancellation(self: *ControllerContext) *const std.atomic.Value(bool) {
         return if (self.operation()) |op| &op.transport_cancelled else &self.cell.closed;
     }
     fn deinit(self: *ControllerContext) void {
         if (self.received) |item| item.release();
-        if (self.builder) |builder| builder.retire();
+        self.received = null;
+        switch (self.builder) {
+            .none => {},
+            .controller => |builder| builder.retire(),
+            .cooperative => |builder| builder.value.retire(),
+        }
+        self.builder = .none;
     }
     fn operation(self: *ControllerContext) ?*Operation {
         return switch (self.invocation) {
             .operation => |active| active.value,
-            .initialize, .shutdown => null,
+            .initialize, .shutdown, .cleanup => null,
         };
     }
 };
@@ -713,7 +764,7 @@ fn controllerParent(raw: *anyopaque, identity: *const anyopaque) callconv(.c) ?*
         .attached => |attachment| attachment.parent,
         .independent, .retired => return null,
     };
-    if (parent.adapter.instance != cell.adapter.instance or parent.adapter.definition.identity != identity) return null;
+    if (parent.adapter.instance != cell.adapter.instance or parent.adapter.definition.wire.identity != identity) return null;
     // Membership remains attached until child cleanup and controller join.
     // The parent joins it before destroying the borrowed native state.
     return parent.adapter.backend.ptr;
@@ -766,29 +817,34 @@ fn valueAtPath(root: Value, path: []const u64) ?Value {
 }
 fn controllerBuildMessage(raw: *anyopaque, request: *const abi.MessageBuildRequest) callconv(.c) abi.HostStatus {
     const ctx = context(raw);
-    return buildMessage(ctx, request) catch |err| {
-        if (err == error.Cancelled) return .invalid;
-        if (ctx.builder) |builder| builder.invalidate();
-        recordControllerFailure(ctx, switch (err) {
-            error.Cancelled => unreachable,
-            error.OutOfMemory => .out_of_memory,
-            error.Overflow => .init(.overflow, "native message exceeds its structured value or queue limits"),
-            error.InvalidValue => .init(.type, "native message contains an invalid structured value"),
-            error.DuplicateKey => .init(.domain, "native message dictionary contains duplicate keys"),
-            error.InvalidState => .init(.domain, "invalid native message construction or endpoint"),
-        });
-        return if (err == error.OutOfMemory) .out_of_memory else .invalid;
-    };
+    return buildMessage(ctx, request) catch |err| constructionFailure(ctx, err);
+}
+fn constructionFailure(ctx: *ControllerContext, err: message_builder.Error) abi.HostStatus {
+    if (err == error.Cancelled) return .invalid;
+    switch (ctx.builder) {
+        .none => {},
+        .controller => |builder| builder.invalidate(),
+        .cooperative => |builder| builder.value.invalidate(),
+    }
+    recordControllerFailure(ctx, switch (err) {
+        error.Cancelled => unreachable,
+        error.OutOfMemory => .out_of_memory,
+        error.Overflow => .init(.overflow, "native message exceeds its structured value or queue limits"),
+        error.InvalidValue => .init(.type, "native message contains an invalid structured value"),
+        error.DuplicateKey => .init(.domain, "native message dictionary contains duplicate keys"),
+        error.InvalidState => .init(.domain, "invalid native message construction or endpoint"),
+    });
+    return if (err == error.OutOfMemory) .out_of_memory else .invalid;
 }
 fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest) message_builder.Error!abi.HostStatus {
     if (request.size != @sizeOf(abi.MessageBuildRequest)) return error.InvalidState;
     const op = ctx.operation() orelse return error.InvalidState;
     if (controllerCancelled(ctx)) return .invalid;
-    if (ctx.builder == null) {
-        const builder = try message_builder.Builder.create(ctx.cell.adapter.owner.host, ctx.invocation.operation.running);
-        ctx.builder = builder;
+    if (ctx.builder == .none) {
+        const builder = try message_builder.Builder.create(ctx.cell.adapter.owner.host, ctx.invocation.operation.running.?);
+        ctx.builder = .{ .controller = builder };
     }
-    const builder = ctx.builder.?;
+    const builder = ctx.builder.controller;
     switch (request.action) {
         .scalar => {
             if (request.scalar.size != @sizeOf(abi.Scalar)) return error.InvalidState;
@@ -842,7 +898,7 @@ fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest
             }
             var index: u32 = 0;
             const kind = while (ctx.cell.adapter.instance.validated().port(index)) |definition| : (index += 1) {
-                if (definition.identity == identity) break index;
+                if (definition.wire.identity == identity) break index;
             } else return error.InvalidState;
             const child = op.adapter.stageChild(op, kind, configuration, dependency) catch |err| {
                 recordControllerFailure(ctx, switch (err) {
@@ -886,6 +942,7 @@ fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest
             try builder.consume();
             return .ok;
         },
+        .advance => return error.InvalidState,
         _ => return error.InvalidState,
     }
 
@@ -928,7 +985,7 @@ fn controllerPipe(raw: *anyopaque, owner: abi.EndpointOwner, index: u32, directi
 
 fn controllerResolveEndpoint(raw: *anyopaque, identity: *const anyopaque, owner: abi.EndpointOwner, index: u32, transport: abi.EndpointTransport, direction: abi.EndpointDirection) callconv(.c) bool {
     const ctx = context(raw);
-    if (ctx.cell.adapter.definition.identity != identity or index >= 64) return false;
+    if (ctx.cell.adapter.definition.wire.identity != identity or index >= 64) return false;
     const parent = controllerEndpointParent(ctx, owner) orelse return false;
     const spec = ctx.cell.adapter.instance.validated().endpoint(ctx.cell.adapter.kind, @intCast(index), switch (owner) {
         .resource => .resource,
@@ -1056,11 +1113,11 @@ fn controllerDiscardMessage(raw: *anyopaque) callconv(.c) bool {
 }
 fn controllerAcknowledge(raw: *anyopaque) callconv(.c) bool {
     const ctx = context(raw);
-    if (ctx.cell.closed.load(.acquire) or ctx.cell.adapter.definition.cancellation != .acknowledge) return false;
+    if (ctx.cell.closed.load(.acquire) or ctx.cell.adapter.definition.wire.cancellation != .acknowledge) return false;
     const op = ctx.operation() orelse return false;
     lock(&op.mutex);
     defer unlock(&op.mutex);
-    const running = ctx.invocation.operation.running;
+    const running = ctx.invocation.operation.running.?;
     return running.acknowledgeCancellation();
 }
 fn boundedErrorMessage(message: []const u8) []const u8 {
@@ -1094,7 +1151,7 @@ fn recordControllerFailure(ctx: *ControllerContext, failure: Failure) void {
     if (ctx.operation()) |op| {
         recordOperationFailure(op, .{ .value = failure, .disposition = .operation });
     } else switch (ctx.invocation) {
-        .initialize => {
+        .initialize, .cleanup => {
             ctx.cell.failInitialization(semanticFailure(failure));
         },
         .shutdown => storeControllerFailure(&ctx.invocation.shutdown, failure),
@@ -1125,3 +1182,195 @@ pub fn fromValue(value: Value, instance: *native.ModuleInstance, kind: u32) ?*Ce
     const cell = resource_api.Resource.project(Cell, .{ .port = handle }) orelse return null;
     return if (cell.adapter.instance == instance and cell.adapter.kind == kind) cell else null;
 }
+
+fn cooperativeBuildMessage(raw: *anyopaque, request: *const abi.MessageBuildRequest) callconv(.c) abi.HostStatus {
+    const ctx = context(raw);
+    return buildCooperative(ctx, request) catch |err| constructionFailure(ctx, err);
+}
+fn buildCooperative(ctx: *ControllerContext, request: *const abi.MessageBuildRequest) message_builder.Error!abi.HostStatus {
+    if (request.size != @sizeOf(abi.MessageBuildRequest)) return error.InvalidState;
+    const operation = ctx.operation() orelse return error.InvalidState;
+    if (controllerCancelled(ctx)) return error.Cancelled;
+    if (ctx.builder == .none) {
+        // Allocate before publishing the union tag: result-location semantics
+        // may otherwise expose a partial payload to the failure unwinder.
+        const owned = try message_builder.ResumableBuilder.create(ctx.cell.adapter.owner.host, &operation.transport_cancelled);
+        ctx.builder = .{ .cooperative = .{ .value = owned } };
+    }
+    const building = &ctx.builder.cooperative;
+    const builder = building.value;
+    if (request.action == .advance) {
+        if (building.phase == .idle) return .ok;
+        if (try builder.advance() == .pending) return .yield_required;
+        if (building.phase == .result) {
+            const item = try message_transport.Envelope.create(ctx.cell.adapter.owner.host, builder.validated() orelse return error.InvalidState);
+            if (!operation.terminal_result.replace(item)) {
+                item.release();
+                return error.InvalidState;
+            }
+            try builder.consume();
+        }
+        building.phase = .idle;
+        return .ok;
+    }
+    if (building.phase != .idle) return error.InvalidState;
+    switch (request.action) {
+        .scalar => {
+            if (request.scalar.size != @sizeOf(abi.Scalar)) return error.InvalidState;
+            const scalar = request.scalar;
+            switch (scalar.kind) {
+                .int => try builder.int(@bitCast(scalar.bits)),
+                .float => try builder.float(@bitCast(scalar.bits)),
+                .char => try builder.char(scalar.bits),
+                .symbol => {
+                    if (scalar.bytes_len > ctx.symbol_bytes.len) return error.Overflow;
+                    const size: usize = @intCast(scalar.bytes_len);
+                    const bytes = if (size == 0) "" else (scalar.bytes_ptr orelse return error.InvalidValue)[0..size];
+                    @memcpy(ctx.symbol_bytes[0..size], bytes);
+                    try builder.symbol(ctx.symbol_bytes[0..size]);
+                    building.phase = .working;
+                },
+                .word, .list, .dict, .port => return error.InvalidValue,
+                _ => return error.InvalidValue,
+            }
+        },
+        .copy_input => {
+            if (request.depth > abi.max_read_path_depth) return error.InvalidValue;
+            const path: []const u64 = if (request.depth == 0) &.{} else (request.path orelse return error.InvalidValue)[0..request.depth];
+            const input = valueAtPath(operation.adapter.protocol.parameters, path) orelse return error.InvalidValue;
+            try builder.copy(input);
+            building.phase = .working;
+        },
+        .list => {
+            try builder.list(request.count);
+            building.phase = .working;
+        },
+        .dictionary => {
+            try builder.dictionary(request.count);
+            building.phase = .working;
+        },
+        .result => {
+            try builder.finish();
+            building.phase = .result;
+        },
+        .clear => {
+            try builder.clear();
+            building.phase = .working;
+        },
+        .copy_received, .send, .reply_endpoint, .child, .advance => return error.InvalidState,
+        _ => return error.InvalidState,
+    }
+    return .ok;
+}
+fn cooperativeConsume(raw: *anyopaque, units: u32) callconv(.c) bool {
+    if (context(raw).cooperative) |*work| {
+        if (units == 0 or units > work.budget) return false;
+        work.budget -= units;
+        return true;
+    }
+    return false;
+}
+fn cooperativePark(raw: *anyopaque, milliseconds: u64) callconv(.c) bool {
+    const ctx = context(raw);
+    if (milliseconds > std.math.maxInt(u63)) return false;
+    if (ctx.cooperative) |*work| {
+        work.deadline = ctx.cell.scheduler.deadlineAfter(@intCast(milliseconds)) catch {
+            recordControllerFailure(ctx, .init(.overflow, "cooperative timer deadline overflow"));
+            return false;
+        };
+        return true;
+    }
+    return false;
+}
+fn cooperativeProgress(ctx: *ControllerContext, progress: abi.CooperativeProgress) scheduler.Cooperative.Progress {
+    return switch (progress) {
+        .completed => .completed,
+        .yielded => .yielded,
+        .parked => if (controllerCancelled(ctx)) .yielded else if (ctx.cooperative.?.deadline) |deadline| .{ .parked = deadline } else blk: {
+            recordControllerFailure(ctx, .init(.contract, "cooperative callback parked without a timer"));
+            break :blk .completed;
+        },
+        _ => blk: {
+            recordControllerFailure(ctx, .init(.contract, "invalid cooperative callback progress"));
+            break :blk .completed;
+        },
+    };
+}
+const cooperative_table: abi.CooperativeTable = .{
+    .instance_state = controllerInstance,
+    .parent_state = controllerParent,
+    .input = controllerInput,
+    .build_message = cooperativeBuildMessage,
+    .fail_allocation = controllerFailAllocation,
+    .cancelled = controllerCancelled,
+    .fail = controllerFail,
+    .consume = cooperativeConsume,
+    .park = cooperativePark,
+};
+
+const CooperativeInvocation = struct {
+    context: union(enum) { reserved, live: ControllerContext } = .reserved,
+    phase: enum { callback, publishing, retiring, finished } = .callback,
+    fn deinit(self: *CooperativeInvocation) void {
+        switch (self.context) {
+            .reserved => {},
+            .live => |*ctx| ctx.deinit(),
+        }
+    }
+    fn advance(self: *CooperativeInvocation, adapter: *OperationAdapter, operation: *Operation, running: *controllers.Running) controllers.Progress {
+        if (self.context == .reserved) self.context = .{ .live = .{
+            .cell = adapter.cell,
+            .invocation = .{ .operation = .{ .value = operation, .running = null } },
+            .cooperative = .{},
+        } };
+        const ctx = &self.context.live;
+        ctx.invocation.operation.running = running;
+        defer ctx.invocation.operation.running = null;
+        ctx.cooperative = .{};
+        if (running.cancelled() and self.phase != .finished) self.phase = .retiring;
+        const callbacks = adapter.cell.adapter.definition.execution.cooperative;
+        switch (self.phase) {
+            .callback => {
+                const progress = cooperativeProgress(ctx, callbacks.execute(adapter.cell.adapter.backend.ptr, adapter.code, &cooperative_table, ctx));
+                lock(&operation.mutex);
+                const failed = adapter.failure != null;
+                unlock(&operation.mutex);
+                if (failed or progress == .completed) {
+                    self.phase = .retiring;
+                    if (!failed and ctx.builder == .cooperative) switch (ctx.builder.cooperative.phase) {
+                        .idle => {},
+                        .result => self.phase = .publishing,
+                        .working => recordControllerFailure(ctx, .init(.contract, "cooperative callback completed unfinished construction")),
+                    };
+                    return .yielded;
+                }
+                return operationProgress(progress);
+            },
+            .publishing => {
+                const status = cooperativeBuildMessage(ctx, &.{ .action = .advance });
+                if (status == .yield_required) return .yielded;
+                self.phase = .retiring;
+                return .yielded;
+            },
+            .retiring => {
+                const progress = cooperativeProgress(ctx, callbacks.retire_operation(adapter.cell.adapter.backend.ptr, &cooperative_table, ctx));
+                if (progress != .completed) return operationProgress(progress);
+                ctx.deinit();
+                self.phase = .finished;
+                lock(&operation.mutex);
+                _ = running.acknowledgeCancellation();
+                unlock(&operation.mutex);
+                return .completed;
+            },
+            .finished => unreachable,
+        }
+    }
+    fn operationProgress(progress: scheduler.Cooperative.Progress) controllers.Progress {
+        return switch (progress) {
+            .yielded => .yielded,
+            .parked => |deadline| .{ .parked = deadline },
+            .completed => .completed,
+            .waiting => unreachable,
+        };
+    }
+};

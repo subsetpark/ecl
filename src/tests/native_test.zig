@@ -704,7 +704,7 @@ const PortSpec = struct {
 };
 
 test "native: SDK port declarations validate state layouts and controller adapters" {
-    const P = ecl.Port(PortSpec);
+    const P = ecl.Port(.{ .controller = PortSpec });
     const Extension = ecl.module(.{ .name = "sample", .doc = "Port definition probe.", .linkage = .static, .words = .{}, .ports = .{P} });
     var host = heap.HostOwner.init(std.testing.allocator);
     defer host.cleanup().drain();
@@ -712,8 +712,8 @@ test "native: SDK port declarations validate state layouts and controller adapte
     const validated = try validate(host.cleanup(), requested, Extension.descriptor());
     defer validated.deinit();
     const port = validated.port(0).?;
-    try std.testing.expectEqualStrings("counter", port.name_ptr[0..port.name_len]);
-    try std.testing.expectEqual(@as(u32, @sizeOf(PortSpec.State)), port.state_size);
+    try std.testing.expectEqualStrings("counter", port.wire.name_ptr[0..port.wire.name_len]);
+    try std.testing.expectEqual(@as(u32, @sizeOf(PortSpec.State)), port.wire.state_size);
     try std.testing.expect(validated.port(1) == null);
     var invalid = Extension.descriptor().*;
     var definition = P.definition();
@@ -746,7 +746,7 @@ test "native: SDK port declarations validate state layouts and controller adapte
 }
 
 test "native: registered descriptors reject undeclared kinds lanes and endpoints" {
-    const P = ecl.Port(PortSpec);
+    const P = ecl.Port(.{ .controller = PortSpec });
     const Extension = ecl.module(.{ .name = "sample", .doc = "Registered port validation.", .linkage = .static, .ports = .{P}, .words = .{
         ecl.factory("factory", "Create a counter.", P),
     } });
@@ -2167,4 +2167,66 @@ test "native: cancelled child delivery interleavings settle envelopes and join c
             "1 portprobe.await-blocked x port.cancel x wrap (port.result) @attempt 'err at 'kind at " ++
             "x wrap (port.result) @attempt 'err at 'kind at x port.close p port.close portprobe.cleaned", "'cancelled 'cancelled 2");
     }
+}
+
+test "native: cooperative SDK resources build results and join cancellation through ECL tests" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    for ([_]session.Config{ .cooperative, .{ .worker_pool = 4 } }) |configuration| {
+        var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+            .ecl_path = native_fixture.directory,
+            .native_instances = &.{.{ .name = "instanceprobe", .bytes = "A", .port_limits = .{ .max_live_ports = 1 } }},
+        }), configuration, .language_tests);
+        defer runtime.deinit();
+        try expectOk(&runtime, "[] ((" ++
+            "instanceprobe.cooperative [] port.open (|p| " ++
+            "p wrap (instanceprobe.park [] port.call pop) @spawn " ++
+            "(instanceprobe.started 0 =) (0 clock.sleep) while " ++
+            "dup task.cancel task.await 'err dict.has? {'kind 'user 'msg \"cancelled operation\"} assert " ++
+            "p instanceprobe.values [] port.call 1024 range match? {'kind 'user 'msg \"resumed result\"} assert " ++
+            "p port.close p port.close) call " ++
+            "instanceprobe.next 12065 = {'kind 'user 'msg \"joined operation and resource retirement\"} assert " ++
+            ") 'cooperative test) 'native.acceptance @defm " ++
+            "tests first @test dup 'ok dict.has? (pop) ('err at raise) if");
+    }
+}
+
+test "native: cooperative SDK failed initialization joins reserved cleanup" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+        .ecl_path = native_fixture.directory,
+        .native_instances = &.{.{ .name = "instanceprobe", .bytes = "A", .port_limits = .{ .max_live_ports = 1 } }},
+    }), .cooperative, .language_tests);
+    defer runtime.deinit();
+    try expectOk(&runtime, "[] ((" ++
+        "instanceprobe.started pop [] (instanceprobe.cooperative 1 port.open) @attempt 'err at 'kind at 'io match? " ++
+        "{'kind 'user 'msg \"initialization failure\"} assert " ++
+        "instanceprobe.next 10065 = {'kind 'user 'msg \"failed construction cleanup\"} assert " ++
+        "instanceprobe.cooperative [] port.open port.close " ++
+        ") 'failed-construction test) 'native.acceptance @defm " ++
+        "tests first @test dup 'ok dict.has? (pop) ('err at raise) if");
+}
+
+test "native: cooperative descriptors reject mixed and unknown execution contracts" {
+    var host = heap.HostOwner.init(std.testing.allocator);
+    defer host.cleanup().drain();
+    const extension = @import("native-instance").Extension.descriptor();
+    var raw = extension.*;
+    var definitions = [_]abi.PortDefinition{ extension.ports_ptr.?[0], extension.ports_ptr.?[1] };
+    raw.ports_ptr = &definitions;
+    const requested = try intern.internModuleName("instanceprobe");
+    definitions[1].execution = @enumFromInt(1234);
+    try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &raw);
+    definitions[1] = extension.ports_ptr.?[1];
+    definitions[1].initialize = definitions[0].initialize;
+    try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &raw);
+    definitions[1] = extension.ports_ptr.?[1];
+    definitions[1].lane_count = 2;
+    try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &raw);
+    definitions[1] = extension.ports_ptr.?[1];
+    var callbacks = definitions[1].cooperative.?.*;
+    callbacks.retire = null;
+    definitions[1].cooperative = &callbacks;
+    try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &raw);
 }

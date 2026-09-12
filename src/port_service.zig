@@ -55,7 +55,7 @@ pub fn Resource(comptime Adapter: type) type {
             retired,
         } = .independent,
         children: ?*scheduler.ExternalGroup = null,
-        phase: enum { reserved, initializing, open, closing, cleaned, joined } = .reserved,
+        phase: enum { reserved, reserved_closed, initializing, open, closing, waiting_children, cleaning, cleaned, joined } = .reserved,
         initialization_failure: ?Failure = null,
         shutdown_state: union(enum) { idle, requested, running, completed: ?Failure, aborted } = .idle,
         lanes: [max_lanes]Operations,
@@ -63,9 +63,96 @@ pub fn Resource(comptime Adapter: type) type {
         /// Failure retains the prepared adapter. Success consumes it and derives
         /// allocation and executor authority from its owner before publication.
         pub fn initialize(self: *Cell, adapter: Adapter, worker: *const scheduler.WorkerScheduler, lane_count: u32, capacity: u32, graceful: bool) error{ OutOfMemory, InvalidLimits }!void {
-            if (lane_count == 0 or lane_count > max_lanes or capacity < lane_count or capacity > 256) return error.InvalidLimits;
+            try validateCapacity(lane_count, capacity);
             const group = try Group.init(adapter.allocator(), adapter.executor(), self);
+            self.initializeReserved(adapter, worker, lane_count, capacity, graceful, group);
+        }
+        pub fn initializeCooperative(self: *Cell, adapter: Adapter, worker: *const scheduler.WorkerScheduler, lane_count: u32, capacity: u32) error{ OutOfMemory, InvalidLimits, Io }!void {
+            try validateCapacity(lane_count, capacity);
+            if (lane_count != 1) return error.InvalidLimits;
+            const group = try Group.initCooperative(worker, self, advanceCooperative);
+            self.initializeReserved(adapter, worker, lane_count, capacity, false, group);
+        }
+        fn validateCapacity(lane_count: u32, capacity: u32) error{InvalidLimits}!void {
+            if (lane_count == 0 or lane_count > max_lanes or capacity < lane_count or capacity > 256) return error.InvalidLimits;
+        }
+        fn initializeReserved(self: *Cell, adapter: Adapter, worker: *const scheduler.WorkerScheduler, lane_count: u32, capacity: u32, graceful: bool, group: *Group) void {
             self.* = .{ .adapter = adapter, .allocator = adapter.allocator(), .scheduler = worker, .controllers = group, .lane_count = lane_count, .operation_capacity = capacity, .graceful = graceful, .lanes = .{Operations.init(&self.mutex)} ** max_lanes };
+        }
+        fn advanceCooperative(self: *Cell) scheduler.Cooperative.Progress {
+            lock(&self.mutex);
+            const phase = self.phase;
+            switch (phase) {
+                .reserved, .reserved_closed => {
+                    self.adapter.initState();
+                    self.phase = if (self.closed.load(.acquire)) .closing else .initializing;
+                    unlock(&self.mutex);
+                    return .yielded;
+                },
+                .initializing => {
+                    unlock(&self.mutex);
+                    const progress = self.adapter.advanceInitialize(self);
+                    if (progress != .completed) return progress;
+                    lock(&self.mutex);
+                    if (self.initialization_failure != null) self.closeLocked();
+                    unlock(&self.mutex);
+                    self.publishInitialization();
+                    return .yielded;
+                },
+                .open, .closing => {
+                    // One callback slice per queue turn. Empty-lane scanning
+                    // is bounded by the descriptor's fixed lane ceiling.
+                    var selected: ?*Operations = null;
+                    for (self.lanes[0..self.lane_count]) |*lane| {
+                        if (lane.dispatchable()) {
+                            selected = lane;
+                            break;
+                        }
+                    }
+                    if (selected) |lane| {
+                        unlock(&self.mutex);
+                        return switch (lane.advanceNext(Adapter.Exchange.advanceCooperative)) {
+                            .idle => .waiting,
+                            .yielded, .completed => .yielded,
+                            .parked => |deadline| .{ .parked = deadline },
+                        };
+                    }
+                    if (phase == .open) {
+                        unlock(&self.mutex);
+                        return .waiting;
+                    }
+                    // Unpublished admissions still own queue positions. Their
+                    // publication or rollback wakes execution to settle them.
+                    for (self.lanes[0..self.lane_count]) |*lane| if (!lane.empty()) {
+                        unlock(&self.mutex);
+                        return .waiting;
+                    };
+                    self.phase = .waiting_children;
+                    unlock(&self.mutex);
+                    self.adapter.abortTransport();
+                    if (self.children) |children| children.close();
+                    return .yielded;
+                },
+                .waiting_children => {
+                    if (self.children) |children| if (!children.closed()) {
+                        unlock(&self.mutex);
+                        return .waiting;
+                    };
+                    self.phase = .cleaning;
+                    unlock(&self.mutex);
+                    return .yielded;
+                },
+                .cleaning => {
+                    unlock(&self.mutex);
+                    const progress = self.adapter.advanceCleanup(self);
+                    if (progress != .completed) return progress;
+                    lock(&self.mutex);
+                    self.phase = .cleaned;
+                    unlock(&self.mutex);
+                    return .completed;
+                },
+                .cleaned, .joined => unreachable,
+            }
         }
         fn release(self: *Cell) void {
             if (self.refs.fetchSub(1, .acq_rel) != 1) return;
@@ -218,7 +305,7 @@ pub fn Resource(comptime Adapter: type) type {
             return switch (self.phase) {
                 .reserved, .initializing => .pending,
                 .open => .ready,
-                .closing, .cleaned, .joined => .{ .failed = self.initialization_failure orelse Failure.init(.io, "port is closed") },
+                .reserved_closed, .closing, .waiting_children, .cleaning, .cleaned, .joined => .{ .failed = self.initialization_failure orelse Failure.init(.io, "port is closed") },
             };
         }
         pub fn joined(self: *Cell) bool {
@@ -257,7 +344,7 @@ pub fn Resource(comptime Adapter: type) type {
             if (self.closed.swap(true, .acq_rel)) return;
             if (self.publication) |authority| authority.revokeLocked();
             const notify_backend = self.phase == .initializing or self.phase == .open;
-            self.phase = .closing;
+            self.phase = if (self.phase == .reserved) .reserved_closed else .closing;
             if (self.children) |children| children.close();
             // Total admission, across every lane, is capped at 256.
             for (self.lanes[0..self.lane_count]) |*lane| {
@@ -266,6 +353,7 @@ pub fn Resource(comptime Adapter: type) type {
             }
             self.adapter.failTransport();
             if (notify_backend) self.adapter.cancel();
+            self.controllers.wake();
             self.changed.broadcast(io());
             self.waits.notifyLocked(self);
         }
@@ -304,7 +392,9 @@ pub fn Resource(comptime Adapter: type) type {
             unlock(&self.mutex);
             if (token) |*membership| membership.detach();
         }
-        pub fn childrenClosed(_: *Cell) void {}
+        pub fn childrenClosed(self: *Cell) void {
+            self.controllers.wake();
+        }
         pub fn childGroup(self: *Cell) error{ OutOfMemory, Closed }!*scheduler.ExternalGroup {
             lock(&self.mutex);
             const existing = self.children;

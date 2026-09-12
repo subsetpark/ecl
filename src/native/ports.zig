@@ -143,11 +143,7 @@ pub const MessageBuilder = opaque {
     }
     fn apply(self: *MessageBuilder, request: abi.MessageBuildRequest) ControllerError!void {
         const owned = self.state();
-        switch (owned.table.build_message(owned.context, &request)) {
-            .ok => return,
-            .out_of_memory => return error.OutOfMemory,
-            else => return if (owned.table.cancelled(owned.context)) error.Cancelled else error.Failed,
-        }
+        return applyBuild(owned.table, owned.context, &request);
     }
     pub fn int(self: *MessageBuilder, item: i64) ControllerError!void {
         return self.apply(.{ .action = .scalar, .scalar = capability.Scalar.int(item).wire });
@@ -307,7 +303,16 @@ pub const Controller = opaque {
 /// waits. Optional `shutdown` runs independently of operation lanes, stops new
 /// admission, and is joined before `deinit`. It may race operation handlers and `cancel`;
 /// cancellation must interrupt its waits too. Cleanup runs even when `open` fails.
-pub fn Port(comptime Spec: type) type {
+/// Execution is an exhaustive author choice; neither mode can obtain the
+/// other mode's execution authority through its borrowed context.
+pub fn Port(comptime execution: union(enum) { controller: type, cooperative: type }) type {
+    return switch (execution) {
+        .controller => |Spec| ControllerPort(Spec),
+        .cooperative => |Spec| CooperativePort(Spec),
+    };
+}
+
+fn ControllerPort(comptime Spec: type) type {
     const Lane = if (@hasDecl(Spec, "Lane")) Spec.Lane else enum { operation };
     const cancellation: Cancellation = if (@hasDecl(Spec, "cancellation")) Spec.cancellation else .close_resource;
     comptime {
@@ -403,4 +408,212 @@ pub fn Port(comptime Spec: type) type {
             Spec.deinit(@ptrCast(@alignCast(raw)));
         }
     };
+}
+
+pub const CooperativeProgress = enum { completed, yielded, parked };
+const CooperativeState = struct { table: *const abi.CooperativeTable, context: *anyopaque, input_view: abi.ValueView = .{ .kind = .list } };
+
+/// Invocation-local cooperative authority. The ABI table itself withholds
+/// blocking streams, sends, and synchronous child initialization.
+pub const Cooperative = opaque {
+    fn state(self: *Cooperative) *CooperativeState {
+        return @ptrCast(@alignCast(self));
+    }
+    pub fn consume(self: *Cooperative, units: u32) bool {
+        const owned = self.state();
+        return owned.table.consume(owned.context, units);
+    }
+    /// Capture a timer deadline now. Return parked only after this succeeds.
+    /// Cancellation wakes the parked invocation so its private unwind can join.
+    pub fn park(self: *Cooperative, milliseconds: u63) bool {
+        const owned = self.state();
+        return owned.table.park(owned.context, milliseconds);
+    }
+    pub fn input(self: *Cooperative, path: []const u64) ?*const MessageView {
+        if (path.len > abi.max_read_path_depth) return null;
+        const owned = self.state();
+        if (!owned.table.input(owned.context, path.ptr, @intCast(path.len), &owned.input_view)) return null;
+        return @ptrCast(&owned.input_view);
+    }
+    pub fn instance(self: *Cooperative, comptime I: type) ?*I.State {
+        const owned = self.state();
+        return @ptrCast(@alignCast(owned.table.instance_state(owned.context, I.identity()) orelse return null));
+    }
+    pub fn parent(self: *Cooperative, comptime P: type) ?*P.StateType {
+        comptime if (!@hasDecl(P, "ecl_port_marker")) @compileError("ecl-native: parent requires a declared Port type");
+        const owned = self.state();
+        return @ptrCast(@alignCast(owned.table.parent_state(owned.context, P.kindIdentity()) orelse return null));
+    }
+    pub fn cancelled(self: *Cooperative) bool {
+        const owned = self.state();
+        return owned.table.cancelled(owned.context);
+    }
+    pub fn fail(self: *Cooperative, kind: capability.ErrorKind, message: []const u8) void {
+        const bounded = capability.boundedErrorMessage(message);
+        const owned = self.state();
+        owned.table.fail(owned.context, kind, bounded.ptr, @intCast(bounded.len));
+    }
+    pub fn failOutOfMemory(self: *Cooperative) void {
+        const owned = self.state();
+        owned.table.fail_allocation(owned.context);
+    }
+    pub fn builder(self: *Cooperative) *CooperativeBuilder {
+        return @ptrCast(self);
+    }
+};
+
+/// Scalar writes complete immediately. Symbol, copy, and aggregate commands
+/// begin bounded construction; advance must finish them before another command.
+/// Symbols contain at most 256 bytes. Construction survives callback yields and
+/// its owner retires it on every completion or cancellation path.
+pub const CooperativeBuilder = opaque {
+    fn state(self: *CooperativeBuilder) *CooperativeState {
+        return @ptrCast(@alignCast(self));
+    }
+    fn apply(self: *CooperativeBuilder, request: abi.MessageBuildRequest) ControllerError!void {
+        const owned = self.state();
+        return applyBuild(owned.table, owned.context, &request);
+    }
+    pub fn int(self: *CooperativeBuilder, value: i64) ControllerError!void {
+        return self.apply(.{ .action = .scalar, .scalar = capability.Scalar.int(value).wire });
+    }
+    pub fn float(self: *CooperativeBuilder, value: f64) ControllerError!void {
+        return self.apply(.{ .action = .scalar, .scalar = capability.Scalar.float(value).wire });
+    }
+    pub fn char(self: *CooperativeBuilder, value: u32) ControllerError!void {
+        return self.apply(.{ .action = .scalar, .scalar = capability.Scalar.char(value).wire });
+    }
+    pub fn symbol(self: *CooperativeBuilder, bytes: []const u8) ControllerError!void {
+        return self.apply(.{ .action = .scalar, .scalar = capability.Scalar.symbol(bytes).wire });
+    }
+    pub fn input(self: *CooperativeBuilder, path: []const u64) ControllerError!void {
+        if (path.len > abi.max_read_path_depth) return error.InvalidValue;
+        return self.apply(.{ .action = .copy_input, .path = path.ptr, .depth = @intCast(path.len) });
+    }
+    pub fn list(self: *CooperativeBuilder, count: u32) ControllerError!void {
+        return self.apply(.{ .action = .list, .count = count });
+    }
+    pub fn dictionary(self: *CooperativeBuilder, pairs: u32) ControllerError!void {
+        return self.apply(.{ .action = .dictionary, .count = pairs });
+    }
+    /// Operation completion also advances pending result publication.
+    pub fn result(self: *CooperativeBuilder) ControllerError!void {
+        return self.apply(.{ .action = .result });
+    }
+    pub fn clear(self: *CooperativeBuilder) ControllerError!void {
+        return self.apply(.{ .action = .clear });
+    }
+    pub fn advance(self: *CooperativeBuilder) ControllerError!bool {
+        const owned = self.state();
+        return switch (owned.table.build_message(owned.context, &.{ .action = .advance })) {
+            .ok => true,
+            .yield_required => false,
+            .out_of_memory => error.OutOfMemory,
+            else => if (owned.table.cancelled(owned.context)) error.Cancelled else error.Failed,
+        };
+    }
+};
+
+fn applyBuild(table: anytype, context: *anyopaque, request: *const abi.MessageBuildRequest) ControllerError!void {
+    return switch (table.build_message(context, request)) {
+        .ok => {},
+        .out_of_memory => error.OutOfMemory,
+        else => if (table.cancelled(context)) error.Cancelled else error.Failed,
+    };
+}
+
+fn CooperativePort(comptime Spec: type) type {
+    const Lane = enum { operation };
+    const EndpointSet = declarations.Endpoints(.{});
+    const OperationSet = declarations.Operations(Lane, EndpointSet, Spec.operations);
+    comptime {
+        for (.{ "State", "name", "init", "open", "retireOperation", "retire", "operations" }) |name|
+            if (!@hasDecl(Spec, name)) @compileError("ecl-native: cooperative Port requires State, name, init, open, retireOperation, retire, and operations");
+        if (@sizeOf(Spec.State) == 0 or @sizeOf(Spec.State) > abi.max_port_state_bytes or @alignOf(Spec.State) > 64)
+            @compileError("ecl-native: Port State exceeds the supported size or alignment");
+        if (@TypeOf(Spec.init) != fn () Spec.State or
+            @TypeOf(Spec.retireOperation) != fn (*Spec.State, *Cooperative) CooperativeProgress or
+            @TypeOf(Spec.retire) != fn (*Spec.State, *Cooperative) CooperativeProgress)
+            @compileError("ecl-native: cooperative Port callbacks have invalid signatures");
+        for (.{Spec.open}) |handler| validateCooperativeHandler(Spec.State, handler);
+        for (@import("std").meta.tags(OperationSet.Name)) |name|
+            validateCooperativeHandler(Spec.State, OperationSet.get(name).handler);
+    }
+    return opaque {
+        pub const ecl_port_marker = void;
+        pub const StateType = Spec.State;
+        pub const LaneType = Lane;
+        pub const Endpoints = EndpointSet;
+        pub const Operations = OperationSet;
+        pub const name = Spec.name;
+        var identity: u8 = 0;
+        fn kindIdentity() *const anyopaque {
+            return &identity;
+        }
+        const callbacks: abi.CooperativeDefinition = .{ .initialize = initialize, .execute = execute, .retire_operation = retireOperation, .retire = retire };
+        pub fn definition() abi.PortDefinition {
+            return .{
+                .state_size = @sizeOf(Spec.State),
+                .state_alignment = @alignOf(Spec.State),
+                .name_ptr = name.ptr,
+                .name_len = name.len,
+                .init_state = initState,
+                .initialize = null,
+                .execute = null,
+                .cancel = null,
+                .cleanup = null,
+                .cancellation = .acknowledge,
+                .identity = kindIdentity(),
+                .execution = .cooperative,
+                .cooperative = &callbacks,
+            };
+        }
+        fn initState(raw: *anyopaque) callconv(.c) void {
+            const state: *Spec.State = @ptrCast(@alignCast(raw));
+            state.* = Spec.init();
+        }
+        fn initialize(raw: *anyopaque, table: *const abi.CooperativeTable, context: *anyopaque) callconv(.c) abi.CooperativeProgress {
+            return invoke(Spec.open, raw, table, context);
+        }
+        fn execute(raw: *anyopaque, code: u32, table: *const abi.CooperativeTable, context: *anyopaque) callconv(.c) abi.CooperativeProgress {
+            inline for (comptime @import("std").meta.tags(Operations.Name)) |operation| {
+                if (code == @intFromEnum(operation)) return invoke(Operations.get(operation).handler, raw, table, context);
+            }
+            table.fail(context, .contract, "unsupported registered operation", "unsupported registered operation".len);
+            return .completed;
+        }
+        fn retireOperation(raw: *anyopaque, table: *const abi.CooperativeTable, context: *anyopaque) callconv(.c) abi.CooperativeProgress {
+            return invoke(Spec.retireOperation, raw, table, context);
+        }
+        fn retire(raw: *anyopaque, table: *const abi.CooperativeTable, context: *anyopaque) callconv(.c) abi.CooperativeProgress {
+            return invoke(Spec.retire, raw, table, context);
+        }
+        fn invoke(comptime handler: anytype, raw: *anyopaque, table: *const abi.CooperativeTable, context: *anyopaque) abi.CooperativeProgress {
+            var state: CooperativeState = .{ .table = table, .context = context };
+            const call: *Cooperative = @ptrCast(&state);
+            const progress = if (@typeInfo(@TypeOf(handler)).@"fn".return_type.? == CooperativeProgress)
+                handler(@as(*Spec.State, @ptrCast(@alignCast(raw))), call)
+            else
+                handler(@as(*Spec.State, @ptrCast(@alignCast(raw))), call) catch |err| blk: {
+                    switch (err) {
+                        error.OutOfMemory => call.failOutOfMemory(),
+                        error.Cancelled => if (!call.cancelled()) call.fail(.contract, "cooperative callback reported cancellation without a request"),
+                        error.Failed => call.fail(.io, "cooperative resource operation failed"),
+                        error.InvalidValue => call.fail(.contract, "invalid cooperative capability or value"),
+                    }
+                    break :blk CooperativeProgress.completed;
+                };
+            return switch (progress) {
+                .completed => .completed,
+                .yielded => .yielded,
+                .parked => .parked,
+            };
+        }
+    };
+}
+
+fn validateCooperativeHandler(comptime State: type, comptime handler: anytype) void {
+    if (@TypeOf(handler) != fn (*State, *Cooperative) CooperativeProgress and
+        @TypeOf(handler) != fn (*State, *Cooperative) ControllerError!CooperativeProgress)
+        @compileError("ecl-native: cooperative handler requires resource state and cooperative context");
 }

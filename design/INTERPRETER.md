@@ -1947,6 +1947,16 @@ children before cleanup becomes observable. Adapter state supplies typed
 backend work and transport; ABI descriptors and operation codes remain outside
 this lifecycle. Admission preparation owns its result and resource pin before
 acquiring the publication lock, and rejection retires them after unlocking.
+The native descriptor selects controller or cooperative execution exhaustively.
+Cooperative resources use one serial resumable lane and reserve their scheduler
+continuation before publication. Operation state retains its construction owner
+across yields; its separate builder capability can advance materialization only
+in bounded slices. The cooperative ABI withholds blocking stream and send
+callbacks. Callback completion first settles result construction, then bounded
+private operation retirement, before the shared lane publishes a terminal fact.
+Resource retirement follows operation and dependent-child settlement. Failed
+initialization retains its resource and error in the factory driver until joined
+cleanup returns capacity, so catching the failure cannot race its cleanup.
 
 TCP resources use the same service and exchange owners. Their adapters bind
 listening sockets during initialization and prepare operation storage before

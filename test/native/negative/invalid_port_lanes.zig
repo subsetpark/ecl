@@ -1,6 +1,6 @@
 const ecl = @import("ecl-native");
 comptime {
-    _ = ecl.Port(struct {
+    _ = ecl.Port(.{ .controller = struct {
         pub const name = "invalid";
         pub const State = u32;
         pub const Lane = enum(u32) { read = 1, write = 2 };
@@ -13,5 +13,5 @@ comptime {
         pub fn open(_: *State, _: *ecl.Controller) void {}
         pub fn cancel(_: *State) void {}
         pub fn deinit(_: *State) void {}
-    });
+    } });
 }
