@@ -361,10 +361,10 @@ const Builder = struct {
 
     fn parseManifest(self: *Builder, path: []const u8, item: Value) BuildError!Manifest {
         const top = data.exactFields(item, &.{ "format", "name", "version", "sources", "exports", "requires" }) catch
-            return self.fail("package manifest `{s}` does not have the exact format-1 fields", .{path});
+            return self.fail("package manifest `{s}` does not have the exact format-2 fields", .{path});
         const format = data.field(top, "format") catch @panic("exact manifest lost its format field");
-        if (format != .int or format.int != 1)
-            return self.fail("package manifest `{s}` has an unsupported format", .{path});
+        if (format != .int or format.int != 2)
+            return self.fail("package manifest `{s}` requires format 2; migrate format 1 dependency URLs to tagged sources", .{path});
         const name = data.ownedUtf8(
             self.allocator,
             data.field(top, "name") catch @panic("exact manifest lost its name field"),
@@ -482,10 +482,10 @@ const Builder = struct {
             );
             const requirement = data.exactFields(
                 dict.valueAt(requires, index),
-                &.{ "package", "version", "url", "hash" },
+                &.{ "package", "version", "source", "hash" },
             ) catch return self.fail(
                 "package manifest `{s}` requirement `{s}` does not have the exact keys " ++
-                    "'package 'version 'url 'hash",
+                    "'package 'version 'source 'hash",
                 .{ path, alias },
             );
             const required_name = try self.requirementField(path, alias, requirement, "package");
@@ -500,12 +500,10 @@ const Builder = struct {
                 "package manifest `{s}` requirement `{s}` has a non-semver version",
                 .{ path, alias },
             );
-            const url = try self.requirementField(path, alias, requirement, "url");
-            defer self.allocator.free(url);
-            if (!validUrl(url)) return self.fail(
-                "package manifest `{s}` requirement `{s}` url is not an https url",
-                .{ path, alias },
-            );
+            validateSource(self.allocator, data.field(requirement, "source") catch return error.Invalid) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Invalid => return self.fail("package manifest `{s}` requirement `{s}` has an invalid source", .{ path, alias }),
+            };
             const hash = try self.requirementField(path, alias, requirement, "hash");
             defer self.allocator.free(hash);
             if (!validHash(hash)) return self.fail(
@@ -875,7 +873,30 @@ pub fn validHash(hash: []const u8) bool {
 }
 
 pub fn validUrl(url: []const u8) bool {
-    return url.len > "https://".len and std.mem.startsWith(u8, url, "https://");
+    if (url.len <= 8 or !std.mem.startsWith(u8, url, "https://")) return false;
+    for (url) |byte| if (byte <= 32 or byte == 127 or byte == '@' or byte == '\\' or byte == '#') return false;
+    const uri = std.Uri.parse(url) catch return false;
+    return uri.host != null and uri.host.?.percent_encoded.len != 0 and uri.user == null and uri.password == null;
+}
+
+/// Decode sources at the common host package-data boundary.
+pub fn validateSource(allocator: std.mem.Allocator, item: Value) data.ValidationError!void {
+    const source = try data.asDict(item);
+    const kind = try data.field(source, "kind");
+    if (kind != .symbol) return error.Invalid;
+    const name = intern.get(kind.symbol);
+    if (std.mem.eql(u8, name, "archive")) {
+        _ = try data.exactFields(item, &.{ "kind", "url" });
+    } else if (std.mem.eql(u8, name, "git")) {
+        _ = try data.exactFields(item, &.{ "kind", "url", "commit" });
+        const commit = try data.ownedUtf8(allocator, try data.field(source, "commit"));
+        defer allocator.free(commit);
+        if (commit.len != 40) return error.Invalid;
+        for (commit) |byte| if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return error.Invalid;
+    } else return error.Invalid;
+    const url = try data.ownedUtf8(allocator, try data.field(source, "url"));
+    defer allocator.free(url);
+    if (!validUrl(url)) return error.Invalid;
 }
 
 pub fn validVersion(version: []const u8) bool {

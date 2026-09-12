@@ -467,7 +467,7 @@ fn discoverLock(
                 error.OutOfMemory => return error.OutOfMemory,
                 error.Invalid => break :result try invalidSnapshot(
                     host,
-                    "invalid project lock `{s}`: format-1 validation failed",
+                    "invalid project lock `{s}`: format-2 validation failed; migrate format 1 manifests and regenerate their locks",
                     .{lock_path},
                 ),
             };
@@ -715,7 +715,7 @@ fn validateLock(
     };
     const top = header;
     const format = try data.field(top, "format");
-    if (format != .int or format.int != 1) return error.Invalid;
+    if (format != .int or format.int != 2) return error.Invalid;
     const root_value = try data.field(top, "root");
     const root = try data.ownedUtf8(allocator, root_value);
     defer allocator.free(root);
@@ -742,14 +742,12 @@ fn validateLock(
         if (!validPackageName(name)) return error.Invalid;
         const selection = try data.exactFields(
             dict.valueAt(packages, index),
-            &.{ "version", "url", "hash" },
+            &.{ "version", "source", "hash" },
         );
         const version = try data.ownedUtf8(allocator, try data.field(selection, "version"));
         errdefer allocator.free(version);
         if (!validVersion(version)) return error.Invalid;
-        const url = try data.ownedUtf8(allocator, try data.field(selection, "url"));
-        defer allocator.free(url);
-        if (!validUrl(url)) return error.Invalid;
+        try pkg_catalog.validateSource(allocator, try data.field(selection, "source"));
         const hash = try data.ownedUtf8(allocator, try data.field(selection, "hash"));
         errdefer allocator.free(hash);
         if (!validHash(hash)) return error.Invalid;

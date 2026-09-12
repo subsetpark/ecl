@@ -5,6 +5,11 @@ source-only `smoke` package, imports it through `ecl.lock`, and prints `42`.
 The manifest and lock are committed so an unrelated package operation can be
 checked for byte-stable output.
 
+Package manifests now require format 2, including the manifest inside the
+downloaded archive. A format-1 release must be rebuilt and published under a
+new immutable URL, then added again to record its new hash. Updating only
+this consumer's manifest and lock does not migrate an old release artifact.
+
 Build ecl from the repository root, then run the complete workflow here:
 
 ```sh

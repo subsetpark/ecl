@@ -142,7 +142,7 @@ already installed). Startup never repairs the store or scans dependency sources.
 List your source files and the modules other files may use in `ecl.pkg`:
 
 ```ecl
-{'format 1 'name "my.app" 'version "0.1.0"
+{'format 2 'name "my.app" 'version "0.1.0"
  'sources ["src/*.ecl"] 'exports ["my.app"]
  'requires {}}
 ```

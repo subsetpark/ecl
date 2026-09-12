@@ -1,4 +1,4 @@
-{'format 1 'name "example.pkg-smoke" 'version "0.1.0" 'sources [] 'exports [] 'requires
+{'format 2 'name "example.pkg-smoke" 'version "0.1.0" 'sources [] 'exports [] 'requires
  {"smoke"
   {'package "smoke" 'version "1.0.0" 'url
    "https://github.com/subsetpark/ecl-pkg-smoke/releases/download/v1.0.0/smoke-1.0.0.tgz" 'hash

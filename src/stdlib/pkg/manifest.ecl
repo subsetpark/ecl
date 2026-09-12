@@ -9,7 +9,7 @@
 
  ### setp requirement-keys
  # Required package-requirement keys.
- ['package 'version 'url 'hash]
+ ['package 'version 'source 'hash]
  'requirement-keys setp
 
  ### defp glob-segment-valid?
@@ -55,20 +55,51 @@
  (|name package| package name pkg.name.owns?)
  'export-owned? defp
 
+ ### defp archive-source?
+ (source -- bool : "Return 1 for the exact archive source fields.")
+ (['kind 'url] dict.keys-exactly?) 'archive-source? defp
+
+ ### defp git-source?
+ (source -- bool : "Return 1 for the exact pinned Git source fields.")
+ (|source|
+  source ['kind 'url 'commit] dict.keys-exactly?
+  source 'kind at 'git match? and
+  source 'commit at pkg.name.commit? and) 'git-source? defp
+
+ ### def validate-source
+ (source -- source : "Validate an immutable HTTPS archive or pinned Git source.")
+ (|source|
+  source type 'dict match?
+  'type error.new "a package source is a dict" error.with-message assert
+  source dup 'kind at 'archive match? (archive-source?) (git-source?) if
+  'domain error.new "a source is an archive URL or Git URL and full lowercase commit ID"
+  error.with-message assert
+  source 'url at pkg.name.url?
+  'domain error.new "a source URL must use HTTPS without credentials" error.with-message assert
+  source) 'validate-source def
+
+ ### def write-source
+ (source -- text : "Render a validated source in canonical field order.")
+ (pkg.manifest.validate-source
+  dup 'kind at 'archive match?
+  ('url at str wrap "{{'kind 'archive 'url {}}}" str.format)
+  (('url at str) ('commit at str) bi pair
+   "{{'kind 'git 'url {} 'commit {}}}" str.format)
+  if) 'write-source def
+
  ### def validate-requirement
  (requirement -- requirement : "Validate and return a package requirement.")
  (|requirement|
   requirement type 'dict match?
   'type error.new "a requirement is a dict" error.with-message assert
   requirement requirement-keys dict.keys-exactly?
-  'domain error.new "a requirement has exactly the keys 'package 'version 'url 'hash"
+  'domain error.new "a requirement has exactly the keys 'package 'version 'source 'hash"
   error.with-message
   assert
   requirement 'package at pkg.name.valid?
   'domain error.new "a requirement package is a canonical package name" error.with-message assert
   requirement 'version at pkg.version.validate pop
-  requirement 'url at pkg.name.url?
-  'domain error.new "a requirement url is an https url" error.with-message assert
+  requirement 'source at pkg.manifest.validate-source pop
   requirement 'hash at pkg.name.hash?
   'domain error.new "a requirement hash is sha256- and 64 lowercase hex digits" error.with-message
   assert
@@ -86,8 +117,10 @@
   "a manifest has exactly the keys 'format 'name 'version 'sources 'exports 'requires"
   error.with-message
   assert
-  candidate 'format at 1 match?
-  'domain error.new "the only manifest format is 1" error.with-message assert
+  candidate 'format at 2 match?
+  'domain error.new
+  "manifest format 2 is required; migrate format 1 url fields to tagged source dictionaries"
+  error.with-message assert
   candidate 'name at pkg.name.valid?
   'domain error.new "a package name is dot-joined lowercase segments" error.with-message assert
   candidate 'version at pkg.version.validate pop
@@ -129,10 +162,10 @@
   (|requirement|
    requirement 'package at str
    requirement 'version at str
-   requirement 'url at str
+   requirement 'source at pkg.manifest.write-source
    requirement 'hash at str)
   infra
-  "{{'package {} 'version {} 'url {} 'hash {}}}" str.format) 'render-requirement defp
+  "{{'package {} 'version {} 'source {} 'hash {}}}" str.format) 'render-requirement defp
 
  ### defp render-requirement-entry
  (pair -- text : "Render one manifest requirement while retaining dictionary order.")
@@ -156,6 +189,6 @@
    manifest 'exports at str
    manifest 'requires at render-requirements)
   infra
-  "{{'format 1 'name {} 'version {} 'sources {} 'exports {} 'requires {}}}\n" str.format)
+  "{{'format 2 'name {} 'version {} 'sources {} 'exports {} 'requires {}}}\n" str.format)
  'write def
 ) 'pkg.manifest @defm

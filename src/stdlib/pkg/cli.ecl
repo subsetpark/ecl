@@ -36,7 +36,7 @@
    assert
    prepare-sources
    name wrap
-   (|name| 'format 1 'name name 'version "0.1.0" 'sources ["src/**/*.ecl"] 'exports [] 'requires {})
+   (|name| 'format 2 'name name 'version "0.1.0" 'sources ["src/**/*.ecl"] 'exports [] 'requires {})
    infra
    dict.from-flat
    pkg.manifest.write

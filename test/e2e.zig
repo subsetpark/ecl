@@ -1,32 +1,32 @@
 const std = @import("std");
 const pkg_lock_fixture = @import("pkg_lock_fixture.zig");
 const pkg_example_hash = "315c772a16778673e205ae556185d25b4109ad40641e60e6b5d96d1f7db99745";
-const pkg_runtime_hash = "02144e0eecfc76ebeedaa720e6bc713e658e61b732a40c3e8841ad57d2c7c9a7";
+const pkg_runtime_hash = "50e119dd9bfcff3d9eacc68977d5792f4bd3448d3b23e654838b2add0c5a48e0";
 const pkg_runtime_key = "a-1.0.0-" ++ pkg_runtime_hash;
 const pkg_runtime_manifest =
-    "{'format 1 'name \"root\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires " ++
-    "{\"a\" {'package \"a\" 'version \"1.0.0\" 'url \"https://example.invalid/a.tgz\" " ++
+    "{'format 2 'name \"root\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires " ++
+    "{\"a\" {'package \"a\" 'version \"1.0.0\" 'source {'kind 'archive 'url \"https://example.invalid/a.tgz\"} " ++
     "'hash \"sha256-" ++ pkg_runtime_hash ++ "\"}}}\n";
 const pkg_runtime_lock =
-    "{'format 1\n" ++
+    "{'format 2\n" ++
     " 'root \"root\"\n" ++
     " 'packages\n" ++
-    " {\"a\" {'version \"1.0.0\" 'url \"https://example.invalid/a.tgz\" 'hash \"sha256-" ++ pkg_runtime_hash ++ "\"}}\n" ++
+    " {\"a\" {'version \"1.0.0\" 'source {'kind 'archive 'url \"https://example.invalid/a.tgz\"} 'hash \"sha256-" ++ pkg_runtime_hash ++ "\"}}\n" ++
     " 'requires\n" ++
     " {\"a\" {}\n" ++
     "  \"root\" {\"a\" {'package \"a\" 'version \"1.0.0\"}}}}\n";
 const pkg_runtime_vendor_lock =
-    "{'format 1\n" ++
+    "{'format 2\n" ++
     " 'root \"root\"\n" ++
     " 'store 'vendor\n" ++
     " 'packages\n" ++
-    " {\"a\" {'version \"1.0.0\" 'url \"https://example.invalid/a.tgz\" 'hash \"sha256-" ++ pkg_runtime_hash ++ "\"}}\n" ++
+    " {\"a\" {'version \"1.0.0\" 'source {'kind 'archive 'url \"https://example.invalid/a.tgz\"} 'hash \"sha256-" ++ pkg_runtime_hash ++ "\"}}\n" ++
     " 'requires\n" ++
     " {\"a\" {}\n" ++
     "  \"root\" {\"a\" {'package \"a\" 'version \"1.0.0\"}}}}\n";
 
 const test_project_lock =
-    "{'format 1 'root \"app\" 'packages {} 'requires {\"app\" {}}}\n";
+    "{'format 2 'root \"app\" 'packages {} 'requires {\"app\" {}}}\n";
 
 test "e2e: proc direct execution preserves argv cwd environment and policy" {
     const ecl_exe = try absoluteExe();
@@ -574,7 +574,7 @@ test "e2e: ecl test runs the default stateful runner" {
     defer scratch.cleanup();
     try writeTestProject(
         scratch.dir,
-        "{'format 1 'name \"app\" 'version \"0.1.0\" " ++
+        "{'format 2 'name \"app\" 'version \"0.1.0\" " ++
             "'sources [\"suite.ecl\"] 'exports [\"app.suite\"] 'requires {}}\n",
         &.{.{
             .path = "suite.ecl",
@@ -608,7 +608,7 @@ test "e2e: ecl test runs the default stateful runner" {
 test "e2e: tests retain file-private module visibility" {
     var scratch = std.testing.tmpDir(.{});
     defer scratch.cleanup();
-    try writeTestProject(scratch.dir, "{'format 1 'name \"app\" 'version \"0.1.0\" 'sources [\"*.ecl\"] " ++
+    try writeTestProject(scratch.dir, "{'format 2 'name \"app\" 'version \"0.1.0\" 'sources [\"*.ecl\"] " ++
         "'exports [\"app.foo\" \"app.bar\"] 'requires {}}\n", &.{
         .{ .path = "bar.ecl", .source = "[] ((42) 'answer def) @module 'baz register\n" ++
             "[] ((baz.answer 42 = {'kind 'user} assert) 'local test) 'app.bar @defm\n" ++
@@ -635,7 +635,7 @@ test "e2e: tests retain file-private module visibility" {
 test "e2e: ecl test discovers private-only sources and loads each artifact once" {
     var scratch = std.testing.tmpDir(.{});
     defer scratch.cleanup();
-    try writeTestProject(scratch.dir, "{'format 1 'name \"app\" 'version \"0.1.0\" " ++
+    try writeTestProject(scratch.dir, "{'format 2 'name \"app\" 'version \"0.1.0\" " ++
         "'sources [\"*.ecl\" \"private.ecl\"] 'exports [] 'requires {}}\n", &.{
         .{ .path = "private.ecl", .source = "[] ((42) 'answer def) 'helper @defm\n" ++
             "[] ((helper.answer 42 = {'kind 'user} assert) 'answer test) 'suite @defm\n" },
@@ -650,7 +650,7 @@ test "e2e: ecl test discovers private-only sources and loads each artifact once"
 
     // The first source loads the later source through an export. Preload must
     // reuse that committed artifact, including with overlapping source globs.
-    try writeTestProject(scratch.dir, "{'format 1 'name \"app\" 'version \"0.1.0\" " ++
+    try writeTestProject(scratch.dir, "{'format 2 'name \"app\" 'version \"0.1.0\" " ++
         "'sources [\"*.ecl\" \"z-public.ecl\"] 'exports [\"app.public\"] 'requires {}}\n", &.{
         .{ .path = "a-consumer.ecl", .source = "app.public.answer 42 = {'kind 'user} assert\n" ++
             "[] (([] (helper.answer) @attempt 'err at 'kind at 'undefined-word match? " ++
@@ -668,7 +668,7 @@ test "e2e: ecl test accepts a userland runner" {
     defer scratch.cleanup();
     try writeTestProject(
         scratch.dir,
-        "{'format 1 'name \"app\" 'version \"0.1.0\" " ++
+        "{'format 2 'name \"app\" 'version \"0.1.0\" " ++
             "'sources [\"suite.ecl\" \"custom.ecl\"] 'exports [\"app.suite\" \"app.custom.runner\"] " ++
             "'requires {}}\n",
         &.{
@@ -715,7 +715,7 @@ test "e2e: ecl test reports project and runner failures" {
     defer invalid.cleanup();
     try invalid.dir.writeFile(io, .{
         .sub_path = "ecl.pkg",
-        .data = "{'format 1 'name \"app\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires {}}\n",
+        .data = "{'format 2 'name \"app\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires {}}\n",
     });
     try invalid.dir.writeFile(io, .{ .sub_path = "ecl.lock", .data = "not a lock\n" });
     var invalid_result = try cli.runOptions(.{
@@ -733,7 +733,7 @@ test "e2e: ecl test reports project and runner failures" {
     defer project.cleanup();
     try writeTestProject(
         project.dir,
-        "{'format 1 'name \"app\" 'version \"0.1.0\" " ++
+        "{'format 2 'name \"app\" 'version \"0.1.0\" " ++
             "'sources [\"suite.ecl\"] 'exports [\"app.suite\"] 'requires {}}\n",
         &.{.{ .path = "suite.ecl", .source = "[] ((1) 'one test) 'app.suite @defm\n" }},
     );
@@ -837,7 +837,7 @@ test "e2e: pkg init derives a canonical root manifest without overwriting" {
     const manifest = try project.readFileAlloc(io, "ecl.pkg", allocator, .unlimited);
     defer allocator.free(manifest);
     try std.testing.expectEqualStrings(
-        "{'format 1 'name \"sample\" 'version \"0.1.0\" 'sources (\"src/**/*.ecl\") 'exports () 'requires {}}\n",
+        "{'format 2 'name \"sample\" 'version \"0.1.0\" 'sources (\"src/**/*.ecl\") 'exports () 'requires {}}\n",
         manifest,
     );
     var sources = try project.openDir(io, "src", .{});
@@ -1005,7 +1005,7 @@ test "e2e: pkg sync regenerates a corrupt lock from the explicit project" {
     try scratch.dir.createDir(io, "cache", .default_dir);
     try scratch.dir.writeFile(io, .{
         .sub_path = "project/ecl.pkg",
-        .data = "{'format 1 'name \"root\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires {}}\n",
+        .data = "{'format 2 'name \"root\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires {}}\n",
     });
     try scratch.dir.writeFile(io, .{
         .sub_path = "project/ecl.lock",
@@ -1031,7 +1031,7 @@ test "e2e: pkg sync regenerates a corrupt lock from the explicit project" {
     const lock = try project.readFileAlloc(io, "ecl.lock", allocator, .unlimited);
     defer allocator.free(lock);
     try std.testing.expectEqualStrings(
-        "{'format 1\n 'root \"root\"\n 'packages\n {}\n 'requires\n {\"root\" {}}}\n",
+        "{'format 2\n 'root \"root\"\n 'packages\n {}\n 'requires\n {\"root\" {}}}\n",
         lock,
     );
 }
@@ -1078,7 +1078,7 @@ test "e2e: checked-in package consumer executes and remains byte-stable offline"
     try scratch.dir.writeFile(io, .{ .sub_path = "project/main.ecl", .data = build_options.pkg_example_program });
     try scratch.dir.writeFile(io, .{
         .sub_path = "cache/smoke-1.0.0-" ++ pkg_example_hash ++ "/ecl.pkg",
-        .data = "{'format 1 'name \"smoke\" 'version \"1.0.0\" 'sources [\"**/*\"] 'exports [\"smoke\"] 'requires {}}\n",
+        .data = "{'format 2 'name \"smoke\" 'version \"1.0.0\" 'sources [\"**/*\"] 'exports [\"smoke\"] 'requires {}}\n",
     });
     try scratch.dir.writeFile(io, .{
         .sub_path = "cache/smoke-1.0.0-" ++ pkg_example_hash ++ "/smoke.ecl",
@@ -1141,7 +1141,7 @@ test "e2e: pkg vendor makes locked execution and verification cache-independent"
     try scratch.dir.writeFile(io, .{ .sub_path = "project/ecl.lock", .data = pkg_runtime_lock });
     try scratch.dir.writeFile(io, .{
         .sub_path = "cache/" ++ pkg_runtime_key ++ "/ecl.pkg",
-        .data = "{'format 1 'name \"a\" 'version \"1.0.0\" 'sources [\"**/*\"] 'exports [\"a\"] 'requires {}}\n",
+        .data = "{'format 2 'name \"a\" 'version \"1.0.0\" 'sources [\"**/*\"] 'exports [\"a\"] 'requires {}}\n",
     });
     try scratch.dir.writeFile(io, .{
         .sub_path = "cache/" ++ pkg_runtime_key ++ "/a.ecl",
@@ -1254,11 +1254,11 @@ test "e2e: pkg gc retains the union of named locks and preserves unknown cache n
     const key_c = "c-3.0.0-" ++ hash_c;
     const key_d = "d-4.0.0-" ++ hash_d;
     const key_e = "e-5.0.0-" ++ hash_e;
-    const lock_a = "{'format 1 'root \"one\" 'packages {\"a\" {'version \"1.0.0\" " ++
-        "'url \"https://example.invalid/a.tgz\" 'hash \"sha256-" ++ hash_a ++
+    const lock_a = "{'format 2 'root \"one\" 'packages {\"a\" {'version \"1.0.0\" " ++
+        "'source {'kind 'archive 'url \"https://example.invalid/a.tgz\"} 'hash \"sha256-" ++ hash_a ++
         "\"}} 'requires {\"a\" {} \"one\" {\"a\" {'package \"a\" 'version \"1.0.0\"}}}}\n";
-    const lock_b = "{'format 1 'root \"two\" 'packages {\"b\" {'version \"2.0.0\" " ++
-        "'url \"https://example.invalid/b.tgz\" 'hash \"sha256-" ++ hash_b ++
+    const lock_b = "{'format 2 'root \"two\" 'packages {\"b\" {'version \"2.0.0\" " ++
+        "'source {'kind 'archive 'url \"https://example.invalid/b.tgz\"} 'hash \"sha256-" ++ hash_b ++
         "\"}} 'requires {\"b\" {} \"two\" {\"b\" {'package \"b\" 'version \"2.0.0\"}}}}\n";
 
     var scratch = std.testing.tmpDir(.{});

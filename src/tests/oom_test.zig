@@ -53,11 +53,11 @@ fn archiveSource(allocator: std.mem.Allocator) ![]u8 {
     return allocator.dupe(u8, source.written());
 }
 
-const package_a_key = "a-1.0.0-68c57ef8116b31d853d00ba9b295bacf14bf30730d61a05c5d51b00a3d223277";
+const package_a_key = "a-1.0.0-a623bf09cb12068dc16b81c4a4a4e28f9eea52b6dadd88344708502f3a992465";
 /// The lock hash of package `a` in the sync probes; the store probe verifies
 /// the seal it just installed, so it needs the fixture's real digest.
 const package_a_hash = "sha256-1f9aefdfdd91996e4f2f80b7f89f1ac3d8907616b74f1cf55a1a48042556738a";
-const package_valid_seal_hash = "sha256-68c57ef8116b31d853d00ba9b295bacf14bf30730d61a05c5d51b00a3d223277";
+const package_valid_seal_hash = "sha256-a623bf09cb12068dc16b81c4a4a4e28f9eea52b6dadd88344708502f3a992465";
 
 fn packageStoreSource(allocator: std.mem.Allocator) ![]u8 {
     var source = std.Io.Writer.Allocating.init(allocator);
@@ -74,8 +74,8 @@ fn packageStoreSource(allocator: std.mem.Allocator) ![]u8 {
 }
 
 const package_sync_source =
-    "{'format 1 'name \"r\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires " ++
-    "{\"a\" {'package \"a\" 'version \"1.0.0\" 'url \"https://e.com/a.tgz\" " ++
+    "{'format 2 'name \"r\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires " ++
+    "{\"a\" {'package \"a\" 'version \"1.0.0\" 'source {'kind 'archive 'url \"https://e.com/a.tgz\"} " ++
     "'hash \"" ++ package_a_hash ++ "\"}}} pkg.sync.run pop";
 
 const package_cli_source = "[] pkg.cli.tree";
@@ -93,11 +93,11 @@ const PackageScratch = struct {
         const lock_probe_hash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "ecl.pkg",
-            .data = "{'format 1 'name \"root\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires {}}\n",
+            .data = "{'format 2 'name \"root\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires {}}\n",
         });
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "ecl.lock",
-            .data = "{'format 1 'root \"root\" 'packages {\"lockprobe\" {'version \"1.0.0\" 'url \"https://e.com/p.tgz\" 'hash \"sha256-" ++ lock_probe_hash ++ "\"}} 'requires {\"lockprobe\" {} \"root\" {\"lockprobe\" {'package \"lockprobe\" 'version \"1.0.0\"}}}}\n",
+            .data = "{'format 2 'root \"root\" 'packages {\"lockprobe\" {'version \"1.0.0\" 'source {'kind 'archive 'url \"https://e.com/p.tgz\"} 'hash \"sha256-" ++ lock_probe_hash ++ "\"}} 'requires {\"lockprobe\" {} \"root\" {\"lockprobe\" {'package \"lockprobe\" 'version \"1.0.0\"}}}}\n",
         });
         try directory.dir.createDir(
             std.testing.io,
@@ -111,7 +111,7 @@ const PackageScratch = struct {
         });
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "lockprobe-1.0.0-" ++ lock_probe_hash ++ "/ecl.pkg",
-            .data = "{'format 1 'name \"lockprobe\" 'version \"1.0.0\" 'sources [\"**/*\"] 'exports [\"lockprobe\"] 'requires {}}\n",
+            .data = "{'format 2 'name \"lockprobe\" 'version \"1.0.0\" 'sources [\"**/*\"] 'exports [\"lockprobe\"] 'requires {}}\n",
         });
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "lockprobe-1.0.0-" ++ lock_probe_hash ++ "/.ecl-package.catalog",
@@ -138,7 +138,7 @@ const PackageScratch = struct {
         });
         try self.directory.dir.writeFile(std.testing.io, .{
             .sub_path = key ++ "/ecl.pkg",
-            .data = "{'format 1 'name \"a\" 'version \"1.0.0\" 'sources [\"**/*\"] 'exports [\"a\"] 'requires {}}\n",
+            .data = "{'format 2 'name \"a\" 'version \"1.0.0\" 'sources [\"**/*\"] 'exports [\"a\"] 'requires {}}\n",
         });
         try self.directory.dir.writeFile(std.testing.io, .{
             .sub_path = key ++ "/.ecl-package.catalog",
@@ -799,7 +799,7 @@ fn stdlibSessionAllocationProbe(
     if (surface == .package_sync) try scratch.installPackageA();
     if (surface == .package_catalog_repair) {
         try scratch.directory.dir.createDir(std.testing.io, package_a_key, .default_dir);
-        try scratch.directory.dir.writeFile(std.testing.io, .{ .sub_path = package_a_key ++ "/ecl.pkg", .data = "{'format 1 'name \"a\" 'version \"1.0.0\" 'sources [\"**/*\"] 'exports [\"a\"] 'requires {}}\n" });
+        try scratch.directory.dir.writeFile(std.testing.io, .{ .sub_path = package_a_key ++ "/ecl.pkg", .data = "{'format 2 'name \"a\" 'version \"1.0.0\" 'sources [\"**/*\"] 'exports [\"a\"] 'requires {}}\n" });
         try scratch.directory.dir.writeFile(std.testing.io, .{ .sub_path = package_a_key ++ "/a.ecl", .data = "[] (() 'noop def) 'a @defm\n" });
         const hex = std.mem.trim(u8, archive_fixtures.package_valid, " \r\n\t");
         const bytes = try std.testing.allocator.alloc(u8, hex.len / 2);
@@ -811,7 +811,7 @@ fn stdlibSessionAllocationProbe(
     if (surface == .root_source_preload) {
         try scratch.directory.dir.writeFile(std.testing.io, .{
             .sub_path = "ecl.pkg",
-            .data = "{'format 1 'name \"root\" 'version \"0.1.0\" 'sources [\"suite.ecl\"] 'exports [] 'requires {}}\n",
+            .data = "{'format 2 'name \"root\" 'version \"0.1.0\" 'sources [\"suite.ecl\"] 'exports [] 'requires {}}\n",
         });
         try scratch.directory.dir.writeFile(std.testing.io, .{
             .sub_path = "suite.ecl",

@@ -1446,6 +1446,14 @@ cleanup, and completion interests. Result observation and claiming go directly
 through the common result owner. Neither operation admission nor exchange
 observation dispatches on a backend family or uses backend readiness codes.
 
+Package manifests and locks share the format-2 source grammar. Dependency
+identity retains a tagged immutable source and an artifact hash; Git sources
+retain resolved commit IDs. Source validation belongs to the package data
+boundary in both userland resolution and host catalog loading. Canonical
+source serialization orders equivalent mirrors independently of dictionary
+insertion order; conflicting hashes or Git commits for one package version
+are rejected. Store catalog metadata has an independent format version.
+
 Package discovery and synchronization are
 described in `ENVIRONMENT.md`; they enter the evaluator through the same module
 loader and bounded-driver conventions as other sources. Host-side lock and

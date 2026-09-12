@@ -83,8 +83,8 @@ test "loader: catalog exports resolve with non-lexical IDs and reversed persiste
             try fixture.writeOnePackageLock("dep", "1.0.0", hash_a);
             try fixture.writeStoreArtifact("dep", "1.0.0", hash_a, "order.ecl", "\"dep.order-z\" \"dep.order-a\"", source, .{});
         } else {
-            try fixture.write("project/ecl.lock", "{'format 1 'root \"root\" 'packages {} 'requires {\"root\" {}}}");
-            try fixture.write("project/ecl.pkg", "{'format 1 'name \"root\" 'version \"0.1.0\" " ++
+            try fixture.write("project/ecl.lock", "{'format 2 'root \"root\" 'packages {} 'requires {\"root\" {}}}");
+            try fixture.write("project/ecl.pkg", "{'format 2 'name \"root\" 'version \"0.1.0\" " ++
                 "'sources [\"*.ecl\"] 'exports [\"root.order-a\" \"root.order-z\"] 'requires {}}");
             try fixture.write("project/order.ecl", source);
         }
@@ -140,12 +140,12 @@ test "loader: invalid dependency catalogs fail closed with sync diagnostics" {
 test "loader: local file additions and edits are discovered without sync" {
     var fixture = try LockFixture.init();
     defer fixture.deinit();
-    try fixture.write("project/ecl.lock", "{'format 1 'root \"root\" 'packages {} 'requires {\"root\" {}}}\n");
+    try fixture.write("project/ecl.lock", "{'format 2 'root \"root\" 'packages {} 'requires {\"root\" {}}}\n");
     for ([_]bool{ false, true }) |edited| {
         try fixture.write("project/ecl.pkg", if (edited)
-            "{'format 1 'name \"root\" 'version \"0.1.0\" 'sources [\"*.ecl\"] 'exports [\"root.one\" \"root.two\"] 'requires {}}\n"
+            "{'format 2 'name \"root\" 'version \"0.1.0\" 'sources [\"*.ecl\"] 'exports [\"root.one\" \"root.two\"] 'requires {}}\n"
         else
-            "{'format 1 'name \"root\" 'version \"0.1.0\" 'sources [\"*.ecl\"] 'exports [\"root.one\"] 'requires {}}\n");
+            "{'format 2 'name \"root\" 'version \"0.1.0\" 'sources [\"*.ecl\"] 'exports [\"root.one\"] 'requires {}}\n");
         try fixture.write("project/one.ecl", if (edited) "[] ((2) 'answer def) 'root.one @defm\n" else "[] ((1) 'answer def) 'root.one @defm\n");
         if (edited) try fixture.write("project/two.ecl", "[] ((3) 'answer def) 'root.two @defm\n");
         var backing: test_heap.SessionHeap = .init;
@@ -167,9 +167,9 @@ test "loader: private modules belong to their defining file independent of load 
     for ([_]bool{ false, true }) |bar_first| {
         var fixture = try LockFixture.init();
         defer fixture.deinit();
-        try fixture.write("project/ecl.pkg", "{'format 1 'name \"root\" 'version \"0.1.0\" " ++
+        try fixture.write("project/ecl.pkg", "{'format 2 'name \"root\" 'version \"0.1.0\" " ++
             "'sources [\"*.ecl\"] 'exports [\"root.foo\" \"root.bar\" \"root.other\"] 'requires {}}\n");
-        try fixture.write("project/ecl.lock", "{'format 1 'root \"root\" 'packages {} 'requires {\"root\" {}}}\n");
+        try fixture.write("project/ecl.lock", "{'format 2 'root \"root\" 'packages {} 'requires {\"root\" {}}}\n");
         try fixture.write("project/foo.ecl", "[] ((99) 'answer def) 'root.foo.hidden @defm\n" ++
             "[] ((baz.answer) 'answer def (call) 'apply def " ++
             "(root.foo.hidden.answer) 'own def) 'root.foo @defm\n");
@@ -256,12 +256,12 @@ test "loader: the root package exports local source through the same catalog" {
     defer fixture.deinit();
     try fixture.write(
         "project/ecl.pkg",
-        "{'format 1 'name \"root\" 'version \"0.1.0\" " ++
+        "{'format 2 'name \"root\" 'version \"0.1.0\" " ++
             "'sources [\"src/**/*\"] 'exports [\"root.local\"] 'requires {}}\n",
     );
     try fixture.write(
         "project/ecl.lock",
-        "{'format 1 'root \"root\" 'packages {} 'requires {\"root\" {}}}\n",
+        "{'format 2 'root \"root\" 'packages {} 'requires {\"root\" {}}}\n",
     );
     try fixture.directory.dir.createDir(std.testing.io, "project/src", .default_dir);
     try fixture.write(
@@ -294,10 +294,10 @@ test "loader: a root-defined module reaches its declared direct dependency" {
     defer fixture.deinit();
     try fixture.write(
         "project/ecl.pkg",
-        "{'format 1 'name \"root\" 'version \"0.1.0\" " ++
+        "{'format 2 'name \"root\" 'version \"0.1.0\" " ++
             "'sources [\"src/**/*\"] 'exports [\"root.local\"] 'requires " ++
             "{\"dep\" {'package \"dep\" 'version \"1.0.0\" " ++
-            "'url \"https://example.invalid/dep.tgz\" 'hash \"" ++ hash_a ++ "\"}}}\n",
+            "'source {'kind 'archive 'url \"https://example.invalid/dep.tgz\"} 'hash \"" ++ hash_a ++ "\"}}}\n",
     );
     try fixture.writeOnePackageLock("dep", "1.0.0", hash_a);
     try fixture.writeStoreModule("dep", "1.0.0", hash_a, "dep", 5);
@@ -355,7 +355,7 @@ test "loader: both manifest validators reject drive-prefixed source globs" {
         .{ .glob = "CC:src/**/*.ecl", .valid = true },
     };
     for (cases) |case| {
-        const manifest = try std.fmt.allocPrint(allocator, "{{'format 1 'name \"dep\" 'version \"1.0.0\" 'sources [\"{s}\"] 'exports [] 'requires {{}}}}", .{case.glob});
+        const manifest = try std.fmt.allocPrint(allocator, "{{'format 2 'name \"dep\" 'version \"1.0.0\" 'sources [\"{s}\"] 'exports [] 'requires {{}}}}", .{case.glob});
         defer allocator.free(manifest);
         try directory.dir.writeFile(std.testing.io, .{ .sub_path = "ecl.pkg", .data = manifest });
         const source = try std.fmt.allocPrint(allocator, "{s} pkg.manifest.validate pop", .{manifest});
@@ -387,8 +387,8 @@ test "loader: catalog discovery holds a manifest to the whole public contract" {
     const cases = [_]struct { requires: []const u8, needle: []const u8 }{
         .{
             .requires = "{\"dep\" {'package \"dep\" 'version \"1.0.0\" " ++
-                "'url \"http://e.com/d.tgz\" 'hash \"" ++ hash_a ++ "\"}}",
-            .needle = "url is not an https url",
+                "'source {'kind 'archive 'url \"http://e.com/d.tgz\"} 'hash \"" ++ hash_a ++ "\"}}",
+            .needle = "has an invalid source",
         },
         .{
             .requires = "{\"dep\" {'package \"dep\" 'version \"1.0.0\"}}",
@@ -396,19 +396,19 @@ test "loader: catalog discovery holds a manifest to the whole public contract" {
         },
         .{
             .requires = "{\"dep\" {'package \"dep\" 'version \"one\" " ++
-                "'url \"https://e.com/d.tgz\" 'hash \"" ++ hash_a ++ "\"}}",
+                "'source {'kind 'archive 'url \"https://e.com/d.tgz\"} 'hash \"" ++ hash_a ++ "\"}}",
             .needle = "has a non-semver version",
         },
         .{
             .requires = "{\"dep\" {'package \"root.sub\" 'version \"1.0.0\" " ++
-                "'url \"https://e.com/d.tgz\" 'hash \"" ++ hash_a ++ "\"}}",
+                "'source {'kind 'archive 'url \"https://e.com/d.tgz\"} 'hash \"" ++ hash_a ++ "\"}}",
             .needle = "one name owns the other",
         },
         .{
             .requires = "{\"one\" {'package \"dep\" 'version \"1.0.0\" " ++
-                "'url \"https://e.com/d.tgz\" 'hash \"" ++ hash_a ++ "\"} " ++
+                "'source {'kind 'archive 'url \"https://e.com/d.tgz\"} 'hash \"" ++ hash_a ++ "\"} " ++
                 "\"two\" {'package \"dep\" 'version \"1.0.0\" " ++
-                "'url \"https://e.com/d.tgz\" 'hash \"" ++ hash_a ++ "\"}}",
+                "'source {'kind 'archive 'url \"https://e.com/d.tgz\"} 'hash \"" ++ hash_a ++ "\"}}",
             .needle = "under more than one alias",
         },
         .{
@@ -421,7 +421,7 @@ test "loader: catalog discovery holds a manifest to the whole public contract" {
         defer fixture.deinit();
         const manifest = try std.fmt.allocPrint(
             std.testing.allocator,
-            "{{'format 1 'name \"root\" 'version \"0.1.0\" " ++
+            "{{'format 2 'name \"root\" 'version \"0.1.0\" " ++
                 "'sources [\"src/**/*\"] 'exports [\"root.local\"] 'requires {s}}}\n",
             .{case.requires},
         );
@@ -429,7 +429,7 @@ test "loader: catalog discovery holds a manifest to the whole public contract" {
         try fixture.write("project/ecl.pkg", manifest);
         try fixture.write(
             "project/ecl.lock",
-            "{'format 1 'root \"root\" 'packages {} 'requires {\"root\" {}}}\n",
+            "{'format 2 'root \"root\" 'packages {} 'requires {\"root\" {}}}\n",
         );
         try fixture.directory.dir.createDir(std.testing.io, "project/src", .default_dir);
         try fixture.write("project/src/a.ecl", "[] ((1) 'answer def) 'root.local @defm\n");
@@ -466,8 +466,8 @@ test "loader: a lock may omit a requirer entry for a package that requires nothi
     // succeed: a canonically written lock is never unopenable.
     try fixture.write(
         "project/ecl.lock",
-        "{'format 1 'root \"root\" 'packages " ++
-            "{\"dep\" {'version \"1.0.0\" 'url \"https://example.invalid/dep.tgz\" " ++
+        "{'format 2 'root \"root\" 'packages " ++
+            "{\"dep\" {'version \"1.0.0\" 'source {'kind 'archive 'url \"https://example.invalid/dep.tgz\"} " ++
             "'hash \"" ++ hash_a ++ "\"}} " ++
             "'requires {\"root\" {\"dep\" {'package \"dep\" 'version \"1.0.0\"}}}}\n",
     );
@@ -909,7 +909,7 @@ const LockFixture = struct {
         try directory.dir.createDir(std.testing.io, "path", .default_dir);
         if (marker) try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "project/ecl.pkg",
-            .data = "{'format 1 'name \"root\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires {}}\n",
+            .data = "{'format 2 'name \"root\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires {}}\n",
         });
         const nested = try std.fs.path.join(allocator, &.{ root, "project", "nested" });
         errdefer allocator.free(nested);
@@ -940,7 +940,7 @@ const LockFixture = struct {
     ) !void {
         const text = try std.fmt.allocPrint(
             std.testing.allocator,
-            "{{'format 1\n 'root \"root\"\n 'packages\n {{\"{s}\" {{'version \"{s}\" 'url \"https://example.invalid/{s}.tgz\" 'hash \"{s}\"}}}}\n 'requires\n {{\"{s}\" {{}} \"root\" {{\"{s}\" {{'package \"{s}\" 'version \"{s}\"}}}}}}}}\n",
+            "{{'format 2\n 'root \"root\"\n 'packages\n {{\"{s}\" {{'version \"{s}\" 'source {{'kind 'archive 'url \"https://example.invalid/{s}.tgz\"}} 'hash \"{s}\"}}}}\n 'requires\n {{\"{s}\" {{}} \"root\" {{\"{s}\" {{'package \"{s}\" 'version \"{s}\"}}}}}}}}\n",
             .{ package, version, package, hash, package, package, package, version },
         );
         defer std.testing.allocator.free(text);
@@ -958,7 +958,7 @@ const LockFixture = struct {
     ) !void {
         const text = try std.fmt.allocPrint(
             std.testing.allocator,
-            "{{'format 1\n 'root \"root\"\n 'packages\n {{\"{s}\" {{'version \"{s}\" 'url \"https://example.invalid/{s}.tgz\" 'hash \"{s}\"}} \"{s}\" {{'version \"{s}\" 'url \"https://example.invalid/{s}.tgz\" 'hash \"{s}\"}}}}\n 'requires\n {{\"{s}\" {{}} \"{s}\" {{}} \"root\" {{\"{s}\" {{'package \"{s}\" 'version \"{s}\"}} \"{s}\" {{'package \"{s}\" 'version \"{s}\"}}}}}}}}\n",
+            "{{'format 2\n 'root \"root\"\n 'packages\n {{\"{s}\" {{'version \"{s}\" 'source {{'kind 'archive 'url \"https://example.invalid/{s}.tgz\"}} 'hash \"{s}\"}} \"{s}\" {{'version \"{s}\" 'source {{'kind 'archive 'url \"https://example.invalid/{s}.tgz\"}} 'hash \"{s}\"}}}}\n 'requires\n {{\"{s}\" {{}} \"{s}\" {{}} \"root\" {{\"{s}\" {{'package \"{s}\" 'version \"{s}\"}} \"{s}\" {{'package \"{s}\" 'version \"{s}\"}}}}}}}}\n",
             .{ first, first_version, first, first_hash, second, second_version, second, second_hash, first, second, first, first, first_version, second, second, second_version },
         );
         defer std.testing.allocator.free(text);
@@ -968,9 +968,9 @@ const LockFixture = struct {
     fn writeTransitiveLock(self: *LockFixture) !void {
         const text = try std.fmt.allocPrint(
             std.testing.allocator,
-            "{{'format 1\n 'root \"root\"\n 'packages\n " ++
-                "{{\"alpha\" {{'version \"1.0.0\" 'url \"https://example.invalid/alpha.tgz\" 'hash \"{s}\"}} " ++
-                "\"beta\" {{'version \"1.0.0\" 'url \"https://example.invalid/beta.tgz\" 'hash \"{s}\"}}}}\n " ++
+            "{{'format 2\n 'root \"root\"\n 'packages\n " ++
+                "{{\"alpha\" {{'version \"1.0.0\" 'source {{'kind 'archive 'url \"https://example.invalid/alpha.tgz\"}} 'hash \"{s}\"}} " ++
+                "\"beta\" {{'version \"1.0.0\" 'source {{'kind 'archive 'url \"https://example.invalid/beta.tgz\"}} 'hash \"{s}\"}}}}\n " ++
                 "'requires\n {{\"alpha\" {{\"beta\" {{'package \"beta\" 'version \"1.0.0\"}}}} " ++
                 "\"beta\" {{}} \"root\" {{\"alpha\" {{'package \"alpha\" 'version \"1.0.0\"}}}}}}}}\n",
             .{ hash_a, hash_b },
@@ -982,10 +982,10 @@ const LockFixture = struct {
     fn writeAuthorizationLock(self: *LockFixture) !void {
         const text = try std.fmt.allocPrint(
             std.testing.allocator,
-            "{{'format 1\n 'root \"root\"\n 'packages\n " ++
-                "{{\"alpha\" {{'version \"1.0.0\" 'url \"https://example.invalid/alpha.tgz\" 'hash \"{s}\"}} " ++
-                "\"beta\" {{'version \"1.0.0\" 'url \"https://example.invalid/beta.tgz\" 'hash \"{s}\"}} " ++
-                "\"secret\" {{'version \"1.0.0\" 'url \"https://example.invalid/secret.tgz\" 'hash \"{s}\"}}}}\n " ++
+            "{{'format 2\n 'root \"root\"\n 'packages\n " ++
+                "{{\"alpha\" {{'version \"1.0.0\" 'source {{'kind 'archive 'url \"https://example.invalid/alpha.tgz\"}} 'hash \"{s}\"}} " ++
+                "\"beta\" {{'version \"1.0.0\" 'source {{'kind 'archive 'url \"https://example.invalid/beta.tgz\"}} 'hash \"{s}\"}} " ++
+                "\"secret\" {{'version \"1.0.0\" 'source {{'kind 'archive 'url \"https://example.invalid/secret.tgz\"}} 'hash \"{s}\"}}}}\n " ++
                 "'requires\n {{\"alpha\" {{\"secret\" {{'package \"secret\" 'version \"1.0.0\"}}}} " ++
                 "\"beta\" {{}} \"secret\" {{}} \"root\" " ++
                 "{{\"alpha\" {{'package \"alpha\" 'version \"1.0.0\"}} " ++
@@ -1020,7 +1020,7 @@ const LockFixture = struct {
         defer std.testing.allocator.free(manifest_path);
         const manifest = try std.fmt.allocPrint(
             std.testing.allocator,
-            "{{'format 1 'name \"{s}\" 'version \"{s}\" 'sources [] 'exports [] 'requires {{}}}}\n",
+            "{{'format 2 'name \"{s}\" 'version \"{s}\" 'sources [] 'exports [] 'requires {{}}}}\n",
             .{ package, version },
         );
         defer std.testing.allocator.free(manifest);
@@ -1067,7 +1067,7 @@ const LockFixture = struct {
         defer std.testing.allocator.free(manifest_path);
         const manifest = try std.fmt.allocPrint(
             std.testing.allocator,
-            "{{'format 1 'name \"{s}\" 'version \"{s}\" 'sources [\"**/*\"] 'exports [{s}] 'requires {{}}}}\n",
+            "{{'format 2 'name \"{s}\" 'version \"{s}\" 'sources [\"**/*\"] 'exports [{s}] 'requires {{}}}}\n",
             .{ package, version, exports },
         );
         defer std.testing.allocator.free(manifest);
@@ -1108,7 +1108,7 @@ const LockFixture = struct {
         defer std.testing.allocator.free(manifest_path);
         const manifest = try std.fmt.allocPrint(
             std.testing.allocator,
-            "{{'format 1 'name \"{s}\" 'version \"{s}\" 'sources [\"**/*\"] 'exports [\"{s}\"] 'requires {{}}}}\n",
+            "{{'format 2 'name \"{s}\" 'version \"{s}\" 'sources [\"**/*\"] 'exports [\"{s}\"] 'requires {{}}}}\n",
             .{ package, version, module_name },
         );
         defer std.testing.allocator.free(manifest);
@@ -1939,7 +1939,7 @@ test "loader: catalog export verification resumes within its membership budget" 
     inline for ([_]bool{ false, true }) |missing| {
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "ecl.pkg",
-            .data = "{'format 1 'name \"dep\" 'version \"1.0.0\" 'sources [\"*.ecl\"] " ++
+            .data = "{'format 2 'name \"dep\" 'version \"1.0.0\" 'sources [\"*.ecl\"] " ++
                 "'requires {} 'exports [\"dep.c\" \"dep.b\" \"dep.a\"" ++
                 (if (missing) " \"dep.missing\"]}" else "]}"),
         });
@@ -1997,7 +1997,7 @@ test "loader: catalog export verification resumes within its membership budget" 
 test "loader: catalog membership is package-local and survives allocation failures" {
     var fixture = try LockFixture.init();
     defer fixture.deinit();
-    const manifest = "{'format 1 'name \"dep\" 'version \"1.0.0\" 'sources [\"*.ecl\"] " ++
+    const manifest = "{'format 2 'name \"dep\" 'version \"1.0.0\" 'sources [\"*.ecl\"] " ++
         "'exports [\"dep.only\"] 'requires {}}";
     try fixture.write("project/ecl.pkg", manifest);
     try fixture.write("project/module.ecl", "[] () 'dep.only @defm");

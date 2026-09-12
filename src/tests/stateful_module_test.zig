@@ -61,11 +61,11 @@ const ConcurrentLockFixture = struct {
         );
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "project/ecl.pkg",
-            .data = "{'format 1 'name \"root\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires {}}\n",
+            .data = "{'format 2 'name \"root\" 'version \"0.1.0\" 'sources [] 'exports [] 'requires {}}\n",
         });
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "project/ecl.lock",
-            .data = "{'format 1\n 'root \"root\"\n 'packages\n {\"race\" {'version \"1.0.0\" 'url \"https://example.invalid/race.tgz\" 'hash \"" ++ concurrent_hash ++ "\"}}\n 'requires\n {\"race\" {} \"root\" {\"race\" {'package \"race\" 'version \"1.0.0\"}}}}\n",
+            .data = "{'format 2\n 'root \"root\"\n 'packages\n {\"race\" {'version \"1.0.0\" 'source {'kind 'archive 'url \"https://example.invalid/race.tgz\"} 'hash \"" ++ concurrent_hash ++ "\"}}\n 'requires\n {\"race\" {} \"root\" {\"race\" {'package \"race\" 'version \"1.0.0\"}}}}\n",
         });
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "cache/race-1.0.0-" ++ concurrent_hash[7..] ++ "/race.ecl",
@@ -73,7 +73,7 @@ const ConcurrentLockFixture = struct {
         });
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "cache/race-1.0.0-" ++ concurrent_hash[7..] ++ "/ecl.pkg",
-            .data = "{'format 1 'name \"race\" 'version \"1.0.0\" 'sources [\"**/*\"] 'exports [\"race\"] 'requires {}}\n",
+            .data = "{'format 2 'name \"race\" 'version \"1.0.0\" 'sources [\"**/*\"] 'exports [\"race\"] 'requires {}}\n",
         });
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "cache/race-1.0.0-" ++ concurrent_hash[7..] ++ "/.ecl-package.catalog",

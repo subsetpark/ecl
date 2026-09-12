@@ -2787,7 +2787,10 @@ grammar without raising.
 hexadecimal digits.
 
 ### url?
-`( value -- bool )` — Test for a nonempty HTTPS URL.
+`( value -- bool )` — Test for a nonempty HTTPS URL without credentials.
+
+### commit?
+`( value -- bool )` — Test for a full 40-digit lowercase hexadecimal Git commit ID.
 
 ### owns?
 `( package-name module-name -- bool )` — Return 1 when a package owns a module
@@ -2831,9 +2834,17 @@ version strings. The empty list is `'shape`; a non-list or non-string member is
 
 ## pkg.manifest
 
+### validate-source
+`( source -- source )` — Validate an exact archive source (`kind`, `url`) or
+Git source (`kind`, `url`, `commit`). URLs use HTTPS without credentials;
+commits contain exactly 40 lowercase hexadecimal digits.
+
+### write-source
+`( source -- text )` — Render a validated source in canonical field order.
+
 ### validate-requirement
 `( requirement -- requirement )` — Validate and return one exact target
-package, minimum version, URL, and hash declaration.
+package, minimum version, tagged source, and hash declaration.
 
 ### validate
 `( candidate -- manifest )` — Return a manifest unchanged, or raise. A non-dict
@@ -2886,7 +2897,7 @@ carrying the requested module where applicable.
 `( root-manifest manifests -- lock )` — Resolve the reachable exact-version
 requirement graph by minimal version selection. `manifests` maps package names
 to exact-version manifest maps. Return a validated lock, or raise a structured
-error for malformed input, conflicting hashes, a selected-prefix collision, a
+error for malformed input, conflicting hashes or Git commits, a selected-prefix collision, a
 requirement cycle, or a missing manifest. It reaches no filesystem, network,
 or evaluation capability.
 

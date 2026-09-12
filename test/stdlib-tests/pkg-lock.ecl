@@ -4,21 +4,21 @@
  'stdlib.test.support ('equal 'raises-containing 'documented) import
 
  ### setp canonical-lock
- "{'format 1\n 'root \"my.proj\"\n 'packages\n {\"bar\" {'version \"0.3.0\" 'url \"https://e.com/b.tgz\" 'hash \"sha256-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\"}\n  \"foo\" {'version \"1.2.0\" 'url \"https://e.com/f.tgz\" 'hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}}\n 'requires\n {\"foo\" {\"bar\" {'package \"bar\" 'version \"0.3.0\"}}\n  \"my.proj\" {\"foo\" {'package \"foo\" 'version \"1.2.0\"}}}}\n"
+ "{'format 2\n 'root \"my.proj\"\n 'packages\n {\"bar\" {'version \"0.3.0\" 'source {'kind 'archive 'url \"https://e.com/b.tgz\"} 'hash \"sha256-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\"}\n  \"foo\" {'version \"1.2.0\" 'source {'kind 'archive 'url \"https://e.com/f.tgz\"} 'hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}}\n 'requires\n {\"foo\" {\"bar\" {'package \"bar\" 'version \"0.3.0\"}}\n  \"my.proj\" {\"foo\" {'package \"foo\" 'version \"1.2.0\"}}}}\n"
  'canonical-lock setp
 
  ### setp vendor-lock
- "{'format 1\n 'root \"my.proj\"\n 'store 'vendor\n 'packages\n {\"bar\" {'version \"0.3.0\" 'url \"https://e.com/b.tgz\" 'hash \"sha256-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\"}\n  \"foo\" {'version \"1.2.0\" 'url \"https://e.com/f.tgz\" 'hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}}\n 'requires\n {\"foo\" {\"bar\" {'package \"bar\" 'version \"0.3.0\"}}\n  \"my.proj\" {\"foo\" {'package \"foo\" 'version \"1.2.0\"}}}}\n"
+ "{'format 2\n 'root \"my.proj\"\n 'store 'vendor\n 'packages\n {\"bar\" {'version \"0.3.0\" 'source {'kind 'archive 'url \"https://e.com/b.tgz\"} 'hash \"sha256-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\"}\n  \"foo\" {'version \"1.2.0\" 'source {'kind 'archive 'url \"https://e.com/f.tgz\"} 'hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}}\n 'requires\n {\"foo\" {\"bar\" {'package \"bar\" 'version \"0.3.0\"}}\n  \"my.proj\" {\"foo\" {'package \"foo\" 'version \"1.2.0\"}}}}\n"
  'vendor-lock setp
 
  ### setp unsorted-lock
- {'format 1 'root "my.proj"
+ {'format 2 'root "my.proj"
   'packages
   {"foo"
-   {'version "1.2.0" 'url "https://e.com/f.tgz"
+   {'version "1.2.0" 'source {'kind 'archive 'url "https://e.com/f.tgz"}
     'hash "sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}
    "bar"
-   {'version "0.3.0" 'url "https://e.com/b.tgz"
+   {'version "0.3.0" 'source {'kind 'archive 'url "https://e.com/b.tgz"}
     'hash "sha256-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"}}
   'requires
   {"my.proj" {"foo" {'package "foo" 'version "1.2.0"}}
@@ -37,7 +37,7 @@
   'domain
   "store mode is 'vendor"
   raises-containing
-  ({'format 1 'root "a"} pkg.lock.write)
+  ({'format 2 'root "a"} pkg.lock.write)
   'domain
   "exactly the keys"
   raises-containing
@@ -52,13 +52,13 @@
   unsorted-lock "bar.worker" pkg.lock.why
   "bar.worker: my.proj -> foo 1.2.0 -> bar 0.3.0\n"
   equal
-  {'format 1 'root "root"
+  {'format 2 'root "root"
    'packages
    {"foo"
-    {'version "1.0.0" 'url "https://e.com/foo.tgz"
+    {'version "1.0.0" 'source {'kind 'archive 'url "https://e.com/foo.tgz"}
      'hash "sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}
     "foo.bar"
-    {'version "1.0.0" 'url "https://e.com/foo-bar.tgz"
+    {'version "1.0.0" 'source {'kind 'archive 'url "https://e.com/foo-bar.tgz"}
      'hash "sha256-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"}}
    'requires
    {"foo" {} "foo.bar" {}
@@ -77,10 +77,10 @@
   dup 'root at "my.proj" equal
   dup 'requires at "my.proj" at dict.keys ("foo") equal
   pop
-  ({'format 1 'root "a"
+  ({'format 2 'root "a"
     'packages
     {"foo"
-     {'version "1.0.0" 'url "https://e.com/f.tgz"
+     {'version "1.0.0" 'source {'kind 'archive 'url "https://e.com/f.tgz"}
       'hash "sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}
     'requires
     {"a" {"foo" {'package "foo" 'version "1.2.0"}} "foo" {}}}
@@ -88,13 +88,13 @@
   'domain
   "never below a minimum"
   raises-containing
-  ({'format 1 'root "a" 'packages {}
+  ({'format 2 'root "a" 'packages {}
     'requires {"a" {"foo" {'package "foo" 'version "1.2.0"}}}}
    pkg.lock.write)
   'domain
   "has a selection"
   raises-containing
-  ({'format 1 'root "a" 'packages {} 'requires {}} pkg.lock.write)
+  ({'format 2 'root "a" 'packages {} 'requires {}} pkg.lock.write)
   'domain
   "root's own requirements"
   raises-containing)

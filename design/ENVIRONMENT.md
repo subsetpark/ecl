@@ -456,7 +456,7 @@ chooses among minimum versions declared by reachable manifests.
 `ecl.pkg` has this shape:
 
 ```ecl
-{'format 1
+{'format 2
  'name "my.proj"
  'version "0.1.0"
  'sources ["src/**/*.ecl"]
@@ -464,18 +464,24 @@ chooses among minimum versions declared by reachable manifests.
  'requires
  {"statistics" {'package "foo"
                  'version "1.2.0"
-                 'url "https://example.com/foo-1.2.0.tgz"
+                 'source {'kind 'archive 'url "https://example.com/foo-1.2.0.tgz"}
                  'hash "sha256-<64 lowercase hex digits>"}}}
 ```
 
-`'format` is the integer `1`. `'name` is the package's canonical name, and
+`'format` is the integer `2`. `'name` is the package's canonical name, and
 `'version` is its version. `'sources` lists portable source-file globs, and
 `'exports` lists exact public module names. `'requires` maps consumer-local aliases to requirements.
 
-A requirement contains exactly `'package`, `'version`, `'url`, and `'hash`.
-The version is a minimum. The URL begins with `https://`. The hash has the
+A requirement contains exactly `'package`, `'version`, `'source`, and `'hash`.
+The version is a minimum. Sources are tagged dictionaries: an archive has
+`'kind 'archive` and `'url`; Git has `'kind 'git`, `'url`, and `'commit`.
+URLs use HTTPS without credentials. Git commits are full 40-character lowercase
+hexadecimal identifiers. The hash has the
 form `sha256-` followed by 64 lowercase hexadecimal digits. Aliases do not
 change ECL module names.
+
+Format 1 is rejected. To migrate, wrap each former URL in an archive source
+dictionary, set the manifest format to 2, and regenerate the lock with sync.
 
 Every dictionary key is declared by the format. A requirement cannot target
 the containing manifest's package. One consumer cannot target the same
@@ -545,9 +551,10 @@ root and selected manifests. Each selected version satisfies every recorded
 minimum.
 
 Traversal and diagnostics use canonical package, version, and requirer order.
-If declarations for one name and version share a hash and use different URLs,
-the lexicographically least URL is recorded. Different hashes conflict. A
-cycle reports its sorted distinct package names.
+For declarations sharing a name, version, and hash, the lexicographically
+least canonical source encoding is recorded. Different hashes conflict, as do
+differing Git commits for that identity, even when an archive mirror sorts
+first. A cycle reports its sorted distinct package names.
 
 Resolver failures use these messages and data fields:
 
@@ -572,11 +579,11 @@ keys`.
 `ecl.lock` is derived project data with this shape:
 
 ```ecl
-{'format 1
+{'format 2
  'root "my.proj"
  'packages
- {"bar" {'version "0.3.0" 'url "https://…" 'hash "sha256-…"}
-  "foo" {'version "1.2.0" 'url "https://…" 'hash "sha256-…"}}
+ {"bar" {'version "0.3.0" 'source {'kind 'archive 'url "https://…"} 'hash "sha256-…"}
+  "foo" {'version "1.2.0" 'source {'kind 'archive 'url "https://…"} 'hash "sha256-…"}}
  'requires
  {"foo" {"database" {'package "bar" 'version "0.3.0"}}
   "my.proj" {"statistics" {'package "foo" 'version "1.2.0"}}}}
@@ -631,7 +638,7 @@ A package artifact is a gzip-compressed tar byte list satisfying the archive
 rules above and these additional rules:
 
 - exactly one regular root file is named `ecl.pkg`;
-- the manifest is valid UTF-8 and valid format-1 package data;
+- the manifest is valid UTF-8 and valid format-2 package data;
 - ordinary directories and data files are allowed;
 - `.eclmod` files, links, and special nodes are forbidden;
 - the root names `.ecl-package.tgz` and `.ecl-package.catalog` are reserved;
@@ -786,7 +793,7 @@ grants the discovered root to evaluated code as the `'project` filesystem root
 with `read-data`, `inspect`, `create`, and `replace`; the discovered path
 itself never enters evaluated code. `init` acts on the `'cwd` root.
 
-- `init [name]` creates `src/` and a format-1 manifest at version `0.1.0`, with
+- `init [name]` creates `src/` and a format-2 manifest at version `0.1.0`, with
   `sources ["src/**/*.ecl"]` and no exports. An existing source directory is
   preserved. The working directory basename supplies the default name.
   Manifest creation never replaces an existing or racing file.

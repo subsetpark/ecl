@@ -8,12 +8,13 @@
  ### defp requirement
  (package version url hash -- requirement : "Construct requirement fixture data.")
  (|package version url hash|
-  {} 'package package put 'version version put 'url url put 'hash hash put) 'requirement defp
+  {} 'package package put 'version version put 'source {} 'kind 'archive put 'url url put put 'hash
+  hash put) 'requirement defp
 
  ### defp manifest
  (name version requires -- manifest : "Construct manifest fixture data.")
  (|name version requires|
-  {} 'format 1 put
+  {} 'format 2 put
   'name name put
   'version version put
   'sources ["**/*"] put
@@ -66,6 +67,32 @@
  ({}
   "b" {} "1.0.0" manifest-b put put
   "c" {} "1.2.0" manifest-c-12 put "1.5.0" manifest-c-15 put put) 'catalog defp
+
+ ### defp git-requirement
+ (commit -- requirement : "Require c 1.2.0 from one pinned Git source.")
+ (|commit|
+  req-c-12 'source {'kind 'git 'url "https://e.com/c.git"} 'commit commit put put)
+ 'git-requirement defp
+
+ ### defp git-graph
+ (left right -- root catalog : "Build two declarations of one Git package identity.")
+ (|left right|
+  root 'requires root 'requires at "c" left git-requirement put put
+  catalog "b" {} "1.0.0"
+  "b" "1.0.0" {} "c" right git-requirement put manifest put put)
+ 'git-graph defp
+
+ ### test pinned-git
+ (-- : "Preserve pinned sources and reject differing commits despite equal artifact hashes.")
+ ("0123456789abcdef0123456789abcdef01234567"
+  dup git-graph pkg.mvs.resolve
+  ['packages "c" 'source 'commit] at-path
+  "0123456789abcdef0123456789abcdef01234567" equal
+  ("0123456789abcdef0123456789abcdef01234567"
+   "1123456789abcdef0123456789abcdef01234567"
+   git-graph pkg.mvs.resolve)
+  'domain "conflicting Git commits" raises-containing)
+ 'pinned-git test
 
  ### test resolution
  (-- : "Select every reachable maximum and record all declared minimums.")

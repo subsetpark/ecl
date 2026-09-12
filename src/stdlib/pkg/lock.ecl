@@ -14,7 +14,7 @@
 
  ### setp selection-keys
  # Exact fields retained for one globally selected package.
- ['version 'url 'hash]
+ ['version 'source 'hash]
  'selection-keys setp
 
  ### setp edge-keys
@@ -28,11 +28,10 @@
   selection type 'dict match?
   'type error.new "a selected package is a dict" error.with-message assert
   selection selection-keys dict.keys-exactly?
-  'domain error.new "a selected package has exactly the keys 'version 'url 'hash"
+  'domain error.new "a selected package has exactly the keys 'version 'source 'hash"
   error.with-message assert
   selection 'version at pkg.version.validate pop
-  selection 'url at pkg.name.url?
-  'domain error.new "a selected package url is an https url" error.with-message assert
+  selection 'source at pkg.manifest.validate-source pop
   selection 'hash at pkg.name.hash?
   'domain error.new "a selected package hash is sha256- and 64 lowercase hex digits"
   error.with-message assert
@@ -90,8 +89,9 @@
   'domain error.new "a lock has exactly the keys 'format 'root 'packages 'requires, or adds 'store"
   error.with-message
   assert
-  candidate 'format at 1 match?
-  'domain error.new "the only lock format is 1" error.with-message assert
+  candidate 'format at 2 match?
+  'domain error.new "lock format 2 is required; regenerate format 1 locks after migrating ecl.pkg"
+  error.with-message assert
   candidate 'root at pkg.name.valid?
   'domain error.new "a package name is dot-joined lowercase segments" error.with-message assert
   candidate
@@ -133,9 +133,9 @@
 
  ### defp render-requirement
  (requirement -- text : "Render one selection in the canonical field order.")
- (('version at) ('url at) ('hash at) tri
-  3 pack (str) each
-  "{{'version {} 'url {} 'hash {}}}" str.format) 'render-requirement defp
+ (('version at str) ('source at pkg.manifest.write-source) ('hash at str) tri
+  3 pack
+  "{{'version {} 'source {} 'hash {}}}" str.format) 'render-requirement defp
 
  ### defp render-selection
  (pair -- text : "Render one `packages` entry.")
@@ -180,7 +180,7 @@
   lock 'packages at (render-selection) render-block
   lock 'requires at (render-requirer) render-block
   4 pack
-  "{{'format 1\n 'root {}{}\n 'packages\n {}\n 'requires\n {}}}\n" str.format) 'render-validated
+  "{{'format 2\n 'root {}{}\n 'packages\n {}\n 'requires\n {}}}\n" str.format) 'render-validated
  defp
 
  ### defp append-tree-line

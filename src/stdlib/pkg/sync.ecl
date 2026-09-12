@@ -63,8 +63,10 @@
  ### defp fetch-body
  (package requirement -- body : "Fetch and hash-check one exact package archive.")
  (|package requirement|
-  'target requirement 'url at pair dict.from-flat http.get-bytes
-  package requirement 'url at success-response
+  requirement 'source at 'kind at 'archive match?
+  'domain error.new "Git package fetching is not available in this build" error.with-message assert
+  'target requirement 'source at 'url at pair dict.from-flat http.get-bytes
+  package requirement 'source at 'url at success-response
   'body at
   package requirement 'hash at hash-checked) 'fetch-body defp
 
@@ -89,7 +91,8 @@
   body package inspect-checked pkg.manifest.read
   package version matching-manifest pop
   package version url hash 4 pack
-  (|package version url hash| 'package package 'version version 'url url 'hash hash)
+  (|package version url hash| 'package package 'version version 'source {} 'kind 'archive put 'url
+   url put 'hash hash)
   infra
   dict.from-flat
   pkg.manifest.validate-requirement) 'requirement-checked defp

@@ -203,7 +203,9 @@
 
  ### defp source-record
  (requirement package -- record : "Attach declaring-package provenance to a requirement.")
- (|requirement package| requirement 'requirer package put) 'source-record defp
+ (|requirement package|
+  requirement 'requirer package put
+  'git-commit requirement 'source at 'commit "" at-or put) 'source-record defp
 
  ### defp merge-source
  (prior name requirement package -- record :
@@ -218,8 +220,26 @@
   infra
   (hash-conflict) with
   when
-  prior 'url prior requirement ('url at) both lex-min put
+  prior 'git-commit prior 'git-commit at requirement 'source at 'commit "" at-or merge-commit put
+  'source prior requirement canonical-source put
   'requirer prior 'requirer at package lex-min put) 'merge-source defp
+
+ ### defp merge-commit
+ (left right -- commit : "Retain Git identity even when an archive mirror sorts first.")
+ (|left right|
+  left empty? right empty? or left right match? or
+  'domain error.new "one package version has conflicting Git commits" error.with-message assert
+  left empty? right () partial left () partial if) 'merge-commit defp
+
+ ### defp canonical-source
+ (prior requirement -- source : "Reject conflicting Git commits and order equivalent mirrors.")
+ (('source at) both canonical-source-pair) 'canonical-source defp
+
+ ### defp canonical-source-pair
+ (left right -- source : "Choose a source by canonical encoding after checking Git identity.")
+ (|left right|
+  left pkg.manifest.write-source right pkg.manifest.write-source cmp 1 =
+  right () partial left () partial if) 'canonical-source-pair defp
 
  ### defp lex-min
  (left right -- minimum : "Return the lexicographically lesser of two strings.")
@@ -396,7 +416,7 @@
  ### defp selection-pair
  (name state -- pair : "Return one selected package entry.")
  (|name state|
-  state 'sources name state selected-node pair at-path 'requirer del 'package del
+  state 'sources name state selected-node pair at-path 'requirer del 'git-commit del 'package del
   name swap pair) 'selection-pair defp
 
  ### defp selected-packages
@@ -429,13 +449,13 @@
   cat raze dict.from-flat) 'resolved-requires defp
 
  ### defp resolved-lock
- (state -- lock : "Build and validate the format-1 lock for a completed graph traversal.")
+ (state -- lock : "Build and validate the format-2 lock for a completed graph traversal.")
  (|state|
   state ['root 'name] at-path state selected-names cons
   dup pkg.name.collides? (prefix-collision) (pop) if
   state wrap
   (|state|
-   'format 1
+   'format 2
    'root state ['root 'name] at-path
    'packages state selected-packages
    'requires state resolved-requires)

@@ -48,7 +48,18 @@
 
  ### def url?
  (value -- bool : "Return 1 for a nonempty HTTPS URL.")
- (dup str.str? (("https://" str.starts?) (len 8 >) bi and) (pop 0) if) 'url? def
+ (dup str.str?
+  (|url|
+   url "https://" str.starts? url len 8 > and
+   url "@" str.contains? not and
+   url "\\" str.contains? not and
+   url "#" str.contains? not and
+   url (int 32 >) all? and
+   url 8 drop "/" split first empty? not and) (pop 0) if) 'url? def
+
+ ### def commit?
+ (value -- bool : "Return 1 for a full lowercase SHA-1 Git commit identifier.")
+ (dup str.str? ((len 40 =) (hex-chars chars-in?) bi and) (pop 0) if) 'commit? def
 
  ### def owns?
  (package-name module-name -- bool :

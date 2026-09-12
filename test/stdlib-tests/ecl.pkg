@@ -1,4 +1,4 @@
-{'format 1 'name "stdlib.test" 'version "0.1.0"
+{'format 2 'name "stdlib.test" 'version "0.1.0"
  'sources
  ["support.ecl" "result.ecl" "error.ecl" "str.ecl" "dict.ecl" "table.ecl" "csv.ecl" "json.ecl"
   "random.ecl" "archive.ecl" "time.ecl" "pkg-version.ecl" "pkg-name.ecl" "pkg-manifest.ecl"
