@@ -224,6 +224,6 @@ contributor instructions.
 ECL is distributed under the [BSD 3-Clause License](LICENSE).
 
 The default distribution includes maintained applications. `zig build -Dapps=false`
-installs the same interpreter and native SDK without application sources or Git
+installs the same interpreter without application sources or Git
 dependencies; it does not fetch or link libgit2. Use a separate installation prefix
 when comparing core-only and complete distributions.

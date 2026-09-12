@@ -103,7 +103,7 @@ pub const RuntimeInputs = struct {
     environ: []const machine.Environ.Entry,
     /// Whether the process has already claimed stdin as the program source.
     standard_input: machine.StandardInput.Availability = .data,
-    /// Absolute startup directory for process execution and project discovery.
+    /// Absolute startup directory for process execution and module-map discovery.
     initial_cwd: []const u8,
     process_limits: process_port.Limits = .{},
     filesystem: filesystem_port.Config = .{},

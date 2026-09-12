@@ -69,4 +69,3 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(content)
         except (BrokenPipeError, ssl.SSLError):
             pass
-

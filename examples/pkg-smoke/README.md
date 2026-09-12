@@ -1,44 +1,32 @@
-# Package manager smoke project
+# Portable package-lock example
 
-This is ecl's checked-in package-manager consumer. It depends on the public
-source-only `smoke` package, imports it through `ecl.lock`, and prints `42`.
-The manifest and lock are committed so an unrelated package operation can be
-checked for byte-stable output.
+This project imports the source-only fixture package `a` and prints `42`. Its
+version-controlled manifest and format-3 lock pin the complete dependency graph.
+The local alias `smoke` does not rename the module `a`.
 
-Package manifests now require format 2, including the manifest inside the
-downloaded archive. A format-1 release must be rebuilt and published under a
-new immutable URL, then added again to record its new hash. Updating only
-this consumer's manifest and lock does not migrate an old release artifact.
-
-Build ecl from the repository root, then run the complete workflow here:
+Run this workflow from the repository root. The seed script uses the maintained
+application's public cache API to store the checked-in deterministic archive.
+The illustrative HTTPS URL is never fetched; every synchronization below is
+offline.
 
 ```sh
+zig build -Doptimize=ReleaseSafe
+export ECL_CACHE="$PWD/.zig-cache/pkg-example-cache"
+./zig-out/bin/ecl --module-map apps/pkg/ecl.modules examples/pkg-smoke/seed-cache.ecl
 cd examples/pkg-smoke
 ECL=../../zig-out/bin/ecl
-
-"$ECL" pkg add smoke 1.0.0 \
-  https://github.com/subsetpark/ecl-pkg-smoke/releases/download/v1.0.0/smoke-1.0.0.tgz
-"$ECL" pkg sync
-"$ECL" main.ecl
 "$ECL" pkg sync --offline
-"$ECL" pkg tree
-"$ECL" pkg why smoke.answer
+"$ECL" main.ecl
 "$ECL" pkg verify
+"$ECL" pkg tree
+"$ECL" pkg why a.answer
+"$ECL" pkg vendor --offline
+"$ECL" main.ecl
 git diff --exit-code -- ecl.pkg ecl.lock
 ```
 
-The successful transcript is:
-
-```text
-added smoke 1.0.0
-synced 1 packages
-42
-synced 1 packages
-example.pkg-smoke
-example.pkg-smoke -> smoke 1.0.0
-smoke.answer: example.pkg-smoke -> smoke 1.0.0
-verified 1 packages
-```
-
-The first two commands use the network. Everything from `main.ecl` through
-`pkg verify` uses the immutable store entry selected by the checked-in lock.
+Both executions print `42`. Synchronization and vendoring preserve the portable
+lock; generated dependency trees live in immutable local generations. The
+interpreter loads only `ecl.modules`. A fresh checkout of the manifest and lock
+reproduces the same graph when its pinned artifact is available. Dependency
+changes require `ecl pkg update`; ordinary sync never silently updates a lock.

@@ -1,10 +1,9 @@
 //! Slow, exhaustive allocation-failure coverage across initialized sessions.
 //!
-//! Each logical standard-library, package, and host surface owns an independent
+//! Each logical standard-library, module-map, and host surface owns an independent
 //! failure window. Operations in one module still share its publication cost;
 //! unrelated modules never run as prefixes of one another's allocation
-//! ordinals. Package synchronization and CLI additionally separate module
-//! publication from their comparatively expensive operations.
+//! ordinals. Package policy uses these same public facilities from ECL.
 //!
 //! Component-level probes elsewhere inject failures into a directly
 //! constructed subject (`list.zig`, `dict.zig`, `env.zig`, `equal.zig`, the
@@ -359,7 +358,7 @@ fn checkPostInitAllocationFailureShard(
 /// sets `fail_index` to that ordinal plus `failure_offset` when the offset is
 /// non-null. Session initialization itself is already exhausted by the core
 /// and project-session probes; replaying those same ordinals for every
-/// standard-library, package, and host bundle multiplied the slow gate without
+/// standard-library, module-map, and host bundle multiplied the slow gate without
 /// adding coverage.
 fn checkAllPostInitAllocationFailuresParallel(
     backing_allocator: std.mem.Allocator,
@@ -675,7 +674,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
 }
 
 /// Exhausts the module-map discovery branch of Session initialization once.
-/// Every standard-library and package probe below uses the same host shape, so
+/// Every standard-library and module-map probe below uses the same host shape, so
 /// their post-init windows do not need to replay these ordinals independently.
 fn projectSessionInitializationProbe(allocator: std.mem.Allocator) !void {
     var locked_allocator = LockedAllocator{ .child = allocator };

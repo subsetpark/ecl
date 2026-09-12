@@ -37,7 +37,8 @@
  (|project|
   manifest str project 'directory at "ecl.pkg" fs.create-text
   "broken" project 'directory at "ecl.modules" fs.create-text
-  project started project pair (build) with call) 'exercise defp
+  project pkg.project.lock
+  project started project pair (build) with call port.close) 'exercise defp
 
  ### defp build
  (work project -- : "Install one exact dependency without any network or shared cache.")
@@ -59,6 +60,8 @@
   work lock pkg.resolution.write pkg.install.activate
   project pkg.install.verify
   project started project pair (reproduce) with call
+  project rejected-map
+  project recover-publication
   project work 'location at check-damage) 'build defp
 
  ### defp reproduce
@@ -72,6 +75,59 @@
   work manifest str lock pkg.resolution.write pkg.generation.finish
   work lock pkg.resolution.write pkg.install.activate
   project pkg.install.verify) 'reproduce defp
+
+ ### defp rejected-map
+ (project -- : "Reject a conflicting local declaration before publishing a candidate generation.")
+ (|project|
+  "[] () 'sample.api @defm" project 'directory at "collision.ecl" fs.publish-text
+  project started project pair (reject-work) with call) 'rejected-map defp
+
+ ### defp reject-work
+ (work project -- : "Join failed staging and retain both active root files exactly.")
+ (|work project|
+  project 'directory at "ecl.modules" fs.read-text
+  project 'directory at "ecl.lock" fs.read-text
+  work manifest 'sources ["collision.ecl"] put str lock pkg.resolution.write
+  3 pack (pkg.generation.finish) @attempt result.err? 1 equal
+  work 'stage at port.close
+  project 'directory at work 'location at fs.exists? 0 equal
+  project 'directory at "ecl.lock" fs.read-text equal
+  project 'directory at "ecl.modules" fs.read-text equal
+  project pkg.install.verify) 'reject-work defp
+
+ ### defp recover-publication
+ (project -- : "Prepare a different valid graph and interrupt after publishing its root lock.")
+ (|project|
+  project started project pair (recover-work) with call) 'recover-publication defp
+
+ ### defp recover-work
+ (work project -- :
+  "An existing generation remains consistent while recovery completes activation.")
+ (|work project|
+  project 'directory at "ecl.modules" fs.read-text
+  work manifest 'requires {} put 1 pkg.install.selection
+  work project 3 pack (interrupt-work) with call) 'recover-work defp
+
+ ### defp interrupt-work
+ (previous-map next-lock work project -- :
+  "Replay the real generation validator across the two root writes.")
+ (|previous-map next-lock work project|
+  manifest 'requires {} put pkg.manifest.write
+  dup project 'directory at "ecl.pkg" fs.publish-text
+  work swap next-lock pkg.generation.finish
+  project 'directory at work 'location at next-lock
+  project 'path at (pkg.verify.publication) partial pkg.transaction.prepare
+  next-lock project 'directory at "ecl.lock" fs.publish-text
+  project wrap (pkg.install.verify) @attempt result.err? 1 equal
+  project 'directory at "ecl.modules" fs.read-text previous-map equal
+  project previous-map pkg.layout.from-reference pkg.verify.generation
+  project 'directory at previous-map pkg.layout.from-reference "/ecl.lock" cat fs.read-text
+  lock pkg.resolution.write equal
+  project pkg.install.recover project pkg.install.verify
+  project 'directory at "ecl.modules" fs.read-text work 'location at pkg.layout.reference equal
+  project 'directory at "ecl.lock" fs.read-text next-lock equal
+  project 'directory at ".ecl/publication.ecl" fs.exists? 0 equal
+  project pkg.install.recover project pkg.install.verify) 'interrupt-work defp
 
  ### defp check-damage
  (project location -- :

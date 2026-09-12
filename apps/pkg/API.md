@@ -112,4 +112,3 @@ and never evaluate it.
 `( manifest -- text )` — Validate a manifest and render its stable one-line
 form with a terminal newline, preserving requirement dictionary insertion
 order.
-

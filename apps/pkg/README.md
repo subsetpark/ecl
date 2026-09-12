@@ -6,7 +6,8 @@ interpreter consumes only `ecl.modules`; it never discovers or interprets
 `ecl.pkg`, `ecl.lock`, or application recovery records.
 
 See [manifest and source conventions](FORMATS.md) and the
-[pure data API reference](API.md).
+[pure data API reference](API.md). Verification evidence and separate core/complete
+distribution measurements are recorded in [VALIDATION.md](VALIDATION.md).
 
 ## Portable project state
 
@@ -81,6 +82,13 @@ application modules and broken project runtime state does not prevent startup.
 `zig build test-pkg-application` owns a temporary caller directory and cache,
 then invokes the built-in ECL test runner for command assertions. The host
 fixture supplies process isolation and does not duplicate package policy tests.
+
+`zig build test-pkg-git` launches the installed application in isolated caller
+processes against a controlled HTTPS Git server. ECL tests cover mixed archive
+and Git sources, moved tags, unavailable commits, corrupt project state,
+explicit updates, portable-lock reproduction in fresh checkouts, and vendoring
+after relocation and removal of the shared cache. The host fixture only creates repositories,
+serves Git, copies checkout inputs, and launches test phases.
 
 ## Source package archives
 
@@ -164,7 +172,9 @@ selection, construction, and activation under the project mutation lock.
 `zig build test-pkg-generation` runs this full acceptance through ECL's test
 runner, including initial resolution, exact lock preservation, explicit update
 selection, offline reproduction, activation, and independent verification of
-older generations. It is included in the full test suite; the fast precommit
+older generations. It also rejects a conflicting candidate map before directory
+publication and recovers an interrupted root-lock write using the full generation
+validator while the previous snapshot stays consistent. It is included in the full test suite; the fast precommit
 tier retains the smaller policy cases in `test-pkg-app`.
 
 ## Publication and recovery

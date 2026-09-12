@@ -1,7 +1,1 @@
-{'format 2
- 'root "example.pkg-smoke"
- 'packages
- {"smoke" {'version "1.0.0" 'source {'kind 'archive 'url "https://github.com/subsetpark/ecl-pkg-smoke/releases/download/v1.0.0/smoke-1.0.0.tgz"} 'hash "sha256-315c772a16778673e205ae556185d25b4109ad40641e60e6b5d96d1f7db99745"}}
- 'requires
- {"example.pkg-smoke" {"smoke" {'package "smoke" 'version "1.0.0"}}
-  "smoke" {}}}
+{'format 3 'root "example.pkg-smoke" 'root-requires {"smoke" {'package "a" 'version "1.0.0" 'source {'kind 'archive 'url "https://example.invalid/a-1.0.0.tgz"} 'hash "sha256-50e119dd9bfcff3d9eacc68977d5792f4bd3448d3b23e654838b2add0c5a48e0"}} 'packages {"a" {'version "1.0.0" 'source {'kind 'archive 'url "https://example.invalid/a-1.0.0.tgz"} 'hash "sha256-50e119dd9bfcff3d9eacc68977d5792f4bd3448d3b23e654838b2add0c5a48e0"}} 'requires {"example.pkg-smoke" {"smoke" {'package "a" 'version "1.0.0"}} "a" {}}}

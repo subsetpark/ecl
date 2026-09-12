@@ -259,6 +259,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe);
     var git_native_run: ?*std.Build.Step = null;
     var pkg_fetch_run: ?*std.Build.Step = null;
+    var pkg_git_run: ?*std.Build.Step = null;
     if (git_extension) |extension| {
         b.installDirectory(.{
             .source_dir = b.path("apps/pkg/src"),
@@ -269,6 +270,11 @@ pub fn build(b: *std.Build) void {
         b.installFile("apps/pkg/application.json", "share/ecl/apps/pkg/application.json");
         b.installFile("apps/pkg/installed.modules", "share/ecl/apps/pkg/ecl.modules");
         b.getInstallStep().dependOn(native_build.installExtension(b, extension, "share/ecl/apps/pkg"));
+        const pkg_git_acceptance = b.addSystemCommand(&.{ "python3", "test/package_git_application.py" });
+        pkg_git_acceptance.addArtifactArg(exe);
+        pkg_git_acceptance.addArtifactArg(extension);
+        pkg_git_run = &pkg_git_acceptance.step;
+        b.step("test-pkg-git", "Run installed package commands, mixed sources, and portable-lock reproduction in ECL").dependOn(&pkg_git_acceptance.step);
         const git_native_acceptance = b.addSystemCommand(&.{ "python3", "test/git_extension.py" });
         git_native_acceptance.addArtifactArg(exe);
         git_native_acceptance.addArtifactArg(extension);
@@ -381,6 +387,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_tests.step);
     if (git_native_run) |step| test_step.dependOn(step);
     if (pkg_fetch_run) |step| test_step.dependOn(step);
+    if (pkg_git_run) |step| test_step.dependOn(step);
     test_step.dependOn(native_negative_step);
     const run_ecl_tests = b.addRunArtifact(exe);
     run_ecl_tests.addArg("test");
