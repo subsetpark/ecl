@@ -251,6 +251,7 @@ const QueueItem = union(enum) {
     cancellation: *TaskCell,
     wait: *WaitSet,
     external_group: *ExternalGroupState,
+    cooperative: *Cooperative,
 };
 
 const QueueEntry = struct {
@@ -314,7 +315,7 @@ const WaitRegistration = struct {
 /// A wait's slot in the timer heap. A node carries a deadline only while it
 /// is linked: there is no detached node with a stale instant to misread.
 const TimerNode = struct {
-    wait: *WaitSet,
+    target: union(enum) { wait: *WaitSet, cooperative: *Cooperative },
     membership: union(enum) {
         detached,
         linked: struct { index: usize, deadline: Deadline },
@@ -338,6 +339,7 @@ const TimerChunk = [timer_chunk_capacity]?*TimerNode;
 const TimerHeap = struct {
     chunks: std.ArrayList(*TimerChunk) = .empty,
     len: usize = 0,
+    reservations: usize = 0,
 
     fn deinit(self: *TimerHeap, allocator: std.mem.Allocator) void {
         std.debug.assert(self.len == 0);
@@ -351,19 +353,32 @@ const TimerHeap = struct {
         return self.get(0);
     }
 
-    fn insert(
-        self: *TimerHeap,
-        allocator: std.mem.Allocator,
-        node: *TimerNode,
-        deadline: Deadline,
-    ) error{OutOfMemory}!void {
+    fn ensureCapacity(self: *TimerHeap, allocator: std.mem.Allocator, count: usize) error{OutOfMemory}!void {
+        if (count <= self.chunks.items.len * timer_chunk_capacity) return;
+        const chunk = try allocator.create(TimerChunk);
+        errdefer allocator.destroy(chunk);
+        chunk.* = [_]?*TimerNode{null} ** timer_chunk_capacity;
+        try self.chunks.append(allocator, chunk);
+    }
+
+    fn reserve(self: *TimerHeap, allocator: std.mem.Allocator) error{OutOfMemory}!void {
+        try self.ensureCapacity(allocator, self.len + self.reservations + 1);
+        self.reservations += 1;
+    }
+
+    fn insert(self: *TimerHeap, allocator: std.mem.Allocator, node: *TimerNode, deadline: Deadline) error{OutOfMemory}!void {
+        // Ordinary waits cannot consume capacity promised to reserved work.
+        try self.ensureCapacity(allocator, self.len + self.reservations + 1);
+        self.insertPrepared(node, deadline);
+    }
+
+    fn insertReserved(self: *TimerHeap, node: *TimerNode, deadline: Deadline) void {
+        self.reservations -= 1;
+        self.insertPrepared(node, deadline);
+    }
+
+    fn insertPrepared(self: *TimerHeap, node: *TimerNode, deadline: Deadline) void {
         std.debug.assert(node.membership == .detached);
-        if (self.len == self.chunks.items.len * timer_chunk_capacity) {
-            const chunk = try allocator.create(TimerChunk);
-            errdefer allocator.destroy(chunk);
-            chunk.* = [_]?*TimerNode{null} ** timer_chunk_capacity;
-            try self.chunks.append(allocator, chunk);
-        }
         const index = self.len;
         self.len += 1;
         self.set(index, node);
@@ -382,6 +397,10 @@ const TimerHeap = struct {
         self.set(last_index, null);
         self.len = last_index;
         node.membership = .detached;
+        switch (node.target) {
+            .wait => {},
+            .cooperative => self.reservations += 1,
+        }
         if (index == last_index) return;
         self.set(index, last);
         last.relink(index);
@@ -528,7 +547,7 @@ const WaitSet = struct {
             .registrations = registrations,
             .canonical = canonical,
             .state = .{ .initializing = .{ .request = request } },
-            .timer = .{ .wait = self },
+            .timer = .{ .target = .{ .wait = self } },
             .queue = .{ .item = .{ .wait = self } },
         };
         return self;
@@ -1573,6 +1592,187 @@ const WorkerState = struct {
     cooperative_arbitration: ExecutorArbitration = .{},
 };
 
+/// Reserved bounded work on the ordinary scheduler queue. Its owner controls
+/// admission and cancellation; this capability only schedules and joins slices.
+/// Creation reserves its timer slot and executor before publication. Neither a
+/// wake nor a suspended callback's retirement allocates or starts a thread.
+pub const Cooperative = opaque {
+    pub const Progress = union(enum) { yielded, waiting, parked: Deadline, completed };
+    const State = struct {
+        allocator: std.mem.Allocator,
+        worker: *const WorkerScheduler,
+        parent: *anyopaque,
+        retain: *const fn (*anyopaque) void,
+        release: *const fn (*anyopaque) void,
+        advance: *const fn (*anyopaque) Progress,
+        finish: *const fn (*anyopaque) void,
+        mutex: std.Io.Mutex = .init,
+        phase: union(enum) { reserved, queued, running: bool, waiting: enum { event, timer }, finished } = .reserved,
+        queue: QueueEntry,
+        timer: TimerNode,
+    };
+    fn state(self: *Cooperative) *State {
+        return @ptrCast(@alignCast(self));
+    }
+    /// Failure borrows the parent. Success owns reserved storage; start acquires
+    /// the execution pin. Discard an unstarted reservation with deinit.
+    pub fn create(worker: *const WorkerScheduler, comptime Parent: type, parent: *Parent) error{ OutOfMemory, Io }!*Cooperative {
+        const Callbacks = struct {
+            fn retain(raw: *anyopaque) void {
+                const owner: *Parent = @ptrCast(@alignCast(raw));
+                owner.retainReadiness();
+            }
+            fn release(raw: *anyopaque) void {
+                const owner: *Parent = @ptrCast(@alignCast(raw));
+                owner.releaseReadiness();
+            }
+            fn advance(raw: *anyopaque) Progress {
+                const owner: *Parent = @ptrCast(@alignCast(raw));
+                return owner.advanceCooperative();
+            }
+            fn finish(raw: *anyopaque) void {
+                const owner: *Parent = @ptrCast(@alignCast(raw));
+                owner.finishCooperative();
+            }
+        };
+        const owned = try worker.allocator().create(State);
+        errdefer worker.allocator().destroy(owned);
+        try worker.ensureStarted();
+        try worker.ensureTimer();
+        const scheduler_state = worker.privateState();
+        std.Io.Threaded.mutexLock(&scheduler_state.timer_mutex);
+        defer std.Io.Threaded.mutexUnlock(&scheduler_state.timer_mutex);
+        try scheduler_state.timer_heap.reserve(worker.allocator());
+        const self: *Cooperative = @ptrCast(owned);
+        owned.* = .{
+            .allocator = worker.allocator(),
+            .worker = worker,
+            .parent = parent,
+            .retain = Callbacks.retain,
+            .release = Callbacks.release,
+            .advance = Callbacks.advance,
+            .finish = Callbacks.finish,
+            .queue = .{ .item = .{ .cooperative = self } },
+            .timer = .{ .target = .{ .cooperative = self } },
+        };
+        return self;
+    }
+    fn releaseReservation(self: *Cooperative) void {
+        const scheduler_state = self.state().worker.privateState();
+        std.Io.Threaded.mutexLock(&scheduler_state.timer_mutex);
+        scheduler_state.timer_heap.reservations -= 1;
+        std.Io.Threaded.mutexUnlock(&scheduler_state.timer_mutex);
+    }
+    /// Consumes only an unstarted reservation or fully joined work. Finished
+    /// storage may outlive the scheduler; it no longer owns a timer reservation.
+    pub fn deinit(self: *Cooperative) void {
+        const owned = self.state();
+        switch (owned.phase) {
+            .reserved => self.releaseReservation(),
+            .finished => {},
+            .queued, .running, .waiting => @panic("destroying live cooperative work"),
+        }
+        owned.allocator.destroy(owned);
+    }
+    pub fn start(self: *Cooperative) void {
+        const owned = self.state();
+        std.Io.Threaded.mutexLock(&owned.mutex);
+        defer std.Io.Threaded.mutexUnlock(&owned.mutex);
+        switch (owned.phase) {
+            .reserved => {},
+            .queued, .running, .waiting, .finished => @panic("cooperative work already started"),
+        }
+        owned.retain(owned.parent);
+        owned.phase = .queued;
+        owned.worker.enqueue(&owned.queue);
+    }
+    /// Coalesces notifications, including notification during a slice that is
+    /// about to park. Waking parked work removes its timer before rescheduling.
+    pub fn wake(self: *Cooperative) void {
+        self.wakeInternal(false);
+    }
+    fn wakeInternal(self: *Cooperative, timer_delivery: bool) void {
+        const owned = self.state();
+        std.Io.Threaded.mutexLock(&owned.mutex);
+        var timer_pin = false;
+        if (timer_delivery) {
+            const scheduler_state = owned.worker.privateState();
+            std.Io.Threaded.mutexLock(&scheduler_state.timer_mutex);
+            const current = owned.phase == .waiting and owned.phase.waiting == .timer and owned.timer.membership == .detached;
+            std.Io.Threaded.mutexUnlock(&scheduler_state.timer_mutex);
+            if (!current) {
+                std.Io.Threaded.mutexUnlock(&owned.mutex);
+                return;
+            }
+        }
+        switch (owned.phase) {
+            .reserved, .queued, .finished => {},
+            .running => |*notified| notified.* = true,
+            .waiting => {
+                const scheduler_state = owned.worker.privateState();
+                std.Io.Threaded.mutexLock(&scheduler_state.timer_mutex);
+                timer_pin = owned.timer.membership == .linked;
+                if (timer_pin) scheduler_state.timer_heap.remove(&owned.timer);
+                std.Io.Threaded.mutexUnlock(&scheduler_state.timer_mutex);
+                owned.phase = .queued;
+                owned.worker.enqueue(&owned.queue);
+            },
+        }
+        // Capture the release borrow before unlocking: execution can finish as
+        // soon as this lock opens, leaving only the detached timer's pin alive.
+        const parent = owned.parent;
+        const release = owned.release;
+        std.Io.Threaded.mutexUnlock(&owned.mutex);
+        if (timer_pin) release(parent);
+    }
+    fn run(self: *Cooperative) void {
+        const owned = self.state();
+        std.Io.Threaded.mutexLock(&owned.mutex);
+        owned.phase = .{ .running = false };
+        std.Io.Threaded.mutexUnlock(&owned.mutex);
+        const progress = owned.advance(owned.parent);
+        std.Io.Threaded.mutexLock(&owned.mutex);
+        const notified = owned.phase.running;
+        switch (progress) {
+            .completed => {
+                self.releaseReservation();
+                owned.phase = .finished;
+                const parent = owned.parent;
+                const finish = owned.finish;
+                const release = owned.release;
+                std.Io.Threaded.mutexUnlock(&owned.mutex);
+                finish(parent);
+                release(parent);
+                return;
+            },
+            .yielded => owned.phase = .queued,
+            .waiting => owned.phase = if (notified) .queued else .{ .waiting = .event },
+            .parked => |deadline| {
+                if (notified or deadline.reachedBy(owned.worker.now())) {
+                    owned.phase = .queued;
+                } else {
+                    const scheduler_state = owned.worker.privateState();
+                    std.Io.Threaded.mutexLock(&scheduler_state.timer_mutex);
+                    owned.retain(owned.parent);
+                    scheduler_state.timer_heap.insertReserved(&owned.timer, deadline);
+                    std.Io.Threaded.mutexUnlock(&scheduler_state.timer_mutex);
+                    owned.phase = .{ .waiting = .timer };
+                    scheduler_state.timer_wake.set(blockingIo());
+                }
+            },
+        }
+        if (owned.phase == .queued) owned.worker.enqueue(&owned.queue);
+        std.Io.Threaded.mutexUnlock(&owned.mutex);
+    }
+    fn timerExpired(self: *Cooperative) void {
+        const owned = self.state();
+        const parent = owned.parent;
+        const release = owned.release;
+        self.wakeInternal(true);
+        release(parent);
+    }
+};
+
 /// Scope-owned resources derive allocation and bounded retirement from one
 /// scheduler root. Membership must end before that root is destroyed; closed
 /// resource values retain only independently owned issuer metadata.
@@ -2237,6 +2437,7 @@ pub const WorkerScheduler = enum(usize) {
             .cancellation => |cell| self.runCancellation(cell),
             .wait => |wait| self.runWait(wait),
             .external_group => |group| group.advance(),
+            .cooperative => |work| work.run(),
         }
     }
 
@@ -3031,8 +3232,13 @@ fn timerMain(scheduler: *const WorkerScheduler) void {
             if (deadline.reachedBy(scheduler.now())) {
                 scheduler_state.timer_heap.remove(node);
                 std.Io.Threaded.mutexUnlock(&scheduler_state.timer_mutex);
-                node.wait.select(.timeout);
-                node.wait.release();
+                switch (node.target) {
+                    .wait => |wait| {
+                        wait.select(.timeout);
+                        wait.release();
+                    },
+                    .cooperative => |work| work.timerExpired(),
+                }
                 continue;
             }
             next_deadline = deadline;
@@ -3328,4 +3534,100 @@ test "native: scope cancellation observes an entire external publication batch" 
         try std.testing.expectEqual(@as(usize, 1), member.cancellations);
         try std.testing.expectEqual(@as(usize, 0), member.refs.load(.acquire));
     }
+}
+
+test "native: cooperative work reserves timer and execution before allocation-free wake and completion" {
+    const Probe = struct {
+        work: *Cooperative = undefined,
+        worker: *const WorkerScheduler,
+        refs: std.atomic.Value(usize) = .init(0),
+        finished: std.atomic.Value(bool) = .init(false),
+        parked: std.Io.Event = .unset,
+        waiting: std.Io.Event = .unset,
+        joined: std.Io.Event = .unset,
+        step: usize = 0,
+        pub fn retainReadiness(self: *@This()) void {
+            _ = self.refs.fetchAdd(1, .monotonic);
+        }
+        pub fn releaseReadiness(self: *@This()) void {
+            if (self.refs.fetchSub(1, .acq_rel) == 1) self.joined.set(blockingIo());
+        }
+        pub fn advanceCooperative(self: *@This()) Cooperative.Progress {
+            self.step += 1;
+            switch (self.step) {
+                1 => {
+                    // A notification issued inside the callback must survive
+                    // its subsequent transition to waiting.
+                    self.work.wake();
+                    return .waiting;
+                },
+                2 => {
+                    const deadline = self.worker.deadlineAfter(1000) catch unreachable;
+                    self.parked.set(blockingIo());
+                    return .{ .parked = deadline };
+                },
+                3 => {
+                    const deadline = self.worker.deadlineAfter(1000) catch unreachable;
+                    self.waiting.set(blockingIo());
+                    return .{ .parked = deadline };
+                },
+                4 => return .completed,
+                else => unreachable,
+            }
+        }
+        pub fn finishCooperative(self: *@This()) void {
+            self.finished.store(true, .release);
+        }
+    };
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var cleanup = heap.testing.Cleanup.init(failing.allocator());
+    defer cleanup.deinit();
+    var runtime = try Scheduler.init(cleanup.capability(), .{ .worker_pool = 2 }, .manual);
+    var scope = TaskScope.init(runtime.worker());
+    defer runtime.deinit(&scope);
+    var probe: Probe = .{ .worker = runtime.worker() };
+    const work = try Cooperative.create(runtime.worker(), Probe, &probe);
+    defer work.deinit();
+    probe.work = work;
+    failing.fail_index = failing.alloc_index;
+    work.start();
+    probe.parked.waitUncancelable(blockingIo());
+    while (runtime.timerEntryCount() == 0) std.Thread.yield() catch unreachable;
+    try runtime.advanceManualClock(1000);
+    probe.waiting.waitUncancelable(blockingIo());
+    while (runtime.timerEntryCount() == 0) std.Thread.yield() catch unreachable;
+    work.wake();
+    probe.joined.waitUncancelable(blockingIo());
+    try std.testing.expect(probe.finished.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 4), probe.step);
+    try std.testing.expectEqual(@as(usize, 0), runtime.timerEntryCount());
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
+test "native: cooperative reservations unwind every construction allocation failure" {
+    const Probe = struct {
+        pub fn retainReadiness(_: *@This()) void {
+            unreachable;
+        }
+        pub fn releaseReadiness(_: *@This()) void {
+            unreachable;
+        }
+        pub fn advanceCooperative(_: *@This()) Cooperative.Progress {
+            unreachable;
+        }
+        pub fn finishCooperative(_: *@This()) void {
+            unreachable;
+        }
+        fn run(allocator: std.mem.Allocator) !void {
+            var cleanup = heap.testing.Cleanup.init(allocator);
+            defer cleanup.deinit();
+            var runtime = try Scheduler.init(cleanup.capability(), .cooperative, .manual);
+            var scope = TaskScope.init(runtime.worker());
+            defer runtime.deinit(&scope);
+            var probe: @This() = .{};
+            const work = try Cooperative.create(runtime.worker(), @This(), &probe);
+            defer work.deinit();
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
 }

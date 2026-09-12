@@ -1931,6 +1931,12 @@ Suspended work remains cancellable and must resume to settle its private state
 before queue retirement; dropping an observer does not discard that work.
 Invocation state distinguishes suspended work from returned callbacks, so
 cancellation cannot mistake a scheduling boundary for terminal completion.
+Cooperative resources reserve a scheduler continuation and timer capacity before
+publication. Ready slices share the scheduler's normal arbitration; parking
+owns a cancellable timer pin, and notifications during execution survive the
+transition to a wait. Completion returns the reservation before releasing the
+execution pin. Retained, finished resource values therefore do not retain
+scheduler authority or require it for destruction.
 
 The common controller service validates lane capacity, admits prepared
 exchanges, supplies admission readiness, sequences initialization and graceful
