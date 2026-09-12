@@ -35,6 +35,39 @@ Conventions:
   otherwise. A `# =>` comment shows the value or values left for the command
   printer; it is not part of the word's behavior.
 
+## host
+
+### cwd
+`( -- path )` — Return the absolute startup directory captured by the Session
+host as UTF-8 text. This does not consult `PWD` or change the working directory.
+
+### executable
+`( -- path )` — Ask the operating system for the current executable's absolute
+path and return UTF-8 text. This does not consult `PATH` or trust the executable
+name supplied in the argument vector. Raise `'io` when the host cannot provide
+the path or it is not UTF-8. This is an observation, not an open-file identity:
+subsequent deletion or replacement can make the path unavailable or stale.
+Neither metadata operation grants authority beyond the existing filesystem and
+process facilities. Text construction is cancellable.
+
+## source
+
+### declarations
+`( quotation -- list )` — Inspect parsed source without executing it. Return
+the symbols immediately preceding top-level `@defm` words, in source order.
+Preserve duplicate names and report literal spellings without validating
+namespace or export policy. Ignore computed names and declarations inside
+quotations, lists, dictionaries, strings, or comments. This reports syntactic
+declarations, not proof that executing the source would register a module.
+Like other quotation operations, this accepts a list (`'type` otherwise).
+Use `parse` to inspect text, with its ordinary parse failures. Inspection is
+cancellable.
+
+```ecl
+"[] () 'example @defm" parse source.declarations
+# => ('example)
+```
+
 ## Prelude and core
 
 ### *
@@ -1384,8 +1417,9 @@ and are not coerced.
 ### unpack-tgz
 `( bytes root destination -- regular-file-paths )` — Validate and atomically
 unpack a gzip-compressed tar byte list beneath a previously absent
-`destination`, a canonical relative path under the named Session filesystem
-`root` (see [`fs`](#fs)). The destination must
+`destination`, a canonical relative path under a named Session filesystem root
+or scope-owned directory resource (see [`fs`](#fs)). Extraction owns its
+directory lease until publication or rollback completes. The destination must
 name a child entry, not `.`. Return normalized regular-file paths in archive
 order. Unsafe, linked, special, duplicate, malformed, or over-limit members
 are `'domain`; invalid byte items are `'domain`; wrong container kinds are
@@ -1394,6 +1428,29 @@ exhausted operation quota is `'overflow`; filesystem and destination
 conflicts are `'io`. Failure never publishes a partial destination. See the
 environment's [`archive` contract](ENVIRONMENT.md#byte-lists-and-archives)
 for the complete format, limit, containment, and publication contract.
+
+### open-tgz
+`( bytes -- archive )` — Validate a gzip tar with the same hostile-input parser
+and limits as `unpack-tgz`, then return a scope-owned archive resource without
+filesystem writes. No manifest or package identity is required. The resource
+retains the validated uncompressed document until `port.close` or scope exit;
+cleanup is joined and advances incrementally through member storage.
+
+### next-member
+`( archive -- metadata )` — Select the next archive member and return
+`{'path string 'kind symbol 'size int}` in archive order. Kinds are `'file` and
+`'directory`; size is the content length in bytes. `{}` denotes stable end.
+Advancing skips unread contents of the previous member. Metadata owns its path
+independently of later cursor operations or closure.
+
+### read-member
+`( archive maximum -- bytes )` — Read up to `maximum` bytes from the selected
+member, advancing its content position. The maximum must be an integer from
+1 through 65,536. `[]` denotes end of that member, a directory, or no selected
+member. Reads copy bounded chunks into independently owned values; concurrent
+reads consume distinct chunks, with unspecified completion order. Coordinate
+member advancement with reads when using the archive across tasks. Operations
+on a closed archive raise `'io`.
 
 ## clock
 
@@ -1692,9 +1749,9 @@ the error with `'msg` set to `message`.
 
 ## fs
 
-Filesystem words. Every word names a `root` by symbol and a `path` string.
-The command line uses `'cwd` for the startup working directory; package commands
-also provide `'project`. All filesystem operations are available on each root,
+Filesystem words accept a named `root` symbol or a directory resource and a `path` string.
+The command line uses `'cwd` for the startup working directory. Applications
+may explicitly open other host directories. All filesystem operations are available on each root,
 subject to operating-system permissions and runtime limits.
 
 A path is a UTF-8 slash path in the canonical grammar: `.` names the root
@@ -1709,11 +1766,11 @@ Resolution is descriptor-relative beneath the root's retained handle. An
 intermediate symlink is followed only while its target stays within the root;
 an absolute target, a relative target that would pop above the root, more than
 40 followed links, or more than 64 KiB of expanded resolver input is refused.
-`read-bytes`, `read-text`, `stat`, `list`, and the source side of `copy`
+`child-dir`, `open-list`, `read-bytes`, `read-text`, `stat`, `list`, and the source side of `copy`
 follow a final link under the same rule; every other word acts on the final
 entry itself. Containment is never a lexical prefix check.
 
-Every failure carries a data dictionary with `'operation` (the word's own
+Path-taking failures carry a data dictionary with `'operation` (the word's own
 symbol), `'root` and `'path` (or `'source-root`, `'source-path`,
 `'destination-root`, and `'destination-path` for `copy`), and a closed
 `'reason` symbol: `'invalid-path`, `'unknown-root`,
@@ -1738,6 +1795,67 @@ entry durability, ownership, timestamps, and extended attributes are not
 promised. Created files use the host's ordinary creation mode under the
 process umask, a replaced file keeps its permission bits, and a copy carries
 the source's permission bits under the umask.
+
+### open-dir
+`( host-path -- directory )` — Open an absolute host directory path, subject to
+OS permissions, and return a scope-owned port resource. Host symlinks may be
+followed while opening this explicit root. Relative paths are rejected.
+`port.close` closes the resource and joins cleanup; scope exit does the same.
+A closing directory rejects new operations with `'io`. Closure waits for
+admitted operations to release their independent descriptor leases, then joins
+backend cleanup.
+
+### lock
+`( root path -- lock )` — Acquire an exclusive advisory lock on a regular file,
+creating an empty file if the path is absent. Existing contents are preserved;
+final symlinks and non-regular files are rejected. Contention parks the task
+between attempts and is cancellable. The returned port owns the lock until
+`port.close` or its owning scope exits. A lock is not a directory resource.
+The lock file remains after release. Coordinating applications must keep its
+directory entry in place: replacing or deleting it establishes a different
+lock identity. Advisory locking coordinates participating applications and
+does not prevent other filesystem access.
+
+### child-dir
+`( root path -- directory )` — Acquire an independent directory resource beneath
+an existing root. Resolution, including final symlinks, is confined to that
+root. The acquired directory becomes the new containment boundary; closing
+its ordinary parent resource does not close it. Children of a staging resource,
+including further descendants, close when staging is sealed or closed even
+after task ownership transfer. `.` acquires the root itself.
+
+### stage-dir
+`( root destination -- stage )` — Create a private sibling of the destination
+and return a scope-owned directory resource. The destination parent must exist.
+Filesystem operations accept the stage as a root. `port.close` or scope exit
+joins descendant closure and recursive rollback; no destination is published.
+The staging directory uses mode `0700` under the process umask.
+
+### open-list
+`( root path -- cursor )` — Open a scope-owned incremental enumeration of a
+confined directory. The cursor is a port resource, distinct from a directory
+root. It owns its descriptor until `port.close` or scope exit. An enumeration
+opened through staging or its descendants also closes when staging seals.
+
+### next-entry
+`( cursor -- entry )` — Return the next `{'name string 'kind symbol}` dictionary,
+or `{}` at stable end. Kinds are `'file`, `'directory`, `'symlink`, and `'other`;
+dot entries are omitted and symlinks are described without following them.
+Names must be UTF-8. Order and visibility of concurrent namespace changes follow
+the host filesystem; this is not a directory snapshot. Concurrent calls reserve
+distinct entries, though their results may complete out of order. Each result
+owns its name independently of subsequent calls or cursor closure. A closed
+cursor raises `'io`. Reading does not materialize the whole directory or apply
+the aggregate limits of `list`; callers can stop and close at any entry.
+
+### commit-dir
+`( stage -- )` — Seal the stage, reject further operations, close its descendant
+resources, and wait for admitted operations before atomically publishing to the
+absent destination. Any existing entry causes an `'io` failure and is preserved;
+failure retains the sealed staging resource for joined cleanup with `port.close`.
+Success joins descriptor closure and keeps the published tree even if the task
+is subsequently cancelled. Namespace publication is atomic; directory-entry
+durability across a host crash is not promised.
 
 ### copy
 `( source-root source-path destination-root destination-path -- )` — Copy a
@@ -1777,6 +1895,20 @@ nothing is silently omitted.
 `{'kind 'file 'size n}` for a regular file, `{'kind 'directory}`,
 `{'kind 'symlink}`, or `{'kind 'other}`. An absent entry is `'not-found`.
 
+### mkdirs
+`( root path -- )` — Create missing intermediate and final directories. Existing
+directories are preserved, including contained symlink targets. `.` is a no-op.
+Every component uses the ordinary confined resolver. Failure or cancellation
+may leave directories created before that point.
+
+### remove-tree
+`( root path -- )` — Recursively remove a directory and its contents. The final
+entry must be a directory, and `.` is rejected. Symlinks inside the tree are
+removed without following their targets. Work is incremental and cancellable;
+failure may leave partially removed contents with temporary entry names.
+Removal uses bounded descriptor storage and needs no new allocations once the
+selected directory has been opened.
+
 ### mkdir
 `( root path -- )` — Create exactly one absent directory beneath an existing
 parent. There is no recursive parent creation; an existing entry of any kind is
@@ -1808,6 +1940,21 @@ without replacing. The source may be a regular file, symlink, or directory and
 is not followed; an existing destination is `'already-exists`, and a
 destination on another device is `'cross-device` rather than an emulated
 copy.
+
+### publish-bytes
+`( bytes root path -- )` — Atomically publish complete file contents, creating
+an absent destination or replacing one that exists. An entry observed before
+staging must be a regular file; a symlink, directory, or other entry is
+`'not-regular`. Use the observed file's permissions, or host defaults on first
+creation. Publication replaces the final directory entry without following it;
+concurrent publications each succeed and the last commit wins. An intervening
+directory causes failure. A failed operation preserves its destination, and
+cancellation before commit removes staging. Cancellation after commit does not
+roll back publication. Visibility is atomic; directory-entry durability across
+a crash is not promised.
+
+### publish-text
+`( string root path -- )` — Publish UTF-8 text under the `publish-bytes` contract.
 
 ### replace-bytes
 `( bytes root path -- )` — Atomically replace an existing regular file with
@@ -2754,276 +2901,6 @@ slashes with no `.`, `..`, or NUL component and no leading or trailing slash.
 This predicate never normalizes; normalize first when accepting untrusted
 text.
 
-## pkg.data
-
-Pure structural helpers shared by the package-format modules.
-
-### assert-inert-entry
-`( pair -- )` — Discard an inert dict entry, or raise `'domain` with its key
-when its value recursively contains an executable word.
-
-### read-one
-`( text -- form )` — Parse exactly one form without evaluating it. Unreadable
-text is `'parse`; zero or multiple forms are `'shape`.
-
-#### Examples
-
-```ecl
-"[1 2]" pkg.data.read-one
-# => [1 2]
-```
-
-### sorted-entries
-`( dict -- pairs )` — Return a dict's entries in ascending key order.
-
-## pkg.name
-
-### valid?
-`( value -- bool )` — Test the canonical dot-joined lowercase package-name
-grammar without raising.
-
-### hash?
-`( value -- bool )` — Test for `sha256-` followed by exactly 64 lowercase
-hexadecimal digits.
-
-### url?
-`( value -- bool )` — Test for a nonempty HTTPS URL.
-
-### owns?
-`( package-name module-name -- bool )` — Return 1 when a package owns a module
-name: the name itself, or a name continuing after a `.` boundary. `foo` owns
-`foo.bar` and does not own `foobar`. A non-string is `'type`; a malformed
-canonical name is `'domain`.
-
-#### Examples
-
-```ecl
-"foo" "foo.bar" pkg.name.owns?
-# => 1
-```
-
-### collides?
-`( names -- bool )` — Return 1 when any two canonical names overlap under
-`pkg.name.owns?`.
-
-## pkg.version
-
-### validate
-`( candidate -- parts )` — Validate a package version and return its core
-fields and prerelease identifiers. A non-string is `'type`; a spelling outside
-the supported SemVer grammar is `'domain`.
-
-### less?
-`( left right -- bool )` — Return 1 when the left version precedes the right
-under Semantic Versioning 2.0.0 §11. Both operands are validated.
-
-#### Examples
-
-```ecl
-"1.2.0" "1.10.0" pkg.version.less?
-# => 1
-```
-
-### max
-`( versions -- version )` — Return the greatest member of a nonempty list of
-version strings. The empty list is `'shape`; a non-list or non-string member is
-`'type`; every member is validated before comparison.
-
-## pkg.manifest
-
-### validate-requirement
-`( requirement -- requirement )` — Validate and return one exact target
-package, minimum version, URL, and hash declaration.
-
-### validate
-`( candidate -- manifest )` — Return a manifest unchanged, or raise. A non-dict
-is `'type`; an undeclared key, unsupported format, malformed name, version,
-hash, or URL, self-requirement, ownership collision, or executable word value
-is `'domain`. Sources are distinct safe portable glob strings. Exports are distinct,
-exact, package-owned module names; exporting a parent does not export its
-children. Private module names are visible only within their defining file. Requirement keys are local
-aliases and do not rewrite module names.
-
-### read
-`( text -- manifest )` — Parse one form with `pkg.data.read-one`, validate it,
-and never evaluate it.
-
-### write
-`( manifest -- text )` — Validate a manifest and render its stable one-line
-form with a terminal newline, preserving requirement dictionary insertion
-order.
-
-## pkg.lock
-
-### validate
-`( candidate -- lock )` — Return a lock unchanged after checking its grammar,
-root provenance, selected packages, alias-to-package minimum edges, and
-satisfaction.
-
-### read
-`( text -- lock )` — Parse one form without evaluation and validate it.
-
-### vendor
-`( lock -- lock )` — Validate a lock and return it with the closed
-`'store 'vendor` mode. No path is accepted or produced.
-
-### write
-`( lock -- text )` — Validate a lock and render its canonical sorted layout,
-including the terminal newline.
-
-### tree
-`( lock -- text )` — Render the root and one canonical line per recorded
-dependency edge, ordered by requiring package and required package.
-
-### why
-`( lock module -- text )` — Render one deterministic root-to-owner path for a
-canonical qualified module. An unowned or unreachable module is `'domain`
-carrying the requested module where applicable.
-
-## pkg.mvs
-
-### resolve
-`( root-manifest manifests -- lock )` — Resolve the reachable exact-version
-requirement graph by minimal version selection. `manifests` maps package names
-to exact-version manifest maps. Return a validated lock, or raise a structured
-error for malformed input, conflicting hashes, a selected-prefix collision, a
-requirement cycle, or a missing manifest. It reaches no filesystem, network,
-or evaluation capability.
-
-## pkg.store
-
-Package archive and publication capabilities over the Session's package
-authority. A package-command Session (the `ecl pkg` subcommands) retains
-handles for the shared cache store and the project vendor store; words name
-one with the symbol `'cache` or `'vendor` and address an entry by its
-canonical `<name>-<version>-<hex>` key. No absolute path, host handle, generic
-rename, or recursive deletion reaches ECL. An ordinary evaluation Session has
-no package authority and every store word is `'domain`; a package Session
-whose host selected no cache reports `'io` naming `ECL_CACHE`,
-`XDG_CACHE_HOME`, and `HOME`; a non-canonical key or unknown store symbol is
-`'domain`. Every traversal, write, rollback, and output materialization
-advances through bounded scheduler work.
-
-### gc
-`( retained-store-keys -- removed-count )` — Preserve the supplied canonical
-keys and every unknown cache node, and remove other canonical real-directory
-entries of the shared cache through bounded detach/walk/delete phases. An
-absent cache removes nothing. A non-list, non-string key, or malformed store
-key is `'type` or `'domain`; filesystem failures are `'io`.
-
-### inspect
-`( bytes package-name -- manifest-text )` — Validate one tgz's hostile-input
-and source-only archive envelope without creating a filesystem destination.
-Return the sole root `ecl.pkg` as exact UTF-8 text. This word needs no
-package authority.
-
-### install
-`( bytes package-name store key -- regular-file-paths )` — Repeat archive
-validation, derive and persist the staged manifest/glob/module catalog with
-the actual archive hash, and atomically publish the entry `key` in the named store, which must be absent.
-Return normalized regular-file paths only after commit; failure never exposes
-a partial destination.
-
-### manifest
-`( store key -- manifest-text )` — Read the installed entry's root `ecl.pkg`
-as exact UTF-8 text without following a link at the entry or file level.
-
-### present?
-`( store key -- bool )` — Return 0 for an absent entry and 1 for a real
-directory. A symlink, non-directory, or inaccessible entry is `'io`.
-
-### read-seal
-`( store key package-name hash -- bytes )` — Perform the same streamed seal
-verification as `verify`, then return its exact octets as an ordinary integer
-byte list. Catalog metadata is not required. It never reads a caller-selected child filename.
-
-### verify
-`( store key package-name hash -- )` — Stream the installed entry's reserved
-archive seal and require its SHA-256 to equal `hash`, then compare the persisted
-catalog against a freshly derived catalog. It performs no writes. Failures name
-the package and carry the key for host-I/O errors.
-
-### ensure-catalog
-`( store key package-name hash -- )` — Require current-format catalog metadata
-matching the package identity and hash. When invalid or absent, verify the seal,
-validate the installed source tree, and atomically publish replacement metadata.
-Valid metadata needs no rebuild. Failure or cancellation preserves the previous
-catalog. Invalid source data is `'domain`; filesystem failures are `'io`.
-
-## pkg.sync
-
-Synchronization runs inside a package-command Session: stores are the
-`'cache` and `'vendor` symbols of `pkg.store`, and the project's `ecl.pkg` and
-`ecl.lock` are reached through the `'project` filesystem root. Cache selection
-is host policy and never an evaluated word.
-
-### install-immutable
-`( bytes package store key -- )` — Install one immutable package with
-`pkg.store.install`, accepting a concurrently published real directory as
-success and re-raising every other failure.
-
-### store-key
-`( package requirement -- key )` — Derive the canonical
-`<name>-<version>-<hex>` key from a validated selection.
-
-### store-keys
-`( lock -- keys )` — Validate a lock and return its selected canonical keys in
-package-name order.
-
-### store-root
-`( lock -- store )` — Return `'vendor` for a vendored lock and `'cache`
-otherwise.
-
-### write-project-file
-`( text path -- )` — Publish one project data file beneath `'project`:
-`fs.create-text` when the path is absent, otherwise the strict
-`fs.replace-text`. A concurrent collision surfaces as the `fs` failure rather
-than becoming an upsert.
-
-### requirement
-`( package version url -- requirement )` — Fetch and inspect one exact HTTPS
-package archive and return its validated version, URL, and computed hash
-declaration.
-
-### verify
-`( lock -- count )` — Verify every selected seal in the lock's store and
-return the selection count.
-
-### run
-`( root-manifest -- lock )` — Discover and hash-check the complete exact
-transitive manifest graph, resolve it with `pkg.mvs.resolve`, fetch and
-atomically install only selected missing store entries, then publish the
-canonical `ecl.lock` with `write-project-file`. Return the validated lock. See
-[Synchronization](ENVIRONMENT.md#synchronization) for the two-pass fetch,
-error, and partial-success contracts.
-
-### run-offline
-`( root-manifest -- lock )` — Perform the same discovery, resolution,
-installation check, and lock publication using only present store entries. An
-absent exact entry is `'io` naming its package, store, and key; no request is
-opened.
-
-## pkg.cli
-
-The CLI module is an ordinary line-oriented adapter. `src/main.zig` validates
-argv shapes, discovers the project as trusted host startup work, and grants it
-to the Session as the `'project` filesystem root together with the package
-store authority; no absolute path enters evaluated code. These words return no
-stack output and print one stable line on success.
-
-- `init ( arguments -- )` creates `ecl.pkg` in the `'cwd` root and prints
-  `initialized ecl.pkg for <name>`.
-- `add ( arguments -- )` records one exact fetched requirement and prints
-  `added <name> <version>`.
-- `sync` and `sync-offline` `( arguments -- )` print `synced <count> packages`.
-- `tree` and `why` `( arguments -- )` print `pkg.lock.tree` and
-  `pkg.lock.why` output unchanged.
-- `verify ( arguments -- )` prints `verified <count> packages`.
-- `vendor ( arguments -- )` populates the fixed vendor store, atomically marks
-  the lock vendored, and prints `vendored <count> packages`.
-- `gc ( lock-paths -- )` unions at least one named lock, each a canonical
-  relative path beneath `'cwd` (an absolute or escaping path is `'domain`),
-  and prints `removed <count> packages`.
 
 ## result
 

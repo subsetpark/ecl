@@ -11,11 +11,13 @@ const help =
     \\    ecl <SOURCE> [ARGS...]     Evaluate source and print the stack
     \\    ecl fmt <FILE|->           Format source to standard output
     \\    ecl fmt -w <FILE>          Format and atomically rewrite a file
-    \\    ecl pkg <SUBCOMMAND>       Manage the current project's packages
-    \\    ecl test [OPTIONS] [-- ARGS...]  Run the root project's tests
+    \\    ecl check-map <FILE>       Validate an inert module map
+    \\    ecl <APPLICATION> [ARGS...] Run an installed application
+    \\    ecl test [OPTIONS] [-- ARGS...]  Run the local module scope tests
     \\
     \\OPTIONS:
     \\    -e, --eval <SOURCE>        Evaluate source text
+    \\    --module-map <FILE>       Load an explicit module map (before command)
     \\    -h, --help                 Show this help
     \\    -V, --version              Show the version
     \\
@@ -33,7 +35,7 @@ pub fn main(init: std.process.Init) void {
             break :failure 1;
         },
         error.InvalidHostConfig => failure: {
-            writeFile(init.io, .stderr, "ecl: runtime directories, package store, or limits are invalid\n") catch
+            writeFile(init.io, .stderr, "ecl: runtime directories, module map, or limits are invalid\n") catch
                 std.process.exit(1);
             break :failure 1;
         },
@@ -44,6 +46,7 @@ const Startup = struct {
     process: std.process.Init,
     cwd: []const u8,
     environ: []const ecl.machine.Environ.Entry,
+    module_map: ?[]const u8 = null,
 };
 
 fn entry(process: std.process.Init) AppError!u8 {
@@ -53,10 +56,16 @@ fn entry(process: std.process.Init) AppError!u8 {
     return dispatch(init);
 }
 
-fn dispatch(init: Startup) AppError!u8 {
+fn dispatch(startup: Startup) AppError!u8 {
+    var init = startup;
     const arguments = init.process.minimal.args.toSlice(init.process.arena.allocator()) catch
         return error.OutOfMemory;
-    const cli = arguments[1..];
+    var cli = arguments[1..];
+    if (cli.len != 0 and std.mem.eql(u8, cli[0], "--module-map")) {
+        if (cli.len < 2) return emitSyntheticError(init, .io, "--module-map requires a file", null);
+        init.module_map = cli[1];
+        cli = cli[2..];
+    }
     if (cli.len == 0) {
         const worker_count = try configuredWorkers(init) orelse return 2;
         const tty = std.Io.File.stdin().isTty(init.process.io) catch return error.Io;
@@ -75,7 +84,7 @@ fn dispatch(init: Startup) AppError!u8 {
         return 0;
     }
     if (std.mem.eql(u8, first, "fmt")) return formatCommand(init, cli[1..]);
-    if (std.mem.eql(u8, first, "pkg")) return packageCommand(init, cli[1..]);
+    if (std.mem.eql(u8, first, "check-map")) return checkMapCommand(init, cli[1..]);
     if (std.mem.eql(u8, first, "test")) return testCommand(init, cli[1..]);
     const worker_count = try configuredWorkers(init) orelse return 2;
     if (std.mem.eql(u8, first, "-e") or std.mem.eql(u8, first, "--eval")) {
@@ -88,6 +97,7 @@ fn dispatch(init: Startup) AppError!u8 {
         return executeSource(init, "<command>", cli[1], cli[2..], true, .data, worker_count);
     }
     if (std.mem.eql(u8, first, "-")) return runStdin(init, cli[1..], worker_count);
+    if (try installedApplication(init, first, cli[1..], worker_count)) |status| return status;
     const is_file: bool = file: {
         std.Io.Dir.cwd().access(init.process.io, first, .{ .read = true }) catch |err| switch (err) {
             error.FileNotFound, error.NameTooLong, error.BadPathName => break :file false,
@@ -115,6 +125,99 @@ fn dispatch(init: Startup) AppError!u8 {
         return emitSyntheticError(init, .io, message, null);
     }
     return executeSource(init, "<command>", first, cli[1..], true, .data, worker_count);
+}
+
+/// Installation-owned descriptors are inert JSON, parsed before constructing
+/// a Session. Application startup therefore does not inspect the caller's map.
+const ApplicationDescriptor = struct {
+    format: u32,
+    entry: []const u8,
+    module_map: []const u8,
+};
+
+fn checkMapCommand(init: Startup, arguments: []const []const u8) AppError!u8 {
+    const from_stdin = arguments.len == 3 and std.mem.eql(u8, arguments[0], "--document") and std.mem.eql(u8, arguments[2], "-");
+    if (!from_stdin and (arguments.len != 1 or std.mem.eql(u8, arguments[0], "-"))) {
+        try writeFile(init.process.io, .stderr, "ecl check-map: usage: ecl check-map <FILE> | --document <FILE> -\n");
+        return 1;
+    }
+    const path = try std.fs.path.resolve(init.process.gpa, &.{ init.cwd, arguments[if (from_stdin) 1 else 0] });
+    defer init.process.gpa.free(path);
+    var host = ecl.heap.HostOwner.init(init.process.gpa);
+    defer host.cleanup().drain();
+    const map = (if (from_stdin) input: {
+        var buffer: [8192]u8 = undefined;
+        var stream = std.Io.File.stdin().reader(init.process.io, &buffer);
+        const source = stream.interface.allocRemaining(init.process.gpa, .limited(16 * 1024 * 1024)) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return emitIoError(init, "cannot read bounded module map input", err),
+        };
+        defer init.process.gpa.free(source);
+        break :input ecl.module_map.validate(host.cleanup(), init.process.io, source, path, true);
+    } else ecl.module_map.load(host.cleanup(), init.process.io, path)) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Invalid => return emitSyntheticError(init, .io, "invalid module map", null),
+    };
+    defer map.deinit();
+    return 0;
+}
+
+fn applicationName(name: []const u8) bool {
+    if (name.len == 0 or name.len > 64 or !std.ascii.isAlphabetic(name[0])) return false;
+    for (name) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '-') return false;
+    return true;
+}
+
+fn applicationRelativePath(path: []const u8) bool {
+    if (path.len == 0 or path.len > 4096 or !std.unicode.utf8ValidateSlice(path)) return false;
+    for (path) |byte| if (byte < 32 or byte == 127 or byte == '\\' or byte == ':') return false;
+    var parts = std.mem.splitScalar(u8, path, '/');
+    while (parts.next()) |part| {
+        if (part.len == 0 or std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, "..")) return false;
+    }
+    return true;
+}
+
+fn installedApplication(init: Startup, name: []const u8, arguments: []const []const u8, worker_count: usize) AppError!?u8 {
+    if (!applicationName(name)) return null;
+    const allocator = init.process.gpa;
+    const executable = std.process.executablePathAlloc(init.process.io, allocator) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.Io,
+    };
+    defer allocator.free(executable);
+    const bin = std.fs.path.dirname(executable) orelse return null;
+    const prefix = std.fs.path.dirname(bin) orelse return null;
+    const app_dir = try std.fs.path.join(allocator, &.{ prefix, "share", "ecl", "apps", name });
+    defer allocator.free(app_dir);
+    const descriptor_path = try std.fs.path.join(allocator, &.{ app_dir, "application.json" });
+    defer allocator.free(descriptor_path);
+    const bytes = std.Io.Dir.cwd().readFileAlloc(init.process.io, descriptor_path, allocator, .limited(16 * 1024)) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return null,
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return try emitIoError(init, "cannot read installed application descriptor", err),
+    };
+    defer allocator.free(bytes);
+    const parsed = std.json.parseFromSlice(ApplicationDescriptor, allocator, bytes, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return try emitSyntheticError(init, .io, "invalid installed application descriptor", null),
+    };
+    defer parsed.deinit();
+    const descriptor = parsed.value;
+    if (descriptor.format != 1 or !applicationRelativePath(descriptor.entry) or !applicationRelativePath(descriptor.module_map))
+        return try emitSyntheticError(init, .io, "invalid installed application descriptor", null);
+    const entry_path = try std.fs.path.join(allocator, &.{ app_dir, descriptor.entry });
+    defer allocator.free(entry_path);
+    const map = try std.fs.path.join(allocator, &.{ app_dir, descriptor.module_map });
+    defer allocator.free(map);
+    const source = std.Io.Dir.cwd().readFileAlloc(init.process.io, entry_path, allocator, .limited(16 * 1024 * 1024)) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return try emitIoError(init, "cannot read installed application entry", err),
+    };
+    defer allocator.free(source);
+    var application = init;
+    application.module_map = map;
+    return try executeSource(application, entry_path, source, arguments, false, .data, worker_count);
 }
 
 const test_help =
@@ -152,7 +255,7 @@ const CliRuntime = struct {
     diagnostic_buffer: [4096]u8,
     output_writer: std.Io.File.Writer,
     diagnostic_writer: std.Io.File.Writer,
-    roots: [2]ecl.filesystem_port.Root,
+    roots: [1]ecl.filesystem_port.Root,
     session: ecl.session.Session,
 
     fn init(
@@ -162,15 +265,10 @@ const CliRuntime = struct {
         worker_count: usize,
         standard_input: ecl.machine.StandardInput.Availability,
         mode: ecl.session.CommandMode,
-        project_root: ?[]const u8,
     ) AppError!void {
         self.output_writer = std.Io.File.stdout().writerStreaming(startup.process.io, &self.output_buffer);
         self.diagnostic_writer = std.Io.File.stderr().writerStreaming(startup.process.io, &self.diagnostic_buffer);
         self.roots[0] = cwdRoot(startup.cwd);
-        const root_count: usize = if (project_root) |path| count: {
-            self.roots[1] = .{ .name = "project", .absolute_path = path };
-            break :count 2;
-        } else 1;
         self.session = try ecl.session.Session.init(
             startup.process.gpa,
             arguments,
@@ -179,10 +277,11 @@ const CliRuntime = struct {
                 .output = &self.output_writer.interface,
                 .diagnostics = &self.diagnostic_writer.interface,
                 .ecl_path = startup.process.environ_map.get("ECL_PATH"),
+                .module_map = startup.module_map,
                 .environ = startup.environ,
                 .standard_input = standard_input,
                 .initial_cwd = startup.cwd,
-                .filesystem = .{ .roots = self.roots[0..root_count] },
+                .filesystem = .{ .roots = &self.roots },
                 .clock = .{ .wall = .host },
             },
             .{ .worker_pool = worker_count },
@@ -227,17 +326,17 @@ fn testCommand(init: Startup, arguments: []const []const u8) AppError!u8 {
     // SAFETY: init fills borrowed storage and the Session before use; only a
     // successful init installs the teardown defer, and cli stays at this address.
     var cli: CliRuntime = undefined;
-    try cli.init(init, trailing, worker_count, .data, .language_tests, null);
+    try cli.init(init, trailing, worker_count, .data, .language_tests);
     defer cli.deinit();
     const runtime = &cli.session;
 
-    while (true) switch (try runtime.advanceRootPreload()) {
+    while (true) switch (try runtime.advanceLocalPreload()) {
         .pending => {},
         .complete => break,
-        .no_project => return emitSyntheticError(
+        .no_map => return emitSyntheticError(
             init,
             .io,
-            "ecl test requires a lock-backed root project; run `ecl pkg sync`",
+            "ecl test requires an ecl.modules map with a designated local scope",
             null,
         ),
         .invalid => |message| return emitSyntheticError(init, .io, message, null),
@@ -267,44 +366,6 @@ fn testCommand(init: Startup, arguments: []const []const u8) AppError!u8 {
     };
 }
 
-const package_help =
-    \\USAGE:
-    \\    ecl pkg <init|add|sync|tree|why|verify|vendor|gc>
-    \\    ecl pkg init [name]
-    \\    ecl pkg add <name> <version> <https-url>
-    \\    ecl pkg sync [--offline]
-    \\    ecl pkg tree
-    \\    ecl pkg why <module>
-    \\    ecl pkg verify
-    \\    ecl pkg vendor
-    \\    ecl pkg gc <lock-file> [lock-file ...]
-    \\
-    \\Lock files given to gc are canonical relative paths beneath the working
-    \\directory; commands read and write project files only beneath the
-    \\discovered project root.
-    \\
-;
-
-fn packageUsage(init: Startup) AppError!u8 {
-    try writeFile(init.process.io, .stderr, package_help);
-    return 1;
-}
-
-/// The host-selected shared package cache as an absolute path, or null when
-/// no environment variable names one. A relative selection keeps its
-/// established meaning by resolving once against the captured startup
-/// directory; evaluated package code never derives or sees this path.
-fn cacheRootFromEnviron(init: Startup, startup_directory: []const u8) AppError!?[]u8 {
-    const selected = try ecl.pkg_lock.cacheRoot(init.process.gpa, .{
-        .ecl_cache = init.process.environ_map.get("ECL_CACHE"),
-        .xdg_cache_home = init.process.environ_map.get("XDG_CACHE_HOME"),
-        .home = init.process.environ_map.get("HOME"),
-    }) orelse return null;
-    if (std.fs.path.isAbsolute(selected)) return selected;
-    defer init.process.gpa.free(selected);
-    return std.fs.path.join(init.process.gpa, &.{ startup_directory, selected }) catch return error.OutOfMemory;
-}
-
 /// The sentinel slice `realPathFileAlloc` hands back must be freed as one.
 fn startupDirectory(init: Startup) AppError![:0]u8 {
     return std.Io.Dir.cwd().realPathFileAlloc(init.process.io, ".", init.process.gpa) catch |err| switch (err) {
@@ -313,118 +374,6 @@ fn startupDirectory(init: Startup) AppError![:0]u8 {
     };
 }
 
-fn packageCommand(init: Startup, arguments: []const []const u8) AppError!u8 {
-    if (arguments.len == 0) return packageUsage(init);
-    const command = arguments[0];
-    const worker_count = try configuredWorkers(init) orelse return 2;
-
-    if (std.mem.eql(u8, command, "init")) {
-        if (arguments.len != 1 and arguments.len != 2) return packageUsage(init);
-        const cwd = std.Io.Dir.cwd().realPathFileAlloc(init.process.io, ".", init.process.gpa) catch |err|
-            return emitIoError(init, "cannot resolve package project directory", err);
-        defer init.process.gpa.free(cwd);
-        const name = if (arguments.len == 2) arguments[1] else std.fs.path.basename(cwd);
-        return executeSource(
-            init,
-            "<pkg:init>",
-            "args pkg.cli.init",
-            &.{name},
-            false,
-            .program_source,
-            worker_count,
-        );
-    }
-
-    const startup = try startupDirectory(init);
-    defer init.process.gpa.free(startup);
-    if (std.mem.eql(u8, command, "gc")) {
-        if (arguments.len < 2) return packageUsage(init);
-        const cache = try cacheRootFromEnviron(init, startup);
-        defer if (cache) |root| init.process.gpa.free(root);
-        return executePackageSource(
-            init,
-            "<pkg:gc>",
-            "args pkg.cli.gc",
-            arguments[1..],
-            null,
-            .{ .collect = .{ .cache = cache } },
-            worker_count,
-        );
-    }
-
-    const valid_shape = if (std.mem.eql(u8, command, "add"))
-        arguments.len == 4
-    else if (std.mem.eql(u8, command, "sync"))
-        arguments.len == 1 or
-            (arguments.len == 2 and std.mem.eql(u8, arguments[1], "--offline"))
-    else if (std.mem.eql(u8, command, "tree") or
-        std.mem.eql(u8, command, "verify") or
-        std.mem.eql(u8, command, "vendor"))
-        arguments.len == 1
-    else if (std.mem.eql(u8, command, "why"))
-        arguments.len == 2
-    else
-        false;
-    if (!valid_shape) return packageUsage(init);
-
-    const discovery = try ecl.project.Root.discover(init.process.gpa, init.process.io, ".");
-    const project_root = switch (discovery) {
-        .absent => return emitSyntheticError(
-            init,
-            .io,
-            "no ecl.pkg found from the working directory to the filesystem root",
-            null,
-        ),
-        .invalid => |failure| {
-            defer failure.deinit();
-            return emitSyntheticError(init, .io, failure.message(), null);
-        },
-        .found => |root| root,
-    };
-    defer project_root.deinit();
-    const cache = try cacheRootFromEnviron(init, startup);
-    defer if (cache) |root| init.process.gpa.free(root);
-    // The discovered project is trusted host input resolved once, here. The
-    // package authority reaches the vendor store only as the fixed child of
-    // this retained handle, so no path names it.
-    var project_handle = std.Io.Dir.cwd().openDir(init.process.io, project_root.path(), .{}) catch |err|
-        return emitIoError(init, "cannot open project root", err);
-    defer project_handle.close(init.process.io);
-    // Each command names exactly the stores it may touch. Mutating commands
-    // may create an absent cache; read-only commands leave absence visible.
-    const grant: ecl.package_authority.PackageGrant = if (std.mem.eql(u8, command, "add") or
-        std.mem.eql(u8, command, "sync"))
-        .{ .synchronize = .{ .cache = cache, .project = project_handle } }
-    else if (std.mem.eql(u8, command, "vendor"))
-        .{ .vendor = .{ .cache = cache, .project = project_handle } }
-    else if (std.mem.eql(u8, command, "verify"))
-        .{ .verify = .{ .cache = cache, .project = project_handle } }
-    else
-        .inspect;
-    const source = if (std.mem.eql(u8, command, "add"))
-        "args pkg.cli.add"
-    else if (std.mem.eql(u8, command, "sync"))
-        if (arguments.len == 2) "args pkg.cli.sync-offline" else "args pkg.cli.sync"
-    else if (std.mem.eql(u8, command, "tree"))
-        "args pkg.cli.tree"
-    else if (std.mem.eql(u8, command, "why"))
-        "args pkg.cli.why"
-    else if (std.mem.eql(u8, command, "vendor"))
-        "args pkg.cli.vendor"
-    else
-        "args pkg.cli.verify";
-    return executePackageSource(
-        init,
-        "<pkg>",
-        source,
-        arguments[1..],
-        project_root.path(),
-        grant,
-        worker_count,
-    );
-}
-/// The one filesystem root every command-line Session receives: the startup
-/// working directory, captured once.
 fn cwdRoot(initial_cwd: []const u8) ecl.filesystem_port.Root {
     return .{ .name = "cwd", .absolute_path = initial_cwd };
 }
@@ -586,38 +535,10 @@ fn executeSource(
     standard_input: ecl.machine.StandardInput.Availability,
     worker_count: usize,
 ) AppError!u8 {
-    return executeWith(init, source_name, source, arguments, print_stack, standard_input, worker_count, null, null);
-}
-
-/// A package command: the ordinary command-line Session plus the `'project`
-/// filesystem root and the opaque package-store authority.
-fn executePackageSource(
-    init: Startup,
-    source_name: []const u8,
-    source: []const u8,
-    arguments: []const []const u8,
-    project_root: ?[]const u8,
-    grant: ecl.package_authority.PackageGrant,
-    worker_count: usize,
-) AppError!u8 {
-    return executeWith(init, source_name, source, arguments, false, .program_source, worker_count, project_root, grant);
-}
-
-fn executeWith(
-    init: Startup,
-    source_name: []const u8,
-    source: []const u8,
-    arguments: []const []const u8,
-    print_stack: bool,
-    standard_input: ecl.machine.StandardInput.Availability,
-    worker_count: usize,
-    project_root: ?[]const u8,
-    package_grant: ?ecl.package_authority.PackageGrant,
-) AppError!u8 {
     // SAFETY: init fills borrowed storage and the Session before use; only a
     // successful init installs the teardown defer, and cli stays at this address.
     var cli: CliRuntime = undefined;
-    try cli.init(init, arguments, worker_count, standard_input, if (package_grant) |grant| .{ .package = grant } else .evaluate, project_root);
+    try cli.init(init, arguments, worker_count, standard_input, .evaluate);
     defer cli.deinit();
     const session = &cli.session;
     const outcome = try session.runUnit(source_name, source);
@@ -644,7 +565,7 @@ fn repl(init: Startup, worker_count: usize) AppError!u8 {
     // SAFETY: init fills borrowed storage and the Session before use; only a
     // successful init installs the teardown defer, and cli stays at this address.
     var cli: CliRuntime = undefined;
-    try cli.init(init, &.{}, worker_count, .program_source, .evaluate, null);
+    try cli.init(init, &.{}, worker_count, .program_source, .evaluate);
     defer cli.deinit();
     const session = &cli.session;
     const history_path = if (init.process.environ_map.get("HOME")) |home|

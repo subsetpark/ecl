@@ -17,6 +17,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const external = @import("external.zig");
 const intern = @import("intern.zig");
+const heap = @import("heap.zig");
+const Value = @import("value.zig").Value;
 
 pub const Limits = struct {
     max_transfer_bytes: u64 = 1 << 30,
@@ -65,17 +67,19 @@ const OwnedRoot = struct {
 /// Session-owned authority. Units never receive this owner; they receive the
 /// opaque `external.FilesystemAccess` and the narrow functions below.
 pub const FilesystemOwner = struct {
-    allocator: std.mem.Allocator,
+    host: *const heap.HostCleanup,
     io: std.Io,
     roots: []OwnedRoot,
     limits: Limits,
     live: std.atomic.Value(usize) = .init(0),
+    directory_issuer: *@import("module_bindings.zig").Identity,
 
     pub fn init(
-        allocator: std.mem.Allocator,
+        host: *const heap.HostCleanup,
         io: std.Io,
         config: Config,
     ) InitError!FilesystemOwner {
+        const allocator = host.allocator();
         if (comptime !backendSupported()) return error.InvalidConfig;
         try validateLimits(config.limits);
         const cwd = if (config.roots.len == 0)
@@ -124,21 +128,24 @@ pub const FilesystemOwner = struct {
             };
             initialized += 1;
         }
+        const directory_issuer = try @import("module_bindings.zig").Identity.create(allocator);
         return .{
-            .allocator = allocator,
+            .host = host,
             .io = io,
             .roots = roots,
             .limits = config.limits,
+            .directory_issuer = directory_issuer,
         };
     }
 
     pub fn deinit(self: *FilesystemOwner) void {
+        self.directory_issuer.release();
         std.debug.assert(self.live.load(.acquire) == 0);
         for (self.roots) |*root| {
             root.dir.close(self.io);
-            self.allocator.free(root.name);
+            self.host.allocator().free(root.name);
         }
-        self.allocator.free(self.roots);
+        self.host.allocator().free(self.roots);
         self.* = undefined;
     }
 
@@ -163,6 +170,10 @@ pub const FilesystemOwner = struct {
     }
 };
 
+comptime {
+    heap.requireSingleHostCapability(FilesystemOwner);
+}
+
 fn validateLimits(limits: Limits) InitError!void {
     if (limits.max_transfer_bytes == 0 or limits.max_directory_entries == 0 or
         limits.max_directory_name_bytes == 0 or limits.max_live_operations == 0 or
@@ -186,31 +197,85 @@ fn ownerFromAccess(access_value: *external.FilesystemAccess) *FilesystemOwner {
     return @ptrCast(@alignCast(access_value));
 }
 
-/// A resolved root selection: an index into the owner's table. It carries no
-/// handle authority of its own beyond the borrowed directory it names.
-pub const RootHandle = struct {
-    owner: *FilesystemOwner,
-    index: usize,
+/// Consumes an independently opened directory on both success and failure.
+pub fn adoptDirectory(access_value: *external.FilesystemAccess, scope: *@import("scheduler.zig").TaskScope, dir: std.Io.Dir) error{ OutOfMemory, ScopeClosing }!@import("value.zig").Value {
+    return @import("directory_resource.zig").adopt(access_value, scope, dir);
+}
 
-    pub fn dir(self: RootHandle) std.Io.Dir {
-        return self.owner.roots[self.index].dir;
+/// Consumes an acquired advisory lock on both success and failure.
+pub fn adoptLock(access_value: *external.FilesystemAccess, scope: *@import("scheduler.zig").TaskScope, file: std.Io.File) error{ OutOfMemory, ScopeClosing }!@import("value.zig").Value {
+    return @import("directory_resource.zig").adoptLock(access_value, scope, file);
+}
+
+/// Borrow allocator and identity metadata from the operational issuer.
+pub fn resourceIssuer(access_value: *external.FilesystemAccess) *@import("module_bindings.zig").Identity {
+    return ownerFromAccess(access_value).directory_issuer;
+}
+
+/// Queue backend cleanup in the issuing Session's bounded retirement domain.
+pub fn retireHandle(access_value: *external.FilesystemAccess, resource: anytype, node: *heap.ReleaseDomain.Retirement) void {
+    heap.hostDomain(ownerFromAccess(access_value).host).retire(resource, node);
+}
+
+/// Explicit host paths establish a new root; subsequent access is confined
+/// beneath its descriptor. No relative path acquires ambient authority.
+pub fn openHostDirectory(access_value: *external.FilesystemAccess, path: []const u8) union(enum) { directory: std.Io.Dir, failed: Reason } {
+    const owner = ownerFromAccess(access_value);
+    if (path.len == 0 or path.len > owner.limits.max_resolved_path_bytes or !std.fs.path.isAbsolute(path) or std.mem.indexOfScalar(u8, path, 0) != null)
+        return .{ .failed = .invalid_path };
+    return .{ .directory = std.Io.Dir.cwd().openDir(owner.io, path, .{ .iterate = true }) catch |err| return .{ .failed = reasonForError(err) } };
+}
+
+/// A borrowed, factory-issued root identity. Its descriptor remains owned by
+/// the Session filesystem owner throughout admitted operation cleanup.
+pub const RootHandle = opaque {
+    fn state(self: *RootHandle) *OwnedRoot {
+        return @ptrCast(@alignCast(self));
     }
-
-    pub fn name(self: RootHandle) []const u8 {
-        return self.owner.roots[self.index].name;
+    pub fn dir(self: *RootHandle) std.Io.Dir {
+        return self.state().dir;
     }
-
-    pub fn same(self: RootHandle, other: RootHandle) bool {
-        return self.owner == other.owner and self.index == other.index;
+    pub fn name(self: *RootHandle) []const u8 {
+        return self.state().name;
+    }
+    pub fn same(self: *RootHandle, other: *RootHandle) bool {
+        return self == other;
     }
 };
+fn rootHandle(root: *OwnedRoot) *RootHandle {
+    return @ptrCast(root);
+}
 
-pub fn findRoot(access_value: *external.FilesystemAccess, symbol: u32) ?RootHandle {
+pub fn findRoot(access_value: *external.FilesystemAccess, symbol: u32) ?*RootHandle {
     const owner = ownerFromAccess(access_value);
-    for (owner.roots, 0..) |root, index| {
-        if (root.symbol == symbol) return .{ .owner = owner, .index = index };
-    }
+    for (owner.roots) |*root| if (root.symbol == symbol) return rootHandle(root);
     return null;
+}
+
+/// A tagged selection contains only already authenticated root capabilities.
+/// Consuming deinit releases an independently leased directory resource.
+pub const RootSelection = union(enum) {
+    named: *RootHandle,
+    resource: *@import("directory_resource.zig").Lease,
+    pub fn dir(self: RootSelection) std.Io.Dir {
+        return switch (self) {
+            .named => |root| root.dir(),
+            .resource => |lease| lease.dir(),
+        };
+    }
+    pub fn deinit(self: RootSelection) void {
+        switch (self) {
+            .named => {},
+            .resource => |lease| lease.deinit(),
+        }
+    }
+};
+pub fn isRoot(item: Value) bool {
+    return item == .symbol or @import("directory_resource.zig").isDirectory(item);
+}
+pub fn selectRoot(access_value: *external.FilesystemAccess, item: Value) error{ OutOfMemory, UnknownRoot, Closed, Io }!RootSelection {
+    if (item == .symbol) return .{ .named = findRoot(access_value, item.symbol) orelse return error.UnknownRoot };
+    return .{ .resource = try @import("directory_resource.zig").acquire(item) };
 }
 
 pub fn limitsOf(access_value: *external.FilesystemAccess) Limits {
@@ -457,16 +522,50 @@ const BoundedPath = struct {
 
 /// Resumable descriptor-relative resolution. `path` holds the remaining,
 /// budgeted path text, into which symlink targets are spliced; `stack` holds
-/// one open handle per traversed directory, with the borrowed root at index
-/// zero.
+/// a borrowed root and a chunked stack of owned parent descriptors.
 pub const Resolver = struct {
+    state: *ResolverState,
+
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, root: std.Io.Dir, path_text: []const u8, resolver_limits: Limits, mode: ResolveMode) ResolverInitError!Resolver {
+        const state = try allocator.create(ResolverState);
+        errdefer allocator.destroy(state);
+        state.* = try ResolverState.init(allocator, io, root, path_text, resolver_limits, mode);
+        return .{ .state = state };
+    }
+
+    pub fn step(self: *Resolver) error{OutOfMemory}!StepProgress {
+        return self.state.step();
+    }
+    pub fn createParents(self: *Resolver) void {
+        self.state.createParents();
+    }
+
+    /// Consumes this resolver and transfers every remaining descriptor to
+    /// bounded retirement. No allocation is needed on cancellation or failure.
+    pub fn retire(self: *Resolver, releases: *heap.ReleaseDomain) void {
+        releases.retire(self.state, &self.state.retirement);
+        self.* = undefined;
+    }
+
+    /// Blocking disposal requires the host's cleanup authority; evaluated
+    /// code can only enqueue retirement through its worker-visible domain.
+    pub fn deinit(self: *Resolver, host: *const heap.HostCleanup) void {
+        self.retire(heap.hostDomain(host));
+        host.drain();
+    }
+};
+
+const ResolverState = struct {
+    retirement: heap.ReleaseDomain.Retirement = .{},
     allocator: std.mem.Allocator,
     io: std.Io,
     limits: Limits,
     mode: ResolveMode,
-    stack: std.ArrayList(std.Io.Dir) = .empty,
+    root: std.Io.Dir,
+    stack: @import("poll.zig").ChunkStack(std.Io.Dir),
     path: BoundedPath,
     expansions: usize = 0,
+    create_missing: bool = false,
 
     /// `error.PathTooLong` reports a path over the resolver byte limit before
     /// any handle is opened.
@@ -477,41 +576,48 @@ pub const Resolver = struct {
         path_text: []const u8,
         resolver_limits: Limits,
         mode: ResolveMode,
-    ) ResolverInitError!Resolver {
+    ) ResolverInitError!ResolverState {
         var path = try BoundedPath.init(allocator, path_text, resolver_limits.max_resolved_path_bytes);
         errdefer path.deinit();
-        var stack: std.ArrayList(std.Io.Dir) = .empty;
-        errdefer stack.deinit(allocator);
-        try stack.append(allocator, root);
         return .{
             .allocator = allocator,
             .io = io,
             .limits = resolver_limits,
             .mode = mode,
-            .stack = stack,
+            .root = root,
+            .stack = .init(allocator),
             .path = path,
         };
     }
 
-    pub fn deinit(self: *Resolver) void {
-        for (self.stack.items[1..]) |dir| dir.close(self.io);
-        self.stack.deinit(self.allocator);
+    pub fn advanceRetirement(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *ResolverState) bool {
+        if (self.stack.pop()) |dir| {
+            dir.close(self.io);
+            return false;
+        }
+        self.stack.retire(releases);
         self.path.deinit();
-        self.* = undefined;
+        allocator.destroy(self);
+        return true;
     }
 
-    fn top(self: *const Resolver) std.Io.Dir {
-        return self.stack.items[self.stack.items.len - 1];
+    /// Create absent intermediate directories, retaining the same descriptor
+    /// containment and symlink validation as ordinary resolution.
+    pub fn createParents(self: *ResolverState) void {
+        self.create_missing = true;
     }
 
-    /// Removes the innermost handle as an owned result; the root is borrowed.
-    fn takeTop(self: *Resolver) ParentHandle {
-        if (self.stack.items.len == 1) return .{ .dir = self.stack.items[0], .owned = false };
-        return .{ .dir = self.stack.pop().?, .owned = true };
+    fn top(self: *ResolverState) std.Io.Dir {
+        return if (self.stack.topPtr()) |dir| dir.* else self.root;
+    }
+
+    /// Removes the innermost owned handle; the root remains borrowed.
+    fn takeTop(self: *ResolverState) ParentHandle {
+        return if (self.stack.pop()) |dir| .{ .dir = dir, .owned = true } else .{ .dir = self.root, .owned = false };
     }
 
     /// Performs at most one metadata or open syscall.
-    pub fn step(self: *Resolver) error{OutOfMemory}!StepProgress {
+    pub fn step(self: *ResolverState) error{OutOfMemory}!StepProgress {
         const pending = self.path.bytes;
         while (self.path.index < pending.len and pending[self.path.index] == '/')
             self.path.index += 1;
@@ -530,7 +636,7 @@ pub const Resolver = struct {
             return .pending;
         }
         if (std.mem.eql(u8, component, "..")) {
-            if (self.stack.items.len == 1) return .{ .failed = .symlink_escape };
+            if (self.stack.isEmpty()) return .{ .failed = .symlink_escape };
             const popped = self.stack.pop().?;
             popped.close(self.io);
             self.path.index = end;
@@ -542,6 +648,15 @@ pub const Resolver = struct {
         const info = self.top().statFile(self.io, component, .{ .follow_symlinks = false }) catch |err| switch (err) {
             error.FileNotFound => {
                 if (last) return self.completeEntry(component);
+                if (self.create_missing) {
+                    self.top().createDir(self.io, component, .default_dir) catch |create_err| switch (create_err) {
+                        error.PathAlreadyExists => {},
+                        else => return .{ .failed = reasonForError(create_err) },
+                    };
+                    // Reinspect before opening: a competing creator may have
+                    // published a symlink rather than a directory.
+                    return .pending;
+                }
                 return .{ .failed = .not_found };
             },
             else => return .{ .failed = reasonForError(err) },
@@ -554,7 +669,7 @@ pub const Resolver = struct {
                     error.SymLinkLoop => return .{ .failed = .changed },
                     else => return .{ .failed = reasonForError(err) },
                 };
-                self.stack.append(self.allocator, child) catch |err| {
+                self.stack.push(child) catch |err| {
                     child.close(self.io);
                     return err;
                 };
@@ -568,12 +683,12 @@ pub const Resolver = struct {
         }
     }
 
-    fn completeEntry(self: *Resolver, component: []const u8) error{OutOfMemory}!StepProgress {
+    fn completeEntry(self: *ResolverState, component: []const u8) error{OutOfMemory}!StepProgress {
         const name = try self.allocator.dupe(u8, component);
         return .{ .complete = .{ .entry = .{ .parent = self.takeTop(), .name = name } } };
     }
 
-    fn spliceLink(self: *Resolver, component: []const u8, end: usize) error{OutOfMemory}!StepProgress {
+    fn spliceLink(self: *ResolverState, component: []const u8, end: usize) error{OutOfMemory}!StepProgress {
         if (self.expansions == self.limits.max_symlink_expansions) return .{ .failed = .symlink_loop };
         self.expansions += 1;
         var buffer: [std.posix.PATH_MAX]u8 = undefined;
@@ -606,6 +721,22 @@ pub const OpenOutcome = union(enum) {
     file: std.Io.File,
     failed: Reason,
 };
+
+/// Exclusive creation never truncates an existing file. An existing entry is
+/// opened without following links, then validated through the descriptor.
+pub fn openLockFile(io: std.Io, parent: std.Io.Dir, name: []const u8) OpenOutcome {
+    const file = parent.createFile(io, name, .{ .exclusive = true, .truncate = false, .read = true }) catch |err| switch (err) {
+        error.PathAlreadyExists => parent.openFile(io, name, .{ .mode = .read_write, .follow_symlinks = false, .allow_directory = false }) catch |open_err| return .{ .failed = reasonForError(open_err) },
+        else => return .{ .failed = reasonForError(err) },
+    };
+    switch (regularFileInfo(io, file, std.math.maxInt(u64))) {
+        .regular => return .{ .file = file },
+        .failed => |reason| {
+            file.close(io);
+            return .{ .failed = reason };
+        },
+    }
+}
 
 /// Opens the final entry for reading without following a symlink; an entry
 /// that became a link since resolution is a race failure, not a follow.
@@ -803,6 +934,81 @@ pub fn stagingDirectoryName(io: std.Io, buffer: *[24]u8) []const u8 {
     return buffer;
 }
 
+/// Destructive, allocation-free tree emptying. Flattening each selected child
+/// into the root avoids a depth-sized descriptor or allocation stack. This is
+/// also usable during rollback when no allocator can make further progress.
+/// The caller retains the root's parent and removes the root after completion.
+pub const TreeRemoval = struct {
+    io: std.Io,
+    root: std.Io.Dir,
+    iterator: std.Io.Dir.Iterator,
+    child: ?struct {
+        dir: std.Io.Dir,
+        iterator: std.Io.Dir.Iterator,
+        name: [std.fs.max_name_bytes]u8,
+        length: usize,
+    } = null,
+
+    /// Consumes the open, iterable root directory.
+    pub fn init(io: std.Io, root: std.Io.Dir) TreeRemoval {
+        return .{ .io = io, .root = root, .iterator = root.iterate() };
+    }
+
+    pub fn restart(self: *TreeRemoval) void {
+        self.iterator = self.root.iterate();
+    }
+
+    pub fn step(self: *TreeRemoval) ReadProgress {
+        if (self.child) |*child| {
+            const entry = child.iterator.next(self.io) catch |err| return .{ .failed = reasonForError(err) };
+            if (entry) |item| {
+                var name: [24]u8 = undefined;
+                _ = stagingDirectoryName(self.io, &name);
+                renameNoReplace(self.io, child.dir, item.name, self.root, &name) catch |err| switch (err) {
+                    error.PathAlreadyExists, error.FileNotFound => child.iterator = child.dir.iterate(),
+                    else => return .{ .failed = reasonForError(err) },
+                };
+                return .pending;
+            }
+            self.root.deleteDir(self.io, child.name[0..child.length]) catch |err| switch (err) {
+                error.DirNotEmpty => {
+                    child.iterator = child.dir.iterate();
+                    return .pending;
+                },
+                error.FileNotFound => {},
+                else => return .{ .failed = reasonForError(err) },
+            };
+            child.dir.close(self.io);
+            self.child = null;
+            self.restart();
+            return .pending;
+        }
+        const entry = self.iterator.next(self.io) catch |err| return .{ .failed = reasonForError(err) };
+        const item = entry orelse return .complete;
+        const info = self.root.statFile(self.io, item.name, .{ .follow_symlinks = false }) catch |err| switch (err) {
+            error.FileNotFound => return .pending,
+            else => return .{ .failed = reasonForError(err) },
+        };
+        if (info.kind == .directory) {
+            if (item.name.len > std.fs.max_name_bytes) return .{ .failed = .limit };
+            const dir = self.root.openDir(self.io, item.name, .{ .iterate = true, .follow_symlinks = false }) catch |err| return .{ .failed = reasonForError(err) };
+            var child: @typeInfo(@FieldType(TreeRemoval, "child")).optional.child = .{ .dir = dir, .iterator = dir.iterate(), .name = undefined, .length = item.name.len };
+            @memcpy(child.name[0..item.name.len], item.name);
+            self.child = child;
+        } else self.root.deleteFile(self.io, item.name) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return .{ .failed = reasonForError(err) },
+        };
+        return .pending;
+    }
+
+    pub fn deinit(self: *TreeRemoval) void {
+        if (self.child) |child| child.dir.close(self.io);
+        self.root.close(self.io);
+        self.* = undefined;
+    }
+};
+
 pub const RenameError = std.Io.Dir.RenamePreserveError;
 
 const darwin = struct {
@@ -953,28 +1159,31 @@ test "resolver refuses an initial path over the byte limit before opening anythi
     const limits: Limits = .{ .max_resolved_path_bytes = 8 };
     try std.testing.expectError(error.PathTooLong, Resolver.init(std.testing.allocator, std.testing.io, root, "abcdefghi", limits, .follow_final));
     var resolver = try Resolver.init(std.testing.allocator, std.testing.io, root, "abcdefgh", limits, .follow_final);
-    resolver.deinit();
+    var cleanup = heap.HostOwner.init(std.testing.allocator);
+    resolver.deinit(cleanup.cleanup());
 }
 
 test "filesystem config rejects relative roots, duplicate names, and zero limits" {
+    var cleanup = heap.HostOwner.init(std.testing.allocator);
+    defer cleanup.cleanup().drain();
     var scratch = std.testing.tmpDir(.{});
     defer scratch.cleanup();
     const path = try scratch.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(path);
-    try std.testing.expectError(error.InvalidConfig, FilesystemOwner.init(std.testing.allocator, std.testing.io, .{
+    try std.testing.expectError(error.InvalidConfig, FilesystemOwner.init(cleanup.cleanup(), std.testing.io, .{
         .roots = &.{.{ .name = "cwd", .absolute_path = "relative/dir" }},
     }));
-    try std.testing.expectError(error.InvalidConfig, FilesystemOwner.init(std.testing.allocator, std.testing.io, .{
+    try std.testing.expectError(error.InvalidConfig, FilesystemOwner.init(cleanup.cleanup(), std.testing.io, .{
         .roots = &.{
             .{ .name = "cwd", .absolute_path = path },
             .{ .name = "cwd", .absolute_path = path },
         },
     }));
-    try std.testing.expectError(error.InvalidConfig, FilesystemOwner.init(std.testing.allocator, std.testing.io, .{
+    try std.testing.expectError(error.InvalidConfig, FilesystemOwner.init(cleanup.cleanup(), std.testing.io, .{
         .roots = &.{.{ .name = "cwd", .absolute_path = path }},
         .limits = .{ .max_live_operations = 0 },
     }));
-    var owner = try FilesystemOwner.init(std.testing.allocator, std.testing.io, .{
+    var owner = try FilesystemOwner.init(cleanup.cleanup(), std.testing.io, .{
         .roots = &.{.{ .name = "cwd", .absolute_path = path }},
     });
     defer owner.deinit();
@@ -984,11 +1193,13 @@ test "filesystem config rejects relative roots, duplicate names, and zero limits
 }
 
 test "live-operation reservations are exhausted and released exactly" {
+    var cleanup = heap.HostOwner.init(std.testing.allocator);
+    defer cleanup.cleanup().drain();
     var scratch = std.testing.tmpDir(.{});
     defer scratch.cleanup();
     const path = try scratch.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(path);
-    var owner = try FilesystemOwner.init(std.testing.allocator, std.testing.io, .{
+    var owner = try FilesystemOwner.init(cleanup.cleanup(), std.testing.io, .{
         .roots = &.{.{ .name = "cwd", .absolute_path = path }},
         .limits = .{ .max_live_operations = 2 },
     });
@@ -1042,7 +1253,8 @@ test "resolver confines symlink targets to the root" {
     };
     for (cases) |case| {
         var resolver = try Resolver.init(std.testing.allocator, io, root, case.path, .{}, case.mode);
-        defer resolver.deinit();
+        var cleanup = heap.HostOwner.init(std.testing.allocator);
+        defer resolver.deinit(cleanup.cleanup());
         var outcome = try resolveBlocking(&resolver);
         switch (case.expect) {
             .entry => |name| {

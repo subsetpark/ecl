@@ -17,6 +17,7 @@ const allocator = std.testing.allocator;
 
 const Case = struct {
     source: []const u8,
+    io: std.Io = std.testing.io,
     environ: []const machine.Environ.Entry = &.{},
     standard_input: machine.StandardInput.Availability = .data,
 };
@@ -48,7 +49,7 @@ fn expectStackWithStreams(
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{
-        .io = std.testing.io,
+        .io = case.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
         .environ = case.environ,
@@ -87,7 +88,7 @@ fn expectError(case: Case, expected: support.ErrorCase) !void {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{
-        .io = std.testing.io,
+        .io = case.io,
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
         .environ = case.environ,
@@ -237,4 +238,38 @@ test "hostio: Session rejects invalid startup environment entries" {
         .cooperative,
         .evaluate,
     ));
+}
+
+const MetadataIo = struct {
+    fn path(_: ?*anyopaque, buffer: []u8) std.process.ExecutablePathError!usize {
+        const bytes = "/host/λ/ecl";
+        @memcpy(buffer[0..bytes.len], bytes);
+        return bytes.len;
+    }
+    fn unavailable(_: ?*anyopaque, _: []u8) std.process.ExecutablePathError!usize {
+        return error.PermissionDenied;
+    }
+    fn invalid(_: ?*anyopaque, buffer: []u8) std.process.ExecutablePathError!usize {
+        buffer[0] = 0xff;
+        return 1;
+    }
+};
+
+test "hostio: executable metadata uses the host interface and rejects unavailable or invalid text" {
+    var vtable = std.testing.io.vtable.*;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    vtable.processExecutablePath = MetadataIo.path;
+    try expectStack(.{ .io = io, .source = "host.executable" }, "\"/host/λ/ecl\"");
+    vtable.processExecutablePath = MetadataIo.unavailable;
+    try expectError(.{ .io = io, .source = "host.executable" }, .{
+        .name = "unavailable host executable",
+        .source = "host.executable",
+        .kind = "io",
+    });
+    vtable.processExecutablePath = MetadataIo.invalid;
+    try expectError(.{ .io = io, .source = "host.executable" }, .{
+        .name = "invalid host executable text",
+        .source = "host.executable",
+        .kind = "io",
+    });
 }

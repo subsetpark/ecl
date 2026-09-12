@@ -151,7 +151,7 @@ jobs:
           set +e
           # OPTIMIZE is passed into the container.
           # shellcheck disable=SC2016
-          timeout 25m docker run --rm --platform linux/amd64 \
+          timeout 35m docker run --rm --platform linux/amd64 \
             --env OPTIMIZE="$OPTIMIZE" \
             --volume "$GITHUB_WORKSPACE:/work:ro" \
             --volume "$ZIG_GLOBAL_CACHE_HOST:/root/.cache/zig" \
@@ -170,6 +170,8 @@ jobs:
               timeout 20m /opt/zig/zig build test-tsan \
               -Doptimize="$OPTIMIZE" --summary all --test-timeout 10m \
                 < /dev/null
+              timeout 10m /opt/zig/zig build test-git-extension test-pkg-fetch -Dgit-tsan=true \
+                -Doptimize="$OPTIMIZE" --summary all < /dev/null
           '
           tsan_status=$?
           set -e
@@ -207,6 +209,23 @@ jobs:
           docker exec --env OPTIMIZE="$OPTIMIZE" ecl-ci sh -euxc
           'cd /build; timeout 20m zig build test
           -Doptimize="$OPTIMIZE" --summary all --test-timeout 10m < /dev/null'
+
+      - name: Core-only and complete distribution boundary
+        if: inputs.run_full_suite
+        run: |
+          docker exec --env OPTIMIZE="$OPTIMIZE" ecl-ci sh -euxc '
+            cd /build
+            for applications in false true; do
+              set +e
+              timeout 10m zig build -Dapps="$applications" -Doptimize="$OPTIMIZE" --prefix "/tmp/ecl-distribution-$applications" < /dev/null
+              build_status=$?
+              set -e
+              test "$build_status" -eq 0 || exit "$build_status"
+            done
+            test ! -e /tmp/ecl-distribution-false/share/ecl/apps
+            test -f /tmp/ecl-distribution-true/share/ecl/apps/pkg/git.eclmod
+            cmp /tmp/ecl-distribution-false/bin/ecl /tmp/ecl-distribution-true/bin/ecl
+          '
 
       - name: WorkDriver benchmark smoke
         if: inputs.run_performance_smoke
@@ -270,6 +289,13 @@ jobs:
           docker exec --env OPTIMIZE="$OPTIMIZE" ecl-ci sh -euxc
           'cd /build; timeout 10m zig build test-native-acceptance
           -Doptimize="$OPTIMIZE" --summary all --test-timeout 5m < /dev/null'
+
+      - name: Standalone Git snapshot acceptance
+        if: inputs.run_native_acceptance
+        run: >-
+          docker exec --env OPTIMIZE="$OPTIMIZE" ecl-ci sh -euxc
+          'cd /build; timeout 10m zig build test-git-extension test-pkg-fetch
+          -Doptimize="$OPTIMIZE" --summary all < /dev/null'
 
       - name: Fuzz campaigns
         if: inputs.run_fuzz

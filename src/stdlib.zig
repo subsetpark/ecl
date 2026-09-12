@@ -1,6 +1,6 @@
 //! The embedded standard library manifest.
 //!
-//! Every first-party module ships inside the binary, so the auto-load driver
+//! Every standard-library module ships inside the binary, so the auto-load driver
 //! consults this table before it ever touches the filesystem. That order is
 //! required behavior: a stray `csv.ecl` on `ECL_PATH` must not
 //! silently replace the stdlib, and `import` of a stdlib word must work with no
@@ -16,7 +16,6 @@ const Csv = @import("stdlib/csv.zig").Extension;
 const json_module = @import("stdlib/json.zig");
 const http_module = @import("stdlib/http.zig");
 const archive_module = @import("stdlib/archive.zig");
-const pkg_store_module = @import("stdlib/pkg_store.zig");
 const io_module = @import("stdlib/io.zig");
 const dict_module = @import("stdlib/dict.zig");
 const rand_module = @import("stdlib/rand.zig");
@@ -77,6 +76,8 @@ const modules = [_]Module{
     .{ .name = "io", .entry = .{ .builtin = &io_module.words } },
     .{ .name = "csv", .entry = .{ .native = Csv.descriptor() } },
     .{ .name = "json", .entry = .{ .builtin = &json_module.words } },
+    .{ .name = "host", .entry = .{ .builtin = &@import("stdlib/host.zig").words } },
+    .{ .name = "source", .entry = .{ .builtin = &@import("stdlib/source.zig").words } },
     .{ .name = "table", .entry = .{ .source = .{
         .name = "<stdlib:table>",
         .text = @embedFile("stdlib/table.ecl"),
@@ -112,44 +113,11 @@ const modules = [_]Module{
     .{ .name = "archive", .entry = .{ .builtin = &archive_module.words } },
     .{ .name = "clock", .entry = .{ .builtin = &clock_module.words } },
     .{ .name = "time", .entry = .{ .builtin = &time_module.words } },
-    .{ .name = "pkg.store", .entry = .{ .builtin = &pkg_store_module.words } },
     .{ .name = "rng", .entry = .{ .source = .{
         .name = "<stdlib:rng>",
         .text = @embedFile("stdlib/rng.ecl"),
     } } },
     .{ .name = "rand", .entry = .{ .builtin = &rand_module.words } },
-    .{ .name = "pkg.version", .entry = .{ .source = .{
-        .name = "<stdlib:pkg.version>",
-        .text = @embedFile("stdlib/pkg/version.ecl"),
-    } } },
-    .{ .name = "pkg.name", .entry = .{ .source = .{
-        .name = "<stdlib:pkg.name>",
-        .text = @embedFile("stdlib/pkg/name.ecl"),
-    } } },
-    .{ .name = "pkg.data", .entry = .{ .source = .{
-        .name = "<stdlib:pkg.data>",
-        .text = @embedFile("stdlib/pkg/data.ecl"),
-    } } },
-    .{ .name = "pkg.manifest", .entry = .{ .source = .{
-        .name = "<stdlib:pkg.manifest>",
-        .text = @embedFile("stdlib/pkg/manifest.ecl"),
-    } } },
-    .{ .name = "pkg.lock", .entry = .{ .source = .{
-        .name = "<stdlib:pkg.lock>",
-        .text = @embedFile("stdlib/pkg/lock.ecl"),
-    } } },
-    .{ .name = "pkg.mvs", .entry = .{ .source = .{
-        .name = "<stdlib:pkg.mvs>",
-        .text = @embedFile("stdlib/pkg/mvs.ecl"),
-    } } },
-    .{ .name = "pkg.sync", .entry = .{ .source = .{
-        .name = "<stdlib:pkg.sync>",
-        .text = @embedFile("stdlib/pkg/sync.ecl"),
-    } } },
-    .{ .name = "pkg.cli", .entry = .{ .source = .{
-        .name = "<stdlib:pkg.cli>",
-        .text = @embedFile("stdlib/pkg/cli.ecl"),
-    } } },
     .{ .name = "test.default", .entry = .{ .source = .{
         .name = "<stdlib:test.default>",
         .text = @embedFile("stdlib/test/default.ecl"),
@@ -157,6 +125,7 @@ const modules = [_]Module{
 };
 
 comptime {
+    @setEvalBranchQuota(100000);
     for (modules, 0..) |module, index| {
         env.assertStaticModuleName(module.name);
         for (modules[0..index]) |prior| {

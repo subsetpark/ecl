@@ -48,6 +48,7 @@ pub const Options = struct {
     diagnostics: ?@FieldType(session.RuntimeInputs, "diagnostics") = null,
     tls_trust: ?@FieldType(session.RuntimeInputs, "tls_trust") = null,
     ecl_path: ?@FieldType(session.RuntimeInputs, "ecl_path") = null,
+    module_map: ?@FieldType(session.RuntimeInputs, "module_map") = null,
     environ: ?@FieldType(session.RuntimeInputs, "environ") = null,
     standard_input: ?@FieldType(session.RuntimeInputs, "standard_input") = null,
     initial_cwd: ?@FieldType(session.RuntimeInputs, "initial_cwd") = null,

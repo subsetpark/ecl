@@ -125,30 +125,48 @@ ecl pkg sync
 ```
 
 `pkg init` creates `src/` and selects `src/**/*.ecl`, with no public exports.
-Put source files there and run `ecl test`; modules stay private until you add
-them to `exports`.
+Put source files there and run `ecl test`. Literal top-level module declarations
+are visible within the local scope; `exports` selects what installed consumers see.
 
 To add a dependency, run `ecl pkg add <name> <version> <https-url>` with the
-package's name, version, and archive URL, then run `ecl pkg sync` again.
+package's name, version, and archive URL, then run `ecl pkg update`.
+Public HTTPS Git repositories can also supply packages:
+
+```sh
+ecl pkg add https://example.com/author/library.git --tag v1.2.0
+# Or: ecl pkg add https://example.com/author/library.git --commit <full-commit-id>
+ecl pkg update
+```
+
+The repository must contain `ecl.pkg` at its root. `add` infers its name and
+version and records the resolved commit and artifact hash; `sync` installs it
+without resolving the tag again. Exactly one tag or full lowercase 40-digit
+commit is required. Branches, credentials, symlinks, and submodules are rejected.
+Ordinary tracked data files are included. Git need not be installed.
+For a private certificate authority, set `ECL_GIT_CA_FILE` to an absolute PEM
+certificate bundle path; certificate verification remains enabled.
+
 Commit both `ecl.pkg` and `ecl.lock`.
 
-Installation stores dependency module catalogs alongside the sealed archives.
-Startup reads these catalogs and discovers your local sources afresh, so local
-file additions and edits need no sync. If dependency metadata is missing or
-invalid, run `ecl pkg sync` (or `ecl pkg sync --offline` with all dependencies
-already installed). Startup never repairs the store or scans dependency sources.
-`ecl pkg verify` checks both archive seals and catalog mappings.
+Synchronization publishes an immutable project-local generation and activates
+its `ecl.modules` map. The interpreter reads only that map and discovers local
+sources afresh; it never reads manifests or lockfiles, fetches, or repairs state.
+Normal sync honors the portable lock; dependency changes require `ecl pkg update`.
+Each generation retains its own resolution snapshot. Interrupted publication is
+recovered by the next mutating package command, preserving the previous runnable
+generation until activation. `ecl pkg verify` checks the active generation without
+repair. See the [package application contract](apps/pkg/README.md).
 
 List your source files and the modules other files may use in `ecl.pkg`:
 
 ```ecl
-{'format 1 'name "my.app" 'version "0.1.0"
+{'format 2 'name "my.app" 'version "0.1.0"
  'sources ["src/*.ecl"] 'exports ["my.app"]
  'requires {}}
 ```
 
-Exports name exact modules declared in those files. Other modules stay private
-to their defining file, including when running tests.
+Exports name exact modules exposed to installed consumers. Other registrations
+in installed artifacts stay private to their defining file.
 
 Use `ecl pkg tree` to inspect dependencies, `ecl pkg verify` to check them,
 and `ecl pkg vendor` to prepare the project for offline use. Run a synchronized
@@ -204,3 +222,8 @@ contributor instructions.
 - [Native extension tutorial](examples/port-authoring/README.md): build a Zig extension.
 
 ECL is distributed under the [BSD 3-Clause License](LICENSE).
+
+The default distribution includes maintained applications. `zig build -Dapps=false`
+installs the same interpreter without application sources or Git
+dependencies; it does not fetch or link libgit2. Use a separate installation prefix
+when comparing core-only and complete distributions.

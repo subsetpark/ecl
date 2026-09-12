@@ -108,7 +108,7 @@ That state owns:
 - immutable or explicitly synchronized views of host services such as
   arguments, environment variables, standard input, output, diagnostics, TLS
   trust, project configuration, module search paths, process, filesystem, and
-  network owners, and optional package-store authority.
+  and network owners.
 
 Grouping these objects under one owner correlates every dependent lifetime.
 Values, module pins, source cursors, task cells, and deferred destruction all
@@ -147,7 +147,7 @@ Units. The CLI captures its startup directory and environment snapshot once
 and shares those inputs across every execution entrypoint. One private CLI
 runtime owns writer buffers, writers, named-root storage, and its Session. It
 is initialized at its final address and remains there until Session teardown
-releases every borrow. Failed construction retains no live Session. Project
+releases every borrow. Failed construction retains no live Session. Module-map
 discovery begins at that startup directory.
 
 Host operations are exposed to executing code through narrow facades. A Unit
@@ -158,9 +158,7 @@ mutation, and teardown are distinct authorities.
 
 Every initialized Session has the same complete runtime shape. Its constructor
 requires I/O, output and diagnostic writers, a startup directory, an environment
-snapshot, scheduler configuration, and an explicit command mode. Evaluation,
-language tests, and package commands differ only in the additional authorities
-their modes mint. Process, filesystem, and network owners are unconditional.
+snapshot, scheduler configuration, and an explicit command mode. Evaluation and language tests differ only in test facilities. Process, filesystem, and network owners are unconditional.
 
 Inherited context distinguishes prelude bootstrap from runtime execution.
 Both phases require a module registry. The bootstrap phase builds the core
@@ -198,6 +196,65 @@ operations subject to operating-system permissions. Units receive opaque
 `FilesystemAccess` for root lookup and operation admission. Root-relative path
 resolution enforces containment; module loading remains a separate operation.
 
+Named roots are opaque factory-issued identities. The shared root-selection
+boundary accepts those identities or independently leased directory resources;
+filesystem operations and archive extraction use that same tagged selection.
+Archive extraction holds its selection through parser, publication, and rollback
+retirement, so closing a staging root cannot invalidate an admitted extraction.
+
+Explicit host-directory acquisition mints a scope-owned resource through the
+same atomic membership and transfer protocol as other ports. Its lifetime
+state owns open admission, closure waiting for admitted leases, queued backend
+retirement, or joined closure.
+Operation admission duplicates the descriptor under the resource's lifetime
+lock. Each driver owns that independent lease through resolver retirement;
+resource closure joins these leases before backend retirement. Cleanup is
+queued through the issuing filesystem owner, which derives its allocator and
+retirement domain from one host authority. Closed values retain
+only issuer metadata, which outlives the Session's operational filesystem owner.
+Child acquisition uses the shared confined resolver and establishes a new root.
+
+Directory staging extends this lifetime with sealed admission and private versus
+published backend ownership. Descendants carry permanent membership in the
+staging owner's external group independently of task ownership. Sealing closes
+that group and waits for its completion callback and all descriptor leases
+before the atomic absent-destination rename. Group publication precedes the
+child lifetime lock; group closure and membership detachment occur outside it.
+Private backend retirement empties the tree in allocation-free bounded steps;
+published retirement only closes handles. Factory failure transfers the already
+allocated staging owner directly into the same retirement domain, so cleanup
+does not depend on resource publication succeeding.
+
+Root-scope closure participates in the ordinary ready/retirement arbitration
+when a configured worker pool has not started. Cleanup never depends on lazily
+allocating workers: a root-only program can own filesystem resources without
+having spawned a task or parked, and cancellation must still join every member.
+
+Incremental enumerations share directory-resource scope ownership and permanent
+staging dependencies. The cursor owns a fixed-size host iterator; advancing it
+reserves one entry and copies its bounded name under the lifetime lock. Result
+materialization then owns that copy, so neither another reader nor closure can
+invalidate its bytes. Enumeration performs no directory-sized collection or
+cleanup, and its nominal resource type cannot be used as a directory root.
+
+Archive inspection publishes the shared parser's validated document directly
+into scope ownership. Resource metadata is allocated before a guarded scope
+publication consumes the document, so every failed publication leaves parser
+ownership intact. Its cleanup capability derives allocation and bounded
+retirement from the owning scheduler; closed identities retain no operational
+scheduler reference. Cursor operations copy at most one bounded path or content
+chunk under the lifetime lock. Result construction owns those copies independently
+of closure, and document retirement frees member paths one step at a time.
+
+Advisory locks share the fixed-handle resource lifetime with directory handles,
+while their nominal backend types keep lock values out of root acquisition.
+An acquisition driver owns an unlocked descriptor while waiting; nonblocking
+lock attempts alternate with scheduler timer waits. Publication consumes that
+descriptor into scope ownership, and every failed or cancelled acquisition
+closes it through driver retirement. No worker blocks waiting for another
+application to release a lock. Successful timer wakes preserve their requesting
+driver, as readiness wakes do; failed wakes retire it before error propagation.
+
 Clocks are two runtime inputs with different shapes. The scheduler owns
 monotonic time as one `MonotonicClock` tagged union, selected at construction
 from internal clock configuration: the `host` variant carries the Session's origin
@@ -213,26 +270,12 @@ reads `WorkerScheduler.now`, so the whole Session agrees on one "now". The wall 
 or a base anchored to the monotonic clock. CLI construction selects realtime;
 the other variants support deterministic tests independently of TLS time.
 
-Package command mode alone mints a `PackageOwner`, and carries one tagged
-`PackageGrant` naming exactly the stores a command shape may touch (`inspect`,
-`collect`, `verify`, `synchronize`, `vendor`). The shared cache is an
-absolute host path the command line resolved once at startup, a relative
-`ECL_CACHE` included; the vendor store has no path at all and is only ever the
-fixed child `vendor` of the retained project handle, opened without following
-a final symlink, so a repository-controlled link cannot become a store.
-`pkg.store` words receive the opaque `PackageAccess`, name a store by symbol,
-and address entries only by validated canonical store keys. Ordinary evaluation
-Sessions never construct it, so their package-store words fail closed, and no
-absolute store path is ever passed through evaluated code.
-Cache selection from `ECL_CACHE`, `XDG_CACHE_HOME`, and `HOME` is host
-startup work shared with runtime module loading.
-
 ### Shutdown follows the ownership graph
 
 Session teardown first stops execution and closes task and external-resource
 creation. It then retires root scopes, including cancellation and direct-child
-reap for every process member, before destroying the process, filesystem, and
-package owners; every filesystem driver is retired with the scheduler, so no
+reap for every process member, before destroying the process and filesystem
+owners; every filesystem driver is retired with the scheduler, so no
 handle, staging entry, or quota reservation can still reference an owner when
 its root handles close. Stacks, module generations, source provenance, and
 native pins follow in dependency order, with bounded retirement drained while
@@ -619,29 +662,53 @@ Old code remains executable, but a superseded home cannot publish new durable
 state. Removal closes admission, lets outstanding turns settle, and separates
 the slot's teardown from delayed generation retirement.
 
-### Package visibility belongs to the defining source
+### Module visibility belongs to the defining source
 
-Dependency catalogs are portable derived metadata owned by atomic package
-publication. Their inert format binds relative source selection and exact exports
-to package identity and archive hash; it contains no runtime authority or IDs.
-Only explicit package synchronization may repair metadata, after seal and source
-validation, through atomic replacement that preserves prior metadata on failure.
-The Session imports current-format dependency catalogs without source discovery
-or store mutation and mints its own identities. Root project discovery remains
-dynamic. Catalog validation owns path safety, namespace uniqueness, reference
-integrity, and graph limits for both imported and freshly built entries.
-Both producers order each artifact's exports by numeric module-name ID for
-bounded binary-search membership, independently of spelling or metadata order.
-Fresh catalog construction records declaration membership in each unique
-manifest export entry, scoped to that package. A manifest-owned name index is
-reserved once and populated in budgeted steps before parsing artifacts, so
-declarations reach their export entries without rescanning the manifest.
-Export verification retains its cursor across scheduler steps and charges each
-constant-time membership lookup
-against the caller's work budget, independently of the catalog's module count.
+A Session owns one immutable validated module map and the source identities
+minted from it. The generic validator owns inert decoding, reference integrity,
+path rules, direct visibility edges, uniqueness, and size limits. Discovery and
+explicit selection share this boundary. A reference is limited to one hop;
+each document owns the base directory for its paths. No runtime component reads
+package manifests, locks, cache metadata, or recovery records.
 
-A cataloged source has one Session-owned file identity and private registry.
-The catalog separates source selection from exact public exports; the shared
+Local source discovery and public source inspection share the reader's inert
+declaration scanner. It observes adjacent top-level forms without executing
+code or descending into containers. Literal names retain order and duplicates;
+the consuming schema owns export validation. Public inspection materializes
+results in bounded passes with ordinary driver retirement.
+
+The Session's snapshot consumes the validated map on successful construction;
+on failure the caller retains it. Each artifact owns one private registry,
+absolute source identity, and commitment state. Public exports are ordered by
+nominal module-name ID for bounded membership checks. Lookup and local-source
+cursors advance by one export, edge, or artifact, retaining lexical context
+across scheduler suspension. Already-published modules pass the same visibility
+check as cold loads.
+
+ECL and native artifacts commit through their loading lease before another
+loader can observe completion. Provenance carries the artifact's publication
+identity. Failed loads publish neither partial public registrations nor a
+committed artifact; retry uses the same source identity.
+
+Standalone validation owns bounded input and the validated map through a host
+cleanup owner without constructing a Session. An unpublished document supplies
+its intended filename as the relative-path base; validation does not require
+or publish that file. The same validator handles file and stdin input, including
+the one-reference limit and inert discovery of live sources.
+
+Installed-application dispatch resolves a descriptor only from the executable's
+installation prefix, before Session construction. The descriptor selects the
+entry source and complete map; the startup directory remains the caller's.
+This keeps application resolution independent of project discovery without
+granting a separate execution mode or application-specific runtime authority.
+
+Application metadata publication uses the same staged-file owner as ordinary
+filesystem writes. Its create-or-replace commit performs one descriptor-relative
+rename after sealing the complete contents. Before commit, cancellation and
+failure leave staging owned by the driver for retirement; after commit, the
+destination owns the published contents and cancellation cannot undo it.
+
+The map separates source selection from exact public exports; the shared
 registry contains exported registrations while each file owns its private
 registrations. Private names therefore cannot collide across files or become
 visible through incidental loading.
@@ -653,7 +720,7 @@ visibility cursor: the defining file's private registrations, followed by
 authorized public exports. Suspended loads retain the same lexical context
 through authorization and resumed dispatch.
 
-File identity, package ownership, and the private registry are carried by one
+File identity, resolution scope, and the private registry are carried by one
 opaque source capability. The Session keeps it alive until execution stops;
 registry teardown uses the existing host-owned retirement protocol. Frame
 storage accommodates the lexical capability retained by a suspended load,
@@ -662,9 +729,9 @@ with a 144-byte ceiling.
 ### Loading feeds the same resolution tail
 
 An unresolved qualified name may suspend dispatch while the loader searches
-the embedded standard-library manifest, the project/package catalog, source
+the embedded standard-library manifest, the module map, source
 paths, or native artifacts according to `ENVIRONMENT.md`. The continuation
-retains the exact word, source site, operands when necessary, and package
+retains the exact word, source site, operands when necessary, and lexical
 authorization. After publication, execution returns to the same resolved-
 binding path used by an already-loaded module.
 
@@ -791,7 +858,7 @@ frame becomes public error data.
 
 Every operation whose cost can scale with user input must expose resumable
 progress. This includes reading, hashing, equality, rendering, list and
-dictionary construction, pervasion, sorting, imports, module loading, package
+dictionary construction, pervasion, sorting, imports, module loading,
 work, error unwinding, cancellation walks, and destruction.
 
 The rule is stronger than “check cancellation in long loops”: there must be no
@@ -1098,9 +1165,16 @@ overtake an earlier call while it yields. An optional process deadline stores
 presence separately from its duration: absence is unlimited, while a present
 zero duration expires immediately.
 
+The `host` builtin is classified with host-backed standard-library primitives.
+Startup-directory observation borrows immutable storage from the Session's
+process owner; it cannot mint launch authority. Executable-path observation
+uses the host I/O interface and a fixed path buffer. A self-owned, address-stable
+driver retains either borrow while bounded UTF-8 materialization is pending,
+and retires partial output through the ordinary scheduler release domain.
+
 ### Filesystem operations are bounded drivers over confined handles
 
-Every `fs` word, generic archive extraction, and package-store operation runs
+Every `fs` word, and generic archive extraction runs
 as one scheduler driver. The driver first encodes and validates its inputs
 without touching the host: the canonical path grammar, the named root, and a live-operation slot from the owner's quota. It then
 resolves the path with `filesystem_port.Resolver`, one component per step:
@@ -1121,7 +1195,7 @@ Transfers move 64 KiB per step; listings observe at most 256 entries and
 64 KiB of names per step, and ordering runs through `directory_order.Orderer`,
 a resumable pointer collection plus bottom-up merge sort whose sorted slice is
 reachable only from its completed state; the source audit forbids general
-sort calls in the filesystem, archive, and package-store drivers, so a whole
+sort calls in the filesystem and archive drivers, so a whole
 listing can never be ordered in one scheduler step. Mutation stages complete contents in a private
 sibling entry whose unguessable name is known only to the driver, checks
 cancellation after the last write, and publishes with one atomic namespace
@@ -1134,7 +1208,7 @@ every handle, disposes any unpublished staging entry, releases listing storage
 one entry per step, and releases the quota slot last, so a task scope or
 Session cannot publish quiescence while an operation still owns any of them.
 The filesystem read, write, and publication primitives run on the worker in
-these bounded quanta, the same convention the archive and package-store
+these bounded quanta, the same convention the archive
 drivers already use. Process pipes, native callbacks, and network ports use
 host-owned controller jobs. Network resource initialization owns socket and
 acceptor startup before publication.
@@ -1143,6 +1217,18 @@ Every failure maps a host error to one closed reason vocabulary at the
 `filesystem_port` boundary and attaches the operation, root, path (or both
 ends of a transfer), and reason to the pending failure, so programs branch on
 stable symbols and never on errno names.
+
+Recursive creation extends the existing resolver's policy: missing parents are
+created and reinspected before traversal. Recursive removal owns an iterable
+directory and advances without depth-dependent storage or cleanup allocations.
+Its destructive cursor moves a selected child's entries into the removal root
+before removing that child, using the shared no-clobber rename boundary. Every
+step stays descriptor-relative and the driver retains all open handles through
+bounded retirement. Resolver storage reserves its retirement node before opening
+any parent, so completion and cancellation both transfer the remaining handle
+stack to one-descriptor retirement steps without allocating. Only host cleanup
+authority can request blocking resolver disposal. Cancellation promises
+confinement, not rollback of removal.
 
 ### Network resources use registered controllers
 
@@ -1351,7 +1437,7 @@ The placement rule is:
   authoritative but measured bulk performance needs a fused path.
 
 Hosted modules combine source definitions with narrowly registered builtins.
-Their manifest, documentation, effects, provenance, and package requirements
+Their manifest, documentation, effects, provenance, and module requirements
 are validated before publication. Core and hosted builtin words use one
 complete declaration carrying implementation, spelling, effect, and
 documentation. Installation validates that declaration and publishes its
@@ -1446,11 +1532,17 @@ cleanup, and completion interests. Result observation and claiming go directly
 through the common result owner. Neither operation admission nor exchange
 observation dispatches on a backend family or uses backend readiness codes.
 
-Package discovery and synchronization are
-described in `ENVIRONMENT.md`; they enter the evaluator through the same module
-loader and bounded-driver conventions as other sources. Host-side lock and
-catalog validation share one inert-record decoder for exact fields, required
-values, and owned text; each owner retains its own schema and input limits.
+Maintained applications own their policy and enter through ordinary ECL
+execution with an installation-selected map. Package publication journals,
+locks, generations, and source selection are application data. The core inert
+record decoder is shared only by general metadata schemas.
+
+The Git extension owns its native allocations, scratch repository, and joined
+cleanup through the public port lifecycle. Libgit2 global options are serialized;
+requests never modify the interpreter's environment or working directory.
+Cooperative cancellation, finite network waits, and accounting bounds do not
+provide process isolation or a hard termination deadline. Large archives travel
+through byte endpoints; structured results carry the resolved commit.
 
 `http.server` shows the shape of a protocol module in source over host ports:
 one effect boundary, a single private word that validates and encodes a whole
@@ -1466,6 +1558,17 @@ input and completion tasks, applies bounded capture and an optional task deadlin
 and joins that scope before returning or raising an error.
 
 ### The native ABI is narrow and transactional
+
+Distribution extensions participate in the exhaustive production-source audit.
+Their build graph supplies only the public SDK and native dependencies; the
+import audit rejects interpreter imports. The Git snapshot extension runs as an
+ordinary registered port. Its controller invocation owns the complete native
+object graph and private scratch repository through joined teardown. One
+library admission lock covers libgit2 initialization, global configuration and
+allocator selection, fetch, export, and destruction. Cancellation is checked
+while waiting for admission and throughout cooperative backend work; it never
+releases ownership before the controller has joined. Backend allocation budgets
+and deadlines do not establish process isolation or hard termination bounds.
 
 A native artifact describes one module. The loader validates its descriptor,
 module name, exported definitions, effects, documentation, callbacks, and
@@ -2042,6 +2145,11 @@ The order of preference is:
 2. use compile-time validation and exhaustive switching;
 3. use the AST-aware source audit for rules Zig's type system cannot express;
 4. test behavior through public or production-connected interfaces.
+
+Maintained ECL module directories, including application libraries, share the
+parser-based terminal-registration check. Entry scripts live outside those
+directories. Canonical formatting applies to both application and library
+sources.
 
 Behavioral tests exercise runtime or public interfaces. Source audits prove
 source shape.

@@ -10,6 +10,9 @@ const SourceGroup = struct {
 };
 
 const source_groups = [_]SourceGroup{
+    // Distribution extensions compile against only the public SDK and native
+    // dependencies; they remain production inputs to every applicable audit.
+    .{ .production = true, .files = &.{"../extensions/git/git.zig"}, .sources = &.{source_audit_options.git_extension_source} },
     // Exact, non-rehashing map construction and resumable interning keep
     // user-sized storage work outside scheduler-native stacks.
     .{ .production = true, .files = &.{
@@ -55,13 +58,14 @@ const source_groups = [_]SourceGroup{
     // opaque rendered result rather than folding those lifetime boundaries
     // into Session internals.
     .{ .production = true, .files = &.{
-        "env.zig", "modules.zig", "snapshot.zig", "module_prims.zig", "reflection.zig", "session.zig", "project.zig", "pkg_catalog.zig", "pkg_lock.zig", "package_data.zig",
+        "env.zig", "modules.zig", "snapshot.zig", "module_prims.zig", "reflection.zig", "session.zig", "inert_data.zig", "module_map.zig", "module_snapshot.zig",
     }, .sources = &.{
-        @embedFile("../env.zig"),        @embedFile("../modules.zig"),
-        @embedFile("../snapshot.zig"),   @embedFile("../module_prims.zig"),
-        @embedFile("../reflection.zig"), @embedFile("../session.zig"),
-        @embedFile("../project.zig"),    @embedFile("../pkg_catalog.zig"),
-        @embedFile("../pkg_lock.zig"),   @embedFile("../package_data.zig"),
+        @embedFile("../env.zig"),             @embedFile("../modules.zig"),
+        @embedFile("../snapshot.zig"),        @embedFile("../module_prims.zig"),
+        @embedFile("../reflection.zig"),      @embedFile("../session.zig"),
+
+        @embedFile("../inert_data.zig"),      @embedFile("../module_map.zig"),
+        @embedFile("../module_snapshot.zig"),
     } },
     // The embedded prelude loader and the embedded stdlib manifest are one
     // bootstrap surface: both hand constant source to the ordinary reader.
@@ -81,14 +85,14 @@ const source_groups = [_]SourceGroup{
     // Builtin-backed stdlib modules hold host authority the SDK withholds, so
     // they are ordinary production sources under the bounded-traversal rules.
     .{ .production = true, .files = &.{
-        "stdlib/dict.zig",  "stdlib/rand.zig", "stdlib/json.zig", "stdlib/http.zig", "stdlib/archive.zig", "stdlib/pkg_store.zig", "stdlib/fs.zig",
-        "stdlib/clock.zig", "stdlib/time.zig",
+        "stdlib/dict.zig",  "stdlib/rand.zig", "stdlib/json.zig",   "stdlib/http.zig", "stdlib/archive.zig", "stdlib/fs.zig",
+        "stdlib/clock.zig", "stdlib/time.zig", "stdlib/source.zig", "stdlib/host.zig",
     }, .sources = &.{
         @embedFile("../stdlib/dict.zig"),    @embedFile("../stdlib/rand.zig"),
         @embedFile("../stdlib/json.zig"),    @embedFile("../stdlib/http.zig"),
-        @embedFile("../stdlib/archive.zig"), @embedFile("../stdlib/pkg_store.zig"),
-        @embedFile("../stdlib/fs.zig"),      @embedFile("../stdlib/clock.zig"),
-        @embedFile("../stdlib/time.zig"),
+        @embedFile("../stdlib/archive.zig"), @embedFile("../stdlib/fs.zig"),
+        @embedFile("../stdlib/clock.zig"),   @embedFile("../stdlib/time.zig"),
+        @embedFile("../stdlib/source.zig"),  @embedFile("../stdlib/host.zig"),
     } },
     .{ .production = true, .files = &.{
         "combinators.zig",
@@ -130,20 +134,20 @@ const source_groups = [_]SourceGroup{
         @embedFile("bench_workdrivers.zig"),    @embedFile("ecl_source_check.zig"),
     } },
     // Scheduler-owned external resources: process ports, filesystem roots,
-    // network listeners, and package stores share the nominal capability
+    // and network listeners share the nominal capability
     // vocabulary in external.zig and are opened only by their Session-owned
     // owner.
     .{ .production = true, .files = &.{
-        "scheduler.zig",         "scheduler_core.zig", "external.zig",        "process_port.zig",    "console.zig",      "task_prims.zig",    "filesystem_port.zig", "package_authority.zig", "directory_order.zig",
-        "net_port.zig",          "byte_ring.zig",      "port_transfer.zig",   "port_controller.zig", "port_message.zig", "port_failure.zig",  "port_builder.zig",    "port_bytes.zig",        "port_messages.zig",
-        "port_declarations.zig", "port_resource.zig",  "module_bindings.zig", "port_endpoint.zig",   "port_result.zig",  "port_exchange.zig", "port_operation.zig",  "port_service.zig",      "port_factory.zig",
-        "process_adapter.zig",   "net_adapter.zig",    "http_service.zig",
+        "scheduler.zig",       "scheduler_core.zig", "external.zig",      "process_port.zig",    "console.zig",        "task_prims.zig",   "filesystem_port.zig", "directory_resource.zig", "directory_stage.zig", "directory_order.zig",   "archive_document.zig",
+        "net_port.zig",        "byte_ring.zig",      "port_transfer.zig", "port_controller.zig", "port_message.zig",   "port_failure.zig", "port_builder.zig",    "port_bytes.zig",         "port_messages.zig",   "port_declarations.zig", "port_resource.zig",
+        "module_bindings.zig", "port_endpoint.zig",  "port_result.zig",   "port_exchange.zig",   "port_operation.zig", "port_service.zig", "port_factory.zig",    "process_adapter.zig",    "net_adapter.zig",     "http_service.zig",
     }, .sources = &.{
         @embedFile("../scheduler.zig"),         @embedFile("../scheduler_core.zig"),
         @embedFile("../external.zig"),          @embedFile("../process_port.zig"),
         @embedFile("../console.zig"),           @embedFile("../task_prims.zig"),
-        @embedFile("../filesystem_port.zig"),   @embedFile("../package_authority.zig"),
-        @embedFile("../directory_order.zig"),   @embedFile("../net_port.zig"),
+        @embedFile("../filesystem_port.zig"),   @embedFile("../directory_resource.zig"),
+        @embedFile("../directory_stage.zig"),   @embedFile("../directory_order.zig"),
+        @embedFile("../archive_document.zig"),  @embedFile("../net_port.zig"),
         @embedFile("../byte_ring.zig"),         @embedFile("../port_transfer.zig"),
         @embedFile("../port_controller.zig"),   @embedFile("../port_message.zig"),
         @embedFile("../port_failure.zig"),      @embedFile("../port_builder.zig"),
@@ -197,7 +201,7 @@ const test_files = [_][]const u8{
     "tests/stateful_module_test.zig",
     "tests/stdlib_test.zig",
     "tests/hostio_test.zig",
-    "tests/pkg_sync_test.zig",
+
     "tests/archive_test.zig",
     "tests/http_test.zig",
     "tests/random_test.zig",
@@ -242,7 +246,6 @@ const repository_verification_files = [_][]const u8{
     "test/native/negative/undeclared_port.zig",
     "test/native/negative/retained_port_candidate.zig",
     "test/http_fixture_server.zig",
-    "test/pkg_lock_fixture.zig",
     "test/process_fixture.zig",
 };
 pub fn main(init: std.process.Init) !void {
@@ -251,6 +254,7 @@ pub fn main(init: std.process.Init) !void {
         if (component.files.len != component.sources.len) return error.SourceAuditFailed;
     }
     failed = auditSourceCoverage(init) or failed;
+    failed = auditExtensionImports() or failed;
     failed = auditSourceBodies() or failed;
     failed = auditFilesystemAuthority() or failed;
     failed = auditUnsafeCasts() or failed;
@@ -314,40 +318,41 @@ fn auditFormalValueKinds() bool {
 }
 
 fn auditSourceCoverage(init: std.process.Init) bool {
-    var directory = std.Io.Dir.cwd().openDir(init.io, "src", .{ .iterate = true }) catch |err| {
-        std.log.err("source coverage: cannot open src: {s}", .{@errorName(err)});
-        return true;
-    };
-    defer directory.close(init.io);
-    var walker = directory.walk(std.heap.page_allocator) catch |err| {
-        std.log.err("source coverage: cannot walk src: {s}", .{@errorName(err)});
-        return true;
-    };
-    defer walker.deinit();
     var failed = false;
     var production_count: usize = 0;
     var verification_count: usize = 0;
-    while (walker.next(init.io) catch |err| {
-        std.log.err("source coverage: cannot enumerate src: {s}", .{@errorName(err)});
-        return true;
-    }) |entry| {
-        if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig")) continue;
-        var matches: usize = 0;
-        var is_production = false;
-        for (source_groups) |component| for (component.files) |file| {
-            if (!sameSourcePath(entry.path, file)) continue;
-            matches += 1;
-            is_production = component.production;
+    for ([_][]const u8{ "src", "extensions", "apps" }) |root| {
+        var directory = std.Io.Dir.cwd().openDir(init.io, root, .{ .iterate = true }) catch |err| {
+            std.log.err("source coverage: cannot open {s}: {s}", .{ root, @errorName(err) });
+            return true;
         };
-        for (test_files) |file| matches += @intFromBool(sameSourcePath(entry.path, file));
-        if (matches != 1) {
-            std.log.err("source coverage: {s} belongs to {d} source groups; expected exactly one", .{
-                entry.path, matches,
-            });
-            failed = true;
-            continue;
+        defer directory.close(init.io);
+        var walker = directory.walk(std.heap.page_allocator) catch return true;
+        defer walker.deinit();
+        while (walker.next(init.io) catch |err| {
+            std.log.err("source coverage: cannot enumerate src: {s}", .{@errorName(err)});
+            return true;
+        }) |entry| {
+            if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig")) continue;
+            var path_buffer: [4096]u8 = undefined;
+            const path = if (std.mem.eql(u8, root, "src")) entry.path else std.fmt.bufPrint(&path_buffer, "../{s}/{s}", .{ root, entry.path }) catch return true;
+            var matches: usize = 0;
+            var is_production = false;
+            for (source_groups) |component| for (component.files) |file| {
+                if (!sameSourcePath(path, file)) continue;
+                matches += 1;
+                is_production = component.production;
+            };
+            for (test_files) |file| matches += @intFromBool(sameSourcePath(path, file));
+            if (matches != 1) {
+                std.log.err("source coverage: {s} belongs to {d} source groups; expected exactly one", .{
+                    path, matches,
+                });
+                failed = true;
+                continue;
+            }
+            if (is_production) production_count += 1 else verification_count += 1;
         }
-        if (is_production) production_count += 1 else verification_count += 1;
     }
     std.log.info("source coverage: {d} production and {d} verification inputs classified", .{
         production_count, verification_count,
@@ -361,10 +366,34 @@ fn auditSourceCoverage(init: std.process.Init) bool {
             expected_verification += component.files.len;
     }
     if (production_count != expected_production or verification_count != expected_verification) {
-        std.log.err("source coverage: manifest contains missing src inputs", .{});
+        std.log.err("source coverage: manifest contains missing production or src verification inputs", .{});
         failed = true;
     }
     failed = auditRepositoryVerification(init) or failed;
+    return failed;
+}
+
+fn auditExtensionImports() bool {
+    var failed = false;
+    for (source_groups) |group| for (group.files, group.sources) |file, source| {
+        if (!std.mem.startsWith(u8, file, "../extensions/")) continue;
+        var tokenizer = std.zig.Tokenizer.init(source);
+        while (true) {
+            const token = tokenizer.next();
+            if (token.tag == .eof) break;
+            if (token.tag != .builtin or !std.mem.eql(u8, source[token.loc.start..token.loc.end], "@import")) continue;
+            const open = tokenizer.next();
+            const argument = tokenizer.next();
+            const close = tokenizer.next();
+            const spelling = source[argument.loc.start..argument.loc.end];
+            if (open.tag != .l_paren or argument.tag != .string_literal or close.tag != .r_paren or
+                (!std.mem.eql(u8, spelling, "\"std\"") and !std.mem.eql(u8, spelling, "\"ecl-native\"")))
+            {
+                std.log.err("extension boundary: {s} may import only std and ecl-native", .{file});
+                failed = true;
+            }
+        }
+    };
     return failed;
 }
 
@@ -736,30 +765,26 @@ fn auditSourceBodies() bool {
 /// function and a word spelling is text. Among the modules that implement
 /// evaluated filesystem words, none may name the working directory; the
 /// owners that open trusted host paths once at Session construction
-/// (`filesystem_port.zig`, `package_authority.zig`) and the CLI, project
+/// (`filesystem_port.zig`, `directory_resource.zig`) and the CLI, map
 /// discovery, and module-loading host boundaries do so by design.
 fn auditFilesystemAuthority() bool {
     var failed = false;
     const ambient_cwd = [_][]const []const u8{
         &.{ "Dir", ".", "cwd", "(", ")" },
     };
-    const confined_sources = [_]struct { name: []const u8, text: [:0]const u8 }{
-        .{ .name = "fs module", .text = @embedFile("../stdlib/fs.zig") },
-        .{ .name = "archive module", .text = @embedFile("../stdlib/archive.zig") },
-        .{ .name = "package store module", .text = @embedFile("../stdlib/pkg_store.zig") },
-    };
-    for (confined_sources) |source| {
-        failed = auditTokens(source.name, source.text, &ambient_cwd) or failed;
-    }
-    // User-sized ordering inside a scheduler driver goes through the
-    // resumable directory orderer; a general sort call would run a whole
-    // listing in one step.
+    // Derive stdlib confinement from exhaustive production classification;
+    // adding another builtin cannot silently evade this boundary.
     const unbounded_sorting = [_][]const []const u8{
         &.{ "std", ".", "mem", ".", "sort" },
         &.{ "std", ".", "sort", "." },
     };
-    for (confined_sources) |source| {
-        failed = auditTokens(source.name, source.text, &unbounded_sorting) or failed;
+    for (source_groups) |group| {
+        if (!group.production) continue;
+        for (group.files, group.sources) |name, text| {
+            if (!std.mem.startsWith(u8, name, "stdlib/")) continue;
+            failed = auditTokens(name, text, &ambient_cwd) or failed;
+            failed = auditTokens(name, text, &unbounded_sorting) or failed;
+        }
     }
     // The filesystem port opens configured roots by their trusted host path
     // exactly once, inside the owner's constructor, and nowhere else.
@@ -1040,14 +1065,6 @@ const first_party_definition_sources = [_][:0]const u8{
     @embedFile("../stdlib/str.ecl"),
     @embedFile("../stdlib/table.ecl"),
     @embedFile("../stdlib/rng.ecl"),
-    @embedFile("../stdlib/pkg/version.ecl"),
-    @embedFile("../stdlib/pkg/name.ecl"),
-    @embedFile("../stdlib/pkg/data.ecl"),
-    @embedFile("../stdlib/pkg/manifest.ecl"),
-    @embedFile("../stdlib/pkg/lock.ecl"),
-    @embedFile("../stdlib/pkg/mvs.ecl"),
-    @embedFile("../stdlib/pkg/sync.ecl"),
-    @embedFile("../stdlib/pkg/cli.ecl"),
     @embedFile("../stdlib/path.ecl"),
     @embedFile("../stdlib/http/server.ecl"),
     @embedFile("../stdlib/http/request.ecl"),

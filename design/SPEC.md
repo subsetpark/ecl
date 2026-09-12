@@ -1924,7 +1924,7 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   the Session, and Session teardown destroys that state. External effects are
   not transactional or rolled back.
 - **`ecl test` delegates framework policy to ECL.** The command requires a
-  valid lock-backed root project, loads each declared root source artifact
+  valid module map with a local scope, loads each ECL artifact of that scope
   once, including sources with no exports, then calls the public qualified
   runner selected by `--runner` (default `test.default.run`). Tokens after `--` are ordinary
   `args`. Successful completion is status 0; `exit` selects the requested
@@ -2140,7 +2140,7 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   except that the reserved module segment `core` selects the core scope (see
   Scope chains) and never consults the registry.
   A missing registration or public binding raises `'undefined-word`.
-  Filesystem search, embedded resources, package catalogs, native loading, and
+  Filesystem search, embedded resources, module maps, native loading, and
   eager or on-demand acquisition are host facilities outside the language
   semantics. A host may obtain and register an image by any means, but ECL
   programs observe only the resulting registration, never whether a module is

@@ -47,3 +47,31 @@ jobs:
     with:
       optimize: ReleaseFast
       run_snapshots: true
+
+  git-macos:
+    name: Git packages and snapshot extension on macOS
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Zig 0.16
+        shell: bash
+        run: |
+          python3 - <<'PYTHON'
+          import hashlib, pathlib, platform, subprocess, urllib.request
+          architecture = 'aarch64' if platform.machine() == 'arm64' else 'x86_64'
+          expected = {'aarch64': 'b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489', 'x86_64': '0387557ed1877bc6a2e1802c8391953baddba76081876301c522f52977b52ba7'}
+          archive = pathlib.Path('/tmp/zig.tar.xz')
+          with urllib.request.urlopen(f'https://ziglang.org/download/0.16.0/zig-{architecture}-macos-0.16.0.tar.xz', timeout=60) as response:
+              archive.write_bytes(response.read())
+          assert hashlib.sha256(archive.read_bytes()).hexdigest() == expected[architecture]
+          pathlib.Path('/tmp/zig').mkdir(exist_ok=True)
+          subprocess.run(['tar', '-C', '/tmp/zig', '--strip-components=1', '-xf', str(archive)], stdin=subprocess.DEVNULL, timeout=60, check=True)
+          PYTHON
+      - name: Build and exercise HTTPS packages
+        run: |
+          python3 - <<'PYTHON'
+          import subprocess
+          subprocess.run(['/tmp/zig/zig', 'build', 'test-pkg-git', '-Doptimize=ReleaseSafe'], stdin=subprocess.DEVNULL, timeout=900, check=True)
+          subprocess.run(['/tmp/zig/zig', 'build', 'test-git-extension', 'test-pkg-fetch', '-Doptimize=ReleaseSafe'], stdin=subprocess.DEVNULL, timeout=900, check=True)
+          PYTHON

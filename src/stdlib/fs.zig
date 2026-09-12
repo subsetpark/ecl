@@ -1,7 +1,7 @@
-//! Filesystem words over Session-named root directories.
+//! Filesystem words over named roots and scope-owned directory resources.
 //!
-//! Every word names a root by symbol and a canonical relative path; the
-//! Session's filesystem owner turns the symbol into a retained directory
+//! Each confined operation selects a root and a canonical relative path; the
+//! Session's filesystem owner turns a symbol into a retained directory
 //! handle and `filesystem_port` resolves the path beneath it one component
 //! per scheduler step. Reads, writes, copies, and listings advance in fixed
 //! quanta; mutation stages into a private sibling entry and publishes with one
@@ -13,6 +13,7 @@ const dict = @import("../dict.zig");
 const directory_order = @import("../directory_order.zig");
 const env = @import("../env.zig");
 const external = @import("../external.zig");
+const directory = @import("../directory_resource.zig");
 const fsport = @import("../filesystem_port.zig");
 const heap = @import("../heap.zig");
 const intern = @import("../intern.zig");
@@ -28,12 +29,23 @@ const Value = value.Value;
 const work_quantum = machine.kernel_poll_quantum;
 
 pub const words = [_]env.BuiltinWord{
+    .{ .name = "open-list", .doc = "( root path -- cursor ) Open a scope-owned incremental directory enumeration.", .primitive = openList },
+    .{ .name = "next-entry", .doc = "( cursor -- entry ) Read the next name/kind dictionary, or an empty dictionary at end.", .primitive = nextEntry },
+    .{ .name = "stage-dir", .doc = "( root destination -- stage ) Own a private directory until commit or joined rollback.", .primitive = stageDirectory },
+    .{ .name = "commit-dir", .doc = "( stage -- ) Seal and atomically publish a directory to its absent destination.", .primitive = commitDirectory },
+    .{ .name = "mkdirs", .doc = "( root path -- ) Create missing directories, preserving existing directories.", .primitive = makeDirectories },
+    .{ .name = "remove-tree", .doc = "( root path -- ) Recursively remove a directory without following contained symlinks.", .primitive = removeTree },
+    .{ .name = "lock", .doc = "( root path -- lock ) Acquire a cancellable exclusive advisory lock on a regular file, creating it if absent.", .primitive = advisoryLock },
+    .{ .name = "open-dir", .doc = "( host-path -- directory ) Open an absolute host directory as a scope-owned resource.", .primitive = openDirectory },
+    .{ .name = "child-dir", .doc = "( root path -- directory ) Acquire a directory confined beneath a root.", .primitive = childDirectory },
     .{ .name = "read-bytes", .doc = "( root path -- bytes ) Read one regular file's exact bytes beneath a named root.", .primitive = readBytes },
     .{ .name = "read-text", .doc = "( root path -- string ) Read one regular UTF-8 file beneath a named root.", .primitive = readText },
     .{ .name = "create-bytes", .doc = "( bytes root path -- ) Atomically create an absent file from exact bytes.", .primitive = createBytes },
     .{ .name = "create-text", .doc = "( string root path -- ) Atomically create an absent UTF-8 file.", .primitive = createText },
     .{ .name = "replace-bytes", .doc = "( bytes root path -- ) Atomically replace an existing regular file with exact bytes.", .primitive = replaceBytes },
     .{ .name = "replace-text", .doc = "( string root path -- ) Atomically replace an existing regular file with UTF-8 text.", .primitive = replaceText },
+    .{ .name = "publish-bytes", .doc = "( bytes root path -- ) Atomically publish a complete file, creating or replacing the destination.", .primitive = publishBytes },
+    .{ .name = "publish-text", .doc = "( string root path -- ) Atomically publish a complete UTF-8 file, creating or replacing the destination.", .primitive = publishText },
     .{ .name = "stat", .doc = "( root path -- metadata ) Describe the object a path reaches, following a final link within the root.", .primitive = stat },
     .{ .name = "lstat", .doc = "( root path -- metadata ) Describe the final entry itself without following a link.", .primitive = lstat },
     .{ .name = "exists?", .doc = "( root path -- bool ) Return 1 when the final entry exists, without following it.", .primitive = exists },
@@ -46,12 +58,21 @@ pub const words = [_]env.BuiltinWord{
 };
 
 const Operation = enum {
+    open_list,
+    stage_dir,
+    mkdirs,
+    remove_tree,
+    lock,
+    open_dir,
+    child_dir,
     read_bytes,
     read_text,
     create_bytes,
     create_text,
     replace_bytes,
     replace_text,
+    publish_bytes,
+    publish_text,
     stat,
     lstat,
     exists,
@@ -64,24 +85,32 @@ const Operation = enum {
 
     fn name(self: Operation) []const u8 {
         return switch (self) {
+            .open_list => "open-list",
+            .stage_dir => "stage-dir",
+            .open_dir => "open-dir",
+            .child_dir => "child-dir",
             .read_bytes => "read-bytes",
             .read_text => "read-text",
             .create_bytes => "create-bytes",
             .create_text => "create-text",
             .replace_bytes => "replace-bytes",
             .replace_text => "replace-text",
+            .publish_bytes => "publish-bytes",
+            .publish_text => "publish-text",
             .exists => "exists?",
+            .remove_tree => "remove-tree",
             .remove_file => "remove-file",
             .remove_dir => "remove-dir",
-            .stat, .lstat, .list, .mkdir, .copy, .rename => @tagName(self),
+            .mkdirs, .lock, .stat, .lstat, .list, .mkdir, .copy, .rename => @tagName(self),
         };
     }
 
-    const Shape = enum { unary, payload, copy, rename };
+    const Shape = enum { host, unary, payload, copy, rename };
 
     fn shape(self: Operation) Shape {
         return switch (self) {
-            .create_bytes, .create_text, .replace_bytes, .replace_text => .payload,
+            .open_dir => .host,
+            .create_bytes, .create_text, .replace_bytes, .replace_text, .publish_bytes, .publish_text => .payload,
             .copy => .copy,
             .rename => .rename,
             else => .unary,
@@ -89,12 +118,12 @@ const Operation = enum {
     }
 
     fn textPayload(self: Operation) bool {
-        return self == .create_text or self == .replace_text;
+        return self == .create_text or self == .replace_text or self == .publish_text;
     }
 
     fn resolveMode(self: Operation) fsport.ResolveMode {
         return switch (self) {
-            .read_bytes, .read_text, .stat, .list, .copy => .follow_final,
+            .open_list, .mkdirs, .child_dir, .read_bytes, .read_text, .stat, .list, .copy => .follow_final,
             else => .no_follow_final,
         };
     }
@@ -102,11 +131,120 @@ const Operation = enum {
     /// Words that act on a child entry reject `.`, which names the root.
     fn requiresEntry(self: Operation) bool {
         return switch (self) {
-            .create_bytes, .create_text, .replace_bytes, .replace_text, .mkdir, .rename, .remove_file, .remove_dir => true,
-            .read_bytes, .read_text, .stat, .lstat, .exists, .list, .copy => false,
+            .stage_dir, .create_bytes, .create_text, .replace_bytes, .replace_text, .publish_bytes, .publish_text, .lock, .mkdir, .rename, .remove_tree, .remove_file, .remove_dir => true,
+            .open_list, .mkdirs, .open_dir, .child_dir, .read_bytes, .read_text, .stat, .lstat, .exists, .list, .copy => false,
         };
     }
 };
+
+fn openList(evaluator: *Machine) MachineError!void {
+    return begin(evaluator, .open_list);
+}
+fn nextEntry(evaluator: *Machine) MachineError!void {
+    var cursor = try evaluator.popValue();
+    errdefer cursor.deinit();
+    if (!directory.isEnumeration(cursor.borrow())) return evaluator.typeError("a directory enumeration resource");
+    const driver = try evaluator.allocator().create(NextEntry);
+    driver.* = .{ .cursor = cursor.take() };
+    evaluator.adoptDriver(driver);
+}
+const NextEntry = struct {
+    pub const address_stable_driver = {};
+    pub const ownership: heap.DriverOwnership = .self_owned;
+    cursor: Value,
+    entry: directory.Entry = undefined,
+    state: union(enum) { reading, name: kernel_storage.Utf8Materializer, complete } = .reading,
+    pub fn deinit(self: *@This(), releases: *heap.ReleaseDomain, _: std.mem.Allocator) void {
+        if (self.state == .name) self.state.name.retire(releases);
+        releases.releaseValue(self.cursor);
+    }
+    pub fn advance(evaluator: *Machine, self: *@This()) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        if (self.state == .reading) switch (directory.next(self.cursor)) {
+            .pending => return .yielded,
+            .closed => return evaluator.fail(.io, "directory enumeration is closed"),
+            .failed => |reason| return evaluator.fail(errorKindFor(reason), reason.message()),
+            .end => {
+                self.state = .complete;
+                return .{ .output = try dict.fromUniquePairs(evaluator.allocator(), evaluator.releaseDomain(), &.{}) };
+            },
+            .entry => |entry| {
+                self.entry = entry;
+                self.state = .{ .name = .init(evaluator.allocator(), self.entry.name[0..self.entry.length]) };
+            },
+        };
+        return switch (self.state.name.advance(work_quantum) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidUtf8 => return evaluator.fail(.io, "directory entry is not UTF-8"),
+        }) {
+            .pending => .yielded,
+            .complete => |name| result: {
+                self.state.name.deinit();
+                self.state = .complete;
+                defer evaluator.releaseDomain().releaseValue(name);
+                break :result .{ .output = try dict.fromUniquePairs(evaluator.allocator(), evaluator.releaseDomain(), &.{
+                    .{ .{ .symbol = try intern.intern("name") }, name },
+                    .{ .{ .symbol = try intern.intern("kind") }, .{ .symbol = try intern.intern(self.entry.kind.symbol()) } },
+                }) };
+            },
+        };
+    }
+};
+
+fn stageDirectory(evaluator: *Machine) MachineError!void {
+    return begin(evaluator, .stage_dir);
+}
+fn commitDirectory(evaluator: *Machine) MachineError!void {
+    var stage = try evaluator.popValue();
+    errdefer stage.deinit();
+    if (!directory.isStage(stage.borrow())) return evaluator.typeError("a directory staging resource");
+    const driver = try evaluator.allocator().create(CommitDirectory);
+    driver.* = .{ .stage = stage.take() };
+    evaluator.adoptDriver(driver);
+}
+const CommitDirectory = struct {
+    pub const address_stable_driver = {};
+    pub const ownership: heap.DriverOwnership = .self_owned;
+    stage: Value,
+    state: enum { sealing, joining } = .sealing,
+    pub fn deinit(self: *@This(), releases: *heap.ReleaseDomain, _: std.mem.Allocator) void {
+        releases.releaseValue(self.stage);
+    }
+    pub fn advance(evaluator: *Machine, self: *@This()) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        if (self.state == .sealing) switch (directory.commit(self.stage)) {
+            .closed => return evaluator.fail(.io, "directory staging resource is closed"),
+            .failed => |reason| return evaluator.fail(.io, reason.message()),
+            .pending => |source| {
+                try evaluator.park(.{ .external = source });
+                return .yielded;
+            },
+            .committed => self.state = .joining,
+        };
+        const port = @import("../port_resource.zig").Resource.fromValue(self.stage).?;
+        if (!port.joined()) {
+            try evaluator.park(.{ .external = port.source() });
+            return .yielded;
+        }
+        return .completed;
+    }
+};
+
+fn makeDirectories(evaluator: *Machine) MachineError!void {
+    return begin(evaluator, .mkdirs);
+}
+fn removeTree(evaluator: *Machine) MachineError!void {
+    return begin(evaluator, .remove_tree);
+}
+fn advisoryLock(evaluator: *Machine) MachineError!void {
+    return begin(evaluator, .lock);
+}
+fn openDirectory(evaluator: *Machine) MachineError!void {
+    return begin(evaluator, .open_dir);
+}
+fn childDirectory(evaluator: *Machine) MachineError!void {
+    return begin(evaluator, .child_dir);
+}
 
 fn readBytes(evaluator: *Machine) MachineError!void {
     return begin(evaluator, .read_bytes);
@@ -125,6 +263,12 @@ fn replaceBytes(evaluator: *Machine) MachineError!void {
 }
 fn replaceText(evaluator: *Machine) MachineError!void {
     return begin(evaluator, .replace_text);
+}
+fn publishBytes(evaluator: *Machine) MachineError!void {
+    return begin(evaluator, .publish_bytes);
+}
+fn publishText(evaluator: *Machine) MachineError!void {
+    return begin(evaluator, .publish_text);
 }
 fn stat(evaluator: *Machine) MachineError!void {
     return begin(evaluator, .stat);
@@ -198,6 +342,7 @@ const Payload = union(enum) {
 
 fn begin(evaluator: *Machine, operation: Operation) MachineError!void {
     const count: usize = switch (operation.shape()) {
+        .host => 1,
         .unary => 2,
         .payload, .rename => 3,
         .copy => 4,
@@ -207,13 +352,19 @@ fn begin(evaluator: *Machine, operation: Operation) MachineError!void {
     // it is read, and an arm that fails returns before reaching a read.
     var inputs: Inputs = undefined;
     switch (operation.shape()) {
+        .host => {
+            var path = try evaluator.popValue();
+            errdefer path.deinit();
+            if (!path.borrow().isString()) return evaluator.typeError("an absolute host directory path");
+            inputs = .{ .root = .{ .symbol = try intern.intern("host") }, .path = path.take() };
+        },
         .unary => {
             var path = try evaluator.popValue();
             errdefer path.deinit();
             if (!path.borrow().isString()) return evaluator.typeError("a string path");
             var root = try evaluator.popValue();
             errdefer root.deinit();
-            if (root.borrow() != .symbol) return evaluator.typeError("a root symbol");
+            if (!validRoot(root.borrow())) return evaluator.typeError("a root symbol or directory resource");
             inputs = .{ .root = root.take(), .path = path.take() };
         },
         .payload => {
@@ -222,7 +373,7 @@ fn begin(evaluator: *Machine, operation: Operation) MachineError!void {
             if (!path.borrow().isString()) return evaluator.typeError("a string path");
             var root = try evaluator.popValue();
             errdefer root.deinit();
-            if (root.borrow() != .symbol) return evaluator.typeError("a root symbol");
+            if (!validRoot(root.borrow())) return evaluator.typeError("a root symbol or directory resource");
             var payload = try evaluator.popValue();
             errdefer payload.deinit();
             if (operation.textPayload()) {
@@ -236,13 +387,13 @@ fn begin(evaluator: *Machine, operation: Operation) MachineError!void {
             if (!destination_path.borrow().isString()) return evaluator.typeError("a string destination path");
             var destination_root = try evaluator.popValue();
             errdefer destination_root.deinit();
-            if (destination_root.borrow() != .symbol) return evaluator.typeError("a destination root symbol");
+            if (!validRoot(destination_root.borrow())) return evaluator.typeError("a destination root symbol or directory resource");
             var source_path = try evaluator.popValue();
             errdefer source_path.deinit();
             if (!source_path.borrow().isString()) return evaluator.typeError("a string source path");
             var source_root = try evaluator.popValue();
             errdefer source_root.deinit();
-            if (source_root.borrow() != .symbol) return evaluator.typeError("a source root symbol");
+            if (!validRoot(source_root.borrow())) return evaluator.typeError("a source root symbol or directory resource");
             inputs = .{
                 .root = source_root.take(),
                 .path = source_path.take(),
@@ -259,7 +410,7 @@ fn begin(evaluator: *Machine, operation: Operation) MachineError!void {
             if (!source_path.borrow().isString()) return evaluator.typeError("a string source path");
             var root = try evaluator.popValue();
             errdefer root.deinit();
-            if (root.borrow() != .symbol) return evaluator.typeError("a root symbol");
+            if (!validRoot(root.borrow())) return evaluator.typeError("a root symbol or directory resource");
             heap.retainValue(root.borrow());
             inputs = .{
                 .root = root.borrow(),
@@ -370,6 +521,11 @@ const Listed = struct {
 const EntryList = poll.ChunkList(Listed);
 const Orderer = directory_order.Orderer(Listed, Listed.lessThan);
 
+fn validRoot(item: Value) bool {
+    return fsport.isRoot(item);
+}
+const RootSelection = fsport.RootSelection;
+
 const Driver = struct {
     pub const address_stable_driver = {};
     pub const ownership: heap.DriverOwnership = .bounded_retirement;
@@ -385,8 +541,8 @@ const Driver = struct {
     path: ?[]u8 = null,
     second_path: ?[]u8 = null,
     payload: ?Payload = null,
-    root: ?fsport.RootHandle = null,
-    second_root: ?fsport.RootHandle = null,
+    root: ?RootSelection = null,
+    second_root: ?RootSelection = null,
     slot: ?fsport.OperationSlot = null,
     resolved: ?fsport.Resolved = null,
     second: ?fsport.Resolved = null,
@@ -452,6 +608,8 @@ const Driver = struct {
         resolve: fsport.Resolver,
         resolve_second: fsport.Resolver,
         act,
+        removing_tree: fsport.TreeRemoval,
+        waiting_lock: std.Io.File,
         read: Read,
         bytes_value: struct { buffer: []u8, materializer: list.ByteListMaterializer },
         text_value: struct { buffer: []u8, materializer: kernel_storage.Utf8Materializer },
@@ -482,6 +640,8 @@ const Driver = struct {
             .resolve => |*resolver| self.resolve(evaluator, resolver, .primary),
             .resolve_second => |*resolver| self.resolve(evaluator, resolver, .second),
             .act => self.act(evaluator),
+            .waiting_lock => |file| self.waitForLock(evaluator, file),
+            .removing_tree => |*tree| self.removeTreeStep(evaluator, tree),
             .read => |*read| self.readStep(evaluator, read),
             .bytes_value => |*building| self.materializeBytes(building),
             .text_value => |*building| self.materializeText(evaluator, building),
@@ -599,6 +759,13 @@ const Driver = struct {
     /// Grammar, root lookup, and quota checks happen before any
     /// host object is opened.
     fn authorize(self: *Driver, evaluator: *Machine) MachineError!machine.WorkProgress {
+        if (self.operation == .open_dir) {
+            const dir = switch (fsport.openHostDirectory(self.access, self.path.?)) {
+                .directory => |dir| dir,
+                .failed => |reason| return self.fail(evaluator, reason),
+            };
+            return self.publishDirectory(evaluator, dir);
+        }
         const class = fsport.classifyPath(self.path.?) catch return self.fail(evaluator, .invalid_path);
         if (class == .root and self.operation.requiresEntry() and self.operation != .rename)
             return self.fail(evaluator, .invalid_path);
@@ -607,12 +774,10 @@ const Driver = struct {
             if (second_class == .root) return self.fail(evaluator, .invalid_path);
             if (self.operation == .rename and class == .root) return self.fail(evaluator, .invalid_path);
         }
-        const root = fsport.findRoot(self.access, self.inputs.root.symbol) orelse
-            return self.fail(evaluator, .unknown_root);
+        const root = try self.acquireRoot(evaluator, self.inputs.root);
         self.root = root;
         if (self.inputs.second_root) |second_root_value| {
-            const second_root = fsport.findRoot(self.access, second_root_value.symbol) orelse
-                return self.fail(evaluator, .unknown_root);
+            const second_root = try self.acquireRoot(evaluator, second_root_value);
             self.second_root = second_root;
         }
         if (self.payload) |*payload| {
@@ -627,7 +792,7 @@ const Driver = struct {
         // Built into a local first: writing `try` straight into the union
         // could tag the state before the payload exists, and retirement would
         // then retire a resolver that was never constructed.
-        const resolver = fsport.Resolver.init(
+        var resolver = fsport.Resolver.init(
             self.allocator,
             self.io,
             root.dir(),
@@ -638,6 +803,7 @@ const Driver = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.PathTooLong => return self.fail(evaluator, .limit),
         };
+        if (self.operation == .mkdirs) resolver.createParents();
         self.state = .{ .resolve = resolver };
         return .yielded;
     }
@@ -673,16 +839,16 @@ const Driver = struct {
                                     error.PathTooLong => self.fail(evaluator, .limit),
                                 };
                             };
-                            resolver.deinit();
+                            resolver.retire(evaluator.releaseDomain());
                             self.resolved = resolved;
                             self.state = .{ .resolve_second = next };
                             return .yielded;
                         }
-                        resolver.deinit();
+                        resolver.retire(evaluator.releaseDomain());
                         self.resolved = resolved;
                     },
                     .second => {
-                        resolver.deinit();
+                        resolver.retire(evaluator.releaseDomain());
                         self.second = resolved;
                     },
                 }
@@ -692,8 +858,48 @@ const Driver = struct {
         }
     }
 
+    fn acquireRoot(self: *Driver, evaluator: *Machine, item: Value) MachineError!RootSelection {
+        return fsport.selectRoot(self.access, item) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.UnknownRoot => return self.fail(evaluator, .unknown_root),
+            error.Closed => return self.failMessage(evaluator, .io, .io, "directory resource is closed"),
+            error.Io => return self.fail(evaluator, .changed),
+        };
+    }
+
+    fn publishDirectory(self: *Driver, evaluator: *Machine, dir: std.Io.Dir) MachineError!machine.WorkProgress {
+        const scope: *@import("../scheduler.zig").TaskScope = @ptrCast(@alignCast(evaluator.unit.task_scope orelse {
+            dir.close(self.io);
+            return evaluator.fail(.cancelled, "directory scope is closing");
+        }));
+        const adoption = if (self.operation == .open_list)
+            directory.adoptEnumeration(self.access, scope, dir, self.inputs.root)
+        else
+            directory.adoptChild(self.access, scope, dir, self.inputs.root);
+        const result = adoption catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.ScopeClosing => return evaluator.fail(.cancelled, "directory scope is closing"),
+        };
+        self.state = .complete;
+        return .{ .output = result };
+    }
+
+    fn acquireDirectory(self: *Driver, evaluator: *Machine) MachineError!machine.WorkProgress {
+        const dir = switch (self.resolved.?) {
+            .directory => |d| d.dir.openDir(self.io, ".", .{ .iterate = true }),
+            .entry => |entry| entry.parent.dir.openDir(self.io, entry.name, .{ .iterate = true, .follow_symlinks = false }),
+        } catch |err| return self.fail(evaluator, fsport.reasonForError(err));
+        return self.publishDirectory(evaluator, dir);
+    }
+
     fn act(self: *Driver, evaluator: *Machine) MachineError!machine.WorkProgress {
         return switch (self.operation) {
+            .stage_dir => self.stageDirectory(evaluator),
+            .mkdirs => self.makeDirectories(evaluator),
+            .remove_tree => self.beginRemoveTree(evaluator),
+            .lock => self.beginLock(evaluator),
+            .open_dir => unreachable,
+            .child_dir, .open_list => self.acquireDirectory(evaluator),
             .read_bytes, .read_text => self.beginRead(evaluator),
             .stat => self.inspect(evaluator, true),
             .lstat => self.inspect(evaluator, false),
@@ -705,8 +911,50 @@ const Driver = struct {
             .rename => self.renameEntry(evaluator),
             .create_bytes, .create_text => self.beginStage(evaluator, .create),
             .replace_bytes, .replace_text => self.beginStage(evaluator, .replace),
+            .publish_bytes, .publish_text => self.beginStage(evaluator, .publish),
             .copy => self.beginCopy(evaluator),
         };
+    }
+
+    fn stageDirectory(self: *Driver, evaluator: *Machine) MachineError!machine.WorkProgress {
+        const entry = try self.requireEntry(evaluator, self.resolved.?);
+        const scope: *@import("../scheduler.zig").TaskScope = @ptrCast(@alignCast(evaluator.unit.task_scope orelse return evaluator.fail(.cancelled, "directory scope is closing")));
+        const stage = @import("../directory_stage.zig").Stage.create(self.access, entry.parent.dir, entry.name) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            return self.fail(evaluator, fsport.reasonForError(err));
+        };
+        const result = directory.adoptStage(self.access, scope, stage, self.inputs.root) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.ScopeClosing => return evaluator.fail(.cancelled, "directory scope is closing"),
+        };
+        self.state = .complete;
+        return .{ .output = result };
+    }
+
+    fn beginLock(self: *Driver, evaluator: *Machine) MachineError!machine.WorkProgress {
+        const entry = try self.requireEntry(evaluator, self.resolved.?);
+        const file = switch (fsport.openLockFile(self.io, entry.parent.dir, entry.name)) {
+            .file => |file| file,
+            .failed => |reason| return self.fail(evaluator, reason),
+        };
+        self.state = .{ .waiting_lock = file };
+        return .yielded;
+    }
+
+    fn waitForLock(self: *Driver, evaluator: *Machine, file: std.Io.File) MachineError!machine.WorkProgress {
+        if (!(file.tryLock(self.io, .exclusive) catch |err| return self.fail(evaluator, fsport.reasonForError(err)))) {
+            try evaluator.park(.{ .sleep = 10 });
+            return .yielded;
+        }
+        const scope: *@import("../scheduler.zig").TaskScope = @ptrCast(@alignCast(evaluator.unit.task_scope orelse return evaluator.fail(.cancelled, "lock scope is closing")));
+        // Adoption consumes the descriptor even on failure. Retirement cannot
+        // close it again once the resource factory owns it.
+        self.state = .complete;
+        const result = fsport.adoptLock(self.access, scope, file) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.ScopeClosing => return evaluator.fail(.cancelled, "lock scope is closing"),
+        };
+        return .{ .output = result };
     }
 
     // -- reads --------------------------------------------------------------
@@ -983,6 +1231,48 @@ const Driver = struct {
         return .completed;
     }
 
+    fn makeDirectories(self: *Driver, evaluator: *Machine) MachineError!machine.WorkProgress {
+        switch (self.resolved.?) {
+            .directory => {},
+            .entry => |entry| entry.parent.dir.createDir(self.io, entry.name, .default_dir) catch |err| switch (err) {
+                error.PathAlreadyExists => {
+                    const dir = entry.parent.dir.openDir(self.io, entry.name, .{ .follow_symlinks = false }) catch |open_err| return self.fail(evaluator, fsport.reasonForError(open_err));
+                    dir.close(self.io);
+                },
+                else => return self.fail(evaluator, fsport.reasonForError(err)),
+            },
+        }
+        self.state = .complete;
+        return .completed;
+    }
+
+    fn beginRemoveTree(self: *Driver, evaluator: *Machine) MachineError!machine.WorkProgress {
+        const entry = try self.requireEntry(evaluator, self.resolved.?);
+        const dir = entry.parent.dir.openDir(self.io, entry.name, .{ .iterate = true, .follow_symlinks = false }) catch |err| return self.fail(evaluator, fsport.reasonForError(err));
+        self.state = .{ .removing_tree = .init(self.io, dir) };
+        return .yielded;
+    }
+
+    fn removeTreeStep(self: *Driver, evaluator: *Machine, tree: *fsport.TreeRemoval) MachineError!machine.WorkProgress {
+        switch (tree.step()) {
+            .pending => return .yielded,
+            .failed => |reason| return self.fail(evaluator, reason),
+            .complete => {
+                const entry = try self.requireEntry(evaluator, self.resolved.?);
+                entry.parent.dir.deleteDir(self.io, entry.name) catch |err| switch (err) {
+                    error.DirNotEmpty => {
+                        tree.restart();
+                        return .yielded;
+                    },
+                    else => return self.fail(evaluator, fsport.reasonForError(err)),
+                };
+                tree.deinit();
+                self.state = .complete;
+                return .completed;
+            },
+        }
+    }
+
     const RemoveKind = enum { file, directory };
 
     fn removeEntry(self: *Driver, evaluator: *Machine, kind: RemoveKind) MachineError!machine.WorkProgress {
@@ -1016,7 +1306,7 @@ const Driver = struct {
 
     // -- staged publication -------------------------------------------------
 
-    const StageMode = enum { create, replace };
+    const StageMode = enum { create, replace, publish };
 
     fn beginStage(self: *Driver, evaluator: *Machine, mode: StageMode) MachineError!machine.WorkProgress {
         const entry = try self.requireEntry(evaluator, self.resolved.?);
@@ -1028,8 +1318,11 @@ const Driver = struct {
         // created one gets the host default.
         const permissions: std.Io.File.Permissions = switch (mode) {
             .create => if (existing != null) return self.fail(evaluator, .already_exists) else .default_file,
-            .replace => permissions: {
-                const info = existing orelse return self.fail(evaluator, .not_found);
+            .replace, .publish => permissions: {
+                const info = existing orelse {
+                    if (mode == .replace) return self.fail(evaluator, .not_found);
+                    break :permissions .default_file;
+                };
                 if (info.kind != .file) return self.fail(evaluator, .not_regular);
                 break :permissions info.permissions;
             },
@@ -1061,6 +1354,7 @@ const Driver = struct {
         const entry = if (self.operation == .copy) self.second.?.entry else self.resolved.?.entry;
         const failed: ?fsport.Reason = switch (self.operation) {
             .replace_bytes, .replace_text => staged.commitExchange(entry.name),
+            .publish_bytes, .publish_text => staged.commitReplace(entry.name),
             else => staged.commitNoReplace(entry.name),
         };
         if (failed) |reason| return self.fail(evaluator, reason);
@@ -1156,7 +1450,9 @@ const Driver = struct {
             .encode_text => |*encoder| encoder.deinit(),
             .encode_bytes => |*encoder| encoder.deinit(),
             .authorize, .act, .complete => {},
-            .resolve, .resolve_second => |*resolver| resolver.deinit(),
+            .waiting_lock => |file| file.close(self.io),
+            .removing_tree => |*tree| tree.deinit(),
+            .resolve, .resolve_second => |*resolver| resolver.retire(releases),
             .read => |*read| {
                 read.file.close(self.io);
                 allocator.free(read.buffer);
@@ -1239,6 +1535,8 @@ const Driver = struct {
         }
         if (self.resolved) |*resolved| resolved.deinit(allocator, self.io);
         if (self.second) |*resolved| resolved.deinit(allocator, self.io);
+        if (self.root) |root| root.deinit();
+        if (self.second_root) |root| root.deinit();
         if (self.payload) |*payload| payload.retire(releases, allocator);
         if (self.path) |path| allocator.free(path);
         if (self.second_path) |path| allocator.free(path);

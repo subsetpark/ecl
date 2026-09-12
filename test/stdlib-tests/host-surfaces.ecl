@@ -15,8 +15,8 @@
    'clock.unix
    'net.listen 'net.local-address 'net.close
    'net.accept 'net.read 'net.write 'net.peer-address
-   'pkg.store.inspect 'pkg.store.install 'pkg.store.present?
-   'pkg.store.verify 'pkg.store.read-seal 'pkg.store.manifest 'pkg.store.gc)
+   'fs.open-dir 'fs.child-dir 'fs.stage-dir 'fs.commit-dir
+   'fs.publish-text 'archive.open-tgz 'source.declarations)
   documented)
  'documentation test
 
