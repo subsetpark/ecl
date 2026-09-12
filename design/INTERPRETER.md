@@ -1925,7 +1925,12 @@ externally held unadmitted ticket and no independent
 lane argument on cancellation or completion. An operation payload and its ticket share one allocation and reference count.
 Queue and observer ownership independently keep that allocation alive; only
 their final release destroys the payload and ticket. A writer allocation pins
-its admitted resource until both its turn and permit ownership end.
+its admitted resource until both its turn and permit ownership end. A resumable
+callback retains its queue position and execution ownership between slices.
+Suspended work remains cancellable and must resume to settle its private state
+before queue retirement; dropping an observer does not discard that work.
+Invocation state distinguishes suspended work from returned callbacks, so
+cancellation cannot mistake a scheduling boundary for terminal completion.
 
 The common controller service validates lane capacity, admits prepared
 exchanges, supplies admission readiness, sequences initialization and graceful

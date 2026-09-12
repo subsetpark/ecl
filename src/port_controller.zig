@@ -374,6 +374,9 @@ pub const Execution = opaque {
 const CancellationPolicy = enum { release, acknowledge, close_resource };
 pub const CancelAction = enum { retired, interrupt, close_resource, settled };
 pub const Completion = enum { retired, close_resource };
+/// One bounded callback slice either retains its queue ownership or completes.
+pub const Progress = enum { yielded, completed };
+pub const Dispatch = enum { idle, yielded, completed };
 pub const ExecutionState = enum { preparing, queued, active, cancelling, reusable, cancelled, done };
 
 /// Invocation-local execution authority, minted only while lending a callback.
@@ -410,7 +413,7 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
             next: ?*Node = null,
             phase: enum { queued, active, retired },
             execution: ExecutionState = .queued,
-            executing: bool = false,
+            invocation: enum { unstarted, running, suspended, returned } = .unstarted,
 
             fn owner(self: *Node) *Cell {
                 return if (owns_cell) &self.cell else self.cell;
@@ -435,12 +438,13 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
                 switch (self.execution) {
                     .queued => self.execution = .active,
                     .active => {},
-                    .preparing, .cancelling, .reusable, .cancelled, .done => return false,
+                    .cancelling, .reusable => if (self.invocation != .suspended) return false,
+                    .preparing, .cancelled, .done => return false,
                 }
                 return true;
             }
             fn requestCancellation(self: *Node) void {
-                if (owns_cell and self.execution == .active and !self.executing) return;
+                if (owns_cell and self.execution == .active and self.invocation == .returned) return;
                 switch (self.execution) {
                     .preparing, .queued, .active => self.execution = .cancelling,
                     .cancelling, .reusable, .cancelled, .done => {},
@@ -625,7 +629,7 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
                 node.next = null;
                 node.phase = if (lane.first == null) .active else .queued;
                 node.execution = .preparing;
-                node.executing = false;
+                node.invocation = .unstarted;
                 const ticket: *Ticket = @ptrCast(node);
                 @call(.auto, initialize, .{ &node.cell, ticket } ++ args);
                 lane.append(node);
@@ -644,7 +648,7 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
                 node.next = null;
                 node.phase = if (lane.first == null) .active else .queued;
                 node.execution = .queued;
-                node.executing = false;
+                node.invocation = .unstarted;
                 node.cell = cell;
                 callbacks.retain(cell);
                 lane.append(node);
@@ -657,36 +661,59 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
             node.lane = self;
             return @ptrCast(node);
         }
-        /// One lane executor owns dispatch. The runtime establishes both locks,
-        /// lends execution authority, and completes only after callback return.
+        fn executeToCompletion(cell: *Cell, running: *Running) Progress {
+            callbacks.execute(cell, running);
+            return .completed;
+        }
+        /// Controller execution uses the same dispatch and retirement protocol
+        /// as resumable execution, with one completing callback slice.
         pub fn runNext(self: *Self) bool {
+            return switch (self.advanceNext(executeToCompletion)) {
+                .idle => false,
+                .yielded, .completed => true,
+            };
+        }
+        /// One lane executor owns dispatch. A yielded callback retains its FIFO
+        /// position and queue pin, including after its last observer disappears.
+        /// Cancellation of suspended work resumes that work to join its unwind.
+        pub fn advanceNext(self: *Self, comptime advance: *const fn (*Cell, *Running) Progress) Dispatch {
             const mutex = self.mutex;
             std.Io.Threaded.mutexLock(mutex);
             const node = self.first orelse {
                 std.Io.Threaded.mutexUnlock(mutex);
-                return false;
+                return .idle;
             };
             const cell = node.owner();
             std.Io.Threaded.mutexLock(&cell.mutex);
             if (node.execution == .preparing) {
                 std.Io.Threaded.mutexUnlock(&cell.mutex);
                 std.Io.Threaded.mutexUnlock(mutex);
-                return false;
+                return .idle;
             }
-            const execute = callbacks.runnable(cell) and node.begin();
-            node.executing = execute;
-            if (!execute) node.requestCancellation();
+            const execute = (node.invocation == .suspended or callbacks.runnable(cell)) and node.begin();
+            if (execute) node.invocation = .running else node.requestCancellation();
             std.Io.Threaded.mutexUnlock(&cell.mutex);
             std.Io.Threaded.mutexUnlock(mutex);
-            if (execute) {
+            const progress = if (execute) blk: {
                 var execution: Running.Invocation = .{ .context = node, .acknowledge = Node.acknowledgeErased, .cancelled = Node.cancelledErased };
-                callbacks.execute(cell, @as(*Running, @ptrCast(&execution)));
-                std.Io.Threaded.mutexLock(&cell.mutex);
-                node.executing = false;
-                std.Io.Threaded.mutexUnlock(&cell.mutex);
-            }
+                break :blk advance(cell, @as(*Running, @ptrCast(&execution)));
+            } else Progress.completed;
+            std.Io.Threaded.mutexLock(&cell.mutex);
+            node.invocation = switch (progress) {
+                .yielded => .suspended,
+                .completed => .returned,
+            };
+            std.Io.Threaded.mutexUnlock(&cell.mutex);
             std.Io.Threaded.mutexLock(mutex);
             std.Io.Threaded.mutexLock(&cell.mutex);
+            switch (progress) {
+                .yielded => {
+                    std.Io.Threaded.mutexUnlock(&cell.mutex);
+                    std.Io.Threaded.mutexUnlock(mutex);
+                    return .yielded;
+                },
+                .completed => {},
+            }
             const completion = self.finishAndRemove(node);
             callbacks.notifyOperation(cell);
             std.Io.Threaded.mutexUnlock(&cell.mutex);
@@ -694,7 +721,7 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
             std.Io.Threaded.mutexUnlock(mutex);
             callbacks.retireOperation(cell);
             node.release();
-            return true;
+            return .completed;
         }
         fn cancelNode(self: *Self, node: *Node, policy: CancellationPolicy) CancelAction {
             switch (node.execution) {
@@ -705,7 +732,7 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
                     return .retired;
                 },
                 .active => {
-                    if (owns_cell and !node.executing) return .settled;
+                    if (owns_cell and node.invocation == .returned) return .settled;
                     node.requestCancellation();
                     return switch (policy) {
                         .close_resource => .close_resource,
@@ -901,5 +928,87 @@ test "native: prepared controller jobs reuse storage without allocator access" {
         probe.done.waitUncancelable(io());
         try std.testing.expectEqual(index, probe.value);
     }
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
+test "native: resumable lanes join cancellation without allocating or losing FIFO ownership" {
+    const Probe = struct {
+        mutex: std.Io.Mutex = .init,
+        calls: usize = 0,
+        unwound: usize = 0,
+        destroyed: usize = 0,
+        completed: usize = 0,
+    };
+    const Operation = struct {
+        mutex: std.Io.Mutex = .init,
+        probe: *Probe,
+        remaining: usize = 2,
+        fn initialize(self: *@This(), _: anytype, probe: *Probe) void {
+            self.* = .{ .probe = probe };
+        }
+        fn deinit(self: *@This()) void {
+            self.probe.destroyed += 1;
+        }
+        fn runnable(_: *@This()) bool {
+            return true;
+        }
+        fn execute(_: *@This(), _: *Running) void {
+            unreachable;
+        }
+        fn advance(self: *@This(), running: *Running) Progress {
+            self.probe.calls += 1;
+            if (running.cancelled()) {
+                self.probe.unwound += 1;
+                if (self.remaining > 0) {
+                    self.remaining -= 1;
+                    return .yielded;
+                }
+                _ = running.acknowledgeCancellation();
+                return .completed;
+            }
+            if (self.remaining > 0) {
+                self.remaining -= 1;
+                return .yielded;
+            }
+            self.probe.completed += 1;
+            return .completed;
+        }
+        fn notify(_: *@This()) void {}
+        fn complete(_: *@This(), _: Completion) void {}
+        fn cancellation(_: *@This()) CallbackCancellation {
+            return .acknowledge;
+        }
+        fn cancelResource(_: *@This(), _: CancelAction) void {}
+        fn retire(_: *@This()) void {}
+    };
+    const Queue = Lane(Operation, .operation, .{ .deinit = Operation.deinit, .runnable = Operation.runnable, .execute = Operation.execute, .notifyOperation = Operation.notify, .completeResource = Operation.complete, .cancelPolicy = Operation.cancellation, .cancelResource = Operation.cancelResource, .retireOperation = Operation.retire });
+    var probe: Probe = .{};
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var lane = Queue.init(&probe.mutex);
+    const first = (try lane.prepare(failing.allocator())).admit(2, .{&probe}, Operation.initialize).?;
+    defer first.release();
+    const second = (try lane.prepare(failing.allocator())).admit(2, .{&probe}, Operation.initialize).?;
+    defer {
+        while (lane.advanceNext(Operation.advance) != .idle) {}
+    }
+    try std.testing.expectEqual(Dispatch.idle, lane.advanceNext(Operation.advance));
+    try std.testing.expect(first.publish());
+    try std.testing.expect(second.publish());
+    // Queue ownership alone keeps the second operation and its continuation.
+    second.release();
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectEqual(Dispatch.yielded, lane.advanceNext(Operation.advance));
+    first.cancel();
+    try std.testing.expectEqual(Dispatch.yielded, lane.advanceNext(Operation.advance));
+    try std.testing.expectEqual(@as(usize, 0), probe.completed);
+    try std.testing.expectEqual(Dispatch.completed, lane.advanceNext(Operation.advance));
+    try std.testing.expectEqual(ExecutionState.cancelled, first.status());
+    try std.testing.expectEqual(@as(usize, 2), probe.unwound);
+    try std.testing.expectEqual(Dispatch.yielded, lane.advanceNext(Operation.advance));
+    try std.testing.expectEqual(Dispatch.yielded, lane.advanceNext(Operation.advance));
+    try std.testing.expectEqual(Dispatch.completed, lane.advanceNext(Operation.advance));
+    try std.testing.expectEqual(@as(usize, 1), probe.completed);
+    try std.testing.expectEqual(@as(usize, 1), probe.destroyed);
+    try std.testing.expectEqual(Dispatch.idle, lane.advanceNext(Operation.advance));
     try std.testing.expect(!failing.has_induced_failure);
 }
