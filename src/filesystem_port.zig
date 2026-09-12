@@ -196,6 +196,12 @@ pub fn adoptDirectory(access_value: *external.FilesystemAccess, scope: *@import(
     return @import("directory_resource.zig").adopt(owner.directory_issuer, owner.io, scope, dir);
 }
 
+/// Consumes an acquired advisory lock on both success and failure.
+pub fn adoptLock(access_value: *external.FilesystemAccess, scope: *@import("scheduler.zig").TaskScope, file: std.Io.File) error{ OutOfMemory, ScopeClosing }!@import("value.zig").Value {
+    const owner = ownerFromAccess(access_value);
+    return @import("directory_resource.zig").adoptLock(owner.directory_issuer, owner.io, scope, file);
+}
+
 /// Explicit host paths establish a new root; subsequent access is confined
 /// beneath its descriptor. No relative path acquires ambient authority.
 pub fn openHostDirectory(access_value: *external.FilesystemAccess, path: []const u8) union(enum) { directory: std.Io.Dir, failed: Reason } {
@@ -625,6 +631,22 @@ pub const OpenOutcome = union(enum) {
     file: std.Io.File,
     failed: Reason,
 };
+
+/// Exclusive creation never truncates an existing file. An existing entry is
+/// opened without following links, then validated through the descriptor.
+pub fn openLockFile(io: std.Io, parent: std.Io.Dir, name: []const u8) OpenOutcome {
+    const file = parent.createFile(io, name, .{ .exclusive = true, .truncate = false, .read = true }) catch |err| switch (err) {
+        error.PathAlreadyExists => parent.openFile(io, name, .{ .mode = .read_write, .follow_symlinks = false, .allow_directory = false }) catch |open_err| return .{ .failed = reasonForError(open_err) },
+        else => return .{ .failed = reasonForError(err) },
+    };
+    switch (regularFileInfo(io, file, std.math.maxInt(u64))) {
+        .regular => return .{ .file = file },
+        .failed => |reason| {
+            file.close(io);
+            return .{ .failed = reason };
+        },
+    }
+}
 
 /// Opens the final entry for reading without following a symlink; an entry
 /// that became a link since resolution is a race failure, not a follow.

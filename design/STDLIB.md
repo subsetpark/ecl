@@ -1765,6 +1765,17 @@ followed while opening this explicit root. Relative paths are rejected.
 A closed directory rejects new operations with `'io`. Operations already
 admitted own independent descriptors until their scheduler cleanup completes.
 
+### lock
+`( root path -- lock )` — Acquire an exclusive advisory lock on a regular file,
+creating an empty file if the path is absent. Existing contents are preserved;
+final symlinks and non-regular files are rejected. Contention parks the task
+between attempts and is cancellable. The returned port owns the lock until
+`port.close` or its owning scope exits. A lock is not a directory resource.
+The lock file remains after release. Coordinating applications must keep its
+directory entry in place: replacing or deleting it establishes a different
+lock identity. Advisory locking coordinates participating applications and
+does not prevent other filesystem access.
+
 ### child-dir
 `( root path -- directory )` — Acquire an independent directory resource beneath
 an existing root. Resolution, including final symlinks, is confined to that

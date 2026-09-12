@@ -430,6 +430,29 @@ test "fs: text and byte reads round trip exactly across chunk boundaries" {
     try scratch.expectAbsent("nine");
 }
 
+test "fs: advisory locks serialize mutations and release after cancellation" {
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    const options = scratch.filesystem();
+    try scratch.write("counter", "0");
+    try runCase(options, .{ .worker_pool = 4 },
+        \\'root "." fs.child-dir 'd set
+        \\(d "mutex" fs.lock d "counter" fs.read-text 0 clock.sleep int 1 + str d "counter" fs.publish-text port.close) 'increment def
+        \\[] (increment) @spawn [] (increment) @spawn
+        \\task.await 'ok at len swap task.await 'ok at len d "counter" fs.read-text
+    , .{ .stack = "0 0 \"2\"" });
+    try runCase(options, .{ .worker_pool = 2 },
+        \\'root "mutex" fs.lock 'holder set
+        \\[] ('root "mutex" fs.lock port.close) @spawn 'waiter set
+        \\waiter 0 task.await-for 'err at 'kind at
+        \\waiter task.cancel waiter task.await 'err at 'kind at
+        \\holder port.close 'root "mutex" fs.lock port.close
+    , .{ .stack = "'timeout 'cancelled" });
+    try scratch.directory.dir.symLink(io, "counter", "link", .{});
+    try expectStack(options, "[] ('root \"link\" fs.lock) @attempt 'err at 'kind at", "'io");
+    try scratch.expectNoStaging(".");
+}
+
 test "fs: directory resources own confined descriptors and close with their scope" {
     var scratch = try Scratch.init();
     defer scratch.deinit();

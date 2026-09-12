@@ -207,6 +207,15 @@ resource closure cannot invalidate an admitted operation. Closed values retain
 only issuer metadata, which outlives the Session's operational filesystem owner.
 Child acquisition uses the shared confined resolver and establishes a new root.
 
+Advisory locks share the fixed-handle resource lifetime with directory handles,
+while their nominal backend types keep lock values out of root acquisition.
+An acquisition driver owns an unlocked descriptor while waiting; nonblocking
+lock attempts alternate with scheduler timer waits. Publication consumes that
+descriptor into scope ownership, and every failed or cancelled acquisition
+closes it through driver retirement. No worker blocks waiting for another
+application to release a lock. Successful timer wakes preserve their requesting
+driver, as readiness wakes do; failed wakes retire it before error propagation.
+
 Clocks are two runtime inputs with different shapes. The scheduler owns
 monotonic time as one `MonotonicClock` tagged union, selected at construction
 from internal clock configuration: the `host` variant carries the Session's origin

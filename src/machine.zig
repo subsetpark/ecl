@@ -6934,13 +6934,16 @@ fn resumePark(self: *Machine) MachineError!void {
         .task_wait => |wait| return resumeTaskWait(self, wait, delivery.task_join),
         .sleep => |sleep| {
             std.debug.assert(!delivery.task_join);
+            // Successful timer waits resume the driver that requested them,
+            // just as successful external readiness waits do.
+            if (sleep == .elapsed) return;
             // A work-driver park owns backend state across the wait. Move its
             // cleanup through the ordinary driver destructor before raising;
             // the failure unwinder requires that no native continuation still
             // owns the operands or external registration it is abandoning.
             clearWorkDriver(self.unit);
             return switch (sleep) {
-                .elapsed => {},
+                .elapsed => unreachable,
                 .cancelled => self.fail(.cancelled, "unit cancelled while sleeping"),
                 .io => self.fail(.io, "could not start the scheduler timer service"),
                 .overflow => self.fail(.overflow, "sleep deadline lies beyond the clock's range"),

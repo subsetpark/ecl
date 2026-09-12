@@ -756,6 +756,7 @@ fn projectSessionInitializationProbe(allocator: std.mem.Allocator) !void {
 const StdlibSurface = enum {
     file_publication,
     directory_resource,
+    advisory_lock,
     source_declarations,
     locked_project_module,
     root_source_preload,
@@ -1009,6 +1010,11 @@ fn stdlibSessionAllocationProbe(
             "\"probe\" io.eprint 1 \"probe\" io.debug pop " ++
                 "\"ECL_OOM_PROBE\" getenv pop " ++
                 "[] (\"ECL_OOM_ABSENT\" getenv) @attempt pop [] (io.stdin) @attempt pop",
+        ),
+        .advisory_lock => try runOk(
+            &runtime,
+            "oom-lock.ecl",
+            "'cwd \"mutex\" fs.lock port.close 'cwd \"mutex\" fs.lock port.close",
         ),
         .directory_resource => try runOk(
             &runtime,
@@ -2124,4 +2130,9 @@ test "oom: standard-library and host: package: Git helper propagates every alloc
 test "oom: standard-library and host: stdlib: directory resources propagate every allocation failure" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.directory_resource);
+}
+
+test "oom: standard-library and host: stdlib: advisory locks propagate every allocation failure" {
+    try requireSelectedOomTest(@src());
+    try checkStdlibSurface(.advisory_lock);
 }

@@ -29,6 +29,7 @@ const Value = value.Value;
 const work_quantum = machine.kernel_poll_quantum;
 
 pub const words = [_]env.BuiltinWord{
+    .{ .name = "lock", .doc = "( root path -- lock ) Acquire a cancellable exclusive advisory lock on a regular file, creating it if absent.", .primitive = advisoryLock },
     .{ .name = "open-dir", .doc = "( host-path -- directory ) Open an absolute host directory as a scope-owned resource.", .primitive = openDirectory },
     .{ .name = "child-dir", .doc = "( root path -- directory ) Acquire a directory confined beneath a root.", .primitive = childDirectory },
     .{ .name = "read-bytes", .doc = "( root path -- bytes ) Read one regular file's exact bytes beneath a named root.", .primitive = readBytes },
@@ -51,6 +52,7 @@ pub const words = [_]env.BuiltinWord{
 };
 
 const Operation = enum {
+    lock,
     open_dir,
     child_dir,
     read_bytes,
@@ -86,7 +88,7 @@ const Operation = enum {
             .exists => "exists?",
             .remove_file => "remove-file",
             .remove_dir => "remove-dir",
-            .stat, .lstat, .list, .mkdir, .copy, .rename => @tagName(self),
+            .lock, .stat, .lstat, .list, .mkdir, .copy, .rename => @tagName(self),
         };
     }
 
@@ -116,12 +118,15 @@ const Operation = enum {
     /// Words that act on a child entry reject `.`, which names the root.
     fn requiresEntry(self: Operation) bool {
         return switch (self) {
-            .create_bytes, .create_text, .replace_bytes, .replace_text, .publish_bytes, .publish_text, .mkdir, .rename, .remove_file, .remove_dir => true,
+            .create_bytes, .create_text, .replace_bytes, .replace_text, .publish_bytes, .publish_text, .lock, .mkdir, .rename, .remove_file, .remove_dir => true,
             .open_dir, .child_dir, .read_bytes, .read_text, .stat, .lstat, .exists, .list, .copy => false,
         };
     }
 };
 
+fn advisoryLock(evaluator: *Machine) MachineError!void {
+    return begin(evaluator, .lock);
+}
 fn openDirectory(evaluator: *Machine) MachineError!void {
     return begin(evaluator, .open_dir);
 }
@@ -506,6 +511,7 @@ const Driver = struct {
         resolve: fsport.Resolver,
         resolve_second: fsport.Resolver,
         act,
+        waiting_lock: std.Io.File,
         read: Read,
         bytes_value: struct { buffer: []u8, materializer: list.ByteListMaterializer },
         text_value: struct { buffer: []u8, materializer: kernel_storage.Utf8Materializer },
@@ -536,6 +542,7 @@ const Driver = struct {
             .resolve => |*resolver| self.resolve(evaluator, resolver, .primary),
             .resolve_second => |*resolver| self.resolve(evaluator, resolver, .second),
             .act => self.act(evaluator),
+            .waiting_lock => |file| self.waitForLock(evaluator, file),
             .read => |*read| self.readStep(evaluator, read),
             .bytes_value => |*building| self.materializeBytes(building),
             .text_value => |*building| self.materializeText(evaluator, building),
@@ -783,6 +790,7 @@ const Driver = struct {
 
     fn act(self: *Driver, evaluator: *Machine) MachineError!machine.WorkProgress {
         return switch (self.operation) {
+            .lock => self.beginLock(evaluator),
             .open_dir => unreachable,
             .child_dir => self.acquireDirectory(evaluator),
             .read_bytes, .read_text => self.beginRead(evaluator),
@@ -799,6 +807,32 @@ const Driver = struct {
             .publish_bytes, .publish_text => self.beginStage(evaluator, .publish),
             .copy => self.beginCopy(evaluator),
         };
+    }
+
+    fn beginLock(self: *Driver, evaluator: *Machine) MachineError!machine.WorkProgress {
+        const entry = try self.requireEntry(evaluator, self.resolved.?);
+        const file = switch (fsport.openLockFile(self.io, entry.parent.dir, entry.name)) {
+            .file => |file| file,
+            .failed => |reason| return self.fail(evaluator, reason),
+        };
+        self.state = .{ .waiting_lock = file };
+        return .yielded;
+    }
+
+    fn waitForLock(self: *Driver, evaluator: *Machine, file: std.Io.File) MachineError!machine.WorkProgress {
+        if (!(file.tryLock(self.io, .exclusive) catch |err| return self.fail(evaluator, fsport.reasonForError(err)))) {
+            try evaluator.park(.{ .sleep = 10 });
+            return .yielded;
+        }
+        const scope: *@import("../scheduler.zig").TaskScope = @ptrCast(@alignCast(evaluator.unit.task_scope orelse return evaluator.fail(.cancelled, "lock scope is closing")));
+        // Adoption consumes the descriptor even on failure. Retirement cannot
+        // close it again once the resource factory owns it.
+        self.state = .complete;
+        const result = fsport.adoptLock(self.access, scope, file) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.ScopeClosing => return evaluator.fail(.cancelled, "lock scope is closing"),
+        };
+        return .{ .output = result };
     }
 
     // -- reads --------------------------------------------------------------
@@ -1252,6 +1286,7 @@ const Driver = struct {
             .encode_text => |*encoder| encoder.deinit(),
             .encode_bytes => |*encoder| encoder.deinit(),
             .authorize, .act, .complete => {},
+            .waiting_lock => |file| file.close(self.io),
             .resolve, .resolve_second => |*resolver| resolver.deinit(),
             .read => |*read| {
                 read.file.close(self.io);
