@@ -221,6 +221,11 @@ published retirement only closes handles. Factory failure transfers the already
 allocated staging owner directly into the same retirement domain, so cleanup
 does not depend on resource publication succeeding.
 
+Root-scope closure participates in the ordinary ready/retirement arbitration
+when a configured worker pool has not started. Cleanup never depends on lazily
+allocating workers: a root-only program can own filesystem resources without
+having spawned a task or parked, and cancellation must still join every member.
+
 Advisory locks share the fixed-handle resource lifetime with directory handles,
 while their nominal backend types keep lock values out of root acquisition.
 An acquisition driver owns an unlocked descriptor while waiting; nonblocking

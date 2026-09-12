@@ -502,6 +502,14 @@ test "fs: staging directories publish atomically and join descendant cleanup" {
     try std.testing.expectEqual(@as(usize, 3), try scratch.entryCount("."));
 }
 
+test "fs: cold worker pools join scope-owned filesystem resources" {
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    try runCase(scratch.filesystem(), .{ .worker_pool = 4 }, "'root \".\" fs.child-dir pop 'root \"mutex\" fs.lock pop " ++
+        "'root \"abandoned\" fs.stage-dir dup \"a/b\" fs.mkdirs pop", .{ .stack = "" });
+    try std.testing.expectEqual(@as(usize, 1), try scratch.entryCount("."));
+}
+
 test "fs: directory closure joins admitted descriptor leases" {
     var scratch = try Scratch.init();
     defer scratch.deinit();
