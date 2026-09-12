@@ -198,6 +198,15 @@ operations subject to operating-system permissions. Units receive opaque
 `FilesystemAccess` for root lookup and operation admission. Root-relative path
 resolution enforces containment; module loading remains a separate operation.
 
+Explicit host-directory acquisition mints a scope-owned resource through the
+same atomic membership and transfer protocol as other ports. Its lifetime
+state owns either an open descriptor, closure in progress, or joined closure.
+Operation admission duplicates the descriptor under the resource's lifetime
+lock. Each driver owns that independent lease through resolver retirement;
+resource closure cannot invalidate an admitted operation. Closed values retain
+only issuer metadata, which outlives the Session's operational filesystem owner.
+Child acquisition uses the shared confined resolver and establishes a new root.
+
 Clocks are two runtime inputs with different shapes. The scheduler owns
 monotonic time as one `MonotonicClock` tagged union, selected at construction
 from internal clock configuration: the `host` variant carries the Session's origin

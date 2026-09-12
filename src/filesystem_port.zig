@@ -70,6 +70,7 @@ pub const FilesystemOwner = struct {
     roots: []OwnedRoot,
     limits: Limits,
     live: std.atomic.Value(usize) = .init(0),
+    directory_issuer: *@import("module_bindings.zig").Identity,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -124,15 +125,18 @@ pub const FilesystemOwner = struct {
             };
             initialized += 1;
         }
+        const directory_issuer = try @import("module_bindings.zig").Identity.create(allocator);
         return .{
             .allocator = allocator,
             .io = io,
             .roots = roots,
             .limits = config.limits,
+            .directory_issuer = directory_issuer,
         };
     }
 
     pub fn deinit(self: *FilesystemOwner) void {
+        self.directory_issuer.release();
         std.debug.assert(self.live.load(.acquire) == 0);
         for (self.roots) |*root| {
             root.dir.close(self.io);
@@ -184,6 +188,21 @@ pub fn validRootName(name: []const u8) bool {
 
 fn ownerFromAccess(access_value: *external.FilesystemAccess) *FilesystemOwner {
     return @ptrCast(@alignCast(access_value));
+}
+
+/// Consumes an independently opened directory on both success and failure.
+pub fn adoptDirectory(access_value: *external.FilesystemAccess, scope: *@import("scheduler.zig").TaskScope, dir: std.Io.Dir) error{ OutOfMemory, ScopeClosing }!@import("value.zig").Value {
+    const owner = ownerFromAccess(access_value);
+    return @import("directory_resource.zig").adopt(owner.directory_issuer, owner.io, scope, dir);
+}
+
+/// Explicit host paths establish a new root; subsequent access is confined
+/// beneath its descriptor. No relative path acquires ambient authority.
+pub fn openHostDirectory(access_value: *external.FilesystemAccess, path: []const u8) union(enum) { directory: std.Io.Dir, failed: Reason } {
+    const owner = ownerFromAccess(access_value);
+    if (path.len == 0 or path.len > owner.limits.max_resolved_path_bytes or !std.fs.path.isAbsolute(path) or std.mem.indexOfScalar(u8, path, 0) != null)
+        return .{ .failed = .invalid_path };
+    return .{ .directory = std.Io.Dir.cwd().openDir(owner.io, path, .{ .iterate = true }) catch |err| return .{ .failed = reasonForError(err) } };
 }
 
 /// A resolved root selection: an index into the owner's table. It carries no

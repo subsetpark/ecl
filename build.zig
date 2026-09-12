@@ -719,6 +719,7 @@ pub fn build(b: *std.Build) void {
             "net:",
             "http server:",
             "http:",
+            "fs: directory resources own confined descriptors and close with their scope",
             "fs: concurrent creates have exactly one winner and no staging residue",
             "fs: cancellation before commit leaves the destination unchanged",
         },

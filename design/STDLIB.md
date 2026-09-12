@@ -1710,7 +1710,7 @@ the error with `'msg` set to `message`.
 
 ## fs
 
-Filesystem words. Every word names a `root` by symbol and a `path` string.
+Filesystem words accept a named `root` symbol or a directory resource and a `path` string.
 The command line uses `'cwd` for the startup working directory; package commands
 also provide `'project`. All filesystem operations are available on each root,
 subject to operating-system permissions and runtime limits.
@@ -1727,7 +1727,7 @@ Resolution is descriptor-relative beneath the root's retained handle. An
 intermediate symlink is followed only while its target stays within the root;
 an absolute target, a relative target that would pop above the root, more than
 40 followed links, or more than 64 KiB of expanded resolver input is refused.
-`read-bytes`, `read-text`, `stat`, `list`, and the source side of `copy`
+`child-dir`, `read-bytes`, `read-text`, `stat`, `list`, and the source side of `copy`
 follow a final link under the same rule; every other word acts on the final
 entry itself. Containment is never a lexical prefix check.
 
@@ -1756,6 +1756,20 @@ entry durability, ownership, timestamps, and extended attributes are not
 promised. Created files use the host's ordinary creation mode under the
 process umask, a replaced file keeps its permission bits, and a copy carries
 the source's permission bits under the umask.
+
+### open-dir
+`( host-path -- directory )` — Open an absolute host directory path, subject to
+OS permissions, and return a scope-owned port resource. Host symlinks may be
+followed while opening this explicit root. Relative paths are rejected.
+`port.close` closes the resource and joins cleanup; scope exit does the same.
+A closed directory rejects new operations with `'io`. Operations already
+admitted own independent descriptors until their scheduler cleanup completes.
+
+### child-dir
+`( root path -- directory )` — Acquire an independent directory resource beneath
+an existing root. Resolution, including final symlinks, is confined to that
+root. The acquired directory becomes the new containment boundary; closing
+its parent resource does not close it. `.` acquires the root itself.
 
 ### copy
 `( source-root source-path destination-root destination-path -- )` — Copy a

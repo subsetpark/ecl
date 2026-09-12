@@ -755,6 +755,7 @@ fn projectSessionInitializationProbe(allocator: std.mem.Allocator) !void {
 
 const StdlibSurface = enum {
     file_publication,
+    directory_resource,
     source_declarations,
     locked_project_module,
     root_source_preload,
@@ -1008,6 +1009,11 @@ fn stdlibSessionAllocationProbe(
             "\"probe\" io.eprint 1 \"probe\" io.debug pop " ++
                 "\"ECL_OOM_PROBE\" getenv pop " ++
                 "[] (\"ECL_OOM_ABSENT\" getenv) @attempt pop [] (io.stdin) @attempt pop",
+        ),
+        .directory_resource => try runOk(
+            &runtime,
+            "oom-directory.ecl",
+            "'cwd \".\" fs.child-dir dup \".\" fs.stat pop dup port.close port.close",
         ),
         .file_publication => try runOk(
             &runtime,
@@ -2113,4 +2119,9 @@ test "oom: standard-library and host: package: catalog repair propagates every a
 test "oom: standard-library and host: package: Git helper propagates every allocation failure" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.package_git);
+}
+
+test "oom: standard-library and host: stdlib: directory resources propagate every allocation failure" {
+    try requireSelectedOomTest(@src());
+    try checkStdlibSurface(.directory_resource);
 }

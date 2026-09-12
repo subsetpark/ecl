@@ -430,6 +430,25 @@ test "fs: text and byte reads round trip exactly across chunk boundaries" {
     try scratch.expectAbsent("nine");
 }
 
+test "fs: directory resources own confined descriptors and close with their scope" {
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    const options = scratch.filesystem();
+    try scratch.write("file", "hello");
+    try scratch.directory.dir.createDir(io, "child", .default_dir);
+    try scratch.directory.dir.symLink(io, "../file", "child/outside", .{});
+    try expectStack(options, "'root \".\" fs.child-dir \"file\" fs.read-text", "\"hello\"");
+    const open = try std.fmt.allocPrint(allocator, "\"{s}\" fs.open-dir \"file\" fs.read-text", .{scratch.path});
+    defer allocator.free(open);
+    try expectStack(options, open, "\"hello\"");
+    try expectStack(options, "'root \"child\" fs.child-dir 'd set \"x\" d \"file\" fs.publish-text d \"file\" fs.read-text", "\"x\"");
+    try expectStack(options, "[] ('root \"child\" fs.child-dir \"outside\" fs.read-text) @attempt 'err at 'data at 'reason at", "'symlink-escape");
+    try expectStack(options, "'root \".\" fs.child-dir dup port.close port.close", "");
+    try runCase(options, .{ .worker_pool = 4 }, "[] ('root \".\" fs.child-dir) @spawn task.await 'ok at first wrap (\"file\" fs.read-text) @attempt 'err at 'kind at " ++
+        "'root \".\" fs.child-dir 'd set d wrap [] (port.close) @give task.await 'ok at len " ++
+        "[] (d \"file\" fs.read-text) @attempt 'err at 'kind at", .{ .stack = "'io 0 'io" });
+}
+
 test "fs: stat lstat exists and list describe entries exactly" {
     var scratch = try Scratch.init();
     defer scratch.deinit();

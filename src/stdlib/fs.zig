@@ -1,7 +1,7 @@
-//! Filesystem words over Session-named root directories.
+//! Filesystem words over named roots and scope-owned directory resources.
 //!
-//! Every word names a root by symbol and a canonical relative path; the
-//! Session's filesystem owner turns the symbol into a retained directory
+//! Each confined operation selects a root and a canonical relative path; the
+//! Session's filesystem owner turns a symbol into a retained directory
 //! handle and `filesystem_port` resolves the path beneath it one component
 //! per scheduler step. Reads, writes, copies, and listings advance in fixed
 //! quanta; mutation stages into a private sibling entry and publishes with one
@@ -13,6 +13,7 @@ const dict = @import("../dict.zig");
 const directory_order = @import("../directory_order.zig");
 const env = @import("../env.zig");
 const external = @import("../external.zig");
+const directory = @import("../directory_resource.zig");
 const fsport = @import("../filesystem_port.zig");
 const heap = @import("../heap.zig");
 const intern = @import("../intern.zig");
@@ -28,6 +29,8 @@ const Value = value.Value;
 const work_quantum = machine.kernel_poll_quantum;
 
 pub const words = [_]env.BuiltinWord{
+    .{ .name = "open-dir", .doc = "( host-path -- directory ) Open an absolute host directory as a scope-owned resource.", .primitive = openDirectory },
+    .{ .name = "child-dir", .doc = "( root path -- directory ) Acquire a directory confined beneath a root.", .primitive = childDirectory },
     .{ .name = "read-bytes", .doc = "( root path -- bytes ) Read one regular file's exact bytes beneath a named root.", .primitive = readBytes },
     .{ .name = "read-text", .doc = "( root path -- string ) Read one regular UTF-8 file beneath a named root.", .primitive = readText },
     .{ .name = "create-bytes", .doc = "( bytes root path -- ) Atomically create an absent file from exact bytes.", .primitive = createBytes },
@@ -48,6 +51,8 @@ pub const words = [_]env.BuiltinWord{
 };
 
 const Operation = enum {
+    open_dir,
+    child_dir,
     read_bytes,
     read_text,
     create_bytes,
@@ -68,6 +73,8 @@ const Operation = enum {
 
     fn name(self: Operation) []const u8 {
         return switch (self) {
+            .open_dir => "open-dir",
+            .child_dir => "child-dir",
             .read_bytes => "read-bytes",
             .read_text => "read-text",
             .create_bytes => "create-bytes",
@@ -83,10 +90,11 @@ const Operation = enum {
         };
     }
 
-    const Shape = enum { unary, payload, copy, rename };
+    const Shape = enum { host, unary, payload, copy, rename };
 
     fn shape(self: Operation) Shape {
         return switch (self) {
+            .open_dir => .host,
             .create_bytes, .create_text, .replace_bytes, .replace_text, .publish_bytes, .publish_text => .payload,
             .copy => .copy,
             .rename => .rename,
@@ -100,7 +108,7 @@ const Operation = enum {
 
     fn resolveMode(self: Operation) fsport.ResolveMode {
         return switch (self) {
-            .read_bytes, .read_text, .stat, .list, .copy => .follow_final,
+            .child_dir, .read_bytes, .read_text, .stat, .list, .copy => .follow_final,
             else => .no_follow_final,
         };
     }
@@ -109,10 +117,17 @@ const Operation = enum {
     fn requiresEntry(self: Operation) bool {
         return switch (self) {
             .create_bytes, .create_text, .replace_bytes, .replace_text, .publish_bytes, .publish_text, .mkdir, .rename, .remove_file, .remove_dir => true,
-            .read_bytes, .read_text, .stat, .lstat, .exists, .list, .copy => false,
+            .open_dir, .child_dir, .read_bytes, .read_text, .stat, .lstat, .exists, .list, .copy => false,
         };
     }
 };
+
+fn openDirectory(evaluator: *Machine) MachineError!void {
+    return begin(evaluator, .open_dir);
+}
+fn childDirectory(evaluator: *Machine) MachineError!void {
+    return begin(evaluator, .child_dir);
+}
 
 fn readBytes(evaluator: *Machine) MachineError!void {
     return begin(evaluator, .read_bytes);
@@ -210,6 +225,7 @@ const Payload = union(enum) {
 
 fn begin(evaluator: *Machine, operation: Operation) MachineError!void {
     const count: usize = switch (operation.shape()) {
+        .host => 1,
         .unary => 2,
         .payload, .rename => 3,
         .copy => 4,
@@ -219,13 +235,19 @@ fn begin(evaluator: *Machine, operation: Operation) MachineError!void {
     // it is read, and an arm that fails returns before reaching a read.
     var inputs: Inputs = undefined;
     switch (operation.shape()) {
+        .host => {
+            var path = try evaluator.popValue();
+            errdefer path.deinit();
+            if (!path.borrow().isString()) return evaluator.typeError("an absolute host directory path");
+            inputs = .{ .root = .{ .symbol = try intern.intern("host") }, .path = path.take() };
+        },
         .unary => {
             var path = try evaluator.popValue();
             errdefer path.deinit();
             if (!path.borrow().isString()) return evaluator.typeError("a string path");
             var root = try evaluator.popValue();
             errdefer root.deinit();
-            if (root.borrow() != .symbol) return evaluator.typeError("a root symbol");
+            if (!validRoot(root.borrow())) return evaluator.typeError("a root symbol or directory resource");
             inputs = .{ .root = root.take(), .path = path.take() };
         },
         .payload => {
@@ -234,7 +256,7 @@ fn begin(evaluator: *Machine, operation: Operation) MachineError!void {
             if (!path.borrow().isString()) return evaluator.typeError("a string path");
             var root = try evaluator.popValue();
             errdefer root.deinit();
-            if (root.borrow() != .symbol) return evaluator.typeError("a root symbol");
+            if (!validRoot(root.borrow())) return evaluator.typeError("a root symbol or directory resource");
             var payload = try evaluator.popValue();
             errdefer payload.deinit();
             if (operation.textPayload()) {
@@ -248,13 +270,13 @@ fn begin(evaluator: *Machine, operation: Operation) MachineError!void {
             if (!destination_path.borrow().isString()) return evaluator.typeError("a string destination path");
             var destination_root = try evaluator.popValue();
             errdefer destination_root.deinit();
-            if (destination_root.borrow() != .symbol) return evaluator.typeError("a destination root symbol");
+            if (!validRoot(destination_root.borrow())) return evaluator.typeError("a destination root symbol or directory resource");
             var source_path = try evaluator.popValue();
             errdefer source_path.deinit();
             if (!source_path.borrow().isString()) return evaluator.typeError("a string source path");
             var source_root = try evaluator.popValue();
             errdefer source_root.deinit();
-            if (source_root.borrow() != .symbol) return evaluator.typeError("a source root symbol");
+            if (!validRoot(source_root.borrow())) return evaluator.typeError("a source root symbol or directory resource");
             inputs = .{
                 .root = source_root.take(),
                 .path = source_path.take(),
@@ -271,7 +293,7 @@ fn begin(evaluator: *Machine, operation: Operation) MachineError!void {
             if (!source_path.borrow().isString()) return evaluator.typeError("a string source path");
             var root = try evaluator.popValue();
             errdefer root.deinit();
-            if (root.borrow() != .symbol) return evaluator.typeError("a root symbol");
+            if (!validRoot(root.borrow())) return evaluator.typeError("a root symbol or directory resource");
             heap.retainValue(root.borrow());
             inputs = .{
                 .root = root.borrow(),
@@ -382,6 +404,26 @@ const Listed = struct {
 const EntryList = poll.ChunkList(Listed);
 const Orderer = directory_order.Orderer(Listed, Listed.lessThan);
 
+fn validRoot(item: Value) bool {
+    return item == .symbol or directory.isDirectory(item);
+}
+const RootSelection = union(enum) {
+    named: fsport.RootHandle,
+    resource: *directory.Lease,
+    fn dir(self: RootSelection) std.Io.Dir {
+        return switch (self) {
+            .named => |root| root.dir(),
+            .resource => |lease| lease.dir(),
+        };
+    }
+    fn deinit(self: RootSelection) void {
+        switch (self) {
+            .named => {},
+            .resource => |lease| lease.deinit(),
+        }
+    }
+};
+
 const Driver = struct {
     pub const address_stable_driver = {};
     pub const ownership: heap.DriverOwnership = .bounded_retirement;
@@ -397,8 +439,8 @@ const Driver = struct {
     path: ?[]u8 = null,
     second_path: ?[]u8 = null,
     payload: ?Payload = null,
-    root: ?fsport.RootHandle = null,
-    second_root: ?fsport.RootHandle = null,
+    root: ?RootSelection = null,
+    second_root: ?RootSelection = null,
     slot: ?fsport.OperationSlot = null,
     resolved: ?fsport.Resolved = null,
     second: ?fsport.Resolved = null,
@@ -611,6 +653,13 @@ const Driver = struct {
     /// Grammar, root lookup, and quota checks happen before any
     /// host object is opened.
     fn authorize(self: *Driver, evaluator: *Machine) MachineError!machine.WorkProgress {
+        if (self.operation == .open_dir) {
+            const dir = switch (fsport.openHostDirectory(self.access, self.path.?)) {
+                .directory => |dir| dir,
+                .failed => |reason| return self.fail(evaluator, reason),
+            };
+            return self.publishDirectory(evaluator, dir);
+        }
         const class = fsport.classifyPath(self.path.?) catch return self.fail(evaluator, .invalid_path);
         if (class == .root and self.operation.requiresEntry() and self.operation != .rename)
             return self.fail(evaluator, .invalid_path);
@@ -619,12 +668,10 @@ const Driver = struct {
             if (second_class == .root) return self.fail(evaluator, .invalid_path);
             if (self.operation == .rename and class == .root) return self.fail(evaluator, .invalid_path);
         }
-        const root = fsport.findRoot(self.access, self.inputs.root.symbol) orelse
-            return self.fail(evaluator, .unknown_root);
+        const root = try self.acquireRoot(evaluator, self.inputs.root);
         self.root = root;
         if (self.inputs.second_root) |second_root_value| {
-            const second_root = fsport.findRoot(self.access, second_root_value.symbol) orelse
-                return self.fail(evaluator, .unknown_root);
+            const second_root = try self.acquireRoot(evaluator, second_root_value);
             self.second_root = second_root;
         }
         if (self.payload) |*payload| {
@@ -704,8 +751,40 @@ const Driver = struct {
         }
     }
 
+    fn acquireRoot(self: *Driver, evaluator: *Machine, item: Value) MachineError!RootSelection {
+        if (item == .symbol) return .{ .named = fsport.findRoot(self.access, item.symbol) orelse return self.fail(evaluator, .unknown_root) };
+        return .{ .resource = directory.acquire(item) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Closed => return self.failMessage(evaluator, .io, .io, "directory resource is closed"),
+            error.Io => return self.fail(evaluator, .changed),
+        } };
+    }
+
+    fn publishDirectory(self: *Driver, evaluator: *Machine, dir: std.Io.Dir) MachineError!machine.WorkProgress {
+        const scope: *@import("../scheduler.zig").TaskScope = @ptrCast(@alignCast(evaluator.unit.task_scope orelse {
+            dir.close(self.io);
+            return evaluator.fail(.cancelled, "directory scope is closing");
+        }));
+        const result = fsport.adoptDirectory(self.access, scope, dir) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.ScopeClosing => return evaluator.fail(.cancelled, "directory scope is closing"),
+        };
+        self.state = .complete;
+        return .{ .output = result };
+    }
+
+    fn acquireDirectory(self: *Driver, evaluator: *Machine) MachineError!machine.WorkProgress {
+        const dir = switch (self.resolved.?) {
+            .directory => |d| d.dir.openDir(self.io, ".", .{ .iterate = true }),
+            .entry => |entry| entry.parent.dir.openDir(self.io, entry.name, .{ .iterate = true, .follow_symlinks = false }),
+        } catch |err| return self.fail(evaluator, fsport.reasonForError(err));
+        return self.publishDirectory(evaluator, dir);
+    }
+
     fn act(self: *Driver, evaluator: *Machine) MachineError!machine.WorkProgress {
         return switch (self.operation) {
+            .open_dir => unreachable,
+            .child_dir => self.acquireDirectory(evaluator),
             .read_bytes, .read_text => self.beginRead(evaluator),
             .stat => self.inspect(evaluator, true),
             .lstat => self.inspect(evaluator, false),
@@ -1256,6 +1335,8 @@ const Driver = struct {
         }
         if (self.resolved) |*resolved| resolved.deinit(allocator, self.io);
         if (self.second) |*resolved| resolved.deinit(allocator, self.io);
+        if (self.root) |root| root.deinit();
+        if (self.second_root) |root| root.deinit();
         if (self.payload) |*payload| payload.retire(releases, allocator);
         if (self.path) |path| allocator.free(path);
         if (self.second_path) |path| allocator.free(path);
