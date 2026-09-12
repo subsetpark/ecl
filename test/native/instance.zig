@@ -66,19 +66,40 @@ fn retirements(call: *ecl.Call("-- value")) ecl.CallbackResult {
 const Resource = ecl.Port(.{ .controller = struct {
     pub const name = "resource";
     pub const State = struct { value: i64 = 0 };
-    pub const operations = .{ .value = .{ .doc = "Read the host-configured value.", .handler = read, .lane = .operation, .endpoints = .{} } };
+    pub const operations = .{
+        .value = .{ .doc = "Read the host-configured value.", .handler = read, .lane = .operation, .endpoints = .{} },
+        .child = .{ .doc = "Create an independent child using its initialization borrow.", .handler = child, .lane = .operation, .endpoints = .{} },
+        .cooperative_child = .{ .name = "cooperative-child", .doc = "Create an independent cooperative child using its initialization borrow.", .handler = cooperativeChild, .lane = .operation, .endpoints = .{} },
+    };
     pub fn init() State {
         return .{};
     }
     pub fn open(state: *State, controller: *ecl.Controller) void {
         const instance = controller.instance(Instance) orelse return controller.fail(.contract, "missing instance");
         state.value = instance.value.load(.monotonic);
+        if (controller.initializationParent(Resource)) |parent| {
+            if (controller.parent(Resource) != null) return controller.fail(.contract, "independent child acquired a lifetime borrow");
+            state.value = parent.value + 10;
+        }
     }
     pub fn cancel(_: *State) void {}
     pub fn deinit(_: *State) void {}
     fn read(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+        if (controller.initializationParent(Resource) != null) return error.InvalidValue;
         const builder = controller.builder();
         try builder.int(state.value);
+        try builder.result();
+    }
+    fn child(_: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+        const builder = controller.builder();
+        try builder.list(0);
+        try builder.child(Resource, .independent);
+        try builder.result();
+    }
+    fn cooperativeChild(_: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+        const builder = controller.builder();
+        try builder.list(0);
+        try builder.child(CooperativeResource, .independent);
         try builder.result();
     }
 } });
@@ -98,10 +119,14 @@ const CooperativeResource = ecl.Port(.{ .cooperative = struct {
         target: u32 = 1024,
         retire_remaining: u32 = 513,
         cleanup_remaining: u32 = 513,
+        copied_parent: ?i64 = null,
+        construction: enum { start, clear, key, scalars, dictionary, input, list } = .start,
     };
     pub const operations = .{
         .values = .{ .doc = "Build a result over several bounded slices.", .handler = values, .lane = .operation, .endpoints = .{} },
         .park = .{ .doc = "Park until cancelled, then join private retirement.", .handler = park, .lane = .operation, .endpoints = .{} },
+        .borrowed = .{ .doc = "Read an independently copied initialization value.", .handler = borrowed, .lane = .operation, .endpoints = .{} },
+        .message = .{ .doc = "Construct a heterogeneous message using bounded SDK builders.", .handler = message, .lane = .operation, .endpoints = .{} },
     };
     pub fn init() State {
         return .{};
@@ -109,6 +134,10 @@ const CooperativeResource = ecl.Port(.{ .cooperative = struct {
     pub fn open(state: *State, context: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
         const instance = context.instance(Instance) orelse return error.InvalidValue;
         state.memory = instance.memory;
+        if (context.initializationParent(Resource)) |parent| {
+            if (context.parent(Resource) != null) return error.InvalidValue;
+            state.copied_parent = parent.value + 20;
+        }
         if (state.bytes == null) state.bytes = try state.memory.?.allocate(1024);
         while (state.initialized < state.bytes.?.len and context.consume(1)) {
             state.bytes.?[state.initialized] = @truncate(state.initialized);
@@ -154,10 +183,55 @@ const CooperativeResource = ecl.Port(.{ .cooperative = struct {
         if (!context.park(3_600_000)) return error.InvalidValue;
         return .parked;
     }
+    fn borrowed(state: *State, context: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
+        if (context.initializationParent(Resource) != null or context.parent(Resource) != null) return error.InvalidValue;
+        try context.builder().int(state.copied_parent orelse return error.InvalidValue);
+        try context.builder().result();
+        return .completed;
+    }
+    fn message(state: *State, context: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
+        const builder = context.builder();
+        if (state.construction != .start and !try builder.advance()) return .yielded;
+        switch (state.construction) {
+            .start => {
+                try builder.int(99);
+                try builder.clear();
+                state.construction = .clear;
+            },
+            .clear => {
+                try builder.symbol("answer");
+                state.construction = .key;
+            },
+            .key => {
+                try builder.float(0.5);
+                try builder.char(955);
+                try builder.list(2);
+                state.construction = .scalars;
+            },
+            .scalars => {
+                try builder.dictionary(1);
+                state.construction = .dictionary;
+            },
+            .dictionary => {
+                try builder.input(&.{});
+                state.construction = .input;
+            },
+            .input => {
+                try builder.list(2);
+                state.construction = .list;
+            },
+            .list => {
+                try builder.result();
+                return .completed;
+            },
+        }
+        return .yielded;
+    }
     pub fn retireOperation(state: *State, context: *ecl.Cooperative) ecl.CooperativeProgress {
         while (state.retire_remaining != 0 and context.consume(1)) state.retire_remaining -= 1;
         if (state.retire_remaining != 0) return .yielded;
         state.phase = .start;
+        state.construction = .start;
         state.index = 0;
         const instance = context.instance(Instance).?;
         _ = instance.value.fetchAdd(1000, .monotonic);

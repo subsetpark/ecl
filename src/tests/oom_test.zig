@@ -1514,6 +1514,22 @@ test "oom: standard-library and host: native port registered vocabulary publicat
     ).run);
 }
 
+test "oom: standard-library and host: native child initialization borrow" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortProbe(
+        "instanceprobe.resource [] port.open dup instanceprobe.child [] port.call port.close port.close",
+        "",
+    ).run);
+}
+
+test "oom: standard-library and host: cooperative native message construction" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortProbe(
+        "instanceprobe.cooperative [] port.open dup instanceprobe.message [7] port.call pop port.close",
+        "",
+    ).run);
+}
+
 test "oom: standard-library and host: native port registered concurrent allocation accounting" {
     try requireSelectedOomTest(@src());
     const Probe = struct {

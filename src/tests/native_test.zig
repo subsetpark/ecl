@@ -2230,3 +2230,40 @@ test "native: cooperative descriptors reject mixed and unknown execution contrac
     definitions[1].cooperative = &callbacks;
     try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &raw);
 }
+
+test "native: independent children consume initialization borrows before parent closure" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    for ([_]session.Config{ .cooperative, .{ .worker_pool = 4 } }) |configuration| {
+        var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+            .ecl_path = native_fixture.directory,
+            .native_instances = &.{.{ .name = "instanceprobe", .bytes = "A", .port_limits = .{ .max_live_ports = 2 } }},
+        }), configuration, .language_tests);
+        defer runtime.deinit();
+        try expectOk(&runtime, "[] ((" ++
+            "instanceprobe.resource [] port.open (|p| " ++
+            "p instanceprobe.child [] port.call p port.close " ++
+            "dup instanceprobe.value [] port.call 75 = {'kind 'user 'msg \"independent controller child\"} assert port.close) call " ++
+            "instanceprobe.resource [] port.open (|p| " ++
+            "p instanceprobe.cooperative-child [] port.call p port.close " ++
+            "dup instanceprobe.borrowed [] port.call 85 = {'kind 'user 'msg \"independent cooperative child\"} assert port.close) call " ++
+            ") 'initialization-borrow test) 'native.acceptance @defm " ++
+            "tests first @test dup 'ok dict.has? (pop) ('err at raise) if");
+    }
+}
+
+test "native: cooperative builders preserve scalars aggregates copies and cleared state" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+        .ecl_path = native_fixture.directory,
+    }), .cooperative, .language_tests);
+    defer runtime.deinit();
+    try expectOk(&runtime, "[] ((" ++
+        "instanceprobe.cooperative [] port.open dup instanceprobe.message [7] port.call " ++
+        "dup first 'answer at first 0.5 = {'kind 'user 'msg \"float\"} assert " ++
+        "dup first 'answer at 1 at int 955 = {'kind 'user 'msg \"character\"} assert " ++
+        "1 at [7] match? {'kind 'user 'msg \"copied input\"} assert port.close " ++
+        ") 'structured-message test) 'native.acceptance @defm " ++
+        "tests first @test dup 'ok dict.has? (pop) ('err at raise) if");
+}

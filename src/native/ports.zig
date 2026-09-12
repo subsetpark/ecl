@@ -236,6 +236,15 @@ pub const Controller = opaque {
         const pointer = owned.table.parent_state(owned.context, P.kindIdentity()) orelse return null;
         return @ptrCast(@alignCast(pointer));
     }
+    /// Borrow the issuing parent's state only during initialization. This
+    /// also permits an independent child to take independently owned native
+    /// storage from its parent. Never retain this pointer after initialization;
+    /// use parent() when the child requires a lifetime dependency instead.
+    pub fn initializationParent(self: *Controller, comptime P: type) ?*P.StateType {
+        comptime if (!@hasDecl(P, "ecl_port_marker")) @compileError("ecl-native: parent requires a declared Port type");
+        const owned = self.state();
+        return @ptrCast(@alignCast(owned.table.initialization_parent(owned.context, P.kindIdentity()) orelse return null));
+    }
     /// Borrowed view of the owned received message; the next view lookup
     /// invalidates this view. Message ownership is unchanged.
     pub fn received(self: *Controller, path: []const u64) ?*const MessageView {
@@ -443,6 +452,14 @@ pub const Cooperative = opaque {
         comptime if (!@hasDecl(P, "ecl_port_marker")) @compileError("ecl-native: parent requires a declared Port type");
         const owned = self.state();
         return @ptrCast(@alignCast(owned.table.parent_state(owned.context, P.kindIdentity()) orelse return null));
+    }
+    /// Initialization-only parent borrow, including independently owned
+    /// children. It expires when initialization completes, fails, or is
+    /// cancelled, and must not be retained by operations or cleanup.
+    pub fn initializationParent(self: *Cooperative, comptime P: type) ?*P.StateType {
+        comptime if (!@hasDecl(P, "ecl_port_marker")) @compileError("ecl-native: parent requires a declared Port type");
+        const owned = self.state();
+        return @ptrCast(@alignCast(owned.table.initialization_parent(owned.context, P.kindIdentity()) orelse return null));
     }
     pub fn cancelled(self: *Cooperative) bool {
         const owned = self.state();

@@ -1906,6 +1906,15 @@ resource lock, while membership publication and backend startup revalidation
 use that lock. The creator retains the provisional cell until publication or
 backend rollback completes.
 
+Every native child holds a parent dependency during initialization, even when
+its published lifetime will be independent. A distinct initialization-only
+borrow permits native storage handoff without exposing it as ECL configuration.
+Successful initialization consumes that temporary membership before publishing
+readiness; failed construction retains it through joined cleanup. Lifetime
+borrows require a dependent child and remain valid through its retirement.
+Neither scope transfer nor an independent child's publication can upgrade the
+temporary borrow into a lifetime dependency.
+
 All registered resources bind scope ownership and terminal publication to a
 runtime-owned activity group. Its provisional state owns startup rollback; successful submission transfers the root into the
 executor. Draining owns the root outcome and every outstanding activity until

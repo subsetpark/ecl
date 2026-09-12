@@ -5,8 +5,8 @@
 
 const builtin = @import("builtin");
 
-pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v9";
-pub const abi_version: u32 = 9;
+pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v10";
+pub const abi_version: u32 = 10;
 
 pub const max_error_message_bytes: u32 = 4096;
 pub const max_guest_scalar_bytes: u32 = 4096;
@@ -120,6 +120,7 @@ pub const ControllerStatus = enum(u32) { ok, eof, cancelled, failed, out_of_memo
 pub const ControllerRead = extern struct { status: ControllerStatus, count: u32 = 0 };
 pub const ControllerTable = extern struct {
     instance_state: InstanceStateFn,
+    initialization_parent: InstanceStateFn,
     parent_state: *const fn (*anyopaque, *const anyopaque) callconv(.c) ?*anyopaque,
     build_message: *const fn (*anyopaque, *const MessageBuildRequest) callconv(.c) HostStatus,
     fail_allocation: *const fn (*anyopaque) callconv(.c) void,
@@ -144,6 +145,7 @@ pub const ResourceExecution = enum(u32) { controller, cooperative, _ };
 pub const CooperativeProgress = enum(u32) { completed, yielded, parked, _ };
 pub const CooperativeTable = extern struct {
     instance_state: InstanceStateFn,
+    initialization_parent: InstanceStateFn,
     parent_state: @FieldType(ControllerTable, "parent_state"),
     input: @FieldType(ControllerTable, "input"),
     build_message: @FieldType(ControllerTable, "build_message"),
@@ -481,9 +483,9 @@ comptime {
     assertRecord(Descriptor, 112, 8);
     assertRecord(PortDefinition, 112, 8);
     assertRecord(CooperativeDefinition, 40, 8);
-    assertRecord(CooperativeTable, 72, 8);
+    assertRecord(CooperativeTable, 80, 8);
     assertRecord(MessageBuildRequest, 72, 8);
-    assertRecord(ControllerTable, 144, 8);
+    assertRecord(ControllerTable, 152, 8);
     assertRecord(InstanceTable, 24, 8);
     assertRecord(NativeMemory, 24, 8);
     assertRecord(InstanceDefinition, 48, 8);

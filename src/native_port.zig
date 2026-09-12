@@ -543,7 +543,11 @@ const OperationAdapter = struct {
         const parent = self.cell;
         const owner = parent.adapter.owner;
         const provisional = try operation.childGroup();
-        const dependent: ?Cell.Parent = if (dependency == .dependent) .{ .cell = parent, .group = try parent.childGroup() } else null;
+        const dependent: ?Cell.Parent = .{ .cell = parent, .group = try parent.childGroup(), .lifetime = switch (dependency) {
+            .dependent => .resource,
+            .independent => .initialization,
+            _ => unreachable,
+        } };
         const cell = Resource.create(owner, .{ parent.adapter.instance, kind, configuration, parent.scheduler }, ResourceAdapter.initializeAllocation) catch |err| return switch (err) {
             error.InvalidLimits => error.InsufficientLanes,
             else => |failure| failure,
@@ -762,11 +766,25 @@ fn controllerParent(raw: *anyopaque, identity: *const anyopaque) callconv(.c) ?*
     defer unlock(&cell.mutex);
     const parent = switch (cell.dependency) {
         .attached => |attachment| attachment.parent,
-        .independent, .retired => return null,
+        .independent, .initializing, .retired => return null,
     };
     if (parent.adapter.instance != cell.adapter.instance or parent.adapter.definition.wire.identity != identity) return null;
     // Membership remains attached until child cleanup and controller join.
     // The parent joins it before destroying the borrowed native state.
+    return parent.adapter.backend.ptr;
+}
+
+fn controllerInitializationParent(raw: *anyopaque, identity: *const anyopaque) callconv(.c) ?*anyopaque {
+    const ctx = context(raw);
+    if (ctx.invocation != .initialize) return null;
+    const cell = ctx.cell;
+    lock(&cell.mutex);
+    defer unlock(&cell.mutex);
+    const parent = switch (cell.dependency) {
+        .attached, .initializing => |attachment| attachment.parent,
+        .independent, .retired => return null,
+    };
+    if (parent.adapter.instance != cell.adapter.instance or parent.adapter.definition.wire.identity != identity) return null;
     return parent.adapter.backend.ptr;
 }
 
@@ -1172,7 +1190,7 @@ fn storeControllerFailure(destination: *?Failure, failure: Failure) void {
     if (destination.* != null and failure != .out_of_memory) return;
     destination.* = failure;
 }
-const controller_table: abi.ControllerTable = .{ .instance_state = controllerInstance, .resolve_endpoint = controllerResolveEndpoint, .read_bytes = controllerReadBytes, .write_bytes = controllerWriteBytes, .receive_event = controllerReceiveEvent, .fail_resource = controllerFailResource, .parent_state = controllerParent, .discard_message = controllerDiscardMessage, .build_message = controllerBuildMessage, .fail_allocation = controllerFailAllocation, .received_message = controllerReceivedMessage, .forward_message = controllerForwardMessage, .result_message = controllerResultMessage, .input = controllerInput, .finish_endpoint = controllerFinishEndpoint, .cancelled = controllerCancelled, .acknowledge_cancellation = controllerAcknowledge, .fail = controllerFail };
+const controller_table: abi.ControllerTable = .{ .instance_state = controllerInstance, .initialization_parent = controllerInitializationParent, .resolve_endpoint = controllerResolveEndpoint, .read_bytes = controllerReadBytes, .write_bytes = controllerWriteBytes, .receive_event = controllerReceiveEvent, .fail_resource = controllerFailResource, .parent_state = controllerParent, .discard_message = controllerDiscardMessage, .build_message = controllerBuildMessage, .fail_allocation = controllerFailAllocation, .received_message = controllerReceivedMessage, .forward_message = controllerForwardMessage, .result_message = controllerResultMessage, .input = controllerInput, .finish_endpoint = controllerFinishEndpoint, .cancelled = controllerCancelled, .acknowledge_cancellation = controllerAcknowledge, .fail = controllerFail };
 
 pub fn fromValue(value: Value, instance: *native.ModuleInstance, kind: u32) ?*Cell {
     const handle = switch (value) {
@@ -1298,6 +1316,7 @@ fn cooperativeProgress(ctx: *ControllerContext, progress: abi.CooperativeProgres
 }
 const cooperative_table: abi.CooperativeTable = .{
     .instance_state = controllerInstance,
+    .initialization_parent = controllerInitializationParent,
     .parent_state = controllerParent,
     .input = controllerInput,
     .build_message = cooperativeBuildMessage,

@@ -33,7 +33,8 @@ pub fn Resource(comptime Adapter: type) type {
             .retireAfterUnlock = retireDependency,
         });
         const Transfer = transfers.ScopeTransfer(Cell, transferOwnership, transferLive);
-        pub const Parent = struct { cell: *Cell, group: *scheduler.ExternalGroup };
+        pub const Parent = struct { cell: *Cell, group: *scheduler.ExternalGroup, lifetime: enum { initialization, resource } = .resource };
+        const Attachment = struct { parent: *Cell, membership: external.ScopeMembership };
         pub const Admission = @import("port_exchange.zig").Admission;
         adapter: Adapter,
         allocator: std.mem.Allocator,
@@ -51,7 +52,8 @@ pub fn Resource(comptime Adapter: type) type {
         publication: ?*resource_api.PublicationAuthority = null,
         dependency: union(enum) {
             independent,
-            attached: struct { parent: *Cell, membership: external.ScopeMembership },
+            initializing: Attachment,
+            attached: Attachment,
             retired,
         } = .independent,
         children: ?*scheduler.ExternalGroup = null,
@@ -266,7 +268,7 @@ pub fn Resource(comptime Adapter: type) type {
             lock(&self.mutex);
             defer unlock(&self.mutex);
             const dependent = switch (self.dependency) {
-                .attached => |attachment| attachment.membership.authorizesCancellation(scope),
+                .attached, .initializing => |attachment| attachment.membership.authorizesCancellation(scope),
                 .independent, .retired => false,
             };
             if (self.ownership.authorizesCancellation(scope) or dependent) self.closeLocked();
@@ -365,6 +367,17 @@ pub fn Resource(comptime Adapter: type) type {
         }
         fn publishInitialization(self: *Cell) void {
             lock(&self.mutex);
+            // Successful independent construction consumes its temporary
+            // parent borrow before readiness can publish the child. Detach
+            // outside this lock; parent retirement can wake immediately.
+            var temporary: ?external.ScopeMembership = null;
+            if (!self.closed.load(.acquire) and self.dependency == .initializing) {
+                temporary = self.dependency.initializing.membership;
+                self.dependency = .independent;
+            }
+            unlock(&self.mutex);
+            if (temporary) |*membership| membership.detach();
+            lock(&self.mutex);
             self.phase = if (self.closed.load(.acquire)) .closing else .open;
             self.waits.notifyLocked(self);
             self.changed.broadcast(io());
@@ -385,7 +398,7 @@ pub fn Resource(comptime Adapter: type) type {
         fn retireDependency(self: *Cell) void {
             lock(&self.mutex);
             var token: ?external.ScopeMembership = switch (self.dependency) {
-                .attached => |attachment| attachment.membership,
+                .attached, .initializing => |attachment| attachment.membership,
                 .independent, .retired => null,
             };
             self.dependency = .retired;
@@ -416,7 +429,7 @@ pub fn Resource(comptime Adapter: type) type {
         pub fn prepareChildStartup(self: *Cell, provisional: *scheduler.ExternalGroup, dependent: ?Parent) error{ OutOfMemory, ScopeClosing }!void {
             const Publication = struct {
                 cell: *Cell,
-                parent: ?*Cell,
+                parent: ?Parent,
                 pub fn lock(item: *@This()) void {
                     std.Io.Threaded.mutexLock(&item.cell.mutex);
                 }
@@ -429,7 +442,10 @@ pub fn Resource(comptime Adapter: type) type {
                 }
                 pub fn publish(item: *@This(), tokens: [16]?external.ScopeMembership) void {
                     if (item.parent) |parent| {
-                        item.cell.dependency = .{ .attached = .{ .parent = parent, .membership = tokens[0].? } };
+                        item.cell.dependency = switch (parent.lifetime) {
+                            .initialization => .{ .initializing = .{ .parent = parent.cell, .membership = tokens[0].? } },
+                            .resource => .{ .attached = .{ .parent = parent.cell, .membership = tokens[0].? } },
+                        };
                     } else item.cell.ownership = .{ .owned = tokens[0].? };
                 }
             };
@@ -438,7 +454,7 @@ pub fn Resource(comptime Adapter: type) type {
             incoming[0] = external.scopeMember(Cell, self);
             if (!try provisional.publish(incoming, &publication)) return error.ScopeClosing;
             if (dependent) |parent| {
-                publication.parent = parent.cell;
+                publication.parent = parent;
                 incoming = .{null} ** 16;
                 incoming[0] = external.scopeMember(Cell, self);
                 if (!try parent.group.publish(incoming, &publication)) return error.ScopeClosing;

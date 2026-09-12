@@ -32,7 +32,7 @@ Session's runtime I/O state.
 The public `net` and `proc` modules are ECL compositions over these registered
 capabilities and `port.*`. Their operation and endpoint selectors expose only
 their corresponding resources and streams. First-party adapters use typed backend calls;
-the extension adapter translates ABI v9 calls into the same runtime interfaces
+the extension adapter translates ABI v10 calls into the same runtime interfaces
 for controller execution, transport, cancellation, ownership, and cleanup.
 
 Embedded names have precedence over filesystem modules. A file on `ECL_PATH`
@@ -127,8 +127,8 @@ module. Its descriptor declares the same canonical name requested by the
 loader. The complete word table validates before publication, and publication
 is atomic.
 
-The current pre-release native ABI is version 9, with entry symbol
-`ecl_module_abi_v9`. Resource authors choose `ecl.Port(.{ .controller = Spec })`
+The current pre-release native ABI is version 10, with entry symbol
+`ecl_module_abi_v10`. Resource authors choose `ecl.Port(.{ .controller = Spec })`
 or `ecl.Port(.{ .cooperative = Spec })`. Cooperative callbacks receive bounded
 work accounting and cancellable timer parking. Their persistent builder begins
 aggregate construction and advances it explicitly; it has no blocking endpoints.
@@ -224,7 +224,12 @@ startup. No child handle grants native code ECL storage or interpreter access.
 `Controller.parent(Port)` borrows the issuing parent's native state only for a
 dependent child of that registered kind in the same module instance. Roots,
 independent children, and wrong kinds return null. The borrow remains valid
-through child cleanup, including parent closure and scope transfers. Native
+through child cleanup, including parent closure and scope transfers.
+`initializationParent(Port)` is a separate borrow available only during
+initialization, including independent children. The parent remains alive until
+initialization finishes or failed construction joins cleanup. Native code may
+transfer independently owned storage through this borrow, but must not retain
+the parent pointer for later operations or cleanup. Native
 libraries synchronize shared state across controllers; this access grants no
 ECL heap, allocator, or interpreter authority.
 A message receiver's `reply` appends an opaque sender to the current builder.
