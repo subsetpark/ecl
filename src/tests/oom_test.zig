@@ -754,6 +754,7 @@ fn projectSessionInitializationProbe(allocator: std.mem.Allocator) !void {
 }
 
 const StdlibSurface = enum {
+    file_publication,
     source_declarations,
     locked_project_module,
     root_source_preload,
@@ -1007,6 +1008,11 @@ fn stdlibSessionAllocationProbe(
             "\"probe\" io.eprint 1 \"probe\" io.debug pop " ++
                 "\"ECL_OOM_PROBE\" getenv pop " ++
                 "[] (\"ECL_OOM_ABSENT\" getenv) @attempt pop [] (io.stdin) @attempt pop",
+        ),
+        .file_publication => try runOk(
+            &runtime,
+            "oom-publication.ecl",
+            "\"x\" 'cwd \"published\" fs.publish-text [0 255] 'cwd \"published\" fs.publish-bytes",
         ),
         .filesystem => try runOk(
             &runtime,
@@ -1693,6 +1699,11 @@ test "oom: standard-library and host: package: locked project module propagates 
 test "oom: standard-library and host: package: root source preload propagates every allocation failure" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.root_source_preload);
+}
+
+test "oom: standard-library and host: stdlib: file publication propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
+    try checkStdlibSurface(.file_publication);
 }
 
 test "oom: standard-library and host: stdlib: source declarations propagate every allocation failure" {

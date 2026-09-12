@@ -1827,6 +1827,21 @@ is not followed; an existing destination is `'already-exists`, and a
 destination on another device is `'cross-device` rather than an emulated
 copy.
 
+### publish-bytes
+`( bytes root path -- )` — Atomically publish complete file contents, creating
+an absent destination or replacing one that exists. An entry observed before
+staging must be a regular file; a symlink, directory, or other entry is
+`'not-regular`. Use the observed file's permissions, or host defaults on first
+creation. Publication replaces the final directory entry without following it;
+concurrent publications each succeed and the last commit wins. An intervening
+directory causes failure. A failed operation preserves its destination, and
+cancellation before commit removes staging. Cancellation after commit does not
+roll back publication. Visibility is atomic; directory-entry durability across
+a crash is not promised.
+
+### publish-text
+`( string root path -- )` — Publish UTF-8 text under the `publish-bytes` contract.
+
 ### replace-bytes
 `( bytes root path -- )` — Atomically replace an existing regular file with
 exact bytes. The final entry must be observed as a regular file without

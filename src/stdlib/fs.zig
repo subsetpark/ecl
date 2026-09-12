@@ -34,6 +34,8 @@ pub const words = [_]env.BuiltinWord{
     .{ .name = "create-text", .doc = "( string root path -- ) Atomically create an absent UTF-8 file.", .primitive = createText },
     .{ .name = "replace-bytes", .doc = "( bytes root path -- ) Atomically replace an existing regular file with exact bytes.", .primitive = replaceBytes },
     .{ .name = "replace-text", .doc = "( string root path -- ) Atomically replace an existing regular file with UTF-8 text.", .primitive = replaceText },
+    .{ .name = "publish-bytes", .doc = "( bytes root path -- ) Atomically publish a complete file, creating or replacing the destination.", .primitive = publishBytes },
+    .{ .name = "publish-text", .doc = "( string root path -- ) Atomically publish a complete UTF-8 file, creating or replacing the destination.", .primitive = publishText },
     .{ .name = "stat", .doc = "( root path -- metadata ) Describe the object a path reaches, following a final link within the root.", .primitive = stat },
     .{ .name = "lstat", .doc = "( root path -- metadata ) Describe the final entry itself without following a link.", .primitive = lstat },
     .{ .name = "exists?", .doc = "( root path -- bool ) Return 1 when the final entry exists, without following it.", .primitive = exists },
@@ -52,6 +54,8 @@ const Operation = enum {
     create_text,
     replace_bytes,
     replace_text,
+    publish_bytes,
+    publish_text,
     stat,
     lstat,
     exists,
@@ -70,6 +74,8 @@ const Operation = enum {
             .create_text => "create-text",
             .replace_bytes => "replace-bytes",
             .replace_text => "replace-text",
+            .publish_bytes => "publish-bytes",
+            .publish_text => "publish-text",
             .exists => "exists?",
             .remove_file => "remove-file",
             .remove_dir => "remove-dir",
@@ -81,7 +87,7 @@ const Operation = enum {
 
     fn shape(self: Operation) Shape {
         return switch (self) {
-            .create_bytes, .create_text, .replace_bytes, .replace_text => .payload,
+            .create_bytes, .create_text, .replace_bytes, .replace_text, .publish_bytes, .publish_text => .payload,
             .copy => .copy,
             .rename => .rename,
             else => .unary,
@@ -89,7 +95,7 @@ const Operation = enum {
     }
 
     fn textPayload(self: Operation) bool {
-        return self == .create_text or self == .replace_text;
+        return self == .create_text or self == .replace_text or self == .publish_text;
     }
 
     fn resolveMode(self: Operation) fsport.ResolveMode {
@@ -102,7 +108,7 @@ const Operation = enum {
     /// Words that act on a child entry reject `.`, which names the root.
     fn requiresEntry(self: Operation) bool {
         return switch (self) {
-            .create_bytes, .create_text, .replace_bytes, .replace_text, .mkdir, .rename, .remove_file, .remove_dir => true,
+            .create_bytes, .create_text, .replace_bytes, .replace_text, .publish_bytes, .publish_text, .mkdir, .rename, .remove_file, .remove_dir => true,
             .read_bytes, .read_text, .stat, .lstat, .exists, .list, .copy => false,
         };
     }
@@ -125,6 +131,12 @@ fn replaceBytes(evaluator: *Machine) MachineError!void {
 }
 fn replaceText(evaluator: *Machine) MachineError!void {
     return begin(evaluator, .replace_text);
+}
+fn publishBytes(evaluator: *Machine) MachineError!void {
+    return begin(evaluator, .publish_bytes);
+}
+fn publishText(evaluator: *Machine) MachineError!void {
+    return begin(evaluator, .publish_text);
 }
 fn stat(evaluator: *Machine) MachineError!void {
     return begin(evaluator, .stat);
@@ -705,6 +717,7 @@ const Driver = struct {
             .rename => self.renameEntry(evaluator),
             .create_bytes, .create_text => self.beginStage(evaluator, .create),
             .replace_bytes, .replace_text => self.beginStage(evaluator, .replace),
+            .publish_bytes, .publish_text => self.beginStage(evaluator, .publish),
             .copy => self.beginCopy(evaluator),
         };
     }
@@ -1016,7 +1029,7 @@ const Driver = struct {
 
     // -- staged publication -------------------------------------------------
 
-    const StageMode = enum { create, replace };
+    const StageMode = enum { create, replace, publish };
 
     fn beginStage(self: *Driver, evaluator: *Machine, mode: StageMode) MachineError!machine.WorkProgress {
         const entry = try self.requireEntry(evaluator, self.resolved.?);
@@ -1028,8 +1041,11 @@ const Driver = struct {
         // created one gets the host default.
         const permissions: std.Io.File.Permissions = switch (mode) {
             .create => if (existing != null) return self.fail(evaluator, .already_exists) else .default_file,
-            .replace => permissions: {
-                const info = existing orelse return self.fail(evaluator, .not_found);
+            .replace, .publish => permissions: {
+                const info = existing orelse {
+                    if (mode == .replace) return self.fail(evaluator, .not_found);
+                    break :permissions .default_file;
+                };
                 if (info.kind != .file) return self.fail(evaluator, .not_regular);
                 break :permissions info.permissions;
             },
@@ -1061,6 +1077,7 @@ const Driver = struct {
         const entry = if (self.operation == .copy) self.second.?.entry else self.resolved.?.entry;
         const failed: ?fsport.Reason = switch (self.operation) {
             .replace_bytes, .replace_text => staged.commitExchange(entry.name),
+            .publish_bytes, .publish_text => staged.commitReplace(entry.name),
             else => staged.commitNoReplace(entry.name),
         };
         if (failed) |reason| return self.fail(evaluator, reason);

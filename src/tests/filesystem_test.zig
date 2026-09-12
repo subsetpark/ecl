@@ -489,6 +489,18 @@ test "fs: create is exclusive and replace is strict" {
     try scratch.write("existing", "old");
 
     try expectStack(options, "\"héllo\" 'root \"new.txt\" fs.create-text 'root \"new.txt\" fs.read-text", "\"héllo\"");
+    try expectStack(options, "\"first\" 'root \"published\" fs.publish-text 'root \"published\" fs.read-text", "\"first\"");
+    try expectStack(options, "[0 255] 'root \"published\" fs.publish-bytes 'root \"published\" fs.read-bytes", "[0 255]");
+    try expectFsFailure(options, "\"x\" 'root \"dir\" fs.publish-text", "io", "fs.publish-text", "not-regular");
+    try expectFsFailure(options, "\"x\" 'root \"dangling\" fs.publish-text", "io", "fs.publish-text", "not-regular");
+    try scratch.expectNoStaging(".");
+    try runCase(options, .{ .worker_pool = 4 },
+        \\[] ("left" 'root "published" fs.publish-text) @spawn
+        \\[] ("right" 'root "published" fs.publish-text) @spawn
+        \\task.await 'ok at pop task.await 'ok at pop
+        \\'root "published" fs.read-text dup "left" match? swap "right" match? or
+    , .{ .stack = "1" });
+    try scratch.expectNoStaging(".");
     try expectStack(options, "[0 255] 'root \"new.bin\" fs.create-bytes 'root \"new.bin\" fs.read-bytes", "[0 255]");
     try expectStack(options, "\"\" 'root \"empty\" fs.create-text 'root \"empty\" fs.stat", "{'kind 'file 'size 0}");
     for ([_][]const u8{ "existing", "dir", "dangling", "new.txt" }) |collision| {
@@ -671,6 +683,8 @@ test "fs: cancellation before commit leaves the destination unchanged" {
     for ([_][]const u8{
         "\"new\" 'root \"existing\" fs.replace-text",
         "\"new\" 'root \"created\" fs.create-text",
+        "\"new\" 'root \"existing\" fs.publish-text",
+        "\"new\" 'root \"created\" fs.publish-text",
         "'root \"existing\" 'root \"copied\" fs.copy",
         "'root \".\" fs.list",
         "'root \"existing\" fs.read-text",

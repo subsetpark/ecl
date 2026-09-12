@@ -665,6 +665,12 @@ entry source and complete map; the startup directory remains the caller's.
 This keeps application resolution independent of project discovery without
 granting a separate execution mode or application-specific runtime authority.
 
+Application metadata publication uses the same staged-file owner as ordinary
+filesystem writes. Its create-or-replace commit performs one descriptor-relative
+rename after sealing the complete contents. Before commit, cancellation and
+failure leave staging owned by the driver for retirement; after commit, the
+destination owns the published contents and cancellation cannot undo it.
+
 The catalog separates source selection from exact public exports; the shared
 registry contains exported registrations while each file owns its private
 registrations. Private names therefore cannot collide across files or become
