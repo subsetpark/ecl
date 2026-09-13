@@ -1831,6 +1831,32 @@ Filesystem operations accept the stage as a root. `port.close` or scope exit
 joins descendant closure and recursive rollback; no destination is published.
 The staging directory uses mode `0700` under the process umask.
 
+### reserve
+`( root -- reservation )` — Retain a selected directory root and one filesystem
+operation slot until joined closure. A reservation can be passed as a root;
+its derived operations share that slot and reject overlapping work with
+`'overflow` and reason `'limit`. Closure waits for admitted work. This supports
+compositions that must retain admission across inspection and publication.
+
+### open-writer
+`( root path -- writer )` — Open private storage for an absent regular file.
+The parent must exist and `.` is rejected. A writer is distinct from a directory.
+It retains root lifetime and operation admission until joined cleanup. Staging
+dependencies survive task transfer. Closing an uncommitted writer removes its
+private contents and publishes no destination.
+
+### write-chunk
+`( writer bytes -- )` — Append at most 65536 integer bytes. The streaming transfer
+limit (1 GiB by default) covers the complete stream, including previous chunks.
+A failed or cancelled append prevents later publication of partial contents.
+
+### commit-file
+`( writer -- )` — Stop admission, flush the completed stream, and atomically
+publish its previously absent destination. Publication is serialized against
+cancellation. Success joins writer cleanup; failure retains unpublished private
+state for explicit or scope cleanup. No allocation is required after the
+publication permit is granted.
+
 ### open-list
 `( root path -- cursor )` — Open a scope-owned incremental enumeration of a
 confined directory. The cursor is a port resource, distinct from a directory

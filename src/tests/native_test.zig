@@ -3146,3 +3146,22 @@ test "native: prepared finalizer failures retain immutable diagnostics and rejec
         );
     }
 }
+
+test "native: resource kind observation preserves closed kinds and rejects foreign instances" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    for ([_]bool{ true, false }) |linked| {
+        var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+            .ecl_path = if (linked) null else native_fixture.directory,
+            .native_instances = &.{
+                .{ .name = "instanceprobe", .registration = .{ .deferred = if (linked) @import("native-instance").Extension.descriptor() else null } },
+                .{ .name = "loanforeign", .registration = .{ .deferred = @import("native-instance").ForeignLoanExtension.descriptor() } },
+            },
+        }), .cooperative, .language_tests);
+        defer runtime.deinit();
+        try expectOk(&runtime, "42 instanceprobe.resource-kind 0 = {'kind 'user 'msg \"scalar kind\"} assert " ++
+            "loanforeign.resource [] port.open (|p| p instanceprobe.resource-kind 0 = {'kind 'user 'msg \"foreign instance\"} assert p port.close) call " ++
+            "instanceprobe.resource [] port.open (|p| p instanceprobe.resource-kind 1 = {'kind 'user 'msg \"controller kind\"} assert p port.close p instanceprobe.resource-kind 1 = {'kind 'user 'msg \"closed kind\"} assert) call " ++
+            "instanceprobe.cooperative [] port.open (|p| p instanceprobe.resource-kind 2 = {'kind 'user 'msg \"cooperative kind\"} assert p port.close) call");
+    }
+}

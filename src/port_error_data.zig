@@ -17,6 +17,12 @@ pub const View = opaque {
     fn envelope(self: *const View) *messages.Envelope {
         return @ptrCast(@constCast(self));
     }
+    /// Independently retain immutable diagnostics in their issuing domain.
+    /// Diagnostic envelopes never enter queues or carry mutable reservations.
+    pub fn retain(self: *const View) *Owned {
+        _ = self.envelope().borrow();
+        return @ptrCast(@constCast(self));
+    }
     pub fn len(self: *const View) usize {
         return @intCast(self.envelope().value().dict.length());
     }

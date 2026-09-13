@@ -706,6 +706,7 @@ const StdlibSurface = enum {
     directory_enumeration,
     directory_staging,
     file_publication,
+    filesystem_stream,
     directory_resource,
     advisory_lock,
     tree_operations,
@@ -942,6 +943,13 @@ fn stdlibSessionAllocationProbe(
             &runtime,
             "oom-directory.ecl",
             "'cwd \".\" fs.child-dir dup \".\" fs.stat pop dup port.close port.close",
+        ),
+        .filesystem_stream => try runOk(
+            &runtime,
+            "oom-stream.ecl",
+            "'cwd fs.reserve 'root set root \"published\" fs.open-writer 'writer set " ++
+                "writer [65 66] fs.write-chunk writer [] fs.write-chunk writer fs.commit-file " ++
+                "root \"aborted\" fs.open-writer 'writer set writer [67] fs.write-chunk writer port.close root port.close",
         ),
         .file_publication => try runOk(
             &runtime,
@@ -2296,4 +2304,9 @@ test "oom: standard-library and host: native prepared finalizer failures" {
             "[] (resource instanceprobe.prepared-seal 1 port.call) @attempt pop resource port.close",
         "",
     ).run);
+}
+
+test "oom: standard-library and host: stdlib: filesystem streaming publication and rollback" {
+    try requireSelectedOomTest(@src());
+    try checkStdlibSurface(.filesystem_stream);
 }

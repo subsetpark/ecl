@@ -6,7 +6,7 @@
 //! Sessions, so the traceless SessionHeap remains the appropriate allocator.
 const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
-const filesystem_port = @import("../filesystem_port.zig");
+const filesystem_module = @import("../session.zig").Filesystem;
 const session = @import("../session.zig");
 const support = @import("kernel_test_support.zig");
 const test_heap = @import("test_heap.zig");
@@ -114,7 +114,7 @@ const Scratch = struct {
     path: [:0]u8,
     /// Backing storage for `filesystem`, so the returned configuration borrows this
     /// value rather than a temporary.
-    root_storage: [1]filesystem_port.Root,
+    root_storage: [1]filesystem_module.Root,
 
     fn init() !Scratch {
         var directory = std.testing.tmpDir(.{});
@@ -140,7 +140,7 @@ const Scratch = struct {
         return allocator.dupe(u8, name);
     }
 
-    fn filesystem(self: *const Scratch) filesystem_port.Config {
+    fn filesystem(self: *const Scratch) filesystem_module.Configuration {
         return .{ .roots = &self.root_storage };
     }
 

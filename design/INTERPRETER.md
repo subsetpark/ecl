@@ -158,7 +158,7 @@ mutation, and teardown are distinct authorities.
 
 Every initialized Session has the same complete runtime shape. Its constructor
 requires I/O, output and diagnostic writers, a startup directory, an environment
-snapshot, scheduler configuration, and an explicit command mode. Evaluation and language tests differ only in test facilities. Process, filesystem, and network owners are unconditional.
+snapshot, scheduler configuration, and an explicit command mode. Evaluation and language tests differ only in test facilities. Bundled filesystem, process, and network descriptors are unconditional; their state belongs to the common native-instance owner.
 
 Inherited context distinguishes prelude bootstrap from runtime execution.
 Both phases require a module registry. The bootstrap phase builds the core
@@ -184,42 +184,34 @@ Executable and working-directory syntax is validated at the process boundary;
 the operating system determines access. Units obtain only ordinary registered
 process capabilities, never process-group identifiers or native owner access.
 
-The filesystem owner opens named roots once and owns their handles and the
-live-operation quota. Invalid roots or limits fail construction with
-`InvalidHostConfig`, distinctly from allocation failure. Authority remains the
-retained directory handle after a rename, and every root supports all filesystem
-operations subject to operating-system permissions. Units receive opaque
-`FilesystemAccess` for root lookup and operation admission. Root-relative path
-resolution enforces containment; module loading remains a separate operation.
+The eager filesystem SDK instance opens configured roots once and owns their
+handles and admission limits. Invalid roots or limits fail Session construction
+with `InvalidHostConfig`, distinctly from allocation failure. Root authority
+remains the retained descriptor after a rename. Units obtain ordinary native
+capabilities; they have no filesystem owner or root-lookup facade.
 
-Named roots are opaque factory-issued identities. The shared root-selection
-boundary accepts those identities or independently leased directory resources;
-filesystem operations and archive extraction use that same tagged selection.
-Archive extraction holds its selection through parser, publication, and rollback
-retirement, so closing a staging root cannot invalidate an admitted extraction.
+Directories, staging directories, enumeration cursors, reservations, locks, and
+writers have distinct nominal SDK resource kinds. Read-only kind observation
+recognizes same-instance closed resources without granting state access or
+admission. Initializer input loans guard descriptor duplication, and admitted
+operations retain independently owned descriptors through bounded retirement.
+The common resource lifecycle joins those loans before private state cleanup.
 
-Explicit host-directory acquisition mints a scope-owned resource through the
-same atomic membership and transfer protocol as other ports. Its lifetime
-state owns open admission, closure waiting for admitted leases, queued backend
-retirement, or joined closure.
-Operation admission duplicates the descriptor under the resource's lifetime
-lock. Each driver owns that independent lease through resolver retirement;
-resource closure joins these leases before backend retirement. Cleanup is
-queued through the issuing filesystem owner, which derives its allocator and
-retirement domain from one host authority. Closed values retain
-only issuer metadata, which outlives the Session's operational filesystem owner.
-Child acquisition uses the shared confined resolver and establishes a new root.
+An extraction reservation retains its selected root and one filesystem quota
+slot through parsing, publication, or rollback. Derived operations share that
+reservation with serialized admission. ECL archive composition uses validated
+inspection, directories, staging, and streaming writers; the parser cannot
+access filesystem state. It materializes archive-order result paths before
+sealing the staging directory.
 
-Directory staging extends this lifetime with sealed admission and private versus
-published backend ownership. Descendants carry permanent membership in the
-staging owner's external group independently of task ownership. Sealing closes
-that group and waits for its completion callback and all descriptor leases
-before the atomic absent-destination rename. Group publication precedes the
-child lifetime lock; group closure and membership detachment occur outside it.
-Private backend retirement empties the tree in allocation-free bounded steps;
-published retirement only closes handles. Factory failure transfers the already
-allocated staging owner directly into the same retirement domain, so cleanup
-does not depend on resource publication succeeding.
+Directory descendants inherit staging dependencies independently of task
+ownership. Ordinary directory closure leaves independently acquired children
+alive. Staging sealing stops admission and joins dependent children and input
+loans before its bounded finalizer. The common commit permit serializes atomic
+publication against cancellation and reserves result storage first. Prepared
+failure alternatives preserve actual structured host errors without allocation
+after that permit. Failed publication retains the private tree for bounded,
+allocation-free rollback; successful retirement closes only owned handles.
 
 Root-scope closure participates in the ordinary ready/retirement arbitration
 when a configured worker pool has not started. Cleanup never depends on lazily
@@ -270,8 +262,8 @@ the other variants support deterministic tests independently of TLS time.
 
 Session teardown first stops execution and closes task and external-resource
 creation. It then retires root scopes, including cancellation and direct-child
-reap for every process member, before destroying the process and filesystem
-owners; every filesystem driver is retired with the scheduler, so no
+reap for every process member, before retiring native instances; every
+filesystem continuation is retired with the scheduler, so no
 handle, staging entry, or quota reservation can still reference an owner when
 its root handles close. Stacks, module generations, source provenance, and
 native pins follow in dependency order, with bounded retirement drained while
@@ -1169,68 +1161,43 @@ zero duration expires immediately.
 
 The `host` builtin is classified with host-backed standard-library primitives.
 Startup-directory observation borrows immutable storage from the Session's
-process owner; it cannot mint launch authority. Executable-path observation
+metadata snapshot; it cannot mint launch authority. Executable-path observation
 uses the host I/O interface and a fixed path buffer. A self-owned, address-stable
 driver retains either borrow while bounded UTF-8 materialization is pending,
 and retires partial output through the ordinary scheduler release domain.
 
-### Filesystem operations are bounded drivers over confined handles
+### Filesystem operations use cooperative SDK resources
 
-Every `fs` word, and generic archive extraction runs
-as one scheduler driver. The driver first encodes and validates its inputs
-without touching the host: the canonical path grammar, the named root, and a live-operation slot from the owner's quota. It then
-resolves the path with `filesystem_port.Resolver`, one component per step:
-each component is opened or inspected relative to the handle on top of a
-stack anchored at the root with `O_NOFOLLOW`; a symlink target is read and
-spliced into the resolver's budgeted input, a private `BoundedPath` that the
-initial path pays into at construction and that every splice charges before
-replacing the text (40 expansions and 64 KiB by default), so a resolver never
-holds bytes the limit did not admit; `..` pops one handle and refuses to pop
-the root; an absolute target is refused. Linux and macOS share this one walker, and the only
-platform-specific code is the atomic no-clobber and exchange rename
-(`renameat2` flags on Linux, `renameatx_np` on Darwin). Hosts without those
-primitives fail rather than degrade to a check-then-overwrite sequence, and no
-supported path ever reopens a root by its configured string or consults the
-process working directory.
+Filesystem implementations compile in an isolated SDK build root. Input
+encoding, path validation, traversal, transfer, result construction, and
+retirement carry resumable state. The instance receives bounded callback and
+construction work grants; filesystem resource creation starts no controller
+thread. Controller execution remains available to socket and process resources.
 
-Transfers move 64 KiB per step; listings observe at most 256 entries and
-64 KiB of names per step, and ordering runs through `directory_order.Orderer`,
-a resumable pointer collection plus bottom-up merge sort whose sorted slice is
-reachable only from its completed state; the source audit forbids general
-sort calls in the filesystem and archive drivers, so a whole
-listing can never be ordered in one scheduler step. Mutation stages complete contents in a private
-sibling entry whose unguessable name is known only to the driver, checks
-cancellation after the last write, and publishes with one atomic namespace
-operation: a no-clobber rename for create and copy, an exchange for replace
-(the displaced entry then sits under the staging name and is disposed after
-the commit has already succeeded). Cancellation or failure before the commit
-unlinks the staging entry and leaves the destination unchanged; a commit that
-has succeeded is reported as success. The driver's bounded retirement closes
-every handle, disposes any unpublished staging entry, releases listing storage
-one entry per step, and releases the quota slot last, so a task scope or
-Session cannot publish quiescence while an operation still owns any of them.
-The filesystem read, write, and publication primitives run on the worker in
-these bounded quanta, the same convention the archive
-drivers already use. Process pipes, native callbacks, and network ports use
-host-owned controller jobs. Network resource initialization owns socket and
-acceptor startup before publication.
+The confined resolver opens or inspects one path component relative to retained
+handles with no-follow semantics. Symlink expansion charges its path budget
+before copying bounded chunks; parent traversal cannot pop the root. Linux and
+macOS share traversal, with platform-specific atomic no-clobber and exchange
+rename primitives. An unavailable primitive fails instead of falling back to
+check-then-overwrite publication.
 
-Every failure maps a host error to one closed reason vocabulary at the
-`filesystem_port` boundary and attaches the operation, root, path (or both
-ends of a transfer), and reason to the pending failure, so programs branch on
-stable symbols and never on errno names.
+Transfers copy at most 64 KiB per step. Enumeration batches contain at most 256
+entries and 64 KiB of names; ECL collection and ordering use bounded language
+kernels. Error construction discards partial private result builders before
+publishing the stable reason vocabulary. Wrappers attach public operation and
+original root/path context.
 
-Recursive creation extends the existing resolver's policy: missing parents are
-created and reinspected before traversal. Recursive removal owns an iterable
-directory and advances without depth-dependent storage or cleanup allocations.
-Its destructive cursor moves a selected child's entries into the removal root
-before removing that child, using the shared no-clobber rename boundary. Every
-step stays descriptor-relative and the driver retains all open handles through
-bounded retirement. Resolver storage reserves its retirement node before opening
-any parent, so completion and cancellation both transfer the remaining handle
-stack to one-descriptor retirement steps without allocating. Only host cleanup
-authority can request blocking resolver disposal. Cancellation promises
-confinement, not rollback of removal.
+Writers own private sibling files. Aborting removes unpublished contents;
+commit seals admission and publishes atomically after flushing completed data.
+The stream quota counts all chunks. Whole-value writes retain their original
+transfer limit independently of the streaming limit. Resolver retirement closes
+one descriptor per step and releases operation admission last.
+
+Recursive creation reinspects missing parents after creation. Recursive removal
+uses a descriptor-relative, allocation-free flattening cursor, performing one
+entry operation per step. Cancellation preserves confinement but does not roll
+back removals. Private staging rollback uses the same bounded cleanup protocol,
+including when construction never publishes a resource.
 
 ### Network resources use registered controllers
 

@@ -9,7 +9,7 @@ pub const Fixture = struct {
     cwd: [:0]u8,
     output: std.Io.Writer.Discarding = .init(&.{}),
     diagnostics: std.Io.Writer.Discarding = .init(&.{}),
-    roots: [1]@import("../filesystem_port.zig").Root,
+    roots: [1]@import("../session.zig").Filesystem.Root,
 
     pub fn init() !Fixture {
         var temporary = std.testing.tmpDir(.{});

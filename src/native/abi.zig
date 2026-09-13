@@ -5,8 +5,8 @@
 
 const builtin = @import("builtin");
 
-pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v23";
-pub const abi_version: u32 = 23;
+pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v24";
+pub const abi_version: u32 = 24;
 
 pub const max_error_message_bytes: u32 = 4096;
 pub const max_guest_scalar_bytes: u32 = 4096;
@@ -423,6 +423,7 @@ pub const HostTable = extern struct {
     read_units: ?ReadUnitsFn = null,
     bulk_build: ?BulkBuildFn = null,
     instance_state: ?InstanceStateFn = null,
+    input_resource_kind: ?*const fn (*anyopaque, u32, *const anyopaque) callconv(.c) bool = null,
 };
 
 pub const Invoke = *const fn (
@@ -522,7 +523,7 @@ comptime {
     assertRecord(ValueView, 48, 8);
     assertRecord(Scalar, 32, 8);
     assertRecord(InvokeResult, 16, 8);
-    assertRecord(HostTable, 160, 8);
+    assertRecord(HostTable, 168, 8);
     assertRecord(Descriptor, 112, 8);
     assertRecord(PortDefinition, 136, 8);
     assertRecord(CapacityFailureDefinition, 40, 8);

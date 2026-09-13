@@ -1476,6 +1476,12 @@ fn controllerStopOutput(raw: *anyopaque, identity: *const anyopaque, index: u32)
 
 const controller_table: abi.ControllerTable = .{ .initialization_resource = controllerInitializationResource, .stop_output = controllerStopOutput, .fail_streams = controllerFailStreams, .finish_input = controllerFinishInput, .instance_state = controllerInstance, .initialization_parent = controllerInitializationParent, .resolve_endpoint = controllerResolveEndpoint, .read_bytes = controllerReadBytes, .write_bytes = controllerWriteBytes, .receive_event = controllerReceiveEvent, .fail_resource = controllerFailResource, .parent_state = controllerParent, .discard_message = controllerDiscardMessage, .build_message = controllerBuildMessage, .fail_allocation = controllerFailAllocation, .received_message = controllerReceivedMessage, .forward_message = controllerForwardMessage, .result_message = controllerResultMessage, .input = controllerInput, .finish_endpoint = controllerFinishEndpoint, .cancelled = controllerCancelled, .acknowledge_cancellation = controllerAcknowledge, .fail = controllerFail };
 
+/// Immutable kind observation; no backend pointer or admission escapes.
+pub fn isResourceKind(item: Value, instance: *native.ModuleInstance, identity: *const anyopaque) bool {
+    const cell = resource_api.Resource.project(Cell, item) orelse return false;
+    return cell.adapter.instance == instance and cell.adapter.definition.wire.identity == identity;
+}
+
 pub fn fromValue(value: Value, instance: *native.ModuleInstance, kind: u32) ?*Cell {
     const handle = switch (value) {
         .port => |port| port,
@@ -1525,9 +1531,16 @@ fn buildCooperative(ctx: *ControllerContext, request: *const abi.MessageBuildReq
                     ctx.cooperative.?.wait = .readiness;
                     return .parked;
                 },
-                .failed => |failure| {
+                .failed => {
+                    const failure = cell.resourceInitialization().failed;
+                    if (failure.details) |view| {
+                        const retained = view.retain();
+                        const accepted = if (ctx.operation()) |op| op.terminal_result.replaceDetails(retained) else ctx.cell.replaceInitializationDetails(retained);
+                        if (!accepted) retained.release();
+                    }
+                    _ = controllerTransportFailure(ctx, failure.report);
                     cell.close();
-                    return cooperativeStatus(childCreationFailure(ctx, if (failure == .out_of_memory) error.OutOfMemory else error.Io));
+                    return if (failure.report == .out_of_memory) .out_of_memory else .invalid;
                 },
                 .ready => {},
             }

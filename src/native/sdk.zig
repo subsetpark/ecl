@@ -327,6 +327,16 @@ pub fn Call(comptime effect_source: []const u8) type {
             return @ptrCast(&self.state().views[index].?);
         }
 
+        /// Observe the nominal kind of a same-instance input resource, including
+        /// a closed resource. This grants neither a state borrow nor admission.
+        pub fn inputIsResource(self: *Self, comptime P: type, comptime index: usize) bool {
+            if (index >= EffectSpec.inputs.len) @compileError("ecl-native: input index exceeds the declared effect");
+            if (!@hasDecl(P, "ecl_port_marker")) @compileError("ecl-native: resource observation requires a declared Port type");
+            const invocation = &self.state().invocation;
+            const query = invocation.host.input_resource_kind orelse return false;
+            return query(invocation.context, index, P.definition().identity.?);
+        }
+
         pub fn instance(self: *Self, comptime I: type) ?*I.State {
             const invocation = &self.state().invocation;
             const get = invocation.host.instance_state orelse return null;

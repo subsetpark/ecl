@@ -255,7 +255,7 @@ const CliRuntime = struct {
     diagnostic_buffer: [4096]u8,
     output_writer: std.Io.File.Writer,
     diagnostic_writer: std.Io.File.Writer,
-    roots: [1]ecl.filesystem_port.Root,
+    roots: [1]ecl.Filesystem.Root,
     session: ecl.session.Session,
 
     fn init(
@@ -374,7 +374,7 @@ fn startupDirectory(init: Startup) AppError![:0]u8 {
     };
 }
 
-fn cwdRoot(initial_cwd: []const u8) ecl.filesystem_port.Root {
+fn cwdRoot(initial_cwd: []const u8) ecl.Filesystem.Root {
     return .{ .name = "cwd", .absolute_path = initial_cwd };
 }
 /// One immutable view of the process environment, borrowed from the arena so

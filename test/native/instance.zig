@@ -571,6 +571,7 @@ pub const Extension = ecl.module(.{
         ecl.factory("activity", "Open independently supervised byte pumps.", ActivityResource),
         ecl.word("started", "Observe cooperative operation startup.", cooperativeStarted),
         ecl.word("child-advances", "Observe cooperative child initialization dispatches.", childAdvances),
+        ecl.word("resource-kind", "Observe same-instance resource kinds without state access.", resourceKind),
     },
 });
 
@@ -1233,3 +1234,7 @@ const PreparedFinalizer = ecl.Port(.{ .cooperative = struct {
         return .completed;
     }
 } });
+
+fn resourceKind(call: *ecl.Call("value -- kind")) ecl.CallbackResult {
+    return call.complete(.{ecl.Scalar.int(if (call.inputIsResource(Resource, 0)) 1 else if (call.inputIsResource(CooperativeResource, 0)) 2 else 0)});
+}

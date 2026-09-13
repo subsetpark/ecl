@@ -26,14 +26,12 @@ property. Each publishes
 ordinary module images and participates in registration, aliases, imports,
 reflection, and shadowing through the same language operations.
 
-`net.core.listener` and `proc.core.process` export the bundled factories used
-by `port.open`. They are ordinary standard-library words; opening a resource uses the
-Session's runtime I/O state.
-The public `net` and `proc` modules are ECL compositions over these registered
-capabilities and `port.*`. Their operation and endpoint selectors expose only
-their corresponding resources and streams. First-party adapters use typed backend calls;
-the extension adapter translates ABI v23 calls into the same runtime interfaces
-for controller execution, transport, cancellation, ownership, and cleanup.
+The bundled `fs.core`, `net.core`, and `proc.core` modules expose ordinary
+native factories and selectors. Their public `fs`, `net`, and `proc` APIs are
+ECL compositions over those capabilities and `port.*`. All three backends
+compile against `std`, the public SDK, and native dependencies, including in
+builds without maintained applications. ABI v24 uses the same descriptors and
+instance lifecycle for static and dynamic registration.
 
 Embedded names have precedence over filesystem modules. A file on `ECL_PATH`
 cannot replace an embedded module during automatic loading. A program may
@@ -128,7 +126,7 @@ loader. The complete word table validates before publication, and publication
 is atomic.
 
 The current pre-release native ABI is version 19, with entry symbol
-`ecl_module_abi_v23`. Resource authors choose `ecl.Port(.{ .controller = Spec })`
+`ecl_module_abi_v24`. Resource authors choose `ecl.Port(.{ .controller = Spec })`
 or `ecl.Port(.{ .cooperative = Spec })`. Cooperative callbacks receive bounded
 work accounting, read-only Session-relative `monotonicMilliseconds`, and
 cancellable timer parking. Clock observation follows the host clock policy and
@@ -439,6 +437,15 @@ once at startup. Package commands add the `'project` root described below.
 Session construction opens the roots once; a relative, missing, non-directory,
 duplicate, or malformed root, a zero limit, or an unsupported target is a
 construction error distinct from allocation failure.
+
+Embedding uses `Session.Filesystem.Configuration` (also exported as
+`Filesystem` by the interpreter module), containing `Root` entries and `Limits`.
+Roots and immutable configuration belong to an eager native instance. Its
+resource budget is separate from unrelated extensions. `max_transfer_bytes`
+limits whole-value reads, writes, and copies; `max_stream_transfer_bytes`
+limits the total bytes of an explicit writer stream. Both default to 1 GiB.
+Filesystem operations use cooperative execution and bounded retirement without
+per-resource controller threads.
 
 Supported targets are Linux and macOS. Paths are UTF-8 slash paths; a host
 filename that is not valid UTF-8 cannot be listed and fails the whole listing.

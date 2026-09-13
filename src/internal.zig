@@ -39,9 +39,8 @@ pub const session = @import("session.zig");
 pub const console = @import("console.zig");
 pub const scheduler = @import("scheduler.zig");
 pub const external = @import("external.zig");
-pub const filesystem_port = @import("filesystem_port.zig");
+pub const Filesystem = @import("session.zig").Filesystem;
 pub const port_message = @import("port_message.zig");
-pub const directory_order = @import("directory_order.zig");
 pub const task_prims = @import("task_prims.zig");
 pub const test_prims = @import("test_prims.zig");
 
@@ -81,8 +80,7 @@ test {
     _ = console;
     _ = scheduler;
     _ = external;
-    _ = filesystem_port;
-    _ = directory_order;
+    _ = Filesystem;
     _ = task_prims;
     _ = test_prims;
     _ = @import("tests/value_test.zig");

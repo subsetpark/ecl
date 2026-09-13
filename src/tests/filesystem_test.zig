@@ -8,7 +8,7 @@
 //! right allocator (see `test_heap.zig`).
 const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
-const filesystem_port = @import("../filesystem_port.zig");
+const filesystem_module = @import("../session.zig").Filesystem;
 const session = @import("../session.zig");
 const support = @import("kernel_test_support.zig");
 const test_heap = @import("test_heap.zig");
@@ -16,7 +16,7 @@ const test_heap = @import("test_heap.zig");
 const allocator = std.testing.allocator;
 const io = std.testing.io;
 
-const Config = filesystem_port.Config;
+const Config = filesystem_module.Configuration;
 
 /// A temporary directory plus the absolute path that names it as a root.
 const Scratch = struct {
@@ -24,7 +24,7 @@ const Scratch = struct {
     path: [:0]u8,
     /// Backing storage for `filesystem`, so the returned configuration borrows this
     /// value rather than a temporary.
-    root_storage: [1]filesystem_port.Root,
+    root_storage: [1]filesystem_module.Root,
 
     fn init() !Scratch {
         var directory = std.testing.tmpDir(.{});
@@ -532,34 +532,10 @@ test "fs: cold worker pools join scope-owned filesystem resources" {
 test "fs: directory closure joins admitted descriptor leases" {
     var scratch = try Scratch.init();
     defer scratch.deinit();
-    try scratch.write("file", "x");
-    var memory: test_heap.SessionHeap = .init;
-    defer test_heap.retire(&memory);
-    var output_buffer: [64]u8 = undefined;
-    var output = std.Io.Writer.Discarding.init(&output_buffer);
-    var inputs = try runtime_fixture.Fixture.init();
-    defer inputs.deinit();
-    var runtime = try session.Session.init(memory.allocator(), &.{}, inputs.inputs(.{
-        .io = io,
-        .output = &output.writer,
-        .diagnostics = &output.writer,
-        .filesystem = scratch.filesystem(),
-    }), .cooperative, .evaluate);
-    defer runtime.deinit();
-    try std.testing.expect((try runtime.runUnit("<directory>", "'root \".\" fs.child-dir")) == .ok);
-    const item = runtime.stackItems()[0];
-    const resource = @import("../port_resource.zig").Resource.fromValue(item).?;
-    var lease: ?*@import("../directory_resource.zig").Lease = try @import("../directory_resource.zig").acquire(item);
-    defer if (lease) |owned| owned.deinit();
-    resource.close();
-    try std.testing.expect((try runtime.runUnit("<pending-close>", "")) == .ok);
-    try std.testing.expect(!resource.joined());
-    try std.testing.expectError(error.Closed, @import("../directory_resource.zig").acquire(item));
-    try std.testing.expectEqual(@as(u64, 1), (try lease.?.dir().statFile(io, "file", .{})).size);
-    lease.?.deinit();
-    lease = null;
-    try std.testing.expect((try runtime.runUnit("<settle>", "")) == .ok);
-    try std.testing.expect(resource.joined());
+    try runCase(scratch.filesystem(), .{ .worker_pool = 4 }, "'root \".\" fs.child-dir 'directory set directory \"file\" fs.open-writer 'writer set " ++
+        "[] (directory port.close) @spawn 'closing set " ++
+        "writer [65 66] fs.write-chunk writer fs.commit-file closing task.await pop " ++
+        "[] (directory \".\" fs.stat) @attempt 'err at 'kind at 'root \"file\" fs.read-text", .{ .stack = "'io \"AB\"" });
 }
 
 test "fs: directory resources own confined descriptors and close with their scope" {
@@ -873,8 +849,7 @@ test "fs: the live-operation quota is released after each operation" {
     // Concurrent tasks contend for one slot. Whether they overlap is a
     // scheduling fact, so the assertion is the invariant: every outcome is
     // success or the limit reason, at least one succeeds, and the slot is
-    // free again afterwards. Exhaustion itself is proven deterministically
-    // by the filesystem port's own reservation test.
+    // free again afterwards. Explicit reservations prove exhaustion separately.
     const big = try allocator.alloc(u8, 512 * 1024);
     defer allocator.free(big);
     @memset(big, 'y');
@@ -960,4 +935,72 @@ test "fs: concurrent creates have exactly one winner and no staging residue" {
 test "fs: words cold-load through the builtin manifest and are documented" {
     try support.expectStack("'fs.read-text doc len 0 > 'path.normalize doc len 0 >", "1 1");
     try support.expectStack("'fs ('exists?) import 'path ('join) import (\"a\" \"b\") join", "\"a/b\"");
+}
+
+test "fs: streaming publication and reservations enforce total limits and rollback" {
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    const options: Config = .{ .roots = scratch.root_storage[0..], .limits = .{
+        .max_live_operations = 1,
+        .max_transfer_bytes = 1,
+        .max_stream_transfer_bytes = 4,
+    } };
+    try expectStack(options, "'root fs.reserve 'reservation set " ++
+        "[] ('root \".\" fs.stat) @attempt 'err at 'data at 'reason at " ++
+        "reservation \"published\" fs.open-writer 'writer set writer [65 66] fs.write-chunk writer [67 68] fs.write-chunk writer fs.commit-file " ++
+        "reservation \"aborted\" fs.open-writer 'writer set writer [65 66 67] fs.write-chunk " ++
+        "[] (writer [68 69] fs.write-chunk) @attempt 'err at 'data at 'reason at " ++
+        "[] (writer fs.commit-file) @attempt 'err at 'kind at writer port.close " ++
+        "reservation \"aborted\" fs.exists? reservation port.close " ++
+        "[] ('root \"published\" fs.read-bytes) @attempt 'err at 'data at 'reason at " ++
+        "'root \"published\" fs.stat 'size at", "'limit 'limit 'overflow 0 'limit 4");
+    const published = try scratch.read("published");
+    defer allocator.free(published);
+    try std.testing.expectEqualStrings("ABCD", published);
+    try scratch.expectAbsent("aborted");
+    try scratch.expectNoStaging(".");
+}
+
+test "fs: directory kinds and child errors retain public type precedence and context" {
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    try expectStack(scratch.filesystem(), "'root \".\" fs.open-list 'cursor set " ++
+        "[] (cursor \"bad/../path\" fs.stat) @attempt 'err at 'kind at cursor port.close " ++
+        "'root \".\" fs.child-dir 'directory set " ++
+        "[] (directory \"missing/child\" fs.child-dir) @attempt 'err at 'data at 'reason at " ++
+        "directory port.close " ++
+        "[] (directory \".\" fs.stage-dir) @attempt 'err at 'data at 'reason at " ++
+        "[] (directory \"child\" fs.child-dir) @attempt 'err at 'data at 'reason at", "'type 'not-found 'invalid-path 'io");
+}
+
+test "fs: concurrent symlink replacement cannot escape retained roots" {
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    try scratch.directory.dir.createDirPath(io, "root/inside");
+    try scratch.directory.dir.createDirPath(io, "outside");
+    try scratch.write("root/inside/file", "inside");
+    try scratch.write("outside/file", "outside");
+    const root_path = try scratch.directory.dir.realPathFileAlloc(io, "root", allocator);
+    defer allocator.free(root_path);
+    const Peer = struct {
+        dir: std.Io.Dir,
+        stop: std.atomic.Value(bool) = .init(false),
+        fn run(self: *@This()) void {
+            var escape = false;
+            while (!self.stop.load(.acquire)) {
+                self.dir.deleteFile(io, "root/pointer") catch {};
+                self.dir.symLink(io, if (escape) "../outside" else "inside", "root/pointer", .{}) catch {};
+                escape = !escape;
+            }
+        }
+    };
+    var peer: Peer = .{ .dir = scratch.directory.dir };
+    const thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
+    defer {
+        peer.stop.store(true, .release);
+        thread.join();
+    }
+    try expectStack(.{ .roots = &.{.{ .name = "root", .absolute_path = root_path }} }, "100 ([] ('root \"pointer/file\" fs.read-text) @attempt " ++
+        "dup 'ok dict.has? ('ok at first \"inside\" match? {'kind 'user 'msg \"confined content\"} assert) " ++
+        "('err at 'kind at 'io match? {'kind 'user 'msg \"portable race failure\"} assert) if) times", "");
 }

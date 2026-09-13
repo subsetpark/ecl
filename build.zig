@@ -185,6 +185,7 @@ pub fn build(b: *std.Build) void {
         .{ .file = "activity_finish_output", .message = "ecl-native: activity finishes resource byte inputs" },
         .{ .file = "activity_stop_input", .message = "ecl-native: activity stops resource byte outputs" },
         .{ .file = "rejected_open_resource_authority", .message = "no field or member function named 'builder' in 'ports.RejectedOpen'" },
+        .{ .file = "resource_kind_state", .message = "ecl-native: resource observation requires a declared Port type" },
         .{ .file = "cooperative_prepared_failure", .message = "no field or member function named 'preparedFailure' in 'ports.Cooperative'" },
         .{ .file = "finalizer_resource_lease", .message = "no field or member function named 'initializationResource' in 'ports.Finalizer'" },
         .{ .file = "rejected_open_clock_authority", .message = "no field or member function named 'monotonicMilliseconds' in 'ports.RejectedOpen'" },
@@ -649,6 +650,22 @@ pub fn build(b: *std.Build) void {
     audit_options.addOption([:0]const u8, "git_extension_source", @embedFile("extensions/git/git.zig"));
     audit_options.addOption([:0]const u8, "proc_extension_source", @embedFile("extensions/proc/proc.zig"));
     audit_options.addOption([:0]const u8, "net_extension_source", @embedFile("extensions/net/net.zig"));
+    audit_options.addOption([:0]const u8, "fs_algorithms_source", @embedFile("extensions/fs/algorithms.zig"));
+    audit_options.addOption([:0]const u8, "fs_cursor_source", @embedFile("extensions/fs/cursor.zig"));
+    audit_options.addOption([:0]const u8, "fs_encoding_source", @embedFile("extensions/fs/encoding.zig"));
+    audit_options.addOption([:0]const u8, "fs_fs_source", @embedFile("extensions/fs/fs.zig"));
+    audit_options.addOption([:0]const u8, "fs_lock_source", @embedFile("extensions/fs/lock.zig"));
+    audit_options.addOption([:0]const u8, "fs_pair_request_source", @embedFile("extensions/fs/pair_request.zig"));
+    audit_options.addOption([:0]const u8, "fs_publication_source", @embedFile("extensions/fs/publication.zig"));
+    audit_options.addOption([:0]const u8, "fs_reader_source", @embedFile("extensions/fs/reader.zig"));
+    audit_options.addOption([:0]const u8, "fs_request_source", @embedFile("extensions/fs/request.zig"));
+    audit_options.addOption([:0]const u8, "fs_service_source", @embedFile("extensions/fs/service.zig"));
+    audit_options.addOption([:0]const u8, "fs_staging_source", @embedFile("extensions/fs/staging.zig"));
+    audit_options.addOption([:0]const u8, "fs_storage_source", @embedFile("extensions/fs/storage.zig"));
+    audit_options.addOption([:0]const u8, "fs_support_source", @embedFile("extensions/fs/support.zig"));
+    audit_options.addOption([:0]const u8, "fs_validation_source", @embedFile("extensions/fs/validation.zig"));
+    audit_options.addOption([:0]const u8, "fs_writer_source", @embedFile("extensions/fs/writer.zig"));
+
     audit_options.addOption(
         []const u8,
         "formal_values",
@@ -868,6 +885,9 @@ pub fn build(b: *std.Build) void {
             "fs: directory resources own confined descriptors and close with their scope",
             "fs: concurrent creates have exactly one winner and no staging residue",
             "fs: cancellation before commit leaves the destination unchanged",
+            "fs: streaming publication and reservations enforce total limits and rollback",
+            "fs: directory kinds and child errors retain public type precedence and context",
+            "fs: concurrent symlink replacement cannot escape retained roots",
         },
     });
     tsan_tests.linkage = runtime_linkage;
@@ -1357,6 +1377,14 @@ fn configureRuntime(
     });
     proc.addImport("ecl-native", sdk);
     module.addImport("bundled-proc", proc);
+    const fs = module.owner.createModule(.{
+        .root_source_file = module.owner.path("extensions/fs/fs.zig"),
+        .target = module.resolved_target,
+        .optimize = module.optimize,
+        .sanitize_thread = module.sanitize_thread,
+    });
+    fs.addImport("ecl-native", sdk);
+    module.addImport("bundled-fs", fs);
     module.addImport("port-declarations", sdk.import_table.get("port-declarations").?);
     module.addOptions("session_options", options);
 }
