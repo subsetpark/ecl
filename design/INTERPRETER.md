@@ -107,8 +107,9 @@ That state owns:
 - the scheduler and root task scope; and
 - immutable or explicitly synchronized views of host services such as
   arguments, environment variables, standard input, output, diagnostics, TLS
-  trust, project configuration, and module search paths. Bundled filesystem,
-  network, and process state belongs to the native-module owner.
+  trust, project configuration, and module search paths. Filesystem roots and
+  admission belong to a Session-owned authority; bundled network and process
+  state belongs to the native-module owner.
 
 Grouping these objects under one owner correlates every dependent lifetime.
 Values, module pins, source cursors, task cells, and deferred destruction all
@@ -158,7 +159,10 @@ mutation, and teardown are distinct authorities.
 
 Every initialized Session has the same complete runtime shape. Its constructor
 requires I/O, output and diagnostic writers, a startup directory, an environment
-snapshot, scheduler configuration, and an explicit command mode. Evaluation and language tests differ only in test facilities. Bundled filesystem, process, and network descriptors are unconditional; their state belongs to the common native-instance owner.
+snapshot, scheduler configuration, and an explicit command mode. Evaluation and
+language tests differ only in test facilities. Filesystem, process, and network
+services are unconditional. Filesystem authority belongs to the Session; process
+and network descriptors use the common native-instance owner.
 
 Inherited context distinguishes prelude bootstrap from runtime execution.
 Both phases require a module registry. The bootstrap phase builds the core
@@ -184,37 +188,42 @@ Executable and working-directory syntax is validated at the process boundary;
 the operating system determines access. Units obtain only ordinary registered
 process capabilities, never process-group identifiers or native owner access.
 
-The eager filesystem SDK instance opens configured roots once and owns their
-handles and admission limits. Invalid roots or limits fail Session construction
-with `InvalidHostConfig`, distinctly from allocation failure. Root authority
-remains the retained descriptor after a rename. Units obtain ordinary native
-capabilities; they have no filesystem owner or root-lookup facade.
+The filesystem owner opens configured roots once and owns their handles and
+admission limits until all Session work and retirement have joined. Invalid
+roots or limits fail Session construction with `InvalidHostConfig`, distinctly
+from allocation failure. Root authority remains the retained descriptor after
+a rename. Units receive only an opaque access capability, never the owner.
 
-Directories, staging directories, enumeration cursors, reservations, locks, and
-writers have distinct nominal SDK resource kinds. Read-only kind observation
-recognizes same-instance closed resources without granting state access or
-admission. Initializer input loans guard descriptor duplication, and admitted
-operations retain independently owned descriptors through bounded retirement.
-The common resource lifecycle joins those loans before private state cleanup.
+Direct filesystem drivers own validated inputs, descriptor leases, operation
+admission, and partial outputs. Directory, staging, enumeration, lock, and writer
+resources use nominal adapters over the shared scope-owned port lifecycle.
+A directory lease prevents closure while admitted work still uses its descriptor.
+Successful and failed filesystem calls retain their result until their bounded
+cleanup cursor releases temporary handles and admission. The next call cannot
+observe quota occupied solely by its predecessor's queued cleanup. Filesystem
+and archive drivers share this completion protocol; abandoned execution hands
+the same cursor to bounded retirement, including failed construction before
+resource publication.
 
-An extraction reservation retains its selected root and one filesystem quota
-slot through parsing, publication, or rollback. Derived operations share that
-reservation with serialized admission. ECL archive composition uses validated
-inspection, directories, staging, and streaming writers; the parser cannot
-access filesystem state. It materializes archive-order result paths before
-sealing the staging directory.
+A reservation retains one quota slot across a composition. Derived roots retain
+that reservation; an operation claims its admission without reserving another
+slot. A two-root operation claims each distinct reservation once. An active
+claim owns its lifetime independently of the selecting root lease. Unrelated
+operations fail with the portable limit reason while admission is exhausted.
 
 Directory descendants inherit staging dependencies independently of task
 ownership. Ordinary directory closure leaves independently acquired children
-alive. Staging sealing stops admission and joins dependent children and input
-loans before its bounded finalizer. The common commit permit serializes atomic
-publication against cancellation and reserves result storage first. Prepared
-failure alternatives preserve actual structured host errors without allocation
-after that permit. Child construction preserves the initialized child’s semantic
-failure and retains immutable diagnostics in the same issuing domain before
-releasing the child. Controller and cooperative construction share this
-observation rule. Failed publication retains the private tree for bounded,
-allocation-free rollback; successful retirement closes only owned handles.
+alive. Staging sealing stops admission and joins dependent children and leases
+before publication. Stream append claims use the shared FIFO writer lane with bounded admission.
+Sealing waits for already-admitted chunks; abandoning
+an admitted append prevents later publication. Publication is serialized with
+resource cancellation under the owning lifecycle lock. Successful publication
+needs no result allocation and cleanup cannot roll it back.
+
+Archive inspection and extraction share their validated parser. Extraction uses
+the same confined resolver, admission, and atomic publication primitives as
+filesystem drivers, retains its root through rollback, and materializes result
+paths before publication. Parsing, transfer, and cleanup remain bounded work.
 
 Root-scope closure participates in the ordinary ready/retirement arbitration
 when a configured worker pool has not started. Cleanup never depends on lazily
@@ -1197,13 +1206,14 @@ uses the host I/O interface and a fixed path buffer. A self-owned, address-stabl
 driver retains either borrow while bounded UTF-8 materialization is pending,
 and retires partial output through the ordinary scheduler release domain.
 
-### Filesystem operations use cooperative SDK resources
+### Filesystem operations use direct bounded drivers
 
-Filesystem implementations compile in an isolated SDK build root. Input
-encoding, path validation, traversal, transfer, result construction, and
-retirement carry resumable state. The instance receives bounded callback and
-construction work grants; filesystem resource creation starts no controller
-thread. Controller execution remains available to socket and process resources.
+Filesystem words dispatch directly to runtime drivers. Input encoding, path
+validation, traversal, transfer, result construction, and retirement carry
+resumable state under the ordinary scheduler allowance. Scalar metadata does
+not pass through ECL wrapper calls or native message builders. Persistent
+filesystem resources use the shared port lifecycle and create no controller
+threads. Native socket and process implementations keep their SDK execution.
 
 The confined resolver opens or inspects one path component relative to retained
 handles with no-follow semantics. Symlink expansion charges its path budget
@@ -1213,10 +1223,9 @@ rename primitives. An unavailable primitive fails instead of falling back to
 check-then-overwrite publication.
 
 Transfers copy at most 64 KiB per step. Enumeration batches contain at most 256
-entries and 64 KiB of names; ECL collection and ordering use bounded language
-kernels. Error construction discards partial private result builders before
-publishing the stable reason vocabulary. Wrappers attach public operation and
-original root/path context.
+entries and 64 KiB of names; collection and ordering use bounded runtime
+cursors. Error construction discards partial private outputs before publishing
+the stable reason vocabulary with public operation and original root/path context.
 
 Writers own private sibling files. Aborting removes unpublished contents;
 commit seals admission and publishes atomically after flushing completed data.

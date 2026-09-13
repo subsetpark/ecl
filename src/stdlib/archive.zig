@@ -1,17 +1,21 @@
-//! Exact hashing and validated hostile-input archive inspection.
+//! Exact hashing, archive inspection, and hostile-input-safe extraction.
 //!
 //! Binary payloads remain ordinary ECL integer lists. The encoder borrows an
 //! internal byte leaf when available and validates any equivalent list, so the
 //! module never assigns language semantics to a storage representation.
 const std = @import("std");
+const driver_completion = @import("../driver_completion.zig");
 const document = @import("../archive_document.zig");
 const value = @import("../value.zig");
 const heap = @import("../heap.zig");
 const env = @import("../env.zig");
+const external = @import("../external.zig");
+const fsport = @import("../filesystem_port.zig");
 const intern = @import("../intern.zig");
 const machine = @import("../machine.zig");
 const storage = @import("../kernel_storage.zig");
 const list = @import("../list.zig");
+const poll = @import("../poll.zig");
 
 const Value = value.Value;
 const Machine = machine.Machine;
@@ -32,6 +36,12 @@ pub const words = [_]env.BuiltinWord{
         .doc = "( bytes -- lowercase-hex ) Hash an integer byte list with SHA-256.",
         .primitive = sha256,
     },
+    .{
+        .name = "unpack-tgz",
+        .doc = "( bytes root destination -- regular-file-paths ) Validate and atomically " ++
+            "extract a gzip tar into a previously absent destination beneath a root.",
+        .primitive = unpackTgz,
+    },
 };
 
 fn openTgz(evaluator: *Machine) MachineError!void {
@@ -39,11 +49,14 @@ fn openTgz(evaluator: *Machine) MachineError!void {
     errdefer bytes.deinit();
     if (bytes.borrow() != .list) return evaluator.typeError("an integer byte list");
     const encoder = storage.ByteVectorEncoder.init(evaluator.allocator(), bytes.borrow());
-    try evaluator.startDriver(InspectionDriver{
+    try evaluator.startDriver(UnpackDriver{
         .allocator = evaluator.allocator(),
+        .io = null,
+        .authority = .none,
         .bytes_value = .init(bytes.take()),
+        .source = .init(.view),
         .entries = .init(.init(evaluator.allocator())),
-        .state = .{ .parsing = .{ .encode_bytes = .{ .byte = .init(encoder) } } },
+        .state = .{ .parsing = .{ .encode_bytes = .{ .byte = .init(encoder), .target = .view } } },
     });
 }
 fn nextMember(evaluator: *Machine) MachineError!void {
@@ -193,6 +206,38 @@ const Sha256Driver = struct {
     }
 };
 
+fn unpackTgz(evaluator: *Machine) MachineError!void {
+    try evaluator.require(3);
+    var destination = try evaluator.popValue();
+    errdefer destination.deinit();
+    if (!destination.borrow().isString()) return evaluator.typeError("a string destination path");
+    var root = try evaluator.popValue();
+    errdefer root.deinit();
+    if (!fsport.isRoot(root.borrow())) return evaluator.typeError("a root symbol or directory resource");
+    var bytes_value = try evaluator.popValue();
+    errdefer bytes_value.deinit();
+    if (bytes_value.borrow() != .list) return evaluator.typeError("an integer byte list");
+    const access = evaluator.unit.inherited.runtime().filesystem_access;
+    const byte_encoder = storage.ByteVectorEncoder.init(evaluator.allocator(), bytes_value.borrow());
+    const path_encoder = storage.StringEncoder.init(evaluator.allocator(), destination.borrow());
+    const entries = poll.ChunkList(Entry).init(evaluator.allocator());
+    try evaluator.startDriver(UnpackDriver{
+        .allocator = evaluator.allocator(),
+        .io = fsport.hostIo(access),
+        .authority = .{ .filesystem = access },
+        .bytes_value = .init(bytes_value.take()),
+        .source = .init(.{ .unpack = .{
+            .root = .init(root.take()),
+            .destination = .init(destination.take()),
+        } }),
+        .entries = .init(entries),
+        .state = .{ .parsing = .{ .encode_bytes = .{
+            .byte = .init(byte_encoder),
+            .target = .{ .unpack = .init(path_encoder) },
+        } } },
+    });
+}
+
 const EntryKind = document.Kind;
 const Entry = document.Member;
 const EntryList = document.Members;
@@ -230,19 +275,82 @@ const GzipDecoder = struct {
     }
 };
 
-const InspectionDriver = struct {
+const Mode = enum { view, unpack };
+
+fn observeCleanupError(action: []const u8, err: anyerror) void {
+    switch (err) {
+        error.FileNotFound, error.NotDir => {},
+        else => std.log.err("archive rollback could not {s}: {s}", .{ action, @errorName(err) }),
+    }
+}
+
+/// Where a publication is allowed to land. Generic extraction is confined to
+/// a named or scope-owned filesystem root. Inspection publishes no files.
+const Authority = union(enum) {
+    none,
+    filesystem: *external.FilesystemAccess,
+};
+
+const UnpackDriver = struct {
     pub const ownership: heap.DriverOwnership = .bounded_retirement;
 
     retirement: heap.ReleaseDomain.Retirement = .{},
+    completion: driver_completion.Completion = .{},
     allocator: std.mem.Allocator,
+    io: ?std.Io,
+    authority: Authority,
     bytes_value: heap.Owned(Value),
+    source: heap.Owned(SourceTarget),
     entries: heap.Owned(EntryList),
     state: State,
+    /// The resolved parent directory and final name the publication targets.
+    /// Set by the resolver phase; every namespace operation is relative to it.
+    destination: ?fsport.Resolved = null,
+    /// The live-operation reservation an extraction holds from authorization
+    /// through terminal cleanup.
+    slot: ?fsport.OperationSlot = null,
+    root: ?fsport.RootSelection = null,
+
+    const Staged = struct {
+        result: Value,
+        /// The private staging directory name inside the destination parent.
+        path: heap.Owned([]u8),
+    };
+    const SourceTarget = union(enum) {
+        pub const owned_disposal: heap.OwnedDisposal = .deinit;
+
+        view,
+        unpack: struct { root: heap.Owned(Value), destination: heap.Owned(Value) },
+
+        pub fn deinit(
+            self: *SourceTarget,
+            releases: *heap.ReleaseDomain,
+            allocator: std.mem.Allocator,
+        ) void {
+            switch (self.*) {
+                .view => {},
+                .unpack => |*source| {
+                    source.root.deinit(releases, allocator);
+                    source.destination.deinit(releases, allocator);
+                },
+            }
+        }
+    };
+    const EncodeTarget = union(enum) {
+        view,
+        unpack: heap.Owned(storage.StringEncoder),
+    };
+    const EncodedTarget = union(enum) {
+        view,
+        unpack: heap.Owned([]u8),
+    };
     const EncodedInputs = struct {
         bytes: heap.Owned(storage.ByteVector),
+        target: EncodedTarget,
     };
     const Archive = struct {
         bytes: heap.Owned(storage.ByteVector),
+        target: EncodedTarget,
         tar: heap.Owned([]u8),
         slots: heap.Owned([]?*Entry),
     };
@@ -250,6 +358,7 @@ const InspectionDriver = struct {
         tar_offset: usize = 0,
         zero_blocks: u2 = 0,
         member_count: usize = 0,
+        file_count: usize = 0,
         pending_path: ?heap.Owned([]u8) = null,
         pending_size: ?u64 = null,
     };
@@ -257,6 +366,19 @@ const InspectionDriver = struct {
         offset: usize,
         end: usize,
         next_offset: usize,
+    };
+    const ResultInputs = struct {
+        values: []Value,
+        built: usize = 0,
+    };
+    const ResultRelease = struct {
+        values: []Value,
+        built: usize,
+        index: usize = 0,
+    };
+    const PathWork = union(enum) {
+        next,
+        text: storage.Utf8Materializer,
     };
     const ScanWork = union(enum) {
         publish_view,
@@ -275,6 +397,22 @@ const InspectionDriver = struct {
             scan_offset: usize,
         },
         trailing_zeroes,
+
+        allocate_results,
+        materialize_paths: struct {
+            inputs: ResultInputs,
+            iterator: EntryList.Iterator,
+            work: PathWork = .next,
+        },
+        materialize_result: struct {
+            inputs: ResultInputs,
+            materializer: list.ValueMaterializer,
+        },
+        release_result_inputs: struct {
+            release: ResultRelease,
+            result: Value,
+        },
+        complete,
     };
     const Scanning = struct {
         context: ScanContext = .{},
@@ -283,6 +421,11 @@ const InspectionDriver = struct {
     const Parsing = union(enum) {
         encode_bytes: struct {
             byte: heap.Owned(storage.ByteVectorEncoder),
+            target: EncodeTarget,
+        },
+        encode_destination: struct {
+            bytes: heap.Owned(storage.ByteVector),
+            destination: heap.Owned(storage.StringEncoder),
         },
         allocate_tar: EncodedInputs,
         allocate_decoder: struct { inputs: EncodedInputs, tar: heap.Owned([]u8) },
@@ -306,33 +449,115 @@ const InspectionDriver = struct {
             index: usize = 0,
         },
     };
-    const Active = struct { archive: Archive, scanning: Scanning = .{} };
-    const CleanupWork = union(enum) { entries: EntryList.ReverseIterator, finish };
+    const ExtractWork = union(enum) {
+        next,
+        file: struct {
+            entry: *const Entry,
+            file: std.Io.File,
+            written: usize = 0,
+        },
+    };
+    const Publication = union(enum) {
+        resolve: struct { result: Value, resolver: fsport.Resolver },
+        destination_check: Value,
+        stage_path: Value,
+        create_stage: Staged,
+        open_stage: Staged,
+        extract: struct {
+            staged: Staged,
+            dir: std.Io.Dir,
+            iterator: EntryList.Iterator,
+            created_count: usize = 0,
+            work: ExtractWork = .next,
+        },
+        commit: struct { staged: Staged, created_count: usize },
+        published: heap.Owned([]u8),
+    };
+    const ActiveWork = union(enum) {
+        scanning: Scanning,
+        publication: Publication,
+    };
+    const Active = struct {
+        archive: Archive,
+        work: ActiveWork,
+    };
+    const RollbackContext = struct {
+        path: heap.Owned([]u8),
+    };
+    const RollbackPlan = union(enum) {
+        entries: usize,
+    };
+    const RollbackWork = union(enum) {
+        skip: struct { iterator: EntryList.ReverseIterator, remaining: usize },
+        entries: EntryList.ReverseIterator,
+        parents: struct {
+            iterator: EntryList.ReverseIterator,
+            entry: *const Entry,
+            end: usize,
+        },
+        root,
+    };
+    const CleanupWork = union(enum) {
+        entries: EntryList.ReverseIterator,
+        entries_with_results: struct {
+            iterator: EntryList.ReverseIterator,
+            release: ResultRelease,
+        },
+        results: ResultRelease,
+        finish,
+    };
+    const ScanningRetirement = union(enum) {
+        plain,
+        results: ResultRelease,
+    };
     const State = union(enum) {
         parsing: Parsing,
         active: Active,
+        rollback_reopen: struct {
+            archive: Archive,
+            context: RollbackContext,
+            plan: RollbackPlan,
+        },
+        rollback: struct {
+            archive: Archive,
+            context: RollbackContext,
+            dir: std.Io.Dir,
+            work: RollbackWork,
+        },
         cleanup_archive: Archive,
+        cleanup_archive_with_results: struct {
+            archive: Archive,
+            release: ResultRelease,
+        },
         cleanup: CleanupWork,
     };
 
-    pub fn advance(evaluator: *Machine, self: *InspectionDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Machine, self: *UnpackDriver) MachineError!machine.WorkProgress {
+        return self.completion.advance(evaluator, self);
+    }
+
+    pub fn advanceOperation(self: *UnpackDriver, evaluator: *Machine) MachineError!driver_completion.Progress {
         try evaluator.pollKernel();
         return switch (self.state) {
             .parsing => |*parsing| self.advanceParsing(evaluator, parsing),
             .active => |*active| self.advanceActive(evaluator, active),
+            .rollback_reopen,
+            .rollback,
             .cleanup_archive,
+            .cleanup_archive_with_results,
             .cleanup,
             => unreachable,
         };
     }
 
     fn advanceParsing(
-        self: *InspectionDriver,
+        self: *UnpackDriver,
         evaluator: *Machine,
         parsing: *Parsing,
-    ) MachineError!machine.WorkProgress {
+    ) MachineError!driver_completion.Progress {
         return switch (parsing.*) {
             .encode_bytes => |*encoding| self.encodeBytes(evaluator, encoding),
+            .encode_destination => |*encoding| self.encodeDestination(evaluator, encoding),
             .allocate_tar => |*allocation| self.allocateTar(evaluator, allocation),
             .allocate_decoder => |*allocation| self.allocateDecoder(allocation),
             .decompress => |*decompression| self.decompress(evaluator, decompression),
@@ -342,30 +567,106 @@ const InspectionDriver = struct {
         };
     }
 
-    fn advanceActive(self: *InspectionDriver, evaluator: *Machine, active: *Active) MachineError!machine.WorkProgress {
-        const scanning = &active.scanning;
-        return switch (scanning.work) {
-            .publish_view => self.publishView(evaluator, &active.archive),
-            .tar_header => self.readTarHeader(evaluator, &active.archive, scanning),
-            .insert_member => |*insertion| self.insertMember(evaluator, &active.archive, scanning, insertion),
-            .parse_pax => |*pax| self.parsePaxRecord(evaluator, &active.archive, scanning, pax),
-            .scan_pax => |*scan| self.scanPaxRecord(evaluator, &active.archive, scanning, scan),
-            .trailing_zeroes => self.trailingZeroes(evaluator, &active.archive, scanning),
+    fn advanceActive(
+        self: *UnpackDriver,
+        evaluator: *Machine,
+        active: *Active,
+    ) MachineError!driver_completion.Progress {
+        return switch (active.work) {
+            .scanning => |*scanning| switch (scanning.work) {
+                .publish_view => self.publishView(evaluator, &active.archive),
+                .tar_header => self.readTarHeader(evaluator, &active.archive, scanning),
+                .insert_member => |*insertion| self.insertMember(
+                    evaluator,
+                    &active.archive,
+                    scanning,
+                    insertion,
+                ),
+                .parse_pax => |*pax| self.parsePaxRecord(evaluator, &active.archive, scanning, pax),
+                .scan_pax => |*scan| self.scanPaxRecord(evaluator, &active.archive, scanning, scan),
+                .trailing_zeroes => self.trailingZeroes(evaluator, &active.archive, scanning),
+                .allocate_results => self.allocateResults(scanning),
+                .materialize_paths => |*paths| self.materializePaths(evaluator, scanning, paths),
+                .materialize_result => |*materialization| materializeResult(
+                    active,
+                    materialization,
+                ),
+                .release_result_inputs => |*release| try self.releaseResultInputs(
+                    evaluator,
+                    active,
+                    release,
+                ),
+                .complete => unreachable,
+            },
+            .publication => |*publication| self.advancePublication(evaluator, &active.archive, publication),
+        };
+    }
+
+    fn takeEncodeTarget(target: *EncodeTarget) EncodeTarget {
+        return switch (target.*) {
+            .view => .view,
+            .unpack => |*cursor| .{ .unpack = .init(cursor.take()) },
+        };
+    }
+
+    fn takeEncodedTarget(target: *EncodedTarget) EncodedTarget {
+        return switch (target.*) {
+            .view => .view,
+            .unpack => |*path| .{ .unpack = .init(path.take()) },
         };
     }
 
     fn takeEncodedInputs(inputs: *EncodedInputs) EncodedInputs {
-        return .{ .bytes = .init(inputs.bytes.take()) };
+        return .{
+            .bytes = .init(inputs.bytes.take()),
+            .target = takeEncodedTarget(&inputs.target),
+        };
     }
+
     fn takeArchive(archive: *Archive) Archive {
-        return .{ .bytes = .init(archive.bytes.take()), .tar = .init(archive.tar.take()), .slots = .init(archive.slots.take()) };
+        return .{
+            .bytes = .init(archive.bytes.take()),
+            .target = takeEncodedTarget(&archive.target),
+            .tar = .init(archive.tar.take()),
+            .slots = .init(archive.slots.take()),
+        };
+    }
+
+    /// The canonical root-relative destination path supplied by the caller.
+    fn archiveDestination(archive: *Archive) []u8 {
+        return switch (archive.target) {
+            .unpack => |*path| path.borrow(),
+            .view => unreachable,
+        };
+    }
+
+    /// The resolved publication parent and final entry name.
+    fn destinationEntry(self: *UnpackDriver) @FieldType(fsport.Resolved, "entry") {
+        return switch (self.destination.?) {
+            .entry => |entry| entry,
+            .directory => unreachable,
+        };
+    }
+
+    fn operationMode(self: *const UnpackDriver) Mode {
+        return switch (self.source.borrow()) {
+            .view => .view,
+            .unpack => .unpack,
+        };
+    }
+
+    fn sourceDestination(self: *const UnpackDriver) Value {
+        return switch (self.source.borrow()) {
+            .unpack => |*source| source.destination.borrow(),
+            .view => unreachable,
+        };
     }
 
     fn encodeBytes(
-        self: *InspectionDriver,
+        self: *UnpackDriver,
         evaluator: *Machine,
         encoding: *@FieldType(Parsing, "encode_bytes"),
-    ) MachineError!machine.WorkProgress {
+    ) MachineError!driver_completion.Progress {
         switch (encoding.byte.borrowMut().advance(work_quantum) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidByte => return evaluator.failAtIndex(
@@ -376,18 +677,81 @@ const InspectionDriver = struct {
         }) {
             .pending => return .yielded,
             .complete => |bytes| {
+                const target = takeEncodeTarget(&encoding.target);
                 encoding.byte.deinit(evaluator.releaseDomain(), self.allocator);
-                self.state = .{ .parsing = .{ .allocate_tar = .{ .bytes = .init(bytes) } } };
+                self.state = .{ .parsing = switch (target) {
+                    .view => .{ .allocate_tar = .{ .bytes = .init(bytes), .target = .view } },
+                    .unpack => |path| .{ .encode_destination = .{
+                        .bytes = .init(bytes),
+                        .destination = path,
+                    } },
+                } };
                 return .yielded;
             },
         }
     }
 
+    fn encodeDestination(
+        self: *UnpackDriver,
+        evaluator: *Machine,
+        encoding: *@FieldType(Parsing, "encode_destination"),
+    ) MachineError!driver_completion.Progress {
+        switch (encoding.destination.borrowMut().advance(work_quantum) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidCodepoint => return self.failDomain(evaluator, "destination contains an invalid Unicode scalar"),
+        }) {
+            .pending => return .yielded,
+            .complete => |path| {
+                if (path.len == 0) {
+                    self.allocator.free(path);
+                    return self.failDomain(evaluator, "destination is empty");
+                }
+                switch (self.authority) {
+                    .filesystem => |access| self.authorizeExtraction(evaluator, access, path) catch |err| {
+                        self.allocator.free(path);
+                        return err;
+                    },
+                    .none => unreachable,
+                }
+                const bytes = encoding.bytes.take();
+                encoding.destination.deinit(evaluator.releaseDomain(), self.allocator);
+                self.state = .{ .parsing = .{ .allocate_tar = .{
+                    .bytes = .init(bytes),
+                    .target = .{ .unpack = .init(path) },
+                } } };
+                return .yielded;
+            },
+        }
+    }
+
+    /// Grammar, root, permission, and quota checks for extraction, before any
+    /// archive byte is decompressed.
+    fn authorizeExtraction(
+        self: *UnpackDriver,
+        evaluator: *Machine,
+        access: *external.FilesystemAccess,
+        path: []const u8,
+    ) MachineError!void {
+        const class = fsport.classifyPath(path) catch
+            return self.failReason(evaluator, .domain, .invalid_path, "destination is not a canonical relative path");
+        if (class == .root)
+            return self.failReason(evaluator, .domain, .invalid_path, "destination must name a child entry, not the root");
+        const root_value = self.source.borrow().unpack.root.borrow();
+        self.root = fsport.selectRoot(access, root_value) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.UnknownRoot => return self.failReason(evaluator, .domain, .unknown_root, "unknown filesystem root"),
+            error.Closed => return self.failReason(evaluator, .io, .io, "directory resource is closed"),
+            error.Io => return self.failReason(evaluator, .io, .changed, "directory resource changed"),
+        };
+        self.slot = fsport.reserveSelected(access, self.root.?) orelse
+            return self.failReason(evaluator, .overflow, .limit, "filesystem operation limit reached");
+    }
+
     fn allocateTar(
-        self: *InspectionDriver,
+        self: *UnpackDriver,
         evaluator: *Machine,
         allocation: *EncodedInputs,
-    ) MachineError!machine.WorkProgress {
+    ) MachineError!driver_completion.Progress {
         const compressed = allocation.bytes.borrow().bytes();
         if (compressed.len < 18 or compressed[0] != 0x1f or compressed[1] != 0x8b)
             return self.failDomain(evaluator, "malformed gzip archive");
@@ -404,9 +768,9 @@ const InspectionDriver = struct {
     }
 
     fn allocateDecoder(
-        self: *InspectionDriver,
+        self: *UnpackDriver,
         allocation: *@FieldType(Parsing, "allocate_decoder"),
-    ) MachineError!machine.WorkProgress {
+    ) MachineError!driver_completion.Progress {
         const decoder = try GzipDecoder.init(self.allocator, allocation.inputs.bytes.borrow().bytes());
         const inputs = takeEncodedInputs(&allocation.inputs);
         const tar = allocation.tar.take();
@@ -419,10 +783,10 @@ const InspectionDriver = struct {
     }
 
     fn decompress(
-        self: *InspectionDriver,
+        self: *UnpackDriver,
         evaluator: *Machine,
         decompression: *@FieldType(Parsing, "decompress"),
-    ) MachineError!machine.WorkProgress {
+    ) MachineError!driver_completion.Progress {
         const output = decompression.tar.borrow();
         if (decompression.index != output.len) {
             const end = @min(decompression.index + work_quantum, output.len);
@@ -448,10 +812,10 @@ const InspectionDriver = struct {
     }
 
     fn verifyGzip(
-        self: *InspectionDriver,
+        self: *UnpackDriver,
         evaluator: *Machine,
         verification: *@FieldType(Parsing, "verify"),
-    ) MachineError!machine.WorkProgress {
+    ) MachineError!driver_completion.Progress {
         const output = verification.tar.borrow();
         if (verification.index != output.len) {
             const end = @min(verification.index + work_quantum, output.len);
@@ -473,9 +837,9 @@ const InspectionDriver = struct {
     }
 
     fn allocateSlots(
-        self: *InspectionDriver,
+        self: *UnpackDriver,
         allocation: *@FieldType(Parsing, "allocate_slots"),
-    ) MachineError!machine.WorkProgress {
+    ) MachineError!driver_completion.Progress {
         const slots = try self.allocator.alloc(?*Entry, member_slots);
         const inputs = takeEncodedInputs(&allocation.inputs);
         const tar = allocation.tar.take();
@@ -488,9 +852,9 @@ const InspectionDriver = struct {
     }
 
     fn initializeSlots(
-        self: *InspectionDriver,
+        self: *UnpackDriver,
         initialization: *@FieldType(Parsing, "initialize_slots"),
-    ) MachineError!machine.WorkProgress {
+    ) MachineError!driver_completion.Progress {
         const slots = initialization.slots.borrow();
         const end = @min(initialization.index + work_quantum, slots.len);
         @memset(slots[initialization.index..end], null);
@@ -500,16 +864,18 @@ const InspectionDriver = struct {
         var inputs = takeEncodedInputs(&initialization.inputs);
         const archive: Archive = .{
             .bytes = .init(inputs.bytes.take()),
+            .target = takeEncodedTarget(&inputs.target),
             .tar = .init(initialization.tar.take()),
             .slots = .init(initialization.slots.take()),
         };
         self.state = .{ .active = .{
             .archive = archive,
+            .work = .{ .scanning = .{} },
         } };
         return .yielded;
     }
 
-    fn publishView(self: *InspectionDriver, evaluator: *Machine, archive: *Archive) MachineError!machine.WorkProgress {
+    fn publishView(self: *UnpackDriver, evaluator: *Machine, archive: *Archive) MachineError!driver_completion.Progress {
         const scope: *@import("../scheduler.zig").TaskScope = @ptrCast(@alignCast(evaluator.unit.task_scope orelse return evaluator.fail(.cancelled, "archive scope is closing")));
         const result = document.adopt(scope, archive.tar.borrow(), self.entries.borrow()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -525,16 +891,19 @@ const InspectionDriver = struct {
     }
 
     fn readTarHeader(
-        self: *InspectionDriver,
+        self: *UnpackDriver,
         evaluator: *Machine,
         archive: *Archive,
         scanning: *Scanning,
-    ) MachineError!machine.WorkProgress {
+    ) MachineError!driver_completion.Progress {
         const context = &scanning.context;
         const tar = archive.tar.borrow();
         if (context.tar_offset == tar.len) {
             if (context.zero_blocks < 2) return self.failDomain(evaluator, "tar archive has no end marker");
-            scanning.work = .publish_view;
+            scanning.work = switch (self.operationMode()) {
+                .view => .publish_view,
+                .unpack => .allocate_results,
+            };
             return .yielded;
         }
         if (context.tar_offset + tar_block_bytes > tar.len)
@@ -611,6 +980,7 @@ const InspectionDriver = struct {
             .data_offset = data_offset,
             .size = @intCast(effective_size),
         };
+        if (kind == .file) context.file_count += 1;
         const hash = std.hash.Wyhash.hash(0, path);
         scanning.work = .{ .insert_member = .{
             .entry = entry,
@@ -621,12 +991,12 @@ const InspectionDriver = struct {
     }
 
     fn parsePaxRecord(
-        self: *InspectionDriver,
+        self: *UnpackDriver,
         evaluator: *Machine,
         archive: *Archive,
         scanning: *Scanning,
         pax: *Pax,
-    ) MachineError!machine.WorkProgress {
+    ) MachineError!driver_completion.Progress {
         if (pax.offset == pax.end) {
             scanning.context.tar_offset = pax.next_offset;
             scanning.work = .tar_header;
@@ -656,12 +1026,12 @@ const InspectionDriver = struct {
     }
 
     fn scanPaxRecord(
-        self: *InspectionDriver,
+        self: *UnpackDriver,
         evaluator: *Machine,
         archive: *Archive,
         scanning: *Scanning,
         scan: *@FieldType(ScanWork, "scan_pax"),
-    ) MachineError!machine.WorkProgress {
+    ) MachineError!driver_completion.Progress {
         const tar = archive.tar.borrow();
         const payload_end = scan.record_end - 1;
         const end = @min(scan.scan_offset + work_quantum, payload_end);
@@ -694,7 +1064,7 @@ const InspectionDriver = struct {
     }
 
     fn memberPath(
-        self: *InspectionDriver,
+        self: *UnpackDriver,
         context: *ScanContext,
         header: *const [tar_block_bytes]u8,
     ) error{OutOfMemory}![]u8 {
@@ -713,12 +1083,12 @@ const InspectionDriver = struct {
     }
 
     fn insertMember(
-        self: *InspectionDriver,
+        self: *UnpackDriver,
         evaluator: *Machine,
         archive: *Archive,
         scanning: *Scanning,
         insertion: *@FieldType(ScanWork, "insert_member"),
-    ) MachineError!machine.WorkProgress {
+    ) MachineError!driver_completion.Progress {
         const entry = &insertion.entry;
         var remaining = work_quantum;
         while (remaining != 0) : (remaining -= 1) {
@@ -742,24 +1112,509 @@ const InspectionDriver = struct {
     }
 
     fn trailingZeroes(
-        self: *InspectionDriver,
+        self: *UnpackDriver,
         evaluator: *Machine,
         archive: *Archive,
         scanning: *Scanning,
-    ) MachineError!machine.WorkProgress {
+    ) MachineError!driver_completion.Progress {
         const tar = archive.tar.borrow();
         const end = @min(scanning.context.tar_offset + work_quantum, tar.len);
         for (tar[scanning.context.tar_offset..end]) |byte| if (byte != 0)
             return self.failDomain(evaluator, "tar data follows its end marker");
         scanning.context.tar_offset = end;
         if (end != tar.len) return .yielded;
-        scanning.work = .publish_view;
+        scanning.work = switch (self.operationMode()) {
+            .view => .publish_view,
+            .unpack => .allocate_results,
+        };
         return .yielded;
     }
 
-    fn failDomain(self: *InspectionDriver, evaluator: *Machine, message: []const u8) MachineError {
+    fn allocateResults(self: *UnpackDriver, scanning: *Scanning) MachineError!driver_completion.Progress {
+        const values = try self.allocator.alloc(Value, scanning.context.file_count);
+        scanning.work = .{ .materialize_paths = .{
+            .inputs = .{ .values = values },
+            .iterator = self.entries.borrow().iterator(),
+        } };
+        return .yielded;
+    }
+
+    fn materializePaths(
+        self: *UnpackDriver,
+        evaluator: *Machine,
+        scanning: *Scanning,
+        paths: *@FieldType(ScanWork, "materialize_paths"),
+    ) MachineError!driver_completion.Progress {
+        switch (paths.work) {
+            .text => |*materializer| switch (materializer.advance(work_quantum) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidUtf8 => return self.failDomain(evaluator, "tar member path is not valid UTF-8"),
+            }) {
+                .pending => return .yielded,
+                .complete => |path_value| {
+                    var completed = materializer.*;
+                    paths.inputs.values[paths.inputs.built] = path_value;
+                    paths.inputs.built += 1;
+                    paths.work = .next;
+                    completed.deinit();
+                    return .yielded;
+                },
+            },
+            .next => {},
+        }
+        var remaining = work_quantum;
+        while (remaining != 0) : (remaining -= 1) {
+            const entry = paths.iterator.next() orelse {
+                const inputs = paths.inputs;
+                scanning.work = .{ .materialize_result = .{
+                    .inputs = inputs,
+                    .materializer = .init(self.allocator, inputs.values),
+                } };
+                return .yielded;
+            };
+            if (entry.kind == .directory) continue;
+            paths.work = .{ .text = .init(self.allocator, entry.path) };
+            return .yielded;
+        }
+        return .yielded;
+    }
+
+    fn materializeResult(
+        active: *Active,
+        materialization: *@FieldType(ScanWork, "materialize_result"),
+    ) MachineError!driver_completion.Progress {
+        return switch (try materialization.materializer.advance(work_quantum)) {
+            .pending => .yielded,
+            .complete => |result| result: {
+                var completed = materialization.materializer;
+                const inputs = materialization.inputs;
+                const next: ActiveWork = .{ .scanning = .{
+                    .work = .{ .release_result_inputs = .{
+                        .release = .{ .values = inputs.values, .built = inputs.built },
+                        .result = result,
+                    } },
+                } };
+                active.work = next;
+                completed.deinit();
+                break :result .yielded;
+            },
+        };
+    }
+
+    fn releaseResultInputs(
+        self: *UnpackDriver,
+        evaluator: *Machine,
+        active: *Active,
+        release: *@FieldType(ScanWork, "release_result_inputs"),
+    ) MachineError!driver_completion.Progress {
+        if (release.release.index != release.release.built) {
+            evaluator.releaseDomain().releaseValue(
+                release.release.values[release.release.index],
+            );
+            release.release.index += 1;
+            return .yielded;
+        }
+        // The resolver is constructed before the input storage is released,
+        // so an allocation failure leaves this state owning exactly what its
+        // retirement releases.
+        const publication: Publication = switch (self.authority) {
+            .filesystem => |access| publication: {
+                const root = self.root.?;
+                const resolver = fsport.Resolver.init(
+                    self.allocator,
+                    self.io.?,
+                    root.dir(),
+                    archiveDestination(&active.archive),
+                    fsport.limitsOf(access),
+                    .no_follow_final,
+                ) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.PathTooLong => return self.failReason(evaluator, .overflow, .limit, "destination exceeds the resolver byte limit"),
+                };
+                break :publication .{ .resolve = .{ .result = release.result, .resolver = resolver } };
+            },
+            .none => unreachable,
+        };
+        self.allocator.free(release.release.values);
+        active.work = .{ .publication = publication };
+        return .yielded;
+    }
+
+    fn advancePublication(
+        self: *UnpackDriver,
+        evaluator: *Machine,
+        archive: *Archive,
+        publication: *Publication,
+    ) MachineError!driver_completion.Progress {
+        const io = self.io.?;
+        switch (publication.*) {
+            .resolve => |*resolving| switch (try resolving.resolver.step()) {
+                .pending => return .yielded,
+                .failed => |reason| return self.failReason(
+                    evaluator,
+                    if (reason == .limit) .overflow else .io,
+                    reason,
+                    reason.message(),
+                ),
+                .complete => |resolved| {
+                    resolving.resolver.retire(evaluator.releaseDomain());
+                    const result = resolving.result;
+                    switch (resolved) {
+                        .entry => self.destination = resolved,
+                        .directory => |*handle| {
+                            var closing = handle.*;
+                            closing.close(io);
+                            publication.* = .{ .destination_check = result };
+                            return self.failReason(evaluator, .domain, .invalid_path, "destination must name a child entry, not the root");
+                        },
+                    }
+                    publication.* = .{ .destination_check = result };
+                    return .yielded;
+                },
+            },
+            .destination_check => |result| {
+                const target = self.destinationEntry();
+                _ = target.parent.dir.statFile(io, target.name, .{ .follow_symlinks = false }) catch |err| switch (err) {
+                    error.FileNotFound => {
+                        publication.* = .{ .stage_path = result };
+                        return .yielded;
+                    },
+                    else => return self.failIo(evaluator, "cannot inspect archive destination", err),
+                };
+                return self.failDestinationExists(evaluator, "archive destination already exists");
+            },
+            .stage_path => |result| {
+                var name_buffer: [24]u8 = undefined;
+                const name = fsport.stagingDirectoryName(io, &name_buffer);
+                const path = try self.allocator.dupe(u8, name);
+                publication.* = .{ .create_stage = .{
+                    .result = result,
+                    .path = .init(path),
+                } };
+            },
+            .create_stage => |*staged| {
+                const target = self.destinationEntry();
+                target.parent.dir.createDir(io, staged.path.borrow(), .default_dir) catch |err| switch (err) {
+                    error.PathAlreadyExists => {
+                        const result = staged.result;
+                        staged.path.deinit(evaluator.releaseDomain(), self.allocator);
+                        publication.* = .{ .stage_path = result };
+                        return .yielded;
+                    },
+                    else => return self.failIo(evaluator, "cannot create archive staging directory", err),
+                };
+                const moved = staged.*;
+                publication.* = .{ .open_stage = moved };
+            },
+            .open_stage => |*staged| {
+                const target = self.destinationEntry();
+                const directory = target.parent.dir.openDir(io, staged.path.borrow(), .{
+                    .follow_symlinks = false,
+                }) catch |err|
+                    return self.failIo(evaluator, "cannot open archive staging directory", err);
+                const moved = staged.*;
+                publication.* = .{ .extract = .{
+                    .staged = moved,
+                    .dir = directory,
+                    .iterator = self.entries.borrow().iterator(),
+                } };
+            },
+            .extract => |*extraction| switch (extraction.work) {
+                .next => {
+                    const entry = extraction.iterator.next() orelse {
+                        extraction.dir.close(io);
+                        const staged = extraction.staged;
+                        const created_count = extraction.created_count;
+                        publication.* = .{ .commit = .{
+                            .staged = staged,
+                            .created_count = created_count,
+                        } };
+                        return .yielded;
+                    };
+                    extraction.created_count += 1;
+                    if (entry.kind == .directory) {
+                        extraction.dir.createDirPath(io, entry.path) catch |err|
+                            return self.failIo(evaluator, "cannot create archive directory", err);
+                        return .yielded;
+                    }
+                    if (entry.size > fsport.limitsOf(self.authority.filesystem).max_stream_transfer_bytes)
+                        return self.failReason(evaluator, .overflow, .limit, "archive member exceeds the streaming transfer limit");
+                    if (lastSlash(entry.path)) |slash|
+                        extraction.dir.createDirPath(io, entry.path[0..slash]) catch |err|
+                            return self.failIo(evaluator, "cannot create archive parent directory", err);
+                    const file = extraction.dir.createFile(io, entry.path, .{ .exclusive = true }) catch |err|
+                        return self.failIo(evaluator, "cannot create archive file", err);
+                    extraction.work = .{ .file = .{ .entry = entry, .file = file } };
+                },
+                .file => |*file_state| {
+                    if (file_state.written != file_state.entry.size) {
+                        const end = @min(file_state.written + work_quantum, file_state.entry.size);
+                        const source = archive.tar.borrow()[file_state.entry.data_offset + file_state.written .. file_state.entry.data_offset + end];
+                        file_state.file.writePositionalAll(io, source, file_state.written) catch |err|
+                            return self.failIo(evaluator, "cannot write archive file", err);
+                        file_state.written = end;
+                    } else {
+                        file_state.file.close(io);
+                        extraction.work = .next;
+                    }
+                },
+            },
+            .commit => |*commit_state| {
+                const target = self.destinationEntry();
+                fsport.renameNoReplace(
+                    io,
+                    target.parent.dir,
+                    commit_state.staged.path.borrow(),
+                    target.parent.dir,
+                    target.name,
+                ) catch |err| switch (err) {
+                    error.PathAlreadyExists => return self.failDestinationExists(
+                        evaluator,
+                        "archive destination already exists",
+                    ),
+                    else => return self.failIo(evaluator, "cannot publish archive destination", err),
+                };
+                const result = commit_state.staged.result;
+                const path = commit_state.staged.path.take();
+                publication.* = .{ .published = .init(path) };
+                return .{ .output = result };
+            },
+            .published => unreachable,
+        }
+        return .yielded;
+    }
+
+    fn failDomain(self: *UnpackDriver, evaluator: *Machine, message: []const u8) MachineError {
         _ = self;
         return evaluator.fail(.domain, message);
+    }
+
+    /// Authority and resolution failures carry the same provenance the `fs`
+    /// words attach: the operation, root, path, and portable reason.
+    fn failReason(
+        self: *UnpackDriver,
+        evaluator: *Machine,
+        kind: machine.ErrorKind,
+        reason: fsport.Reason,
+        message: []const u8,
+    ) MachineError {
+        const operation = try intern.intern("unpack-tgz");
+        const reason_symbol = try intern.intern(reason.symbol());
+        const failure = evaluator.fail(kind, message);
+        const unpack = self.source.borrow().unpack;
+        evaluator.addErrorFilesystem(.{
+            .operation = .{ .symbol = operation },
+            .reason = .{ .symbol = reason_symbol },
+            .target = .{ .single = .{ .root = unpack.root.borrow(), .path = unpack.destination.borrow() } },
+        });
+        return failure;
+    }
+
+    fn failIo(self: *UnpackDriver, evaluator: *Machine, message: []const u8, err: anyerror) MachineError {
+        return self.failReason(evaluator, .io, fsport.reasonForError(err), message);
+    }
+
+    fn failDestinationExists(
+        self: *UnpackDriver,
+        evaluator: *Machine,
+        message: []const u8,
+    ) MachineError {
+        const failure = self.failReason(evaluator, .io, .already_exists, message);
+        evaluator.addErrorDestinationExists();
+        return failure;
+    }
+
+    fn beginPublicationRetirement(
+        self: *UnpackDriver,
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+        active: *Active,
+        publication: *Publication,
+    ) void {
+        const archive = takeArchive(&active.archive);
+        switch (publication.*) {
+            .resolve => |*resolving| {
+                resolving.resolver.retire(releases);
+                releases.releaseValue(resolving.result);
+                self.state = .{ .cleanup_archive = archive };
+            },
+            // These abandon the publication before a staging directory
+            // exists. Every other failing arm reaches cleanup through
+            // rollback, which removes the stage root first.
+            .destination_check, .stage_path => |result| {
+                releases.releaseValue(result);
+                self.state = .{ .cleanup_archive = archive };
+            },
+            .create_stage => |*staged| {
+                releases.releaseValue(staged.result);
+                staged.path.deinit(releases, allocator);
+                self.state = .{ .cleanup_archive = archive };
+            },
+            .open_stage => |*staged| {
+                releases.releaseValue(staged.result);
+                const path = staged.path.take();
+                self.state = .{ .rollback_reopen = .{
+                    .archive = archive,
+                    .context = .{
+                        .path = .init(path),
+                    },
+                    .plan = .{ .entries = 0 },
+                } };
+            },
+            .extract => |*extraction| {
+                switch (extraction.work) {
+                    .file => |file_state| file_state.file.close(self.io.?),
+                    .next => {},
+                }
+                releases.releaseValue(extraction.staged.result);
+                const path = extraction.staged.path.take();
+                const context: RollbackContext = .{
+                    .path = .init(path),
+                };
+                const dir = extraction.dir;
+                const work = rollbackEntries(self, extraction.created_count);
+                self.state = .{ .rollback = .{
+                    .archive = archive,
+                    .context = context,
+                    .dir = dir,
+                    .work = work,
+                } };
+            },
+            .commit => |*commit_state| {
+                releases.releaseValue(commit_state.staged.result);
+                const path = commit_state.staged.path.take();
+                const plan: RollbackPlan = .{ .entries = commit_state.created_count };
+                self.state = .{ .rollback_reopen = .{
+                    .archive = archive,
+                    .context = .{
+                        .path = .init(path),
+                    },
+                    .plan = plan,
+                } };
+            },
+            .published => |*path| {
+                path.deinit(releases, allocator);
+                self.state = .{ .cleanup_archive = archive };
+            },
+        }
+    }
+
+    fn rollbackEntries(self: *UnpackDriver, created_count: usize) RollbackWork {
+        return .{ .skip = .{
+            .iterator = self.entries.borrow().reverseIterator(),
+            .remaining = self.entries.borrow().count - created_count,
+        } };
+    }
+
+    fn advanceRollbackReopen(
+        self: *UnpackDriver,
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+        reopening: *@FieldType(State, "rollback_reopen"),
+    ) bool {
+        const context = &reopening.context;
+        const parent = self.destinationEntry().parent.dir;
+        const directory = parent.openDir(self.io.?, context.path.borrow(), .{ .follow_symlinks = false }) catch |open_err| {
+            observeCleanupError("reopen the stage", open_err);
+            parent.deleteDir(self.io.?, context.path.borrow()) catch |err|
+                observeCleanupError("remove an unopened stage", err);
+            context.path.deinit(releases, allocator);
+            const archive = takeArchive(&reopening.archive);
+            self.state = .{ .cleanup_archive = archive };
+            return false;
+        };
+        const moved = context.*;
+        const work = switch (reopening.plan) {
+            .entries => |created_count| rollbackEntries(self, created_count),
+        };
+        const archive = takeArchive(&reopening.archive);
+        self.state = .{ .rollback = .{
+            .archive = archive,
+            .context = moved,
+            .dir = directory,
+            .work = work,
+        } };
+        return false;
+    }
+
+    fn advanceRollback(
+        self: *UnpackDriver,
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+        rollback: *@FieldType(State, "rollback"),
+    ) bool {
+        switch (rollback.work) {
+            .skip => |*skip| {
+                if (skip.remaining != 0) {
+                    _ = skip.iterator.next();
+                    skip.remaining -= 1;
+                } else {
+                    const iterator = skip.iterator;
+                    rollback.work = .{ .entries = iterator };
+                }
+            },
+            .entries => |*iterator| {
+                const entry = iterator.next() orelse {
+                    rollback.work = .root;
+                    return false;
+                };
+                switch (entry.kind) {
+                    .file => rollback.dir.deleteFile(self.io.?, entry.path) catch |err|
+                        observeCleanupError("remove a staged file", err),
+                    .directory => rollback.dir.deleteDir(self.io.?, entry.path) catch |err|
+                        observeCleanupError("remove a staged directory", err),
+                }
+                if (lastSlash(entry.path)) |end| {
+                    const moved = iterator.*;
+                    rollback.work = .{ .parents = .{
+                        .iterator = moved,
+                        .entry = entry,
+                        .end = end,
+                    } };
+                }
+            },
+            .parents => |*parents| {
+                rollback.dir.deleteDir(self.io.?, parents.entry.path[0..parents.end]) catch |err|
+                    observeCleanupError("remove an implicit parent directory", err);
+                if (lastSlash(parents.entry.path[0..parents.end])) |end| {
+                    parents.end = end;
+                } else {
+                    const iterator = parents.iterator;
+                    rollback.work = .{ .entries = iterator };
+                }
+            },
+            .root => {
+                rollback.dir.close(self.io.?);
+                self.destinationEntry().parent.dir.deleteDir(self.io.?, rollback.context.path.borrow()) catch |err|
+                    observeCleanupError("remove the stage root", err);
+                rollback.context.path.deinit(releases, allocator);
+                const archive = takeArchive(&rollback.archive);
+                self.state = .{ .cleanup_archive = archive };
+            },
+        }
+        return false;
+    }
+
+    fn retireEncodeTarget(
+        target: *EncodeTarget,
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+    ) void {
+        switch (target.*) {
+            .view => {},
+            .unpack => |*cursor| cursor.deinit(releases, allocator),
+        }
+    }
+
+    fn retireEncodedTarget(
+        target: *EncodedTarget,
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+    ) void {
+        switch (target.*) {
+            .view => {},
+            .unpack => |*text| text.deinit(releases, allocator),
+        }
     }
 
     fn retireEncodedInputs(
@@ -768,6 +1623,7 @@ const InspectionDriver = struct {
         allocator: std.mem.Allocator,
     ) void {
         inputs.bytes.deinit(releases, allocator);
+        retireEncodedTarget(&inputs.target, releases, allocator);
     }
 
     fn retireArchive(
@@ -778,12 +1634,45 @@ const InspectionDriver = struct {
         archive.slots.deinit(releases, allocator);
         archive.tar.deinit(releases, allocator);
         archive.bytes.deinit(releases, allocator);
+        retireEncodedTarget(&archive.target, releases, allocator);
     }
 
-    fn retireScanning(scanning: *Scanning, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
-        if (scanning.work == .insert_member) allocator.free(scanning.work.insert_member.entry.path);
+    fn retireScanning(
+        scanning: *Scanning,
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+    ) ScanningRetirement {
+        const retirement: ScanningRetirement = switch (scanning.work) {
+            .insert_member => |insertion| result: {
+                allocator.free(insertion.entry.path);
+                break :result .plain;
+            },
+            .materialize_paths => |*paths| result: {
+                switch (paths.work) {
+                    .text => |*materializer| materializer.retire(releases),
+                    .next => {},
+                }
+                break :result .{ .results = .{
+                    .values = paths.inputs.values,
+                    .built = paths.inputs.built,
+                } };
+            },
+            .materialize_result => |*materialization| result: {
+                materialization.materializer.retire(releases);
+                break :result .{ .results = .{
+                    .values = materialization.inputs.values,
+                    .built = materialization.inputs.built,
+                } };
+            },
+            .release_result_inputs => |release| result: {
+                releases.releaseValue(release.result);
+                break :result .{ .results = release.release };
+            },
+            else => .plain,
+        };
         if (scanning.context.pending_path) |*path| path.deinit(releases, allocator);
         scanning.context.pending_path = null;
+        return retirement;
     }
 
     fn retireParsing(
@@ -794,6 +1683,11 @@ const InspectionDriver = struct {
         switch (parsing.*) {
             .encode_bytes => |*encoding| {
                 encoding.byte.deinit(releases, allocator);
+                retireEncodeTarget(&encoding.target, releases, allocator);
+            },
+            .encode_destination => |*encoding| {
+                encoding.bytes.deinit(releases, allocator);
+                encoding.destination.deinit(releases, allocator);
             },
             .allocate_tar => |*allocation| retireEncodedInputs(allocation, releases, allocator),
             .allocate_decoder => |*allocation| {
@@ -821,22 +1715,67 @@ const InspectionDriver = struct {
         }
     }
 
-    pub fn advanceRetirement(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *InspectionDriver) bool {
+    pub fn advanceRetirement(
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+        self: *UnpackDriver,
+    ) bool {
+        if (!self.completion.retire(self, releases, allocator)) return false;
+        allocator.destroy(self);
+        return true;
+    }
+
+    pub fn advanceCleanup(self: *UnpackDriver, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) bool {
         switch (self.state) {
             .parsing => |*parsing| {
                 retireParsing(parsing, releases, allocator);
-                self.state = .{ .cleanup = .{ .entries = self.entries.borrow().reverseIterator() } };
+                self.state = .{ .cleanup = .{
+                    .entries = self.entries.borrow().reverseIterator(),
+                } };
                 return false;
             },
             .active => |*active| {
-                retireScanning(&active.scanning, releases, allocator);
-                const archive = takeArchive(&active.archive);
-                self.state = .{ .cleanup_archive = archive };
+                switch (active.work) {
+                    .scanning => |*scanning| {
+                        const retirement = retireScanning(scanning, releases, allocator);
+                        const archive = takeArchive(&active.archive);
+                        self.state = switch (retirement) {
+                            .plain => .{ .cleanup_archive = archive },
+                            .results => |release| .{ .cleanup_archive_with_results = .{
+                                .archive = archive,
+                                .release = release,
+                            } },
+                        };
+                    },
+                    .publication => |*publication| self.beginPublicationRetirement(
+                        releases,
+                        allocator,
+                        active,
+                        publication,
+                    ),
+                }
                 return false;
             },
+            .rollback_reopen => |*reopening| return self.advanceRollbackReopen(
+                releases,
+                allocator,
+                reopening,
+            ),
+            .rollback => |*rollback| return self.advanceRollback(releases, allocator, rollback),
             .cleanup_archive => |*archive| {
                 retireArchive(archive, releases, allocator);
-                self.state = .{ .cleanup = .{ .entries = self.entries.borrow().reverseIterator() } };
+                self.state = .{ .cleanup = .{
+                    .entries = self.entries.borrow().reverseIterator(),
+                } };
+                return false;
+            },
+            .cleanup_archive_with_results => |*cleanup| {
+                retireArchive(&cleanup.archive, releases, allocator);
+                const release = cleanup.release;
+                self.state = .{ .cleanup = .{ .entries_with_results = .{
+                    .iterator = self.entries.borrow().reverseIterator(),
+                    .release = release,
+                } } };
                 return false;
             },
             .cleanup => |*cleanup| switch (cleanup.*) {
@@ -848,12 +1787,34 @@ const InspectionDriver = struct {
                     self.state = .{ .cleanup = .finish };
                     return false;
                 },
+                .entries_with_results => |*entries| {
+                    if (entries.iterator.next()) |entry| {
+                        allocator.free(entry.path);
+                        return false;
+                    }
+                    const release = entries.release;
+                    self.state = .{ .cleanup = .{ .results = release } };
+                    return false;
+                },
+                .results => |*results| {
+                    if (results.index != results.built) {
+                        releases.releaseValue(results.values[results.index]);
+                        results.index += 1;
+                        return false;
+                    }
+                    allocator.free(results.values);
+                    self.state = .{ .cleanup = .finish };
+                    return false;
+                },
                 .finish => {},
             },
         }
         self.bytes_value.deinit(releases, allocator);
+        self.source.deinit(releases, allocator);
         self.entries.deinit(releases, allocator);
-        allocator.destroy(self);
+        if (self.destination) |*destination| destination.deinit(allocator, self.io.?);
+        if (self.root) |root| root.deinit();
+        if (self.slot) |*slot| slot.release();
         return true;
     }
 };
@@ -906,4 +1867,8 @@ fn validMemberPath(path: []const u8) bool {
             return false;
     }
     return true;
+}
+
+fn lastSlash(path: []const u8) ?usize {
+    return std.mem.lastIndexOfScalar(u8, path, '/');
 }

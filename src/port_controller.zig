@@ -687,6 +687,12 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
         pub fn hasCapacity(self: *const Self, limit: usize) bool {
             return self.count < limit;
         }
+        /// Readiness for a writer-issued key, under the resource lock. Comparing
+        /// the queue head keeps erased readiness observations inside its owner.
+        pub fn writerReady(self: *const Self, key: u64) bool {
+            if (owns_cell) @compileError("writer readiness requires a writer lane");
+            return if (self.first) |node| @intFromPtr(node) == key else true;
+        }
         fn append(self: *Self, node: *Node) void {
             if (self.last) |last| last.next = node else self.first = node;
             self.last = node;

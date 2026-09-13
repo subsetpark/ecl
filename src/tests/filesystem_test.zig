@@ -962,6 +962,61 @@ test "fs: streaming publication and reservations enforce total limits and rollba
     try scratch.expectNoStaging(".");
 }
 
+test "fs: direct reservations follow derived roots and pair admission" {
+    for ([_]session.Config{ .cooperative, .{ .worker_pool = 1 }, .{ .worker_pool = 4 } }) |config| {
+        var scratch = try Scratch.init();
+        defer scratch.deinit();
+        try scratch.write("source", "data");
+        const options: Config = .{ .roots = scratch.root_storage[0..], .limits = .{ .max_live_operations = 2 } };
+        try runCase(options, config, "'root fs.reserve 'a set 'root fs.reserve 'b set " ++
+            "a \"source\" b \"copy\" fs.copy b \"copy\" fs.read-text " ++
+            "[] (a \"source\" b \"copy\" fs.copy) @attempt 'err at 'data at 'reason at " ++
+            "a \"source\" a \"same\" fs.copy a \"same\" fs.read-text " ++
+            "a \".\" fs.child-dir 'child set a port.close " ++
+            "[] ('root \".\" fs.stat) @attempt 'err at 'data at 'reason at " ++
+            "child port.close b port.close 'root \"copy\" fs.stat 'size at", .{ .stack = "\"data\" 'already-exists \"data\" 'limit 4" });
+    }
+}
+
+test "fs: completed operations release admission before the next call" {
+    for ([_]session.Config{ .cooperative, .{ .worker_pool = 1 }, .{ .worker_pool = 4 } }) |config| {
+        var scratch = try Scratch.init();
+        defer scratch.deinit();
+        const options: Config = .{ .roots = scratch.root_storage[0..], .limits = .{ .max_live_operations = 1 } };
+        try runCase(options, config, "64 (256 range (pop 'root \".\" fs.child-dir) each " ++
+            "(port.close 0) each pop) times 16384 " ++
+            "64 ([] ('root \"missing\" fs.read-text) @attempt 'err at 'data at 'reason at " ++
+            "'not-found match? {'kind 'user 'msg \"cleanup before failure delivery\"} assert) times", .{ .stack = "16384" });
+    }
+}
+
+test "fs: direct writers serialize chunks and preserve validation before admission" {
+    for ([_]session.Config{ .cooperative, .{ .worker_pool = 1 }, .{ .worker_pool = 4 } }) |config| {
+        var scratch = try Scratch.init();
+        defer scratch.deinit();
+        try runCase(scratch.filesystem(), config, "'root \"published\" fs.stage-dir 'stage set stage \"file\" fs.open-writer 'writer set " ++
+            "[] (writer [256] fs.write-chunk) @attempt 'err at 'kind at " ++
+            "32 range (pop [] (writer [65] fs.write-chunk) @spawn) each " ++
+            "(task.await 'ok at pop 0) each pop writer fs.commit-file stage fs.commit-dir " ++
+            "'root \"published/file\" fs.read-bytes dup len swap sum", .{ .stack = "'type 32 2080" });
+        try scratch.expectNoStaging(".");
+    }
+}
+
+test "fs: direct writer finalization joins admitted chunks" {
+    for ([_]session.Config{ .cooperative, .{ .worker_pool = 1 }, .{ .worker_pool = 4 } }) |config| {
+        var scratch = try Scratch.init();
+        defer scratch.deinit();
+        try runCase(scratch.filesystem(), config, "'root \"raced\" fs.open-writer 'writer set writer [65] fs.write-chunk " ++
+            "32 range (pop [] (writer [66] fs.write-chunk 1) @spawn) each 'tasks set " ++
+            "writer fs.commit-file tasks " ++
+            "(task.await dup 'ok dict.has? ('ok at first) " ++
+            "('err at 'kind at 'io match? {'kind 'user 'msg \"unadmitted write error\"} assert 0) if) each " ++
+            "sum 1 + 'root \"raced\" fs.read-bytes len =", .{ .stack = "1" });
+        try scratch.expectNoStaging(".");
+    }
+}
+
 test "fs: directory kinds and child errors retain public type precedence and context" {
     var scratch = try Scratch.init();
     defer scratch.deinit();

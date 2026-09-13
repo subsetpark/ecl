@@ -1,5 +1,169 @@
 # Shared runtime overhead
 
+## Direct filesystem runtime
+
+The direct filesystem iteration follows `7f737bc` and changes the target from
+reducing SDK overhead to retaining the pre-SDK filesystem performance envelope.
+`fs` dispatches to bounded runtime primitives. Archive extraction shares their
+confined resolver and atomic publication operations. The former `fs.core` and
+`archive.core` implementation registrations and ECL wrappers are removed;
+the documented `fs` and `archive` vocabulary remains available unconditionally.
+
+This restores the direct driver design from `b71fe554`, with the later public
+streaming and reservation contracts retained. Scope ownership, permanent staging
+dependencies, cancellation, readiness, and bounded retirement use the shared
+port and scheduler protocols. Writers reuse the common FIFO writer lane,
+including its prepared admission storage; sealing joins previously admitted
+chunks. Reservations hold admission across derived roots, and two-root
+operations claim each distinct reservation once. Archive extraction honors the
+stream limit and retains portable failure context through joined rollback.
+
+Filesystem and archive calls share a completion gate which retains success or
+failure until their existing bounded cleanup cursor releases admission. Cancelled
+execution transfers that same cursor to retirement. Extended directory churn
+exposed an inherited defect in both the pre-SDK binary and the first direct
+candidate: completed operations could occupy all quota while queued cleanup
+lagged, producing a false operation-limit error. The gate removes that dependency
+on retirement timing. The fixed build passed one warmup and five repetitions of
+131,072 directory creations and joined closures; both old controls reproduced
+the error. The preserved direct candidate also reproduced it at 4,096 resources.
+
+The native SDK and ABI remain at version 24. Network and process backends keep
+their SDK implementations. Filesystem calls use evaluator drivers as before the
+SDK migration; they do not promise that host filesystem syscalls cannot block.
+This decision removes the per-call ECL composition and native marshalling cost
+without introducing a second resource cleanup or worker lifecycle.
+
+Measurements use Zig 0.16.0, native x86_64 Linux 7.1.9-1-MANJARO,
+ReleaseSafe, identical affinity to CPUs 4 and 6, one warmup, and five fresh
+processes per variant with alternating order. Builds, tests, and profiling were
+stopped during timing; the unrelated host workload remained active. Compare
+these paired measurements, not absolute times from earlier sessions. Times
+include startup and joined shutdown, including the cooperative benchmark host.
+
+The final paired comparison uses the preserved pre-SDK binary, the initial
+direct candidate before joined completion, and the retained implementation:
+
+| Workload | Pre-SDK seconds | Initial direct seconds | Final direct seconds |
+|---|---:|---:|---:|
+| 10,000 stat, default pool | 0.211 | 0.201 | 0.197 |
+| 10,000 stat, one worker | 0.208 | 0.205 | 0.199 |
+| 10,000 stat, cooperative | 0.222 | 0.201 | 0.203 |
+| 100,000 stat, one worker | 1.768 | — | 1.610 |
+| 16 reads of 64 KiB, one worker | 0.037 | 0.039 | 0.038 |
+| 20 archive extractions and removals, one worker | 0.093 | 0.095 | 0.092 |
+| 64 writer chunks of 8 KiB, one worker | unavailable | 0.052 | 0.051 |
+
+Final default-pool stat has a five-run range of 0.196779–0.211301 seconds,
+versus 0.207327–0.221079 pre-SDK. The longer 100,000-call case improves 9.0%
+against pre-SDK, with disjoint ranges of 1.598282–1.632426 and
+1.727438–1.793596 seconds. Read and archive results overlap the pre-SDK ranges;
+no improvement over that baseline is claimed for them. The long directory stress
+completed in 4.599113–4.703103 seconds; failed old-control runs are not treated
+as valid timing comparisons.
+
+The preceding [SDK comparison](runtime-overhead-direct-fs-timing.json) measured
+33.386 seconds through the SDK versus 0.191 seconds for the initial direct
+candidate, a 174.5× improvement on default-pool stat. The final comparison above
+preserves that improvement within variation. The SDK direct-native control still
+takes 16.295 seconds for 10,000 requests, showing that removing the ECL wrappers
+alone would not recover the original envelope. The initial direct implementation
+also improved the streaming case 6.0×, with no additional timing cost established
+by the final paired comparison.
+
+The separate cooperative stat counter probe records 160,237 allocations and
+87,304 peak tracked bytes for the direct implementation, versus 4,747,156 and
+1,892,444 for the SDK predecessor. Pre-SDK records 160,213 allocations and
+the same 87,304-byte peak. Joined completion leaves allocation count and peak
+unchanged and adds one bounded cleanup turn per call: final root driver
+resumptions are 60,061, versus 18,400,768 through the SDK. Default-pool
+voluntary context switches have a median
+of one, versus 825,482 through the SDK. These are reductions in interpreter
+and lifecycle work, not a claim that filesystem syscalls became faster.
+
+The final [service repetitions](runtime-overhead-direct-fs-joined-services.json)
+sample interpreter threads and RSS through `/proc` every millisecond and verify
+results and joined cleanup. Each complete series has one warmup and five fresh
+processes. Earlier [control failures](runtime-overhead-direct-fs-failures.json)
+and interrupted [long-run](runtime-overhead-direct-fs-long-interrupted.json)
+and [service](runtime-overhead-direct-fs-services-interrupted.json) comparisons
+are retained separately, not silently folded into successful timing samples.
+
+| Service workload | Pre-SDK seconds | Initial direct seconds | Final direct seconds |
+|---|---:|---:|---:|
+| 4,096 directory resources, retaining 256 at once | 0.163 | 0.190 | 0.197 |
+| 10,000 stat calls | 0.200 | 0.185 | 0.191 |
+| 64 reads of 64 KiB | 0.040 | 0.042 | 0.042 |
+| Abandon eight trees of 128 directories | 0.158 | 0.153 | 0.153 |
+| 32 loopback connections | 0.166 | 0.175 | 0.176 |
+| 32 concurrent duplex processes | 2.846 | 2.878 | 2.843 |
+
+This is not exact parity for every filesystem workload. Directory churn remains
+20.8% slower than successful pre-SDK samples, and the 4 MiB read case is 5.1%
+slower, with disjoint ranges. Joined completion itself costs 3.4% in the sampled
+stat service and 3.5% in directory churn relative to the initial direct candidate;
+it fixes the reproduced quota error. Recursive cleanup remains within the old
+envelope. Network/process timing ranges overlap the immediate predecessor's.
+The earlier [SDK service comparison](runtime-overhead-direct-fs-services.json)
+measured 4.585 seconds for directory churn, 0.784 for reads, and 3.750 for tree
+cleanup, establishing that the large migration regressions are removed.
+
+Final stat and read peaks are one interpreter thread, versus four in the paired
+SDK service run; directory and staging workloads use three, versus four. Final
+median RSS is 6,320 KiB for stat, 6,708 for reads, 7,784 for directory resources,
+and 7,760 for staging cleanup. These remain above the pre-SDK medians of 5,788,
+6,300, 7,320, and 7,288 KiB, but below the SDK comparison's 10,592, 12,008,
+12,916, and 10,720 KiB. No claim of identical whole-process memory is made.
+
+Separate [profiling](runtime-overhead-direct-fs-profile.json) uses 131,072
+directory resources in cooperative execution, where both controls complete.
+The dominant pinned-CPU user-instruction count rises 4.0%, from 6,335,400,159
+to 6,590,799,992. This is a diagnostic, not another timing repetition. User-cycle
+samples put 19.8% of directory work and 35.1% of stat work in `memset`, with
+allocation, lookup, dispatch, and shared reclamation also prominent. The remaining
+directory cost is not explained solely by extra filesystem computation; shared
+resource initialization and coordination remain relevant bottlenecks.
+
+The [final latency and deep-cleanup probes](runtime-overhead-direct-fs-joined-extra.json)
+have overlapping ranges against the initial direct candidate. One-worker
+cancellation medians are 0.479 versus 0.498 ms; eight-worker medians are 1.246
+versus 1.223 ms. A 10,000-deep recursive cleanup remains about 42 ms in
+cooperative, one-worker, and eight-worker execution. These probes establish no
+repeatable fairness or unrelated cleanup regression.
+
+The raw [final paired measurements](runtime-overhead-direct-fs-joined-timing.json) retain
+programs, input hashes, artifact identities, elapsed/user/system time, context
+switches, and counter output. The `launch_peak_rss_kib` field is the `wait4` launch
+high-water mark, which includes inherited launcher memory and is not used as
+an interpreter-memory measurement (the initial report called this field
+`peak_rss_kib`). The separate service samples use `/proc`
+after exec for that purpose. The preserved pre-SDK CLI is `8aae611`; its
+benchmark harness was adapted to the current measurement interface without
+changing runtime code (harness patch SHA-256
+`cb7c82696f0db4771bf9cf4878181056e522fedf32929696f2a8533d6c23e04d`).
+`zig build install build-bench-workdrivers -Doptimize=ReleaseSafe` builds both
+timing and counter artifacts without executing a benchmark during compilation.
+
+Verification passed: `zig build check test-ports precommit
+-Dport-test-filter='fs:'`, `test-ports -Dport-test-filter='archive:'`, and
+initialized-Session allocation-failure sweeps with
+`test-oom-surfaces -Doom-filter=filesystem`, `directory`, and `archive`, and
+Ubuntu/glibc Docker `test-tsan`. New public tests cover reservation inheritance
+and pair admission, concurrent writer ordering, finalization joining admitted
+chunks, archive stream-limit rollback, and one-slot admission across 16,384
+directory operations followed by repeated failures. Their assertions were
+deliberately broken, observed failing, restored, and verified. The final joined
+completion and post-write cancellation paths passed all listed gates. Linux and
+macOS CI coverage remains unchanged; local execution was on Linux.
+
+The measured source patch against `7f737bc` has SHA-256
+`71f2c9b5ede64d5e3be248216f9ca12dbb33a55f0c6ad5f4de7f51b15a7f921f`.
+The ReleaseSafe CLI has SHA-256
+`566cc536755ce270afb3dbd728ed7067cd215af035be73131820132ac2a28e28`.
+The initial direct candidate's source patch was
+`9dd914c46e4ca690bf8a35e8e2c76425941037d3a5b9cfed6a82b0a3394abe67`,
+with CLI `920d710a0747ce53d9e0ad327f3616f74f355fdb13c7fb016f32df25cc568f81`.
+
 ## Bounded operation completion
 
 This iteration follows `2c6006c`. It retains coalescing of callback, result

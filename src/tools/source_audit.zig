@@ -26,21 +26,6 @@ const source_groups = [_]SourceGroup{
     .{ .production = true, .files = &.{"../extensions/git/git.zig"}, .sources = &.{source_audit_options.git_extension_source} },
     .{ .production = true, .files = &.{"../extensions/net/net.zig"}, .sources = &.{source_audit_options.net_extension_source} },
     .{ .production = true, .files = &.{"../extensions/proc/proc.zig"}, .sources = &.{source_audit_options.proc_extension_source} },
-    .{ .production = true, .files = &.{"../extensions/fs/algorithms.zig"}, .sources = &.{source_audit_options.fs_algorithms_source} },
-    .{ .production = true, .files = &.{"../extensions/fs/cursor.zig"}, .sources = &.{source_audit_options.fs_cursor_source} },
-    .{ .production = true, .files = &.{"../extensions/fs/encoding.zig"}, .sources = &.{source_audit_options.fs_encoding_source} },
-    .{ .production = true, .files = &.{"../extensions/fs/fs.zig"}, .sources = &.{source_audit_options.fs_fs_source} },
-    .{ .production = true, .files = &.{"../extensions/fs/lock.zig"}, .sources = &.{source_audit_options.fs_lock_source} },
-    .{ .production = true, .files = &.{"../extensions/fs/pair_request.zig"}, .sources = &.{source_audit_options.fs_pair_request_source} },
-    .{ .production = true, .files = &.{"../extensions/fs/publication.zig"}, .sources = &.{source_audit_options.fs_publication_source} },
-    .{ .production = true, .files = &.{"../extensions/fs/reader.zig"}, .sources = &.{source_audit_options.fs_reader_source} },
-    .{ .production = true, .files = &.{"../extensions/fs/request.zig"}, .sources = &.{source_audit_options.fs_request_source} },
-    .{ .production = true, .files = &.{"../extensions/fs/service.zig"}, .sources = &.{source_audit_options.fs_service_source} },
-    .{ .production = true, .files = &.{"../extensions/fs/staging.zig"}, .sources = &.{source_audit_options.fs_staging_source} },
-    .{ .production = true, .files = &.{"../extensions/fs/storage.zig"}, .sources = &.{source_audit_options.fs_storage_source} },
-    .{ .production = true, .files = &.{"../extensions/fs/support.zig"}, .sources = &.{source_audit_options.fs_support_source} },
-    .{ .production = true, .files = &.{"../extensions/fs/validation.zig"}, .sources = &.{source_audit_options.fs_validation_source} },
-    .{ .production = true, .files = &.{"../extensions/fs/writer.zig"}, .sources = &.{source_audit_options.fs_writer_source} },
     // Exact, non-rehashing map construction and resumable interning keep
     // user-sized storage work outside scheduler-native stacks.
     embeddedGroup(true, &.{
@@ -87,7 +72,7 @@ const source_groups = [_]SourceGroup{
     // Builtin-backed stdlib modules hold host authority the SDK withholds, so
     // they are ordinary production sources under the bounded-traversal rules.
     embeddedGroup(true, &.{
-        "stdlib/dict.zig",  "stdlib/rand.zig", "stdlib/json.zig",   "stdlib/http.zig", "stdlib/archive.zig",
+        "stdlib/dict.zig",  "stdlib/rand.zig", "stdlib/json.zig",   "stdlib/http.zig", "stdlib/archive.zig", "stdlib/fs.zig",
         "stdlib/clock.zig", "stdlib/time.zig", "stdlib/source.zig", "stdlib/host.zig",
     }),
     embeddedGroup(true, &.{
@@ -104,9 +89,9 @@ const source_groups = [_]SourceGroup{
     // Explicit continuation state is part of the kernel correctness boundary;
     // native-stack traversals could not yield.
     embeddedGroup(true, &.{
-        "kernel_support.zig",  "kernels.zig",      "kernel_storage.zig",   "kernel_numeric.zig",
-        "kernel_sequence.zig", "kernel_order.zig", "kernel_dict_text.zig", "idioms.zig",
-        "kernel_random.zig",   "kernel_flat.zig",
+        "kernel_support.zig",  "kernels.zig",      "kernel_storage.zig",    "kernel_numeric.zig",
+        "kernel_sequence.zig", "kernel_order.zig", "kernel_dict_text.zig",  "idioms.zig",
+        "kernel_random.zig",   "kernel_flat.zig",  "driver_completion.zig",
     }),
     embeddedGroup(false, &.{
         "source_audit.zig",               "tools/source_audit.zig",
@@ -118,11 +103,11 @@ const source_groups = [_]SourceGroup{
     // vocabulary in external.zig and are opened only by their Session-owned
     // owner.
     embeddedGroup(true, &.{
-        "scheduler.zig",    "scheduler_core.zig",  "external.zig",          "console.zig",        "task_prims.zig",      "archive_document.zig",
-        "byte_ring.zig",    "port_transfer.zig",   "port_controller.zig",   "port_message.zig",   "port_failure.zig",    "port_builder.zig",
-        "port_bytes.zig",   "port_messages.zig",   "port_declarations.zig", "port_resource.zig",  "module_bindings.zig", "port_endpoint.zig",
-        "port_result.zig",  "port_error_data.zig", "port_exchange.zig",     "port_operation.zig", "port_service.zig",    "port_factory.zig",
-        "http_service.zig",
+        "scheduler.zig",    "scheduler_core.zig",  "external.zig",           "console.zig",         "task_prims.zig",      "archive_document.zig",
+        "byte_ring.zig",    "port_transfer.zig",   "port_controller.zig",    "port_message.zig",    "port_failure.zig",    "port_builder.zig",
+        "port_bytes.zig",   "port_messages.zig",   "port_declarations.zig",  "port_resource.zig",   "module_bindings.zig", "port_endpoint.zig",
+        "port_result.zig",  "port_error_data.zig", "port_exchange.zig",      "port_operation.zig",  "port_service.zig",    "port_factory.zig",
+        "http_service.zig", "filesystem_port.zig", "directory_resource.zig", "directory_stage.zig", "directory_order.zig", "filesystem_stream.zig",
     }),
     // The installed author SDK, its sized ABI records, validation, loader,
     // and transactional-call boundary form one separately rooted component.
@@ -765,7 +750,7 @@ fn auditSourceBodies() bool {
 /// function and a word spelling is text. Among the modules that implement
 /// evaluated filesystem words, none may name the working directory; the
 /// owners that open trusted host paths once at Session construction
-/// (the isolated filesystem SDK module) and the CLI, map
+/// (`filesystem_port.zig`, `directory_resource.zig`) and the CLI, map
 /// discovery, and module-loading host boundaries do so by design.
 fn auditFilesystemAuthority() bool {
     var failed = false;
@@ -786,6 +771,12 @@ fn auditFilesystemAuthority() bool {
             failed = auditTokens(name, text, &unbounded_sorting) or failed;
         }
     }
+    failed = auditProductionFunctionTokenPair(
+        "filesystem_port.zig",
+        @embedFile("../filesystem_port.zig"),
+        "step",
+        "cwd",
+    ) or failed;
     const removed_words = [_][]const u8{ "slurp", "spit", "lines" };
     const console_module = @embedFile("../stdlib/io.zig");
     for (removed_words) |name| {
@@ -1052,8 +1043,6 @@ const first_party_definition_sources = [_][:0]const u8{
     @embedFile("../prelude.ecl"),
     @embedFile("../stdlib/port.ecl"),
     @embedFile("../stdlib/proc.ecl"),
-    @embedFile("../stdlib/fs.ecl"),
-    @embedFile("../stdlib/archive.ecl"),
     @embedFile("../stdlib/net.ecl"),
     @embedFile("../stdlib/result.ecl"),
     @embedFile("../stdlib/str.ecl"),

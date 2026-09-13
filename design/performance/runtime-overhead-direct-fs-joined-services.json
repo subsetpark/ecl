@@ -1,0 +1,1104 @@
+{
+  "optimization": "ReleaseSafe",
+  "target": "x86_64-linux",
+  "affinity": [
+    4,
+    6
+  ],
+  "artifacts": {
+    "pre-sdk": {
+      "path": "/home/zax/.cache/ecl-instance-verification/baseline/zig-out/bin/ecl",
+      "sha256": "29369868a797e4bf1c897f49b7b9b21f43cb072b58b0ed332db9b6ba8458a1de"
+    },
+    "prejoin": {
+      "path": "/home/zax/.cache/ecl-overhead/direct-fs-prejoin-out/bin/ecl",
+      "sha256": "920d710a0747ce53d9e0ad327f3616f74f355fdb13c7fb016f32df25cc568f81"
+    },
+    "direct": {
+      "path": "/home/zax/.cache/ecl-overhead/direct-fs-out/bin/ecl",
+      "sha256": "566cc536755ce270afb3dbd728ed7067cd215af035be73131820132ac2a28e28"
+    }
+  },
+  "measurements": [
+    {
+      "iteration": 0,
+      "variant": "pre-sdk",
+      "case": "filesystem-directory-resources",
+      "source": "16 (256 range (pop 'cwd \".\" fs.child-dir) each (port.close 0) each pop) times 4096",
+      "seconds": 0.17155896098120138,
+      "units_per_second": 23875.173739533315,
+      "threads": 3,
+      "rss_kib": 7320
+    },
+    {
+      "iteration": 0,
+      "variant": "prejoin",
+      "case": "filesystem-directory-resources",
+      "source": "16 (256 range (pop 'cwd \".\" fs.child-dir) each (port.close 0) each pop) times 4096",
+      "seconds": 0.1923443530104123,
+      "units_per_second": 21295.14038698224,
+      "threads": 3,
+      "rss_kib": 8048
+    },
+    {
+      "iteration": 0,
+      "variant": "direct",
+      "case": "filesystem-directory-resources",
+      "source": "16 (256 range (pop 'cwd \".\" fs.child-dir) each (port.close 0) each pop) times 4096",
+      "seconds": 0.19329234800534323,
+      "units_per_second": 21190.69917804906,
+      "threads": 3,
+      "rss_kib": 7596
+    },
+    {
+      "iteration": 0,
+      "variant": "pre-sdk",
+      "case": "filesystem-stat",
+      "source": "10000 ('cwd \"data\" fs.stat pop) times 10000",
+      "seconds": 0.20296086600865237,
+      "units_per_second": 49270.58204202623,
+      "threads": 1,
+      "rss_kib": 5788
+    },
+    {
+      "iteration": 0,
+      "variant": "prejoin",
+      "case": "filesystem-stat",
+      "source": "10000 ('cwd \"data\" fs.stat pop) times 10000",
+      "seconds": 0.18561615500948392,
+      "units_per_second": 53874.620985921494,
+      "threads": 1,
+      "rss_kib": 6904
+    },
+    {
+      "iteration": 0,
+      "variant": "direct",
+      "case": "filesystem-stat",
+      "source": "10000 ('cwd \"data\" fs.stat pop) times 10000",
+      "seconds": 0.19081876298878342,
+      "units_per_second": 52405.74796403964,
+      "threads": 1,
+      "rss_kib": 6324
+    },
+    {
+      "iteration": 0,
+      "variant": "pre-sdk",
+      "case": "filesystem-read",
+      "source": "64 ('cwd \"data\" fs.read-bytes len 65536 = {'kind 'user 'msg \"benchmark result\"} assert) times 4194304",
+      "seconds": 0.039944971998920664,
+      "units_per_second": 105002051.32484089,
+      "threads": 1,
+      "rss_kib": 6300
+    },
+    {
+      "iteration": 0,
+      "variant": "prejoin",
+      "case": "filesystem-read",
+      "source": "64 ('cwd \"data\" fs.read-bytes len 65536 = {'kind 'user 'msg \"benchmark result\"} assert) times 4194304",
+      "seconds": 0.04220149401226081,
+      "units_per_second": 99387571.41587044,
+      "threads": 1,
+      "rss_kib": 7604
+    },
+    {
+      "iteration": 0,
+      "variant": "direct",
+      "case": "filesystem-read",
+      "source": "64 ('cwd \"data\" fs.read-bytes len 65536 = {'kind 'user 'msg \"benchmark result\"} assert) times 4194304",
+      "seconds": 0.04343012999743223,
+      "units_per_second": 96575902.49552521,
+      "threads": 1,
+      "rss_kib": 6708
+    },
+    {
+      "iteration": 0,
+      "variant": "pre-sdk",
+      "case": "filesystem-staging-cleanup",
+      "source": "8 ('cwd \"published\" fs.stage-dir 's set 128 range (str s swap fs.mkdirs 0) each pop s port.close) times 1024",
+      "seconds": 0.16436567102209665,
+      "units_per_second": 6230.011374226298,
+      "threads": 3,
+      "rss_kib": 7096
+    },
+    {
+      "iteration": 0,
+      "variant": "prejoin",
+      "case": "filesystem-staging-cleanup",
+      "source": "8 ('cwd \"published\" fs.stage-dir 's set 128 range (str s swap fs.mkdirs 0) each pop s port.close) times 1024",
+      "seconds": 0.1499065679963678,
+      "units_per_second": 6830.921511222985,
+      "threads": 3,
+      "rss_kib": 8208
+    },
+    {
+      "iteration": 0,
+      "variant": "direct",
+      "case": "filesystem-staging-cleanup",
+      "source": "8 ('cwd \"published\" fs.stage-dir 's set 128 range (str s swap fs.mkdirs 0) each pop s port.close) times 1024",
+      "seconds": 0.15576298400992528,
+      "units_per_second": 6574.090798971534,
+      "threads": 3,
+      "rss_kib": 7756
+    },
+    {
+      "iteration": 0,
+      "variant": "pre-sdk",
+      "case": "network-connections",
+      "source": "{'address \"127.0.0.1\" 'port 0} net.listen 'l set l net.local-address 'port at str io.print 32 range (pop l net.accept) each 'clients set l net.close clients (dup 1 net.read [65] match? {'kind 'user 'msg \"benchmark result\"} assert net.close 0) each pop 32",
+      "seconds": 0.1809003600210417,
+      "units_per_second": 176.8929591753044,
+      "threads": 136,
+      "rss_kib": 48248
+    },
+    {
+      "iteration": 0,
+      "variant": "prejoin",
+      "case": "network-connections",
+      "source": "{'address \"127.0.0.1\" 'port 0} net.listen 'l set l net.local-address 'port at str io.print 32 range (pop l net.accept) each 'clients set l net.close clients (dup 1 net.read [65] match? {'kind 'user 'msg \"benchmark result\"} assert net.close 0) each pop 32",
+      "seconds": 0.17343334900215268,
+      "units_per_second": 184.50892048220098,
+      "threads": 135,
+      "rss_kib": 55516
+    },
+    {
+      "iteration": 0,
+      "variant": "direct",
+      "case": "network-connections",
+      "source": "{'address \"127.0.0.1\" 'port 0} net.listen 'l set l net.local-address 'port at str io.print 32 range (pop l net.accept) each 'clients set l net.close clients (dup 1 net.read [65] match? {'kind 'user 'msg \"benchmark result\"} assert net.close 0) each pop 32",
+      "seconds": 0.17563805999816395,
+      "units_per_second": 182.19285729035332,
+      "threads": 135,
+      "rss_kib": 54624
+    },
+    {
+      "iteration": 0,
+      "variant": "pre-sdk",
+      "case": "process-duplex",
+      "source": "4096 range 256 mod 'payload set 32 range (pop [] ({'executable \"/bin/cat\"} 'stdin payload dict.put proc.run 'stdout at len) @spawn) each (task.await 'ok at first) each sum 131072 = {'kind 'user 'msg \"benchmark result\"} assert 32",
+      "seconds": 2.8742907179985195,
+      "units_per_second": 11.133181413981271,
+      "threads": 228,
+      "rss_kib": 77972
+    },
+    {
+      "iteration": 0,
+      "variant": "prejoin",
+      "case": "process-duplex",
+      "source": "4096 range 256 mod 'payload set 32 range (pop [] ({'executable \"/bin/cat\"} 'stdin payload dict.put proc.run 'stdout at len) @spawn) each (task.await 'ok at first) each sum 131072 = {'kind 'user 'msg \"benchmark result\"} assert 32",
+      "seconds": 2.6737757789960597,
+      "units_per_second": 11.96809405312784,
+      "threads": 228,
+      "rss_kib": 86592
+    },
+    {
+      "iteration": 0,
+      "variant": "direct",
+      "case": "process-duplex",
+      "source": "4096 range 256 mod 'payload set 32 range (pop [] ({'executable \"/bin/cat\"} 'stdin payload dict.put proc.run 'stdout at len) @spawn) each (task.await 'ok at first) each sum 131072 = {'kind 'user 'msg \"benchmark result\"} assert 32",
+      "seconds": 2.7515771749895066,
+      "units_per_second": 11.629693795567277,
+      "threads": 228,
+      "rss_kib": 85632
+    },
+    {
+      "iteration": 1,
+      "variant": "direct",
+      "case": "process-duplex",
+      "source": "4096 range 256 mod 'payload set 32 range (pop [] ({'executable \"/bin/cat\"} 'stdin payload dict.put proc.run 'stdout at len) @spawn) each (task.await 'ok at first) each sum 131072 = {'kind 'user 'msg \"benchmark result\"} assert 32",
+      "seconds": 2.8430249440134503,
+      "units_per_second": 11.255617038247347,
+      "threads": 228,
+      "rss_kib": 85844
+    },
+    {
+      "iteration": 1,
+      "variant": "prejoin",
+      "case": "process-duplex",
+      "source": "4096 range 256 mod 'payload set 32 range (pop [] ({'executable \"/bin/cat\"} 'stdin payload dict.put proc.run 'stdout at len) @spawn) each (task.await 'ok at first) each sum 131072 = {'kind 'user 'msg \"benchmark result\"} assert 32",
+      "seconds": 2.633050747012021,
+      "units_per_second": 12.153202909709778,
+      "threads": 228,
+      "rss_kib": 86248
+    },
+    {
+      "iteration": 1,
+      "variant": "pre-sdk",
+      "case": "process-duplex",
+      "source": "4096 range 256 mod 'payload set 32 range (pop [] ({'executable \"/bin/cat\"} 'stdin payload dict.put proc.run 'stdout at len) @spawn) each (task.await 'ok at first) each sum 131072 = {'kind 'user 'msg \"benchmark result\"} assert 32",
+      "seconds": 2.8455020940164104,
+      "units_per_second": 11.245818468132693,
+      "threads": 228,
+      "rss_kib": 77608
+    },
+    {
+      "iteration": 1,
+      "variant": "direct",
+      "case": "network-connections",
+      "source": "{'address \"127.0.0.1\" 'port 0} net.listen 'l set l net.local-address 'port at str io.print 32 range (pop l net.accept) each 'clients set l net.close clients (dup 1 net.read [65] match? {'kind 'user 'msg \"benchmark result\"} assert net.close 0) each pop 32",
+      "seconds": 0.17591960899881087,
+      "units_per_second": 181.90126832430775,
+      "threads": 136,
+      "rss_kib": 54636
+    },
+    {
+      "iteration": 1,
+      "variant": "prejoin",
+      "case": "network-connections",
+      "source": "{'address \"127.0.0.1\" 'port 0} net.listen 'l set l net.local-address 'port at str io.print 32 range (pop l net.accept) each 'clients set l net.close clients (dup 1 net.read [65] match? {'kind 'user 'msg \"benchmark result\"} assert net.close 0) each pop 32",
+      "seconds": 0.17531900000176392,
+      "units_per_second": 182.52442689998256,
+      "threads": 135,
+      "rss_kib": 55524
+    },
+    {
+      "iteration": 1,
+      "variant": "pre-sdk",
+      "case": "network-connections",
+      "source": "{'address \"127.0.0.1\" 'port 0} net.listen 'l set l net.local-address 'port at str io.print 32 range (pop l net.accept) each 'clients set l net.close clients (dup 1 net.read [65] match? {'kind 'user 'msg \"benchmark result\"} assert net.close 0) each pop 32",
+      "seconds": 0.16783150398987345,
+      "units_per_second": 190.66742083137623,
+      "threads": 136,
+      "rss_kib": 48052
+    },
+    {
+      "iteration": 1,
+      "variant": "direct",
+      "case": "filesystem-staging-cleanup",
+      "source": "8 ('cwd \"published\" fs.stage-dir 's set 128 range (str s swap fs.mkdirs 0) each pop s port.close) times 1024",
+      "seconds": 0.15165849099867046,
+      "units_per_second": 6752.012322270681,
+      "threads": 3,
+      "rss_kib": 7760
+    },
+    {
+      "iteration": 1,
+      "variant": "prejoin",
+      "case": "filesystem-staging-cleanup",
+      "source": "8 ('cwd \"published\" fs.stage-dir 's set 128 range (str s swap fs.mkdirs 0) each pop s port.close) times 1024",
+      "seconds": 0.1506936089717783,
+      "units_per_second": 6795.245047132512,
+      "threads": 3,
+      "rss_kib": 8208
+    },
+    {
+      "iteration": 1,
+      "variant": "pre-sdk",
+      "case": "filesystem-staging-cleanup",
+      "source": "8 ('cwd \"published\" fs.stage-dir 's set 128 range (str s swap fs.mkdirs 0) each pop s port.close) times 1024",
+      "seconds": 0.15364026499446481,
+      "units_per_second": 6664.919512062099,
+      "threads": 3,
+      "rss_kib": 7284
+    },
+    {
+      "iteration": 1,
+      "variant": "direct",
+      "case": "filesystem-read",
+      "source": "64 ('cwd \"data\" fs.read-bytes len 65536 = {'kind 'user 'msg \"benchmark result\"} assert) times 4194304",
+      "seconds": 0.04186053600278683,
+      "units_per_second": 100197092.54847495,
+      "threads": 1,
+      "rss_kib": 6704
+    },
+    {
+      "iteration": 1,
+      "variant": "prejoin",
+      "case": "filesystem-read",
+      "source": "64 ('cwd \"data\" fs.read-bytes len 65536 = {'kind 'user 'msg \"benchmark result\"} assert) times 4194304",
+      "seconds": 0.04284092999296263,
+      "units_per_second": 97904130.48197104,
+      "threads": 1,
+      "rss_kib": 7604
+    },
+    {
+      "iteration": 1,
+      "variant": "pre-sdk",
+      "case": "filesystem-read",
+      "source": "64 ('cwd \"data\" fs.read-bytes len 65536 = {'kind 'user 'msg \"benchmark result\"} assert) times 4194304",
+      "seconds": 0.040666726999916136,
+      "units_per_second": 103138469.93412206,
+      "threads": 1,
+      "rss_kib": 6300
+    },
+    {
+      "iteration": 1,
+      "variant": "direct",
+      "case": "filesystem-stat",
+      "source": "10000 ('cwd \"data\" fs.stat pop) times 10000",
+      "seconds": 0.19244807498762384,
+      "units_per_second": 51962.06821316914,
+      "threads": 1,
+      "rss_kib": 6320
+    },
+    {
+      "iteration": 1,
+      "variant": "prejoin",
+      "case": "filesystem-stat",
+      "source": "10000 ('cwd \"data\" fs.stat pop) times 10000",
+      "seconds": 0.18526555801508948,
+      "units_per_second": 53976.57345023364,
+      "threads": 1,
+      "rss_kib": 6904
+    },
+    {
+      "iteration": 1,
+      "variant": "pre-sdk",
+      "case": "filesystem-stat",
+      "source": "10000 ('cwd \"data\" fs.stat pop) times 10000",
+      "seconds": 0.201444399979664,
+      "units_per_second": 49641.48917025993,
+      "threads": 1,
+      "rss_kib": 5788
+    },
+    {
+      "iteration": 1,
+      "variant": "direct",
+      "case": "filesystem-directory-resources",
+      "source": "16 (256 range (pop 'cwd \".\" fs.child-dir) each (port.close 0) each pop) times 4096",
+      "seconds": 0.19677364701055922,
+      "units_per_second": 20815.79552052619,
+      "threads": 3,
+      "rss_kib": 7784
+    },
+    {
+      "iteration": 1,
+      "variant": "prejoin",
+      "case": "filesystem-directory-resources",
+      "source": "16 (256 range (pop 'cwd \".\" fs.child-dir) each (port.close 0) each pop) times 4096",
+      "seconds": 0.1927631619910244,
+      "units_per_second": 21248.873268590196,
+      "threads": 3,
+      "rss_kib": 8044
+    },
+    {
+      "iteration": 1,
+      "variant": "pre-sdk",
+      "case": "filesystem-directory-resources",
+      "source": "16 (256 range (pop 'cwd \".\" fs.child-dir) each (port.close 0) each pop) times 4096",
+      "seconds": 0.16282749301171862,
+      "units_per_second": 25155.457006914752,
+      "threads": 3,
+      "rss_kib": 7320
+    },
+    {
+      "iteration": 2,
+      "variant": "pre-sdk",
+      "case": "filesystem-directory-resources",
+      "source": "16 (256 range (pop 'cwd \".\" fs.child-dir) each (port.close 0) each pop) times 4096",
+      "seconds": 0.1596408790210262,
+      "units_per_second": 25657.588614633714,
+      "threads": 3,
+      "rss_kib": 7324
+    },
+    {
+      "iteration": 2,
+      "variant": "prejoin",
+      "case": "filesystem-directory-resources",
+      "source": "16 (256 range (pop 'cwd \".\" fs.child-dir) each (port.close 0) each pop) times 4096",
+      "seconds": 0.18836324400035664,
+      "units_per_second": 21745.21904067571,
+      "threads": 3,
+      "rss_kib": 8236
+    },
+    {
+      "iteration": 2,
+      "variant": "direct",
+      "case": "filesystem-directory-resources",
+      "source": "16 (256 range (pop 'cwd \".\" fs.child-dir) each (port.close 0) each pop) times 4096",
+      "seconds": 0.19254064798587933,
+      "units_per_second": 21273.43001515397,
+      "threads": 3,
+      "rss_kib": 7592
+    },
+    {
+      "iteration": 2,
+      "variant": "pre-sdk",
+      "case": "filesystem-stat",
+      "source": "10000 ('cwd \"data\" fs.stat pop) times 10000",
+      "seconds": 0.2050147090048995,
+      "units_per_second": 48776.987995339485,
+      "threads": 1,
+      "rss_kib": 5788
+    },
+    {
+      "iteration": 2,
+      "variant": "prejoin",
+      "case": "filesystem-stat",
+      "source": "10000 ('cwd \"data\" fs.stat pop) times 10000",
+      "seconds": 0.18319693699595518,
+      "units_per_second": 54586.065487660366,
+      "threads": 1,
+      "rss_kib": 6904
+    },
+    {
+      "iteration": 2,
+      "variant": "direct",
+      "case": "filesystem-stat",
+      "source": "10000 ('cwd \"data\" fs.stat pop) times 10000",
+      "seconds": 0.19174491200828925,
+      "units_per_second": 52152.622436039885,
+      "threads": 1,
+      "rss_kib": 6320
+    },
+    {
+      "iteration": 2,
+      "variant": "pre-sdk",
+      "case": "filesystem-read",
+      "source": "64 ('cwd \"data\" fs.read-bytes len 65536 = {'kind 'user 'msg \"benchmark result\"} assert) times 4194304",
+      "seconds": 0.0401195950107649,
+      "units_per_second": 104545023.41996682,
+      "threads": 1,
+      "rss_kib": 6296
+    },
+    {
+      "iteration": 2,
+      "variant": "prejoin",
+      "case": "filesystem-read",
+      "source": "64 ('cwd \"data\" fs.read-bytes len 65536 = {'kind 'user 'msg \"benchmark result\"} assert) times 4194304",
+      "seconds": 0.042054836987517774,
+      "units_per_second": 99734163.78346454,
+      "threads": 1,
+      "rss_kib": 7604
+    },
+    {
+      "iteration": 2,
+      "variant": "direct",
+      "case": "filesystem-read",
+      "source": "64 ('cwd \"data\" fs.read-bytes len 65536 = {'kind 'user 'msg \"benchmark result\"} assert) times 4194304",
+      "seconds": 0.04234963800990954,
+      "units_per_second": 99039902.04163162,
+      "threads": 1,
+      "rss_kib": 6708
+    },
+    {
+      "iteration": 2,
+      "variant": "pre-sdk",
+      "case": "filesystem-staging-cleanup",
+      "source": "8 ('cwd \"published\" fs.stage-dir 's set 128 range (str s swap fs.mkdirs 0) each pop s port.close) times 1024",
+      "seconds": 0.16225023299921304,
+      "units_per_second": 6311.239010701246,
+      "threads": 3,
+      "rss_kib": 7288
+    },
+    {
+      "iteration": 2,
+      "variant": "prejoin",
+      "case": "filesystem-staging-cleanup",
+      "source": "8 ('cwd \"published\" fs.stage-dir 's set 128 range (str s swap fs.mkdirs 0) each pop s port.close) times 1024",
+      "seconds": 0.15371793101076037,
+      "units_per_second": 6661.552060106243,
+      "threads": 3,
+      "rss_kib": 8204
+    },
+    {
+      "iteration": 2,
+      "variant": "direct",
+      "case": "filesystem-staging-cleanup",
+      "source": "8 ('cwd \"published\" fs.stage-dir 's set 128 range (str s swap fs.mkdirs 0) each pop s port.close) times 1024",
+      "seconds": 0.1519468299811706,
+      "units_per_second": 6739.199495816366,
+      "threads": 3,
+      "rss_kib": 7760
+    },
+    {
+      "iteration": 2,
+      "variant": "pre-sdk",
+      "case": "network-connections",
+      "source": "{'address \"127.0.0.1\" 'port 0} net.listen 'l set l net.local-address 'port at str io.print 32 range (pop l net.accept) each 'clients set l net.close clients (dup 1 net.read [65] match? {'kind 'user 'msg \"benchmark result\"} assert net.close 0) each pop 32",
+      "seconds": 0.16657994501292706,
+      "units_per_second": 192.09995535487008,
+      "threads": 136,
+      "rss_kib": 48056
+    },
+    {
+      "iteration": 2,
+      "variant": "prejoin",
+      "case": "network-connections",
+      "source": "{'address \"127.0.0.1\" 'port 0} net.listen 'l set l net.local-address 'port at str io.print 32 range (pop l net.accept) each 'clients set l net.close clients (dup 1 net.read [65] match? {'kind 'user 'msg \"benchmark result\"} assert net.close 0) each pop 32",
+      "seconds": 0.1754758489842061,
+      "units_per_second": 182.36127755039496,
+      "threads": 136,
+      "rss_kib": 55524
+    },
+    {
+      "iteration": 2,
+      "variant": "direct",
+      "case": "network-connections",
+      "source": "{'address \"127.0.0.1\" 'port 0} net.listen 'l set l net.local-address 'port at str io.print 32 range (pop l net.accept) each 'clients set l net.close clients (dup 1 net.read [65] match? {'kind 'user 'msg \"benchmark result\"} assert net.close 0) each pop 32",
+      "seconds": 0.17075443000067025,
+      "units_per_second": 187.40362987873516,
+      "threads": 135,
+      "rss_kib": 54716
+    },
+    {
+      "iteration": 2,
+      "variant": "pre-sdk",
+      "case": "process-duplex",
+      "source": "4096 range 256 mod 'payload set 32 range (pop [] ({'executable \"/bin/cat\"} 'stdin payload dict.put proc.run 'stdout at len) @spawn) each (task.await 'ok at first) each sum 131072 = {'kind 'user 'msg \"benchmark result\"} assert 32",
+      "seconds": 2.8122677500068676,
+      "units_per_second": 11.37871740694742,
+      "threads": 228,
+      "rss_kib": 77660
+    },
+    {
+      "iteration": 2,
+      "variant": "prejoin",
+      "case": "process-duplex",
+      "source": "4096 range 256 mod 'payload set 32 range (pop [] ({'executable \"/bin/cat\"} 'stdin payload dict.put proc.run 'stdout at len) @spawn) each (task.await 'ok at first) each sum 131072 = {'kind 'user 'msg \"benchmark result\"} assert 32",
+      "seconds": 2.7436598670028616,
+      "units_per_second": 11.663253300765879,
+      "threads": 228,
+      "rss_kib": 85672
+    },
+    {
+      "iteration": 2,
+      "variant": "direct",
+      "case": "process-duplex",
+      "source": "4096 range 256 mod 'payload set 32 range (pop [] ({'executable \"/bin/cat\"} 'stdin payload dict.put proc.run 'stdout at len) @spawn) each (task.await 'ok at first) each sum 131072 = {'kind 'user 'msg \"benchmark result\"} assert 32",
+      "seconds": 2.912033355998574,
+      "units_per_second": 10.98888511496009,
+      "threads": 228,
+      "rss_kib": 85600
+    },
+    {
+      "iteration": 3,
+      "variant": "direct",
+      "case": "process-duplex",
+      "source": "4096 range 256 mod 'payload set 32 range (pop [] ({'executable \"/bin/cat\"} 'stdin payload dict.put proc.run 'stdout at len) @spawn) each (task.await 'ok at first) each sum 131072 = {'kind 'user 'msg \"benchmark result\"} assert 32",
+      "seconds": 2.70192564901663,
+      "units_per_second": 11.843405095786574,
+      "threads": 228,
+      "rss_kib": 85436
+    },
+    {
+      "iteration": 3,
+      "variant": "prejoin",
+      "case": "process-duplex",
+      "source": "4096 range 256 mod 'payload set 32 range (pop [] ({'executable \"/bin/cat\"} 'stdin payload dict.put proc.run 'stdout at len) @spawn) each (task.await 'ok at first) each sum 131072 = {'kind 'user 'msg \"benchmark result\"} assert 32",
+      "seconds": 2.9517313399992418,
+      "units_per_second": 10.841095043564575,
+      "threads": 228,
+      "rss_kib": 86636
+    },
+    {
+      "iteration": 3,
+      "variant": "pre-sdk",
+      "case": "process-duplex",
+      "source": "4096 range 256 mod 'payload set 32 range (pop [] ({'executable \"/bin/cat\"} 'stdin payload dict.put proc.run 'stdout at len) @spawn) each (task.await 'ok at first) each sum 131072 = {'kind 'user 'msg \"benchmark result\"} assert 32",
+      "seconds": 2.8647678809938952,
+      "units_per_second": 11.170189463621744,
+      "threads": 228,
+      "rss_kib": 77976
+    },
+    {
+      "iteration": 3,
+      "variant": "direct",
+      "case": "network-connections",
+      "source": "{'address \"127.0.0.1\" 'port 0} net.listen 'l set l net.local-address 'port at str io.print 32 range (pop l net.accept) each 'clients set l net.close clients (dup 1 net.read [65] match? {'kind 'user 'msg \"benchmark result\"} assert net.close 0) each pop 32",
+      "seconds": 0.1757532049959991,
+      "units_per_second": 182.0734933438537,
+      "threads": 135,
+      "rss_kib": 54632
+    },
+    {
+      "iteration": 3,
+      "variant": "prejoin",
+      "case": "network-connections",
+      "source": "{'address \"127.0.0.1\" 'port 0} net.listen 'l set l net.local-address 'port at str io.print 32 range (pop l net.accept) each 'clients set l net.close clients (dup 1 net.read [65] match? {'kind 'user 'msg \"benchmark result\"} assert net.close 0) each pop 32",
+      "seconds": 0.1678803240065463,
+      "units_per_second": 190.61197427014852,
+      "threads": 136,
+      "rss_kib": 55532
+    },
+    {
+      "iteration": 3,
+      "variant": "pre-sdk",
+      "case": "network-connections",
+      "source": "{'address \"127.0.0.1\" 'port 0} net.listen 'l set l net.local-address 'port at str io.print 32 range (pop l net.accept) each 'clients set l net.close clients (dup 1 net.read [65] match? {'kind 'user 'msg \"benchmark result\"} assert net.close 0) each pop 32",
+      "seconds": 0.1629603150067851,
+      "units_per_second": 196.3668270932566,
+      "threads": 136,
+      "rss_kib": 48176
+    },
+    {
+      "iteration": 3,
+      "variant": "direct",
+      "case": "filesystem-staging-cleanup",
+      "source": "8 ('cwd \"published\" fs.stage-dir 's set 128 range (str s swap fs.mkdirs 0) each pop s port.close) times 1024",
+      "seconds": 0.1561131639755331,
+      "units_per_second": 6559.344349464897,
+      "threads": 3,
+      "rss_kib": 7760
+    },
+    {
+      "iteration": 3,
+      "variant": "prejoin",
+      "case": "filesystem-staging-cleanup",
+      "source": "8 ('cwd \"published\" fs.stage-dir 's set 128 range (str s swap fs.mkdirs 0) each pop s port.close) times 1024",
+      "seconds": 0.15420847601490095,
+      "units_per_second": 6640.36132424428,
+      "threads": 3,
+      "rss_kib": 8116
+    },
+    {
+      "iteration": 3,
+      "variant": "pre-sdk",
+      "case": "filesystem-staging-cleanup",
+      "source": "8 ('cwd \"published\" fs.stage-dir 's set 128 range (str s swap fs.mkdirs 0) each pop s port.close) times 1024",
+      "seconds": 0.15778216600301675,
+      "units_per_second": 6489.960341781728,
+      "threads": 3,
+      "rss_kib": 7292
+    },
+    {
+      "iteration": 3,
+      "variant": "direct",
+      "case": "filesystem-read",
+      "source": "64 ('cwd \"data\" fs.read-bytes len 65536 = {'kind 'user 'msg \"benchmark result\"} assert) times 4194304",
+      "seconds": 0.042314644990256056,
+      "units_per_second": 99121805.25125137,
+      "threads": 1,
+      "rss_kib": 6708
+    },
+    {
+      "iteration": 3,
+      "variant": "prejoin",
+      "case": "filesystem-read",
+      "source": "64 ('cwd \"data\" fs.read-bytes len 65536 = {'kind 'user 'msg \"benchmark result\"} assert) times 4194304",
+      "seconds": 0.04166618498857133,
+      "units_per_second": 100664459.7087653,
+      "threads": 1,
+      "rss_kib": 7600
+    },
+    {
+      "iteration": 3,
+      "variant": "pre-sdk",
+      "case": "filesystem-read",
+      "source": "64 ('cwd \"data\" fs.read-bytes len 65536 = {'kind 'user 'msg \"benchmark result\"} assert) times 4194304",
+      "seconds": 0.04013610500260256,
+      "units_per_second": 104502018.81144239,
+      "threads": 1,
+      "rss_kib": 6300
+    },
+    {
+      "iteration": 3,
+      "variant": "direct",
+      "case": "filesystem-stat",
+      "source": "10000 ('cwd \"data\" fs.stat pop) times 10000",
+      "seconds": 0.18905463098781183,
+      "units_per_second": 52894.7635281396,
+      "threads": 1,
+      "rss_kib": 6324
+    },
+    {
+      "iteration": 3,
+      "variant": "prejoin",
+      "case": "filesystem-stat",
+      "source": "10000 ('cwd \"data\" fs.stat pop) times 10000",
+      "seconds": 0.18454119100351818,
+      "units_per_second": 54188.44403041354,
+      "threads": 1,
+      "rss_kib": 6904
+    },
+    {
+      "iteration": 3,
+      "variant": "pre-sdk",
+      "case": "filesystem-stat",
+      "source": "10000 ('cwd \"data\" fs.stat pop) times 10000",
+      "seconds": 0.19881490198895335,
+      "units_per_second": 50298.04053901163,
+      "threads": 1,
+      "rss_kib": 5788
+    },
+    {
+      "iteration": 3,
+      "variant": "direct",
+      "case": "filesystem-directory-resources",
+      "source": "16 (256 range (pop 'cwd \".\" fs.child-dir) each (port.close 0) each pop) times 4096",
+      "seconds": 0.1970231469895225,
+      "units_per_second": 20789.435467792122,
+      "threads": 3,
+      "rss_kib": 7784
+    },
+    {
+      "iteration": 3,
+      "variant": "prejoin",
+      "case": "filesystem-directory-resources",
+      "source": "16 (256 range (pop 'cwd \".\" fs.child-dir) each (port.close 0) each pop) times 4096",
+      "seconds": 0.1900814900000114,
+      "units_per_second": 21548.65263314042,
+      "threads": 3,
+      "rss_kib": 8048
+    },
+    {
+      "iteration": 3,
+      "variant": "pre-sdk",
+      "case": "filesystem-directory-resources",
+      "source": "16 (256 range (pop 'cwd \".\" fs.child-dir) each (port.close 0) each pop) times 4096",
+      "seconds": 0.1595690289977938,
+      "units_per_second": 25669.14159800165,
+      "threads": 3,
+      "rss_kib": 7324
+    },
+    {
+      "iteration": 4,
+      "variant": "pre-sdk",
+      "case": "filesystem-directory-resources",
+      "source": "16 (256 range (pop 'cwd \".\" fs.child-dir) each (port.close 0) each pop) times 4096",
+      "seconds": 0.16372215101728216,
+      "units_per_second": 25017.995271560016,
+      "threads": 3,
+      "rss_kib": 7320
+    },
+    {
+      "iteration": 4,
+      "variant": "prejoin",
+      "case": "filesystem-directory-resources",
+      "source": "16 (256 range (pop 'cwd \".\" fs.child-dir) each (port.close 0) each pop) times 4096",
+      "seconds": 0.19121454597916454,
+      "units_per_second": 21420.96449318409,
+      "threads": 3,
+      "rss_kib": 8240
+    },
+    {
+      "iteration": 4,
+      "variant": "direct",
+      "case": "filesystem-directory-resources",
+      "source": "16 (256 range (pop 'cwd \".\" fs.child-dir) each (port.close 0) each pop) times 4096",
+      "seconds": 0.19280012501985766,
+      "units_per_second": 21244.799501961566,
+      "threads": 3,
+      "rss_kib": 7788
+    },
+    {
+      "iteration": 4,
+      "variant": "pre-sdk",
+      "case": "filesystem-stat",
+      "source": "10000 ('cwd \"data\" fs.stat pop) times 10000",
+      "seconds": 0.20016933701117523,
+      "units_per_second": 49957.70156066267,
+      "threads": 1,
+      "rss_kib": 5784
+    },
+    {
+      "iteration": 4,
+      "variant": "prejoin",
+      "case": "filesystem-stat",
+      "source": "10000 ('cwd \"data\" fs.stat pop) times 10000",
+      "seconds": 0.1844894679961726,
+      "units_per_second": 54203.63616749905,
+      "threads": 1,
+      "rss_kib": 6900
+    },
+    {
+      "iteration": 4,
+      "variant": "direct",
+      "case": "filesystem-stat",
+      "source": "10000 ('cwd \"data\" fs.stat pop) times 10000",
+      "seconds": 0.19080233201384544,
+      "units_per_second": 52410.26089384671,
+      "threads": 1,
+      "rss_kib": 6320
+    },
+    {
+      "iteration": 4,
+      "variant": "pre-sdk",
+      "case": "filesystem-read",
+      "source": "64 ('cwd \"data\" fs.read-bytes len 65536 = {'kind 'user 'msg \"benchmark result\"} assert) times 4194304",
+      "seconds": 0.04020072700222954,
+      "units_per_second": 104334033.55534796,
+      "threads": 1,
+      "rss_kib": 6268
+    },
+    {
+      "iteration": 4,
+      "variant": "prejoin",
+      "case": "filesystem-read",
+      "source": "64 ('cwd \"data\" fs.read-bytes len 65536 = {'kind 'user 'msg \"benchmark result\"} assert) times 4194304",
+      "seconds": 0.04214209798374213,
+      "units_per_second": 99527650.5127511,
+      "threads": 1,
+      "rss_kib": 7600
+    },
+    {
+      "iteration": 4,
+      "variant": "direct",
+      "case": "filesystem-read",
+      "source": "64 ('cwd \"data\" fs.read-bytes len 65536 = {'kind 'user 'msg \"benchmark result\"} assert) times 4194304",
+      "seconds": 0.042096084012882784,
+      "units_per_second": 99636441.21188103,
+      "threads": 1,
+      "rss_kib": 6708
+    },
+    {
+      "iteration": 4,
+      "variant": "pre-sdk",
+      "case": "filesystem-staging-cleanup",
+      "source": "8 ('cwd \"published\" fs.stage-dir 's set 128 range (str s swap fs.mkdirs 0) each pop s port.close) times 1024",
+      "seconds": 0.16130182301276363,
+      "units_per_second": 6348.347345826166,
+      "threads": 3,
+      "rss_kib": 7288
+    },
+    {
+      "iteration": 4,
+      "variant": "prejoin",
+      "case": "filesystem-staging-cleanup",
+      "source": "8 ('cwd \"published\" fs.stage-dir 's set 128 range (str s swap fs.mkdirs 0) each pop s port.close) times 1024",
+      "seconds": 0.1513651820132509,
+      "units_per_second": 6765.096083393581,
+      "threads": 3,
+      "rss_kib": 8212
+    },
+    {
+      "iteration": 4,
+      "variant": "direct",
+      "case": "filesystem-staging-cleanup",
+      "source": "8 ('cwd \"published\" fs.stage-dir 's set 128 range (str s swap fs.mkdirs 0) each pop s port.close) times 1024",
+      "seconds": 0.15562818801845424,
+      "units_per_second": 6579.784890116275,
+      "threads": 3,
+      "rss_kib": 7756
+    },
+    {
+      "iteration": 4,
+      "variant": "pre-sdk",
+      "case": "network-connections",
+      "source": "{'address \"127.0.0.1\" 'port 0} net.listen 'l set l net.local-address 'port at str io.print 32 range (pop l net.accept) each 'clients set l net.close clients (dup 1 net.read [65] match? {'kind 'user 'msg \"benchmark result\"} assert net.close 0) each pop 32",
+      "seconds": 0.15959250601008534,
+      "units_per_second": 200.51066807596706,
+      "threads": 136,
+      "rss_kib": 48052
+    },
+    {
+      "iteration": 4,
+      "variant": "prejoin",
+      "case": "network-connections",
+      "source": "{'address \"127.0.0.1\" 'port 0} net.listen 'l set l net.local-address 'port at str io.print 32 range (pop l net.accept) each 'clients set l net.close clients (dup 1 net.read [65] match? {'kind 'user 'msg \"benchmark result\"} assert net.close 0) each pop 32",
+      "seconds": 0.18176845100242645,
+      "units_per_second": 176.04815260032572,
+      "threads": 135,
+      "rss_kib": 55584
+    },
+    {
+      "iteration": 4,
+      "variant": "direct",
+      "case": "network-connections",
+      "source": "{'address \"127.0.0.1\" 'port 0} net.listen 'l set l net.local-address 'port at str io.print 32 range (pop l net.accept) each 'clients set l net.close clients (dup 1 net.read [65] match? {'kind 'user 'msg \"benchmark result\"} assert net.close 0) each pop 32",
+      "seconds": 0.1694909869984258,
+      "units_per_second": 188.80059976461882,
+      "threads": 136,
+      "rss_kib": 54876
+    },
+    {
+      "iteration": 4,
+      "variant": "pre-sdk",
+      "case": "process-duplex",
+      "source": "4096 range 256 mod 'payload set 32 range (pop [] ({'executable \"/bin/cat\"} 'stdin payload dict.put proc.run 'stdout at len) @spawn) each (task.await 'ok at first) each sum 131072 = {'kind 'user 'msg \"benchmark result\"} assert 32",
+      "seconds": 2.8419326370058116,
+      "units_per_second": 11.259943175048086,
+      "threads": 228,
+      "rss_kib": 77816
+    },
+    {
+      "iteration": 4,
+      "variant": "prejoin",
+      "case": "process-duplex",
+      "source": "4096 range 256 mod 'payload set 32 range (pop [] ({'executable \"/bin/cat\"} 'stdin payload dict.put proc.run 'stdout at len) @spawn) each (task.await 'ok at first) each sum 131072 = {'kind 'user 'msg \"benchmark result\"} assert 32",
+      "seconds": 3.036936413991498,
+      "units_per_second": 10.536934475339196,
+      "threads": 228,
+      "rss_kib": 86708
+    },
+    {
+      "iteration": 4,
+      "variant": "direct",
+      "case": "process-duplex",
+      "source": "4096 range 256 mod 'payload set 32 range (pop [] ({'executable \"/bin/cat\"} 'stdin payload dict.put proc.run 'stdout at len) @spawn) each (task.await 'ok at first) each sum 131072 = {'kind 'user 'msg \"benchmark result\"} assert 32",
+      "seconds": 2.8552820530021563,
+      "units_per_second": 11.207299106003884,
+      "threads": 228,
+      "rss_kib": 85688
+    },
+    {
+      "iteration": 5,
+      "variant": "direct",
+      "case": "process-duplex",
+      "source": "4096 range 256 mod 'payload set 32 range (pop [] ({'executable \"/bin/cat\"} 'stdin payload dict.put proc.run 'stdout at len) @spawn) each (task.await 'ok at first) each sum 131072 = {'kind 'user 'msg \"benchmark result\"} assert 32",
+      "seconds": 2.7895796540251467,
+      "units_per_second": 11.471262329371555,
+      "threads": 228,
+      "rss_kib": 85508
+    },
+    {
+      "iteration": 5,
+      "variant": "prejoin",
+      "case": "process-duplex",
+      "source": "4096 range 256 mod 'payload set 32 range (pop [] ({'executable \"/bin/cat\"} 'stdin payload dict.put proc.run 'stdout at len) @spawn) each (task.await 'ok at first) each sum 131072 = {'kind 'user 'msg \"benchmark result\"} assert 32",
+      "seconds": 2.877939576981589,
+      "units_per_second": 11.11906596508948,
+      "threads": 228,
+      "rss_kib": 86188
+    },
+    {
+      "iteration": 5,
+      "variant": "pre-sdk",
+      "case": "process-duplex",
+      "source": "4096 range 256 mod 'payload set 32 range (pop [] ({'executable \"/bin/cat\"} 'stdin payload dict.put proc.run 'stdout at len) @spawn) each (task.await 'ok at first) each sum 131072 = {'kind 'user 'msg \"benchmark result\"} assert 32",
+      "seconds": 2.8768208230030723,
+      "units_per_second": 11.123390008904224,
+      "threads": 228,
+      "rss_kib": 77884
+    },
+    {
+      "iteration": 5,
+      "variant": "direct",
+      "case": "network-connections",
+      "source": "{'address \"127.0.0.1\" 'port 0} net.listen 'l set l net.local-address 'port at str io.print 32 range (pop l net.accept) each 'clients set l net.close clients (dup 1 net.read [65] match? {'kind 'user 'msg \"benchmark result\"} assert net.close 0) each pop 32",
+      "seconds": 0.17563905401038937,
+      "units_per_second": 182.19182618751262,
+      "threads": 136,
+      "rss_kib": 54704
+    },
+    {
+      "iteration": 5,
+      "variant": "prejoin",
+      "case": "network-connections",
+      "source": "{'address \"127.0.0.1\" 'port 0} net.listen 'l set l net.local-address 'port at str io.print 32 range (pop l net.accept) each 'clients set l net.close clients (dup 1 net.read [65] match? {'kind 'user 'msg \"benchmark result\"} assert net.close 0) each pop 32",
+      "seconds": 0.17706583099788986,
+      "units_per_second": 180.72374449467526,
+      "threads": 136,
+      "rss_kib": 55656
+    },
+    {
+      "iteration": 5,
+      "variant": "pre-sdk",
+      "case": "network-connections",
+      "source": "{'address \"127.0.0.1\" 'port 0} net.listen 'l set l net.local-address 'port at str io.print 32 range (pop l net.accept) each 'clients set l net.close clients (dup 1 net.read [65] match? {'kind 'user 'msg \"benchmark result\"} assert net.close 0) each pop 32",
+      "seconds": 0.16611751800519414,
+      "units_per_second": 192.63471056074548,
+      "threads": 136,
+      "rss_kib": 48104
+    },
+    {
+      "iteration": 5,
+      "variant": "direct",
+      "case": "filesystem-staging-cleanup",
+      "source": "8 ('cwd \"published\" fs.stage-dir 's set 128 range (str s swap fs.mkdirs 0) each pop s port.close) times 1024",
+      "seconds": 0.15280711199739017,
+      "units_per_second": 6701.258773986182,
+      "threads": 3,
+      "rss_kib": 7756
+    },
+    {
+      "iteration": 5,
+      "variant": "prejoin",
+      "case": "filesystem-staging-cleanup",
+      "source": "8 ('cwd \"published\" fs.stage-dir 's set 128 range (str s swap fs.mkdirs 0) each pop s port.close) times 1024",
+      "seconds": 0.15327168701332994,
+      "units_per_second": 6680.946885584573,
+      "threads": 3,
+      "rss_kib": 8208
+    },
+    {
+      "iteration": 5,
+      "variant": "pre-sdk",
+      "case": "filesystem-staging-cleanup",
+      "source": "8 ('cwd \"published\" fs.stage-dir 's set 128 range (str s swap fs.mkdirs 0) each pop s port.close) times 1024",
+      "seconds": 0.15490262600360438,
+      "units_per_second": 6610.604522457695,
+      "threads": 3,
+      "rss_kib": 7280
+    },
+    {
+      "iteration": 5,
+      "variant": "direct",
+      "case": "filesystem-read",
+      "source": "64 ('cwd \"data\" fs.read-bytes len 65536 = {'kind 'user 'msg \"benchmark result\"} assert) times 4194304",
+      "seconds": 0.042192478984361514,
+      "units_per_second": 99408806.9950714,
+      "threads": 1,
+      "rss_kib": 6708
+    },
+    {
+      "iteration": 5,
+      "variant": "prejoin",
+      "case": "filesystem-read",
+      "source": "64 ('cwd \"data\" fs.read-bytes len 65536 = {'kind 'user 'msg \"benchmark result\"} assert) times 4194304",
+      "seconds": 0.04261655200389214,
+      "units_per_second": 98419599.9624028,
+      "threads": 1,
+      "rss_kib": 7604
+    },
+    {
+      "iteration": 5,
+      "variant": "pre-sdk",
+      "case": "filesystem-read",
+      "source": "64 ('cwd \"data\" fs.read-bytes len 65536 = {'kind 'user 'msg \"benchmark result\"} assert) times 4194304",
+      "seconds": 0.039504359010607004,
+      "units_per_second": 106173194.68147352,
+      "threads": 1,
+      "rss_kib": 6300
+    },
+    {
+      "iteration": 5,
+      "variant": "direct",
+      "case": "filesystem-stat",
+      "source": "10000 ('cwd \"data\" fs.stat pop) times 10000",
+      "seconds": 0.18898948997957632,
+      "units_per_second": 52912.99532625162,
+      "threads": 1,
+      "rss_kib": 6324
+    },
+    {
+      "iteration": 5,
+      "variant": "prejoin",
+      "case": "filesystem-stat",
+      "source": "10000 ('cwd \"data\" fs.stat pop) times 10000",
+      "seconds": 0.18567013699794188,
+      "units_per_second": 53858.957405254936,
+      "threads": 1,
+      "rss_kib": 6904
+    },
+    {
+      "iteration": 5,
+      "variant": "pre-sdk",
+      "case": "filesystem-stat",
+      "source": "10000 ('cwd \"data\" fs.stat pop) times 10000",
+      "seconds": 0.1995623930124566,
+      "units_per_second": 50109.64164663933,
+      "threads": 1,
+      "rss_kib": 5788
+    },
+    {
+      "iteration": 5,
+      "variant": "direct",
+      "case": "filesystem-directory-resources",
+      "source": "16 (256 range (pop 'cwd \".\" fs.child-dir) each (port.close 0) each pop) times 4096",
+      "seconds": 0.19672971198451705,
+      "units_per_second": 20820.444246481497,
+      "threads": 3,
+      "rss_kib": 7784
+    },
+    {
+      "iteration": 5,
+      "variant": "prejoin",
+      "case": "filesystem-directory-resources",
+      "source": "16 (256 range (pop 'cwd \".\" fs.child-dir) each (port.close 0) each pop) times 4096",
+      "seconds": 0.1896152530098334,
+      "units_per_second": 21601.637711010426,
+      "threads": 3,
+      "rss_kib": 8048
+    },
+    {
+      "iteration": 5,
+      "variant": "pre-sdk",
+      "case": "filesystem-directory-resources",
+      "source": "16 (256 range (pop 'cwd \".\" fs.child-dir) each (port.close 0) each pop) times 4096",
+      "seconds": 0.16421685999375768,
+      "units_per_second": 24942.627694596646,
+      "threads": 3,
+      "rss_kib": 7320
+    }
+  ]
+}

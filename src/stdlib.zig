@@ -19,6 +19,7 @@ const archive_module = @import("stdlib/archive.zig");
 const io_module = @import("stdlib/io.zig");
 const dict_module = @import("stdlib/dict.zig");
 const rand_module = @import("stdlib/rand.zig");
+const fs_module = @import("stdlib/fs.zig");
 const clock_module = @import("stdlib/clock.zig");
 const time_module = @import("stdlib/time.zig");
 
@@ -99,8 +100,7 @@ const modules = [_]Module{
         .text = @embedFile("stdlib/proc.ecl"),
     } } },
     .{ .name = "proc.core", .entry = .{ .native = @import("bundled-proc").Extension.descriptor() } },
-    .{ .name = "fs", .entry = .{ .source = .{ .name = "<stdlib:fs>", .text = @embedFile("stdlib/fs.ecl") } } },
-    .{ .name = "fs.core", .entry = .{ .native = @import("bundled-fs").descriptor() } },
+    .{ .name = "fs", .entry = .{ .builtin = &fs_module.words } },
     .{ .name = "net", .entry = .{ .source = .{
         .name = "<stdlib:net>",
         .text = @embedFile("stdlib/net.ecl"),
@@ -110,8 +110,7 @@ const modules = [_]Module{
         .name = "<stdlib:path>",
         .text = @embedFile("stdlib/path.ecl"),
     } } },
-    .{ .name = "archive", .entry = .{ .source = .{ .name = "<stdlib:archive>", .text = @embedFile("stdlib/archive.ecl") } } },
-    .{ .name = "archive.core", .entry = .{ .builtin = &archive_module.words } },
+    .{ .name = "archive", .entry = .{ .builtin = &archive_module.words } },
     .{ .name = "clock", .entry = .{ .builtin = &clock_module.words } },
     .{ .name = "time", .entry = .{ .builtin = &time_module.words } },
     .{ .name = "rng", .entry = .{ .source = .{

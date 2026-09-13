@@ -115,6 +115,7 @@ const Scratch = struct {
     /// Backing storage for `filesystem`, so the returned configuration borrows this
     /// value rather than a temporary.
     root_storage: [1]filesystem_module.Root,
+    limits: filesystem_module.Limits = .{},
 
     fn init() !Scratch {
         var directory = std.testing.tmpDir(.{});
@@ -141,7 +142,7 @@ const Scratch = struct {
     }
 
     fn filesystem(self: *const Scratch) filesystem_module.Configuration {
-        return .{ .roots = &self.root_storage };
+        return .{ .roots = &self.root_storage, .limits = self.limits };
     }
 
     fn expectAbsent(self: *Scratch, name: []const u8) !void {
@@ -281,6 +282,25 @@ test "archive: unpack-tgz uses directory leases inside staged generations" {
     defer allocator.free(rejected);
     try expectIoStack(&scratch, rejected, "'domain");
     try scratch.expectEntryCount(1);
+}
+
+test "archive: direct extraction preserves stream limits and joined rollback" {
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    scratch.limits.max_stream_transfer_bytes = 2;
+    const bytes = try decodeHex(.valid);
+    defer allocator.free(bytes);
+    const source = try unpackSource(bytes, "limited");
+    defer allocator.free(source);
+    try expectIoError(&scratch, source, .{
+        .name = "archive member stream limit",
+        .source = source,
+        .kind = "overflow",
+        .word = "archive.unpack-tgz",
+        .data = &.{.{ .name = "reason", .expected = .{ .symbol = "limit" } }},
+    });
+    try scratch.expectAbsent("limited");
+    try scratch.expectEntryCount(0);
 }
 
 test "archive: unpack-tgz atomically extracts regular files and returns paths" {

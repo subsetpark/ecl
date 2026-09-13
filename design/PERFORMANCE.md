@@ -5,6 +5,11 @@ characterizations through public runtime surfaces. They are not portable
 constants. Regenerate a baseline on the target under discussion rather than
 copying timings from this file.
 
+The subsequent [direct filesystem measurements](performance/runtime-overhead.md#direct-filesystem-runtime)
+compare the restored direct runtime with both the pre-SDK baseline and the
+optimized SDK predecessor. The cutover measurements below remain historical
+evidence of the regression that motivated that change.
+
 ## Complete bundled SDK cutover — 2026-09-13
 
 Zig 0.16.0, ReleaseSafe, native x86_64 Linux (kernel 7.1.9-1-MANJARO).

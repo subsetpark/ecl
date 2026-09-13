@@ -200,6 +200,21 @@ const ErrorData = struct {
 };
 const empty_error_data = ErrorData{ .key = .{ .builtin = .needed }, .value = .{ .int = 0 } };
 pub const ErrorDetail = struct { symbol: u32, value: Value };
+/// Provenance attached to one filesystem failure. Values are borrowed; the
+/// pending failure retains what it records.
+pub const FilesystemErrorData = struct {
+    operation: Value,
+    reason: Value,
+    target: union(enum) {
+        single: struct { root: Value, path: Value },
+        transfer: struct {
+            source_root: Value,
+            source_path: Value,
+            destination_root: Value,
+            destination_path: Value,
+        },
+    },
+};
 /// Zig errors carry no payload. The unit owns this allocation-free payload
 /// until an unwind materializes the language dict.
 pub const EclErr = struct {
@@ -1845,6 +1860,7 @@ pub const RuntimeContext = struct {
     console: *console_api.Console,
     host_io: std.Io,
     startup_cwd: []const u8,
+    filesystem_access: *external.FilesystemAccess,
     http_access: *@import("http_service.zig").Access,
     wall_clock: WallClock,
     environ: Environ,
@@ -5028,6 +5044,31 @@ pub const Machine = struct {
     /// while letting a builtin module attach the one datum it owns.
     pub fn addErrorPath(self: *Machine, path: Value) void {
         self.unit.pendingFailure().addData(.path, path);
+    }
+    /// Tags the one absent-only publication conflict that an immutable
+    /// caller may recover after independently confirming the winner.
+    pub fn addErrorDestinationExists(self: *Machine) void {
+        self.unit.pendingFailure().addData(.@"destination-exists", .{ .int = 1 });
+    }
+    /// The stable data dictionary every capability-gated filesystem failure
+    /// carries: the public operation, the named root and path (or both ends of
+    /// a transfer), and a closed portable reason symbol.
+    pub fn addErrorFilesystem(self: *Machine, data: FilesystemErrorData) void {
+        const failure = self.unit.pendingFailure();
+        failure.addData(.operation, data.operation);
+        switch (data.target) {
+            .single => |single| {
+                failure.addData(.root, single.root);
+                failure.addData(.path, single.path);
+            },
+            .transfer => |transfer| {
+                failure.addData(.@"source-root", transfer.source_root);
+                failure.addData(.@"source-path", transfer.source_path);
+                failure.addData(.@"destination-root", transfer.destination_root);
+                failure.addData(.@"destination-path", transfer.destination_path);
+            },
+        }
+        failure.addData(.reason, data.reason);
     }
     /// Attach the closed-vocabulary `'reason` symbol a capability refusal
     /// reports, so programs branch on the symbol rather than the message.

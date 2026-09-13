@@ -26,12 +26,14 @@ property. Each publishes
 ordinary module images and participates in registration, aliases, imports,
 reflection, and shadowing through the same language operations.
 
-The bundled `fs.core`, `net.core`, and `proc.core` modules expose ordinary
-native factories and selectors. Their public `fs`, `net`, and `proc` APIs are
-ECL compositions over those capabilities and `port.*`. All three backends
+The bundled `net.core` and `proc.core` modules expose ordinary native factories
+and selectors. Their public `net` and `proc` APIs are ECL compositions over
+those capabilities and `port.*`. Both backends
 compile against `std`, the public SDK, and native dependencies, including in
 builds without maintained applications. ABI v24 uses the same descriptors and
 instance lifecycle for static and dynamic registration.
+The `fs` and `archive` modules use direct runtime primitives with the shared
+scope-owned port lifecycle, bounded work, and joined cleanup.
 
 Embedded names have precedence over filesystem modules. A file on `ECL_PATH`
 cannot replace an embedded module during automatic loading. A program may
@@ -125,7 +127,7 @@ module. Its descriptor declares the same canonical name requested by the
 loader. The complete word table validates before publication, and publication
 is atomic.
 
-The current pre-release native ABI is version 19, with entry symbol
+The current pre-release native ABI is version 24, with entry symbol
 `ecl_module_abi_v24`. Resource authors choose `ecl.Port(.{ .controller = Spec })`
 or `ecl.Port(.{ .cooperative = Spec })`. Cooperative callbacks receive bounded
 work accounting, read-only Session-relative `monotonicMilliseconds`, and
@@ -385,8 +387,10 @@ never promises to reverse external effects or accepted stream bytes.
 Native instance `port_limits` may select `callback_quantum` and
 `construction_quantum`. `NativeWorkQuantum.fromCount` accepts 1 through 65,536;
 its value representation cannot express a zero or unbounded grant. Defaults stay
-256 native work units per cooperative callback and 64 host construction units.
-The callback grant applies to initialization, operations, and joined retirement.
+256 native work units per cooperative turn and 64 host construction units.
+The callback grant is a ceiling for initialization, operations, and joined
+retirement. An operation may share its remaining grant across callback,
+publication, and retirement phases; host transitions also consume work units.
 The construction grant bounds each host materialization slice, independently of
 message footprint and stack capacity. Grants belong to the registered instance
 and are unavailable in ECL resource-open parameters.
@@ -440,12 +444,12 @@ construction error distinct from allocation failure.
 
 Embedding uses `Session.Filesystem.Configuration` (also exported as
 `Filesystem` by the interpreter module), containing `Root` entries and `Limits`.
-Roots and immutable configuration belong to an eager native instance. Its
-resource budget is separate from unrelated extensions. `max_transfer_bytes`
+Roots and immutable configuration belong to the Session's filesystem owner.
+Its resource budget is separate from native extensions. `max_transfer_bytes`
 limits whole-value reads, writes, and copies; `max_stream_transfer_bytes`
 limits the total bytes of an explicit writer stream. Both default to 1 GiB.
-Filesystem operations use cooperative execution and bounded retirement without
-per-resource controller threads.
+Filesystem operations use direct bounded runtime drivers and shared retirement
+without per-resource controller threads or native message marshalling.
 
 Supported targets are Linux and macOS. Paths are UTF-8 slash paths; a host
 filename that is not valid UTF-8 cannot be listed and fails the whole listing.

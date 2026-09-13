@@ -650,21 +650,6 @@ pub fn build(b: *std.Build) void {
     audit_options.addOption([:0]const u8, "git_extension_source", @embedFile("extensions/git/git.zig"));
     audit_options.addOption([:0]const u8, "proc_extension_source", @embedFile("extensions/proc/proc.zig"));
     audit_options.addOption([:0]const u8, "net_extension_source", @embedFile("extensions/net/net.zig"));
-    audit_options.addOption([:0]const u8, "fs_algorithms_source", @embedFile("extensions/fs/algorithms.zig"));
-    audit_options.addOption([:0]const u8, "fs_cursor_source", @embedFile("extensions/fs/cursor.zig"));
-    audit_options.addOption([:0]const u8, "fs_encoding_source", @embedFile("extensions/fs/encoding.zig"));
-    audit_options.addOption([:0]const u8, "fs_fs_source", @embedFile("extensions/fs/fs.zig"));
-    audit_options.addOption([:0]const u8, "fs_lock_source", @embedFile("extensions/fs/lock.zig"));
-    audit_options.addOption([:0]const u8, "fs_pair_request_source", @embedFile("extensions/fs/pair_request.zig"));
-    audit_options.addOption([:0]const u8, "fs_publication_source", @embedFile("extensions/fs/publication.zig"));
-    audit_options.addOption([:0]const u8, "fs_reader_source", @embedFile("extensions/fs/reader.zig"));
-    audit_options.addOption([:0]const u8, "fs_request_source", @embedFile("extensions/fs/request.zig"));
-    audit_options.addOption([:0]const u8, "fs_service_source", @embedFile("extensions/fs/service.zig"));
-    audit_options.addOption([:0]const u8, "fs_staging_source", @embedFile("extensions/fs/staging.zig"));
-    audit_options.addOption([:0]const u8, "fs_storage_source", @embedFile("extensions/fs/storage.zig"));
-    audit_options.addOption([:0]const u8, "fs_support_source", @embedFile("extensions/fs/support.zig"));
-    audit_options.addOption([:0]const u8, "fs_validation_source", @embedFile("extensions/fs/validation.zig"));
-    audit_options.addOption([:0]const u8, "fs_writer_source", @embedFile("extensions/fs/writer.zig"));
 
     audit_options.addOption(
         []const u8,
@@ -733,13 +718,22 @@ pub fn build(b: *std.Build) void {
         "bench-workdrivers",
         "Characterize WorkDriver and scheduler overhead (ReleaseSafe/ReleaseFast only)",
     );
+    const build_workdriver_bench_step = b.step(
+        "build-bench-workdrivers",
+        "Install timing and counter artifacts without running measurements",
+    );
     switch (optimize) {
-        .ReleaseSafe, .ReleaseFast => workdriver_bench_step.dependOn(&run_workdriver_counters.step),
+        .ReleaseSafe, .ReleaseFast => {
+            workdriver_bench_step.dependOn(&run_workdriver_counters.step);
+            build_workdriver_bench_step.dependOn(&b.addInstallArtifact(workdriver_bench_exe, .{}).step);
+            build_workdriver_bench_step.dependOn(&b.addInstallArtifact(workdriver_counter_exe, .{}).step);
+        },
         else => {
             const release_required = b.addFail(
                 "WorkDriver benchmarks require -Doptimize=ReleaseSafe or ReleaseFast",
             );
             workdriver_bench_step.dependOn(&release_required.step);
+            build_workdriver_bench_step.dependOn(&release_required.step);
         },
     }
 
@@ -889,6 +883,11 @@ pub fn build(b: *std.Build) void {
             "fs: streaming publication and reservations enforce total limits and rollback",
             "fs: directory kinds and child errors retain public type precedence and context",
             "fs: concurrent symlink replacement cannot escape retained roots",
+            "fs: direct reservations follow derived roots and pair admission",
+            "fs: completed operations release admission before the next call",
+            "fs: direct writers serialize chunks and preserve validation before admission",
+            "fs: direct writer finalization joins admitted chunks",
+            "archive: direct extraction preserves stream limits and joined rollback",
         },
     });
     tsan_tests.linkage = runtime_linkage;
@@ -1378,14 +1377,6 @@ fn configureRuntime(
     });
     proc.addImport("ecl-native", sdk);
     module.addImport("bundled-proc", proc);
-    const fs = module.owner.createModule(.{
-        .root_source_file = module.owner.path("extensions/fs/fs.zig"),
-        .target = module.resolved_target,
-        .optimize = module.optimize,
-        .sanitize_thread = module.sanitize_thread,
-    });
-    fs.addImport("ecl-native", sdk);
-    module.addImport("bundled-fs", fs);
     module.addImport("port-declarations", sdk.import_table.get("port-declarations").?);
     module.addOptions("session_options", options);
 }

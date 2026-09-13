@@ -1,0 +1,32 @@
+{
+  "optimization": "ReleaseSafe",
+  "target": "x86_64-linux",
+  "affinity": [
+    4,
+    6
+  ],
+  "description": "Interrupted control runs; not valid completed-work timing samples.",
+  "failures": [
+    {
+      "variant": "initial-direct",
+      "cli_sha256": "920d710a0747ce53d9e0ad327f3616f74f355fdb13c7fb016f32df25cc568f81",
+      "source": "512 (256 range (pop 'cwd \".\" fs.child-dir) each (port.close 0) each pop) times 131072",
+      "diagnostic": "RuntimeError: (['/home/zax/.cache/ecl-instance-verification/fs-profile/usr/bin/perf', 'stat', '-e', 'instructions:u,cycles:u,context-switches', '-o', '/home/zax/.cache/ecl-overhead/evidence/direct-fs-direct-directory-perf-stat.txt', 'taskset', '-c', '4,6', '/home/zax/.cache/ecl-overhead/direct-fs-out/bin/ecl', '-e', '512 (256 range (pop \\'cwd \".\" fs.child-dir) each (port.close 0) each pop) times 131072'], 1, '', '{\\'kind \\'overflow \\'msg \"filesystem operation limit reached\" \\'word \\'fs.child-dir \\'trace [\\'fs.child-dir] \\'data {\\'operation \\'child-dir \\'root \\'cwd \\'path \".\" \\'reason \\'limit \\'source \"<command>\" \\'line 1 \\'col 30}}\\n')",
+      "exit_code": 1
+    },
+    {
+      "variant": "pre-sdk",
+      "cli_sha256": "29369868a797e4bf1c897f49b7b9b21f43cb072b58b0ed332db9b6ba8458a1de",
+      "source": "512 (256 range (pop 'cwd \".\" fs.child-dir) each (port.close 0) each pop) times 131072",
+      "diagnostic": "RuntimeError: ('directory-long', 'pre-sdk', 1, '', '{\\'kind \\'overflow \\'msg \"filesystem operation limit reached\" \\'word \\'fs.child-dir \\'trace [\\'fs.child-dir] \\'data {\\'operation \\'child-dir \\'root \\'cwd \\'path \".\" \\'reason \\'limit \\'source \"<command>\" \\'line 1 \\'col 30}}\\n')",
+      "exit_code": 1
+    },
+    {
+      "variant": "initial-direct",
+      "cli_sha256": "920d710a0747ce53d9e0ad327f3616f74f355fdb13c7fb016f32df25cc568f81",
+      "source": "16 (256 range (pop 'cwd \".\" fs.child-dir) each (port.close 0) each pop) times 4096",
+      "diagnostic": "RuntimeError: ('filesystem-directory-resources', 1, '', '{\\'kind \\'overflow \\'msg \"filesystem operation limit reached\" \\'word \\'fs.child-dir \\'trace [\\'fs.child-dir] \\'data {\\'operation \\'child-dir \\'root \\'cwd \\'path \".\" \\'reason \\'limit \\'source \"<command>\" \\'line 1 \\'col 29}}\\n')",
+      "exit_code": 1
+    }
+  ]
+}
