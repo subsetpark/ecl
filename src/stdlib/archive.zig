@@ -64,15 +64,16 @@ fn nextMember(evaluator: *Machine) MachineError!void {
     errdefer archive.deinit();
     if (!document.isArchive(archive.borrow())) return evaluator.typeError("an archive resource");
     const driver = try evaluator.allocator().create(MemberDriver);
-    driver.* = .{ .archive = archive.take() };
+    // SAFETY: reading initializes path and metadata before the text phase uses them.
+    driver.* = .{ .archive = archive.take(), .path = undefined, .metadata = undefined };
     evaluator.adoptDriver(driver);
 }
 const MemberDriver = struct {
     pub const address_stable_driver = {};
     pub const ownership: heap.DriverOwnership = .self_owned;
     archive: Value,
-    path: [document.path_limit]u8 = undefined,
-    metadata: document.Metadata = undefined,
+    path: [document.path_limit]u8,
+    metadata: document.Metadata,
     state: union(enum) { reading, text: storage.Utf8Materializer, complete } = .reading,
     pub fn deinit(self: *@This(), releases: *heap.ReleaseDomain, _: std.mem.Allocator) void {
         if (self.state == .text) self.state.text.retire(releases);

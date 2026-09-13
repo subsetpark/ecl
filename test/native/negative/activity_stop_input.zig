@@ -11,5 +11,5 @@ const Resource = ecl.Port(.{ .controller = struct {
     pub fn deinit(_: *State) void {}
 } });
 export fn reject(ctx: *ecl.Activity) void {
-    ctx.stopOutput(Resource, .data) catch {};
+    ctx.stopOutput(Resource, .data) catch return;
 }

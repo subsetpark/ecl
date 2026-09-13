@@ -1,3 +1,4 @@
+// zlint-disable homeless-try -- zlint 0.9.1 does not resolve the SDK's aliased error unions; Zig validates every callback signature.
 //! Bundled TCP service implemented entirely through the public native SDK.
 const std = @import("std");
 const builtin = @import("builtin");

@@ -138,6 +138,7 @@ pub fn validate(host: *const heap.HostCleanup, io: std.Io, bytes: []const u8, pa
     const definitions = try data.asDict(try data.field(top, "scopes"));
     if (definitions.length() == 0 or definitions.length() > 4096) return error.Invalid;
     const owned = try allocator.create(Backing);
+    // SAFETY: local is assigned before publication and is not read by error cleanup.
     owned.* = .{ .allocator = allocator, .local = undefined };
     const result = Validated.fromBacking(owned);
     errdefer result.deinit();

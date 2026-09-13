@@ -25,7 +25,7 @@ pub const Candidate = struct {
 /// need neither raw scope pointers nor snapshot reader ownership.
 const LexicalGuard = struct {
     const absent_environment = std.math.maxInt(u64); // Published revisions are even.
-    revisions: [8]u64 = undefined,
+    revisions: [8]u64 = @splat(absent_environment),
     count: u8 = 0,
     core: ?env.ShapeRevision = null,
 

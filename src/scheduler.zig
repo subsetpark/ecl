@@ -3584,7 +3584,7 @@ test "native: scope cancellation observes an entire external publication batch" 
 
 test "native: cooperative work reserves timer and execution before allocation-free wake and completion" {
     const Probe = struct {
-        work: *Cooperative = undefined,
+        work: *Cooperative,
         worker: *const WorkerScheduler,
         refs: std.atomic.Value(usize) = .init(0),
         finished: std.atomic.Value(bool) = .init(false),
@@ -3631,7 +3631,8 @@ test "native: cooperative work reserves timer and execution before allocation-fr
     var runtime = try Scheduler.init(cleanup.capability(), .{ .worker_pool = 2 }, .manual);
     var scope = TaskScope.init(runtime.worker());
     defer runtime.deinit(&scope);
-    var probe: Probe = .{ .worker = runtime.worker() };
+    // SAFETY: work is assigned before starting the cooperative callbacks.
+    var probe: Probe = .{ .worker = runtime.worker(), .work = undefined };
     const work = try Cooperative.create(runtime.worker(), Probe, &probe);
     defer work.deinit();
     probe.work = work;

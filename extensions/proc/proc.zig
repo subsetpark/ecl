@@ -1,3 +1,5 @@
+// zlint-disable homeless-try suppressed-errors -- zlint 0.9.1 cannot resolve SDK error unions or scope suppression to individual lines.
+// Zig validates callback signatures. Teardown deliberately ignores endpoint/wait errors to join the child and drain activities.
 //! Bundled subprocess service authored only against the public native SDK.
 const std = @import("std");
 const builtin = @import("builtin");
@@ -728,6 +730,7 @@ const Process = ecl.Port(.{
                 const done = state.stdin_done and state.stdout_done and state.stderr_done;
                 unlock(&state.mutex);
                 if (stopping and !stopped_outputs) {
+                    // Cancellation may have closed the endpoint; still join the child.
                     context.finishInput(Process, .stdin) catch {};
                     context.stopOutput(Process, .stdout) catch {};
                     context.stopOutput(Process, .stderr) catch {};
@@ -762,9 +765,11 @@ const Process = ecl.Port(.{
                         group.phase = .{ .reaped = term };
                         state.notify();
                         unlock(&state.mutex);
+                        // A cancelled endpoint needs no further finish, but activities must drain.
                         context.finishInput(Process, .stdin) catch {};
                     }
                 }
+                // Timeout and cancellation both require another child/stream status check.
                 state.wake.waitTimeout(io(), .{ .duration = .{ .raw = .fromMilliseconds(10), .clock = .awake } }) catch {};
             }
         }

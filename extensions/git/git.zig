@@ -137,6 +137,7 @@ const Snapshot = ecl.Port(.{
         }
 
         fn fetch(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            // SAFETY: parseRequest initializes each requested string before returning its view.
             var storage: RequestStorage = undefined;
             const request = parseRequest(controller, &storage) catch |err| switch (err) {
                 error.Cancelled => return error.Cancelled,

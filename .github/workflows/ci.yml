@@ -69,9 +69,13 @@ jobs:
           subprocess.run(['tar', '-C', '/tmp/zig', '--strip-components=1', '-xf', str(archive)], stdin=subprocess.DEVNULL, timeout=60, check=True)
           PYTHON
       - name: Build and exercise HTTPS packages
+        env:
+          ZIG_GLOBAL_CACHE_DIR: ${{ runner.temp }}/zig-global-cache
         run: |
           python3 - <<'PYTHON'
-          import subprocess
+          import os, pathlib, subprocess
+          # Zig's ZIP dependency downloader needs tmp even on a cold cache.
+          pathlib.Path(os.environ['ZIG_GLOBAL_CACHE_DIR'], 'tmp').mkdir(parents=True, exist_ok=True)
           subprocess.run(['/tmp/zig/zig', 'build', 'test-pkg-git', '-Doptimize=ReleaseSafe'], stdin=subprocess.DEVNULL, timeout=900, check=True)
           subprocess.run(['/tmp/zig/zig', 'build', 'test-git-extension', 'test-pkg-fetch', '-Doptimize=ReleaseSafe'], stdin=subprocess.DEVNULL, timeout=900, check=True)
           PYTHON

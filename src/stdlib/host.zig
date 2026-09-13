@@ -19,14 +19,15 @@ fn executable(evaluator: *machine.Machine) machine.MachineError!void {
 }
 fn begin(evaluator: *machine.Machine, query: Query) machine.MachineError!void {
     const owned = try evaluator.allocator().create(Metadata);
-    owned.* = .{ .query = query };
+    // SAFETY: executablePath fills the buffer before its returned prefix is read.
+    owned.* = .{ .query = query, .buffer = undefined };
     evaluator.adoptDriver(owned);
 }
 const Metadata = struct {
     pub const address_stable_driver = {};
     pub const ownership: heap.DriverOwnership = .self_owned;
     query: Query,
-    buffer: [std.fs.max_path_bytes]u8 = undefined,
+    buffer: [std.fs.max_path_bytes]u8,
     state: union(enum) { query, text: storage.Utf8Materializer, complete } = .query,
 
     pub fn deinit(self: *@This(), releases: *heap.ReleaseDomain, _: std.mem.Allocator) void {

@@ -623,6 +623,7 @@ pub const Resolver = struct {
     /// bounded retirement. No allocation is needed on cancellation or failure.
     pub fn retire(self: *Resolver, releases: *heap.ReleaseDomain) void {
         releases.retire(self.state, &self.state.retirement);
+        // SAFETY: retirement consumes this handle; it must not be used again.
         self.* = undefined;
     }
 
@@ -1071,6 +1072,7 @@ pub const TreeRemoval = struct {
         if (info.kind == .directory) {
             if (item.name.len > std.fs.max_name_bytes) return .{ .failed = .limit };
             const dir = self.root.openDir(self.io, item.name, .{ .iterate = true, .follow_symlinks = false }) catch |err| return .{ .failed = reasonForError(err) };
+            // SAFETY: the copy initializes the only name prefix exposed by length.
             var child: @typeInfo(@FieldType(TreeRemoval, "child")).optional.child = .{ .dir = dir, .iterator = dir.iterate(), .name = undefined, .length = item.name.len };
             @memcpy(child.name[0..item.name.len], item.name);
             self.child = child;

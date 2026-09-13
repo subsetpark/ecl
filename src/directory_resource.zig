@@ -285,6 +285,7 @@ pub fn next(item: Value) Next {
         const info = cursor.dir.statFile(cell.io, entry.name, .{ .follow_symlinks = false }) catch |err| return .{ .failed = fs.reasonForError(err) };
         break :kind fs.EntryKind.fromHost(info.kind);
     } else fs.EntryKind.fromHost(entry.kind);
+    // SAFETY: the copy initializes the only prefix exposed by length.
     var result: Entry = .{ .name = undefined, .length = entry.name.len, .kind = kind };
     @memcpy(result.name[0..entry.name.len], entry.name);
     return .{ .entry = result };

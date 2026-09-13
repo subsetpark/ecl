@@ -1122,7 +1122,7 @@ test "native: cooperative groups join scope cancellation and unwind failed publi
     const Probe = struct {
         const Cell = struct {
             const Activity = Group(@This(), void, .{ .retain = retainReadiness, .release = releaseReadiness, .retireLocked = retire, .ownership = ownershipOf });
-            group: *Activity = undefined,
+            group: *Activity,
             mutex: std.Io.Mutex = .init,
             refs: std.atomic.Value(usize) = .init(0),
             cancelled: std.atomic.Value(bool) = .init(false),
@@ -1179,7 +1179,8 @@ test "native: cooperative groups join scope cancellation and unwind failed publi
             var scope = scheduler.TaskScope.init(runtime.worker());
             var live = true;
             defer if (live) runtime.deinit(&scope);
-            var cell: Cell = .{ .reject = reject };
+            // SAFETY: group is assigned before publication can invoke callbacks.
+            var cell: Cell = .{ .reject = reject, .group = undefined };
             cell.group = try Cell.Activity.initCooperative(runtime.worker(), &cell, Cell.advance);
             defer cell.group.deinit();
             if (reject) {

@@ -10,7 +10,6 @@
 const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const session = @import("../session.zig");
-const machine = @import("../machine.zig");
 
 test "concurrency: map artifact auto-loads converge through one loading lease" {
     var fixture = try ConcurrentMapFixture.init();

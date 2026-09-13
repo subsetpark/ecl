@@ -161,14 +161,15 @@ fn nextEntry(evaluator: *Machine) MachineError!void {
     errdefer cursor.deinit();
     if (!directory.isEnumeration(cursor.borrow())) return evaluator.typeError("a directory enumeration resource");
     const driver = try evaluator.allocator().create(NextEntry);
-    driver.* = .{ .cursor = cursor.take() };
+    // SAFETY: reading initializes entry before the name phase uses it.
+    driver.* = .{ .cursor = cursor.take(), .entry = undefined };
     evaluator.adoptDriver(driver);
 }
 const NextEntry = struct {
     pub const address_stable_driver = {};
     pub const ownership: heap.DriverOwnership = .self_owned;
     cursor: Value,
-    entry: directory.Entry = undefined,
+    entry: directory.Entry,
     state: union(enum) { reading, name: kernel_storage.Utf8Materializer, complete } = .reading,
     pub fn deinit(self: *@This(), releases: *heap.ReleaseDomain, _: std.mem.Allocator) void {
         if (self.state == .name) self.state.name.retire(releases);

@@ -1,3 +1,4 @@
+// zlint-disable homeless-try -- zlint 0.9.1 does not resolve the SDK's aliased error unions; Zig validates every callback signature.
 //! Independently compiled author fixture for the instance lifecycle contract.
 const std = @import("std");
 const ecl = @import("ecl-native");
