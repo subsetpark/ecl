@@ -2515,3 +2515,66 @@ test "native: activity output precedes a later stream failure" {
             "wrap (4 port.read) @attempt 'err at 'kind at 'io match? {'kind 'user 'msg \"activity failure preserved\"} assert p port.close) call",
     );
 }
+
+test "native: instance endpoint capacities are isolated and preserve bounded streams" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    var first = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+        .ecl_path = native_fixture.directory,
+        .native_instances = &.{.{ .name = "instanceprobe", .bytes = "capacity3", .port_limits = .{ .ring_capacity = 8 } }},
+    }), .cooperative, .language_tests);
+    defer first.deinit();
+    var second = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+        .ecl_path = native_fixture.directory,
+        .native_instances = &.{.{ .name = "instanceprobe", .bytes = "capacity7", .port_limits = .{ .ring_capacity = 8 } }},
+    }), .cooperative, .language_tests);
+    defer second.deinit();
+    try expectOk(&first, "instanceprobe.next pop");
+    try expectOk(&second, "instanceprobe.next pop");
+    for ([_]*session.Session{ &first, &second }, [_]u32{ 3, 7 }) |runtime, capacity| {
+        var buffer: [1024]u8 = undefined;
+        const source = try std.fmt.bufPrint(&buffer, "instanceprobe.activity 6 port.open (|p| p instanceprobe.activity-out port.endpoint dup 64 port.read len {d} = {{'kind 'user 'msg \"configured output capacity\"}} assert " ++
+            "0 over 64 port.read (dup empty? not) (|reader total chunk| reader total chunk len + reader 64 port.read) while pop pop pop p port.close) call", .{capacity});
+        try expectOk(runtime, source);
+    }
+}
+
+fn endpointPolicyAllocationProbe(allocator: std.mem.Allocator) !void {
+    var host = heap.HostOwner.init(allocator);
+    defer host.cleanup().drain();
+    const owner = try native_module.Owner.initConfigured(host.cleanup(), .{}, &.{.{
+        .name = "instanceprobe",
+        .bytes = "capacity3",
+        .port_limits = .{ .ring_capacity = 8 },
+    }});
+    defer owner.closeCalls().settle().deinit();
+    const requested = try intern.internModuleName("instanceprobe");
+    var cursor = owner.loader().startStatic(requested, @import("native-instance").Extension.descriptor()).loading;
+    defer cursor.deinit();
+    while (true) switch (try cursor.advance(1)) {
+        .pending => {},
+        .loaded => |instance| {
+            instance.releasePin();
+            return;
+        },
+        .failure => return error.UnexpectedNativeLoadFailure,
+    };
+}
+
+test "native: instance endpoint policy allocation unwinds static initialization" {
+    try endpointPolicyAllocationProbe(std.testing.allocator);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, endpointPolicyAllocationProbe, .{});
+}
+
+test "native: instance endpoint policy rejects invalid capacities and cleans failed initialization" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    for ([_][]const u8{ "capacity0", "capacity9", "capacity3fail", "foreign" }) |configuration| {
+        var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+            .ecl_path = native_fixture.directory,
+            .native_instances = &.{.{ .name = "instanceprobe", .bytes = configuration, .port_limits = .{ .ring_capacity = 8 } }},
+        }), .cooperative, .language_tests);
+        defer runtime.deinit();
+        try expectOk(&runtime, "[] (instanceprobe.next) @attempt 'err at 'kind at 'io match? {'kind 'user 'msg \"instance policy rejected\"} assert");
+    }
+}

@@ -28,6 +28,14 @@ const Lifecycle = struct {
             state.copied += 1;
         }
         if (state.copied != configuration.len) return .pending;
+        if (std.mem.eql(u8, configuration, "foreign")) try context.configureEndpoint(ForeignPort, .output, 1);
+        if (std.mem.startsWith(u8, configuration, "capacity")) {
+            const capacity: u32 = if (configuration.len >= 9) configuration[8] - '0' else 0;
+            try context.configureEndpoint(ActivityResource, .output, capacity);
+            try context.configureEndpoint(ActivityResource, .input, 2);
+            try context.configureEndpoint(ActivityResource, .ready, 1);
+            if (std.mem.eql(u8, configuration, "capacity3fail")) return error.Failed;
+        }
         if (std.mem.eql(u8, configuration, "fail")) return error.Failed;
         return .complete;
     }
@@ -80,6 +88,18 @@ fn memoryAllocator(call: *ecl.Call("-- value")) ecl.CallbackResult {
 fn retirements(call: *ecl.Call("-- value")) ecl.CallbackResult {
     return call.complete(.{ecl.Scalar.int(retired.load(.monotonic))});
 }
+
+const ForeignPort = ecl.Port(.{ .controller = struct {
+    pub const name = "foreign";
+    pub const State = struct { byte: u8 = 0 };
+    pub const endpoints = .{ .output = ecl.declarations.Endpoint{ .doc = "Undeclared kind endpoint.", .transport = .bytes, .direction = .output, .owner = .resource } };
+    pub fn init() State {
+        return .{};
+    }
+    pub fn open(_: *State, _: *ecl.Controller) void {}
+    pub fn cancel(_: *State) void {}
+    pub fn deinit(_: *State) void {}
+} });
 
 const Resource = ecl.Port(.{ .controller = struct {
     pub const name = "resource";
@@ -432,6 +452,10 @@ const ActivityResource = ecl.Port(.{
             const output = try context.endpoint(ActivityResource, .output);
             // Possessing an activity context does not grant another pump's endpoint.
             if (context.endpoint(ActivityResource, .ready)) |_| return error.InvalidValue else |err| if (err != error.InvalidValue) return err;
+            if (state.mode == 6) {
+                try output.write(&.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 });
+                return;
+            }
             var bytes: [4096]u8 = undefined;
             while (try input.read(&bytes)) |count| {
                 if (state.mode == 1) {

@@ -167,6 +167,9 @@ pub const Owner = opaque {
         state_value.* = .{ .host = host, .limits = limits, .executor = try controllers.Owner.init(host.allocator(), @as(usize, limits.max_live_ports) * (@min(limits.max_operations, abi.max_port_lanes) + 1 + @import("port-declarations").max_activities) + 1) };
         return ownerFromState(state_value);
     }
+    pub fn ringCapacityLimit(self: *Owner) u32 {
+        return self.state().limits.ring_capacity;
+    }
     pub fn access(self: *Owner) *Access {
         return @ptrCast(self);
     }
@@ -337,10 +340,7 @@ const ResourceAdapter = struct {
         errdefer for (cell.adapter.resource_pipes) |pipe| if (pipe) |transport| transport.release();
         for (&cell.adapter.resource_pipes, 0..) |*slot, index| {
             const endpoint = instance.validated().endpoint(kind, @intCast(index), .resource) orelse continue;
-            const transport = try Protocol.Transport.create(cell, switch (endpoint.transport) {
-                .bytes => .bytes,
-                .messages => .messages,
-            });
+            const transport = try Protocol.Transport.create(cell, .resource, @intCast(index), endpoint.transport);
             slot.* = transport;
         }
         cell.adapter.configuration = config.value();
@@ -356,13 +356,13 @@ const Protocol = struct {
     const Transport = union(enum) {
         bytes: byte_transport.Pair,
         messages: message_transport.Pair,
-        fn create(cell: *Cell, kind: enum { bytes, messages }) error{OutOfMemory}!Transport {
+        fn create(cell: *Cell, endpoint_owner: enum { resource, exchange }, endpoint: u6, kind: @import("port-declarations").Transport) error{OutOfMemory}!Transport {
             // Construct a complete transport before publishing its variant in
             // an owning slot. Fallible arm initializers can otherwise expose
             // a tag whose payload was never initialized during rollback.
             switch (kind) {
                 .bytes => {
-                    const pair = byte_transport.create(cell.adapter.owner.host, cell.adapter.owner.limits.ring_capacity) catch |err| return switch (err) {
+                    const pair = byte_transport.create(cell.adapter.owner.host, (if (endpoint_owner == .resource) cell.adapter.instance.endpointCapacity(cell.adapter.kind, endpoint) else cell.adapter.owner.limits.ring_capacity)) catch |err| return switch (err) {
                         error.OutOfMemory => error.OutOfMemory,
                         error.InvalidCapacity => unreachable,
                     };
@@ -417,10 +417,7 @@ const Protocol = struct {
             const id: u6 = @intCast(index);
             if (endpoints & (@as(u64, 1) << id) == 0) continue;
             const definition = cell.adapter.instance.validated().endpoint(cell.adapter.kind, id, .exchange).?;
-            const transport = try Transport.create(cell, switch (definition.transport) {
-                .bytes => .bytes,
-                .messages => .messages,
-            });
+            const transport = try Transport.create(cell, .exchange, id, definition.transport);
             pipe.* = transport;
         }
         return result;

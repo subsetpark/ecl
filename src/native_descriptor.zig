@@ -70,7 +70,7 @@ pub const PortCapability = union(enum) {
 pub const EndpointDefinition = struct {
     resource: u32,
     id: u6,
-    transport: enum { bytes, messages },
+    transport: @import("port-declarations").Transport,
     direction: enum { input, output },
     owner: enum { resource, exchange },
 };

@@ -2082,3 +2082,24 @@ test "oom: standard-library and host: native memory allocator facade" {
     try requireSelectedOomTest(@src());
     try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortProbe("instanceprobe.memory-allocator pop", "").run);
 }
+
+test "oom: standard-library and host: native instance endpoint policy" {
+    try requireSelectedOomTest(@src());
+    const Probe = struct {
+        fn run(failing: *std.testing.FailingAllocator, failure_offset: ?usize) !usize {
+            var locked = LockedAllocator{ .child = failing.allocator() };
+            var inputs = try runtime_fixture.Fixture.init();
+            defer inputs.deinit();
+            var runtime = try session.Session.init(locked.allocator(), &.{}, inputs.inputs(.{
+                .ecl_path = native_fixture.directory,
+                .native_instances = &.{.{ .name = "instanceprobe", .bytes = "capacity3", .port_limits = .{ .ring_capacity = 8 } }},
+            }), .cooperative, .evaluate);
+            defer runtime.deinit();
+            const first = failing.alloc_index;
+            if (failure_offset) |offset| failing.fail_index = first + offset;
+            try runOk(&runtime, "native-endpoint-policy.ecl", "instanceprobe.next pop");
+            return first;
+        }
+    };
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, Probe.run);
+}

@@ -153,12 +153,15 @@ pub const LoadCursor = struct {
                     self.state = .complete;
                     return .{ .loaded = instance };
                 },
-                .stateful => |lifecycle| lifecycle,
+                .initializing => |lifecycle| lifecycle,
+                .initialized => unreachable,
             };
             const table = state.instanceTable();
             switch (lifecycle.definition.initialize(lifecycle.storage.ptr, &table, state, @intCast(@min(budget, 256)))) {
                 .pending => return .pending,
                 .complete => {
+                    const completed = state.lifecycle.initializing;
+                    state.lifecycle = .{ .initialized = completed };
                     self.state = .complete;
                     return .{ .loaded = instance };
                 },
@@ -256,7 +259,7 @@ fn publish(loading: Loading) error{OutOfMemory}!Loading {
     if (initialized.descriptor.instance()) |definition| {
         const storage = try state_value.host.allocator().alignedAlloc(u8, .@"64", definition.state_size);
         definition.init_state(storage.ptr);
-        state_value.lifecycle = .{ .stateful = .{ .definition = definition, .storage = storage } };
+        state_value.lifecycle = .{ .initializing = .{ .definition = definition, .storage = storage } };
     }
     std.Io.Threaded.mutexLock(&owner.state().retired_mutex);
     state_value.next = owner.state().instances;
@@ -287,18 +290,52 @@ const InstanceState = struct {
     retirement: heap.ReleaseDomain.Retirement = .{},
     lifecycle: union(enum) {
         stateless,
-        stateful: struct { definition: abi.InstanceDefinition, storage: []align(64) u8 },
+        initializing: Stateful,
+        initialized: Stateful,
     } = .stateless,
 
+    const Stateful = struct {
+        definition: abi.InstanceDefinition,
+        storage: []align(64) u8,
+        endpoint_capacities: [abi.max_port_definitions]?*[64]u32 = .{null} ** abi.max_port_definitions,
+    };
+    fn portOwner(self: *const InstanceState) *native_port.Owner {
+        return self.private_ports orelse self.owner.state().ports;
+    }
+    fn configureEndpoint(raw: *anyopaque, identity: *const anyopaque, endpoint_id: u32, capacity: u32) callconv(.c) abi.InstanceProgress {
+        const self: *InstanceState = @ptrCast(@alignCast(raw));
+        if (self.refs.load(.acquire) == 0 or endpoint_id >= 64 or capacity == 0 or capacity > self.portOwner().ringCapacityLimit()) return .failed;
+        const lifecycle = switch (self.lifecycle) {
+            .initializing => |*value| value,
+            else => return .failed,
+        };
+        var kind: u32 = 0;
+        while (kind < abi.max_port_definitions) : (kind += 1) {
+            const definition = self.descriptor.port(kind) orelse return .failed;
+            if (definition.wire.identity != identity) continue;
+            const endpoint = self.descriptor.endpoint(kind, @intCast(endpoint_id), .resource) orelse return .failed;
+            if (endpoint.transport != .bytes) return .failed;
+            const page = lifecycle.endpoint_capacities[kind] orelse allocation: {
+                const created = self.host.allocator().create([64]u32) catch return .out_of_memory;
+                created.* = .{0} ** 64;
+                lifecycle.endpoint_capacities[kind] = created;
+                break :allocation created;
+            };
+            page[endpoint_id] = capacity;
+            return .complete;
+        }
+        return .failed;
+    }
     fn instanceTable(self: *InstanceState) abi.InstanceTable {
-        return .{ .configuration_ptr = self.configuration.ptr, .configuration_len = self.configuration.len, .memory = &self.memory };
+        return .{ .configuration_ptr = self.configuration.ptr, .configuration_len = self.configuration.len, .memory = &self.memory, .configure_endpoint = configureEndpoint };
     }
     pub fn advanceRetirement(_: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *InstanceState) bool {
         switch (self.lifecycle) {
             .stateless => {},
-            .stateful => |lifecycle| {
+            .initializing, .initialized => |lifecycle| {
                 const table = self.instanceTable();
                 if (!lifecycle.definition.retire(lifecycle.storage.ptr, &table, self, 256)) return false;
+                for (lifecycle.endpoint_capacities) |page| if (page) |storage| allocator.destroy(storage);
                 allocator.free(lifecycle.storage);
                 self.lifecycle = .stateless;
             },
@@ -422,10 +459,23 @@ pub const ModuleInstance = opaque {
         return self.state().owner.state().ports.access();
     }
 
+    pub fn endpointCapacity(self: *const ModuleInstance, kind: u32, endpoint: u6) u32 {
+        const state_value = self.state();
+        switch (state_value.lifecycle) {
+            .initialized => |lifecycle| if (kind < lifecycle.endpoint_capacities.len) {
+                if (lifecycle.endpoint_capacities[kind]) |page| {
+                    if (page[endpoint] != 0) return page[endpoint];
+                }
+            },
+            .stateless => {},
+            .initializing => unreachable,
+        }
+        return state_value.portOwner().ringCapacityLimit();
+    }
     pub fn instanceState(self: *const ModuleInstance, identity: *const anyopaque) ?*anyopaque {
         return switch (self.state().lifecycle) {
             .stateless => null,
-            .stateful => |lifecycle| if (lifecycle.definition.identity == identity) lifecycle.storage.ptr else null,
+            .initializing, .initialized => |lifecycle| if (lifecycle.definition.identity == identity) lifecycle.storage.ptr else null,
         };
     }
 

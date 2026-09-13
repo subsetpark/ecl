@@ -5,8 +5,8 @@
 
 const builtin = @import("builtin");
 
-pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v13";
-pub const abi_version: u32 = 13;
+pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v14";
+pub const abi_version: u32 = 14;
 
 pub const max_error_message_bytes: u32 = 4096;
 pub const max_guest_scalar_bytes: u32 = 4096;
@@ -79,6 +79,7 @@ pub const InstanceTable = extern struct {
     configuration_ptr: [*]const u8,
     configuration_len: u64,
     memory: *const NativeMemory,
+    configure_endpoint: *const fn (*anyopaque, *const anyopaque, u32, u32) callconv(.c) InstanceProgress,
 };
 pub const NativeMemory = extern struct {
     context: *anyopaque,
@@ -500,7 +501,7 @@ comptime {
     assertRecord(CooperativeTable, 88, 8);
     assertRecord(MessageBuildRequest, 72, 8);
     assertRecord(ControllerTable, 160, 8);
-    assertRecord(InstanceTable, 24, 8);
+    assertRecord(InstanceTable, 32, 8);
     assertRecord(NativeMemory, 24, 8);
     assertRecord(InstanceDefinition, 48, 8);
     assertRecord(ControllerRead, 8, 4);

@@ -88,6 +88,19 @@ pub const InstanceContext = opaque {
         const table = self.adapter().table;
         return table.configuration_ptr[0..@intCast(table.configuration_len)];
     }
+    /// Set the immutable byte capacity of one resource endpoint during instance
+    /// initialization. Capacity must fit the issuing instance's host ceiling.
+    pub fn configureEndpoint(self: *InstanceContext, comptime P: type, comptime name: P.Endpoints.Name, capacity: u32) error{ OutOfMemory, Failed }!void {
+        const endpoint = comptime P.Endpoints.get(name);
+        comptime if (endpoint.owner != .resource or endpoint.transport != .bytes)
+            @compileError("ecl-native: instance capacity configures resource byte endpoints");
+        const owned = self.adapter();
+        switch (owned.table.configure_endpoint(owned.context, P.definition().identity.?, P.Endpoints.id(name), capacity)) {
+            .complete => {},
+            .out_of_memory => return error.OutOfMemory,
+            else => return error.Failed,
+        }
+    }
     pub fn consume(self: *InstanceContext) bool {
         const state = self.adapter();
         if (state.budget == 0) return false;

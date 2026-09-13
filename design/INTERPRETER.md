@@ -1601,6 +1601,12 @@ storage; instances without a policy retain the shared native-extension budget.
 Both policies use the same resource lifecycle and return capacity after joining.
 Instance budgets inherit the Session's admission gate, so shutdown also closes
 child creation. The shared gate outlives every instance resource owner.
+Endpoint capacity policy belongs to the initializing instance state. The host
+validates each override against that descriptor's resource byte endpoints and
+its issuing owner's ceiling. Completion consumes the initializing state and seals
+the policy before resource publication; failed initialization retires the same
+policy storage. Resource transport construction derives capacity from this owner,
+so independent Session policies cannot alter each other or resize live streams.
 
 The exact wire ABI is the callback's sole interpreter surface. It contains:
 
