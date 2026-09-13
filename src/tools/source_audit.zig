@@ -175,6 +175,8 @@ const repository_verification_files = [_][]const u8{
     "test/native/malformed.zig",
     "test/native/negative/rejected_open_resource_authority.zig",
     "test/native/negative/rejected_open_child_authority.zig",
+    "test/native/negative/activity_stop_input.zig",
+    "test/native/negative/activity_finish_output.zig",
     "test/native/negative/no_call_parameter.zig",
     "test/native/negative/invalid_instance_callbacks.zig",
     "test/native/negative/wrong_return_type.zig",

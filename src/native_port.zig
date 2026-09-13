@@ -1369,7 +1369,7 @@ fn storeControllerFailure(destination: *?Failure, failure: Failure) void {
 }
 fn controllerFinishInput(raw: *anyopaque, identity: *const anyopaque, index: u32) callconv(.c) bool {
     const ctx = context(raw);
-    if (ctx.invocation != .shutdown or ctx.cell.adapter.definition.wire.identity != identity or index >= 64 or controllerCancelled(raw)) return false;
+    if ((ctx.invocation != .shutdown and ctx.invocation != .activity) or ctx.cell.adapter.definition.wire.identity != identity or index >= 64 or controllerCancelled(raw)) return false;
     const endpoint = ctx.cell.adapter.instance.validated().endpoint(ctx.cell.adapter.kind, @intCast(index), .resource) orelse return false;
     if (endpoint.transport != .bytes or endpoint.direction != .input) return false;
     const transport = ctx.cell.adapter.resource_pipes[index] orelse return false;
@@ -1377,7 +1377,20 @@ fn controllerFinishInput(raw: *anyopaque, identity: *const anyopaque, index: u32
     return true;
 }
 
-const controller_table: abi.ControllerTable = .{ .fail_streams = controllerFailStreams, .finish_input = controllerFinishInput, .instance_state = controllerInstance, .initialization_parent = controllerInitializationParent, .resolve_endpoint = controllerResolveEndpoint, .read_bytes = controllerReadBytes, .write_bytes = controllerWriteBytes, .receive_event = controllerReceiveEvent, .fail_resource = controllerFailResource, .parent_state = controllerParent, .discard_message = controllerDiscardMessage, .build_message = controllerBuildMessage, .fail_allocation = controllerFailAllocation, .received_message = controllerReceivedMessage, .forward_message = controllerForwardMessage, .result_message = controllerResultMessage, .input = controllerInput, .finish_endpoint = controllerFinishEndpoint, .cancelled = controllerCancelled, .acknowledge_cancellation = controllerAcknowledge, .fail = controllerFail };
+fn controllerStopOutput(raw: *anyopaque, identity: *const anyopaque, index: u32) callconv(.c) bool {
+    const ctx = context(raw);
+    if (ctx.invocation != .activity or ctx.cell.adapter.definition.wire.identity != identity or index >= 64 or controllerCancelled(raw)) return false;
+    const endpoint = ctx.cell.adapter.instance.validated().endpoint(ctx.cell.adapter.kind, @intCast(index), .resource) orelse return false;
+    if (endpoint.transport != .bytes or endpoint.direction != .output) return false;
+    const transport = ctx.cell.adapter.resource_pipes[index] orelse return false;
+    switch (transport) {
+        .bytes => |pair| pair.pipe.stopProduction(),
+        .messages => return false,
+    }
+    return true;
+}
+
+const controller_table: abi.ControllerTable = .{ .stop_output = controllerStopOutput, .fail_streams = controllerFailStreams, .finish_input = controllerFinishInput, .instance_state = controllerInstance, .initialization_parent = controllerInitializationParent, .resolve_endpoint = controllerResolveEndpoint, .read_bytes = controllerReadBytes, .write_bytes = controllerWriteBytes, .receive_event = controllerReceiveEvent, .fail_resource = controllerFailResource, .parent_state = controllerParent, .discard_message = controllerDiscardMessage, .build_message = controllerBuildMessage, .fail_allocation = controllerFailAllocation, .received_message = controllerReceivedMessage, .forward_message = controllerForwardMessage, .result_message = controllerResultMessage, .input = controllerInput, .finish_endpoint = controllerFinishEndpoint, .cancelled = controllerCancelled, .acknowledge_cancellation = controllerAcknowledge, .fail = controllerFail };
 
 pub fn fromValue(value: Value, instance: *native.ModuleInstance, kind: u32) ?*Cell {
     const handle = switch (value) {

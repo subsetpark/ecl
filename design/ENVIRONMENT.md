@@ -32,7 +32,7 @@ Session's runtime I/O state.
 The public `net` and `proc` modules are ECL compositions over these registered
 capabilities and `port.*`. Their operation and endpoint selectors expose only
 their corresponding resources and streams. First-party adapters use typed backend calls;
-the extension adapter translates ABI v18 calls into the same runtime interfaces
+the extension adapter translates ABI v19 calls into the same runtime interfaces
 for controller execution, transport, cancellation, ownership, and cleanup.
 
 Embedded names have precedence over filesystem modules. A file on `ECL_PATH`
@@ -127,8 +127,8 @@ module. Its descriptor declares the same canonical name requested by the
 loader. The complete word table validates before publication, and publication
 is atomic.
 
-The current pre-release native ABI is version 18, with entry symbol
-`ecl_module_abi_v18`. Resource authors choose `ecl.Port(.{ .controller = Spec })`
+The current pre-release native ABI is version 19, with entry symbol
+`ecl_module_abi_v19`. Resource authors choose `ecl.Port(.{ .controller = Spec })`
 or `ecl.Port(.{ .cooperative = Spec })`. Cooperative callbacks receive bounded
 work accounting and cancellable timer parking. Their persistent builder begins
 aggregate construction and advances it explicitly; it has no blocking endpoints.
@@ -146,6 +146,11 @@ handler and its resource byte endpoints. Each endpoint belongs to at most one
 activity. An activity receives `*ecl.Activity`, can use only its declared
 endpoints, and runs independently of operation calls. Returning finishes its
 outputs and rejects subsequent input writes; failures propagate to those streams.
+`Activity.finishInput` closes producer admission to a resource byte input while
+accepted writer turns and bytes drain. `Activity.stopOutput` immediately stops
+producers on a resource byte output, including admitted blocked writes; readers
+observe its accepted prefix followed by EOF. Neither operation grants access to
+stream contents, and neither replaces an already terminal error.
 `Activity.failStreams` fails all resource streams while preserving operation
 admission, buffered output, and already observed EOF. Resource close interrupts
 blocked transport and joins every activity before

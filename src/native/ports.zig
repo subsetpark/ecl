@@ -500,6 +500,24 @@ pub const Activity = opaque {
         const owned = self.controller().state();
         owned.table.fail_streams(owned.context, kind, bounded.ptr, @intCast(bounded.len));
     }
+    /// Stop new input writers and let accepted writer turns and bytes drain.
+    /// This grants no access to another activity's stream contents.
+    pub fn finishInput(self: *Activity, comptime P: type, comptime name: P.Endpoints.Name) ControllerError!void {
+        const spec = comptime P.Endpoints.get(name);
+        comptime if (spec.owner != .resource or spec.transport != .bytes or spec.direction != .input)
+            @compileError("ecl-native: activity finishes resource byte inputs");
+        const owned = self.controller().state();
+        if (!owned.table.finish_input(owned.context, P.kindIdentity(), P.Endpoints.id(name))) return if (self.cancelled()) error.Cancelled else error.InvalidValue;
+    }
+    /// Stop producers immediately, preserving accepted output followed by EOF.
+    /// An admitted blocked write is interrupted; this grants no data access.
+    pub fn stopOutput(self: *Activity, comptime P: type, comptime name: P.Endpoints.Name) ControllerError!void {
+        const spec = comptime P.Endpoints.get(name);
+        comptime if (spec.owner != .resource or spec.transport != .bytes or spec.direction != .output)
+            @compileError("ecl-native: activity stops resource byte outputs");
+        const owned = self.controller().state();
+        if (!owned.table.stop_output(owned.context, P.kindIdentity(), P.Endpoints.id(name))) return if (self.cancelled()) error.Cancelled else error.InvalidValue;
+    }
     pub fn failResource(self: *Activity, kind: capability.ErrorKind, message: []const u8) void {
         self.controller().failResource(kind, message);
     }

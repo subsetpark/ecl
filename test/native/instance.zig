@@ -422,6 +422,7 @@ const ActivityResource = ecl.Port(.{
             mode: i64 = 0,
             finished: std.atomic.Value(u32) = .init(0),
             echo_finished: std.Io.Event = .unset,
+            output_ready: std.Io.Event = .unset,
             received: usize = 0,
         };
         pub const endpoints = .{
@@ -432,8 +433,8 @@ const ActivityResource = ecl.Port(.{
         pub const operations = .{
             .health = .{ .name = "activity-health", .doc = "Observe retained operation admission.", .handler = health, .lane = .operation, .endpoints = .{} },
         };
-        fn health(_: *State, ctx: *ecl.Controller) ecl.ControllerError!void {
-            try ctx.builder().int(1);
+        fn health(state: *State, ctx: *ecl.Controller) ecl.ControllerError!void {
+            try ctx.builder().int(if (state.mode == 8) @intCast(state.received) else 1);
             try ctx.builder().result();
         }
         pub const activities = .{
@@ -447,7 +448,9 @@ const ActivityResource = ecl.Port(.{
             state.instance = context.instance(Instance);
             state.mode = context.input(&.{}).?.int() orelse 0;
         }
-        pub fn cancel(_: *State) void {}
+        pub fn cancel(state: *State) void {
+            state.output_ready.set(std.Io.Threaded.global_single_threaded.io());
+        }
         pub fn deinit(state: *State) void {
             if (state.instance) |instance| _ = instance.value.fetchAdd(if (state.finished.load(.acquire) == 2) 10000 else -1000000, .monotonic);
         }
@@ -467,6 +470,18 @@ const ActivityResource = ecl.Port(.{
             if (context.endpoint(ActivityResource, .ready)) |_| return error.InvalidValue else |err| if (err != error.InvalidValue) return err;
             if (state.mode == 6) {
                 try output.write(&.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 });
+                return;
+            }
+            if (state.mode == 8) {
+                defer state.output_ready.set(std.Io.Threaded.global_single_threaded.io());
+                var bytes: [2]u8 = undefined;
+                const count = (try input.read(&bytes)) orelse return error.InvalidValue;
+                state.received = count;
+                try output.write(bytes[0..count]);
+                state.output_ready.set(std.Io.Threaded.global_single_threaded.io());
+                output.write(&.{3}) catch |err| if (err != error.Failed) return err;
+                if (try input.read(&bytes) != null) return error.InvalidValue;
+                state.received += 100;
                 return;
             }
             var bytes: [4096]u8 = undefined;
@@ -497,6 +512,14 @@ const ActivityResource = ecl.Port(.{
         }
         fn marker(state: *State, context: *ecl.Activity) ecl.ControllerError!void {
             defer _ = state.finished.fetchAdd(1, .release);
+            if (state.mode == 8) {
+                state.output_ready.waitUncancelable(std.Io.Threaded.global_single_threaded.io());
+                if (context.cancelled()) return;
+                if (context.stopOutput(ForeignPort, .output)) |_| return error.InvalidValue else |err| if (err != error.InvalidValue) return err;
+                try context.finishInput(ActivityResource, .input);
+                try context.stopOutput(ActivityResource, .output);
+                state.echo_finished.waitUncancelable(std.Io.Threaded.global_single_threaded.io());
+            }
             if (!context.cancelled()) try (try context.endpoint(ActivityResource, .ready)).write(&.{7});
         }
     },

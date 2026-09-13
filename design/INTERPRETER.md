@@ -1512,6 +1512,9 @@ the observing driver. Commit freezes both result and diagnostic publication.
 A stream failure is distinct from resource closure: a declared activity may fail
 all resource transports while the backend retains admission to report its terminal
 state. Output buffers and terminal EOF retain their existing observation order.
+Activity supervision may finish input admission or stop output production without
+acquiring data authority. Finishing joins admitted writer turns; stopping ends
+those turns immediately while retaining the accepted prefix and terminal facts.
 Cooperative initialization owns its construction continuation until completion
 or joined cancellation, including every partial validation and diagnostic value.
 The remaining interpreter-owned process controller uses the common lifecycle

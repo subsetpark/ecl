@@ -162,6 +162,15 @@ pub const Pipe = opaque {
         owned.phase.finish();
         owned.notifyLocked();
     }
+    /// Stop every producer, including an admitted blocked write, and preserve
+    /// the accepted prefix for readers. A prior terminal failure stays terminal.
+    pub fn stopProduction(self: *Pipe) void {
+        const owned = self.state();
+        std.Io.Threaded.mutexLock(&owned.mutex);
+        defer std.Io.Threaded.mutexUnlock(&owned.mutex);
+        owned.phase.complete();
+        owned.notifyLocked();
+    }
     pub fn fail(self: *Pipe, failure: Failure, discard: bool) void {
         const owned = self.state();
         std.Io.Threaded.mutexLock(&owned.mutex);
@@ -240,4 +249,24 @@ pub fn create(host: *const heap.HostCleanup, capacity: usize) error{ OutOfMemory
     const bytes = try host.allocator().alloc(u8, capacity);
     owned.* = .{ .host = host, .allocator = host.allocator(), .ring = .{ .bytes = bytes }, .writers = Writers.init(&owned.mutex) };
     return owned.capabilities();
+}
+
+test "byte producer stop interrupts admitted writes and preserves accepted bytes" {
+    var owner = heap.HostOwner.init(std.testing.allocator);
+    defer owner.cleanup().drain();
+    const pair = try create(owner.cleanup(), 2);
+    defer pair.pipe.release();
+    const writer = try pair.pipe.beginWrite();
+    defer writer.finish();
+    try std.testing.expectEqual(Write{ .written = 2 }, writer.write(&.{ 1, 2 }));
+    try std.testing.expectEqual(Write.pending, writer.write(&.{3}));
+    pair.pipe.stopProduction();
+    try std.testing.expect(writer.write(&.{3}) == .failed);
+    var bytes: [2]u8 = undefined;
+    try std.testing.expectEqual(Read{ .data = 2 }, pair.pipe.read(&bytes));
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2 }, &bytes);
+    try std.testing.expectEqual(Read.eof, pair.pipe.read(&bytes));
+    try std.testing.expectError(error.Finished, pair.pipe.beginWrite());
+    pair.pipe.fail(Failure.init(.io, "late failure"), false);
+    try std.testing.expectEqual(Read.eof, pair.pipe.read(&bytes));
 }

@@ -182,6 +182,8 @@ pub fn build(b: *std.Build) void {
     }
 
     const negative_cases = [_]struct { file: []const u8, message: []const u8 }{
+        .{ .file = "activity_finish_output", .message = "ecl-native: activity finishes resource byte inputs" },
+        .{ .file = "activity_stop_input", .message = "ecl-native: activity stops resource byte outputs" },
         .{ .file = "rejected_open_resource_authority", .message = "no field or member function named 'builder' in 'ports.RejectedOpen'" },
         .{ .file = "rejected_open_child_authority", .message = "no field or member function named 'child' in 'ports.RejectedErrorDataBuilder'" },
         .{ .file = "invalid_instance_callbacks", .message = "ecl-native: invalid instance lifecycle signatures" },
@@ -994,6 +996,7 @@ pub fn build(b: *std.Build) void {
             "heap.test.",
             // Bounded message validation and allocation rollback are small
             // component checks and introduce no controller or Session startup.
+            "port_bytes.test.",
             "port_message.test.",
             "list.test.",
             "dict.test.",

@@ -2826,3 +2826,22 @@ test "native: capacity failure descriptors reject incomplete lifecycle metadata"
     capacity.state_alignment = 3;
     try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &raw);
 }
+
+test "native: activity supervision stops output and drains input without data authority" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    for ([_]bool{ true, false }) |linked| {
+        var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+            .ecl_path = if (linked) null else native_fixture.directory,
+            .native_instances = &.{.{ .name = "instanceprobe", .descriptor = if (linked) @import("native-instance").Extension.descriptor() else null, .port_limits = .{ .ring_capacity = 2 } }},
+        }), .cooperative, .language_tests);
+        defer runtime.deinit();
+        try expectOk(&runtime, "instanceprobe.activity 8 port.open (|p| " ++
+            "p instanceprobe.activity-in port.endpoint [1 2] port.write " ++
+            "p instanceprobe.activity-ready port.endpoint 1 port.read [7] match? {'kind 'user 'msg \"joined supervision\"} assert " ++
+            "p instanceprobe.activity-out port.endpoint dup 4 port.read [1 2] match? {'kind 'user 'msg \"accepted prefix\"} assert " ++
+            "4 port.read [] match? {'kind 'user 'msg \"stopped output EOF\"} assert " ++
+            "p instanceprobe.activity-health [] port.call 102 = {'kind 'user 'msg \"input drained to EOF\"} assert " ++
+            "p port.close) call");
+    }
+}

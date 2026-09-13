@@ -2189,3 +2189,13 @@ test "oom: standard-library and host: accepted connection SDK lifecycle" {
         "port.call dup net.local-address pop dup net.peer-address pop dup [120] net.write dup port.shutdown port.close",
     ).run);
 }
+
+test "oom: standard-library and host: native activity stream supervision" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortProbe(
+        "instanceprobe.activity 8 port.open (|p| p instanceprobe.activity-in port.endpoint [1 2] port.write " ++
+            "p instanceprobe.activity-ready port.endpoint 1 port.read pop " ++
+            "p instanceprobe.activity-out port.endpoint 8 port.read pop p port.close) call",
+        "",
+    ).run);
+}

@@ -5,8 +5,8 @@
 
 const builtin = @import("builtin");
 
-pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v18";
-pub const abi_version: u32 = 18;
+pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v19";
+pub const abi_version: u32 = 19;
 
 pub const max_error_message_bytes: u32 = 4096;
 pub const max_guest_scalar_bytes: u32 = 4096;
@@ -120,6 +120,7 @@ pub const MessageBuildRequest = extern struct {
 pub const ControllerStatus = enum(u32) { ok, eof, cancelled, failed, out_of_memory, invalid, _ };
 pub const ControllerRead = extern struct { status: ControllerStatus, count: u32 = 0 };
 pub const ControllerTable = extern struct {
+    stop_output: *const fn (*anyopaque, *const anyopaque, u32) callconv(.c) bool,
     finish_input: *const fn (*anyopaque, *const anyopaque, u32) callconv(.c) bool,
     instance_state: InstanceStateFn,
     initialization_parent: InstanceStateFn,
@@ -503,7 +504,7 @@ fn assertRecord(comptime T: type, comptime expected_size: usize, comptime expect
 
 comptime {
     @setEvalBranchQuota(16000);
-    if (@sizeOf(usize) != 8) @compileError("native ABI v9 supports 64-bit targets only");
+    if (@sizeOf(usize) != 8) @compileError("native ABI supports 64-bit targets only");
 
     assertRecord(CapabilityRequirement, 8, 4);
     assertRecord(EffectSlot, 24, 8);
@@ -521,7 +522,7 @@ comptime {
     assertRecord(CooperativeDefinition, 40, 8);
     assertRecord(CooperativeTable, 88, 8);
     assertRecord(MessageBuildRequest, 72, 8);
-    assertRecord(ControllerTable, 168, 8);
+    assertRecord(ControllerTable, 176, 8);
     assertRecord(InstanceTable, 32, 8);
     assertRecord(NativeMemory, 24, 8);
     assertRecord(InstanceDefinition, 48, 8);
