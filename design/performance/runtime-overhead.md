@@ -1,5 +1,13 @@
 # Shared runtime overhead
 
+Raw measurement outputs are archived with [PR #80](https://github.com/subsetpark/ecl/pull/80)
+in the [preserved measurement commit](https://github.com/subsetpark/ecl/tree/b6d4e37538db5f518c16f51267bb9d019a6e9a79/design/performance).
+The archive includes individual repetitions, artifact identities, profiles, and
+failed or interrupted controls. These are historical evidence, not maintained
+test fixtures. Links below point to that immutable archive. Reusable benchmarks
+remain in `test/service_benchmark.py` and the `build-bench-workdrivers` target.
+Further filesystem optimization is tracked in [#81](https://github.com/subsetpark/ecl/issues/81).
+
 ## Direct filesystem runtime
 
 The direct filesystem iteration follows `7f737bc` and changes the target from
@@ -62,7 +70,7 @@ no improvement over that baseline is claimed for them. The long directory stress
 completed in 4.599113–4.703103 seconds; failed old-control runs are not treated
 as valid timing comparisons.
 
-The preceding [SDK comparison](runtime-overhead-direct-fs-timing.json) measured
+The preceding [SDK comparison](https://github.com/subsetpark/ecl/blob/b6d4e37538db5f518c16f51267bb9d019a6e9a79/design/performance/runtime-overhead-direct-fs-timing.json) measured
 33.386 seconds through the SDK versus 0.191 seconds for the initial direct
 candidate, a 174.5× improvement on default-pool stat. The final comparison above
 preserves that improvement within variation. The SDK direct-native control still
@@ -81,12 +89,12 @@ voluntary context switches have a median
 of one, versus 825,482 through the SDK. These are reductions in interpreter
 and lifecycle work, not a claim that filesystem syscalls became faster.
 
-The final [service repetitions](runtime-overhead-direct-fs-joined-services.json)
+The final [service repetitions](https://github.com/subsetpark/ecl/blob/b6d4e37538db5f518c16f51267bb9d019a6e9a79/design/performance/runtime-overhead-direct-fs-joined-services.json)
 sample interpreter threads and RSS through `/proc` every millisecond and verify
 results and joined cleanup. Each complete series has one warmup and five fresh
-processes. Earlier [control failures](runtime-overhead-direct-fs-failures.json)
-and interrupted [long-run](runtime-overhead-direct-fs-long-interrupted.json)
-and [service](runtime-overhead-direct-fs-services-interrupted.json) comparisons
+processes. Earlier [control failures](https://github.com/subsetpark/ecl/blob/b6d4e37538db5f518c16f51267bb9d019a6e9a79/design/performance/runtime-overhead-direct-fs-failures.json)
+and interrupted [long-run](https://github.com/subsetpark/ecl/blob/b6d4e37538db5f518c16f51267bb9d019a6e9a79/design/performance/runtime-overhead-direct-fs-long-interrupted.json)
+and [service](https://github.com/subsetpark/ecl/blob/b6d4e37538db5f518c16f51267bb9d019a6e9a79/design/performance/runtime-overhead-direct-fs-services-interrupted.json) comparisons
 are retained separately, not silently folded into successful timing samples.
 
 | Service workload | Pre-SDK seconds | Initial direct seconds | Final direct seconds |
@@ -104,7 +112,7 @@ slower, with disjoint ranges. Joined completion itself costs 3.4% in the sampled
 stat service and 3.5% in directory churn relative to the initial direct candidate;
 it fixes the reproduced quota error. Recursive cleanup remains within the old
 envelope. Network/process timing ranges overlap the immediate predecessor's.
-The earlier [SDK service comparison](runtime-overhead-direct-fs-services.json)
+The earlier [SDK service comparison](https://github.com/subsetpark/ecl/blob/b6d4e37538db5f518c16f51267bb9d019a6e9a79/design/performance/runtime-overhead-direct-fs-services.json)
 measured 4.585 seconds for directory churn, 0.784 for reads, and 3.750 for tree
 cleanup, establishing that the large migration regressions are removed.
 
@@ -115,7 +123,7 @@ and 7,760 for staging cleanup. These remain above the pre-SDK medians of 5,788,
 6,300, 7,320, and 7,288 KiB, but below the SDK comparison's 10,592, 12,008,
 12,916, and 10,720 KiB. No claim of identical whole-process memory is made.
 
-Separate [profiling](runtime-overhead-direct-fs-profile.json) uses 131,072
+Separate [profiling](https://github.com/subsetpark/ecl/blob/b6d4e37538db5f518c16f51267bb9d019a6e9a79/design/performance/runtime-overhead-direct-fs-profile.json) uses 131,072
 directory resources in cooperative execution, where both controls complete.
 The dominant pinned-CPU user-instruction count rises 4.0%, from 6,335,400,159
 to 6,590,799,992. This is a diagnostic, not another timing repetition. User-cycle
@@ -124,14 +132,14 @@ allocation, lookup, dispatch, and shared reclamation also prominent. The remaini
 directory cost is not explained solely by extra filesystem computation; shared
 resource initialization and coordination remain relevant bottlenecks.
 
-The [final latency and deep-cleanup probes](runtime-overhead-direct-fs-joined-extra.json)
+The [final latency and deep-cleanup probes](https://github.com/subsetpark/ecl/blob/b6d4e37538db5f518c16f51267bb9d019a6e9a79/design/performance/runtime-overhead-direct-fs-joined-extra.json)
 have overlapping ranges against the initial direct candidate. One-worker
 cancellation medians are 0.479 versus 0.498 ms; eight-worker medians are 1.246
 versus 1.223 ms. A 10,000-deep recursive cleanup remains about 42 ms in
 cooperative, one-worker, and eight-worker execution. These probes establish no
 repeatable fairness or unrelated cleanup regression.
 
-The raw [final paired measurements](runtime-overhead-direct-fs-joined-timing.json) retain
+The raw [final paired measurements](https://github.com/subsetpark/ecl/blob/b6d4e37538db5f518c16f51267bb9d019a6e9a79/design/performance/runtime-overhead-direct-fs-joined-timing.json) retain
 programs, input hashes, artifact identities, elapsed/user/system time, context
 switches, and counter output. The `launch_peak_rss_kib` field is the `wait4` launch
 high-water mark, which includes inherited launcher memory and is not used as
@@ -240,13 +248,13 @@ before/after ranges. The cooperative deep-value median rises from 23.029 to
 eight-worker medians are effectively unchanged. No repeatable fairness or
 cleanup regression is established by those probes.
 
-The raw [three-variant measurements](runtime-overhead-immediate-timing.json)
+The raw [three-variant measurements](https://github.com/subsetpark/ecl/blob/b6d4e37538db5f518c16f51267bb9d019a6e9a79/design/performance/runtime-overhead-immediate-timing.json)
 include elapsed/user/system time, context switches, counters, programs, fixture
 identity, and artifact SHA-256 values. The retained CLI SHA-256 is
 `06b246fb9b362c543e7b032cc4265973a922fc5b44cf37da2bc65f6e3ab391fe`.
-The [allocation repetitions](runtime-overhead-immediate-memory.json),
-[public grant observations](runtime-overhead-immediate-grants.json), and
-[latency/cleanup repetitions](runtime-overhead-immediate-extra.json) preserve
+The [allocation repetitions](https://github.com/subsetpark/ecl/blob/b6d4e37538db5f518c16f51267bb9d019a6e9a79/design/performance/runtime-overhead-immediate-memory.json),
+[public grant observations](https://github.com/subsetpark/ecl/blob/b6d4e37538db5f518c16f51267bb9d019a6e9a79/design/performance/runtime-overhead-immediate-grants.json), and
+[latency/cleanup repetitions](https://github.com/subsetpark/ecl/blob/b6d4e37538db5f518c16f51267bb9d019a6e9a79/design/performance/runtime-overhead-immediate-extra.json) preserve
 the additional evidence. The first-slice artifact identities remain in the raw
 comparison even though its code is rejected.
 
@@ -335,10 +343,10 @@ remains much faster on stat; this iteration does not close that gap.
 
 ### Lookup evidence and verification
 
-Raw results are retained in `runtime-overhead-lookup-timing.json`,
-`runtime-overhead-lookup-benches.json`, `runtime-overhead-lookup-cooperative.json`,
-`runtime-overhead-lookup-services.json`, `runtime-overhead-lookup-process.json`,
-and `runtime-overhead-lookup-extra.json`. They include artifact identities,
+Raw results are retained in [runtime-overhead-lookup-timing.json](https://github.com/subsetpark/ecl/blob/b6d4e37538db5f518c16f51267bb9d019a6e9a79/design/performance/runtime-overhead-lookup-timing.json),
+[runtime-overhead-lookup-benches.json](https://github.com/subsetpark/ecl/blob/b6d4e37538db5f518c16f51267bb9d019a6e9a79/design/performance/runtime-overhead-lookup-benches.json), [runtime-overhead-lookup-cooperative.json](https://github.com/subsetpark/ecl/blob/b6d4e37538db5f518c16f51267bb9d019a6e9a79/design/performance/runtime-overhead-lookup-cooperative.json),
+[runtime-overhead-lookup-services.json](https://github.com/subsetpark/ecl/blob/b6d4e37538db5f518c16f51267bb9d019a6e9a79/design/performance/runtime-overhead-lookup-services.json), [runtime-overhead-lookup-process.json](https://github.com/subsetpark/ecl/blob/b6d4e37538db5f518c16f51267bb9d019a6e9a79/design/performance/runtime-overhead-lookup-process.json),
+and [runtime-overhead-lookup-extra.json](https://github.com/subsetpark/ecl/blob/b6d4e37538db5f518c16f51267bb9d019a6e9a79/design/performance/runtime-overhead-lookup-extra.json). They include artifact identities,
 individual timings, CPU time, context switches, counters, and service samples.
 The ReleaseSafe CLI SHA-256 is
 `e4dc676f8470352e593b848c61f1fcb1aef4a488e53bf68c46329782635933b6`.
