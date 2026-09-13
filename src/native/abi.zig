@@ -5,8 +5,8 @@
 
 const builtin = @import("builtin");
 
-pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v15";
-pub const abi_version: u32 = 15;
+pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v16";
+pub const abi_version: u32 = 16;
 
 pub const max_error_message_bytes: u32 = 4096;
 pub const max_guest_scalar_bytes: u32 = 4096;
@@ -79,7 +79,7 @@ pub const InstanceTable = extern struct {
     configuration_ptr: [*]const u8,
     configuration_len: u64,
     memory: *const NativeMemory,
-    configure_endpoint: *const fn (*anyopaque, *const anyopaque, u32, u32) callconv(.c) InstanceProgress,
+    configure_endpoint: *const fn (*anyopaque, *const anyopaque, u32, u64) callconv(.c) InstanceProgress,
 };
 pub const NativeMemory = extern struct {
     context: *anyopaque,

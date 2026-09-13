@@ -90,7 +90,7 @@ pub const InstanceContext = opaque {
     }
     /// Set the immutable byte capacity of one resource endpoint during instance
     /// initialization. Capacity must fit the issuing instance's host ceiling.
-    pub fn configureEndpoint(self: *InstanceContext, comptime P: type, comptime name: P.Endpoints.Name, capacity: u32) error{ OutOfMemory, Failed }!void {
+    pub fn configureEndpoint(self: *InstanceContext, comptime P: type, comptime name: P.Endpoints.Name, capacity: usize) error{ OutOfMemory, Failed }!void {
         const endpoint = comptime P.Endpoints.get(name);
         comptime if (endpoint.owner != .resource or endpoint.transport != .bytes)
             @compileError("ecl-native: instance capacity configures resource byte endpoints");
@@ -675,7 +675,7 @@ pub fn module(comptime spec: anytype) type {
     const Ports = if (@hasField(@TypeOf(spec), "ports")) spec.ports else .{};
     const explicit_words = if (@hasField(@TypeOf(spec), "words")) spec.words else .{};
     @setEvalBranchQuota(1000 + (explicit_words.len + portBindingCount(Ports)) * (explicit_words.len + portBindingCount(Ports)) * 16);
-    if (!identifier(spec.name)) @compileError("ecl-native: module name must be a nonempty identifier");
+    if (!moduleIdentifier(spec.name)) @compileError("ecl-native: module name must contain nonempty identifier segments");
     if (spec.doc.len == 0) @compileError("ecl-native: module documentation must not be empty");
     const module_linkage: Linkage = if (@hasField(@TypeOf(spec), "linkage")) spec.linkage else .dynamic;
     const words = explicit_words ++ portBindings(Ports);
@@ -869,6 +869,12 @@ fn makeSlots(comptime names: anytype) [names.len]abi.EffectSlot {
         .name_len = name.len,
     };
     return result;
+}
+
+fn moduleIdentifier(bytes: []const u8) bool {
+    var components = std.mem.splitScalar(u8, bytes, '.');
+    while (components.next()) |component| if (!identifier(component)) return false;
+    return true;
 }
 
 fn identifier(bytes: []const u8) bool {

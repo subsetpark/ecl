@@ -32,7 +32,7 @@ Session's runtime I/O state.
 The public `net` and `proc` modules are ECL compositions over these registered
 capabilities and `port.*`. Their operation and endpoint selectors expose only
 their corresponding resources and streams. First-party adapters use typed backend calls;
-the extension adapter translates ABI v15 calls into the same runtime interfaces
+the extension adapter translates ABI v16 calls into the same runtime interfaces
 for controller execution, transport, cancellation, ownership, and cleanup.
 
 Embedded names have precedence over filesystem modules. A file on `ECL_PATH`
@@ -127,8 +127,8 @@ module. Its descriptor declares the same canonical name requested by the
 loader. The complete word table validates before publication, and publication
 is atomic.
 
-The current pre-release native ABI is version 15, with entry symbol
-`ecl_module_abi_v15`. Resource authors choose `ecl.Port(.{ .controller = Spec })`
+The current pre-release native ABI is version 16, with entry symbol
+`ecl_module_abi_v16`. Resource authors choose `ecl.Port(.{ .controller = Spec })`
 or `ecl.Port(.{ .cooperative = Spec })`. Cooperative callbacks receive bounded
 work accounting and cancellable timer parking. Their persistent builder begins
 aggregate construction and advances it explicitly; it has no blocking endpoints.
@@ -177,6 +177,11 @@ and zero memory ceilings are rejected.
 Unconfigured modules receive empty configuration and a 64 MiB native-memory
 ceiling. Explicit resource limits give that instance independent capacity;
 otherwise resources use `native_port_limits`.
+Independent host service limits accept positive addressable resource counts and
+byte capacities. `max_live_ports = null` grants unlimited resource admission only
+when every resource kind in that descriptor is cooperative; controller descriptors
+reject that policy during loading. Such instances allocate no controller executor.
+The shared extension limits retain their bounded defaults and validation ceilings.
 A host-provided descriptor uses the same validation, instance initialization, and
 publication as a dynamic extension, and resolves without `ECL_PATH`. Its descriptor
 and code must remain immutable and alive for the Session lifetime. Bundled modules

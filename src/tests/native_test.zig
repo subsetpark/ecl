@@ -2676,3 +2676,38 @@ test "native: large host configuration initializes in bounded slices" {
     defer runtime.deinit();
     try expectOk(&runtime, "instanceprobe.next 7864440 = {'kind 'user 'msg \"complete host configuration\"} assert");
 }
+
+test "native: cooperative instance resources have independent unlimited admission" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+        .native_port_limits = .{ .max_live_ports = 1 },
+        .native_instances = &.{
+            .{ .name = "cooperative.probe", .bytes = "A", .descriptor = @import("native-instance").CooperativeOnly.descriptor(), .port_limits = .{ .max_live_ports = null } },
+            .{ .name = "instanceprobe", .descriptor = @import("native-instance").Extension.descriptor() },
+        },
+    }), .cooperative, .language_tests);
+    defer runtime.deinit();
+    try expectOk(&runtime, "[0] 66 take (pop cooperative.probe.resource [] port.open) each dup len 66 = {'kind 'user 'msg \"unlimited cooperative admission\"} assert " ++
+        "(|ports| instanceprobe.resource [] port.open (|p| [] (instanceprobe.resource [] port.open) @attempt 'err at 'kind at 'domain match? {'kind 'user 'msg \"shared resource budget preserved\"} assert p port.close) call ports (port.close 0) each pop) call");
+}
+
+test "native: unlimited resource policy rejects controller descriptors" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+        .native_instances = &.{.{ .name = "instanceprobe", .descriptor = @import("native-instance").Extension.descriptor(), .port_limits = .{ .max_live_ports = null } }},
+    }), .cooperative, .language_tests);
+    defer runtime.deinit();
+    try expectOk(&runtime, "[] (instanceprobe.next) @attempt 'err at 'kind at 'io match? {'kind 'user 'msg \"controller policy rejected\"} assert");
+}
+
+test "native: host service budgets exceed shared extension ceilings independently" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+        .native_instances = &.{.{ .name = "instanceprobe", .bytes = "A", .descriptor = @import("native-instance").Extension.descriptor(), .memory_limit = std.math.maxInt(usize), .port_limits = .{ .max_live_ports = 4097, .ring_capacity = 16 * 1024 * 1024 + 1 } }},
+    }), .cooperative, .language_tests);
+    defer runtime.deinit();
+    try expectOk(&runtime, "instanceprobe.next 65 = {'kind 'user 'msg \"independent service grant\"} assert");
+}

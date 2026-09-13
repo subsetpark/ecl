@@ -1604,6 +1604,11 @@ configuration. Native storage accounting is serialized by its issuing instance.
 An explicit instance resource policy owns independent capacity and controller
 storage; instances without a policy retain the shared native-extension budget.
 Both policies use the same resource lifecycle and return capacity after joining.
+A private resource owner derives its execution mode from its validated descriptor.
+Cooperative-only owners carry no controller executor or controller job reservation;
+only they may admit resources without a numeric resource ceiling. Controller-capable
+owners reserve a finite executor budget before publication. These alternatives
+share the same admission gate, ownership transfers, and joined retirement.
 Instance budgets inherit the Session's admission gate, so shutdown also closes
 child creation. The shared gate outlives every instance resource owner.
 Endpoint capacity policy belongs to the initializing instance state. The host

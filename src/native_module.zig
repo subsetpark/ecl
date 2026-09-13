@@ -209,7 +209,10 @@ pub const LoadCursor = struct {
                     .descriptor = descriptor,
                 } };
                 const initialized = initialize(validated);
-                const published = publish(initialized) catch return error.OutOfMemory;
+                const published = publish(initialized) catch |err| return switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    error.InvalidConfiguration => .{ .failure = .init("native resource policy is incompatible with its descriptor", .{}) },
+                };
                 self.state = .{ .initializing = published.published };
                 break :complete .pending;
             },
@@ -226,7 +229,7 @@ fn initialize(loading: Loading) Loading {
     } };
 }
 
-fn publish(loading: Loading) error{OutOfMemory}!Loading {
+fn publish(loading: Loading) error{ OutOfMemory, InvalidConfiguration }!Loading {
     var initialized = loading.initialized;
     const owner = initialized.loader.owner();
     const state_value = owner.state().host.allocator().create(InstanceState) catch |err| {
@@ -250,9 +253,9 @@ fn publish(loading: Loading) error{OutOfMemory}!Loading {
         state_value.configuration = configuration.bytes;
         state_value.memory_limit = configuration.memory_limit;
         if (configuration.port_limits) |limits| {
-            state_value.private_ports = owner.state().ports.initInstance(limits) catch |err| switch (err) {
+            state_value.private_ports = owner.state().ports.initInstance(limits, initialized.descriptor) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                error.InvalidLimits => unreachable,
+                error.InvalidLimits => return error.InvalidConfiguration,
             };
         }
     }
@@ -298,13 +301,14 @@ const InstanceState = struct {
     const Stateful = struct {
         definition: abi.InstanceDefinition,
         storage: []align(64) u8,
-        endpoint_capacities: [abi.max_port_definitions]?*[64]u32 = .{null} ** abi.max_port_definitions,
+        endpoint_capacities: [abi.max_port_definitions]?*[64]usize = .{null} ** abi.max_port_definitions,
     };
     fn portOwner(self: *const InstanceState) *native_port.Owner {
         return self.private_ports orelse self.owner.state().ports;
     }
-    fn configureEndpoint(raw: *anyopaque, identity: *const anyopaque, endpoint_id: u32, capacity: u32) callconv(.c) abi.InstanceProgress {
+    fn configureEndpoint(raw: *anyopaque, identity: *const anyopaque, endpoint_id: u32, capacity_wire: u64) callconv(.c) abi.InstanceProgress {
         const self: *InstanceState = @ptrCast(@alignCast(raw));
+        const capacity = std.math.cast(usize, capacity_wire) orelse return .failed;
         if (self.refs.load(.acquire) == 0 or endpoint_id >= 64 or capacity == 0 or capacity > self.portOwner().ringCapacityLimit()) return .failed;
         const lifecycle = switch (self.lifecycle) {
             .initializing => |*value| value,
@@ -317,7 +321,7 @@ const InstanceState = struct {
             const endpoint = self.descriptor.endpoint(kind, @intCast(endpoint_id), .resource) orelse return .failed;
             if (endpoint.transport != .bytes) return .failed;
             const page = lifecycle.endpoint_capacities[kind] orelse allocation: {
-                const created = self.host.allocator().create([64]u32) catch return .out_of_memory;
+                const created = self.host.allocator().create([64]usize) catch return .out_of_memory;
                 created.* = .{0} ** 64;
                 lifecycle.endpoint_capacities[kind] = created;
                 break :allocation created;
@@ -460,7 +464,7 @@ pub const ModuleInstance = opaque {
         return self.state().owner.state().ports.access();
     }
 
-    pub fn endpointCapacity(self: *const ModuleInstance, kind: u32, endpoint: u6) u32 {
+    pub fn endpointCapacity(self: *const ModuleInstance, kind: u32, endpoint: u6) usize {
         const state_value = self.state();
         switch (state_value.lifecycle) {
             .initialized => |lifecycle| if (kind < lifecycle.endpoint_capacities.len) {
@@ -554,7 +558,7 @@ pub const Owner = opaque {
         }
         for (configurations, 0..) |configuration, index| {
             if (configuration.memory_limit == 0) return error.InvalidConfiguration;
-            if (configuration.port_limits) |port_limits| try port_limits.validate();
+            if (configuration.port_limits) |port_limits| try port_limits.validateInstance();
             const name = intern.internModuleName(configuration.name) catch |err| return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 error.InvalidName => error.InvalidConfiguration,

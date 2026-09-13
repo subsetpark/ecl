@@ -105,18 +105,25 @@ fn unlock(mutex: *std.Io.Mutex) void {
 }
 
 pub const Limits = struct {
-    max_live_ports: u32 = 64,
+    max_live_ports: ?usize = 64,
     max_operations: u32 = 16,
-    ring_capacity: u32 = 64 * 1024,
+    ring_capacity: usize = 64 * 1024,
     message_capacity: u32 = 16,
     message_queue_bytes: u32 = 1024 * 1024,
 
+    /// Shared extension capacity keeps its existing bounded admission policy.
     pub fn validate(self: Limits) error{InvalidLimits}!void {
-        if (self.max_live_ports == 0 or self.max_live_ports > 4096 or
+        try self.validateInstance();
+        const count = self.max_live_ports orelse return error.InvalidLimits;
+        if (count > 4096 or self.ring_capacity > 16 * 1024 * 1024) return error.InvalidLimits;
+    }
+    /// A host may grant a service independent capacity. Unlimited resource
+    /// counts additionally require a cooperative-only validated descriptor.
+    pub fn validateInstance(self: Limits) error{InvalidLimits}!void {
+        if ((if (self.max_live_ports) |count| count == 0 else false) or
             self.max_operations == 0 or self.max_operations > 256 or
-            self.ring_capacity == 0 or self.ring_capacity > 16 * 1024 * 1024 or
-            self.message_capacity == 0 or self.message_capacity > 16 or self.message_queue_bytes == 0)
-            return error.InvalidLimits;
+            self.ring_capacity == 0 or self.message_capacity == 0 or
+            self.message_capacity > 16 or self.message_queue_bytes == 0) return error.InvalidLimits;
     }
 };
 
@@ -137,9 +144,9 @@ const OwnerState = struct {
     mutex: std.Io.Mutex = .init,
     closing: std.atomic.Value(bool) = .init(false),
     root_admission: ?*const std.atomic.Value(bool) = null,
-    live: u32 = 0,
+    live: usize = 0,
     identity: u64 = 1,
-    executor: *controllers.Owner,
+    execution: union(enum) { controller: *controllers.Owner, cooperative },
 
     fn allocator(self: *OwnerState) std.mem.Allocator {
         return self.host.allocator();
@@ -149,7 +156,7 @@ const OwnerState = struct {
         defer unlock(&self.mutex);
         if (self.closing.load(.acquire) or
             (if (self.root_admission) |root| root.load(.acquire) else false)) return error.Closed;
-        if (self.live == self.limits.max_live_ports) return error.Limit;
+        if (self.live == (self.limits.max_live_ports orelse std.math.maxInt(usize))) return error.Limit;
         self.live += 1;
     }
     fn releaseLive(self: *OwnerState) void {
@@ -165,12 +172,26 @@ pub const Owner = opaque {
     }
     pub fn init(host: *const heap.HostCleanup, limits: Limits) error{ OutOfMemory, InvalidLimits }!*Owner {
         try limits.validate();
+        return initialize(host, limits, .controller);
+    }
+    fn initialize(host: *const heap.HostCleanup, limits: Limits, mode: std.meta.Tag(@FieldType(OwnerState, "execution"))) error{ OutOfMemory, InvalidLimits }!*Owner {
         const state_value = try host.allocator().create(OwnerState);
         errdefer host.allocator().destroy(state_value);
-        state_value.* = .{ .host = host, .limits = limits, .executor = try controllers.Owner.init(host.allocator(), @as(usize, limits.max_live_ports) * (@min(limits.max_operations, abi.max_port_lanes) + 1 + @import("port-declarations").max_activities) + 1) };
+        const execution: @FieldType(OwnerState, "execution") = switch (mode) {
+            .cooperative => .cooperative,
+            .controller => allocation: {
+                const count = limits.max_live_ports orelse return error.InvalidLimits;
+                const per_resource: usize = @min(limits.max_operations, abi.max_port_lanes) + 1 + @import("port-declarations").max_activities;
+                const slots = std.math.mul(usize, count, per_resource) catch return error.InvalidLimits;
+                const capacity = std.math.add(usize, slots, 1) catch return error.InvalidLimits;
+                const executor = try controllers.Owner.init(host.allocator(), capacity);
+                break :allocation .{ .controller = executor };
+            },
+        };
+        state_value.* = .{ .host = host, .limits = limits, .execution = execution };
         return ownerFromState(state_value);
     }
-    pub fn ringCapacityLimit(self: *Owner) u32 {
+    pub fn ringCapacityLimit(self: *Owner) usize {
         return self.state().limits.ring_capacity;
     }
     pub fn access(self: *Owner) *Access {
@@ -178,8 +199,16 @@ pub const Owner = opaque {
     }
     /// The parent closes admission for every instance. The returned owner
     /// must be joined and destroyed before its parent owner is destroyed.
-    pub fn initInstance(self: *Owner, limits: Limits) error{ OutOfMemory, InvalidLimits }!*Owner {
-        const instance = try init(self.state().host, limits);
+    pub fn initInstance(self: *Owner, limits: Limits, validated: *const descriptor.ValidatedDescriptor) error{ OutOfMemory, InvalidLimits }!*Owner {
+        try limits.validateInstance();
+        var kind: u32 = 0;
+        const mode: std.meta.Tag(@FieldType(OwnerState, "execution")) = scan: {
+            while (validated.port(kind)) |definition| : (kind += 1) {
+                if (definition.execution == .controller) break :scan .controller;
+            }
+            break :scan .cooperative;
+        };
+        const instance = try initialize(self.state().host, limits, mode);
         instance.state().root_admission = self.state().root_admission orelse &self.state().closing;
         return instance;
     }
@@ -192,7 +221,10 @@ pub const Owner = opaque {
     pub fn deinit(self: *Owner) void {
         const state_value = self.state();
         self.closeCreation();
-        state_value.executor.deinit();
+        switch (state_value.execution) {
+            .controller => |executor| executor.deinit(),
+            .cooperative => {},
+        }
         state_value.host.allocator().destroy(state_value);
     }
 };
@@ -250,7 +282,10 @@ const ResourceAdapter = struct {
         return self.owner.host.allocator();
     }
     pub fn executor(self: *const ResourceAdapter) *controllers.Executor {
-        return self.owner.executor.access();
+        return switch (self.owner.execution) {
+            .controller => |owner| owner.access(),
+            .cooperative => unreachable,
+        };
     }
     pub fn nextIdentity(self: *ResourceAdapter) u64 {
         lock(&self.owner.mutex);

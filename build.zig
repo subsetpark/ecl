@@ -185,6 +185,7 @@ pub fn build(b: *std.Build) void {
         .{ .file = "invalid_instance_callbacks", .message = "ecl-native: invalid instance lifecycle signatures" },
         .{ .file = "cooperative_blocking_endpoint", .message = "no field or member function named 'endpoint' in 'ports.Cooperative'" },
         .{ .file = "cooperative_commit_authority", .message = "no field or member function named 'beginCommit' in 'ports.Cooperative'" },
+        .{ .file = "invalid_qualified_module", .message = "ecl-native: module name must contain nonempty identifier segments" },
         .{ .file = "overload_duplicate_resource", .message = "ecl-native: operation selector repeats a resource kind" },
         .{ .file = "overload_undeclared_resource", .message = "ecl-native: registered capability requires a declared port" },
         .{ .file = "finalizer_child_creation", .message = "no field or member function named 'child' in 'ports.FinalizerBuilder'" },

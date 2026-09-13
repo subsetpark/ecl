@@ -511,3 +511,12 @@ pub const Extension = ecl.module(.{
 comptime {
     _ = Extension;
 }
+
+pub const CooperativeOnly = ecl.module(.{
+    .linkage = .static,
+    .name = "cooperative.probe",
+    .doc = "Cooperative instance resource budget probe.",
+    .instance = Instance,
+    .ports = .{CooperativeResource},
+    .words = .{ecl.factory("resource", "Create a cooperative resource.", CooperativeResource)},
+});
