@@ -915,7 +915,7 @@ const ControllerContext = struct {
 const ChildRequest = struct { kind: u32, dependency: abi.ChildDependency };
 const CooperativeConstruction = struct {
     value: *message_builder.ResumableBuilder,
-    phase: union(enum) { idle, working, result, error_data, child_configuration: ChildRequest, child: OperationAdapter.StartedChild(.cooperative) } = .idle,
+    phase: union(enum) { idle, working, result, error_data, failure_choice: Failure, child_configuration: ChildRequest, child: OperationAdapter.StartedChild(.cooperative) } = .idle,
     fn retire(self: *CooperativeConstruction, host: *const heap.HostCleanup) void {
         if (self.phase == .child) {
             switch (self.phase.child.readiness) {
@@ -1184,7 +1184,7 @@ fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest
             try publishErrorData(ctx, builder.validated() orelse return error.InvalidState);
             try builder.consume();
         },
-        .advance => return error.InvalidState,
+        .advance, .prepare_failure => return error.InvalidState,
         _ => return error.InvalidState,
     }
 
@@ -1559,6 +1559,14 @@ fn buildCooperative(ctx: *ControllerContext, request: *const abi.MessageBuildReq
             try publishErrorData(ctx, builder.validated() orelse return error.InvalidState);
             try builder.consume();
         }
+        if (building.phase == .failure_choice) {
+            const details = try diagnostics.Owned.create(ctx.cell.adapter.owner.host, builder.validated() orelse return error.InvalidState);
+            operation.?.terminal_result.prepareFailure(semanticFailure(building.phase.failure_choice), details) catch |err| {
+                details.release();
+                return err;
+            };
+            try builder.consume();
+        }
         building.phase = .idle;
         return .ok;
     }
@@ -1626,6 +1634,14 @@ fn buildCooperative(ctx: *ControllerContext, request: *const abi.MessageBuildReq
             try builder.prepareChild();
             building.phase = .{ .child_configuration = selected };
         },
+        .prepare_failure => {
+            const op = operation orelse return error.InvalidState;
+            if (op.mode != .finalizer or request.scalar.size != @sizeOf(abi.Scalar) or request.scalar.kind != .symbol or request.scalar.bytes_len > abi.max_error_message_bytes) return error.InvalidState;
+            const bytes = if (request.scalar.bytes_len == 0) "" else (request.scalar.bytes_ptr orelse return error.InvalidValue)[0..@intCast(request.scalar.bytes_len)];
+            const failure = reportedFailure(@enumFromInt(request.count), bytes);
+            try builder.finish();
+            building.phase = .{ .failure_choice = failure };
+        },
         .copy_received, .send, .reply_endpoint, .advance => return error.InvalidState,
         _ => return error.InvalidState,
     }
@@ -1688,7 +1704,23 @@ fn cooperativeMonotonicMilliseconds(raw: *anyopaque) callconv(.c) i64 {
     return context(raw).cell.scheduler.monotonicMilliseconds();
 }
 
+fn cooperativePreparedFailure(raw: *anyopaque) callconv(.c) ?*const anyopaque {
+    const ctx = context(raw);
+    const op = ctx.operation() orelse return null;
+    if (op.mode != .finalizer or ctx.builder != .cooperative or ctx.builder.cooperative.phase != .idle) return null;
+    return op.terminal_result.preparedFailure();
+}
+fn cooperativeSelectFailure(raw: *anyopaque, token: *const anyopaque) callconv(.c) bool {
+    const ctx = context(raw);
+    const op = ctx.operation() orelse return false;
+    if (op.mode != .finalizer or !op.ticket.committed()) return false;
+    const failure = op.terminal_result.selectFailure(@ptrCast(token)) orelse return false;
+    _ = controllerTransportFailure(ctx, failure);
+    return true;
+}
 const cooperative_table: abi.CooperativeTable = .{
+    .prepared_failure = cooperativePreparedFailure,
+    .select_failure = cooperativeSelectFailure,
     .initialization_resource = controllerInitializationResource,
     .monotonic_milliseconds = cooperativeMonotonicMilliseconds,
     .begin_commit = cooperativeBeginCommit,
@@ -1738,7 +1770,7 @@ const CooperativeInvocation = struct {
                     if (!failed and ctx.builder == .cooperative) switch (ctx.builder.cooperative.phase) {
                         .idle => {},
                         .result => self.phase = .publishing,
-                        .working, .error_data, .child_configuration, .child => recordControllerFailure(ctx, .init(.contract, "cooperative callback completed unfinished construction")),
+                        .working, .error_data, .failure_choice, .child_configuration, .child => recordControllerFailure(ctx, .init(.contract, "cooperative callback completed unfinished construction")),
                     };
                     return .yielded;
                 }

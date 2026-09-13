@@ -2049,6 +2049,12 @@ owned until joined resource cleanup. Finalizers reserve immutable, capability-fr
 result storage before the lane grants irreversible-work authority. Result mutation
 is unavailable after reservation, and resource cancellation preserves committed
 execution and its terminal result while joining all remaining slices.
+Fallible irreversible work may reserve a bounded set of immutable failure
+alternatives alongside success output. The exchange owns each report and its
+diagnostic envelope through final release. After commit, selection validates an
+opaque token against that exchange and changes only the selected alternative;
+it neither allocates nor mutates published values. Joined terminal observation
+uses that selected report and retains its diagnostics even after resource close.
 Host registration selects deferred discovery or an eager linked descriptor.
 Eager startup uses the ordinary bounded descriptor validator and instance
 lifecycle before Session publication. Its initialized instance pin belongs to the

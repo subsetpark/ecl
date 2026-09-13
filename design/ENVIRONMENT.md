@@ -32,7 +32,7 @@ Session's runtime I/O state.
 The public `net` and `proc` modules are ECL compositions over these registered
 capabilities and `port.*`. Their operation and endpoint selectors expose only
 their corresponding resources and streams. First-party adapters use typed backend calls;
-the extension adapter translates ABI v22 calls into the same runtime interfaces
+the extension adapter translates ABI v23 calls into the same runtime interfaces
 for controller execution, transport, cancellation, ownership, and cleanup.
 
 Embedded names have precedence over filesystem modules. A file on `ECL_PATH`
@@ -128,7 +128,7 @@ loader. The complete word table validates before publication, and publication
 is atomic.
 
 The current pre-release native ABI is version 19, with entry symbol
-`ecl_module_abi_v22`. Resource authors choose `ecl.Port(.{ .controller = Spec })`
+`ecl_module_abi_v23`. Resource authors choose `ecl.Port(.{ .controller = Spec })`
 or `ecl.Port(.{ .cooperative = Spec })`. Cooperative callbacks receive bounded
 work accounting, read-only Session-relative `monotonicMilliseconds`, and
 cancellable timer parking. Clock observation follows the host clock policy and
@@ -392,6 +392,13 @@ The callback grant applies to initialization, operations, and joined retirement.
 The construction grant bounds each host materialization slice, independently of
 message footprint and stack capacity. Grants belong to the registered instance
 and are unavailable in ECL resource-open parameters.
+Finalizers may prepare at most 32 immutable failure alternatives before commit.
+`prepareFailure` consumes a diagnostic dictionary into a bounded report; after
+builder advancement, `preparedFailure` returns an invocation-owned opaque token.
+After `beginCommit`, `failPrepared` selects one such token without allocating or
+mutating values. Tokens expire with their invocation and cannot select failures
+in another invocation. Ordinary callbacks cannot prepare or select alternatives.
+
 Instance port policy also bounds structured message bytes and nodes separately
 from builder stack slots. Factory and operation requests and native results use
 that instance's immutable grant. Copying a validated aggregate uses one stack

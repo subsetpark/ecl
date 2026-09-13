@@ -3105,3 +3105,44 @@ test "native: instance work quanta preserve bounds across callback and construct
         try expectOk(&runtime, source);
     };
 }
+
+test "native: prepared finalizer failures retain immutable diagnostics and reject foreign choices" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    for ([_]bool{ true, false }) |linked| {
+        var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+            .ecl_path = if (linked) null else native_fixture.directory,
+            .native_instances = &.{.{ .name = "instanceprobe", .registration = .{ .deferred = if (linked) @import("native-instance").Extension.descriptor() else null } }},
+        }), .cooperative, .language_tests);
+        defer runtime.deinit();
+        try expectOk(&runtime,
+            \\instanceprobe.prepared-finalizer [] port.open 'resource set
+            \\resource instanceprobe.prepared-seal 0 port.call 42 = {'kind 'user 'msg "prepared success"} assert resource port.close
+            \\instanceprobe.prepared-finalizer [] port.open 'resource set
+            \\[] (resource instanceprobe.prepared-seal 1 port.call) @attempt 'err at 'failure set resource port.close
+            \\failure 'kind at 'domain match? {'kind 'user 'msg "prepared failure kind"} assert
+            \\failure 'msg at "prepared native failure" match? {'kind 'user 'msg "prepared failure message"} assert
+            \\failure 'data at 'choice at 12 = {'kind 'user 'msg "prepared diagnostic survives close"} assert
+            \\instanceprobe.prepared-finalizer [] port.open 'first set first instanceprobe.prepared-seal 2 port.begin 'exchange set
+            \\exchange port.await
+            \\instanceprobe.prepared-finalizer [] port.open 'second set
+            \\[] (second instanceprobe.prepared-seal 3 port.call) @attempt 'err at 'data at 'choice at 12 = {'kind 'user 'msg "foreign token rejected"} assert
+            \\instanceprobe.prepared-rejections 1 = {'kind 'user 'msg "issuer validation executed"} assert
+            \\second port.close exchange port.close first port.close
+            \\instanceprobe.prepared-finalizer [] port.open 'resource set
+            \\resource instanceprobe.prepared-seal 4 port.begin 'exchange set
+            \\(instanceprobe.started 14 = not) (0 clock.sleep) while exchange port.cancel resource port.close
+            \\[] (exchange port.result) @attempt 'err dict.has? {'kind 'user 'msg "uncommitted failure reservation cancelled"} assert exchange port.close
+            \\instanceprobe.prepared-finalizer [] port.open 'resource set
+            \\resource instanceprobe.prepared-seal 5 port.begin 'exchange set
+            \\(instanceprobe.started 15 = not) (0 clock.sleep) while exchange port.cancel resource port.close
+            \\[] (exchange port.result) @attempt 'err at 'data at 'choice at 12 = {'kind 'user 'msg "committed failure survives cancellation"} assert exchange port.close
+            \\instanceprobe.prepared-finalizer [] port.open 'resource set
+            \\resource instanceprobe.prepared-seal 7 port.begin 'exchange set
+            \\(instanceprobe.started 16 = not) (0 clock.sleep) while exchange port.cancel resource port.close
+            \\[] (exchange port.result) @attempt 'err dict.has? {'kind 'user 'msg "partial diagnostic construction cancelled"} assert exchange port.close
+            \\instanceprobe.prepared-finalizer [] port.open 'resource set
+            \\[] (resource instanceprobe.prepared-seal 6 port.call) @attempt 'err at 'kind at 'overflow match? {'kind 'user 'msg "failure choice capacity"} assert resource port.close
+        );
+    }
+}

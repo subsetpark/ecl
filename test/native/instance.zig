@@ -14,6 +14,8 @@ const Lifecycle = struct {
         capacity_retired: std.atomic.Value(i64) = .init(0),
         work_retired: std.atomic.Value(i64) = .init(0),
         work_operation_retired: std.atomic.Value(i64) = .init(0),
+        prepared_token: std.atomic.Value(usize) = .init(0),
+        prepared_rejections: std.atomic.Value(i64) = .init(0),
         packed_started: std.atomic.Value(i64) = .init(0),
         capacity_started: std.atomic.Value(i64) = .init(0),
     };
@@ -541,8 +543,10 @@ pub const Extension = ecl.module(.{
     .name = "instanceprobe",
     .doc = "Instance isolation and retirement probe.",
     .instance = Instance,
-    .ports = .{ Resource, CooperativeResource, ActivityResource, DiagnosticController, DiagnosticCooperative, PackedController, PackedCooperative, ControllerLoan, CooperativeLoan, FinalizationLoan },
+    .ports = .{ Resource, CooperativeResource, ActivityResource, DiagnosticController, DiagnosticCooperative, PackedController, PackedCooperative, ControllerLoan, CooperativeLoan, FinalizationLoan, PreparedFinalizer },
     .words = .{
+        ecl.factory("prepared-finalizer", "Open a finalizer with reserved failure alternatives.", PreparedFinalizer),
+        ecl.word("prepared-rejections", "Read rejected foreign failure capabilities.", preparedRejections),
         ecl.overload("private-value", "Read privately declared operation members.", .{ .{ Resource, .private_value }, .{ CooperativeResource, .private_value } }),
         ecl.overload("shared-value", "Read either controller or cooperative resource state.", .{ .{ Resource, .value }, .{ CooperativeResource, .borrowed } }),
         ecl.word("string-fact", "Observe the semantic string predicate.", isString),
@@ -1118,3 +1122,114 @@ pub const ForeignLoanExtension = ecl.module(.{
     .ports = .{ Resource, CooperativeLoan },
     .words = .{ ecl.factory("resource", "Create a separately issued resource.", Resource), ecl.factory("loan", "Attempt a separately issued resource loan.", CooperativeLoan) },
 });
+
+fn preparedRejections(call: *ecl.Call("-- count")) ecl.CallbackResult {
+    return call.complete(.{ecl.Scalar.int(call.instance(Instance).?.prepared_rejections.load(.acquire))});
+}
+const PreparedFinalizer = ecl.Port(.{ .cooperative = struct {
+    pub const name = "prepared-finalizer";
+    pub const State = struct {
+        phase: enum { start, key, number, dictionary, reserve, reserved, result, commit, waiting, partial, complete } = .start,
+        mode: i64 = 0,
+        count: u32 = 0,
+        choices: [2]?*const ecl.PreparedFailure = .{ null, null },
+        remaining: u32 = 513,
+    };
+    pub const operations = .{
+        .seal = .{ .name = "prepared-seal", .doc = "Choose a preallocated failure after commit.", .handler = seal, .lane = .operation, .endpoints = .{} },
+    };
+    pub fn init() State {
+        return .{};
+    }
+    pub fn open(_: *State, _: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
+        return .completed;
+    }
+    fn seal(state: *State, ctx: *ecl.Finalizer) ecl.ControllerError!ecl.CooperativeProgress {
+        const instance = ctx.instance(Instance).?;
+        const builder = ctx.errorData();
+        switch (state.phase) {
+            .start => {
+                state.mode = (ctx.input(&.{}) orelse return error.InvalidValue).int() orelse return error.InvalidValue;
+                if (ctx.preparedFailure()) |_| return error.InvalidValue else |err| if (err != error.InvalidValue) return err;
+                state.phase = .key;
+            },
+            .key => {
+                try builder.symbol("choice");
+                state.phase = .number;
+            },
+            .number => {
+                const progress = try builder.advance();
+                if (progress != .completed) return progress;
+                try builder.int(state.count + 11);
+                state.phase = .dictionary;
+            },
+            .dictionary => {
+                try builder.dictionary(1);
+                state.phase = .reserve;
+            },
+            .reserve => {
+                const progress = try builder.advance();
+                if (progress != .completed) return progress;
+                try ctx.prepareFailure(if (state.count == 0) .io else .domain, "prepared native failure");
+                state.phase = .reserved;
+            },
+            .reserved => {
+                const progress = try builder.advance();
+                if (progress != .completed) return progress;
+                const choice = try ctx.preparedFailure();
+                if (ctx.failPrepared(choice)) |_| return error.InvalidValue else |err| if (err != error.InvalidValue) return err;
+                if (state.count < 2) state.choices[state.count] = choice;
+                state.count += 1;
+                if (state.mode == 7) {
+                    try builder.symbol("unfinished");
+                    state.phase = .partial;
+                    return .yielded;
+                }
+                if (state.count == (if (state.mode == 6) @as(u32, 33) else 2)) state.phase = .result else state.phase = .key;
+            },
+            .result => {
+                try ctx.builder().int(42);
+                try ctx.builder().result();
+                state.phase = .commit;
+            },
+            .commit => {
+                const progress = try ctx.builder().advance();
+                if (progress != .completed) return progress;
+                if (state.mode == 4) {
+                    instance.cooperative_started.store(14, .release);
+                    return .yielded;
+                }
+                try ctx.beginCommit();
+                if (state.mode == 2) instance.prepared_token.store(@intFromPtr(state.choices[0].?), .release);
+                if (state.mode == 3) {
+                    const foreign: *const ecl.PreparedFailure = @ptrFromInt(instance.prepared_token.load(.acquire));
+                    if (ctx.failPrepared(foreign)) |_| return error.InvalidValue else |err| if (err != error.InvalidValue) return err;
+                    _ = instance.prepared_rejections.fetchAdd(1, .acq_rel);
+                }
+                instance.cooperative_started.store(15, .release);
+                state.phase = .waiting;
+            },
+            .waiting => {
+                if (state.mode == 5 and state.remaining != 0) {
+                    state.remaining -= 1;
+                    return .yielded;
+                }
+                if (state.mode == 1 or state.mode == 3 or state.mode == 5) try ctx.failPrepared(state.choices[1].?);
+                state.phase = .complete;
+                return .completed;
+            },
+            .partial => {
+                instance.cooperative_started.store(16, .release);
+                return .yielded;
+            },
+            .complete => return .completed,
+        }
+        return .yielded;
+    }
+    pub fn retireOperation(_: *State, _: *ecl.Cooperative) ecl.CooperativeProgress {
+        return .completed;
+    }
+    pub fn retire(_: *State, _: *ecl.Cooperative) ecl.CooperativeProgress {
+        return .completed;
+    }
+} });

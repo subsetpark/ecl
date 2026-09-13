@@ -11,6 +11,7 @@ pub const Activity = ports.Activity;
 pub const Shutdown = ports.Shutdown;
 pub const Cooperative = ports.Cooperative;
 pub const Finalizer = ports.Finalizer;
+pub const PreparedFailure = ports.PreparedFailure;
 pub const CooperativeProgress = ports.CooperativeProgress;
 pub const ControllerError = ports.ControllerError;
 pub const MessageView = ports.MessageView;

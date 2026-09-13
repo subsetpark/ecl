@@ -768,6 +768,9 @@ fn applyBuild(table: anytype, context: *anyopaque, request: *const abi.MessageBu
 
 /// A sealing callback runs only after earlier work and dependent children join.
 /// Prepare and advance the complete result before requesting commit authority.
+/// Immutable failure alternative owned by one finalizer invocation. The token
+/// may be retained only until that operation's joined retirement completes.
+pub const PreparedFailure = opaque {};
 pub const Finalizer = opaque {
     fn cooperative(self: *Finalizer) *Cooperative {
         return @ptrCast(self);
@@ -798,6 +801,25 @@ pub const Finalizer = opaque {
     }
     pub fn builder(self: *Finalizer) *FinalizerBuilder {
         return @ptrCast(self);
+    }
+    /// Consume the diagnostic dictionary at the builder top into a prepared
+    /// failure alternative. Advance construction before obtaining its token.
+    /// At most 32 alternatives may be prepared by one finalizer invocation.
+    pub fn prepareFailure(self: *Finalizer, kind: capability.ErrorKind, message: []const u8) ControllerError!void {
+        const bounded = capability.boundedErrorMessage(message);
+        return self.cooperative().builder().apply(.{ .action = .prepare_failure, .count = @intFromEnum(kind), .scalar = capability.Scalar.symbol(bounded).wire });
+    }
+    pub fn preparedFailure(self: *Finalizer) ControllerError!*const PreparedFailure {
+        const owned = self.cooperative().state();
+        const query = owned.table.prepared_failure orelse return error.InvalidValue;
+        return @ptrCast(query(owned.context) orelse return error.InvalidValue);
+    }
+    /// Select an already prepared failure after beginCommit. This performs no
+    /// allocation and accepts only a token issued by this invocation.
+    pub fn failPrepared(self: *Finalizer, failure: *const PreparedFailure) ControllerError!void {
+        const owned = self.cooperative().state();
+        const select = owned.table.select_failure orelse return error.InvalidValue;
+        if (!select(owned.context, failure)) return error.InvalidValue;
     }
     pub fn beginCommit(self: *Finalizer) ControllerError!void {
         const owned = self.cooperative().state();

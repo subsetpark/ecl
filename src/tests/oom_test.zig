@@ -2287,3 +2287,13 @@ test "oom: standard-library and host: native instance work quanta" {
     };
     try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, Probe.run);
 }
+
+test "oom: standard-library and host: native prepared finalizer failures" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortProbe(
+        "instanceprobe.prepared-finalizer [] port.open dup instanceprobe.prepared-seal 0 port.call pop port.close " ++
+            "instanceprobe.prepared-finalizer [] port.open 'resource set " ++
+            "[] (resource instanceprobe.prepared-seal 1 port.call) @attempt pop resource port.close",
+        "",
+    ).run);
+}

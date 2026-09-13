@@ -5,8 +5,8 @@
 
 const builtin = @import("builtin");
 
-pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v22";
-pub const abi_version: u32 = 22;
+pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v23";
+pub const abi_version: u32 = 23;
 
 pub const max_error_message_bytes: u32 = 4096;
 pub const max_guest_scalar_bytes: u32 = 4096;
@@ -104,7 +104,7 @@ pub const PortCancellation = enum(u32) { close_resource, acknowledge, _ };
 
 /// Controller streams block only their private host controller. Zero bytes
 /// denotes request EOF or cancellation; failure is reported separately.
-pub const MessageBuildAction = enum(u32) { scalar = 0, copy_input = 1, copy_received = 2, list = 3, dictionary = 4, send = 7, result = 8, clear = 9, reply_endpoint = 10, child = 11, advance = 12, error_data = 13, bytes = 14, symbol_start = 15, symbol_chunk = 16, symbol_end = 17, _ };
+pub const MessageBuildAction = enum(u32) { scalar = 0, copy_input = 1, copy_received = 2, list = 3, dictionary = 4, send = 7, result = 8, clear = 9, reply_endpoint = 10, child = 11, advance = 12, error_data = 13, bytes = 14, symbol_start = 15, symbol_chunk = 16, symbol_end = 17, prepare_failure = 18, _ };
 pub const ChildDependency = enum(u32) { independent, dependent, inherited, _ };
 pub const MessageBuildRequest = extern struct {
     size: u32 = @sizeOf(MessageBuildRequest),
@@ -153,6 +153,8 @@ pub const ResourceExecution = enum(u32) { controller, cooperative, _ };
 pub const CooperativeProgress = enum(u32) { completed, yielded, parked, _ };
 pub const CooperativeBuildStatus = enum(u32) { ok, out_of_memory, invalid, yield_required, parked, _ };
 pub const CooperativeTable = extern struct {
+    prepared_failure: ?*const fn (*anyopaque) callconv(.c) ?*const anyopaque = null,
+    select_failure: ?*const fn (*anyopaque, *const anyopaque) callconv(.c) bool = null,
     initialization_resource: ?ResourceLeaseFn = null,
     instance_state: InstanceStateFn,
     initialization_parent: InstanceStateFn,
@@ -526,7 +528,7 @@ comptime {
     assertRecord(CapacityFailureDefinition, 40, 8);
     assertRecord(ActivityDefinition, 24, 8);
     assertRecord(CooperativeDefinition, 40, 8);
-    assertRecord(CooperativeTable, 104, 8);
+    assertRecord(CooperativeTable, 120, 8);
     assertRecord(MessageBuildRequest, 72, 8);
     assertRecord(ControllerTable, 184, 8);
     assertRecord(InstanceTable, 32, 8);

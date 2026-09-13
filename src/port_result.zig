@@ -12,12 +12,30 @@ pub const Terminal = union(enum) { success, cancelled, failed: Failure };
 pub const Completion = union(enum) { pending, ready, cancelled, failed: diagnostics.Observation };
 pub const Claim = union(enum) { pending, claimed, value: Value, cancelled, failed: diagnostics.Observation };
 
+/// A prepared failure is borrowed from its issuing exchange through retirement.
+/// Its immutable report and diagnostics cannot be changed after construction.
+pub const PreparedFailure = opaque {};
+const Choice = struct {
+    failure: Failure,
+    details: *diagnostics.Owned,
+    next: ?*Choice = null,
+    fn capability(self: *Choice) *const PreparedFailure {
+        return @ptrCast(self);
+    }
+};
+const max_failure_choices = 32;
 const State = struct {
     host: *const heap.HostCleanup,
     mutex: std.Io.Mutex = .init,
     phase: union(enum) { running, frozen, terminal: Terminal } = .running,
     details: ?*diagnostics.Owned = null,
+    choices: struct { first: ?*Choice = null, last: ?*Choice = null, count: usize = 0, selected: ?*Choice = null } = .{},
     value: union(enum) { available: *messages.Envelope, claimed, discarded, rejected },
+
+    /// Callers hold mutex while choosing the immutable terminal view.
+    fn diagnosticView(self: *const State) ?*const diagnostics.View {
+        return if (self.choices.selected) |choice| choice.details.view() else if (self.details) |details| details.view() else null;
+    }
 
     fn capability(self: *State) *Result {
         return @ptrCast(self);
@@ -42,6 +60,14 @@ pub const Result = opaque {
         const owned = self.state();
         if (owned.value == .available) owned.value.available.release();
         if (owned.details) |details| details.release();
+        var choice = owned.choices.first;
+        // At most max_failure_choices records exist; diagnostic release only
+        // enqueues bounded value retirement in the issuing reclamation domain.
+        while (choice) |current| {
+            choice = current.next;
+            current.details.release();
+            owned.host.allocator().destroy(current);
+        }
         owned.host.allocator().destroy(owned);
     }
     /// Success consumes the envelope. Rejection retains it. Previous result
@@ -73,6 +99,43 @@ pub const Result = opaque {
         std.Io.Threaded.mutexUnlock(&owned.mutex);
         if (previous) |details| details.release();
         return true;
+    }
+    /// Success consumes diagnostics; failure retains them. Both the report and
+    /// diagnostic envelope are allocated before commit can freeze this result.
+    pub fn prepareFailure(self: *Result, failure: Failure, details: *diagnostics.Owned) error{ OutOfMemory, InvalidState, Overflow }!void {
+        const owned = self.state();
+        const choice = try owned.host.allocator().create(Choice);
+        errdefer owned.host.allocator().destroy(choice);
+        choice.* = .{ .failure = failure, .details = details };
+        std.Io.Threaded.mutexLock(&owned.mutex);
+        defer std.Io.Threaded.mutexUnlock(&owned.mutex);
+        if (owned.phase != .running) return error.InvalidState;
+        if (owned.choices.count == max_failure_choices) return error.Overflow;
+        if (owned.choices.last) |last| last.next = choice else owned.choices.first = choice;
+        owned.choices.last = choice;
+        owned.choices.count += 1;
+    }
+    pub fn preparedFailure(self: *Result) ?*const PreparedFailure {
+        const owned = self.state();
+        std.Io.Threaded.mutexLock(&owned.mutex);
+        defer std.Io.Threaded.mutexUnlock(&owned.mutex);
+        if (owned.phase != .running) return null;
+        return if (owned.choices.last) |choice| choice.capability() else null;
+    }
+    /// Selection performs no allocation or value mutation. Validate identity
+    /// against this issuer before dereferencing an extension-supplied token.
+    pub fn selectFailure(self: *Result, token: *const PreparedFailure) ?Failure {
+        const owned = self.state();
+        std.Io.Threaded.mutexLock(&owned.mutex);
+        defer std.Io.Threaded.mutexUnlock(&owned.mutex);
+        if (owned.phase != .frozen or owned.choices.selected != null) return null;
+        var cursor = owned.choices.first;
+        while (cursor) |choice| : (cursor = choice.next) {
+            if (choice.capability() != token) continue;
+            owned.choices.selected = choice;
+            return choice.failure;
+        }
+        return null;
     }
     /// Reserve immutable, capability-free output before irreversible work.
     /// Rejection preserves the current result. No allocation or publication of
@@ -114,7 +177,7 @@ pub const Result = opaque {
             .terminal => |terminal| switch (terminal) {
                 .success => .ready,
                 .cancelled => .cancelled,
-                .failed => |failure| .{ .failed = .{ .report = failure, .details = if (owned.details) |details| details.view() else null } },
+                .failed => |failure| .{ .failed = .{ .report = failure, .details = owned.diagnosticView() } },
             },
         };
     }
@@ -165,7 +228,7 @@ const ResultPublication = struct {
                     return false;
                 },
                 .failed => |failure| {
-                    self.result = .{ .failed = .{ .report = failure, .details = if (self.state.details) |details| details.view() else null } };
+                    self.result = .{ .failed = .{ .report = failure, .details = self.state.diagnosticView() } };
                     return false;
                 },
             },
