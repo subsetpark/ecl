@@ -10,7 +10,7 @@ const intern = @import("intern.zig");
 const poll = @import("poll.zig");
 
 pub const Error = error{ OutOfMemory, InvalidState, InvalidValue, Overflow, DuplicateKey, Cancelled };
-const limits: message.Limits = .{};
+pub const Limits = struct { message: message.Limits = .{}, stack_slots: usize = 4096 };
 const quantum = 64;
 const Dictionary = struct {
     start: usize,
@@ -35,6 +35,7 @@ const State = struct {
     stack: heap.OwnedValueBuffer,
     depth: usize = 0,
     footprint: message.Footprint = .{},
+    limits: Limits,
     phase: Phase = .idle,
 
     fn cancelled(self: *State) bool {
@@ -48,12 +49,15 @@ const State = struct {
         if (self.phase != .idle) return error.InvalidState;
     }
     fn charge(self: *State, footprint: message.Footprint) Error!void {
-        if (footprint.nodes > limits.nodes - self.footprint.nodes or
-            footprint.bytes > limits.bytes - self.footprint.bytes or
-            footprint.capabilities > limits.capabilities - self.footprint.capabilities) return error.Overflow;
+        if (footprint.nodes > self.limits.message.nodes - self.footprint.nodes or
+            footprint.bytes > self.limits.message.bytes - self.footprint.bytes or
+            footprint.capabilities > self.limits.message.capabilities - self.footprint.capabilities) return error.Overflow;
         self.footprint.nodes += footprint.nodes;
         self.footprint.bytes += footprint.bytes;
         self.footprint.capabilities += footprint.capabilities;
+    }
+    fn requireSlot(self: *State) Error!void {
+        if (self.depth == self.stack.capacity()) return error.Overflow;
     }
     fn pushOwned(self: *State, item: Value) void {
         if (self.depth == self.stack.len()) self.stack.appendOwned(item) else self.stack.replaceOwned(self.depth, item);
@@ -181,16 +185,22 @@ pub const Builder = opaque {
         return @ptrCast(@alignCast(self));
     }
     pub fn create(host: *const heap.HostCleanup, running: *@import("port_controller.zig").Running) error{OutOfMemory}!*Builder {
-        return createWithCancellation(host, .{ .controller = running });
+        return createConfigured(host, running, .{});
     }
     pub fn createInitializing(host: *const heap.HostCleanup, closed: *const std.atomic.Value(bool)) error{OutOfMemory}!*Builder {
-        return createWithCancellation(host, .{ .cooperative = closed });
+        return createInitializingConfigured(host, closed, .{});
     }
-    fn createWithCancellation(host: *const heap.HostCleanup, cancellation: @FieldType(State, "cancellation")) error{OutOfMemory}!*Builder {
+    pub fn createConfigured(host: *const heap.HostCleanup, running: *@import("port_controller.zig").Running, grant: Limits) error{OutOfMemory}!*Builder {
+        return createWithCancellation(host, .{ .controller = running }, grant);
+    }
+    pub fn createInitializingConfigured(host: *const heap.HostCleanup, closed: *const std.atomic.Value(bool), grant: Limits) error{OutOfMemory}!*Builder {
+        return createWithCancellation(host, .{ .cooperative = closed }, grant);
+    }
+    fn createWithCancellation(host: *const heap.HostCleanup, cancellation: @FieldType(State, "cancellation"), grant: Limits) error{OutOfMemory}!*Builder {
         const state_value = try host.allocator().create(State);
         errdefer host.allocator().destroy(state_value);
-        const stack = try heap.OwnedValueBuffer.init(heap.hostDomain(host), limits.nodes);
-        state_value.* = .{ .host = host, .cancellation = cancellation, .stack = stack };
+        const stack = try heap.OwnedValueBuffer.init(heap.hostDomain(host), grant.stack_slots);
+        state_value.* = .{ .host = host, .cancellation = cancellation, .stack = stack, .limits = grant };
         return capability(state_value);
     }
     pub fn retire(self: *Builder) void {
@@ -202,16 +212,19 @@ pub const Builder = opaque {
     /// These scalar constructors retain no caller storage.
     pub fn int(self: *Builder, item: i64) Error!void {
         try self.state().requireIdle();
+        try self.state().requireSlot();
         try self.state().charge(.{ .nodes = 1, .bytes = 8 });
         self.state().pushOwned(.{ .int = item });
     }
     pub fn float(self: *Builder, item: f64) Error!void {
         try self.state().requireIdle();
+        try self.state().requireSlot();
         try self.state().charge(.{ .nodes = 1, .bytes = 8 });
         self.state().pushOwned(.{ .float = item });
     }
     pub fn char(self: *Builder, item: u64) Error!void {
         try self.state().requireIdle();
+        try self.state().requireSlot();
         const codepoint = values.unicodeScalar(item) orelse return error.InvalidValue;
         try self.state().charge(.{ .nodes = 1, .bytes = std.unicode.utf8CodepointSequenceLength(codepoint) catch return error.InvalidValue });
         self.state().pushOwned(.{ .char = codepoint });
@@ -223,6 +236,7 @@ pub const Builder = opaque {
     }
     fn beginSymbol(self: *Builder, bytes: []const u8) Error!void {
         try self.state().requireIdle();
+        try self.state().requireSlot();
         try self.state().charge(.{ .nodes = 1, .bytes = bytes.len });
         self.state().phase = .{ .symbol = .{ .bytes = bytes } };
     }
@@ -234,7 +248,8 @@ pub const Builder = opaque {
     fn beginCopy(self: *Builder, input: Value) Error!void {
         const owned = self.state();
         try owned.requireIdle();
-        const validating = try message.Message.create(owned.host.allocator(), input, limits);
+        try owned.requireSlot();
+        const validating = try message.Message.create(owned.host.allocator(), input, owned.limits.message);
         owned.phase = .{ .validating = .{ .message = validating, .purpose = .append } };
     }
     /// Replace the last count completed values with one list, preserving order.
@@ -246,6 +261,7 @@ pub const Builder = opaque {
         const owned = self.state();
         try owned.requireIdle();
         if (count > owned.depth) return error.InvalidState;
+        if (count == 0) try owned.requireSlot();
         try owned.charge(.{ .nodes = 1 });
         const start = owned.depth - count;
         owned.phase = .{ .list = .{ .start = start, .materializer = .init(owned.host.allocator(), owned.stack.values()[start..owned.depth]) } };
@@ -260,6 +276,7 @@ pub const Builder = opaque {
         const owned = self.state();
         try owned.requireIdle();
         if (count > owned.depth / 2) return error.InvalidState;
+        if (count == 0) try owned.requireSlot();
         try owned.charge(.{ .nodes = 1 });
         const buffers = allocation: {
             const keys = try owned.host.allocator().alloc(Value, count);
@@ -278,7 +295,7 @@ pub const Builder = opaque {
         if (owned.phase == .ready) return;
         try owned.requireIdle();
         if (owned.depth != 1) return error.InvalidState;
-        const validating = try message.Message.create(owned.host.allocator(), owned.stack.values()[0], limits);
+        const validating = try message.Message.create(owned.host.allocator(), owned.stack.values()[0], owned.limits.message);
         owned.phase = .{ .validating = .{ .message = validating, .purpose = .finish } };
     }
     /// Seal only the top value as a child configuration. Earlier completed
@@ -291,7 +308,7 @@ pub const Builder = opaque {
         const owned = self.state();
         try owned.requireIdle();
         if (owned.depth == 0) return error.InvalidState;
-        const validating = try message.Message.create(owned.host.allocator(), owned.stack.values()[owned.depth - 1], limits);
+        const validating = try message.Message.create(owned.host.allocator(), owned.stack.values()[owned.depth - 1], owned.limits.message);
         owned.phase = .{ .validating = .{ .message = validating, .purpose = .child } };
     }
     pub fn childConfiguration(self: *Builder) ?*const message.Validated {
@@ -312,7 +329,7 @@ pub const Builder = opaque {
             .bytes = owned.footprint.bytes - footprint.bytes,
             .capabilities = owned.footprint.capabilities - footprint.capabilities + 1,
         };
-        if (next.nodes > limits.nodes or next.capabilities > limits.capabilities) return error.Overflow;
+        if (next.nodes > owned.limits.message.nodes or next.capabilities > owned.limits.message.capabilities) return error.Overflow;
         heap.retainValue(child);
         owned.footprint = next;
         configuration.retire(heap.hostDomain(owned.host));
@@ -377,7 +394,10 @@ pub const ResumableBuilder = opaque {
         return @ptrCast(self);
     }
     pub fn create(host: *const heap.HostCleanup, cancellation: *const std.atomic.Value(bool)) error{OutOfMemory}!*ResumableBuilder {
-        return ResumableBuilder.capability(try Builder.createWithCancellation(host, .{ .cooperative = cancellation }));
+        return createConfigured(host, cancellation, .{});
+    }
+    pub fn createConfigured(host: *const heap.HostCleanup, cancellation: *const std.atomic.Value(bool), grant: Limits) error{OutOfMemory}!*ResumableBuilder {
+        return ResumableBuilder.capability(try Builder.createWithCancellation(host, .{ .cooperative = cancellation }, grant));
     }
     pub fn retire(self: *ResumableBuilder) void {
         self.builder().retire();

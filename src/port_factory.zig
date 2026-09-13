@@ -23,6 +23,7 @@ pub const Start = union(enum) { resource: Value, opening: *Opening, failed: Fail
 pub const Progress = union(enum) { yielded, pending: external.ReadinessSource, resource: Value, failed: Failure };
 
 const FactoryState = struct {
+    message_limits: message.Limits,
     allocator: std.mem.Allocator,
     adapter: *anyopaque,
     open: *const fn (*anyopaque, Context, *const message.Validated) error{OutOfMemory}!Start,
@@ -49,8 +50,12 @@ pub const Factory = opaque {
         const allocator = adapter.allocator();
         const owned = try allocator.create(FactoryState);
         errdefer allocator.destroy(owned);
-        owned.* = .{ .allocator = allocator, .adapter = adapter, .open = Bridge.open, .release = Bridge.release };
+        owned.* = .{ .message_limits = if (@hasDecl(Adapter, "messageLimits")) adapter.messageLimits() else .{}, .allocator = allocator, .adapter = adapter, .open = Bridge.open, .release = Bridge.release };
         return heap.createBorrowedPort(Factory, .factory, allocator, identity, @ptrCast(owned));
+    }
+    /// The issuer's immutable validation grant, retained with this capability.
+    pub fn messageLimits(self: *Factory) message.Limits {
+        return self.state().message_limits;
     }
     pub fn fromValue(item: Value) ?*Factory {
         if (item != .port) return null;

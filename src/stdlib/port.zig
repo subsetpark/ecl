@@ -267,7 +267,7 @@ fn startRequest(evaluator: *machine.Machine, comptime role: @import("../value.zi
     }
     const driver = try evaluator.allocator().create(Request);
     errdefer evaluator.allocator().destroy(driver);
-    const validated = try message.Message.create(evaluator.allocator(), input.borrow(), .{});
+    const validated = try message.Message.create(evaluator.allocator(), input.borrow(), if (role == .factory) factory.?.messageLimits() else operation_selector.?.messageLimits());
     driver.* = .{
         .capability = capability.take(),
         .kind = if (role == .operation_selector)

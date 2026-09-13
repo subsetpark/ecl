@@ -12,6 +12,7 @@ pub const Admission = union(enum) { exchange: Value, pending: external.Readiness
 pub const AdmitError = error{ OutOfMemory, ScopeClosing, WrongKind };
 
 const SelectorState = struct {
+    message_limits: message.Limits,
     allocator: std.mem.Allocator,
     payload: *anyopaque,
     accepts: *const fn (*anyopaque, Value) bool,
@@ -42,8 +43,12 @@ pub const Selector = opaque {
         const allocator = adapter.allocator();
         const owned = try allocator.create(SelectorState);
         errdefer allocator.destroy(owned);
-        owned.* = .{ .allocator = allocator, .payload = adapter, .accepts = SelectorBridge.accepts, .begin = SelectorBridge.begin, .release = SelectorBridge.release };
+        owned.* = .{ .message_limits = if (@hasDecl(Adapter, "messageLimits")) adapter.messageLimits() else .{}, .allocator = allocator, .payload = adapter, .accepts = SelectorBridge.accepts, .begin = SelectorBridge.begin, .release = SelectorBridge.release };
         return heap.createBorrowedPort(Selector, .operation_selector, allocator, identity, @ptrCast(owned));
+    }
+    /// The issuer's immutable validation grant, retained with this capability.
+    pub fn messageLimits(self: *Selector) message.Limits {
+        return self.state().message_limits;
     }
     pub fn fromValue(item: Value) ?*Selector {
         if (item != .port) return null;

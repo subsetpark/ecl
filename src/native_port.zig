@@ -38,6 +38,9 @@ pub const RegisteredCapability = opaque {
     pub fn allocator(self: *RegisteredCapability) std.mem.Allocator {
         return self.instance().portAccess().state().allocator();
     }
+    pub fn messageLimits(self: *RegisteredCapability) port_message.Limits {
+        return self.instance().portAccess().state().limits.message_limits;
+    }
     pub fn definition(self: *RegisteredCapability) descriptor.PortCapability {
         const owned = self.state();
         return owned.instance.definition(owned.definition).body.port;
@@ -115,6 +118,8 @@ pub const Limits = struct {
     ring_capacity: usize = 64 * 1024,
     message_capacity: u32 = 16,
     message_queue_bytes: u32 = 1024 * 1024,
+    message_limits: port_message.Limits = .{},
+    builder_slots: usize = 4096,
 
     /// Shared extension capacity keeps its existing bounded admission policy.
     pub fn validate(self: Limits) error{InvalidLimits}!void {
@@ -128,7 +133,9 @@ pub const Limits = struct {
         if ((if (self.max_live_ports) |count| count == 0 else false) or
             self.max_operations == 0 or self.max_operations > 256 or
             self.ring_capacity == 0 or self.message_capacity == 0 or
-            self.message_capacity > 16 or self.message_queue_bytes == 0) return error.InvalidLimits;
+            self.message_capacity > 16 or self.message_queue_bytes == 0 or
+            self.message_limits.bytes == 0 or self.message_limits.nodes == 0 or
+            self.builder_slots == 0 or self.builder_slots > self.message_limits.nodes) return error.InvalidLimits;
     }
 };
 
@@ -144,6 +151,10 @@ fn semanticFailure(failure: Failure) byte_transport.Failure {
 const Resource = transfers.Resource(Cell, OwnerState, OwnerState.allocator, OwnerState.reserveLive, OwnerState.releaseLive);
 
 const OwnerState = struct {
+    fn builderLimits(self: *const OwnerState) message_builder.Limits {
+        return .{ .message = self.limits.message_limits, .stack_slots = self.limits.builder_slots };
+    }
+
     host: *const heap.HostCleanup,
     limits: Limits,
     mutex: std.Io.Mutex = .init,
@@ -1010,9 +1021,9 @@ fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest
     if (controllerCancelled(ctx)) return .invalid;
     if (ctx.builder == .none) {
         const builder = if (op != null)
-            try message_builder.Builder.create(ctx.cell.adapter.owner.host, ctx.invocation.operation.running.?)
+            try message_builder.Builder.createConfigured(ctx.cell.adapter.owner.host, ctx.invocation.operation.running.?, ctx.cell.adapter.owner.builderLimits())
         else
-            try message_builder.Builder.createInitializing(ctx.cell.adapter.owner.host, &ctx.cell.closed);
+            try message_builder.Builder.createInitializingConfigured(ctx.cell.adapter.owner.host, &ctx.cell.closed, ctx.cell.adapter.owner.builderLimits());
         ctx.builder = .{ .controller = builder };
     }
     const builder = ctx.builder.controller;
@@ -1426,7 +1437,7 @@ fn buildCooperative(ctx: *ControllerContext, request: *const abi.MessageBuildReq
     if (ctx.builder == .none) {
         // Allocate before publishing the union tag: result-location semantics
         // may otherwise expose a partial payload to the failure unwinder.
-        const owned = try message_builder.ResumableBuilder.create(ctx.cell.adapter.owner.host, ctx.cancellation());
+        const owned = try message_builder.ResumableBuilder.createConfigured(ctx.cell.adapter.owner.host, ctx.cancellation(), ctx.cell.adapter.owner.builderLimits());
         ctx.builder = .{ .cooperative = .{ .value = owned } };
     }
     const building = &ctx.builder.cooperative;
@@ -1817,7 +1828,7 @@ const RejectedOpening = struct {
     fn buildDiagnostic(self: *RejectedOpening, request: *const abi.MessageBuildRequest) message_builder.Error!abi.CooperativeBuildStatus {
         if (self.closed.load(.acquire)) return error.Cancelled;
         if (self.phase != .reporting or request.size != @sizeOf(abi.MessageBuildRequest)) return error.InvalidState;
-        if (self.builder == null) self.builder = try message_builder.ResumableBuilder.create(self.host(), &self.closed);
+        if (self.builder == null) self.builder = try message_builder.ResumableBuilder.createConfigured(self.host(), &self.closed, self.instance.portAccess().state().builderLimits());
         const builder = self.builder.?;
         if (request.action == .advance) {
             if (self.construction == .idle) return .ok;

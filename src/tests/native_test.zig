@@ -52,6 +52,10 @@ test "native: instance policies reject duplicate names and invalid limits" {
         &.{.{ .name = "" }},
         &.{.{ .name = "instanceprobe", .memory_limit = 0 }},
         &.{.{ .name = "instanceprobe", .port_limits = .{ .max_live_ports = 0 } }},
+        &.{.{ .name = "instanceprobe", .port_limits = .{ .message_limits = .{ .nodes = 0 } } }},
+        &.{.{ .name = "instanceprobe", .port_limits = .{ .message_limits = .{ .bytes = 0 } } }},
+        &.{.{ .name = "instanceprobe", .port_limits = .{ .builder_slots = 0 } }},
+        &.{.{ .name = "instanceprobe", .port_limits = .{ .builder_slots = 4097 } }},
         &.{ .{ .name = "instanceprobe" }, .{ .name = "instanceprobe" } },
     };
     for (invalid) |configuration| try std.testing.expectError(error.InvalidHostConfig, session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
@@ -2901,5 +2905,31 @@ test "native: eager initialization allocation failures join all completed and pa
     for ([_]bool{ false, true }) |fail_second| {
         try eagerAllocationProbe(std.testing.allocator, fail_second);
         try std.testing.checkAllAllocationFailures(std.testing.allocator, eagerAllocationProbe, .{fail_second});
+    }
+}
+
+test "native: instance message grants preserve default limits and bound construction independently" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    for ([_]bool{ true, false }) |linked| {
+        var ordinary = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+            .ecl_path = if (linked) null else native_fixture.directory,
+            .native_instances = &.{.{ .name = "instanceprobe", .registration = .{ .deferred = if (linked) @import("native-instance").Extension.descriptor() else null } }},
+        }), .cooperative, .evaluate);
+        defer ordinary.deinit();
+        var granted = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+            .ecl_path = if (linked) null else native_fixture.directory,
+            .native_instances = &.{.{ .name = "instanceprobe", .registration = .{ .deferred = if (linked) @import("native-instance").Extension.descriptor() else null }, .port_limits = .{ .message_limits = .{ .nodes = 16384, .bytes = 131072 }, .builder_slots = 4 } }},
+        }), .cooperative, .evaluate);
+        defer granted.deinit();
+        try expectOk(&ordinary, "[] (instanceprobe.resource \"x\" 8192 take port.open) @attempt 'err at 'kind at 'overflow match? {'kind 'user 'msg \"default factory budget\"} assert " ++
+            "instanceprobe.resource [] port.open (|p| p wrap (instanceprobe.shared-value \"x\" 8192 take port.call) @attempt 'err at 'kind at 'overflow match? {'kind 'user 'msg \"default operation budget\"} assert p port.close) call");
+        try expectOk(&granted, "\"x\" 8192 take 'payload set " ++
+            "instanceprobe.diagnostic-controller payload port.open (|p| " ++
+            "p instanceprobe.controller-string-fact payload port.call 1 = {'kind 'user 'msg \"factory and controller request grant\"} assert " ++
+            "p wrap (instanceprobe.controller-diagnose {} 'path payload dict.put port.call) @attempt 'err at 'data at 'path at len 8192 = {'kind 'user 'msg \"controller diagnostic grant\"} assert p port.close) call " ++
+            "instanceprobe.cooperative payload port.open (|p| p instanceprobe.message payload port.call 1 at len 8192 = {'kind 'user 'msg \"cooperative result grant\"} assert p port.close) call " ++
+            "instanceprobe.diagnostic-cooperative [] port.open (|p| p wrap (instanceprobe.cooperative-diagnose {} 'path payload dict.put port.call) @attempt 'err at 'data at 'path at len 8192 = {'kind 'user 'msg \"cooperative diagnostic grant\"} assert p port.close) call " ++
+            "instanceprobe.cooperative [] port.open (|p| p wrap (instanceprobe.values 5 port.call) @attempt 'err at 'kind at 'overflow match? {'kind 'user 'msg \"separate construction bound\"} assert p port.close) call");
     }
 }

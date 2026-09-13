@@ -357,6 +357,11 @@ It may overlap operation callbacks; `cancel` must interrupt its backend waits.
 Failure remains observable on repeated shutdown calls. Unsupported shutdown
 raises `'domain`, and abortive `port.close` remains available. Cancellation
 never promises to reverse external effects or accepted stream bytes.
+Instance port policy also bounds structured message bytes and nodes separately
+from builder stack slots. Factory and operation requests and native results use
+that instance's immutable grant. Copying a validated aggregate uses one stack
+slot regardless of its node count. Defaults remain 64 KiB, 4096 nodes, and 4096
+construction slots for ordinary extensions. ECL requests cannot replace a grant.
 These resource limits do not sandbox native code.
 
 Opening a shared library executes machine code before ECL validates its

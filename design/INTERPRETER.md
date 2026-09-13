@@ -2039,6 +2039,12 @@ registration; later module publication borrows that cached instance rather than
 reinitializing it. The registration releases its pin during joined owner
 settlement, after admission closes. Startup failure retires every completed and
 partial instance through the same reclamation protocol as lazy loading.
+Structured native message grants belong to the registered instance. Factory and
+operation capabilities retain the issuer's immutable validation limits, and native
+builders derive the same grant from their resource owner. Message footprint and
+construction stack capacity are separate bounds: copying a large validated
+aggregate occupies one stack slot. No request can choose its own policy or
+increase another instance's budget; ordinary extension defaults remain unchanged.
 The native descriptor selects controller or cooperative execution exhaustively.
 Cooperative resources use one serial resumable lane and reserve their scheduler
 continuation before publication. Operation state retains its construction owner
