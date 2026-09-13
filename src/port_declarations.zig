@@ -98,3 +98,20 @@ pub fn Operations(comptime Lane: type, comptime EndpointSet: type, comptime entr
         }
     };
 }
+
+/// Every bit pattern denotes a positive, bounded amount of scheduler work.
+/// Storing count-minus-one makes zero and unbounded grants unrepresentable.
+pub const WorkQuantum = enum(u16) {
+    q1 = 0,
+    q64 = 63,
+    q256 = 255,
+    q65536 = 65535,
+    _,
+    pub fn fromCount(amount: u32) error{InvalidLimits}!WorkQuantum {
+        if (amount == 0 or amount > 65536) return error.InvalidLimits;
+        return @enumFromInt(@as(u16, @intCast(amount - 1)));
+    }
+    pub fn count(self: WorkQuantum) u32 {
+        return @as(u32, @intFromEnum(self)) + 1;
+    }
+};

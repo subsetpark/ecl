@@ -384,6 +384,14 @@ It may overlap operation callbacks; `cancel` must interrupt its backend waits.
 Failure remains observable on repeated shutdown calls. Unsupported shutdown
 raises `'domain`, and abortive `port.close` remains available. Cancellation
 never promises to reverse external effects or accepted stream bytes.
+Native instance `port_limits` may select `callback_quantum` and
+`construction_quantum`. `NativeWorkQuantum.fromCount` accepts 1 through 65,536;
+its value representation cannot express a zero or unbounded grant. Defaults stay
+256 native work units per cooperative callback and 64 host construction units.
+The callback grant applies to initialization, operations, and joined retirement.
+The construction grant bounds each host materialization slice, independently of
+message footprint and stack capacity. Grants belong to the registered instance
+and are unavailable in ECL resource-open parameters.
 Instance port policy also bounds structured message bytes and nodes separately
 from builder stack slots. Factory and operation requests and native results use
 that instance's immutable grant. Copying a validated aggregate uses one stack

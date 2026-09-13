@@ -10,10 +10,9 @@ const intern = @import("intern.zig");
 const poll = @import("poll.zig");
 
 pub const Error = error{ OutOfMemory, InvalidState, InvalidValue, Overflow, DuplicateKey, Cancelled };
-pub const Limits = struct { message: message.Limits = .{}, stack_slots: usize = 4096 };
+pub const Limits = struct { message: message.Limits = .{}, stack_slots: usize = 4096, work_quantum: @import("port-declarations").WorkQuantum = .q64 };
 pub const max_byte_chunk = 64 * 1024;
 pub const max_symbol_chunk = 256;
-const quantum = 64;
 const Dictionary = struct {
     start: usize,
     keys: []Value,
@@ -98,6 +97,7 @@ const State = struct {
         self.phase = .failed;
     }
     fn advance(self: *State) Error!poll.Progress(void) {
+        const quantum = self.limits.work_quantum.count();
         switch (self.phase) {
             .idle, .ready, .child_configuration, .symbol_staging => return .complete,
             .failed => return error.InvalidState,

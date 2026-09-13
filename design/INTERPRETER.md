@@ -2066,6 +2066,11 @@ sized staging buffer until complete UTF-8 validation and interning settle;
 partial input never borrows native memory across callbacks. Every construction
 phase carries its own joined cleanup. No request can choose its own policy or
 increase another instance's budget; ordinary extension defaults remain unchanged.
+Instance work quanta use a bounded count-minus-one representation, so every
+value denotes 1 through 65,536 units. The common context starts each cooperative
+slice from its issuer's callback grant, including initialization and retirement;
+construction owners derive their separate materialization grant from the same
+instance. Neither callback inputs nor resource-specific adapters select policy.
 The native descriptor selects controller or cooperative execution exhaustively.
 Cooperative resources use one serial resumable lane and reserve their scheduler
 continuation before publication. Operation state retains its construction owner

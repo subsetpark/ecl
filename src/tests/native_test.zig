@@ -3082,3 +3082,26 @@ test "native: admitted input leases settle before finalizer execution" {
         \\loan port.close commit-task task.await 'ok at first 42 = {'kind 'user 'msg "finalizer resumes after release"} assert target port.close
     );
 }
+
+test "native: instance work quanta preserve bounds across callback and construction lifetimes" {
+    try std.testing.expectError(error.InvalidLimits, session.NativeWorkQuantum.fromCount(0));
+    try std.testing.expectError(error.InvalidLimits, session.NativeWorkQuantum.fromCount(65537));
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    for ([_]bool{ true, false }) |linked| for ([_]u32{ 1, 256, 65536 }) |amount| {
+        const quantum = try session.NativeWorkQuantum.fromCount(amount);
+        var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+            .ecl_path = if (linked) null else native_fixture.directory,
+            .native_instances = &.{.{ .name = "instanceprobe", .registration = .{ .deferred = if (linked) @import("native-instance").Extension.descriptor() else null }, .port_limits = .{ .callback_quantum = quantum, .construction_quantum = quantum, .message_limits = .{ .nodes = 65550, .bytes = 525000 }, .builder_slots = 4 } }},
+        }), .cooperative, .evaluate);
+        defer runtime.deinit();
+        const source = try std.fmt.allocPrint(std.testing.allocator, "instanceprobe.packed-cooperative [] port.open 'resource set " ++
+            "resource instanceprobe.packed-initial-budget [] port.call {d} = {{'kind 'user 'msg \"initialization grant\"}} assert " ++
+            "resource instanceprobe.packed-budget [] port.call {d} = {{'kind 'user 'msg \"callback grant\"}} assert " ++
+            "instanceprobe.work-operation-retired {d} = {{'kind 'user 'msg \"operation retirement grant\"}} assert " ++
+            "resource instanceprobe.cooperative-packed-values 1 port.call dup first sum 10813440 = {{'kind 'user 'msg \"bounded materialization preserves bytes\"}} assert 1 at str len 301 = {{'kind 'user 'msg \"bounded materialization preserves symbols\"}} assert " ++
+            "resource port.close instanceprobe.work-retired {d} = {{'kind 'user 'msg \"resource retirement grant\"}} assert", .{ amount, amount, amount, amount });
+        defer std.testing.allocator.free(source);
+        try expectOk(&runtime, source);
+    };
+}

@@ -12,6 +12,8 @@ const Lifecycle = struct {
         cooperative_started: std.atomic.Value(i64) = .init(0),
         child_advances: std.atomic.Value(i64) = .init(0),
         capacity_retired: std.atomic.Value(i64) = .init(0),
+        work_retired: std.atomic.Value(i64) = .init(0),
+        work_operation_retired: std.atomic.Value(i64) = .init(0),
         packed_started: std.atomic.Value(i64) = .init(0),
         capacity_started: std.atomic.Value(i64) = .init(0),
     };
@@ -551,6 +553,8 @@ pub const Extension = ecl.module(.{
         ecl.factory("packed-cooperative", "Open a resumable native value constructor.", PackedCooperative),
         ecl.factory("diagnostic-controller", "Open a controller diagnostic probe.", DiagnosticController),
         ecl.factory("diagnostic-cooperative", "Open a cooperative diagnostic probe.", DiagnosticCooperative),
+        ecl.word("work-retired", "Observe native resource retirement work granted by the host.", workRetired),
+        ecl.word("work-operation-retired", "Observe native operation retirement work granted by the host.", workOperationRetired),
         ecl.word("packed-started", "Observe partial symbol construction before parking.", packedStarted),
         ecl.word("capacity-started", "Observe rejected opening work.", capacityStarted),
         ecl.word("capacity-retirements", "Observe settled capacity rejection cleanup.", capacityRetirements),
@@ -791,6 +795,12 @@ pub const EagerExtension = ecl.module(.{
     .words = .{ecl.word("value", "Read the captured byte.", eagerValue)},
 });
 
+fn workRetired(call: *ecl.Call("-- count")) ecl.CallbackResult {
+    return call.complete(.{ecl.Scalar.int(call.instance(Instance).?.work_retired.load(.acquire))});
+}
+fn workOperationRetired(call: *ecl.Call("-- count")) ecl.CallbackResult {
+    return call.complete(.{ecl.Scalar.int(call.instance(Instance).?.work_operation_retired.load(.acquire))});
+}
 fn packedStarted(call: *ecl.Call("-- count")) ecl.CallbackResult {
     return call.complete(.{ecl.Scalar.int(call.instance(Instance).?.packed_started.load(.acquire))});
 }
@@ -876,9 +886,11 @@ const PackedController = ecl.Port(.{ .controller = struct {
 } });
 const PackedCooperative = ecl.Port(.{ .cooperative = struct {
     pub const name = "packed-cooperative";
-    pub const State = struct { building: PackedConstruction = .{}, parked: bool = false };
+    pub const State = struct { building: PackedConstruction = .{}, parked: bool = false, initialization_work: u32 = 0 };
     pub const CapacityFailure = PackedRejection;
     pub const operations = .{
+        .budget = .{ .name = "packed-budget", .doc = "Consume and report the host callback work grant.", .handler = budget, .lane = .operation, .endpoints = .{} },
+        .initial_budget = .{ .name = "packed-initial-budget", .doc = "Report the initialization work grant.", .handler = initialBudget, .lane = .operation, .endpoints = .{} },
         .values = .{ .name = "cooperative-packed-values", .doc = "Build bytes and a symbol over bounded slices.", .handler = values, .lane = .operation, .endpoints = .{} },
         .diagnose = .{ .name = "cooperative-packed-diagnostic", .doc = "Build resumable diagnostic values.", .handler = diagnose, .lane = .operation, .endpoints = .{} },
         .finalize = .{ .name = "packed-finalize", .doc = "Commit a bounded constructed result.", .handler = finalize, .lane = .operation, .endpoints = .{} },
@@ -889,7 +901,20 @@ const PackedCooperative = ecl.Port(.{ .cooperative = struct {
     pub fn init() State {
         return .{};
     }
-    pub fn open(_: *State, _: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
+    pub fn open(state: *State, ctx: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
+        while (ctx.consume(1)) state.initialization_work += 1;
+        return .completed;
+    }
+    fn budget(_: *State, ctx: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
+        var amount: u32 = 0;
+        while (ctx.consume(1)) amount += 1;
+        try ctx.builder().int(amount);
+        try ctx.builder().result();
+        return .completed;
+    }
+    fn initialBudget(state: *State, ctx: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
+        try ctx.builder().int(state.initialization_work);
+        try ctx.builder().result();
         return .completed;
     }
     fn prepare(state: *State, ctx: anytype) void {
@@ -935,11 +960,18 @@ const PackedCooperative = ecl.Port(.{ .cooperative = struct {
         if (!ctx.park(3_600_000)) return error.InvalidValue;
         return .parked;
     }
-    pub fn retireOperation(state: *State, _: *ecl.Cooperative) ecl.CooperativeProgress {
-        state.* = .{};
+    pub fn retireOperation(state: *State, ctx: *ecl.Cooperative) ecl.CooperativeProgress {
+        var amount: u32 = 0;
+        while (ctx.consume(1)) amount += 1;
+        ctx.instance(Instance).?.work_operation_retired.store(amount, .release);
+        const initial_work = state.initialization_work;
+        state.* = .{ .initialization_work = initial_work };
         return .completed;
     }
-    pub fn retire(_: *State, _: *ecl.Cooperative) ecl.CooperativeProgress {
+    pub fn retire(_: *State, ctx: *ecl.Cooperative) ecl.CooperativeProgress {
+        var amount: u32 = 0;
+        while (ctx.consume(1)) amount += 1;
+        ctx.instance(Instance).?.work_retired.store(amount, .release);
         return .completed;
     }
 } });

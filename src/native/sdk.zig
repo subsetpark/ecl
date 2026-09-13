@@ -894,3 +894,5 @@ fn identifier(bytes: []const u8) bool {
 fn asciiAlpha(byte: u8) bool {
     return std.ascii.isAlphabetic(byte);
 }
+
+pub const WorkQuantum = @import("port-declarations").WorkQuantum;

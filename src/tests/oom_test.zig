@@ -2267,3 +2267,23 @@ test "oom: standard-library and host: native initializer input leases" {
         "",
     ).run);
 }
+
+test "oom: standard-library and host: native instance work quanta" {
+    try requireSelectedOomTest(@src());
+    const Probe = struct {
+        fn run(failing: *std.testing.FailingAllocator, failure_offset: ?usize) !usize {
+            var locked = LockedAllocator{ .child = failing.allocator() };
+            var inputs = try runtime_fixture.Fixture.init();
+            defer inputs.deinit();
+            var runtime = try session.Session.init(locked.allocator(), &.{}, inputs.inputs(.{
+                .native_instances = &.{.{ .name = "instanceprobe", .port_limits = .{ .callback_quantum = .q1, .construction_quantum = .q1 }, .registration = .{ .deferred = @import("native-instance").Extension.descriptor() } }},
+            }), .cooperative, .evaluate);
+            defer runtime.deinit();
+            const first = failing.alloc_index;
+            if (failure_offset) |offset| failing.fail_index = first + offset;
+            try runOk(&runtime, "native-work-grant.ecl", "instanceprobe.packed-cooperative [] port.open dup instanceprobe.cooperative-packed-values 0 port.call pop port.close");
+            return first;
+        }
+    };
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, Probe.run);
+}

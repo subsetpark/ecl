@@ -9,6 +9,7 @@ const spans = @import("spans.zig");
 const env = @import("env.zig");
 const modules = @import("modules.zig");
 const native_port = @import("native_port.zig");
+pub const NativeWorkQuantum = native_port.WorkQuantum;
 const native_module = @import("native_module.zig");
 const machine = @import("machine.zig");
 const prims = @import("prims.zig");

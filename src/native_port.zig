@@ -112,6 +112,7 @@ fn unlock(mutex: *std.Io.Mutex) void {
     std.Io.Threaded.mutexUnlock(mutex);
 }
 
+pub const WorkQuantum = @import("port-declarations").WorkQuantum;
 pub const Limits = struct {
     max_live_ports: ?usize = 64,
     max_operations: u32 = 16,
@@ -120,6 +121,8 @@ pub const Limits = struct {
     message_queue_bytes: u32 = 1024 * 1024,
     message_limits: port_message.Limits = .{},
     builder_slots: usize = 4096,
+    callback_quantum: WorkQuantum = .q256,
+    construction_quantum: WorkQuantum = .q64,
 
     /// Shared extension capacity keeps its existing bounded admission policy.
     pub fn validate(self: Limits) error{InvalidLimits}!void {
@@ -152,7 +155,7 @@ const Resource = transfers.Resource(Cell, OwnerState, OwnerState.allocator, Owne
 
 const OwnerState = struct {
     fn builderLimits(self: *const OwnerState) message_builder.Limits {
-        return .{ .message = self.limits.message_limits, .stack_slots = self.limits.builder_slots };
+        return .{ .message = self.limits.message_limits, .stack_slots = self.limits.builder_slots, .work_quantum = self.limits.construction_quantum };
     }
 
     host: *const heap.HostCleanup,
@@ -375,11 +378,11 @@ const ResourceAdapter = struct {
                 cell.failInitialization(.out_of_memory);
                 return .completed;
             };
-            ctx.* = .{ .cell = cell, .invocation = .initialize, .cooperative = .{} };
+            ctx.* = .{ .cell = cell, .invocation = .initialize };
             self.initialization_context = ctx;
         }
         const ctx = self.initialization_context.?;
-        ctx.cooperative = .{};
+        ctx.beginCooperativeSlice();
         const progress = cooperativeProgress(ctx, self.definition.execution.cooperative.initialize(self.backend.ptr, &cooperative_table, ctx));
         if (progress == .completed) {
             if (ctx.builder == .cooperative and ctx.builder.cooperative.phase != .idle)
@@ -397,7 +400,8 @@ const ResourceAdapter = struct {
     }
     pub fn advanceCleanup(self: *ResourceAdapter, cell: *Cell) scheduler.Cooperative.Progress {
         self.retireInitializationContext();
-        var ctx: ControllerContext = .{ .cell = cell, .invocation = .cleanup, .cooperative = .{} };
+        var ctx: ControllerContext = .{ .cell = cell, .invocation = .cleanup };
+        ctx.beginCooperativeSlice();
         defer ctx.deinit();
         const progress = cooperativeProgress(&ctx, self.definition.execution.cooperative.retire(self.backend.ptr, &cooperative_table, &ctx));
         if (progress == .completed) self.input_loans.release();
@@ -881,8 +885,11 @@ const ControllerContext = struct {
         controller: *message_builder.Builder,
         cooperative: CooperativeConstruction,
     } = .none,
-    cooperative: ?struct { budget: u32 = 256, wait: union(enum) { none, timer: scheduler.Deadline, readiness } = .none } = null,
+    cooperative: ?struct { budget: u32, wait: union(enum) { none, timer: scheduler.Deadline, readiness } = .none } = null,
     symbol_bytes: [256]u8 = @splat(0),
+    fn beginCooperativeSlice(self: *ControllerContext) void {
+        self.cooperative = .{ .budget = self.cell.adapter.owner.limits.callback_quantum.count() };
+    }
     fn cancellation(self: *ControllerContext) *const std.atomic.Value(bool) {
         return if (self.operation()) |op| &op.transport_cancelled else &self.cell.closed;
     }
@@ -1710,12 +1717,11 @@ const CooperativeInvocation = struct {
         if (self.context == .reserved) self.context = .{ .live = .{
             .cell = adapter.cell,
             .invocation = .{ .operation = .{ .value = operation, .running = null } },
-            .cooperative = .{},
         } };
         const ctx = &self.context.live;
         ctx.invocation.operation.running = running;
         defer ctx.invocation.operation.running = null;
-        ctx.cooperative = .{};
+        ctx.beginCooperativeSlice();
         if (running.cancelled() and self.phase != .finished) self.phase = .retiring;
         const callbacks = adapter.cell.adapter.definition.execution.cooperative;
         switch (self.phase) {
@@ -1805,7 +1811,7 @@ const RejectedOpening = struct {
         return opening;
     }
     pub fn advance(self: *RejectedOpening, quantum: usize) error{OutOfMemory}!factories.Progress {
-        self.budget = @intCast(@min(quantum, 256));
+        self.budget = @intCast(@min(quantum, self.instance.portAccess().state().limits.callback_quantum.count()));
         switch (self.phase) {
             .reporting => |backend| {
                 const progress = self.definition.step(backend.ptr, &table, self);
@@ -1845,7 +1851,7 @@ const RejectedOpening = struct {
         self.builder = null;
     }
     pub fn advanceRetirement(releases: *heap.ReleaseDomain, _: std.mem.Allocator, self: *RejectedOpening) bool {
-        self.budget = 256;
+        self.budget = self.instance.portAccess().state().limits.callback_quantum.count();
         if (self.phase.retiring) |backend| {
             if (!self.definition.retire(backend.ptr, &table, self)) return false;
             self.allocator().free(backend);
