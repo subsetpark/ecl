@@ -436,7 +436,7 @@ fn DuplexSpec(comptime acknowledge: bool) type {
             }
             try Base.run(P, current, mode, selected_lane, controller);
         }
-        pub fn shutdown(state: *State, controller: *ecl.Controller) void {
+        pub fn shutdown(state: *State, controller: *ecl.Shutdown) void {
             _ = shutdowns.fetchAdd(1, .release);
             const config = (controller.input(&.{}) orelse return).int() orelse 0;
             if (config == 252) return controller.failOutOfMemory();

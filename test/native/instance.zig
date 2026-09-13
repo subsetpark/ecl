@@ -60,6 +60,23 @@ fn allocations(call: *ecl.Call("-- value")) ecl.CallbackResult {
     @memset(bytes, 42);
     return call.complete(.{ecl.Scalar.int(bytes[7])});
 }
+fn memoryAllocator(call: *ecl.Call("-- value")) ecl.CallbackResult {
+    const state = call.instance(Instance) orelse return call.fail(.contract, "missing instance");
+    const storage = state.memory.?.allocator();
+    var bytes = try storage.alloc(u8, 8);
+    defer storage.free(bytes);
+    @memset(bytes, 42);
+    bytes = try storage.realloc(bytes, 16);
+    if (bytes[7] != 42) return call.fail(.contract, "native allocator lost data");
+    const aligned = try storage.alignedAlloc(u8, .@"64", 8);
+    defer storage.free(aligned);
+    if (@intFromPtr(aligned.ptr) % 64 != 0) return call.fail(.contract, "native allocator alignment");
+    const value_ptr = try storage.create(i64);
+    defer storage.destroy(value_ptr);
+    value_ptr.* = 43;
+    return call.complete(.{ecl.Scalar.int(value_ptr.*)});
+}
+
 fn retirements(call: *ecl.Call("-- value")) ecl.CallbackResult {
     return call.complete(.{ecl.Scalar.int(retired.load(.monotonic))});
 }
@@ -371,18 +388,93 @@ const CooperativeResource = ecl.Port(.{
     },
 });
 
+const ActivityResource = ecl.Port(.{
+    .controller = struct {
+        pub const name = "activity";
+        pub const State = struct {
+            instance: ?*Instance.State = null,
+            mode: i64 = 0,
+            finished: std.atomic.Value(u32) = .init(0),
+            echo_finished: std.Io.Event = .unset,
+            received: usize = 0,
+        };
+        pub const endpoints = .{
+            .input = ecl.declarations.Endpoint{ .name = "activity-in", .doc = "Feed the joined byte pump.", .transport = .bytes, .direction = .input, .owner = .resource },
+            .output = ecl.declarations.Endpoint{ .name = "activity-out", .doc = "Read the joined byte pump.", .transport = .bytes, .direction = .output, .owner = .resource },
+            .ready = ecl.declarations.Endpoint{ .name = "activity-ready", .doc = "Read the independent startup marker.", .transport = .bytes, .direction = .output, .owner = .resource },
+        };
+        pub const activities = .{
+            .echo = .{ .handler = echo, .endpoints = .{ .input, .output } },
+            .marker = .{ .handler = marker, .endpoints = .{.ready} },
+        };
+        pub fn init() State {
+            return .{};
+        }
+        pub fn open(state: *State, context: *ecl.Controller) void {
+            state.instance = context.instance(Instance);
+            state.mode = context.input(&.{}).?.int() orelse 0;
+        }
+        pub fn cancel(_: *State) void {}
+        pub fn deinit(state: *State) void {
+            if (state.instance) |instance| _ = instance.value.fetchAdd(if (state.finished.load(.acquire) == 2) 10000 else -1000000, .monotonic);
+        }
+        pub fn shutdown(state: *State, context: *ecl.Shutdown) void {
+            if (context.instance(Instance) != state.instance) return context.fail(.contract, "shutdown instance mismatch");
+            context.finishInput(ActivityResource, .input) catch return;
+            state.echo_finished.waitUncancelable(std.Io.Threaded.global_single_threaded.io());
+            if (state.mode == 4 and state.received != 3) context.fail(.contract, "shutdown lost accepted input");
+        }
+        fn echo(state: *State, context: *ecl.Activity) ecl.ControllerError!void {
+            defer state.echo_finished.set(std.Io.Threaded.global_single_threaded.io());
+            defer _ = state.finished.fetchAdd(1, .release);
+            if (context.instance(Instance) != state.instance) return error.InvalidValue;
+            const input = try context.endpoint(ActivityResource, .input);
+            const output = try context.endpoint(ActivityResource, .output);
+            // Possessing an activity context does not grant another pump's endpoint.
+            if (context.endpoint(ActivityResource, .ready)) |_| return error.InvalidValue else |err| if (err != error.InvalidValue) return err;
+            var bytes: [4096]u8 = undefined;
+            while (try input.read(&bytes)) |count| {
+                if (state.mode == 1) {
+                    context.fail(.io, "requested byte pump failure");
+                    return;
+                }
+                if (state.mode == 2) {
+                    context.failResource(.io, "requested whole resource failure");
+                    return;
+                }
+                if (state.mode == 3) {
+                    context.failOutOfMemory();
+                    return;
+                }
+                state.received += count;
+                if (state.mode != 4) try output.write(bytes[0..count]);
+                if (state.mode == 5) {
+                    context.fail(.io, "failure after accepted output");
+                    return;
+                }
+            }
+        }
+        fn marker(state: *State, context: *ecl.Activity) ecl.ControllerError!void {
+            defer _ = state.finished.fetchAdd(1, .release);
+            if (!context.cancelled()) try (try context.endpoint(ActivityResource, .ready)).write(&.{7});
+        }
+    },
+});
+
 pub const Extension = ecl.module(.{
     .linkage = .static,
     .name = "instanceprobe",
     .doc = "Instance isolation and retirement probe.",
     .instance = Instance,
-    .ports = .{ Resource, CooperativeResource },
+    .ports = .{ Resource, CooperativeResource, ActivityResource },
     .words = .{
         ecl.word("next", "Read and increment instance state.", value),
         ecl.word("allocate", "Allocate and release native storage.", allocations),
+        ecl.word("memory-allocator", "Use accounted native storage with standard allocation APIs.", memoryAllocator),
         ecl.word("retirements", "Count completed fixture retirements.", retirements),
         ecl.factory("resource", "Open a configured resource.", Resource),
         ecl.factory("cooperative", "Open a resumable resource.", CooperativeResource),
+        ecl.factory("activity", "Open independently supervised byte pumps.", ActivityResource),
         ecl.word("started", "Observe cooperative operation startup.", cooperativeStarted),
         ecl.word("child-advances", "Observe cooperative child initialization dispatches.", childAdvances),
     },

@@ -2069,3 +2069,16 @@ test "oom: standard-library and host: cooperative finalizer result reservation" 
         "",
     ).run);
 }
+
+test "oom: standard-library and host: native resource activity startup" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortProbe(
+        "instanceprobe.activity [] port.open port.close",
+        "",
+    ).run);
+}
+
+test "oom: standard-library and host: native memory allocator facade" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortProbe("instanceprobe.memory-allocator pop", "").run);
+}

@@ -7,6 +7,8 @@ const ports = @import("ports.zig");
 pub const declarations = @import("port-declarations");
 pub const Port = ports.Port;
 pub const Controller = ports.Controller;
+pub const Activity = ports.Activity;
+pub const Shutdown = ports.Shutdown;
 pub const Cooperative = ports.Cooperative;
 pub const Finalizer = ports.Finalizer;
 pub const CooperativeProgress = ports.CooperativeProgress;
@@ -47,6 +49,26 @@ pub const NativeMemory = opaque {
         const handle = self.wire();
         const pointer = handle.allocate(handle.context, length) orelse return error.OutOfMemory;
         return pointer[0..length];
+    }
+    /// A native-storage allocator for std and native dependencies. It retains
+    /// this authority's accounting and lifetime, supports alignments through 64
+    /// bytes, and never grants access to interpreter values or heap ownership.
+    pub fn allocator(self: *const NativeMemory) std.mem.Allocator {
+        return .{ .ptr = @constCast(self), .vtable = &.{
+            .alloc = allocateStorage,
+            .resize = std.mem.Allocator.noResize,
+            .remap = std.mem.Allocator.noRemap,
+            .free = releaseStorage,
+        } };
+    }
+    fn allocateStorage(raw: *anyopaque, length: usize, alignment: std.mem.Alignment, _: usize) ?[*]u8 {
+        if (alignment.toByteUnits() > 64) return null;
+        const self: *const NativeMemory = @ptrCast(@alignCast(raw));
+        return (self.allocate(length) catch return null).ptr;
+    }
+    fn releaseStorage(raw: *anyopaque, bytes: []u8, _: std.mem.Alignment, _: usize) void {
+        const self: *const NativeMemory = @ptrCast(@alignCast(raw));
+        self.release(@alignCast(bytes));
     }
     /// Consumes a slice allocated by this authority, on every return.
     pub fn release(self: *const NativeMemory, bytes: []align(64) u8) void {

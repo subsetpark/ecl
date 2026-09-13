@@ -164,7 +164,7 @@ pub const Owner = opaque {
         try limits.validate();
         const state_value = try host.allocator().create(OwnerState);
         errdefer host.allocator().destroy(state_value);
-        state_value.* = .{ .host = host, .limits = limits, .executor = try controllers.Owner.init(host.allocator(), @as(usize, limits.max_live_ports) * (@min(limits.max_operations, abi.max_port_lanes) + 1) + 1) };
+        state_value.* = .{ .host = host, .limits = limits, .executor = try controllers.Owner.init(host.allocator(), @as(usize, limits.max_live_ports) * (@min(limits.max_operations, abi.max_port_lanes) + 1 + @import("port-declarations").max_activities) + 1) };
         return ownerFromState(state_value);
     }
     pub fn access(self: *Owner) *Access {
@@ -278,6 +278,18 @@ const ResourceAdapter = struct {
         defer ctx.deinit();
         self.definition.wire.initialize.?(self.backend.ptr, &controller_table, &ctx);
     }
+    pub fn runActivity(self: *ResourceAdapter, cell: *Cell, index: u32) void {
+        const activity = self.definition.execution.controller.activities[index].?;
+        var ctx: ControllerContext = .{ .cell = cell, .invocation = .{ .activity = .{ .index = index } } };
+        defer ctx.deinit();
+        activity.execute(self.backend.ptr, &controller_table, &ctx);
+        for (self.resource_pipes, 0..) |transport, endpoint_index| {
+            if (activity.endpoints & (@as(u64, 1) << @as(u6, @intCast(endpoint_index))) == 0) continue;
+            const pair = transport.?;
+            const endpoint = self.instance.validated().endpoint(self.kind, @intCast(endpoint_index), .resource).?;
+            if (ctx.invocation.activity.failure) |failure| pair.fail(semanticFailure(failure), endpoint.direction == .input) else if (endpoint.direction == .input) pair.fail(.init(.io, "native input consumer completed"), true) else pair.finish();
+        }
+    }
     pub fn advanceInitialize(self: *ResourceAdapter, cell: *Cell) scheduler.Cooperative.Progress {
         var ctx: ControllerContext = .{ .cell = cell, .invocation = .initialize, .cooperative = .{} };
         defer ctx.deinit();
@@ -318,7 +330,7 @@ const ResourceAdapter = struct {
         errdefer message_budget.release();
         const adapter: ResourceAdapter = .{ .owner = owner, .instance = instance, .kind = kind, .definition = definition, .backend = state, .message_budget = message_budget };
         switch (definition.execution) {
-            .controller => try cell.initialize(adapter, worker, definition.wire.lane_count, owner.limits.max_operations, definition.wire.shutdown != null),
+            .controller => try cell.initialize(adapter, worker, definition.wire.lane_count, owner.limits.max_operations, definition.wire.shutdown != null, definition.execution.controller.activityCount()),
             .cooperative => try cell.initializeCooperative(adapter, worker, definition.wire.lane_count, owner.limits.max_operations),
         }
         errdefer cell.controllers.deinit();
@@ -760,7 +772,7 @@ fn createEndpoint(source: EndpointParent, spec: descriptor.EndpointDefinition) e
 
 const ControllerContext = struct {
     cell: *Cell,
-    invocation: union(enum) { initialize, operation: struct { value: *Operation, running: ?*controllers.Running }, shutdown: ?Failure, cleanup },
+    invocation: union(enum) { initialize, operation: struct { value: *Operation, running: ?*controllers.Running }, activity: struct { index: u32, failure: ?Failure = null }, shutdown: ?Failure, cleanup },
     received: ?*message_transport.Envelope = null,
     builder: union(enum) {
         none,
@@ -785,7 +797,7 @@ const ControllerContext = struct {
     fn operation(self: *ControllerContext) ?*Operation {
         return switch (self.invocation) {
             .operation => |active| active.value,
-            .initialize, .shutdown, .cleanup => null,
+            .initialize, .activity, .shutdown, .cleanup => null,
         };
     }
 };
@@ -868,6 +880,7 @@ fn controllerInstance(raw: *anyopaque, identity: *const anyopaque) callconv(.c) 
 fn controllerInput(raw: *anyopaque, path: [*]const u64, depth: u32, output: *abi.ValueView) callconv(.c) bool {
     if (depth > abi.max_read_path_depth or output.size != @sizeOf(abi.ValueView)) return false;
     const ctx = context(raw);
+    if (ctx.invocation == .activity) return false;
     const root: ?Value = if (ctx.operation()) |operation| operation.adapter.protocol.parameters else ctx.cell.adapter.configuration;
     return viewMessage(root, path, depth, output);
 }
@@ -1036,7 +1049,22 @@ fn controllerEndpointParent(ctx: *ControllerContext, owner: abi.EndpointOwner) ?
         _ => null,
     };
 }
+fn permitsActivityEndpoint(ctx: *ControllerContext, owner: abi.EndpointOwner, index: u32) bool {
+    if (ctx.invocation != .activity) {
+        if (owner == .resource and index < 64 and ctx.cell.adapter.definition.execution == .controller) {
+            for (ctx.cell.adapter.definition.execution.controller.activities) |entry| if (entry) |activity| {
+                if (activity.endpoints & (@as(u64, 1) << @as(u6, @intCast(index))) != 0) return false;
+            };
+        }
+        return true;
+    }
+    if (index >= 64 or owner != .resource) return false;
+    const activity = ctx.cell.adapter.definition.execution.controller.activities[ctx.invocation.activity.index].?;
+    return activity.endpoints & (@as(u64, 1) << @as(u6, @intCast(index))) != 0;
+}
+
 fn controllerPipe(raw: *anyopaque, owner: abi.EndpointOwner, index: u32, direction: enum { input, output }) ?byte_transport.Pair {
+    if (!permitsActivityEndpoint(context(raw), owner, index)) return null;
     const source = controllerEndpointParent(context(raw), owner) orelse return null;
     const cell = source.cell();
     if (index >= 64) return null;
@@ -1058,6 +1086,7 @@ fn controllerPipe(raw: *anyopaque, owner: abi.EndpointOwner, index: u32, directi
 fn controllerResolveEndpoint(raw: *anyopaque, identity: *const anyopaque, owner: abi.EndpointOwner, index: u32, transport: abi.EndpointTransport, direction: abi.EndpointDirection) callconv(.c) bool {
     const ctx = context(raw);
     if (ctx.cell.adapter.definition.wire.identity != identity or index >= 64) return false;
+    if (!permitsActivityEndpoint(ctx, owner, index)) return false;
     const parent = controllerEndpointParent(ctx, owner) orelse return false;
     const spec = ctx.cell.adapter.instance.validated().endpoint(ctx.cell.adapter.kind, @intCast(index), switch (owner) {
         .resource => .resource,
@@ -1138,6 +1167,7 @@ fn controllerFinishEndpoint(raw: *anyopaque, owner: abi.EndpointOwner, index: u3
 }
 
 fn controllerQueue(raw: *anyopaque, owner: abi.EndpointOwner, index: u32, direction: enum { input, output }) ?message_transport.Pair {
+    if (!permitsActivityEndpoint(context(raw), owner, index)) return null;
     const source = controllerEndpointParent(context(raw), owner) orelse return null;
     const cell = source.cell();
     if (index >= 64) return null;
@@ -1207,7 +1237,10 @@ fn controllerFailResource(raw: *anyopaque, kind: abi.ErrorKindWire, bytes: [*]co
     const failure = reportedFailure(kind, bytes[0..length]);
     if (ctx.operation()) |op| {
         recordOperationFailure(op, .{ .value = failure, .disposition = .resource });
-    } else recordControllerFailure(ctx, failure);
+    } else {
+        recordControllerFailure(ctx, failure);
+        if (ctx.invocation == .activity) ctx.cell.close();
+    }
 }
 fn reportedFailure(kind: abi.ErrorKindWire, bytes: []const u8) Failure {
     const valid_kind: abi.ErrorKindWire = switch (kind) {
@@ -1226,6 +1259,7 @@ fn recordControllerFailure(ctx: *ControllerContext, failure: Failure) void {
         .initialize, .cleanup => {
             ctx.cell.failInitialization(semanticFailure(failure));
         },
+        .activity => storeControllerFailure(&ctx.invocation.activity.failure, failure),
         .shutdown => storeControllerFailure(&ctx.invocation.shutdown, failure),
         .operation => unreachable,
     }
@@ -1244,7 +1278,17 @@ fn storeControllerFailure(destination: *?Failure, failure: Failure) void {
     if (destination.* != null and failure != .out_of_memory) return;
     destination.* = failure;
 }
-const controller_table: abi.ControllerTable = .{ .instance_state = controllerInstance, .initialization_parent = controllerInitializationParent, .resolve_endpoint = controllerResolveEndpoint, .read_bytes = controllerReadBytes, .write_bytes = controllerWriteBytes, .receive_event = controllerReceiveEvent, .fail_resource = controllerFailResource, .parent_state = controllerParent, .discard_message = controllerDiscardMessage, .build_message = controllerBuildMessage, .fail_allocation = controllerFailAllocation, .received_message = controllerReceivedMessage, .forward_message = controllerForwardMessage, .result_message = controllerResultMessage, .input = controllerInput, .finish_endpoint = controllerFinishEndpoint, .cancelled = controllerCancelled, .acknowledge_cancellation = controllerAcknowledge, .fail = controllerFail };
+fn controllerFinishInput(raw: *anyopaque, identity: *const anyopaque, index: u32) callconv(.c) bool {
+    const ctx = context(raw);
+    if (ctx.invocation != .shutdown or ctx.cell.adapter.definition.wire.identity != identity or index >= 64 or controllerCancelled(raw)) return false;
+    const endpoint = ctx.cell.adapter.instance.validated().endpoint(ctx.cell.adapter.kind, @intCast(index), .resource) orelse return false;
+    if (endpoint.transport != .bytes or endpoint.direction != .input) return false;
+    const transport = ctx.cell.adapter.resource_pipes[index] orelse return false;
+    transport.finish();
+    return true;
+}
+
+const controller_table: abi.ControllerTable = .{ .finish_input = controllerFinishInput, .instance_state = controllerInstance, .initialization_parent = controllerInitializationParent, .resolve_endpoint = controllerResolveEndpoint, .read_bytes = controllerReadBytes, .write_bytes = controllerWriteBytes, .receive_event = controllerReceiveEvent, .fail_resource = controllerFailResource, .parent_state = controllerParent, .discard_message = controllerDiscardMessage, .build_message = controllerBuildMessage, .fail_allocation = controllerFailAllocation, .received_message = controllerReceivedMessage, .forward_message = controllerForwardMessage, .result_message = controllerResultMessage, .input = controllerInput, .finish_endpoint = controllerFinishEndpoint, .cancelled = controllerCancelled, .acknowledge_cancellation = controllerAcknowledge, .fail = controllerFail };
 
 pub fn fromValue(value: Value, instance: *native.ModuleInstance, kind: u32) ?*Cell {
     const handle = switch (value) {

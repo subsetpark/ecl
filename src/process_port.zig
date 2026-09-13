@@ -1363,6 +1363,9 @@ const ServiceAdapter = struct {
     pub fn operationLane(_: *ServiceAdapter, operation: RegisteredOperation) u32 {
         return @intFromEnum(DeclaredOperations.lane(operation));
     }
+    pub fn runActivity(_: *@This(), _: anytype, _: u32) void {
+        unreachable;
+    }
     pub fn prepareOperation(_: *ServiceAdapter, cell: *Service, operation: RegisteredOperation, request: *const port_message.Validated, lane: *ProcessExchange.Lane) error{OutOfMemory}!*ProcessExchange.Prepared {
         const terminal = try results.Result.create(cell.adapter.owner.host);
         errdefer terminal.release();
@@ -1413,7 +1416,7 @@ const ServiceAdapter = struct {
         return null;
     }
     fn initializeAllocation(cell: *Service, owner: *ProcessOwner, spec: *PreparedSpec, worker: *const scheduler_api.WorkerScheduler) error{OutOfMemory}!void {
-        cell.initialize(.{ .owner = owner, .specification = spec }, worker, 2, 16, true) catch |err| return switch (err) {
+        cell.initialize(.{ .owner = owner, .specification = spec }, worker, 2, 16, true, 0) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.InvalidLimits => unreachable,
         };

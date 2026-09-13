@@ -2,6 +2,8 @@
 //! private selectors from these names; neither authors nor ECL coordinate IDs.
 const std = @import("std");
 
+pub const max_activities = 4;
+
 pub const Direction = enum { input, output };
 pub const Transport = enum { bytes, messages };
 pub const Owner = enum { resource, exchange };

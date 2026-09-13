@@ -32,7 +32,7 @@ Session's runtime I/O state.
 The public `net` and `proc` modules are ECL compositions over these registered
 capabilities and `port.*`. Their operation and endpoint selectors expose only
 their corresponding resources and streams. First-party adapters use typed backend calls;
-the extension adapter translates ABI v12 calls into the same runtime interfaces
+the extension adapter translates ABI v13 calls into the same runtime interfaces
 for controller execution, transport, cancellation, ownership, and cleanup.
 
 Embedded names have precedence over filesystem modules. A file on `ECL_PATH`
@@ -127,8 +127,8 @@ module. Its descriptor declares the same canonical name requested by the
 loader. The complete word table validates before publication, and publication
 is atomic.
 
-The current pre-release native ABI is version 12, with entry symbol
-`ecl_module_abi_v12`. Resource authors choose `ecl.Port(.{ .controller = Spec })`
+The current pre-release native ABI is version 13, with entry symbol
+`ecl_module_abi_v13`. Resource authors choose `ecl.Port(.{ .controller = Spec })`
 or `ecl.Port(.{ .cooperative = Spec })`. Cooperative callbacks receive bounded
 work accounting and cancellable timer parking. Their persistent builder begins
 aggregate construction and advances it explicitly; it has no blocking endpoints.
@@ -140,6 +140,17 @@ mutation fails. Cancellation before commit joins resource cleanup. Cancellation
 after commit preserves the terminal result and joins the remaining bounded work.
 Success or failure leaves admission sealed until the caller closes the resource.
 A finalizer cannot create child resources or acquire streaming endpoints.
+
+Controller ports may declare up to four named `activities`, each carrying a
+handler and its resource byte endpoints. Each endpoint belongs to at most one
+activity. An activity receives `*ecl.Activity`, can use only its declared
+endpoints, and runs independently of operation calls. Returning finishes its
+outputs and rejects subsequent input writes; failures propagate to those streams.
+Resource close interrupts blocked transport and joins every activity before
+backend cleanup. Activity startup uses the same reserved controller capacity and
+failed-publication cleanup as operation lanes. A typed `*ecl.Shutdown` callback
+can call `finishInput` to stop producer admission while activities drain accepted
+bytes; it receives no stream consumer authority.
 
 Native modules built for earlier versions must be rebuilt;
 the loader provides no legacy adapter.
@@ -169,7 +180,9 @@ Each slice obeys `context.consume()`. Initialization may yield before publicatio
 retirement runs even after failed initialization. `context.configuration()`
 borrows immutable bytes until instance retirement. `context.memory()` returns
 an opaque, retainable native-storage authority with allocation and consuming
-release operations. Allocations must be released through their issuing authority
+release operations. Its `allocator()` adapts that same accounted storage to
+`std.mem.Allocator` for native dependencies, with alignment up to 64 bytes;
+it does not expose the interpreter's allocator or permit heap-value construction. Allocations must be released through their issuing authority
 before final retirement. Callback and controller `instance(Instance)` access
 checks the declared type's identity and returns only that module's state.
 Concurrent callbacks must synchronize their shared extension state.

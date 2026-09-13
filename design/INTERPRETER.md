@@ -1970,7 +1970,11 @@ failed publication has the same post-retirement lifetime as completed work.
 The common controller service validates lane capacity, admits prepared
 exchanges, supplies admission readiness, sequences initialization and graceful
 shutdown, interrupts outstanding operations, and joins execution and dependent
-children before cleanup becomes observable. Adapter state supplies typed
+children before cleanup becomes observable. Declared resource activities share
+that reserved startup and join protocol. Each byte endpoint has at most one
+activity owner; every endpoint acquisition and transport access checks the
+invocation's validated endpoint set. Activity return publishes stream completion
+or failure before backend cleanup. Adapter state supplies typed
 backend work and transport; ABI descriptors and operation codes remain outside
 this lifecycle. Admission preparation owns its result and resource pin before
 acquiring the publication lock, and rejection retires them after unlocking.

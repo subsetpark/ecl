@@ -338,8 +338,8 @@ fn ControllerPort(comptime Spec: type) type {
             @compileError("ecl-native: Port Lane values must be contiguous from zero");
         if (cancellation == .acknowledge and (!@hasDecl(Spec, "cancelOperation") or @TypeOf(Spec.cancelOperation) != fn (*Spec.State, Lane) void))
             @compileError("ecl-native: recoverable cancellation requires fn cancelOperation(*State, Lane) void");
-        if (@hasDecl(Spec, "shutdown") and @TypeOf(Spec.shutdown) != fn (*Spec.State, *Controller) void)
-            @compileError("ecl-native: shutdown requires fn (*State, *Controller) void");
+        if (@hasDecl(Spec, "shutdown") and @TypeOf(Spec.shutdown) != fn (*Spec.State, *Shutdown) void)
+            @compileError("ecl-native: shutdown requires fn (*State, *Shutdown) void");
         for (.{ "State", "name", "init", "open", "cancel", "deinit" }) |name|
             if (!@hasDecl(Spec, name)) @compileError("ecl-native: Port spec requires State, name, init, open, cancel, and deinit");
         if (@sizeOf(Spec.State) == 0 or @sizeOf(Spec.State) > abi.max_port_state_bytes or @alignOf(Spec.State) > 64)
@@ -352,6 +352,19 @@ fn ControllerPort(comptime Spec: type) type {
     }
     const DeclaredEndpoints = declarations.Endpoints(if (@hasDecl(Spec, "endpoints")) Spec.endpoints else .{});
     const DeclaredOperations = declarations.Operations(Lane, DeclaredEndpoints, if (@hasDecl(Spec, "operations")) Spec.operations else .{});
+    const activity_entries = if (@hasDecl(Spec, "activities")) Spec.activities else .{};
+    const activity_fields = @import("std").meta.fields(@TypeOf(activity_entries));
+    if (activity_fields.len > @import("port-declarations").max_activities) @compileError("ecl-native: at most four resource activities may be declared");
+    const activity_definitions = blk: {
+        var values: [activity_fields.len]abi.ActivityDefinition = undefined;
+        var owned: u64 = 0;
+        for (activity_fields, 0..) |field, index| {
+            values[index] = activityDefinition(Spec.State, DeclaredEndpoints, @field(activity_entries, field.name));
+            if (owned & values[index].endpoints != 0) @compileError("ecl-native: resource endpoints belong to one activity");
+            owned |= values[index].endpoints;
+        }
+        break :blk values;
+    };
     comptime {
         for (@import("std").meta.tags(DeclaredOperations.Name)) |name| {
             if (@TypeOf(DeclaredOperations.get(name).handler) != fn (*Spec.State, *Controller) void and
@@ -372,11 +385,12 @@ fn ControllerPort(comptime Spec: type) type {
         // A mutable object's address supplies nominal identity even when two
         // specs have identical names or the linker folds identical callbacks.
         var kind_identity: u8 = 0;
+        const activities = activity_definitions;
         fn kindIdentity() *const anyopaque {
             return &kind_identity;
         }
         pub fn definition() abi.PortDefinition {
-            return .{ .state_size = @sizeOf(Spec.State), .state_alignment = @alignOf(Spec.State), .name_ptr = name.ptr, .name_len = name.len, .init_state = initState, .initialize = initialize, .execute = execute, .cancel = cancelState, .cleanup = cleanup, .lane_count = @typeInfo(Lane).@"enum".fields.len, .cancellation = switch (cancellation) {
+            return .{ .activity_count = activities.len, .activities_ptr = if (activities.len == 0) null else &activities, .state_size = @sizeOf(Spec.State), .state_alignment = @alignOf(Spec.State), .name_ptr = name.ptr, .name_len = name.len, .init_state = initState, .initialize = initialize, .execute = execute, .cancel = cancelState, .cleanup = cleanup, .lane_count = @typeInfo(Lane).@"enum".fields.len, .cancellation = switch (cancellation) {
                 .close_resource => .close_resource,
                 .acknowledge => .acknowledge,
             }, .cancel_operation = if (cancellation == .acknowledge) cancelOperation else null, .shutdown = if (@hasDecl(Spec, "shutdown")) shutdown else null, .identity = kindIdentity() };
@@ -425,6 +439,95 @@ fn ControllerPort(comptime Spec: type) type {
             Spec.deinit(@ptrCast(@alignCast(raw)));
         }
     };
+}
+
+/// Graceful shutdown controls producer admission without acquiring stream data.
+pub const Shutdown = opaque {
+    fn controller(self: *Shutdown) *Controller {
+        return @ptrCast(self);
+    }
+    pub fn instance(self: *Shutdown, comptime I: type) ?*I.State {
+        return self.controller().instance(I);
+    }
+    pub fn input(self: *Shutdown, path: []const u64) ?*const MessageView {
+        return self.controller().input(path);
+    }
+    pub fn cancelled(self: *Shutdown) bool {
+        return self.controller().cancelled();
+    }
+    pub fn fail(self: *Shutdown, kind: capability.ErrorKind, message: []const u8) void {
+        self.controller().fail(kind, message);
+    }
+    pub fn failOutOfMemory(self: *Shutdown) void {
+        self.controller().failOutOfMemory();
+    }
+    /// Stop producer admission while allowing the resource activity to drain
+    /// every accepted byte. This grants no reader or writer endpoint authority.
+    pub fn finishInput(self: *Shutdown, comptime P: type, comptime name: P.Endpoints.Name) ControllerError!void {
+        const spec = comptime P.Endpoints.get(name);
+        comptime if (spec.owner != .resource or spec.transport != .bytes or spec.direction != .input)
+            @compileError("ecl-native: shutdown finishes resource byte inputs");
+        const owned = self.controller().state();
+        if (!owned.table.finish_input(owned.context, P.kindIdentity(), P.Endpoints.id(name))) return if (self.cancelled()) error.Cancelled else error.InvalidValue;
+    }
+};
+
+/// A joined resource activity owns only its declared byte-stream endpoints.
+/// It can supervise native I/O without borrowing an initialization callback.
+pub const Activity = opaque {
+    fn controller(self: *Activity) *Controller {
+        return @ptrCast(self);
+    }
+    pub fn instance(self: *Activity, comptime I: type) ?*I.State {
+        return self.controller().instance(I);
+    }
+    pub fn cancelled(self: *Activity) bool {
+        return self.controller().cancelled();
+    }
+    pub fn fail(self: *Activity, kind: capability.ErrorKind, message: []const u8) void {
+        self.controller().fail(kind, message);
+    }
+    pub fn failResource(self: *Activity, kind: capability.ErrorKind, message: []const u8) void {
+        self.controller().failResource(kind, message);
+    }
+    pub fn failOutOfMemory(self: *Activity) void {
+        self.controller().failOutOfMemory();
+    }
+    pub fn endpoint(self: *Activity, comptime P: type, comptime name: P.Endpoints.Name) ControllerError!*Endpoint(P, name) {
+        const spec = comptime P.Endpoints.get(name);
+        comptime if (spec.owner != .resource or spec.transport != .bytes) @compileError("ecl-native: activities require resource byte endpoints");
+        return self.controller().endpoint(P, name);
+    }
+};
+
+fn activityMask(comptime EndpointSet: type, comptime endpoints: anytype) u64 {
+    var mask: u64 = 0;
+    for (endpoints) |name| {
+        const selected: EndpointSet.Name = name;
+        const endpoint = EndpointSet.get(selected);
+        if (endpoint.owner != .resource or endpoint.transport != .bytes) @compileError("ecl-native: activities require resource byte endpoints");
+        const bit = @as(u64, 1) << EndpointSet.id(selected);
+        if (mask & bit != 0) @compileError("ecl-native: duplicate activity endpoint");
+        mask |= bit;
+    }
+    return mask;
+}
+fn activityDefinition(comptime State: type, comptime EndpointSet: type, comptime entry: anytype) abi.ActivityDefinition {
+    if (@TypeOf(entry.handler) != fn (*State, *Activity) void and @TypeOf(entry.handler) != fn (*State, *Activity) ControllerError!void)
+        @compileError("ecl-native: activity handler requires resource state and activity context");
+    const Bridge = struct {
+        fn invoke(raw: *anyopaque, table: *const abi.ControllerTable, context: *anyopaque) callconv(.c) void {
+            var state: ControllerState = .{ .table = table, .context = context };
+            const activity: *Activity = @ptrCast(&state);
+            if (@typeInfo(@TypeOf(entry.handler)).@"fn".return_type.? == void) entry.handler(@as(*State, @ptrCast(@alignCast(raw))), activity) else entry.handler(@as(*State, @ptrCast(@alignCast(raw))), activity) catch |err| switch (err) {
+                error.OutOfMemory => activity.failOutOfMemory(),
+                error.Cancelled => if (!activity.cancelled()) activity.fail(.contract, "activity reported cancellation without a request"),
+                error.Failed => activity.fail(.io, "native activity failed"),
+                error.InvalidValue => activity.fail(.contract, "invalid activity capability or value"),
+            };
+        }
+    };
+    return .{ .endpoints = activityMask(EndpointSet, entry.endpoints), .execute = Bridge.invoke };
 }
 
 pub const CooperativeProgress = enum { completed, yielded, parked };

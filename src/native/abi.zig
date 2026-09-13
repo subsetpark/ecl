@@ -5,8 +5,8 @@
 
 const builtin = @import("builtin");
 
-pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v12";
-pub const abi_version: u32 = 12;
+pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v13";
+pub const abi_version: u32 = 13;
 
 pub const max_error_message_bytes: u32 = 4096;
 pub const max_guest_scalar_bytes: u32 = 4096;
@@ -119,6 +119,7 @@ pub const MessageBuildRequest = extern struct {
 pub const ControllerStatus = enum(u32) { ok, eof, cancelled, failed, out_of_memory, invalid, _ };
 pub const ControllerRead = extern struct { status: ControllerStatus, count: u32 = 0 };
 pub const ControllerTable = extern struct {
+    finish_input: *const fn (*anyopaque, *const anyopaque, u32) callconv(.c) bool,
     instance_state: InstanceStateFn,
     initialization_parent: InstanceStateFn,
     parent_state: *const fn (*anyopaque, *const anyopaque) callconv(.c) ?*anyopaque,
@@ -166,6 +167,11 @@ pub const CooperativeDefinition = extern struct {
     retire_operation: ?CooperativeFn,
     retire: ?CooperativeFn,
 };
+pub const ActivityDefinition = extern struct {
+    size: u32 = @sizeOf(ActivityDefinition),
+    endpoints: u64,
+    execute: ?PortControllerFn,
+};
 pub const PortDefinition = extern struct {
     size: u32 = @sizeOf(PortDefinition),
     state_size: u32,
@@ -184,6 +190,9 @@ pub const PortDefinition = extern struct {
     identity: ?*const anyopaque = null,
     execution: ResourceExecution = .controller,
     cooperative: ?*const CooperativeDefinition = null,
+    activity_count: u32 = 0,
+    activity_record_size: u32 = @sizeOf(ActivityDefinition),
+    activities_ptr: ?[*]const ActivityDefinition = null,
 };
 
 pub const CapabilityRequirement = extern struct {
@@ -485,11 +494,12 @@ comptime {
     assertRecord(InvokeResult, 16, 8);
     assertRecord(HostTable, 160, 8);
     assertRecord(Descriptor, 112, 8);
-    assertRecord(PortDefinition, 112, 8);
+    assertRecord(PortDefinition, 128, 8);
+    assertRecord(ActivityDefinition, 24, 8);
     assertRecord(CooperativeDefinition, 40, 8);
     assertRecord(CooperativeTable, 88, 8);
     assertRecord(MessageBuildRequest, 72, 8);
-    assertRecord(ControllerTable, 152, 8);
+    assertRecord(ControllerTable, 160, 8);
     assertRecord(InstanceTable, 24, 8);
     assertRecord(NativeMemory, 24, 8);
     assertRecord(InstanceDefinition, 48, 8);

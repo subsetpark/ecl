@@ -79,7 +79,16 @@ const EndpointSlot = struct { resource: ?EndpointDefinition = null, exchange: ?E
 pub const PortDefinition = struct {
     wire: abi.PortDefinition,
     execution: union(enum) {
-        controller,
+        controller: struct {
+            activities: [@import("port-declarations").max_activities]?struct { endpoints: u64, execute: abi.PortControllerFn } = .{null} ** @import("port-declarations").max_activities,
+            pub fn activityCount(self: @This()) u32 {
+                var count: u32 = 0;
+                for (self.activities) |entry| if (entry != null) {
+                    count += 1;
+                };
+                return count;
+            }
+        },
         cooperative: struct {
             initialize: abi.CooperativeFn,
             execute: abi.CooperativeOperationFn,
@@ -456,6 +465,7 @@ pub const ValidateCursor = struct {
         endpoint_masks: [abi.max_port_definitions]u64 = .{0} ** abi.max_port_definitions,
         resource_endpoint_masks: [abi.max_port_definitions]u64 = .{0} ** abi.max_port_definitions,
         binding_index: usize = 0,
+        activity_index: usize = 0,
     };
     const DefinitionBuild = struct {
         module: ModuleArtifacts,
@@ -651,11 +661,24 @@ pub const ValidateCursor = struct {
                             .acknowledge => if (port.cancel_operation == null) return error.InvalidPortDefinition,
                             _ => return error.InvalidPortDefinition,
                         }
-                        break :blk .controller;
+                        var controller: @FieldType(@FieldType(PortDefinition, "execution"), "controller") = .{};
+                        if (port.activity_count > @import("port-declarations").max_activities) return error.InvalidPortDefinition;
+                        if (port.activity_count != 0) {
+                            const activities = try RecordArray(abi.ActivityDefinition).init(port.activities_ptr orelse return error.InvalidPortDefinition, port.activity_count, port.activity_record_size);
+                            var owned_endpoints: u64 = 0;
+                            for (0..port.activity_count) |activity_index| {
+                                const activity = try activities.read(activity_index);
+                                try validateRecordSize(activity.size, @sizeOf(abi.ActivityDefinition));
+                                if (activity.endpoints & owned_endpoints != 0) return error.InvalidPortDefinition;
+                                owned_endpoints |= activity.endpoints;
+                                controller.activities[activity_index] = .{ .endpoints = activity.endpoints, .execute = activity.execute orelse return error.InvalidPortDefinition };
+                            }
+                        } else if (port.activities_ptr != null) return error.InvalidPortDefinition;
+                        break :blk .{ .controller = controller };
                     },
                     .cooperative => blk: {
                         if (port.initialize != null or port.execute != null or port.cancel != null or port.cleanup != null or
-                            port.cancel_operation != null or port.shutdown != null or port.lane_count != 1 or port.cancellation != .acknowledge)
+                            port.cancel_operation != null or port.shutdown != null or port.activity_count != 0 or port.activities_ptr != null or port.lane_count != 1 or port.cancellation != .acknowledge)
                             return error.InvalidPortDefinition;
                         const callbacks = port.cooperative orelse return error.InvalidPortDefinition;
                         try validateRecordSize(callbacks.size, @sizeOf(abi.CooperativeDefinition));
@@ -759,6 +782,20 @@ pub const ValidateCursor = struct {
                     },
                 }
                 module.binding_index += 1;
+                return;
+            }
+            if (module.activity_index < module.descriptor.port_count) {
+                const index = module.activity_index;
+                if (module.ports[index].?.execution == .controller) {
+                    for (module.ports[index].?.execution.controller.activities) |maybe_activity| if (maybe_activity) |activity| {
+                        if (activity.endpoints & ~module.resource_endpoint_masks[index] != 0) return error.InvalidPortDefinition;
+                        for (0..64) |endpoint_index| {
+                            if (activity.endpoints & (@as(u64, 1) << @as(u6, @intCast(endpoint_index))) == 0) continue;
+                            if (module.endpoints[index * 64 + endpoint_index].resource.?.transport != .bytes) return error.InvalidPortDefinition;
+                        }
+                    };
+                }
+                module.activity_index += 1;
                 return;
             }
             const moved = module.*;

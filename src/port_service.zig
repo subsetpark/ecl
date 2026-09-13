@@ -43,6 +43,7 @@ pub fn Resource(comptime Adapter: type) type {
         lane_count: u32,
         operation_capacity: u32,
         graceful: bool,
+        activity_count: u32 = 0,
         refs: std.atomic.Value(u32) = .init(1),
         closed: std.atomic.Value(bool) = .init(false),
         mutex: std.Io.Mutex = .init,
@@ -65,10 +66,12 @@ pub fn Resource(comptime Adapter: type) type {
 
         /// Failure retains the prepared adapter. Success consumes it and derives
         /// allocation and executor authority from its owner before publication.
-        pub fn initialize(self: *Cell, adapter: Adapter, worker: *const scheduler.WorkerScheduler, lane_count: u32, capacity: u32, graceful: bool) error{ OutOfMemory, InvalidLimits }!void {
+        pub fn initialize(self: *Cell, adapter: Adapter, worker: *const scheduler.WorkerScheduler, lane_count: u32, capacity: u32, graceful: bool, activity_count: u32) error{ OutOfMemory, InvalidLimits }!void {
+            if (activity_count > @import("port-declarations").max_activities) return error.InvalidLimits;
             try validateCapacity(lane_count, capacity);
             const group = try Group.init(adapter.allocator(), adapter.executor(), self);
             self.initializeReserved(adapter, worker, lane_count, capacity, graceful, group);
+            self.activity_count = activity_count;
         }
         pub fn initializeCooperative(self: *Cell, adapter: Adapter, worker: *const scheduler.WorkerScheduler, lane_count: u32, capacity: u32) error{ OutOfMemory, InvalidLimits, Io }!void {
             try validateCapacity(lane_count, capacity);
@@ -200,7 +203,7 @@ pub fn Resource(comptime Adapter: type) type {
             if (initialize_backend) self.adapter.initializeBackend(self);
             lock(&self.mutex);
             if (self.initialization_failure != null) self.closed.store(true, .release);
-            const lanes = if (self.closed.load(.acquire)) 1 else self.lane_count + @as(u32, @intFromBool(self.graceful));
+            const lanes = if (self.closed.load(.acquire)) 1 else self.lane_count + @as(u32, @intFromBool(self.graceful)) + self.activity_count;
             unlock(&self.mutex);
             execution.runLanes(lanes, self, Cell.runLane, Cell.failLaneStartup, Cell.publishInitialization);
             // Join all operation execution and cancellation notification before
@@ -492,7 +495,10 @@ pub fn Resource(comptime Adapter: type) type {
             }
         }
         fn runLane(self: *Cell, index: usize) void {
-            if (index == self.lane_count) return self.runShutdown();
+            if (index >= self.lane_count) {
+                if (self.graceful and index == self.lane_count) return self.runShutdown();
+                return self.adapter.runActivity(self, @intCast(index - self.lane_count - @intFromBool(self.graceful)));
+            }
             const lane = &self.lanes[index];
             while (true) {
                 lock(&self.mutex);
