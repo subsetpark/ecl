@@ -1,5 +1,10 @@
 /* HTTPS Git snapshots. This backend knows only repositories and regular files.
  * Native allocations and the scratch tree belong to this joined invocation. */
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+/* Darwin hides O_NOFOLLOW and mkdtemp in the strict POSIX namespace. */
+#define _DARWIN_C_SOURCE 1
+#endif
+
 #include "snapshot.h"
 #include <git2.h>
 #include <git2/sys/alloc.h>
