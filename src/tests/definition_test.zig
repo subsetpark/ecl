@@ -33,6 +33,45 @@ fn expectErrorContains(runtime: *session.Session, source: []const u8, text: []co
     try std.testing.expect(std.mem.indexOf(u8, rendered.bytes(), text) != null);
 }
 
+test "plain call sites observe rebinding removal and core shadowing" {
+    try support.expectStack(
+        "1 'cached-value set (cached-value) 'probe def " ++
+            "probe probe 2 'cached-value set probe " ++
+            "'cached-value unset [] (probe) @attempt 'err at 'kind at " ++
+            "3 'cached-value set probe " ++
+            "(4 dup +) 'core-probe def core-probe core-probe " ++
+            "(10) 'dup def core-probe 'dup undef core-probe",
+        "1 1 2 'undefined-word 3 8 8 14 8",
+    );
+}
+
+test "plain call sites preserve child shadowing and deep lexical fallback" {
+    try support.expectStack(
+        "1 'outside set (outside) 'read set " ++
+            "[] (read call read call read call 2 'outside set read call) @attempt 'ok at",
+        "[1 1 1 2]",
+    );
+    try support.expectStack(
+        "1 'outside set [] ((outside) 'read def read read " ++
+            "2 'outside set read 'outside unset read) @attempt 'ok at",
+        "[1 1 2 1]",
+    );
+    try support.expectStack(
+        "7 'outside set " ++ "[] (" ** 10 ++ "outside" ++ ") @attempt 'ok at first" ** 10,
+        "7",
+    );
+}
+
+test "plain call sites remain correct after observation pool and cache churn" {
+    try support.expectStack(
+        "1 'outside set (outside) 'probe def probe probe probe " ++
+            "3 (" ++ "outside pop " ** 32 ++ ") times " ++
+            "2 'outside set probe " ++
+            "(outside) 'escaped set [] (3 'outside set escaped call) @attempt 'ok at first",
+        "1 1 1 2 3",
+    );
+}
+
 test "definition annotations support all top-level forms and dynamic data" {
     try support.expectStack(
         "(1) 'plain def " ++

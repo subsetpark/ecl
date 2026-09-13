@@ -1,0 +1,553 @@
+{
+  "optimization": "ReleaseSafe",
+  "target": "x86_64-linux",
+  "affinity": [
+    4,
+    6
+  ],
+  "programs": {
+    "stat": "10000 ('cwd \"data\" fs.stat pop) times 10000",
+    "direct": "10000 (fs.core.request ['stat 'cwd \"data\"] port.open dup fs.core.execute-request [] port.call pop port.close) times 10000",
+    "lexical": "1 'leaf set (leaf dup + pop) 'probe def 100000 (probe) times 10000"
+  },
+  "artifacts": {
+    "retirement": {
+      "path": "/tmp/ecl-overhead-candidate/bin/ecl",
+      "sha256": "93e2a2dd7e3a0c3bf4b8fd9a18f7f924e3bda21b5db661ad47731f42246d5687"
+    },
+    "lookup": {
+      "path": "/home/zax/.cache/ecl-overhead/lookup-probation/bin/ecl",
+      "sha256": "e4dc676f8470352e593b848c61f1fcb1aef4a488e53bf68c46329782635933b6"
+    }
+  },
+  "measurements": [
+    {
+      "iteration": 0,
+      "variant": "retirement",
+      "case": "stat",
+      "workers": "default",
+      "seconds": 33.714279231993714,
+      "user": 32.034145,
+      "system": 4.891097,
+      "voluntary": 830495,
+      "involuntary": 51876
+    },
+    {
+      "iteration": 0,
+      "variant": "lookup",
+      "case": "stat",
+      "workers": "default",
+      "seconds": 21.158969620009884,
+      "user": 19.955396,
+      "system": 3.2401649999999993,
+      "voluntary": 852143,
+      "involuntary": 61201
+    },
+    {
+      "iteration": 0,
+      "variant": "retirement",
+      "case": "stat",
+      "workers": "1",
+      "seconds": 20.14553332599462,
+      "user": 19.320983999999996,
+      "system": 2.1270819999999997,
+      "voluntary": 617945,
+      "involuntary": 3200
+    },
+    {
+      "iteration": 0,
+      "variant": "lookup",
+      "case": "stat",
+      "workers": "1",
+      "seconds": 31.382664707984077,
+      "user": 30.122906,
+      "system": 3.208183,
+      "voluntary": 610175,
+      "involuntary": 7547
+    },
+    {
+      "iteration": 0,
+      "variant": "retirement",
+      "case": "direct",
+      "workers": "1",
+      "seconds": 15.100217292987509,
+      "user": 14.476653999999996,
+      "system": 1.548323,
+      "voluntary": 283389,
+      "involuntary": 5704
+    },
+    {
+      "iteration": 0,
+      "variant": "lookup",
+      "case": "direct",
+      "workers": "1",
+      "seconds": 14.204109398997389,
+      "user": 13.604789999999994,
+      "system": 1.4382400000000004,
+      "voluntary": 279989,
+      "involuntary": 2094
+    },
+    {
+      "iteration": 0,
+      "variant": "retirement",
+      "case": "lexical",
+      "workers": "1",
+      "seconds": 1.102645687002223,
+      "user": 1.0548390000000154,
+      "system": 0.043872000000000355,
+      "voluntary": 1,
+      "involuntary": 12
+    },
+    {
+      "iteration": 0,
+      "variant": "lookup",
+      "case": "lexical",
+      "workers": "1",
+      "seconds": 0.8159193799947388,
+      "user": 0.7665519999999901,
+      "system": 0.0458500000000015,
+      "voluntary": 1,
+      "involuntary": 6
+    },
+    {
+      "iteration": 1,
+      "variant": "lookup",
+      "case": "lexical",
+      "workers": "1",
+      "seconds": 0.9051012510026339,
+      "user": 0.845815000000016,
+      "system": 0.055840999999997365,
+      "voluntary": 1,
+      "involuntary": 5
+    },
+    {
+      "iteration": 1,
+      "variant": "retirement",
+      "case": "lexical",
+      "workers": "1",
+      "seconds": 1.1776275019801687,
+      "user": 1.119312999999977,
+      "system": 0.05382100000000278,
+      "voluntary": 1,
+      "involuntary": 10
+    },
+    {
+      "iteration": 1,
+      "variant": "lookup",
+      "case": "direct",
+      "workers": "1",
+      "seconds": 15.496546939975815,
+      "user": 14.749284000000017,
+      "system": 1.6473439999999968,
+      "voluntary": 280047,
+      "involuntary": 5220
+    },
+    {
+      "iteration": 1,
+      "variant": "retirement",
+      "case": "direct",
+      "workers": "1",
+      "seconds": 14.596979724010453,
+      "user": 14.017874000000006,
+      "system": 1.4754620000000003,
+      "voluntary": 282438,
+      "involuntary": 2188
+    },
+    {
+      "iteration": 1,
+      "variant": "lookup",
+      "case": "stat",
+      "workers": "1",
+      "seconds": 32.956856712989975,
+      "user": 31.80857899999998,
+      "system": 3.0675820000000016,
+      "voluntary": 616309,
+      "involuntary": 7823
+    },
+    {
+      "iteration": 1,
+      "variant": "retirement",
+      "case": "stat",
+      "workers": "1",
+      "seconds": 29.207992200012086,
+      "user": 28.01778300000001,
+      "system": 3.020737999999998,
+      "voluntary": 617925,
+      "involuntary": 8614
+    },
+    {
+      "iteration": 1,
+      "variant": "lookup",
+      "case": "stat",
+      "workers": "default",
+      "seconds": 27.342571878019953,
+      "user": 25.73668599999999,
+      "system": 4.2800230000000035,
+      "voluntary": 841809,
+      "involuntary": 61946
+    },
+    {
+      "iteration": 1,
+      "variant": "retirement",
+      "case": "stat",
+      "workers": "default",
+      "seconds": 20.16246053299983,
+      "user": 19.023421999999982,
+      "system": 3.115371999999997,
+      "voluntary": 836649,
+      "involuntary": 49638
+    },
+    {
+      "iteration": 2,
+      "variant": "retirement",
+      "case": "stat",
+      "workers": "default",
+      "seconds": 30.989235171990003,
+      "user": 29.594712000000015,
+      "system": 3.962426999999998,
+      "voluntary": 811793,
+      "involuntary": 41432
+    },
+    {
+      "iteration": 2,
+      "variant": "lookup",
+      "case": "stat",
+      "workers": "default",
+      "seconds": 33.83298294999986,
+      "user": 32.08876300000003,
+      "system": 5.032772000000001,
+      "voluntary": 834915,
+      "involuntary": 52234
+    },
+    {
+      "iteration": 2,
+      "variant": "retirement",
+      "case": "stat",
+      "workers": "1",
+      "seconds": 30.740723620023346,
+      "user": 29.429712999999992,
+      "system": 3.226924000000004,
+      "voluntary": 612756,
+      "involuntary": 7743
+    },
+    {
+      "iteration": 2,
+      "variant": "lookup",
+      "case": "stat",
+      "workers": "1",
+      "seconds": 31.192676022998057,
+      "user": 29.973104999999975,
+      "system": 3.151696000000001,
+      "voluntary": 611322,
+      "involuntary": 7491
+    },
+    {
+      "iteration": 2,
+      "variant": "retirement",
+      "case": "direct",
+      "workers": "1",
+      "seconds": 14.630978311994113,
+      "user": 14.028363000000013,
+      "system": 1.4750279999999947,
+      "voluntary": 282524,
+      "involuntary": 5048
+    },
+    {
+      "iteration": 2,
+      "variant": "lookup",
+      "case": "direct",
+      "workers": "1",
+      "seconds": 15.408479331003036,
+      "user": 14.81923999999998,
+      "system": 1.530294000000005,
+      "voluntary": 279683,
+      "involuntary": 5210
+    },
+    {
+      "iteration": 2,
+      "variant": "retirement",
+      "case": "lexical",
+      "workers": "1",
+      "seconds": 1.320522730005905,
+      "user": 1.2685200000000236,
+      "system": 0.04684199999999805,
+      "voluntary": 1,
+      "involuntary": 9
+    },
+    {
+      "iteration": 2,
+      "variant": "lookup",
+      "case": "lexical",
+      "workers": "1",
+      "seconds": 1.1138824359804858,
+      "user": 1.0611599999999726,
+      "system": 0.047820999999999,
+      "voluntary": 1,
+      "involuntary": 10
+    },
+    {
+      "iteration": 3,
+      "variant": "lookup",
+      "case": "lexical",
+      "workers": "1",
+      "seconds": 0.8442003550007939,
+      "user": 0.7929410000000416,
+      "system": 0.04787600000000225,
+      "voluntary": 1,
+      "involuntary": 11
+    },
+    {
+      "iteration": 3,
+      "variant": "retirement",
+      "case": "lexical",
+      "workers": "1",
+      "seconds": 1.14988636597991,
+      "user": 1.1078229999999962,
+      "system": 0.037878999999996665,
+      "voluntary": 1,
+      "involuntary": 13
+    },
+    {
+      "iteration": 3,
+      "variant": "lookup",
+      "case": "direct",
+      "workers": "1",
+      "seconds": 15.218094120995374,
+      "user": 14.623691000000008,
+      "system": 1.5302390000000017,
+      "voluntary": 277948,
+      "involuntary": 4372
+    },
+    {
+      "iteration": 3,
+      "variant": "retirement",
+      "case": "direct",
+      "workers": "1",
+      "seconds": 17.153616592026083,
+      "user": 16.533679000000006,
+      "system": 1.5078809999999976,
+      "voluntary": 282562,
+      "involuntary": 6283
+    },
+    {
+      "iteration": 3,
+      "variant": "lookup",
+      "case": "stat",
+      "workers": "1",
+      "seconds": 17.720319275016664,
+      "user": 17.007796999999982,
+      "system": 1.8786929999999984,
+      "voluntary": 592775,
+      "involuntary": 3360
+    },
+    {
+      "iteration": 3,
+      "variant": "retirement",
+      "case": "stat",
+      "workers": "1",
+      "seconds": 19.002333168988116,
+      "user": 18.211506999999983,
+      "system": 2.013421000000001,
+      "voluntary": 621674,
+      "involuntary": 8800
+    },
+    {
+      "iteration": 3,
+      "variant": "lookup",
+      "case": "stat",
+      "workers": "default",
+      "seconds": 34.353918426990276,
+      "user": 32.36807700000003,
+      "system": 5.3324890000000025,
+      "voluntary": 837901,
+      "involuntary": 55338
+    },
+    {
+      "iteration": 3,
+      "variant": "retirement",
+      "case": "stat",
+      "workers": "default",
+      "seconds": 34.169109371025115,
+      "user": 32.35497899999996,
+      "system": 5.056501999999995,
+      "voluntary": 830081,
+      "involuntary": 50763
+    },
+    {
+      "iteration": 4,
+      "variant": "retirement",
+      "case": "stat",
+      "workers": "default",
+      "seconds": 33.294074877980165,
+      "user": 31.701368000000002,
+      "system": 4.854396000000008,
+      "voluntary": 832013,
+      "involuntary": 49695
+    },
+    {
+      "iteration": 4,
+      "variant": "lookup",
+      "case": "stat",
+      "workers": "default",
+      "seconds": 39.7484703460068,
+      "user": 38.06448499999999,
+      "system": 5.145409999999998,
+      "voluntary": 874872,
+      "involuntary": 56607
+    },
+    {
+      "iteration": 4,
+      "variant": "retirement",
+      "case": "stat",
+      "workers": "1",
+      "seconds": 31.256578903004993,
+      "user": 29.942185999999992,
+      "system": 3.229658999999998,
+      "voluntary": 614538,
+      "involuntary": 12141
+    },
+    {
+      "iteration": 4,
+      "variant": "lookup",
+      "case": "stat",
+      "workers": "1",
+      "seconds": 21.177303796983324,
+      "user": 20.32786800000008,
+      "system": 2.193590999999998,
+      "voluntary": 611196,
+      "involuntary": 4533
+    },
+    {
+      "iteration": 4,
+      "variant": "retirement",
+      "case": "direct",
+      "workers": "1",
+      "seconds": 10.166150356992148,
+      "user": 9.77689799999996,
+      "system": 0.9711220000000083,
+      "voluntary": 283845,
+      "involuntary": 2618
+    },
+    {
+      "iteration": 4,
+      "variant": "lookup",
+      "case": "direct",
+      "workers": "1",
+      "seconds": 9.723921107011847,
+      "user": 9.303012999999964,
+      "system": 1.0010580000000004,
+      "voluntary": 279616,
+      "involuntary": 2536
+    },
+    {
+      "iteration": 4,
+      "variant": "retirement",
+      "case": "lexical",
+      "workers": "1",
+      "seconds": 0.7710925169812981,
+      "user": 0.7326890000000503,
+      "system": 0.03593999999999653,
+      "voluntary": 1,
+      "involuntary": 11
+    },
+    {
+      "iteration": 4,
+      "variant": "lookup",
+      "case": "lexical",
+      "workers": "1",
+      "seconds": 0.5495036770007573,
+      "user": 0.5206660000000056,
+      "system": 0.026933999999997127,
+      "voluntary": 1,
+      "involuntary": 9
+    },
+    {
+      "iteration": 5,
+      "variant": "lookup",
+      "case": "lexical",
+      "workers": "1",
+      "seconds": 0.5392620630154852,
+      "user": 0.5074409999999716,
+      "system": 0.029900999999995292,
+      "voluntary": 1,
+      "involuntary": 3
+    },
+    {
+      "iteration": 5,
+      "variant": "retirement",
+      "case": "lexical",
+      "workers": "1",
+      "seconds": 0.7626998490013648,
+      "user": 0.7264040000000023,
+      "system": 0.033972000000005664,
+      "voluntary": 1,
+      "involuntary": 7
+    },
+    {
+      "iteration": 5,
+      "variant": "lookup",
+      "case": "direct",
+      "workers": "1",
+      "seconds": 11.123896019998938,
+      "user": 10.74689699999999,
+      "system": 1.043414999999996,
+      "voluntary": 278764,
+      "involuntary": 3033
+    },
+    {
+      "iteration": 5,
+      "variant": "retirement",
+      "case": "direct",
+      "workers": "1",
+      "seconds": 16.472845277981833,
+      "user": 15.756531999999993,
+      "system": 1.6903039999999976,
+      "voluntary": 284447,
+      "involuntary": 7572
+    },
+    {
+      "iteration": 5,
+      "variant": "lookup",
+      "case": "stat",
+      "workers": "1",
+      "seconds": 30.79165701099555,
+      "user": 29.51143400000001,
+      "system": 3.1470720000000085,
+      "voluntary": 611472,
+      "involuntary": 7882
+    },
+    {
+      "iteration": 5,
+      "variant": "retirement",
+      "case": "stat",
+      "workers": "1",
+      "seconds": 32.69027676800033,
+      "user": 31.494385999999963,
+      "system": 3.113665999999995,
+      "voluntary": 618863,
+      "involuntary": 8441
+    },
+    {
+      "iteration": 5,
+      "variant": "lookup",
+      "case": "stat",
+      "workers": "default",
+      "seconds": 33.80991395498859,
+      "user": 32.09274400000004,
+      "system": 4.943109000000007,
+      "voluntary": 826222,
+      "involuntary": 52119
+    },
+    {
+      "iteration": 5,
+      "variant": "retirement",
+      "case": "stat",
+      "workers": "default",
+      "seconds": 32.75461361001362,
+      "user": 31.021443999999974,
+      "system": 4.909092000000001,
+      "voluntary": 827044,
+      "involuntary": 52300
+    }
+  ]
+}

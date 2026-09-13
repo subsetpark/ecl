@@ -631,6 +631,27 @@ turns the result into an execution pin before code runs. A Unit retains each
 generation it dispatches through. A module-local word can therefore keep
 running during replacement without a raw environment pointer escaping.
 
+Each Unit has a fixed-capacity source-occurrence cache. A first successful
+plain lookup records its resolution context; a repeat in that context admits
+scope observations. Plain lexical and core
+hits own a binding cell and validate every preceding searched scope, including
+the absence of an environment. Shape publication brackets its revision so a
+candidate derived during mutation is rejected. Rebinding loads the current
+cell value; adding, removing, or shadowing a name invalidates the observed
+shape. Guards cover at most eight scopes; deeper chains keep using resumable
+resolution. A bounded Unit-owned pool stores guards outside hot cursor result
+payloads; slot reuse invalidates both old entries and unfinished candidates.
+The starting scope identity selects an immutable parent chain, whose live scopes
+keep their once-installed environments alive. Guards retain revisions rather
+than snapshot readers, so a dormant entry cannot prevent reclamation of
+publication history. Execution context and the existing module generation
+guards continue to determine
+authority and visibility. Lookup continuations fit a bounded 736-byte inline
+driver slot, including their lexical observation tokens.
+Within each bounded cache set, lexical entries are evicted before generation
+or module-local entries; adding lexical coverage cannot displace those existing
+specializations at other source occurrences.
+
 The reserved qualifier `core` is decided before any of that. When the
 resolution cursor splits a dotted spelling and the module segment is exactly
 `core`, it looks the binding segment up in the core environment directly and

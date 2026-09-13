@@ -101,6 +101,7 @@ const Sample = struct {
 };
 
 const Mode = enum { timing, counters };
+var native_path: ?[]const u8 = null;
 const full_sizes = [_]usize{ 1, 32, 1_024, 65_535, 65_536, 65_537, 1_048_576 };
 const quick_sizes = [_]usize{ 32, 65_536 };
 const full_cursor_sizes = [_]usize{ 1, 32, 1_024, 65_536 };
@@ -133,6 +134,7 @@ fn runSample(io: std.Io, workers: usize, case: Case) !Sample {
     var output = std.Io.Writer.Discarding.init(&.{});
     const cwd = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", std.heap.smp_allocator);
     defer std.heap.smp_allocator.free(cwd);
+    const roots = [_]ecl.session.Filesystem.Root{.{ .name = "cwd", .absolute_path = cwd }};
     const inputs: ecl.session.RuntimeInputs = .{
         .io = io,
         .output = &output.writer,
@@ -141,12 +143,14 @@ fn runSample(io: std.Io, workers: usize, case: Case) !Sample {
         .environ = &.{},
         .standard_input = .program_source,
         .clock = .{ .wall = .{ .fixed = 0 } },
+        .filesystem = .{ .roots = &roots },
+        .ecl_path = native_path,
     };
     var runtime = try ecl.session.Session.init(
         session_allocator,
         &.{},
         inputs,
-        .{ .worker_pool = workers },
+        if (workers == 0) .cooperative else .{ .worker_pool = workers },
         .evaluate,
     );
     defer runtime.deinit();
@@ -213,7 +217,7 @@ fn printCase(
 ) !void {
     if (mode == .counters) {
         const sample = try runSample(io, workers, case);
-        try out.print("{s},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d}\n", .{
+        try out.print("{s},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d}\n", .{
             case.name,
             workers,
             size,
@@ -229,6 +233,8 @@ fn printCase(
             sample.metrics.qualified_cache_heals,
             sample.metrics.local_cache_hits,
             sample.metrics.local_cache_misses,
+            sample.metrics.plain_cache_hits,
+            sample.metrics.plain_cache_misses,
         });
         return;
     }
@@ -435,7 +441,7 @@ fn runModuleLocalCallSite(
     sizes: []const usize,
     repetitions: usize,
 ) !void {
-    for ([_]usize{ 1, 8 }) |workers| {
+    for ([_]usize{ 0, 1, 8 }) |workers| {
         for (sizes) |size| {
             const workload = try std.fmt.allocPrint(
                 std.heap.smp_allocator,
@@ -479,7 +485,14 @@ pub fn main(init: std.process.Init) !void {
     var call_site_only = false;
     var local_call_site_only = false;
     var latency_only = false;
+    var custom_source: ?[]const u8 = null;
+    var custom_setup: []const u8 = "";
+    var custom_workers: usize = 1;
     while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--source")) custom_source = args.next() orelse return error.MissingArgument;
+        if (std.mem.eql(u8, arg, "--setup")) custom_setup = args.next() orelse return error.MissingArgument;
+        if (std.mem.eql(u8, arg, "--workers")) custom_workers = try std.fmt.parseInt(usize, args.next() orelse return error.MissingArgument, 10);
+        if (std.mem.eql(u8, arg, "--native-path")) native_path = args.next() orelse return error.MissingArgument;
         if (std.mem.eql(u8, arg, "--counters")) mode = .counters;
         if (std.mem.eql(u8, arg, "--quick")) quick = true;
         if (std.mem.eql(u8, arg, "--cursor-storage-only")) cursor_storage_only = true;
@@ -496,7 +509,7 @@ pub fn main(init: std.process.Init) !void {
     var buffer: [4096]u8 = undefined;
     var stdout = std.Io.File.stdout().writerStreaming(init.io, &buffer);
     const out = &stdout.interface;
-    try out.print("# schema=ecl.workdrivers.{s}.v6\n", .{@tagName(mode)});
+    try out.print("# schema=ecl.workdrivers.{s}.v7\n", .{@tagName(mode)});
     try out.print("# WorkDriver baseline ({s})\n", .{@tagName(mode)});
     try out.print("optimize={s},target={s}-{s},zig={s},root_counters={}\n", .{
         @tagName(builtin.mode),
@@ -508,8 +521,16 @@ pub fn main(init: std.process.Init) !void {
     if (mode == .timing)
         try out.writeAll("case,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\n")
     else
-        try out.writeAll("case,workers,size,allocations,peak_bytes,root_polls,root_logical_transitions,root_driver_resumes,root_application_resumes,root_scheduler_handoffs,qualified_cache_hits,qualified_cache_misses,qualified_cache_heals,local_cache_hits,local_cache_misses\n");
-    if (latency_only) {
+        try out.writeAll("case,workers,size,allocations,peak_bytes,root_polls,root_logical_transitions,root_driver_resumes,root_application_resumes,root_scheduler_handoffs,qualified_cache_hits,qualified_cache_misses,qualified_cache_heals,local_cache_hits,local_cache_misses,plain_cache_hits,plain_cache_misses\n");
+    if (custom_source) |source| {
+        // One Session per process lets an external driver alternate artifacts
+        // and discard exactly one warmup independently of instrumentation.
+        try printCase(init.io, out, mode, custom_workers, 0, .{
+            .name = "custom",
+            .setup = custom_setup,
+            .workload = source,
+        }, 1);
+    } else if (latency_only) {
         try runLatency(init.io, out, mode, repetitions, quick);
     } else if (call_site_only) {
         try runQualifiedCallSite(

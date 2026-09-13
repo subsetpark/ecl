@@ -1,5 +1,122 @@
 # Shared runtime overhead
 
+## Guarded plain lookup
+
+The lookup iteration follows `d2f81a9`. It retains the 16-entry binding cache
+and adds guarded lexical/core resolutions, with at most eight searched scopes.
+A first successful lookup records its context; a repeat admits observations.
+Lexical entries cannot evict established qualified or module-local entries at
+other occurrences. Guard storage belongs to the Unit rather than hot resolver
+return values. Revisions cover absent environments as well as installed shapes.
+
+These measurements use native x86_64 Linux ReleaseSafe builds with Zig 0.16.0,
+the same 64 KiB stat input, and CPUs 4 and 6. Both variants use identical
+affinity. This is a new paired control, not a direct comparison with the earlier
+CPUs 0 and 2 measurements. Each case has one warmup and five fresh-process
+repetitions, with alternating variant order and no concurrent task builds or
+tests. The unrelated host workload remained active.
+
+| Case | Retirement median seconds | Lookup median seconds |
+|---|---:|---:|
+| Public stat, default pool | 32.755 | 33.833 |
+| Public stat, one worker | 30.741 | 30.792 |
+| Public stat, cooperative | 23.509 | 25.304 |
+| Direct native request, one worker | 14.631 | 15.218 |
+| Lexical loop, one worker | 1.150 | 0.844 |
+
+Stat is a cold-lookup control, not a demonstrated speedup. Its default-pool
+median increases 3.3%, with overlapping ranges of 20.162–34.169 and
+27.343–39.748 seconds. Cooperative ranges are 18.006–29.767 and
+17.863–27.410 seconds. The one-worker stat ranges are 19.002–32.690 and
+17.720–32.957 seconds. The lexical loop's median improves 26.6%, but its ranges
+also overlap on this busy host.
+
+The dedicated 4,096-iteration cases establish the lookup benefit more clearly.
+Each fresh process reports the median of three samples; the table below gives
+the median across the five recorded processes. Every before/after range in
+these cases is disjoint.
+
+| Case | Workers | Retirement milliseconds | Lookup milliseconds |
+|---|---:|---:|---:|
+| Module-local call site | cooperative | 8.319 | 5.176 |
+| Module-local call site | 1 | 8.101 | 5.051 |
+| Module-local call site | 8 | 8.083 | 5.148 |
+| Core fallback | cooperative | 10.808 | 5.476 |
+| Core fallback | 1 | 10.614 | 5.176 |
+| Core fallback | 8 | 10.579 | 5.331 |
+
+Separate instrumented runs reduce core-fallback resolver resumptions from
+8,195 to 7, with 8,188 plain hits. The module-local case falls from 4,100
+resumptions to 6, while preserving its qualified and local specializations.
+Both retain 33 allocations. Stat records no plain hits: its allocation count
+changes from 4,747,155 to 4,747,156, and peak temporary memory stays at
+1,892,444 bytes. Instrumentation changes object layout, so its cache-collision
+counts are evidence for those instrumented artifacts, not exact CLI coverage.
+The fixed Unit size increases from 3,792 to 5,536 bytes, including the bounded
+guard pool and a 736-byte driver slot. Dormant guards retain no snapshot reader.
+
+A separate stat instruction-count sample measures 124,412,588,735 versus
+127,226,565,187 user instructions, a 2.3% cold-path cost. User cycles increase
+0.8%, from 52,887,246,094 to 53,318,500,038. These are individual diagnostic
+samples, not repeated timing estimates. Only `cpu_atom` counts are used
+(99–100% coverage); the effectively zero-coverage `cpu_core` results are not
+combined with them. This identifies a small real cost alongside much larger
+elapsed variation. The retained tradeoff is bounded extra metadata and cold
+lookup work for repeatable 36–51% gains on repeated lookups.
+
+The separate 199 Hz profile has 4,070 samples and no reported loss. Dispatch,
+resolution, lexical traversal, and direct lookup remain the leading stat costs.
+Memory clearing is 5.72% of self samples. An earlier discarded draft widened
+hot resolver payloads and put 68.05% of its profile in memory clearing;
+subsequent drafts moved observations out of those payloads and protected the
+existing specializations from lexical churn. The preserved migration baseline
+remains much faster on stat; this iteration does not close that gap.
+
+### Lookup evidence and verification
+
+Raw results are retained in `runtime-overhead-lookup-timing.json`,
+`runtime-overhead-lookup-benches.json`, `runtime-overhead-lookup-cooperative.json`,
+`runtime-overhead-lookup-services.json`, `runtime-overhead-lookup-process.json`,
+and `runtime-overhead-lookup-extra.json`. They include artifact identities,
+individual timings, CPU time, context switches, counters, and service samples.
+The ReleaseSafe CLI SHA-256 is
+`e4dc676f8470352e593b848c61f1fcb1aef4a488e53bf68c46329782635933b6`.
+Scripts, instruction counts, profiles, rejected drafts, and gate logs remain
+under `/home/zax/.cache/ecl-overhead/evidence`.
+
+The service pass uses one warmup and one recorded process per workload; it
+checks behavior, joined exit, and cleanup residue rather than claiming timing
+gains. Filesystem and network thread peaks remain 16 and 147 respectively.
+Sampled filesystem RSS is 14,832–17,864 KiB, and network RSS is 58,204 KiB.
+The process workload was checked again with one warmup and five alternating
+fresh processes per variant. Thread-peak ranges overlap: 198–228 before and
+194–213 after (medians 199 and 209). RSS ranges are 79,384–87,992 and
+82,404–88,196 KiB. Elapsed medians are 0.773 and 0.768 seconds. These observations
+do not establish a process-thread or memory regression; every run joins and
+passes its output and cleanup checks.
+
+Repeated short-task and cancellation probes have lower medians and overlapping
+ranges, without a reproducible latency regression. Creating and then releasing
+a 10,000-deep value takes 26.760 versus 22.354 ms cooperatively, 26.405 versus
+22.923 ms with one worker, and 25.863 versus 21.970 ms with eight workers.
+Those ranges are disjoint. This measures creation plus joined cleanup, not
+destruction in isolation.
+
+The new public cases cover rebinding, unbinding, core shadowing, installation
+of an absent child environment, deep-chain fallback, escaped quotations, and
+cache churn. Existing module, environment, and concurrency suites exercise
+replacement, concurrent publication, and delayed-reader reclamation.
+`zig build check`, final `zig build precommit`, Docker/glibc TSan, and
+initialized-Session batch-import OOM coverage passed.
+The absent-environment assertion was deliberately broken, failed in the
+selected test, and restored. Earlier precommit attempts rejected an external
+cache path and then its escaping symlink; verification uses a physical cache
+inside the repository. A stale default-cache artifact was detected by its
+hash and excluded from measurements. A later precommit attempt exceeded its
+timeout during concurrent build load; the completed final rerun is recorded in
+`lookup-verified-precommit.log`. The source/test patch relative to `d2f81a9`
+has SHA-256 `480499a9966fef9cca73da53c5015dd6529902e87f03791aad84a81c85205470`.
+
 ## Retirement scheduling
 
 Measured on x86_64 Linux 7.1.9-1-MANJARO with Zig 0.16.0, native

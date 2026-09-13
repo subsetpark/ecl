@@ -1,0 +1,113 @@
+{
+  "optimization": "ReleaseSafe",
+  "affinity": [
+    4,
+    6
+  ],
+  "source": "10000 ('cwd \"data\" fs.stat pop) times 10000",
+  "workers": 0,
+  "artifacts": {
+    "retirement-ecl-bench-workdrivers": {
+      "path": "/home/zax/.cache/ecl-overhead/retirement-bench-out/bin/ecl-bench-workdrivers",
+      "sha256": "d2d71fd0a4454342638f2280f71bad35e224d020512be79764680acc3d06b7c2"
+    },
+    "retirement-ecl-bench-workdriver-counters": {
+      "path": "/home/zax/.cache/ecl-overhead/retirement-bench-out/bin/ecl-bench-workdriver-counters",
+      "sha256": "297b17052fc7237148be2da52e2643167062d14650b0b6bf48131abe7038b03a"
+    },
+    "lookup-ecl-bench-workdrivers": {
+      "path": "/home/zax/.cache/ecl-overhead/lookup-probation-bench/bin/ecl-bench-workdrivers",
+      "sha256": "69257c42edcf87ebb505cad1358c3ff9f12dee3d3b605a5e6f2755f32b3d8ca6"
+    },
+    "lookup-ecl-bench-workdriver-counters": {
+      "path": "/home/zax/.cache/ecl-overhead/lookup-probation-bench/bin/ecl-bench-workdriver-counters",
+      "sha256": "5b7e21b9119b7c60c4324e5ae4341dc71227963778569fb9a4ec854354fe65d6"
+    }
+  },
+  "runs": [
+    {
+      "mode": "timing",
+      "iteration": 0,
+      "variant": "retirement",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,0,0,1,21872441,32266287038,32266287038,32266287038,32126725000,32126725000\n"
+    },
+    {
+      "mode": "timing",
+      "iteration": 0,
+      "variant": "lookup",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,0,0,1,21842443,24808902026,24808902026,24808902026,24709390000,24709390000\n"
+    },
+    {
+      "mode": "timing",
+      "iteration": 1,
+      "variant": "lookup",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,0,0,1,21842443,17862934866,17862934866,17862934866,17800038000,17800038000\n"
+    },
+    {
+      "mode": "timing",
+      "iteration": 1,
+      "variant": "retirement",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,0,0,1,21872441,20619062280,20619062280,20619062280,20542420000,20542420000\n"
+    },
+    {
+      "mode": "timing",
+      "iteration": 2,
+      "variant": "retirement",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,0,0,1,21872441,29767196163,29767196163,29767196163,29627179000,29627179000\n"
+    },
+    {
+      "mode": "timing",
+      "iteration": 2,
+      "variant": "lookup",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,0,0,1,21842443,27409538092,27409538092,27409538092,27291656000,27291656000\n"
+    },
+    {
+      "mode": "timing",
+      "iteration": 3,
+      "variant": "lookup",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,0,0,1,21842443,25304126332,25304126332,25304126332,25199614000,25199614000\n"
+    },
+    {
+      "mode": "timing",
+      "iteration": 3,
+      "variant": "retirement",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,0,0,1,21872441,23508685899,23508685899,23508685899,23413799000,23413799000\n"
+    },
+    {
+      "mode": "timing",
+      "iteration": 4,
+      "variant": "retirement",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,0,0,1,21872441,24333401926,24333401926,24333401926,24234865000,24234865000\n"
+    },
+    {
+      "mode": "timing",
+      "iteration": 4,
+      "variant": "lookup",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,0,0,1,21842443,25867791854,25867791854,25867791854,25761241000,25761241000\n"
+    },
+    {
+      "mode": "timing",
+      "iteration": 5,
+      "variant": "lookup",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,0,0,1,21842443,24415385409,24415385409,24415385409,24319963000,24319963000\n"
+    },
+    {
+      "mode": "timing",
+      "iteration": 5,
+      "variant": "retirement",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,0,0,1,21872441,18005609658,18005609658,18005609658,17942553000,17942553000\n"
+    },
+    {
+      "mode": "counters",
+      "iteration": 0,
+      "variant": "retirement",
+      "output": "# schema=ecl.workdrivers.counters.v7\n# WorkDriver baseline (counters)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=true\ncase,workers,size,allocations,peak_bytes,root_polls,root_logical_transitions,root_driver_resumes,root_application_resumes,root_scheduler_handoffs,qualified_cache_hits,qualified_cache_misses,qualified_cache_heals,local_cache_hits,local_cache_misses,plain_cache_hits,plain_cache_misses\ncustom,0,0,4747155,1892444,21872441,25260460,18430766,3480000,4842181,260000,510000,0,90000,4150110,0,0\n"
+    },
+    {
+      "mode": "counters",
+      "iteration": 0,
+      "variant": "lookup",
+      "output": "# schema=ecl.workdrivers.counters.v7\n# WorkDriver baseline (counters)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=true\ncase,workers,size,allocations,peak_bytes,root_polls,root_logical_transitions,root_driver_resumes,root_application_resumes,root_scheduler_handoffs,qualified_cache_hits,qualified_cache_misses,qualified_cache_heals,local_cache_hits,local_cache_misses,plain_cache_hits,plain_cache_misses\ncustom,0,0,4747156,1892444,21842443,25260460,18400768,3480000,4842181,284998,485002,0,95000,4120112,0,4235114\n"
+    }
+  ]
+}

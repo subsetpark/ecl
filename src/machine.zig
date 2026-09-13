@@ -2376,6 +2376,8 @@ pub const RootExecutionMetrics = struct {
     qualified_cache_heals: u64 = 0,
     local_cache_hits: u64 = 0,
     local_cache_misses: u64 = 0,
+    plain_cache_hits: u64 = 0,
+    plain_cache_misses: u64 = 0,
 };
 
 pub const root_execution_metrics_enabled = session_options.instrument_root_execution;
@@ -3003,10 +3005,10 @@ pub const Unit = struct {
         try self.lifetime.adopt(self.allocator, owned);
     }
     /// Sized to the drivers that opt in, checked by `inlineDriverCapable`.
-    /// The idiom driver is 672 bytes on 64-bit targets, including the native
-    /// registration authority retained by qualified-name resolution. Round to
-    /// the slot alignment while preserving the complete ownership state.
-    pub const driver_slot_len = 672;
+    /// Includes native registration authority and a reference to the Unit's
+    /// bounded lexical observations for lookup and idiom recognition. Preserve the
+    /// complete ownership state without allocating on ordinary resolution.
+    pub const driver_slot_len = 736;
     pub const driver_slot_align = 16;
 
     fn acquireInlineDriver(self: *Unit, comptime Driver: type) ?*Driver {
@@ -6021,14 +6023,14 @@ pub const Machine = struct {
             .code = self.unit.current.?.code,
             .index = self.unit.active_index,
         };
+        const cached_site = self.unit.module_call_sites.find(qualified_call_site, word.name);
         if (self.unit.inherited.module_snapshot == null) {
             switch (self.unit.module_call_sites.lookupQualified(
                 self.releaseDomain(),
                 self.unit.module_access,
-                qualified_call_site,
-                word.name,
+                cached_site,
             )) {
-                .absent => {},
+                .absent, .warming => {},
                 .stale => {
                     if (comptime root_execution_metrics_enabled)
                         self.unit.root_execution_metrics.qualified_cache_heals += 1;
@@ -6063,18 +6065,48 @@ pub const Machine = struct {
         // directory walk, the cell, the owner load, and `encloses` are all
         // skipped rather than merely cheapened.
         const running_site = self.unit.current.?.site;
+        const plain_cache_scope: ?env.ScopeId = if (word.scope != 0 and
+            @intFromEnum(running_site.resolution_scope_id) == word.scope)
+            running_site.resolution_scope_id
+        else
+            null;
+        var observe_plain = false;
+        if (plain_cache_scope) |scope_id| {
+            switch (self.unit.module_call_sites.lookupPlain(
+                cached_site,
+                word.name,
+                scope_id,
+                running_site.resolution_scope,
+                self.unit.environment.coreView(),
+            )) {
+                .absent => if (comptime root_execution_metrics_enabled) {
+                    self.unit.root_execution_metrics.plain_cache_misses += 1;
+                },
+                .warming, .stale => {
+                    observe_plain = true;
+                    if (comptime root_execution_metrics_enabled) self.unit.root_execution_metrics.plain_cache_misses += 1;
+                },
+                .hit => |resolution| {
+                    if (comptime root_execution_metrics_enabled)
+                        self.unit.root_execution_metrics.plain_cache_hits += 1;
+                    var resolved = resolution;
+                    defer resolved.deinit(self.unit.allocator);
+                    try executeResolved(self, &resolved);
+                    return;
+                },
+            }
+        }
         const local_context = LocalCacheContext.init(running_site, word.scope);
         if (local_context) |context| {
             switch (self.unit.module_call_sites.lookupLocal(
-                qualified_call_site,
-                word.name,
+                cached_site,
                 context,
             )) {
                 .absent => {
                     if (comptime root_execution_metrics_enabled)
                         self.unit.root_execution_metrics.local_cache_misses += 1;
                 },
-                .stale => unreachable,
+                .stale, .warming => unreachable,
                 .hit => |resolution| {
                     if (comptime root_execution_metrics_enabled)
                         self.unit.root_execution_metrics.local_cache_hits += 1;
@@ -6085,7 +6117,7 @@ pub const Machine = struct {
                 },
             }
         }
-        const local_cache_scope = if (local_context) |context| context.scope_id else null;
+        const local_cache_scope: ?resolution_core.GuardContext = if (plain_cache_scope) |scope_id| .{ .scope_id = scope_id, .pool = if (observe_plain) &self.unit.module_call_sites.guards else null } else null;
         if (word.scope != 0 and
             @intFromEnum(running_site.resolution_scope_id) == word.scope)
         {
@@ -7606,6 +7638,11 @@ fn homeTraceWord(home: *const modules.ModuleHome, local: intern.BindingName) int
 }
 
 const CallSiteCacheCandidate = union(enum) {
+    warming: env.ScopeId,
+    plain: struct {
+        guard: resolution_core.GuardId,
+        cell: env.BindingCellHandle,
+    },
     qualified: struct {
         generation: modules.GenerationGuard,
         cell: env.BindingCellHandle,
@@ -7615,13 +7652,21 @@ const CallSiteCacheCandidate = union(enum) {
         cell: env.BindingCellHandle,
     },
 
+    fn isLexical(self: CallSiteCacheCandidate) bool {
+        return switch (self) {
+            .warming, .plain => true,
+            .qualified, .local => false,
+        };
+    }
     fn deinit(self: *CallSiteCacheCandidate) void {
         switch (self.*) {
+            .warming => {},
             .qualified => |*qualified| {
                 qualified.cell.deinit();
                 qualified.generation.deinit();
             },
             .local => |*local| local.cell.deinit(),
+            .plain => |*plain| plain.cell.deinit(),
         }
         self.* = undefined;
     }
@@ -7629,6 +7674,7 @@ const CallSiteCacheCandidate = union(enum) {
 
 const CallSiteCacheLookup = union(enum) {
     absent,
+    warming,
     stale,
     hit: Resolution,
 };
@@ -7678,6 +7724,10 @@ const ModuleCallSiteCache = struct {
         }
     };
 
+    comptime {
+        if (capacity != resolution_core.GuardPool.capacity) @compileError("cache and guard storage must have the same bound");
+    }
+    guards: resolution_core.GuardPool = .{},
     entries: [capacity]?Entry = .{null} ** capacity,
     victims: [set_count]u1 = .{0} ** set_count,
 
@@ -7704,14 +7754,13 @@ const ModuleCallSiteCache = struct {
         self: *ModuleCallSiteCache,
         releases: *heap.ReleaseDomain,
         access: *const modules.ExecutionAccess,
-        site: ErrorSite,
-        word: u32,
+        found: ?usize,
     ) CallSiteCacheLookup {
-        const slot_index = self.find(site, word) orelse return .absent;
+        const slot_index = found orelse return .absent;
         const candidate = &(self.entries[slot_index] orelse return .absent);
         const qualified = switch (candidate.target) {
             .qualified => |*target| target,
-            .local => return .absent,
+            .local, .plain, .warming => return .absent,
         };
         const execution = qualified.generation.tryEnterCurrent(access) orelse {
             candidate.deinit(releases);
@@ -7731,15 +7780,14 @@ const ModuleCallSiteCache = struct {
 
     fn lookupLocal(
         self: *ModuleCallSiteCache,
-        site: ErrorSite,
-        word: u32,
+        found: ?usize,
         context: LocalCacheContext,
     ) CallSiteCacheLookup {
-        const slot_index = self.find(site, word) orelse return .absent;
+        const slot_index = found orelse return .absent;
         const candidate = &(self.entries[slot_index] orelse return .absent);
         const local = switch (candidate.target) {
             .local => |*target| target,
-            .qualified => return .absent,
+            .qualified, .plain, .warming => return .absent,
         };
         if (local.scope_id != context.scope_id) return .absent;
         const lease = local.cell.load();
@@ -7749,6 +7797,53 @@ const ModuleCallSiteCache = struct {
             .home = context.home,
             .trace_word = homeTraceWord(context.home, lease.traceWord().?),
             .origin = moduleResolutionOrigin(context.home),
+        } };
+    }
+
+    fn lookupPlain(
+        self: *ModuleCallSiteCache,
+        found: ?usize,
+        word: u32,
+        scope_id: env.ScopeId,
+        scope: ?*env.Scope,
+        core: env.EnvironmentView,
+    ) CallSiteCacheLookup {
+        const index = found orelse return .absent;
+        const candidate = &(self.entries[index] orelse return .absent);
+        const target = switch (candidate.target) {
+            .warming => |context_id| return if (context_id == scope_id) .warming else .absent,
+            .plain => |*plain| plain,
+            .qualified, .local => return .absent,
+        };
+        const location = switch (self.guards.resolve(target.guard, scope_id, scope, core)) {
+            .absent => return .absent,
+            .stale => return .stale,
+            .hit => |location| location,
+        };
+        var lease = target.cell.load();
+        switch (location) {
+            .core => if (lease.visibility == .private) {
+                lease.deinit();
+                return .stale;
+            },
+            .scope => if (lease.traceWord() != null) {
+                lease.deinit();
+                return .stale;
+            },
+        }
+        return .{ .hit = .{
+            .lease = lease,
+            .execution_generation = null,
+            .home = null,
+            .trace_word = .plain(word),
+            .origin = switch (location) {
+                .scope => .direct,
+                .core => .core,
+            },
+            .defining_scope = switch (location) {
+                .scope => |selected| selected,
+                .core => null,
+            },
         } };
     }
 
@@ -7765,6 +7860,21 @@ const ModuleCallSiteCache = struct {
             for (0..ways) |way| {
                 const index = base + way;
                 if (self.entries[index] == null) break :empty index;
+            }
+            // Broader lexical coverage must not evict the established
+            // generation and module-local specializations. Prefer a lexical
+            // victim within this same bounded set before ordinary replacement.
+            for (0..ways) |offset| {
+                const index = base + (@as(usize, self.victims[set_index]) + offset) % ways;
+                if (self.entries[index].?.target.isLexical()) {
+                    self.victims[set_index] ^= 1;
+                    break :empty index;
+                }
+            }
+            if (candidate.isLexical()) {
+                var rejected = candidate;
+                rejected.deinit();
+                return;
             }
             const victim = base + self.victims[set_index];
             self.victims[set_index] ^= 1;
@@ -8080,9 +8190,11 @@ pub const ResolutionCursor = struct {
     /// The foreign scope this dispatch borrowed, if any. Rides here so the
     /// activation that ends up reading the scope is the one that releases it.
     borrowed_cell: ?*env.ScopeCell = null,
-    /// Present only for a source occurrence resolving directly in the running
-    /// module root. The activation is the liveness proof for this scope.
+    /// Present only when the occurrence names the running resolution scope.
+    /// The activation is the liveness proof for the observed lexical chain;
+    /// module-local candidates additionally require the exact module root.
     local_cache_scope: ?env.ScopeId = null,
+    guard_pool: ?*resolution_core.GuardPool = null,
 
     /// A cursor for a name that genuinely means "whatever the running chain
     /// says": reflection like `which`, `see`, and `doc`, and the fallback paths
@@ -8105,7 +8217,7 @@ pub const ResolutionCursor = struct {
         written: ?*env.Scope,
         borrow_pin: ?modules.GenerationPin,
         borrowed_cell: ?*env.ScopeCell,
-        local_cache_scope: ?env.ScopeId,
+        local_cache_scope: ?resolution_core.GuardContext,
     ) ResolutionCursor {
         const spelling = intern.get(word);
         const context = if (written) |scope|
@@ -8118,7 +8230,8 @@ pub const ResolutionCursor = struct {
         return .{
             .borrow_pin = borrow_pin,
             .borrowed_cell = borrowed_cell,
-            .local_cache_scope = local_cache_scope,
+            .local_cache_scope = if (local_cache_scope) |capture| capture.scope_id else null,
+            .guard_pool = if (local_cache_scope) |capture| capture.pool else null,
             .allocator = evaluator.unit.allocator,
             .registry = evaluator.unit.inherited.registry,
             .libraries = evaluator.unit.inherited.libraries(),
@@ -8198,6 +8311,7 @@ pub const ResolutionCursor = struct {
         lease: env.BindingLease,
         captured_cell: ?env.BindingCellHandle,
         searched_scope: *env.Scope,
+        guard: resolution_core.GuardId,
     ) Resolution {
         const local = lease.traceWord();
         const home = if (local == null) null else self.homeForLocalHit(searched_scope);
@@ -8208,6 +8322,13 @@ pub const ResolutionCursor = struct {
                 break :cache null;
             };
             if (local == null) {
+                if (guard != .none) if (cell) |owned| {
+                    break :cache CallSiteCacheCandidate{ .plain = .{ .guard = guard, .cell = owned } };
+                };
+                if (cell) |*owned| owned.deinit();
+                break :cache CallSiteCacheCandidate{ .warming = scope_id };
+            }
+            if (!searched_scope.isModuleRoot() or searched_scope.cellId() != scope_id) {
                 if (cell) |*owned| owned.deinit();
                 break :cache null;
             }
@@ -8290,7 +8411,7 @@ pub const ResolutionCursor = struct {
                         self.work = .{ .atom = intern.lookupCursor(self.spelling[0..dot_index]) };
                         self.phase = .prefix;
                     } else {
-                        self.work = .{ .lexical = .init(self.core, self.scope, self.word, self.local_cache_scope != null) };
+                        self.work = .{ .lexical = .init(self.core, self.scope, self.word, if (self.local_cache_scope) |scope_id| .{ .pool = self.guard_pool, .scope_id = scope_id } else null) };
                         self.phase = .lexical;
                     }
                     break :result .pending;
@@ -8404,7 +8525,7 @@ pub const ResolutionCursor = struct {
                         self.phase = .complete;
                         break :result .{ .complete = .{ .unresolved = .core } };
                     };
-                    self.work = .{ .lexical = .init(self.core, null, export_name, false) };
+                    self.work = .{ .lexical = .init(self.core, null, export_name, null) };
                     self.phase = .lexical;
                     break :result .pending;
                 },
@@ -8417,16 +8538,25 @@ pub const ResolutionCursor = struct {
                     break :result .{ .complete = .{ .unresolved = self.plain_chain } };
                 },
                 .item => |candidate| result: {
+                    const guard = self.work.lexical.finishGuard();
                     self.work.deinit();
                     self.phase = .complete;
                     const resolved: Resolution = switch (candidate.location) {
-                        .scope => |scope| self.directResult(candidate.lease, candidate.cell, scope),
+                        .scope => |scope| self.directResult(candidate.lease, candidate.cell, scope, guard),
                         .core => .{
                             .lease = candidate.lease,
                             .execution_generation = null,
                             .home = null,
                             .trace_word = .plain(self.word),
                             .origin = .core,
+                            .call_site_cache = cache: {
+                                if (candidate.cell) |captured| {
+                                    if (guard != .none) break :cache .{ .plain = .{ .guard = guard, .cell = captured } };
+                                    var cell = captured;
+                                    cell.deinit();
+                                }
+                                break :cache if (self.local_cache_scope) |scope_id| .{ .warming = scope_id } else null;
+                            },
                         },
                     };
                     break :result .{ .complete = .{ .resolved = resolved } };
@@ -8502,7 +8632,7 @@ pub const ShadowCursor = struct {
                         self.phase = .complete;
                         break :result .{ .complete = self.takeOutput() };
                     }
-                    self.work = .{ .lexical = .init(self.core, self.scope, self.word, false) };
+                    self.work = .{ .lexical = .init(self.core, self.scope, self.word, null) };
                     self.phase = .lexical;
                     break :result .pending;
                 },
