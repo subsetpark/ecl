@@ -396,7 +396,7 @@ fn ControllerPort(comptime Spec: type) type {
             return &kind_identity;
         }
         pub fn definition() abi.PortDefinition {
-            return .{ .activity_count = activities.len, .activities_ptr = if (activities.len == 0) null else &activities, .state_size = @sizeOf(Spec.State), .state_alignment = @alignOf(Spec.State), .name_ptr = name.ptr, .name_len = name.len, .init_state = initState, .initialize = initialize, .execute = execute, .cancel = cancelState, .cleanup = cleanup, .lane_count = @typeInfo(Lane).@"enum".fields.len, .cancellation = switch (cancellation) {
+            return .{ .capacity_failure = if (@hasDecl(Spec, "CapacityFailure")) Spec.CapacityFailure.definition() else null, .activity_count = activities.len, .activities_ptr = if (activities.len == 0) null else &activities, .state_size = @sizeOf(Spec.State), .state_alignment = @alignOf(Spec.State), .name_ptr = name.ptr, .name_len = name.len, .init_state = initState, .initialize = initialize, .execute = execute, .cancel = cancelState, .cleanup = cleanup, .lane_count = @typeInfo(Lane).@"enum".fields.len, .cancellation = switch (cancellation) {
                 .close_resource => .close_resource,
                 .acknowledge => .acknowledge,
             }, .cancel_operation = if (cancellation == .acknowledge) cancelOperation else null, .shutdown = if (@hasDecl(Spec, "shutdown")) shutdown else null, .identity = kindIdentity() };
@@ -789,6 +789,7 @@ fn CooperativePort(comptime Spec: type) type {
         const callbacks: abi.CooperativeDefinition = .{ .initialize = initialize, .execute = execute, .retire_operation = retireOperation, .retire = retire };
         pub fn definition() abi.PortDefinition {
             return .{
+                .capacity_failure = if (@hasDecl(Spec, "CapacityFailure")) Spec.CapacityFailure.definition() else null,
                 .state_size = @sizeOf(Spec.State),
                 .state_alignment = @alignOf(Spec.State),
                 .name_ptr = name.ptr,
@@ -928,3 +929,121 @@ pub const CooperativeErrorDataBuilder = opaque {
         return self.builder().advance();
     }
 };
+
+pub const RejectionProgress = enum { yielded, completed };
+pub const RejectionResult = ControllerError!RejectionProgress;
+
+/// An already rejected opening may report module-specific validation and
+/// admission diagnostics. This capability cannot create or acquire resources.
+pub const RejectedOpen = opaque {
+    fn cooperative(self: *RejectedOpen) *Cooperative {
+        return @ptrCast(self);
+    }
+    pub fn input(self: *RejectedOpen, path: []const u64) ?*const MessageView {
+        return self.cooperative().input(path);
+    }
+    pub fn instance(self: *RejectedOpen, comptime I: type) ?*I.State {
+        return self.cooperative().instance(I);
+    }
+    pub fn consume(self: *RejectedOpen, units: u32) bool {
+        return self.cooperative().consume(units);
+    }
+    pub fn cancelled(self: *RejectedOpen) bool {
+        return self.cooperative().cancelled();
+    }
+    pub fn fail(self: *RejectedOpen, kind: capability.ErrorKind, message: []const u8) void {
+        self.cooperative().fail(kind, message);
+    }
+    pub fn failOutOfMemory(self: *RejectedOpen) void {
+        self.cooperative().failOutOfMemory();
+    }
+    pub fn errorData(self: *RejectedOpen) *RejectedErrorDataBuilder {
+        return @ptrCast(self);
+    }
+};
+pub const RejectedErrorDataBuilder = opaque {
+    fn builder(self: *RejectedErrorDataBuilder) *CooperativeErrorDataBuilder {
+        return @ptrCast(self);
+    }
+    pub fn int(self: *RejectedErrorDataBuilder, value: i64) ControllerError!void {
+        return self.builder().int(value);
+    }
+    pub fn float(self: *RejectedErrorDataBuilder, value: f64) ControllerError!void {
+        return self.builder().float(value);
+    }
+    pub fn char(self: *RejectedErrorDataBuilder, value: u32) ControllerError!void {
+        return self.builder().char(value);
+    }
+    pub fn symbol(self: *RejectedErrorDataBuilder, value: []const u8) ControllerError!void {
+        return self.builder().symbol(value);
+    }
+    pub fn input(self: *RejectedErrorDataBuilder, value: []const u64) ControllerError!void {
+        return self.builder().input(value);
+    }
+    pub fn list(self: *RejectedErrorDataBuilder, count: u32) ControllerError!void {
+        return self.builder().list(count);
+    }
+    pub fn dictionary(self: *RejectedErrorDataBuilder, count: u32) ControllerError!void {
+        return self.builder().dictionary(count);
+    }
+    pub fn clear(self: *RejectedErrorDataBuilder) ControllerError!void {
+        return self.builder().clear();
+    }
+    pub fn seal(self: *RejectedErrorDataBuilder) ControllerError!void {
+        return self.builder().seal();
+    }
+    pub fn advance(self: *RejectedErrorDataBuilder) ControllerError!RejectionProgress {
+        return switch (try self.builder().advance()) {
+            .completed => .completed,
+            .yielded => .yielded,
+            .parked => error.InvalidValue,
+        };
+    }
+};
+pub fn CapacityFailure(comptime Spec: type) type {
+    comptime {
+        if (@sizeOf(Spec.State) == 0 or @sizeOf(Spec.State) > abi.max_port_state_bytes or @alignOf(Spec.State) > 64)
+            @compileError("ecl-native: invalid capacity failure state size or alignment");
+        if (@TypeOf(Spec.init) != fn () Spec.State or
+            @TypeOf(Spec.step) != fn (*Spec.State, *RejectedOpen) RejectionResult or
+            @TypeOf(Spec.retire) != fn (*Spec.State, *RejectedOpen) bool)
+            @compileError("ecl-native: invalid capacity failure lifecycle signatures");
+    }
+    return opaque {
+        const wire: abi.CapacityFailureDefinition = .{
+            .state_size = @sizeOf(Spec.State),
+            .state_alignment = @alignOf(Spec.State),
+            .init_state = initialize,
+            .step = step,
+            .retire = retire,
+        };
+        pub fn definition() *const abi.CapacityFailureDefinition {
+            return &wire;
+        }
+        fn initialize(raw: *anyopaque) callconv(.c) void {
+            const state: *Spec.State = @ptrCast(@alignCast(raw));
+            state.* = Spec.init();
+        }
+        fn step(raw: *anyopaque, table: *const abi.CooperativeTable, context: *anyopaque) callconv(.c) abi.CooperativeProgress {
+            var state: CooperativeState = .{ .table = table, .context = context };
+            const rejected: *RejectedOpen = @ptrCast(&state);
+            const progress = Spec.step(@ptrCast(@alignCast(raw)), rejected) catch |err| {
+                switch (err) {
+                    error.OutOfMemory => rejected.failOutOfMemory(),
+                    error.Cancelled => if (!rejected.cancelled()) rejected.fail(.contract, "rejection cancelled without a request"),
+                    error.Failed => rejected.fail(.io, "opening rejection failed"),
+                    error.InvalidValue => rejected.fail(.contract, "invalid opening rejection operation"),
+                }
+                return .completed;
+            };
+            return switch (progress) {
+                .completed => .completed,
+                .yielded => .yielded,
+            };
+        }
+        fn retire(raw: *anyopaque, table: *const abi.CooperativeTable, context: *anyopaque) callconv(.c) bool {
+            var state: CooperativeState = .{ .table = table, .context = context };
+            return Spec.retire(@ptrCast(@alignCast(raw)), @ptrCast(&state));
+        }
+    };
+}

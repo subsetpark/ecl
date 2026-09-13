@@ -11,6 +11,8 @@ const Lifecycle = struct {
         value: std.atomic.Value(i64) = .init(0),
         cooperative_started: std.atomic.Value(i64) = .init(0),
         child_advances: std.atomic.Value(i64) = .init(0),
+        capacity_retired: std.atomic.Value(i64) = .init(0),
+        capacity_started: std.atomic.Value(i64) = .init(0),
     };
     pub fn init() State {
         return .{};
@@ -103,6 +105,7 @@ const ForeignPort = ecl.Port(.{ .controller = struct {
 
 const Resource = ecl.Port(.{ .controller = struct {
     pub const name = "resource";
+    pub const CapacityFailure = CapacityReporter;
     pub const State = struct { value: i64 = 0 };
     pub const operations = .{
         .private_value = .{ .name = "hidden-value", .visibility = .private, .doc = "Private controller selector member.", .handler = read, .lane = .operation, .endpoints = .{} },
@@ -154,6 +157,7 @@ fn childAdvances(call: *ecl.Call("-- value")) ecl.CallbackResult {
 const CooperativeResource = ecl.Port(.{
     .cooperative = struct {
         pub const name = "cooperative";
+        pub const CapacityFailure = CapacityReporter;
         pub const State = struct {
             memory: ?*const ecl.NativeMemory = null,
             bytes: ?[]align(64) u8 = null,
@@ -510,6 +514,8 @@ pub const Extension = ecl.module(.{
         ecl.word("string-fact", "Observe the semantic string predicate.", isString),
         ecl.factory("diagnostic-controller", "Open a controller diagnostic probe.", DiagnosticController),
         ecl.factory("diagnostic-cooperative", "Open a cooperative diagnostic probe.", DiagnosticCooperative),
+        ecl.word("capacity-started", "Observe rejected opening work.", capacityStarted),
+        ecl.word("capacity-retirements", "Observe settled capacity rejection cleanup.", capacityRetirements),
         ecl.word("next", "Read and increment instance state.", value),
         ecl.word("allocate", "Allocate and release native storage.", allocations),
         ecl.word("memory-allocator", "Use accounted native storage with standard allocation APIs.", memoryAllocator),
@@ -572,7 +578,7 @@ const DiagnosticController = ecl.Port(.{ .controller = struct {
 } });
 const DiagnosticCooperative = ecl.Port(.{ .cooperative = struct {
     pub const name = "diagnostic-cooperative";
-    pub const State = struct { phase: enum { copy, copying, seal, sealing, fail } = .copy };
+    pub const State = struct { phase: enum { copy, copying, seal, sealing, fail, waiting } = .copy };
     pub const operations = .{
         .diagnose = .{ .name = "cooperative-diagnose", .doc = "Fail with resumably owned diagnostics.", .handler = diagnose, .lane = .operation, .endpoints = .{} },
         .finalize = .{ .name = "diagnostic-finalize", .doc = "Fail after committing with reserved diagnostics.", .handler = finalize, .lane = .operation, .endpoints = .{} },
@@ -588,6 +594,7 @@ const DiagnosticCooperative = ecl.Port(.{ .cooperative = struct {
     fn report(state: *State, ctx: anytype, path: []const u64) ecl.ControllerError!ecl.CooperativeProgress {
         const builder = ctx.errorData();
         switch (state.phase) {
+            .waiting => unreachable,
             .copy => {
                 try builder.input(path);
                 state.phase = .copying;
@@ -634,3 +641,69 @@ const DiagnosticCooperative = ecl.Port(.{ .cooperative = struct {
         return .completed;
     }
 } });
+
+fn capacityStarted(call: *ecl.Call("-- count")) ecl.CallbackResult {
+    return call.complete(.{ecl.Scalar.int(call.instance(Instance).?.capacity_started.load(.acquire))});
+}
+fn capacityRetirements(call: *ecl.Call("-- count")) ecl.CallbackResult {
+    return call.complete(.{ecl.Scalar.int(call.instance(Instance).?.capacity_retired.load(.acquire))});
+}
+const CapacityReporter = ecl.CapacityFailure(struct {
+    pub const State = struct {
+        phase: enum { copy, copying, seal, sealing, fail, waiting } = .copy,
+        remaining: usize = 513,
+    };
+    pub fn init() State {
+        return .{};
+    }
+    pub fn step(state: *State, ctx: *ecl.RejectedOpen) ecl.RejectionResult {
+        if (ctx.input(&.{}).?.kind() == .int and ctx.input(&.{}).?.int() == -1) {
+            if (state.phase != .waiting) {
+                state.phase = .waiting;
+                _ = ctx.instance(Instance).?.capacity_started.fetchAdd(1, .release);
+            }
+            return .yielded;
+        }
+        if (ctx.input(&.{}).?.kind() == .list) {
+            ctx.fail(.domain, "configured resource capacity reached");
+            return .completed;
+        }
+        if (ctx.input(&.{}).?.kind() != .dict) {
+            ctx.fail(.type, "expected a resource configuration dictionary");
+            return .completed;
+        }
+        const builder = ctx.errorData();
+        switch (state.phase) {
+            .waiting => unreachable,
+            .copy => {
+                try builder.input(&.{});
+                state.phase = .copying;
+            },
+            .copying => {
+                const progress = try builder.advance();
+                if (progress != .completed) return progress;
+                state.phase = .seal;
+            },
+            .seal => {
+                try builder.seal();
+                state.phase = .sealing;
+            },
+            .sealing => {
+                const progress = try builder.advance();
+                if (progress != .completed) return progress;
+                state.phase = .fail;
+            },
+            .fail => {
+                ctx.fail(.domain, "configured resource capacity reached");
+                return .completed;
+            },
+        }
+        return .yielded;
+    }
+    pub fn retire(state: *State, ctx: *ecl.RejectedOpen) bool {
+        while (state.remaining != 0 and ctx.consume(1)) state.remaining -= 1;
+        if (state.remaining != 0) return false;
+        _ = ctx.instance(Instance).?.capacity_retired.fetchAdd(1, .release);
+        return true;
+    }
+});

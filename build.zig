@@ -182,6 +182,8 @@ pub fn build(b: *std.Build) void {
     }
 
     const negative_cases = [_]struct { file: []const u8, message: []const u8 }{
+        .{ .file = "rejected_open_resource_authority", .message = "no field or member function named 'builder' in 'ports.RejectedOpen'" },
+        .{ .file = "rejected_open_child_authority", .message = "no field or member function named 'child' in 'ports.RejectedErrorDataBuilder'" },
         .{ .file = "invalid_instance_callbacks", .message = "ecl-native: invalid instance lifecycle signatures" },
         .{ .file = "cooperative_blocking_endpoint", .message = "no field or member function named 'endpoint' in 'ports.Cooperative'" },
         .{ .file = "cooperative_commit_authority", .message = "no field or member function named 'beginCommit' in 'ports.Cooperative'" },

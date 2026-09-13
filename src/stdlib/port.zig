@@ -392,6 +392,7 @@ const Request = struct {
 };
 
 fn factoryFailure(evaluator: *machine.Machine, failure: factories.Failure) machine.MachineError {
+    if (failure.diagnostics) |data| return evaluator.failWithErrorData(.{ .report = failure.report, .details = data });
     return switch (failure.report) {
         .out_of_memory => error.OutOfMemory,
         .report => |report| evaluator.failWithDetails(report.kind, report.message[0..report.len], failure.details),

@@ -139,7 +139,7 @@ const descriptor = abi.Descriptor{
     .invoke = invoke,
 };
 
-export fn ecl_module_abi_v17(output: *abi.EntryResult) callconv(.c) void {
+export fn ecl_module_abi_v18(output: *abi.EntryResult) callconv(.c) void {
     if (is("entry-size")) {
         output.* = .{ .size = 0, .status = .descriptor, .descriptor = &descriptor };
         return;

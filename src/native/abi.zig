@@ -5,8 +5,8 @@
 
 const builtin = @import("builtin");
 
-pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v17";
-pub const abi_version: u32 = 17;
+pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v18";
+pub const abi_version: u32 = 18;
 
 pub const max_error_message_bytes: u32 = 4096;
 pub const max_guest_scalar_bytes: u32 = 4096;
@@ -174,6 +174,14 @@ pub const ActivityDefinition = extern struct {
     endpoints: u64,
     execute: ?PortControllerFn,
 };
+pub const CapacityFailureDefinition = extern struct {
+    size: u32 = @sizeOf(CapacityFailureDefinition),
+    state_size: u32,
+    state_alignment: u32,
+    init_state: ?StateInitFn,
+    step: ?CooperativeFn,
+    retire: ?*const fn (*anyopaque, *const CooperativeTable, *anyopaque) callconv(.c) bool,
+};
 pub const PortDefinition = extern struct {
     size: u32 = @sizeOf(PortDefinition),
     state_size: u32,
@@ -195,6 +203,7 @@ pub const PortDefinition = extern struct {
     activity_count: u32 = 0,
     activity_record_size: u32 = @sizeOf(ActivityDefinition),
     activities_ptr: ?[*]const ActivityDefinition = null,
+    capacity_failure: ?*const CapacityFailureDefinition = null,
 };
 
 pub const CapabilityRequirement = extern struct {
@@ -506,7 +515,8 @@ comptime {
     assertRecord(InvokeResult, 16, 8);
     assertRecord(HostTable, 160, 8);
     assertRecord(Descriptor, 112, 8);
-    assertRecord(PortDefinition, 128, 8);
+    assertRecord(PortDefinition, 136, 8);
+    assertRecord(CapacityFailureDefinition, 40, 8);
     assertRecord(ActivityDefinition, 24, 8);
     assertRecord(CooperativeDefinition, 40, 8);
     assertRecord(CooperativeTable, 88, 8);

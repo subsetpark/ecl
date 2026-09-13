@@ -1495,6 +1495,12 @@ publication. Retained issuer metadata has no backend discriminator.
 Factories register through one opaque opening
 interface: bounded configuration validation precedes admission, resumable
 openings own partial work, and resource initialization precedes stack publication.
+A capacity rejection may invoke a descriptor-owned bounded diagnostic lifecycle
+without reserving another resource or controller. Its typed opening owns the
+request, native state, diagnostic continuation, instance pin, and retirement
+record before publication. Reporting joins that private state; cancellation
+transfers it to bounded reclamation while retaining the same instance lifetime.
+A rejected opening has no resource-creation, endpoint, or commit authority.
 The opening borrows its factory and validated request until retirement. It derives
 its scheduler from the calling scope and never receives an interpreter callback.
 Bounded diagnostic details retain their values before the request retires.

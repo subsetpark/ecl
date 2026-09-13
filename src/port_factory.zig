@@ -9,6 +9,7 @@ const Value = @import("value.zig").Value;
 const machine = @import("machine.zig");
 pub const Failure = struct {
     report: @import("port_bytes.zig").Failure,
+    diagnostics: ?*const @import("port_error_data.zig").View = null,
     details: [3]?machine.ErrorDetail = @splat(null),
     pub fn init(kind: machine.ErrorKind, text: []const u8) Failure {
         return .{ .report = .init(kind, text) };

@@ -60,7 +60,11 @@ pub const RegisteredCapability = opaque {
         const issuer = self.instance();
         const resource = issuer.portAccess().createConfigured(issuer, self.definition().factory, opening.scope, config) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
-            error.Limit, error.InsufficientLanes => .{ .failed = factories.Failure.init(.domain, "port resource capacity is exhausted") },
+            error.Limit => if (issuer.validated().port(self.definition().factory).?.capacity_failure != null)
+                .{ .opening = try RejectedOpening.create(issuer, self.definition().factory, config) }
+            else
+                .{ .failed = factories.Failure.init(.domain, "port resource capacity is exhausted") },
+            error.InsufficientLanes => .{ .failed = factories.Failure.init(.domain, "port resource capacity is exhausted") },
             error.Closed, error.Io => .{ .failed = factories.Failure.init(.io, "port resource creation failed") },
             error.ScopeClosing => .{ .failed = factories.Failure.init(.cancelled, "port scope is closing") },
         };
@@ -1655,4 +1659,223 @@ const CooperativeInvocation = struct {
             .waiting => .waiting,
         };
     }
+};
+
+/// A failed admission owns only diagnostic work. It cannot consume a resource
+/// permit or start a controller. Its issuing instance owns all allocation and
+/// retirement authority, including cancellation before an error is published.
+const RejectedOpening = struct {
+    instance: *native.ModuleInstance,
+    definition: descriptor.CapacityFailureDefinition,
+    input_value: Value,
+    builder: ?*message_builder.ResumableBuilder = null,
+    details: ?*diagnostics.Owned = null,
+    failure: ?Failure = null,
+    phase: union(enum) { reporting: []align(64) u8, settling: []align(64) u8, ready, retiring: ?[]align(64) u8 },
+    construction: enum { idle, working, sealing } = .idle,
+    closed: std.atomic.Value(bool) = .init(false),
+    budget: u32 = 256,
+    symbol_bytes: [256]u8 = @splat(0),
+    retirement: heap.ReleaseDomain.Retirement = .{},
+
+    fn host(self: *RejectedOpening) *const heap.HostCleanup {
+        return self.instance.portAccess().state().host;
+    }
+    pub fn allocator(self: *RejectedOpening) std.mem.Allocator {
+        return self.host().allocator();
+    }
+    fn create(instance: *native.ModuleInstance, kind: u32, configuration: *const port_message.Validated) error{OutOfMemory}!*factories.Opening {
+        const definition = instance.validated().port(kind).?.capacity_failure.?;
+        const memory = instance.portAccess().state().allocator();
+        const owned = try memory.create(RejectedOpening);
+        errdefer memory.destroy(owned);
+        const backend = try memory.alignedAlloc(u8, .@"64", definition.state_size);
+        errdefer memory.free(backend);
+        owned.* = .{ .instance = instance, .definition = definition, .phase = .{ .reporting = backend }, .input_value = configuration.value() };
+        const opening = try factories.Opening.create(RejectedOpening, owned);
+        instance.retain();
+        heap.retainValue(owned.input_value);
+        definition.init_state(backend.ptr);
+        return opening;
+    }
+    pub fn advance(self: *RejectedOpening, quantum: usize) error{OutOfMemory}!factories.Progress {
+        self.budget = @intCast(@min(quantum, 256));
+        switch (self.phase) {
+            .reporting => |backend| {
+                const progress = self.definition.step(backend.ptr, &table, self);
+                switch (progress) {
+                    .completed, .yielded => {},
+                    else => fail(self, .contract, "invalid rejected opening progress".ptr, "invalid rejected opening progress".len),
+                }
+                if (progress != .yielded or self.failure != null) self.phase = .{ .settling = backend };
+                return .yielded;
+            },
+            .settling => |backend| {
+                if (!self.definition.retire(backend.ptr, &table, self)) return .yielded;
+                self.retireConstruction();
+                self.allocator().free(backend);
+                self.phase = .ready;
+            },
+            .ready => {},
+            .retiring => unreachable,
+        }
+        return .{ .failed = .{
+            .report = semanticFailure(self.failure orelse .init(.domain, "port resource capacity is exhausted")),
+            .diagnostics = if (self.details) |details| details.view() else null,
+        } };
+    }
+    pub fn release(self: *RejectedOpening) void {
+        self.closed.store(true, .release);
+        const remaining: ?[]align(64) u8 = switch (self.phase) {
+            .reporting, .settling => |backend| backend,
+            .ready => null,
+            .retiring => unreachable,
+        };
+        self.phase = .{ .retiring = remaining };
+        heap.hostDomain(self.host()).retire(self, &self.retirement);
+    }
+    fn retireConstruction(self: *RejectedOpening) void {
+        if (self.builder) |builder| builder.retire();
+        self.builder = null;
+    }
+    pub fn advanceRetirement(releases: *heap.ReleaseDomain, _: std.mem.Allocator, self: *RejectedOpening) bool {
+        self.budget = 256;
+        if (self.phase.retiring) |backend| {
+            if (!self.definition.retire(backend.ptr, &table, self)) return false;
+            self.allocator().free(backend);
+        }
+        const memory = self.allocator();
+        self.retireConstruction();
+        if (self.details) |details| details.release();
+        releases.releaseValue(self.input_value);
+        self.instance.releasePin();
+        memory.destroy(self);
+        return true;
+    }
+    fn state(raw: *anyopaque) *RejectedOpening {
+        return @ptrCast(@alignCast(raw));
+    }
+    fn instanceState(raw: *anyopaque, identity: *const anyopaque) callconv(.c) ?*anyopaque {
+        return state(raw).instance.instanceState(identity);
+    }
+    fn noParent(_: *anyopaque, _: *const anyopaque) callconv(.c) ?*anyopaque {
+        return null;
+    }
+    fn input(raw: *anyopaque, path: [*]const u64, depth: u32, output: *abi.ValueView) callconv(.c) bool {
+        return viewMessage(state(raw).input_value, path, depth, output);
+    }
+    fn cancelled(raw: *anyopaque) callconv(.c) bool {
+        return state(raw).closed.load(.acquire);
+    }
+    fn fail(raw: *anyopaque, kind: abi.ErrorKindWire, text: [*]const u8, length: u32) callconv(.c) void {
+        storeControllerFailure(&state(raw).failure, reportedFailure(kind, text[0..length]));
+    }
+    fn failAllocation(raw: *anyopaque) callconv(.c) void {
+        storeControllerFailure(&state(raw).failure, .out_of_memory);
+    }
+    fn consume(raw: *anyopaque, amount: u32) callconv(.c) bool {
+        const self = state(raw);
+        if (amount > self.budget) return false;
+        self.budget -= amount;
+        return true;
+    }
+    fn noPark(_: *anyopaque, _: u64) callconv(.c) bool {
+        return false;
+    }
+    fn noCommit(_: *anyopaque) callconv(.c) bool {
+        return false;
+    }
+    fn build(raw: *anyopaque, request: *const abi.MessageBuildRequest) callconv(.c) abi.CooperativeBuildStatus {
+        const self = state(raw);
+        return self.buildDiagnostic(request) catch |err| {
+            if (err == error.Cancelled) return .invalid;
+            if (self.builder) |builder| builder.invalidate();
+            storeControllerFailure(&self.failure, switch (err) {
+                error.OutOfMemory => .out_of_memory,
+                error.Overflow => .init(.overflow, "opening diagnostic exceeds message limits"),
+                error.InvalidValue => .init(.type, "invalid opening diagnostic value"),
+                error.DuplicateKey => .init(.domain, "duplicate opening diagnostic key"),
+                error.InvalidState => .init(.contract, "invalid opening diagnostic construction"),
+                error.Cancelled => unreachable,
+            });
+            return if (err == error.OutOfMemory) .out_of_memory else .invalid;
+        };
+    }
+    fn buildDiagnostic(self: *RejectedOpening, request: *const abi.MessageBuildRequest) message_builder.Error!abi.CooperativeBuildStatus {
+        if (self.closed.load(.acquire)) return error.Cancelled;
+        if (self.phase != .reporting or request.size != @sizeOf(abi.MessageBuildRequest)) return error.InvalidState;
+        if (self.builder == null) self.builder = try message_builder.ResumableBuilder.create(self.host(), &self.closed);
+        const builder = self.builder.?;
+        if (request.action == .advance) {
+            if (self.construction == .idle) return .ok;
+            if (try builder.advance() == .pending) return .yield_required;
+            if (self.construction == .sealing) {
+                const incoming = try diagnostics.Owned.create(self.host(), builder.validated() orelse return error.InvalidState);
+                const previous = self.details;
+                self.details = incoming;
+                if (previous) |details| details.release();
+                try builder.consume();
+            }
+            self.construction = .idle;
+            return .ok;
+        }
+        if (self.construction != .idle) return error.InvalidState;
+        switch (request.action) {
+            .scalar => {
+                if (request.scalar.size != @sizeOf(abi.Scalar)) return error.InvalidState;
+                const scalar = request.scalar;
+                switch (scalar.kind) {
+                    .int => try builder.int(@bitCast(scalar.bits)),
+                    .float => try builder.float(@bitCast(scalar.bits)),
+                    .char => try builder.char(scalar.bits),
+                    .symbol => {
+                        if (scalar.bytes_len > self.symbol_bytes.len) return error.Overflow;
+                        const length: usize = @intCast(scalar.bytes_len);
+                        const bytes = if (length == 0) "" else (scalar.bytes_ptr orelse return error.InvalidValue)[0..length];
+                        @memcpy(self.symbol_bytes[0..length], bytes);
+                        try builder.symbol(self.symbol_bytes[0..length]);
+                        self.construction = .working;
+                    },
+                    else => return error.InvalidValue,
+                }
+            },
+            .copy_input => {
+                if (request.depth > abi.max_read_path_depth) return error.InvalidValue;
+                const path: []const u64 = if (request.depth == 0) &.{} else (request.path orelse return error.InvalidValue)[0..request.depth];
+                try builder.copy(valueAtPath(self.input_value, path) orelse return error.InvalidValue);
+                self.construction = .working;
+            },
+            .list => {
+                try builder.list(request.count);
+                self.construction = .working;
+            },
+            .dictionary => {
+                try builder.dictionary(request.count);
+                self.construction = .working;
+            },
+            .clear => {
+                try builder.clear();
+                self.construction = .working;
+            },
+            .error_data => {
+                try builder.finish();
+                self.construction = .sealing;
+            },
+            else => return error.InvalidState,
+        }
+        return .ok;
+    }
+    const table: abi.CooperativeTable = .{
+        .instance_state = instanceState,
+        .initialization_parent = noParent,
+        .parent_state = noParent,
+        .input = input,
+        .build_message = build,
+        .fail_allocation = failAllocation,
+        .cancelled = cancelled,
+        .fail = fail,
+        .consume = consume,
+        .park = noPark,
+        .begin_commit = noCommit,
+    };
 };

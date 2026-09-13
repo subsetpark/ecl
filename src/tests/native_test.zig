@@ -2771,3 +2771,58 @@ test "native: activity stream failure preserves buffered output and operation ad
         "wrap (8 port.read) @attempt 'err at 'kind at 'io match? {'kind 'user 'msg \"stream failure\"} assert " ++
         "p instanceprobe.activity-health [] port.call 1 = {'kind 'user 'msg \"operation admission\"} assert p port.close) call");
 }
+
+test "native: capacity rejection preserves validation diagnostics and bounded cleanup" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    for ([_]bool{ true, false }) |linked| {
+        inline for (.{ "resource", "cooperative" }) |resource_name| {
+            var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+                .ecl_path = if (linked) null else native_fixture.directory,
+                .native_instances = &.{.{ .name = "instanceprobe", .descriptor = if (linked) @import("native-instance").Extension.descriptor() else null, .port_limits = .{ .max_live_ports = 1 } }},
+            }), .cooperative, .language_tests);
+            defer runtime.deinit();
+            try expectOk(&runtime, "instanceprobe." ++ resource_name ++ " [] port.open (|p| " ++
+                "[] (instanceprobe." ++ resource_name ++ " 42 port.open) @attempt 'err at 'kind at 'type match? {'kind 'user 'msg \"validation before capacity\"} assert " ++
+                "[] (instanceprobe." ++ resource_name ++ " {'reason 'limit 'path \"input\"} port.open) @attempt 'err at (|failure| " ++
+                "failure 'kind at 'domain match? {'kind 'user 'msg \"capacity kind\"} assert failure 'data at 'path at \"input\" match? {'kind 'user 'msg \"capacity context\"} assert) call " ++
+                "instanceprobe.capacity-retirements 2 = {'kind 'user 'msg \"joined rejection cleanup\"} assert p port.close) call");
+            try expectOk(&runtime, "instanceprobe." ++ resource_name ++ " [] port.open (|p| " ++
+                "[] (instanceprobe." ++ resource_name ++ " -1 port.open pop) @spawn " ++
+                "(instanceprobe.capacity-started 0 =) (0 clock.sleep) while " ++
+                "dup task.cancel task.await 'err dict.has? {'kind 'user 'msg \"cancelled rejected opening\"} assert p port.close) call");
+            try expectOk(&runtime, "instanceprobe.capacity-retirements 3 = {'kind 'user 'msg \"retired cancelled opening\"} assert");
+        }
+    }
+}
+
+test "native: capacity failure descriptors reject incomplete lifecycle metadata" {
+    var host = heap.HostOwner.init(std.testing.allocator);
+    defer host.cleanup().drain();
+    const extension = @import("native-instance").Extension.descriptor();
+    var raw = extension.*;
+    const ports = try std.testing.allocator.dupe(abi.PortDefinition, extension.ports_ptr.?[0..extension.port_count]);
+    defer std.testing.allocator.free(ports);
+    raw.ports_ptr = ports.ptr;
+    var capacity = ports[0].capacity_failure.?.*;
+    const original = capacity;
+    ports[0].capacity_failure = &capacity;
+    const requested = try intern.internModuleName("instanceprobe");
+    capacity.size = 0;
+    try expectReject(error.RecordSizeMismatch, host.cleanup(), requested, &raw);
+    capacity = original;
+    capacity.init_state = null;
+    try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &raw);
+    capacity = original;
+    capacity.step = null;
+    try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &raw);
+    capacity = original;
+    capacity.retire = null;
+    try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &raw);
+    capacity = original;
+    capacity.state_size = 0;
+    try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &raw);
+    capacity = original;
+    capacity.state_alignment = 3;
+    try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &raw);
+}

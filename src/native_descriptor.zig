@@ -75,8 +75,15 @@ pub const EndpointDefinition = struct {
 };
 const EndpointSlot = struct { resource: ?EndpointDefinition = null, exchange: ?EndpointDefinition = null };
 
+pub const CapacityFailureDefinition = struct {
+    state_size: u32,
+    init_state: abi.StateInitFn,
+    step: abi.CooperativeFn,
+    retire: *const fn (*anyopaque, *const abi.CooperativeTable, *anyopaque) callconv(.c) bool,
+};
 pub const PortDefinition = struct {
     wire: abi.PortDefinition,
+    capacity_failure: ?CapacityFailureDefinition = null,
     execution: union(enum) {
         controller: struct {
             activities: [@import("port-declarations").max_activities]?struct { endpoints: u64, execute: abi.PortControllerFn } = .{null} ** @import("port-declarations").max_activities,
@@ -673,6 +680,18 @@ pub const ValidateCursor = struct {
                     !std.math.isPowerOfTwo(port.state_alignment) or
                     port.identity == null or port.init_state == null or
                     port.lane_count == 0 or port.lane_count > abi.max_port_lanes) return error.InvalidPortDefinition;
+                const capacity_failure: ?CapacityFailureDefinition = if (port.capacity_failure) |failure| blk: {
+                    try validateRecordSize(failure.size, @sizeOf(abi.CapacityFailureDefinition));
+                    if (failure.state_size == 0 or failure.state_size > abi.max_port_state_bytes or
+                        failure.state_alignment == 0 or failure.state_alignment > 64 or !std.math.isPowerOfTwo(failure.state_alignment)) return error.InvalidPortDefinition;
+                    break :blk .{
+                        .state_size = failure.state_size,
+                        .init_state = failure.init_state orelse return error.InvalidPortDefinition,
+                        .step = failure.step orelse return error.InvalidPortDefinition,
+                        .retire = failure.retire orelse return error.InvalidPortDefinition,
+                    };
+                } else null;
+                port.capacity_failure = null;
                 const execution: @FieldType(PortDefinition, "execution") = switch (port.execution) {
                     .controller => blk: {
                         if (port.initialize == null or port.execute == null or port.cancel == null or port.cleanup == null or port.cooperative != null)
@@ -723,7 +742,7 @@ pub const ValidateCursor = struct {
                     if (std.mem.eql(u8, prior.?.wire.name_ptr[0..prior.?.wire.name_len], owned_name)) return error.DuplicateDefinition;
                 }
                 port.name_ptr = owned_name.ptr;
-                ports[index] = .{ .wire = port, .execution = execution };
+                ports[index] = .{ .wire = port, .execution = execution, .capacity_failure = capacity_failure };
             }
         }
         const requirements = try self.host.allocator().alloc(
