@@ -46,6 +46,12 @@
    (7 drop (len 64 =) ((hex-chars in?) all?) bi and)]
   cond) 'hash? def
 
+ ### defp hostname?
+ (authority -- bool : "Require a host before an optional port, including bracketed IPv6 hosts.")
+ (dup "[" str.starts?
+  (dup "]" str.contains? swap 1 drop "]" split first empty? not and)
+  (":" split first empty? not) if) 'hostname? defp
+
  ### def url?
  (value -- bool : "Return 1 for a nonempty HTTPS URL.")
  (dup str.str?
@@ -55,7 +61,7 @@
    url "\\" str.contains? not and
    url "#" str.contains? not and
    url (int 32 >) all? and
-   url 8 drop "/" split first empty? not and) (pop 0) if) 'url? def
+   url 8 drop "/" split first "?" split first hostname? and) (pop 0) if) 'url? def
 
  ### def commit?
  (value -- bool : "Return 1 for a full lowercase SHA-1 Git commit identifier.")

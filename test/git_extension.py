@@ -19,8 +19,10 @@ from git_https_fixture import Handler, Server, run
 class SnapshotHandler(Handler):
     def respond(self):
         if self.path.startswith('/stalled'):
-            self.server.stalled.set()
-            self.server.release.wait(5)
+            cancelling = self.path.startswith('/stalled-cancel.git')
+            signal = self.server.cancel_stalled if cancelling else self.server.stalled
+            signal.set()
+            self.server.release.wait(30 if cancelling else 5)
             self.close_connection = True
             return
         super().respond()
@@ -54,6 +56,7 @@ def main():
         server = Server(('127.0.0.1', 0), SnapshotHandler)
         server.root = root
         server.stalled = threading.Event()
+        server.cancel_stalled = threading.Event()
         server.release = threading.Event()
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(certs / 'server.pem', certs / 'server-key.pem')
@@ -193,8 +196,30 @@ def main():
             )
             assert invoke(recovered).strip() == "'io " + json.dumps(commit)
             # Cancellation while a network read is stalled remains joined.
-            begin = 'git.snapshot [] port.open \'p set p git.fetch ' + request(url=origin + '/stalled.git', **{'timeout-ms': 200}) + ' port.begin \'x set '
-            invoke(begin + '50 clock.sleep x port.cancel x port.close p port.close')
+            begin = 'git.snapshot [] port.open \'p set p git.fetch ' + request(url=origin + '/stalled-cancel.git', **{'timeout-ms': 30000}) + ' port.begin \'x set '
+            # Only this request can signal cancel_stalled. EOF releases ECL from
+            # io.stdin after the server enters its stalled handler. Both the
+            # handler wait and request timeout exceed the child's exit budget.
+            with subprocess.Popen(
+                [binary, '--module-map', str(module_map), '-e',
+                 begin + "io.stdin pop x port.cancel [] (x port.result) @attempt "
+                 "'err at 'kind at x port.close p port.close"],
+                cwd=caller, env={**os.environ, 'ECL_WORKERS': '4'},
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True,
+            ) as child:
+                try:
+                    assert server.cancel_stalled.wait(5), 'snapshot never reached the stalled read'
+                    assert child.poll() is None, 'snapshot exited before cancellation'
+                    stdout, stderr = child.communicate(input='', timeout=15)
+                    assert child.returncode == 0, (child.returncode, stdout, stderr)
+                    assert stdout.strip() == "'cancelled", (stdout, stderr)
+                    assert 'ThreadSanitizer' not in stderr, stderr
+                    assert list(scratch.iterdir()) == [], 'scratch survived joined cancellation'
+                finally:
+                    if child.poll() is None:
+                        child.kill()
+                        child.communicate(timeout=5)
 
             # A link is rejected even though the repository has no package metadata.
             (repo / 'link').symlink_to('plain.txt')

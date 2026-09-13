@@ -23,6 +23,19 @@
   raises-containing)
  'ownership test
 
+ ### test url-hostnames
+ (-- : "Reject empty URL hosts while retaining ports, queries, and IPv6 literals.")
+ (("https://?query" "https://:443/path" "https:///path" "https://[]/path"
+   "https://[::1/path")
+  (pkg.name.url? 0 equal) for
+  ("https://example.com/path" "https://example.com:443/path"
+   "https://example.com?query" "https://[::1]/path" "https://[::1]:443/path")
+  (pkg.name.url? 1 equal) for
+  ({'kind 'archive 'url "https://?query"} pkg.manifest.validate-source)
+  'domain "HTTPS" raises-containing
+  ("https://:443/path" pkg.fetch.archive) 'domain "HTTPS" raises-containing)
+ 'url-hostnames test
+
  ### test documentation
  (-- : "Require documentation for every package-name export.")
  (('pkg.name.valid? 'pkg.name.hash? 'pkg.name.url?

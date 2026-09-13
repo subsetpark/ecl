@@ -150,6 +150,7 @@
  ### test documentation
  (-- : "Require documentation for manifest and inert-data exports.")
  (('pkg.data.assert-inert-entry 'pkg.data.read-one 'pkg.data.sorted-entries
+   'pkg.manifest.validate-source 'pkg.manifest.write-source
    'pkg.manifest.validate-requirement 'pkg.manifest.validate
    'pkg.manifest.read 'pkg.manifest.write)
   documented)

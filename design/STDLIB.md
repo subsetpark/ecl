@@ -1435,6 +1435,8 @@ and limits as `unpack-tgz`, then return a scope-owned archive resource without
 filesystem writes. No manifest or package identity is required. The resource
 retains the validated uncompressed document until `port.close` or scope exit;
 cleanup is joined and advances incrementally through member storage.
+The limits apply per document. Scope ownership governs lifetime and joined
+cleanup; it does not impose an aggregate heap budget on retained archives.
 
 ### next-member
 `( archive -- metadata )` — Select the next archive member and return

@@ -15,7 +15,7 @@
    'clock.unix
    'net.listen 'net.local-address 'net.close
    'net.accept 'net.read 'net.write 'net.peer-address
-   'fs.open-dir 'fs.child-dir 'fs.stage-dir 'fs.commit-dir
+   'fs.open-dir 'fs.child-dir 'fs.lock 'fs.stage-dir 'fs.commit-dir
    'fs.publish-text 'archive.open-tgz 'source.declarations)
   documented)
  'documentation test

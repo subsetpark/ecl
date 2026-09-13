@@ -1527,7 +1527,9 @@ or joined cancellation, including every partial validation and diagnostic value.
 Controller, cooperative, and rejected-opening construction share value-request
 decoding while retaining separate publication authority and execution progression.
 
-Process resource metadata pins its issuing instance through final reclamation.
+The bundled `proc.core` descriptor uses the public native SDK instance lifecycle
+for immutable process configuration and admission. Process resource metadata
+pins its issuing instance through final reclamation.
 Connection metadata carries the same issuer lifetime. Its outgoing transport
 distinguishes open, finishing, and EOF: finish closes admission, existing writer
 permits preserve their turns, and the controller ends that direction after both
@@ -1583,11 +1585,12 @@ response before writing it, which the source audit holds to that one call
 site. Malformed response values stay ordinary data; malformed wire output is
 unreachable.
 
-`fs`, `net`, and `proc` are ECL modules over registered factory, operation, and
-endpoint capabilities. Filesystem resources use cooperative execution and native
-instance-owned configuration; archive extraction composes those public
-facilities. The bundled network descriptor uses the public native ABI and owns
-its immutable limits, socket state, and admission counts in a Session-local SDK
+`fs` uses Session-owned filesystem authority and direct runtime drivers for
+bounded operations and joined resource cleanup. Archive extraction shares those
+filesystem facilities. `net` and `proc` are ECL modules over registered factory,
+operation, and endpoint capabilities. The bundled network descriptor uses the
+public native ABI and owns its immutable limits, socket state, and admission
+counts in a Session-local SDK
 instance. Listener and connection kinds have separate lifetimes: accepted
 connections retain their instance independently of the listener. Declared byte
 activities drain accepted output and join before socket disposal. No Session
