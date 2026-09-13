@@ -92,7 +92,10 @@ pub fn Resource(comptime roots: anytype) type {
             const prep = &state.preparation;
             if (prep.failure) |*failure| return failure.step(ctx);
             if (state.admission != .open) return error.InvalidValue;
-            if (state.invocation == .idle) state.invocation = .{ .append = .{} };
+            if (state.invocation == .idle) {
+                state.invocation = .{ .append = .{} };
+                state.invocation.append.encoder.byte_limit = @intCast(@min(fs.transfer_quantum, (if (prep.transfer_bytes != null) prep.owner.?.limits.max_transfer_bytes else prep.owner.?.limits.max_stream_transfer_bytes) - state.written));
+            }
             const current = &state.invocation.append;
             switch (current.phase) {
                 .encoding => {

@@ -660,8 +660,9 @@ const OperationAdapter = struct {
         std.Io.Threaded.mutexLock(&cell.mutex);
         defer std.Io.Threaded.mutexUnlock(&cell.mutex);
         while (cell.phase == .reserved or cell.phase == .initializing) cell.changed.waitUncancelable(io(), &cell.mutex);
-        if (cell.initialization_failure) |failure| if (failure == .out_of_memory) return error.OutOfMemory;
-        if (cell.phase != .open or cell.initialization_failure != null) return error.Io;
+        // The caller owns the initialized or failed child while observing its
+        // semantic failure and retaining diagnostics. Creation errors above
+        // have no child to observe.
         return item;
     }
     const ChildMode = enum { controller, cooperative };
@@ -942,6 +943,15 @@ fn childRequest(ctx: *ControllerContext, request: *const abi.MessageBuildRequest
     return error.InvalidState;
 }
 
+fn retainChildFailure(ctx: *ControllerContext, failure: diagnostics.Observation) void {
+    if (failure.details) |view| {
+        const retained = view.retain();
+        const accepted = if (ctx.operation()) |op| op.terminal_result.replaceDetails(retained) else ctx.cell.replaceInitializationDetails(retained);
+        if (!accepted) retained.release();
+    }
+    _ = controllerTransportFailure(ctx, failure.report);
+}
+
 fn childCreationFailure(ctx: *ControllerContext, err: CreateError) abi.HostStatus {
     recordControllerFailure(ctx, switch (err) {
         error.OutOfMemory => .out_of_memory,
@@ -1143,6 +1153,14 @@ fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest
             const selected = try childRequest(ctx, request);
             const child = (op orelse return error.InvalidState).adapter.stageChild(op.?, selected.kind, configuration, selected.dependency) catch |err| return childCreationFailure(ctx, err);
             defer heap.hostDomain(ctx.cell.adapter.owner.host).releaseValue(child);
+            switch (resource_api.Resource.project(Cell, child).?.resourceInitialization()) {
+                .ready => {},
+                .pending => unreachable,
+                .failed => |failure| {
+                    retainChildFailure(ctx, failure);
+                    return if (failure.report == .out_of_memory) .out_of_memory else .invalid;
+                },
+            }
             try builder.replaceChild(child);
         },
         .bytes => try builder.byteList(try builderBytes(request, .list)),
@@ -1533,12 +1551,7 @@ fn buildCooperative(ctx: *ControllerContext, request: *const abi.MessageBuildReq
                 },
                 .failed => {
                     const failure = cell.resourceInitialization().failed;
-                    if (failure.details) |view| {
-                        const retained = view.retain();
-                        const accepted = if (ctx.operation()) |op| op.terminal_result.replaceDetails(retained) else ctx.cell.replaceInitializationDetails(retained);
-                        if (!accepted) retained.release();
-                    }
-                    _ = controllerTransportFailure(ctx, failure.report);
+                    retainChildFailure(ctx, failure);
                     cell.close();
                     return if (failure.report == .out_of_memory) .out_of_memory else .invalid;
                 },

@@ -507,9 +507,6 @@ pub const Session = enum(usize) {
         for (core.stack.items) |item| core.releaseDomain().releaseValue(item);
         core.stack.deinit(core.allocator());
         core.releaseDomain().releaseValue(core.arguments);
-        // Every filesystem driver retired with the scheduler above, so no
-        // handle, staging entry, or quota reservation can still reference
-        // these owners.
         core.http_owner.deinit();
         if (core.ecl_path) |path| core.allocator().free(path);
         if (core.tls_trust) |trust| core.allocator().free(trust.ca_file);

@@ -325,6 +325,7 @@ test "fs: options validation is a distinct Session construction failure" {
             .{ .name = "root", .absolute_path = scratch.path },
         } },
         .{ .roots = &.{.{ .name = "root", .absolute_path = scratch.path }}, .limits = .{ .max_transfer_bytes = 0 } },
+        .{ .roots = &.{.{ .name = "root", .absolute_path = scratch.path }}, .limits = .{ .max_stream_transfer_bytes = 0 } },
     };
     for (invalid) |options| {
         var heap: test_heap.SessionHeap = .init;
@@ -484,8 +485,8 @@ test "fs: staging directories publish atomically and join descendant cleanup" {
         "[] (grandchild \".\" fs.stat) @attempt 'err at 'kind at", .{ .stack = "\"contents\" 'io 'io" });
     try std.testing.expectEqual(@as(usize, 1), try scratch.entryCount("."));
     try expectStack(options, "'root \"published\" fs.stage-dir 's set \"new\" s \"file\" fs.publish-text " ++
-        "[] (s fs.commit-dir) @attempt 'err at 'kind at s port.close " ++
-        "'root \"published/a/file\" fs.read-text", "'io \"contents\"");
+        "[] (s fs.commit-dir) @attempt 'err at dup 'kind at swap 'data at 'reason at s port.close " ++
+        "'root \"published/a/file\" fs.read-text", "'io 'already-exists \"contents\"");
     try std.testing.expectEqual(@as(usize, 1), try scratch.entryCount("."));
     try expectStack(options, "'root \"abandoned\" fs.stage-dir 's set s \"a/b\" fs.mkdirs " ++
         "s \"a\" fs.child-dir 'child set \"x\" child \"file\" fs.publish-text " ++

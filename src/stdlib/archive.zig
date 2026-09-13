@@ -250,7 +250,6 @@ const InspectionDriver = struct {
         tar_offset: usize = 0,
         zero_blocks: u2 = 0,
         member_count: usize = 0,
-        file_count: usize = 0,
         pending_path: ?heap.Owned([]u8) = null,
         pending_size: ?u64 = null,
     };
@@ -612,7 +611,6 @@ const InspectionDriver = struct {
             .data_offset = data_offset,
             .size = @intCast(effective_size),
         };
-        if (kind == .file) context.file_count += 1;
         const hash = std.hash.Wyhash.hash(0, path);
         scanning.work = .{ .insert_member = .{
             .entry = entry,
@@ -908,8 +906,4 @@ fn validMemberPath(path: []const u8) bool {
             return false;
     }
     return true;
-}
-
-fn lastSlash(path: []const u8) ?usize {
-    return std.mem.lastIndexOfScalar(u8, path, '/');
 }

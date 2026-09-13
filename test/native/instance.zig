@@ -595,9 +595,15 @@ const DiagnosticController = ecl.Port(.{ .controller = struct {
     pub const name = "diagnostic-controller";
     pub const State = struct { reserved: u8 = 0 };
     pub const operations = .{
+        .child = .{ .name = "controller-diagnostic-child", .doc = "Preserve failed child initialization diagnostics.", .handler = child, .lane = .operation, .endpoints = .{} },
         .diagnose = .{ .name = "controller-diagnose", .doc = "Fail with owned diagnostics.", .handler = diagnose, .lane = .operation, .endpoints = .{} },
         .string = .{ .name = "controller-string-fact", .doc = "Observe a controller string value.", .handler = string, .lane = .operation, .endpoints = .{} },
     };
+    fn child(_: *State, ctx: *ecl.Controller) ecl.ControllerError!void {
+        try ctx.builder().input(&.{});
+        try ctx.builder().child(DiagnosticController, .independent);
+        try ctx.builder().result();
+    }
     pub fn init() State {
         return .{};
     }
@@ -627,10 +633,33 @@ const DiagnosticCooperative = ecl.Port(.{ .cooperative = struct {
     pub const name = "diagnostic-cooperative";
     pub const State = struct { phase: enum { copy, copying, seal, sealing, fail, waiting } = .copy };
     pub const operations = .{
+        .child = .{ .name = "cooperative-diagnostic-child", .doc = "Preserve failed child initialization diagnostics.", .handler = child, .lane = .operation, .endpoints = .{} },
         .diagnose = .{ .name = "cooperative-diagnose", .doc = "Fail with resumably owned diagnostics.", .handler = diagnose, .lane = .operation, .endpoints = .{} },
         .finalize = .{ .name = "diagnostic-finalize", .doc = "Fail after committing with reserved diagnostics.", .handler = finalize, .lane = .operation, .endpoints = .{} },
         .string = .{ .name = "cooperative-string-fact", .doc = "Observe a cooperative string value.", .handler = string, .lane = .operation, .endpoints = .{} },
     };
+    fn child(state: *State, ctx: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
+        const builder = ctx.builder();
+        const progress = try builder.advance();
+        if (progress != .completed) return progress;
+        switch (state.phase) {
+            .copy => {
+                try builder.input(&.{});
+                state.phase = .copying;
+            },
+            .copying => {
+                try builder.child(DiagnosticCooperative, .independent);
+                state.phase = .seal;
+            },
+            .seal => {
+                try builder.result();
+                state.phase = .sealing;
+            },
+            .sealing => return .completed,
+            .waiting, .fail => return error.InvalidValue,
+        }
+        return .yielded;
+    }
     pub fn init() State {
         return .{};
     }

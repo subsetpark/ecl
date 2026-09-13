@@ -10,6 +10,7 @@ pub const Encoder = struct {
     kind: enum { text, bytes },
     phase: union(enum) { start, measure: struct { index: usize = 0, bytes: usize = 0 }, copy: struct { index: usize = 0, offset: usize = 0 }, complete } = .start,
     count: usize = 0,
+    byte_limit: usize = std.math.maxInt(usize),
     buffer: ?[]u8 = null,
     pub fn init(position: u64, kind: @FieldType(Encoder, "kind")) Encoder {
         return .{ .position = position, .kind = kind };
@@ -24,6 +25,7 @@ pub const Encoder = struct {
             },
             .measure => |*measuring| {
                 if (measuring.index == self.count) {
+                    if (measuring.bytes > self.byte_limit) return error.Limit;
                     self.buffer = try allocator.alloc(u8, measuring.bytes);
                     self.phase = .{ .copy = .{} };
                     continue;

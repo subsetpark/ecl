@@ -949,7 +949,7 @@ fn stdlibSessionAllocationProbe(
             "oom-stream.ecl",
             "'cwd fs.reserve 'root set root \"published\" fs.open-writer 'writer set " ++
                 "writer [65 66] fs.write-chunk writer [] fs.write-chunk writer fs.commit-file " ++
-                "root \"aborted\" fs.open-writer 'writer set writer [67] fs.write-chunk writer port.close root port.close",
+                "root \"aborted\" fs.open-writer 'writer set writer [67] fs.write-chunk writer port.close root wrap (\"missing/sub\" fs.child-dir) @attempt pop root port.close",
         ),
         .file_publication => try runOk(
             &runtime,

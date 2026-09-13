@@ -447,6 +447,7 @@ test "archive: unpack-tgz preserves existing destinations and has one concurrent
         .source = existing_source,
         .kind = "io",
         .word = "archive.unpack-tgz",
+        .data = &.{.{ .name = "destination-exists", .expected = .{ .int = 1 } }},
         .message_contains = "already exists",
     });
     const sentinel = try scratch.directory.dir.readFileAlloc(std.testing.io, "existing/sentinel", allocator, .unlimited);

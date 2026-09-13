@@ -107,8 +107,8 @@ That state owns:
 - the scheduler and root task scope; and
 - immutable or explicitly synchronized views of host services such as
   arguments, environment variables, standard input, output, diagnostics, TLS
-  trust, project configuration, module search paths, process, filesystem, and
-  and network owners.
+  trust, project configuration, and module search paths. Bundled filesystem,
+  network, and process state belongs to the native-module owner.
 
 Grouping these objects under one owner correlates every dependent lifetime.
 Values, module pins, source cursors, task cells, and deferred destruction all
@@ -210,7 +210,10 @@ alive. Staging sealing stops admission and joins dependent children and input
 loans before its bounded finalizer. The common commit permit serializes atomic
 publication against cancellation and reserves result storage first. Prepared
 failure alternatives preserve actual structured host errors without allocation
-after that permit. Failed publication retains the private tree for bounded,
+after that permit. Child construction preserves the initialized child’s semantic
+failure and retains immutable diagnostics in the same issuing domain before
+releasing the child. Controller and cooperative construction share this
+observation rule. Failed publication retains the private tree for bounded,
 allocation-free rollback; successful retirement closes only owned handles.
 
 Root-scope closure participates in the ordinary ready/retirement arbitration
@@ -1136,8 +1139,8 @@ until the last activity drains. The runtime then publishes reaped state and
 returns live capacity under the cell lock, releases its execution pin, and
 detaches scope membership. Startup rollback follows the same transition, so
 an outstanding cancellation callback delays capacity return even when no root
-thread started. Observing reaped state closes the process owner's lifetime use.
-Reaping the group leader therefore
+thread started. Observing reaped state ends the native process resource’s
+execution lifetime. Reaping the group leader therefore
 cannot suppress group cleanup or publish scope quiescence while cleanup still
 owns process-group authority. Stdin independently transitions
 through `open`, `closing`, `closed_cleanly`, or `broken`; `proc.run` cannot
@@ -1266,7 +1269,7 @@ closing those descriptors. Returning connection capacity wakes quota-blocked
 acceptors without taking their listener mutexes. The registry mutex is a leaf
 in the lock order; no listener or connection mutex is acquired beneath it.
 Session teardown joins resource scopes and settles retained values before
-destroying the network owner and its executor.
+retiring the network SDK instance and its common native executor.
 
 ### Absolute deadlines govern timer races
 
@@ -1539,8 +1542,10 @@ response before writing it, which the source audit holds to that one call
 site. Malformed response values stay ordinary data; malformed wire output is
 unreachable.
 
-`net` and `proc` are ECL modules over registered factory, operation, and endpoint
-capabilities. The bundled network descriptor uses the public native ABI and owns
+`fs`, `net`, and `proc` are ECL modules over registered factory, operation, and
+endpoint capabilities. Filesystem resources use cooperative execution and native
+instance-owned configuration; archive extraction composes those public
+facilities. The bundled network descriptor uses the public native ABI and owns
 its immutable limits, socket state, and admission counts in a Session-local SDK
 instance. Listener and connection kinds have separate lifetimes: accepted
 connections retain their instance independently of the listener. Declared byte

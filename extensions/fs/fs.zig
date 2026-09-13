@@ -154,7 +154,8 @@ pub const Stage = ecl.Port(.{ .cooperative = struct {
         ticket: ?*service.Ticket = null,
         derivation: Derivation = .{},
         phase: enum { preparing, creating, retiring, ready } = .preparing,
-        commit_phase: enum { result, ready, committed } = .result,
+        commit_phase: enum { reserving, preparing, result, ready, committed } = .reserving,
+        commit_failures: @import("publication.zig").Failures = .{},
         commit_admission: support.Admission = .{},
         pub fn directory(self: *State) std.Io.Dir {
             return self.stage.?.directory();
@@ -204,15 +205,21 @@ pub const Stage = ecl.Port(.{ .cooperative = struct {
         return .yielded;
     }
     fn commit(state: *State, ctx: *ecl.Finalizer) ecl.ControllerError!ecl.CooperativeProgress {
+        if (state.preparation.failure) |*failure| return failure.step(ctx);
         switch (state.commit_phase) {
-            .result => {
+            .reserving => {
                 if (state.ticket) |ticket| state.commit_admission = support.Admission.acquire(state.preparation.owner.?, ticket, null) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
-                    error.Limit => {
-                        ctx.fail(.overflow, "filesystem operation limit reached");
-                        return .completed;
-                    },
+                    error.Limit => return state.preparation.fail(.limit),
                 };
+                state.commit_phase = .preparing;
+            },
+            .preparing => {
+                const progress = try state.commit_failures.step(ctx);
+                if (progress != .completed) return progress;
+                state.commit_phase = .result;
+            },
+            .result => {
                 try ctx.builder().int(0);
                 try ctx.builder().result();
                 state.commit_phase = .ready;
@@ -221,7 +228,7 @@ pub const Stage = ecl.Port(.{ .cooperative = struct {
                 const progress = try ctx.builder().advance();
                 if (progress != .completed) return progress;
                 try ctx.beginCommit();
-                if (state.stage.?.commit()) |reason| ctx.fail(.io, reason.message());
+                if (state.stage.?.commit()) |reason| try state.commit_failures.report(ctx, reason);
                 state.commit_phase = .committed;
                 return .completed;
             },
@@ -229,6 +236,7 @@ pub const Stage = ecl.Port(.{ .cooperative = struct {
         }
         return .yielded;
     }
+
     pub fn retireOperation(state: *State, _: *ecl.Cooperative) ecl.CooperativeProgress {
         state.derivation = .{};
         state.commit_admission.deinit();

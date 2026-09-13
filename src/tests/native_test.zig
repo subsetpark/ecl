@@ -1874,7 +1874,7 @@ test "native: discarded buffer results and failed initialization release device 
     for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "portprobe.device [] port.open 'd set " ++
         "d portprobe.buffer 1 port.begin 'x set x port.await x port.close d portprobe.device-status [] port.call " ++
         "d wrap (portprobe.buffer 256 port.call) @attempt 'err at 'kind at d portprobe.device-status [] port.call " ++
-        "d port.close portprobe.cleaned", "[0 0 0] 'io [0 0 0] 3");
+        "d port.close portprobe.cleaned", "[0 0 0] 'domain [0 0 0] 3");
 }
 
 test "native: broker delivery messages carry one-time acknowledgement capabilities" {
@@ -1977,7 +1977,7 @@ test "native: child creation rejects an undeclared same-name native kind" {
 test "native: parent state is unavailable to root and independent resources" {
     for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "[] (portprobe.orphan-cursor [0 1] port.open) @attempt 'err at 'kind at 1 portprobe.await-cleaned " ++
         "portprobe.storage [] port.open 's set " ++
-        "s wrap (portprobe.detached-query [0 1] port.call) @attempt 'err at 'kind at s port.close portprobe.cleaned", "'domain 'io 3");
+        "s wrap (portprobe.detached-query [0 1] port.call) @attempt 'err at 'kind at s port.close portprobe.cleaned", "'domain 'domain 3");
 }
 
 test "native: result publication gives an independent child to the claiming scope" {
@@ -3163,5 +3163,14 @@ test "native: resource kind observation preserves closed kinds and rejects forei
             "loanforeign.resource [] port.open (|p| p instanceprobe.resource-kind 0 = {'kind 'user 'msg \"foreign instance\"} assert p port.close) call " ++
             "instanceprobe.resource [] port.open (|p| p instanceprobe.resource-kind 1 = {'kind 'user 'msg \"controller kind\"} assert p port.close p instanceprobe.resource-kind 1 = {'kind 'user 'msg \"closed kind\"} assert) call " ++
             "instanceprobe.cooperative [] port.open (|p| p instanceprobe.resource-kind 2 = {'kind 'user 'msg \"cooperative kind\"} assert p port.close) call");
+    }
+}
+
+test "native: both child execution modes preserve retained initialization diagnostics" {
+    inline for (.{ "controller", "cooperative" }) |mode| {
+        try expectCooperativeAcceptance("instanceprobe.diagnostic-" ++ mode ++ " [] port.open (|p| " ++
+            "p wrap (instanceprobe." ++ mode ++ "-diagnostic-child [1 {'reason 'child-failure 'path \"child\"}] port.call) @attempt " ++
+            "p port.close 'err at (|failure| failure 'kind at 'io match? failure assert " ++
+            "failure 'data at 'path at \"child\" match? {'kind 'user 'msg \"retained child detail\"} assert) call) call");
     }
 }

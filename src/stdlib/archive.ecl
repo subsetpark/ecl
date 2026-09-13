@@ -84,6 +84,9 @@
  (archive reservation destination -- paths :
   "Join staging rollback before releasing its reservation.")
  (|archive reservation destination|
+  reservation destination fs.exists? not
+  'io error.new "archive destination already exists" error.with-message
+  'path destination 'destination-exists 1 4 pack dict.from-flat error.with-data assert
   reservation destination fs.stage-dir
   dup archive swap destination 3 pack (extract) @attempt swap port.close result.or-raise first)
  'staged defp
@@ -127,11 +130,17 @@
    failure failure 'data at 'operation 'unpack-tgz put 'root root put 'path destination put
    error.with-data) call) 'extraction-context defp
 
+ ### defp publication-conflict
+ (failure -- failure : "Tag an absent-destination conflict for callers that can confirm a winner.")
+ (dup 'data {} at-or 'reason 'none at-or 'already-exists match?
+  (dup 'data at 'destination-exists 1 put error.with-data) () if) 'publication-conflict defp
+
  ### defp unpack-error
  (fields -- : "Attach extraction attribution and original root context.")
  (spread (|outcome root destination| outcome 'err at root destination 3 pack) call
   dup first 'data {} at-or 'reason dict.has? (extraction-context) (first) if
-  'word 'archive.unpack-tgz put 'trace ['archive.unpack-tgz] put raise) 'unpack-error defp
+  publication-conflict 'word 'archive.unpack-tgz put 'trace ['archive.unpack-tgz] put raise)
+ 'unpack-error defp
 
  ### def unpack-tgz
  (bytes root destination -- regular-file-paths :
