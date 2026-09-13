@@ -32,7 +32,7 @@ Session's runtime I/O state.
 The public `net` and `proc` modules are ECL compositions over these registered
 capabilities and `port.*`. Their operation and endpoint selectors expose only
 their corresponding resources and streams. First-party adapters use typed backend calls;
-the extension adapter translates ABI v16 calls into the same runtime interfaces
+the extension adapter translates ABI v17 calls into the same runtime interfaces
 for controller execution, transport, cancellation, ownership, and cleanup.
 
 Embedded names have precedence over filesystem modules. A file on `ECL_PATH`
@@ -127,8 +127,8 @@ module. Its descriptor declares the same canonical name requested by the
 loader. The complete word table validates before publication, and publication
 is atomic.
 
-The current pre-release native ABI is version 16, with entry symbol
-`ecl_module_abi_v16`. Resource authors choose `ecl.Port(.{ .controller = Spec })`
+The current pre-release native ABI is version 17, with entry symbol
+`ecl_module_abi_v17`. Resource authors choose `ecl.Port(.{ .controller = Spec })`
 or `ecl.Port(.{ .cooperative = Spec })`. Cooperative callbacks receive bounded
 work accounting and cancellable timer parking. Their persistent builder begins
 aggregate construction and advances it explicitly; it has no blocking endpoints.
@@ -146,7 +146,9 @@ handler and its resource byte endpoints. Each endpoint belongs to at most one
 activity. An activity receives `*ecl.Activity`, can use only its declared
 endpoints, and runs independently of operation calls. Returning finishes its
 outputs and rejects subsequent input writes; failures propagate to those streams.
-Resource close interrupts blocked transport and joins every activity before
+`Activity.failStreams` fails all resource streams while preserving operation
+admission, buffered output, and already observed EOF. Resource close interrupts
+blocked transport and joins every activity before
 backend cleanup. Activity startup uses the same reserved controller capacity and
 failed-publication cleanup as operation lanes. A typed `*ecl.Shutdown` callback
 can call `finishInput` to stop producer admission while activities drain accepted
@@ -157,6 +159,20 @@ distinct resource kinds. Each member keeps its own operation lane, endpoints, an
 execution mode. An operation declaration with `.visibility = .private` omits its
 individual export while remaining available to an overload. Duplicate kinds and
 members from undeclared ports are rejected.
+
+Native module names may contain nonempty dot-separated identifier segments;
+individual word and resource names remain unqualified. `ValueView.isString()` and
+`MessageView.isString()` expose the language string predicate without traversing
+or exposing heap representation.
+
+Controller and cooperative initialization, operations, and finalizers may prepare
+`errorData()` using scalar, input-copy, list, and dictionary construction. `seal()`
+requires a capability-free dictionary with at most four symbol keys. Cooperative
+construction must advance through completion before failing. The next failure
+reports those fields in its `'data`; joined close preserves them for repeated
+failure observation. Diagnostic builders share the callback construction stack;
+sealing consumes the dictionary. Finalizer commit freezes diagnostics together
+with ordinary result publication, so post-commit failures can use reserved data.
 
 Native modules built for earlier versions must be rebuilt;
 the loader provides no legacy adapter.

@@ -425,6 +425,13 @@ const ActivityResource = ecl.Port(.{
             .output = ecl.declarations.Endpoint{ .name = "activity-out", .doc = "Read the joined byte pump.", .transport = .bytes, .direction = .output, .owner = .resource },
             .ready = ecl.declarations.Endpoint{ .name = "activity-ready", .doc = "Read the independent startup marker.", .transport = .bytes, .direction = .output, .owner = .resource },
         };
+        pub const operations = .{
+            .health = .{ .name = "activity-health", .doc = "Observe retained operation admission.", .handler = health, .lane = .operation, .endpoints = .{} },
+        };
+        fn health(_: *State, ctx: *ecl.Controller) ecl.ControllerError!void {
+            try ctx.builder().int(1);
+            try ctx.builder().result();
+        }
         pub const activities = .{
             .echo = .{ .handler = echo, .endpoints = .{ .input, .output } },
             .marker = .{ .handler = marker, .endpoints = .{.ready} },
@@ -474,6 +481,10 @@ const ActivityResource = ecl.Port(.{
                 }
                 state.received += count;
                 if (state.mode != 4) try output.write(bytes[0..count]);
+                if (state.mode == 7) {
+                    context.failStreams(.io, "all streams failed");
+                    return;
+                }
                 if (state.mode == 5) {
                     context.fail(.io, "failure after accepted output");
                     return;
@@ -492,10 +503,13 @@ pub const Extension = ecl.module(.{
     .name = "instanceprobe",
     .doc = "Instance isolation and retirement probe.",
     .instance = Instance,
-    .ports = .{ Resource, CooperativeResource, ActivityResource },
+    .ports = .{ Resource, CooperativeResource, ActivityResource, DiagnosticController, DiagnosticCooperative },
     .words = .{
         ecl.overload("private-value", "Read privately declared operation members.", .{ .{ Resource, .private_value }, .{ CooperativeResource, .private_value } }),
         ecl.overload("shared-value", "Read either controller or cooperative resource state.", .{ .{ Resource, .value }, .{ CooperativeResource, .borrowed } }),
+        ecl.word("string-fact", "Observe the semantic string predicate.", isString),
+        ecl.factory("diagnostic-controller", "Open a controller diagnostic probe.", DiagnosticController),
+        ecl.factory("diagnostic-cooperative", "Open a cooperative diagnostic probe.", DiagnosticCooperative),
         ecl.word("next", "Read and increment instance state.", value),
         ecl.word("allocate", "Allocate and release native storage.", allocations),
         ecl.word("memory-allocator", "Use accounted native storage with standard allocation APIs.", memoryAllocator),
@@ -520,3 +534,103 @@ pub const CooperativeOnly = ecl.module(.{
     .ports = .{CooperativeResource},
     .words = .{ecl.factory("resource", "Create a cooperative resource.", CooperativeResource)},
 });
+
+fn isString(call: *ecl.Call("value -- result")) ecl.CallbackResult {
+    return call.complete(.{ecl.Scalar.int(@intFromBool(call.input(0).isString()))});
+}
+const DiagnosticController = ecl.Port(.{ .controller = struct {
+    pub const name = "diagnostic-controller";
+    pub const State = struct { reserved: u8 = 0 };
+    pub const operations = .{
+        .diagnose = .{ .name = "controller-diagnose", .doc = "Fail with owned diagnostics.", .handler = diagnose, .lane = .operation, .endpoints = .{} },
+        .string = .{ .name = "controller-string-fact", .doc = "Observe a controller string value.", .handler = string, .lane = .operation, .endpoints = .{} },
+    };
+    pub fn init() State {
+        return .{};
+    }
+    pub fn open(_: *State, ctx: *ecl.Controller) void {
+        if (ctx.input(&.{0})) |mode| if (mode.int() == 1) {
+            const builder = ctx.errorData();
+            builder.input(&.{1}) catch return;
+            builder.seal() catch return;
+            ctx.fail(.io, "diagnostic initialization");
+        };
+    }
+    fn diagnose(_: *State, ctx: *ecl.Controller) ecl.ControllerError!void {
+        const builder = ctx.errorData();
+        try builder.input(&.{});
+        try builder.seal();
+        ctx.fail(.io, "diagnostic operation");
+    }
+    fn string(_: *State, ctx: *ecl.Controller) ecl.ControllerError!void {
+        const result = (ctx.input(&.{}) orelse return error.InvalidValue).isString();
+        try ctx.builder().int(@intFromBool(result));
+        try ctx.builder().result();
+    }
+    pub fn cancel(_: *State) void {}
+    pub fn deinit(_: *State) void {}
+} });
+const DiagnosticCooperative = ecl.Port(.{ .cooperative = struct {
+    pub const name = "diagnostic-cooperative";
+    pub const State = struct { phase: enum { copy, copying, seal, sealing, fail } = .copy };
+    pub const operations = .{
+        .diagnose = .{ .name = "cooperative-diagnose", .doc = "Fail with resumably owned diagnostics.", .handler = diagnose, .lane = .operation, .endpoints = .{} },
+        .finalize = .{ .name = "diagnostic-finalize", .doc = "Fail after committing with reserved diagnostics.", .handler = finalize, .lane = .operation, .endpoints = .{} },
+        .string = .{ .name = "cooperative-string-fact", .doc = "Observe a cooperative string value.", .handler = string, .lane = .operation, .endpoints = .{} },
+    };
+    pub fn init() State {
+        return .{};
+    }
+    pub fn open(state: *State, ctx: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
+        if (ctx.input(&.{0})) |mode| if (mode.int() == 1) return report(state, ctx, &.{1});
+        return .completed;
+    }
+    fn report(state: *State, ctx: anytype, path: []const u64) ecl.ControllerError!ecl.CooperativeProgress {
+        const builder = ctx.errorData();
+        switch (state.phase) {
+            .copy => {
+                try builder.input(path);
+                state.phase = .copying;
+            },
+            .copying => {
+                const progress = try builder.advance();
+                if (progress != .completed) return progress;
+                state.phase = .seal;
+            },
+            .seal => {
+                try builder.seal();
+                state.phase = .sealing;
+            },
+            .sealing => {
+                const progress = try builder.advance();
+                if (progress != .completed) return progress;
+                state.phase = .fail;
+            },
+            .fail => {
+                if (@TypeOf(ctx) == *ecl.Finalizer) try ctx.beginCommit();
+                ctx.fail(.io, "cooperative diagnostic failure");
+                return .completed;
+            },
+        }
+        return .yielded;
+    }
+    fn diagnose(state: *State, ctx: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
+        return report(state, ctx, &.{});
+    }
+    fn finalize(state: *State, ctx: *ecl.Finalizer) ecl.ControllerError!ecl.CooperativeProgress {
+        return report(state, ctx, &.{});
+    }
+    fn string(_: *State, ctx: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
+        const result = (ctx.input(&.{}) orelse return error.InvalidValue).isString();
+        try ctx.builder().int(@intFromBool(result));
+        try ctx.builder().result();
+        return .completed;
+    }
+    pub fn retireOperation(state: *State, _: *ecl.Cooperative) ecl.CooperativeProgress {
+        state.phase = .copy;
+        return .completed;
+    }
+    pub fn retire(_: *State, _: *ecl.Cooperative) ecl.CooperativeProgress {
+        return .completed;
+    }
+} });

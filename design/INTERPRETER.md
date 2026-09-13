@@ -1498,6 +1498,16 @@ openings own partial work, and resource initialization precedes stack publicatio
 The opening borrows its factory and validated request until retirement. It derives
 its scheduler from the calling scope and never receives an interpreter callback.
 Bounded diagnostic details retain their values before the request retires.
+Resource initialization and exchange results own immutable capability-free
+error dictionaries through final release, independently of backend cleanup or
+ordinary result discard. Terminal observations borrow that storage under their
+issuer lifetime; interpreter failures retain the bounded entries before releasing
+the observing driver. Commit freezes both result and diagnostic publication.
+A stream failure is distinct from resource closure: a declared activity may fail
+all resource transports while the backend retains admission to report its terminal
+state. Output buffers and terminal EOF retain their existing observation order.
+Cooperative initialization owns its construction continuation until completion
+or joined cancellation, including every partial validation and diagnostic value.
 Built-in controllers do not pass through the extension ABI.
 
 Process resource metadata pins its issuing instance through final reclamation.
@@ -1566,6 +1576,8 @@ and joins that scope before returning or raising an error.
 ### The native ABI is narrow and transactional
 
 Distribution extensions participate in the exhaustive production-source audit.
+Each classified source is embedded from its classified path, so diagnostics and
+rule enforcement cannot diverge through independently maintained source lists.
 Their build graph supplies only the public SDK and native dependencies; the
 import audit rejects interpreter imports. The Git snapshot extension runs as an
 ordinary registered port. Its controller invocation owns the complete native

@@ -14,6 +14,7 @@ const port_message = @import("port_message.zig");
 const byte_transport = @import("port_bytes.zig");
 const message_builder = @import("port_builder.zig");
 const message_transport = @import("port_messages.zig");
+const diagnostics = @import("port_error_data.zig");
 const results = @import("port_result.zig");
 const exchanges = @import("port_exchange.zig");
 const factories = @import("port_factory.zig");
@@ -276,6 +277,7 @@ const ResourceAdapter = struct {
     definition: descriptor.PortDefinition,
     backend: []align(64) u8,
     configuration: ?Value = null,
+    initialization_context: ?*ControllerContext = null,
     message_budget: *message_transport.Budget,
     resource_pipes: [64]?Protocol.Transport = .{null} ** 64,
     pub fn allocator(self: *const ResourceAdapter) std.mem.Allocator {
@@ -332,11 +334,33 @@ const ResourceAdapter = struct {
         }
     }
     pub fn advanceInitialize(self: *ResourceAdapter, cell: *Cell) scheduler.Cooperative.Progress {
-        var ctx: ControllerContext = .{ .cell = cell, .invocation = .initialize, .cooperative = .{} };
-        defer ctx.deinit();
-        return cooperativeProgress(&ctx, self.definition.execution.cooperative.initialize(self.backend.ptr, &cooperative_table, &ctx));
+        if (self.initialization_context == null) {
+            const ctx = self.allocator().create(ControllerContext) catch {
+                cell.failInitialization(.out_of_memory);
+                return .completed;
+            };
+            ctx.* = .{ .cell = cell, .invocation = .initialize, .cooperative = .{} };
+            self.initialization_context = ctx;
+        }
+        const ctx = self.initialization_context.?;
+        ctx.cooperative = .{};
+        const progress = cooperativeProgress(ctx, self.definition.execution.cooperative.initialize(self.backend.ptr, &cooperative_table, ctx));
+        if (progress == .completed) {
+            if (ctx.builder == .cooperative and ctx.builder.cooperative.phase != .idle)
+                recordControllerFailure(ctx, .init(.contract, "initializer completed unfinished construction"));
+            self.retireInitializationContext();
+        }
+        return progress;
+    }
+    fn retireInitializationContext(self: *ResourceAdapter) void {
+        if (self.initialization_context) |ctx| {
+            self.initialization_context = null;
+            ctx.deinit();
+            self.allocator().destroy(ctx);
+        }
     }
     pub fn advanceCleanup(self: *ResourceAdapter, cell: *Cell) scheduler.Cooperative.Progress {
+        self.retireInitializationContext();
         var ctx: ControllerContext = .{ .cell = cell, .invocation = .cleanup, .cooperative = .{} };
         defer ctx.deinit();
         return cooperativeProgress(&ctx, self.definition.execution.cooperative.retire(self.backend.ptr, &cooperative_table, &ctx));
@@ -840,7 +864,7 @@ const ControllerContext = struct {
 const ChildRequest = struct { kind: u32, dependency: abi.ChildDependency };
 const CooperativeConstruction = struct {
     value: *message_builder.ResumableBuilder,
-    phase: union(enum) { idle, working, result, child_configuration: ChildRequest, child: OperationAdapter.StartedChild(.cooperative) } = .idle,
+    phase: union(enum) { idle, working, result, error_data, child_configuration: ChildRequest, child: OperationAdapter.StartedChild(.cooperative) } = .idle,
     fn retire(self: *CooperativeConstruction, host: *const heap.HostCleanup) void {
         if (self.phase == .child) {
             switch (self.phase.child.readiness) {
@@ -932,7 +956,7 @@ fn viewMessage(root: ?Value, path: [*]const u64, depth: u32, output: *abi.ValueV
         .float => |number| .{ .kind = .float, .scalar_bits = @bitCast(number) },
         .char => |codepoint| .{ .kind = .char, .scalar_bits = codepoint },
         .symbol => |id| .{ .kind = .symbol, .bytes_ptr = @import("intern.zig").get(id).ptr, .bytes_len = @import("intern.zig").get(id).len },
-        .list => |header| .{ .kind = .list, .aggregate_len = header.length() },
+        .list => |header| .{ .kind = .list, .aggregate_len = header.length(), .text = if (item.isString()) .string else .none },
         .dict => |header| .{ .kind = .dict, .aggregate_len = header.length() },
         .port => .{ .kind = .port },
         .word, .task, .module => return false,
@@ -977,10 +1001,14 @@ fn constructionFailure(ctx: *ControllerContext, err: message_builder.Error) abi.
 }
 fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest) message_builder.Error!abi.HostStatus {
     if (request.size != @sizeOf(abi.MessageBuildRequest)) return error.InvalidState;
-    const op = ctx.operation() orelse return error.InvalidState;
+    const op = ctx.operation();
+    if (op == null and ctx.invocation != .initialize) return error.InvalidState;
     if (controllerCancelled(ctx)) return .invalid;
     if (ctx.builder == .none) {
-        const builder = try message_builder.Builder.create(ctx.cell.adapter.owner.host, ctx.invocation.operation.running.?);
+        const builder = if (op != null)
+            try message_builder.Builder.create(ctx.cell.adapter.owner.host, ctx.invocation.operation.running.?)
+        else
+            try message_builder.Builder.createInitializing(ctx.cell.adapter.owner.host, &ctx.cell.closed);
         ctx.builder = .{ .controller = builder };
     }
     const builder = ctx.builder.controller;
@@ -1006,8 +1034,7 @@ fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest
             const path = if (request.depth == 0) &.{} else (request.path orelse return error.InvalidValue)[0..request.depth];
             const root = if (request.action == .copy_received)
                 (ctx.received orelse return error.InvalidState).value()
-            else
-                op.adapter.protocol.parameters;
+            else if (op) |operation| operation.adapter.protocol.parameters else (ctx.cell.adapter.configuration orelse return error.InvalidState);
             try builder.copy(valueAtPath(root, path) orelse return error.InvalidValue);
         },
         .reply_endpoint => {
@@ -1030,7 +1057,7 @@ fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest
 
             const configuration = builder.childConfiguration() orelse return error.InvalidState;
             const selected = try childRequest(ctx, request);
-            const child = op.adapter.stageChild(op, selected.kind, configuration, selected.dependency) catch |err| return childCreationFailure(ctx, err);
+            const child = (op orelse return error.InvalidState).adapter.stageChild(op.?, selected.kind, configuration, selected.dependency) catch |err| return childCreationFailure(ctx, err);
             defer heap.hostDomain(ctx.cell.adapter.owner.host).releaseValue(child);
             try builder.replaceChild(child);
         },
@@ -1052,22 +1079,36 @@ fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest
             return .ok;
         },
         .result => {
+            if (op == null) return error.InvalidState;
             try builder.finish();
 
             const validated = builder.validated() orelse return error.InvalidState;
             const item = try message_transport.Envelope.create(ctx.cell.adapter.owner.host, validated);
-            if (!op.terminal_result.replace(item)) {
+            if (!(op orelse return error.InvalidState).terminal_result.replace(item)) {
                 item.release();
                 return .invalid;
             }
             try builder.consume();
             return .ok;
         },
+        .error_data => {
+            try builder.finish();
+            try publishErrorData(ctx, builder.validated() orelse return error.InvalidState);
+            try builder.consume();
+        },
         .advance => return error.InvalidState,
         _ => return error.InvalidState,
     }
 
     return .ok;
+}
+fn publishErrorData(ctx: *ControllerContext, validated: *const port_message.Validated) message_builder.Error!void {
+    const item = try diagnostics.Owned.create(ctx.cell.adapter.owner.host, validated);
+    const accepted = if (ctx.operation()) |op| op.terminal_result.replaceDetails(item) else ctx.cell.replaceInitializationDetails(item);
+    if (!accepted) {
+        item.release();
+        return error.InvalidState;
+    }
 }
 fn controllerCancelled(raw: *anyopaque) callconv(.c) bool {
     const ctx = context(raw);
@@ -1267,6 +1308,15 @@ fn boundedErrorMessage(message: []const u8) []const u8 {
 fn controllerFail(raw: *anyopaque, kind: abi.ErrorKindWire, bytes: [*]const u8, length: u32) callconv(.c) void {
     recordControllerFailure(context(raw), reportedFailure(kind, bytes[0..length]));
 }
+fn controllerFailStreams(raw: *anyopaque, kind: abi.ErrorKindWire, bytes: [*]const u8, length: u32) callconv(.c) void {
+    const ctx = context(raw);
+    if (ctx.invocation != .activity) return;
+    const failure = semanticFailure(reportedFailure(kind, bytes[0..length]));
+    for (ctx.cell.adapter.resource_pipes, 0..) |pipe, index| if (pipe) |transport| {
+        const endpoint = ctx.cell.adapter.instance.validated().endpoint(ctx.cell.adapter.kind, @intCast(index), .resource).?;
+        transport.fail(failure, endpoint.direction == .input);
+    };
+}
 fn controllerFailResource(raw: *anyopaque, kind: abi.ErrorKindWire, bytes: [*]const u8, length: u32) callconv(.c) void {
     const ctx = context(raw);
     const failure = reportedFailure(kind, bytes[0..length]);
@@ -1323,7 +1373,7 @@ fn controllerFinishInput(raw: *anyopaque, identity: *const anyopaque, index: u32
     return true;
 }
 
-const controller_table: abi.ControllerTable = .{ .finish_input = controllerFinishInput, .instance_state = controllerInstance, .initialization_parent = controllerInitializationParent, .resolve_endpoint = controllerResolveEndpoint, .read_bytes = controllerReadBytes, .write_bytes = controllerWriteBytes, .receive_event = controllerReceiveEvent, .fail_resource = controllerFailResource, .parent_state = controllerParent, .discard_message = controllerDiscardMessage, .build_message = controllerBuildMessage, .fail_allocation = controllerFailAllocation, .received_message = controllerReceivedMessage, .forward_message = controllerForwardMessage, .result_message = controllerResultMessage, .input = controllerInput, .finish_endpoint = controllerFinishEndpoint, .cancelled = controllerCancelled, .acknowledge_cancellation = controllerAcknowledge, .fail = controllerFail };
+const controller_table: abi.ControllerTable = .{ .fail_streams = controllerFailStreams, .finish_input = controllerFinishInput, .instance_state = controllerInstance, .initialization_parent = controllerInitializationParent, .resolve_endpoint = controllerResolveEndpoint, .read_bytes = controllerReadBytes, .write_bytes = controllerWriteBytes, .receive_event = controllerReceiveEvent, .fail_resource = controllerFailResource, .parent_state = controllerParent, .discard_message = controllerDiscardMessage, .build_message = controllerBuildMessage, .fail_allocation = controllerFailAllocation, .received_message = controllerReceivedMessage, .forward_message = controllerForwardMessage, .result_message = controllerResultMessage, .input = controllerInput, .finish_endpoint = controllerFinishEndpoint, .cancelled = controllerCancelled, .acknowledge_cancellation = controllerAcknowledge, .fail = controllerFail };
 
 pub fn fromValue(value: Value, instance: *native.ModuleInstance, kind: u32) ?*Cell {
     const handle = switch (value) {
@@ -1349,7 +1399,8 @@ fn cooperativeBuildMessage(raw: *anyopaque, request: *const abi.MessageBuildRequ
 }
 fn buildCooperative(ctx: *ControllerContext, request: *const abi.MessageBuildRequest) message_builder.Error!abi.CooperativeBuildStatus {
     if (request.size != @sizeOf(abi.MessageBuildRequest)) return error.InvalidState;
-    const operation = ctx.operation() orelse return error.InvalidState;
+    const operation = ctx.operation();
+    if (operation == null and ctx.invocation != .initialize) return error.InvalidState;
     if (controllerCancelled(ctx)) return error.Cancelled;
     if (ctx.operation()) |op| {
         if (!op.terminal_result.mutable()) return error.InvalidState;
@@ -1358,7 +1409,7 @@ fn buildCooperative(ctx: *ControllerContext, request: *const abi.MessageBuildReq
     if (ctx.builder == .none) {
         // Allocate before publishing the union tag: result-location semantics
         // may otherwise expose a partial payload to the failure unwinder.
-        const owned = try message_builder.ResumableBuilder.create(ctx.cell.adapter.owner.host, &operation.transport_cancelled);
+        const owned = try message_builder.ResumableBuilder.create(ctx.cell.adapter.owner.host, ctx.cancellation());
         ctx.builder = .{ .cooperative = .{ .value = owned } };
     }
     const building = &ctx.builder.cooperative;
@@ -1391,16 +1442,20 @@ fn buildCooperative(ctx: *ControllerContext, request: *const abi.MessageBuildReq
         if (try builder.advance() == .pending) return .yield_required;
         if (building.phase == .child_configuration) {
             const selected = building.phase.child_configuration;
-            const child = operation.adapter.startChild(operation, selected.kind, builder.childConfiguration() orelse return error.InvalidState, selected.dependency, .cooperative) catch |err| return cooperativeStatus(childCreationFailure(ctx, err));
+            const child = (operation orelse return error.InvalidState).adapter.startChild(operation.?, selected.kind, builder.childConfiguration() orelse return error.InvalidState, selected.dependency, .cooperative) catch |err| return cooperativeStatus(childCreationFailure(ctx, err));
             building.phase = .{ .child = child };
             return .yield_required;
         }
         if (building.phase == .result) {
             const item = try message_transport.Envelope.create(ctx.cell.adapter.owner.host, builder.validated() orelse return error.InvalidState);
-            if (!operation.terminal_result.replace(item)) {
+            if (!operation.?.terminal_result.replace(item)) {
                 item.release();
                 return error.InvalidState;
             }
+            try builder.consume();
+        }
+        if (building.phase == .error_data) {
+            try publishErrorData(ctx, builder.validated() orelse return error.InvalidState);
             try builder.consume();
         }
         building.phase = .idle;
@@ -1430,7 +1485,7 @@ fn buildCooperative(ctx: *ControllerContext, request: *const abi.MessageBuildReq
         .copy_input => {
             if (request.depth > abi.max_read_path_depth) return error.InvalidValue;
             const path: []const u64 = if (request.depth == 0) &.{} else (request.path orelse return error.InvalidValue)[0..request.depth];
-            const input = valueAtPath(operation.adapter.protocol.parameters, path) orelse return error.InvalidValue;
+            const input = valueAtPath(if (operation) |op| op.adapter.protocol.parameters else (ctx.cell.adapter.configuration orelse return error.InvalidState), path) orelse return error.InvalidValue;
             try builder.copy(input);
             building.phase = .working;
         },
@@ -1443,8 +1498,13 @@ fn buildCooperative(ctx: *ControllerContext, request: *const abi.MessageBuildReq
             building.phase = .working;
         },
         .result => {
+            if (operation == null) return error.InvalidState;
             try builder.finish();
             building.phase = .result;
+        },
+        .error_data => {
+            try builder.finish();
+            building.phase = .error_data;
         },
         .clear => {
             try builder.clear();
@@ -1562,7 +1622,7 @@ const CooperativeInvocation = struct {
                     if (!failed and ctx.builder == .cooperative) switch (ctx.builder.cooperative.phase) {
                         .idle => {},
                         .result => self.phase = .publishing,
-                        .working, .child_configuration, .child => recordControllerFailure(ctx, .init(.contract, "cooperative callback completed unfinished construction")),
+                        .working, .error_data, .child_configuration, .child => recordControllerFailure(ctx, .init(.contract, "cooperative callback completed unfinished construction")),
                     };
                     return .yielded;
                 }

@@ -2148,3 +2148,28 @@ test "oom: standard-library and host: unlimited cooperative instance resource" {
     };
     try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, Probe.run);
 }
+
+test "oom: standard-library and host: native diagnostic controller initialization" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortProbe("[] (instanceprobe.diagnostic-controller [1 {'path \"x\"}] port.open) @attempt pop", "").run);
+}
+
+test "oom: standard-library and host: native diagnostic cooperative initialization" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortProbe("[] (instanceprobe.diagnostic-cooperative [1 {'path \"x\"}] port.open) @attempt pop", "").run);
+}
+
+test "oom: standard-library and host: native diagnostic controller result" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortProbe("instanceprobe.diagnostic-controller [] port.open dup wrap (instanceprobe.controller-diagnose {'path \"x\"} port.call) @attempt pop port.close", "").run);
+}
+
+test "oom: standard-library and host: native diagnostic cooperative result" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortProbe("instanceprobe.diagnostic-cooperative [] port.open dup wrap (instanceprobe.cooperative-diagnose {'path \"x\"} port.call) @attempt pop port.close", "").run);
+}
+
+test "oom: standard-library and host: native diagnostic finalizer result" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortProbe("instanceprobe.diagnostic-cooperative [] port.open dup wrap (instanceprobe.diagnostic-finalize {'path \"x\"} port.call) @attempt pop port.close", "").run);
+}

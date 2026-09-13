@@ -772,7 +772,7 @@ fn writeView(call: *Transaction, item: Value, output: *abi.ValueView) abi.HostSt
             .bytes_ptr = intern.get(id.name).ptr,
             .bytes_len = intern.get(id.name).len,
         },
-        .list => |header| .{ .kind = .list, .aggregate_len = header.length() },
+        .list => |header| .{ .kind = .list, .aggregate_len = header.length(), .text = if (item.isString()) .string else .none },
         .dict => |header| .{ .kind = .dict, .aggregate_len = header.length() },
         .task => return call.rejectCapability("native words cannot observe task capabilities"),
         .module => return call.rejectCapability("native words cannot observe module capabilities"),

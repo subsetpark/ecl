@@ -9,33 +9,34 @@ const SourceGroup = struct {
     sources: []const [:0]const u8,
 };
 
+// Derive each embedded source from its classified path. Parallel filename and
+// source arrays cannot silently apply an exception to another file's code.
+fn embeddedGroup(comptime production: bool, comptime files: []const []const u8) SourceGroup {
+    const sources = comptime blk: {
+        var result: [files.len][:0]const u8 = undefined;
+        for (files, 0..) |file, index| result[index] = @embedFile("../" ++ file);
+        break :blk result;
+    };
+    return .{ .production = production, .files = files, .sources = &sources };
+}
+
 const source_groups = [_]SourceGroup{
     // Distribution extensions compile against only the public SDK and native
     // dependencies; they remain production inputs to every applicable audit.
     .{ .production = true, .files = &.{"../extensions/git/git.zig"}, .sources = &.{source_audit_options.git_extension_source} },
     // Exact, non-rehashing map construction and resumable interning keep
     // user-sized storage work outside scheduler-native stacks.
-    .{ .production = true, .files = &.{
+    embeddedGroup(true, &.{
         "value.zig",       "heap.zig",                "intern.zig", "list.zig",
         "equal.zig",       "dict.zig",                "print.zig",  "poll.zig",
         "text_buffer.zig", "startup_environment.zig",
-    }, .sources = &.{
-        @embedFile("../value.zig"),       @embedFile("../heap.zig"),
-        @embedFile("../intern.zig"),      @embedFile("../list.zig"),
-        @embedFile("../equal.zig"),       @embedFile("../dict.zig"),
-        @embedFile("../print.zig"),       @embedFile("../poll.zig"),
-        @embedFile("../text_buffer.zig"), @embedFile("../startup_environment.zig"),
-    } },
+    }),
     // Tokenization, parsing, binder lowering, exact materialization, and
     // provenance publication all carry nominal resumable state. The larger
     // boundary replaces native-stack control flow.
-    .{ .production = true, .files = &.{
+    embeddedGroup(true, &.{
         "lexer.zig", "binder.zig", "reader_types.zig", "reader.zig", "reader_cursor.zig",
-    }, .sources = &.{
-        @embedFile("../lexer.zig"),         @embedFile("../binder.zig"),
-        @embedFile("../reader_types.zig"),  @embedFile("../reader.zig"),
-        @embedFile("../reader_cursor.zig"),
-    } },
+    }),
     // Resumable primitive shells own inputs and exact-size partial outputs;
     // their nominal driver states replace cancellation-only native stacks.
     // Source/file continuations and the typed, resumable failure unwinder make
@@ -43,134 +44,74 @@ const source_groups = [_]SourceGroup{
     // frames and the duplicate synchronous error-value implementation.
     // The native-continuation union carries park, join, cleanup, and work
     // combinations as exhaustive variants rather than five side-band fields.
-    .{ .production = true, .files = &.{
+    embeddedGroup(true, &.{
         "machine.zig", "task_join_core.zig", "resolution_core.zig", "spans.zig", "prims.zig", "test_prims.zig", "internal.zig",
-    }, .sources = &.{
-        @embedFile("../machine.zig"),         @embedFile("../task_join_core.zig"),
-        @embedFile("../resolution_core.zig"), @embedFile("../spans.zig"),
-        @embedFile("../prims.zig"),           @embedFile("../test_prims.zig"),
-        @embedFile("../internal.zig"),
-    } },
+    }),
     // Snapshot-safe lookup, publication, and reflection now expose explicit
     // cursor state so scheduler suspension is represented instead of hidden
     // in cancellation-only loops.
     // Completion adds Directory/Shape/generation-owning cursors plus an
     // opaque rendered result rather than folding those lifetime boundaries
     // into Session internals.
-    .{ .production = true, .files = &.{
+    embeddedGroup(true, &.{
         "env.zig", "modules.zig", "snapshot.zig", "module_prims.zig", "reflection.zig", "session.zig", "inert_data.zig", "module_map.zig", "module_snapshot.zig",
-    }, .sources = &.{
-        @embedFile("../env.zig"),             @embedFile("../modules.zig"),
-        @embedFile("../snapshot.zig"),        @embedFile("../module_prims.zig"),
-        @embedFile("../reflection.zig"),      @embedFile("../session.zig"),
-
-        @embedFile("../inert_data.zig"),      @embedFile("../module_map.zig"),
-        @embedFile("../module_snapshot.zig"),
-    } },
+    }),
     // The embedded prelude loader and the embedded stdlib manifest are one
     // bootstrap surface: both hand constant source to the ordinary reader.
-    .{ .production = true, .files = &.{
+    embeddedGroup(true, &.{
         "prelude.zig", "stdlib.zig",
-    }, .sources = &.{
-        @embedFile("../prelude.zig"), @embedFile("../stdlib.zig"),
-    } },
+    }),
     // First-party native stdlib modules are authored against the public SDK
     // and hold no host authority; they are user-sized traversal files whose
     // resumable state is the SDK's own continuation record.
-    .{ .production = true, .files = &.{
+    embeddedGroup(true, &.{
         "stdlib/csv.zig",
-    }, .sources = &.{
-        @embedFile("../stdlib/csv.zig"),
-    } },
+    }),
     // Builtin-backed stdlib modules hold host authority the SDK withholds, so
     // they are ordinary production sources under the bounded-traversal rules.
-    .{ .production = true, .files = &.{
+    embeddedGroup(true, &.{
         "stdlib/dict.zig",  "stdlib/rand.zig", "stdlib/json.zig",   "stdlib/http.zig", "stdlib/archive.zig", "stdlib/fs.zig",
         "stdlib/clock.zig", "stdlib/time.zig", "stdlib/source.zig", "stdlib/host.zig",
-    }, .sources = &.{
-        @embedFile("../stdlib/dict.zig"),    @embedFile("../stdlib/rand.zig"),
-        @embedFile("../stdlib/json.zig"),    @embedFile("../stdlib/http.zig"),
-        @embedFile("../stdlib/archive.zig"), @embedFile("../stdlib/fs.zig"),
-        @embedFile("../stdlib/clock.zig"),   @embedFile("../stdlib/time.zig"),
-        @embedFile("../stdlib/source.zig"),  @embedFile("../stdlib/host.zig"),
-    } },
-    .{ .production = true, .files = &.{
+    }),
+    embeddedGroup(true, &.{
         "combinators.zig",
-    }, .sources = &.{
-        @embedFile("../combinators.zig"),
-    } },
-    .{ .production = true, .files = &.{
+    }),
+    embeddedGroup(true, &.{
         "definition_prims.zig", "doc.zig",
-    }, .sources = &.{
-        @embedFile("../definition_prims.zig"), @embedFile("../doc.zig"),
-    } },
+    }),
     // The editor owns raw-terminal restoration, scalar-safe mutation, and
     // atomic locked history as separate nominal states.
-    .{ .production = true, .files = &.{
+    embeddedGroup(true, &.{
         "main.zig", "formatter.zig", "line_editor.zig",
-    }, .sources = &.{
-        @embedFile("../main.zig"), @embedFile("../formatter.zig"), @embedFile("../line_editor.zig"),
-    } },
+    }),
     // Explicit continuation state is part of the kernel correctness boundary;
     // native-stack traversals could not yield.
-    .{ .production = true, .files = &.{
+    embeddedGroup(true, &.{
         "kernel_support.zig",  "kernels.zig",      "kernel_storage.zig",   "kernel_numeric.zig",
         "kernel_sequence.zig", "kernel_order.zig", "kernel_dict_text.zig", "idioms.zig",
         "kernel_random.zig",   "kernel_flat.zig",
-    }, .sources = &.{
-        @embedFile("../kernel_support.zig"),   @embedFile("../kernels.zig"),
-        @embedFile("../kernel_storage.zig"),   @embedFile("../kernel_numeric.zig"),
-        @embedFile("../kernel_sequence.zig"),  @embedFile("../kernel_order.zig"),
-        @embedFile("../kernel_dict_text.zig"), @embedFile("../idioms.zig"),
-        @embedFile("../kernel_random.zig"),    @embedFile("../kernel_flat.zig"),
-    } },
-    .{ .production = false, .files = &.{
+    }),
+    embeddedGroup(false, &.{
         "source_audit.zig",               "tools/source_audit.zig",
         "tools/captured_test_runner.zig", "tools/bench_kernels.zig",
         "tools/bench_workdrivers.zig",    "tools/ecl_source_check.zig",
-    }, .sources = &.{
-        @embedFile("../source_audit.zig"),      @embedFile("source_audit.zig"),
-        @embedFile("captured_test_runner.zig"), @embedFile("bench_kernels.zig"),
-        @embedFile("bench_workdrivers.zig"),    @embedFile("ecl_source_check.zig"),
-    } },
+    }),
     // Scheduler-owned external resources: process ports, filesystem roots,
     // and network listeners share the nominal capability
     // vocabulary in external.zig and are opened only by their Session-owned
     // owner.
-    .{ .production = true, .files = &.{
-        "scheduler.zig",       "scheduler_core.zig", "external.zig",      "process_port.zig",    "console.zig",        "task_prims.zig",   "filesystem_port.zig", "directory_resource.zig", "directory_stage.zig", "directory_order.zig",   "archive_document.zig",
-        "net_port.zig",        "byte_ring.zig",      "port_transfer.zig", "port_controller.zig", "port_message.zig",   "port_failure.zig", "port_builder.zig",    "port_bytes.zig",         "port_messages.zig",   "port_declarations.zig", "port_resource.zig",
-        "module_bindings.zig", "port_endpoint.zig",  "port_result.zig",   "port_exchange.zig",   "port_operation.zig", "port_service.zig", "port_factory.zig",    "process_adapter.zig",    "net_adapter.zig",     "http_service.zig",
-    }, .sources = &.{
-        @embedFile("../scheduler.zig"),         @embedFile("../scheduler_core.zig"),
-        @embedFile("../external.zig"),          @embedFile("../process_port.zig"),
-        @embedFile("../console.zig"),           @embedFile("../task_prims.zig"),
-        @embedFile("../filesystem_port.zig"),   @embedFile("../directory_resource.zig"),
-        @embedFile("../directory_stage.zig"),   @embedFile("../directory_order.zig"),
-        @embedFile("../archive_document.zig"),  @embedFile("../net_port.zig"),
-        @embedFile("../byte_ring.zig"),         @embedFile("../port_transfer.zig"),
-        @embedFile("../port_controller.zig"),   @embedFile("../port_message.zig"),
-        @embedFile("../port_failure.zig"),      @embedFile("../port_builder.zig"),
-        @embedFile("../port_bytes.zig"),        @embedFile("../port_messages.zig"),
-        @embedFile("../port_resource.zig"),     @embedFile("../module_bindings.zig"),
-        @embedFile("../port_endpoint.zig"),     @embedFile("../port_result.zig"),
-        @embedFile("../port_exchange.zig"),     @embedFile("../port_operation.zig"),
-        @embedFile("../port_declarations.zig"), @embedFile("../port_service.zig"),
-        @embedFile("../port_factory.zig"),      @embedFile("../process_adapter.zig"),
-        @embedFile("../net_adapter.zig"),       @embedFile("../http_service.zig"),
-    } },
+    embeddedGroup(true, &.{
+        "scheduler.zig",       "scheduler_core.zig", "external.zig",      "process_port.zig",    "console.zig",       "task_prims.zig",     "filesystem_port.zig", "directory_resource.zig", "directory_stage.zig", "directory_order.zig",   "archive_document.zig",
+        "net_port.zig",        "byte_ring.zig",      "port_transfer.zig", "port_controller.zig", "port_message.zig",  "port_failure.zig",   "port_builder.zig",    "port_bytes.zig",         "port_messages.zig",   "port_declarations.zig", "port_resource.zig",
+        "module_bindings.zig", "port_endpoint.zig",  "port_result.zig",   "port_error_data.zig", "port_exchange.zig", "port_operation.zig", "port_service.zig",    "port_factory.zig",       "process_adapter.zig", "net_adapter.zig",       "http_service.zig",
+    }),
     // The installed author SDK, its sized ABI records, validation, loader,
     // and transactional-call boundary form one separately rooted component.
-    .{ .production = true, .files = &.{
+    embeddedGroup(true, &.{
         "native/ports.zig",        "native/abi.zig",        "native/capability.zig", "native/sdk.zig",
         "native/build_helper.zig", "native_descriptor.zig", "native_module.zig",     "native_port.zig",
         "native_call.zig",         "stdlib/io.zig",         "stdlib/port.zig",
-    }, .sources = &.{
-        @embedFile("../native/ports.zig"),  @embedFile("../native/abi.zig"),          @embedFile("../native/capability.zig"),
-        @embedFile("../native/sdk.zig"),    @embedFile("../native/build_helper.zig"), @embedFile("../native_descriptor.zig"),
-        @embedFile("../native_module.zig"), @embedFile("../native_port.zig"),         @embedFile("../native_call.zig"),
-        @embedFile("../stdlib/io.zig"),     @embedFile("../stdlib/port.zig"),
-    } },
+    }),
 };
 
 const test_files = [_][]const u8{
@@ -247,6 +188,8 @@ const repository_verification_files = [_][]const u8{
     "test/native/negative/invalid_qualified_module.zig",
     "test/native/negative/overload_duplicate_resource.zig",
     "test/native/negative/overload_undeclared_resource.zig",
+    "test/native/negative/diagnostic_child_creation.zig",
+    "test/native/negative/cooperative_diagnostic_child_creation.zig",
     "test/native/negative/finalizer_child_creation.zig",
     "test/native/negative/activity_construction_authority.zig",
     "test/native/negative/shutdown_stream_authority.zig",

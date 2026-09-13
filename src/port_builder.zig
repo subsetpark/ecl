@@ -183,6 +183,9 @@ pub const Builder = opaque {
     pub fn create(host: *const heap.HostCleanup, running: *@import("port_controller.zig").Running) error{OutOfMemory}!*Builder {
         return createWithCancellation(host, .{ .controller = running });
     }
+    pub fn createInitializing(host: *const heap.HostCleanup, closed: *const std.atomic.Value(bool)) error{OutOfMemory}!*Builder {
+        return createWithCancellation(host, .{ .cooperative = closed });
+    }
     fn createWithCancellation(host: *const heap.HostCleanup, cancellation: @FieldType(State, "cancellation")) error{OutOfMemory}!*Builder {
         const state_value = try host.allocator().create(State);
         errdefer host.allocator().destroy(state_value);

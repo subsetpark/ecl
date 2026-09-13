@@ -5489,6 +5489,27 @@ pub const Machine = struct {
         };
         return failure;
     }
+    /// Diagnostic views are bounded and capability-free. Retain their values
+    /// before the observing driver releases its resource or exchange.
+    pub fn failWithErrorData(self: *Machine, observation: @import("port_error_data.zig").Observation) MachineError {
+        const report = switch (observation.report) {
+            .out_of_memory => return error.OutOfMemory,
+            .report => |report| report,
+        };
+        const failure = self.fail(report.kind, report.message[0..report.len]);
+        const pending = self.unit.pendingFailure();
+        comptime {
+            if (@import("port_error_data.zig").max_entries + 2 > @typeInfo(@FieldType(EclErr, "data")).array.len)
+                @compileError("native diagnostics must reserve space for source diagnostics");
+        }
+        if (observation.details) |details| for (0..details.len()) |index| {
+            const item = details.value(index);
+            heap.retainValue(item);
+            pending.data[pending.data_len] = .{ .key = .{ .symbol = details.key(index) }, .value = item };
+            pending.data_len += 1;
+        };
+        return failure;
+    }
     fn failAtSource(
         self: *Machine,
         message: []const u8,

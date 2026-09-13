@@ -7,6 +7,7 @@ const controllers = @import("port_controller.zig");
 const transfers = @import("port_transfer.zig");
 const port_message = @import("port_message.zig");
 const resource_api = @import("port_resource.zig");
+const diagnostics = @import("port_error_data.zig");
 const Failure = @import("port_bytes.zig").Failure;
 const max_lanes = 16;
 fn io() std.Io {
@@ -60,6 +61,7 @@ pub fn Resource(comptime Adapter: type) type {
         children: ?*scheduler.ExternalGroup = null,
         phase: enum { reserved, reserved_closed, initializing, open, closing, waiting_children, cleaning, cleaned, joined } = .reserved,
         initialization_failure: ?Failure = null,
+        initialization_details: ?*diagnostics.Owned = null,
         admission: enum { open, sealing_work, sealing_children, sealing_execution, sealed } = .open,
         shutdown_state: union(enum) { idle, requested, running, completed: ?Failure, aborted } = .idle,
         lanes: [max_lanes]Operations,
@@ -192,6 +194,7 @@ pub fn Resource(comptime Adapter: type) type {
             if (self.publication) |authority| authority.deinit();
             if (self.children) |children| children.release();
             self.controllers.deinit();
+            if (self.initialization_details) |details| details.release();
             self.adapter.destroy(self);
         }
         pub fn run(execution: *controllers.Execution, self: *Cell) void {
@@ -241,11 +244,26 @@ pub fn Resource(comptime Adapter: type) type {
             defer unlock(&self.mutex);
             if (self.initialization_failure == null or failure == .out_of_memory) self.initialization_failure = failure;
         }
+        /// The initialization callback alone may replace diagnostic storage.
+        /// Success consumes it before initialization is published; rejection
+        /// retains it. Final resource release retires the immutable result.
+        pub fn replaceInitializationDetails(self: *Cell, incoming: *diagnostics.Owned) bool {
+            lock(&self.mutex);
+            if (self.phase != .initializing) {
+                unlock(&self.mutex);
+                return false;
+            }
+            const previous = self.initialization_details;
+            self.initialization_details = incoming;
+            unlock(&self.mutex);
+            if (previous) |details| details.release();
+            return true;
+        }
         pub fn resourceInitialization(self: *Cell) resource_api.Initialization {
             return switch (self.initialized()) {
                 .ready => .ready,
                 .pending => .{ .pending = self.source(0) },
-                .failed => |failure| .{ .failed = failure },
+                .failed => |failure| .{ .failed = .{ .report = failure, .details = if (self.initialization_details) |details| details.view() else null } },
             };
         }
         pub fn resourceAllocator(self: *Cell) std.mem.Allocator {

@@ -9,7 +9,7 @@ const transport = @import("port_bytes.zig");
 const Value = @import("value.zig").Value;
 
 pub const Shutdown = union(enum) { pending, ready, unsupported, failed: transport.Failure };
-pub const Initialization = union(enum) { ready, pending: external.ReadinessSource, failed: transport.Failure };
+pub const Initialization = union(enum) { ready, pending: external.ReadinessSource, failed: @import("port_error_data.zig").Observation };
 pub const PublicationMode = enum { direct, staged };
 
 pub const PublicationStatus = union(enum) { published, provisional: *scheduler.ExternalGroup, revoked };

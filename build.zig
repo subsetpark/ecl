@@ -188,6 +188,8 @@ pub fn build(b: *std.Build) void {
         .{ .file = "invalid_qualified_module", .message = "ecl-native: module name must contain nonempty identifier segments" },
         .{ .file = "overload_duplicate_resource", .message = "ecl-native: operation selector repeats a resource kind" },
         .{ .file = "overload_undeclared_resource", .message = "ecl-native: registered capability requires a declared port" },
+        .{ .file = "diagnostic_child_creation", .message = "no field or member function named 'child' in 'ports.ErrorDataBuilder'" },
+        .{ .file = "cooperative_diagnostic_child_creation", .message = "no field or member function named 'child' in 'ports.CooperativeErrorDataBuilder'" },
         .{ .file = "finalizer_child_creation", .message = "no field or member function named 'child' in 'ports.FinalizerBuilder'" },
         .{ .file = "activity_construction_authority", .message = "no field or member function named 'builder' in 'ports.Activity'" },
         .{ .file = "shutdown_stream_authority", .message = "no field or member function named 'endpoint' in 'ports.Shutdown'" },

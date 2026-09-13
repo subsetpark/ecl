@@ -288,7 +288,7 @@ const Request = struct {
         operation: struct { resource: Value, selector: *exchanges.Selector },
     },
     message: *message.Message,
-    state: union(enum) { validating, ready, preparing: *factories.Opening, opening: Value, failed_open: struct { resource: Value, failure: bytes.Failure }, consumed } = .validating,
+    state: union(enum) { validating, ready, preparing: *factories.Opening, opening: Value, failed_open: struct { resource: Value, failure: @import("../port_error_data.zig").Observation }, consumed } = .validating,
 
     pub fn deinit(self: *Request, releases: *heap.ReleaseDomain, _: std.mem.Allocator) void {
         const pending: ?Value = switch (self.state) {
@@ -341,7 +341,7 @@ const Request = struct {
                 try evaluator.park(.{ .external = resource.source() });
                 return .yielded;
             }
-            return transportFailure(evaluator, failed.failure);
+            return evaluator.failWithErrorData(failed.failure);
         }
         if (self.state == .opening) {
             const item = self.state.opening;
@@ -490,13 +490,13 @@ const Observe = struct {
                         .value => |item| return output.output(item),
                         .claimed => return evaluator.fail(.contract, "exchange result has already been claimed"),
                         .cancelled => return evaluator.fail(.cancelled, "exchange was cancelled"),
-                        .failed => |failure| return transportFailure(evaluator, failure),
+                        .failed => |failure| return evaluator.failWithErrorData(failure),
                     }
                 } else switch (exchange.completion()) {
                     .pending => try evaluator.park(.{ .external = exchange.source(.completion) }),
                     .ready => return .completed,
                     .cancelled => return evaluator.fail(.cancelled, "exchange was cancelled"),
-                    .failed => |failure| return transportFailure(evaluator, failure),
+                    .failed => |failure| return evaluator.failWithErrorData(failure),
                 }
             },
         }

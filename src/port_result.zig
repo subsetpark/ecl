@@ -5,16 +5,18 @@ const scheduler = @import("scheduler.zig");
 const messages = @import("port_messages.zig");
 const Publication = @import("port_resource.zig").Publication;
 const Failure = @import("port_bytes.zig").Failure;
+const diagnostics = @import("port_error_data.zig");
 const Value = @import("value.zig").Value;
 
 pub const Terminal = union(enum) { success, cancelled, failed: Failure };
-pub const Completion = union(enum) { pending, ready, cancelled, failed: Failure };
-pub const Claim = union(enum) { pending, claimed, value: Value, cancelled, failed: Failure };
+pub const Completion = union(enum) { pending, ready, cancelled, failed: diagnostics.Observation };
+pub const Claim = union(enum) { pending, claimed, value: Value, cancelled, failed: diagnostics.Observation };
 
 const State = struct {
     host: *const heap.HostCleanup,
     mutex: std.Io.Mutex = .init,
     phase: union(enum) { running, frozen, terminal: Terminal } = .running,
+    details: ?*diagnostics.Owned = null,
     value: union(enum) { available: *messages.Envelope, claimed, discarded, rejected },
 
     fn capability(self: *State) *Result {
@@ -39,6 +41,7 @@ pub const Result = opaque {
     pub fn release(self: *Result) void {
         const owned = self.state();
         if (owned.value == .available) owned.value.available.release();
+        if (owned.details) |details| details.release();
         owned.host.allocator().destroy(owned);
     }
     /// Success consumes the envelope. Rejection retains it. Previous result
@@ -54,6 +57,21 @@ pub const Result = opaque {
         owned.value = .{ .available = incoming };
         std.Io.Threaded.mutexUnlock(&owned.mutex);
         previous.release();
+        return true;
+    }
+    /// Success consumes diagnostics; rejection retains them. Final release owns
+    /// their retirement even after close discards ordinary result storage.
+    pub fn replaceDetails(self: *Result, incoming: *diagnostics.Owned) bool {
+        const owned = self.state();
+        std.Io.Threaded.mutexLock(&owned.mutex);
+        if (owned.phase != .running) {
+            std.Io.Threaded.mutexUnlock(&owned.mutex);
+            return false;
+        }
+        const previous = owned.details;
+        owned.details = incoming;
+        std.Io.Threaded.mutexUnlock(&owned.mutex);
+        if (previous) |details| details.release();
         return true;
     }
     /// Reserve immutable, capability-free output before irreversible work.
@@ -96,7 +114,7 @@ pub const Result = opaque {
             .terminal => |terminal| switch (terminal) {
                 .success => .ready,
                 .cancelled => .cancelled,
-                .failed => |failure| .{ .failed = failure },
+                .failed => |failure| .{ .failed = .{ .report = failure, .details = if (owned.details) |details| details.view() else null } },
             },
         };
     }
@@ -147,7 +165,7 @@ const ResultPublication = struct {
                     return false;
                 },
                 .failed => |failure| {
-                    self.result = .{ .failed = failure };
+                    self.result = .{ .failed = .{ .report = failure, .details = if (self.state.details) |details| details.view() else null } };
                     return false;
                 },
             },
@@ -155,7 +173,7 @@ const ResultPublication = struct {
         self.result = switch (self.state.value) {
             .claimed => .claimed,
             .rejected => .cancelled,
-            .discarded => .{ .failed = Failure.init(.io, "exchange result was discarded by close") },
+            .discarded => .{ .failed = .{ .report = Failure.init(.io, "exchange result was discarded by close") } },
             .available => .pending,
         };
         return self.state.value == .available and self.view != null and self.view.?.observes(self.state.value.available);

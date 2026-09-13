@@ -2711,3 +2711,63 @@ test "native: host service budgets exceed shared extension ceilings independentl
     defer runtime.deinit();
     try expectOk(&runtime, "instanceprobe.next 65 = {'kind 'user 'msg \"independent service grant\"} assert");
 }
+
+test "native: structured diagnostics survive initialization and joined exchange closure" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    for ([_]bool{ true, false }) |linked| {
+        var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+            .ecl_path = if (linked) null else native_fixture.directory,
+            .native_instances = &.{.{ .name = "instanceprobe", .descriptor = if (linked) @import("native-instance").Extension.descriptor() else null }},
+        }), .cooperative, .language_tests);
+        defer runtime.deinit();
+        try expectOk(&runtime,
+            \\[] (instanceprobe.diagnostic-controller [1 {'root 'sandbox 'path "nested/file" 'operation 'open 'reason 'denied}] port.open) @attempt 'err at 'data at
+            \\dup 'root at 'sandbox match? {'kind 'user 'msg "controller initialization root"} assert 'path at "nested/file" match? {'kind 'user 'msg "controller initialization path"} assert
+            \\[] (instanceprobe.diagnostic-cooperative [1 {'root 'sandbox 'path "nested/file" 'operation 'open 'reason 'denied}] port.open) @attempt 'err at 'data at
+            \\dup 'operation at 'open match? {'kind 'user 'msg "cooperative initialization operation"} assert 'reason at 'denied match? {'kind 'user 'msg "cooperative initialization reason"} assert
+            \\instanceprobe.diagnostic-controller [] port.open (|p|
+            \\p instanceprobe.controller-diagnose {'path "retained"} port.begin (|x|
+            \\x wrap (port.await) @attempt 'err at 'data at 'path at "retained" match? {'kind 'user 'msg "controller diagnostics"} assert
+            \\x port.close x wrap (port.result) @attempt 'err at 'data at 'path at "retained" match? {'kind 'user 'msg "closed diagnostics"} assert) call p port.close) call
+            \\instanceprobe.diagnostic-cooperative [] port.open (|p|
+            \\p instanceprobe.cooperative-diagnose {'path "resumable"} port.begin (|x|
+            \\x wrap (port.await) @attempt 'err at 'data at 'path at "resumable" match? {'kind 'user 'msg "cooperative diagnostics"} assert
+            \\x port.close x wrap (port.result) @attempt 'err at 'data at 'path at "resumable" match? {'kind 'user 'msg "closed cooperative diagnostics"} assert) call p port.close) call
+            \\instanceprobe.diagnostic-cooperative [] port.open (|p|
+            \\p instanceprobe.diagnostic-finalize {'reason 'commit-failed} port.begin (|x|
+            \\x wrap (port.await) @attempt 'err at 'data at 'reason at 'commit-failed match? {'kind 'user 'msg "postcommit diagnostics"} assert
+            \\x port.close) call p port.close) call
+        );
+    }
+}
+
+test "native: semantic string observations agree through callbacks and both resource modes" {
+    try expectCooperativeAcceptance(
+        \\"hello" instanceprobe.string-fact 1 = {'kind 'user 'msg "string fact"} assert
+        \\[1 2] instanceprobe.string-fact 0 = {'kind 'user 'msg "byte list fact"} assert
+        \\42 instanceprobe.string-fact 0 = {'kind 'user 'msg "scalar fact"} assert
+        \\instanceprobe.diagnostic-controller [] port.open (|p|
+        \\p instanceprobe.controller-string-fact "hello" port.call 1 = {'kind 'user 'msg "controller string"} assert
+        \\p instanceprobe.controller-string-fact [1 2] port.call 0 = {'kind 'user 'msg "controller bytes"} assert p port.close) call
+        \\instanceprobe.diagnostic-cooperative [] port.open (|p|
+        \\p instanceprobe.cooperative-string-fact "hello" port.call 1 = {'kind 'user 'msg "cooperative string"} assert
+        \\p instanceprobe.cooperative-string-fact [1 2] port.call 0 = {'kind 'user 'msg "cooperative bytes"} assert p port.close) call
+    );
+}
+
+test "native: diagnostic publication rejects non-dictionaries excess keys and capabilities" {
+    try expectCooperativeAcceptance("instanceprobe.diagnostic-controller [] port.open (|p| " ++
+        "p wrap (instanceprobe.controller-diagnose 42 port.call) @attempt 'err at 'kind at 'type match? {'kind 'user 'msg \"dictionary required\"} assert " ++
+        "p wrap (instanceprobe.controller-diagnose {'a 1 'b 2 'c 3 'd 4 'e 5} port.call) @attempt 'err at 'kind at 'type match? {'kind 'user 'msg \"bounded details\"} assert " ++
+        "p wrap (instanceprobe.controller-diagnose {1 2} port.call) @attempt 'err at 'kind at 'type match? {'kind 'user 'msg \"symbol keys\"} assert " ++
+        "p wrap (|p| p instanceprobe.controller-diagnose {} 'path p dict.put port.call) @attempt 'err at 'kind at 'type match? {'kind 'user 'msg \"no capability diagnostics\"} assert p port.close) call");
+}
+
+test "native: activity stream failure preserves buffered output and operation admission" {
+    try expectCooperativeAcceptance("instanceprobe.activity 7 port.open (|p| " ++
+        "p instanceprobe.activity-in port.endpoint [1 2] port.write " ++
+        "p instanceprobe.activity-out port.endpoint dup 8 port.read [1 2] match? {'kind 'user 'msg \"accepted output\"} assert " ++
+        "wrap (8 port.read) @attempt 'err at 'kind at 'io match? {'kind 'user 'msg \"stream failure\"} assert " ++
+        "p instanceprobe.activity-health [] port.call 1 = {'kind 'user 'msg \"operation admission\"} assert p port.close) call");
+}

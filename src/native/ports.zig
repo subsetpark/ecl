@@ -137,6 +137,9 @@ pub const MessageView = opaque {
         if (self.kind() != .symbol) return null;
         return self.wire().bytes_ptr.?[0..@intCast(self.wire().bytes_len)];
     }
+    pub fn isString(self: *const MessageView) bool {
+        return self.kind() == .list and self.wire().text == .string;
+    }
     pub fn length(self: *const MessageView) ?u64 {
         return switch (self.kind()) {
             .list, .dict => self.wire().aggregate_len,
@@ -210,6 +213,9 @@ pub const Controller = opaque {
     }
     fn state(self: *Controller) *ControllerState {
         return @ptrCast(@alignCast(self));
+    }
+    pub fn errorData(self: *Controller) *ErrorDataBuilder {
+        return @ptrCast(self);
     }
     pub fn builder(self: *Controller) *MessageBuilder {
         return @ptrCast(self);
@@ -487,6 +493,13 @@ pub const Activity = opaque {
     pub fn fail(self: *Activity, kind: capability.ErrorKind, message: []const u8) void {
         self.controller().fail(kind, message);
     }
+    /// Fail every resource stream while retaining resource operation admission.
+    /// Accepted output precedes the failure; stranded input is discarded.
+    pub fn failStreams(self: *Activity, kind: capability.ErrorKind, message: []const u8) void {
+        const bounded = capability.boundedErrorMessage(message);
+        const owned = self.controller().state();
+        owned.table.fail_streams(owned.context, kind, bounded.ptr, @intCast(bounded.len));
+    }
     pub fn failResource(self: *Activity, kind: capability.ErrorKind, message: []const u8) void {
         self.controller().failResource(kind, message);
     }
@@ -584,6 +597,9 @@ pub const Cooperative = opaque {
     pub fn failOutOfMemory(self: *Cooperative) void {
         const owned = self.state();
         owned.table.fail_allocation(owned.context);
+    }
+    pub fn errorData(self: *Cooperative) *CooperativeErrorDataBuilder {
+        return @ptrCast(self);
     }
     pub fn builder(self: *Cooperative) *CooperativeBuilder {
         return @ptrCast(self);
@@ -686,6 +702,9 @@ pub const Finalizer = opaque {
     }
     pub fn failOutOfMemory(self: *Finalizer) void {
         self.cooperative().failOutOfMemory();
+    }
+    pub fn errorData(self: *Finalizer) *CooperativeErrorDataBuilder {
+        return @ptrCast(self);
     }
     pub fn builder(self: *Finalizer) *FinalizerBuilder {
         return @ptrCast(self);
@@ -838,3 +857,74 @@ fn validateCooperativeHandler(comptime State: type, comptime handler: anytype) v
         @TypeOf(handler) != fn (*State, *Finalizer) ControllerError!CooperativeProgress)
         @compileError("ecl-native: cooperative handler requires resource state and cooperative context");
 }
+
+/// Bounded, capability-free diagnostic construction. Seal before failing.
+pub const ErrorDataBuilder = opaque {
+    fn builder(self: *ErrorDataBuilder) *MessageBuilder {
+        return @ptrCast(self);
+    }
+    pub fn int(self: *ErrorDataBuilder, value: i64) ControllerError!void {
+        return self.builder().int(value);
+    }
+    pub fn float(self: *ErrorDataBuilder, value: f64) ControllerError!void {
+        return self.builder().float(value);
+    }
+    pub fn char(self: *ErrorDataBuilder, value: u32) ControllerError!void {
+        return self.builder().char(value);
+    }
+    pub fn symbol(self: *ErrorDataBuilder, value: []const u8) ControllerError!void {
+        return self.builder().symbol(value);
+    }
+    pub fn input(self: *ErrorDataBuilder, value: []const u64) ControllerError!void {
+        return self.builder().input(value);
+    }
+    pub fn list(self: *ErrorDataBuilder, value: u32) ControllerError!void {
+        return self.builder().list(value);
+    }
+    pub fn dictionary(self: *ErrorDataBuilder, value: u32) ControllerError!void {
+        return self.builder().dictionary(value);
+    }
+    pub fn clear(self: *ErrorDataBuilder) ControllerError!void {
+        return self.builder().clear();
+    }
+    pub fn seal(self: *ErrorDataBuilder) ControllerError!void {
+        return self.builder().apply(.{ .action = .error_data });
+    }
+};
+
+/// Bounded, capability-free diagnostic construction. Seal before failing.
+pub const CooperativeErrorDataBuilder = opaque {
+    fn builder(self: *CooperativeErrorDataBuilder) *CooperativeBuilder {
+        return @ptrCast(self);
+    }
+    pub fn int(self: *CooperativeErrorDataBuilder, value: i64) ControllerError!void {
+        return self.builder().int(value);
+    }
+    pub fn float(self: *CooperativeErrorDataBuilder, value: f64) ControllerError!void {
+        return self.builder().float(value);
+    }
+    pub fn char(self: *CooperativeErrorDataBuilder, value: u32) ControllerError!void {
+        return self.builder().char(value);
+    }
+    pub fn symbol(self: *CooperativeErrorDataBuilder, value: []const u8) ControllerError!void {
+        return self.builder().symbol(value);
+    }
+    pub fn input(self: *CooperativeErrorDataBuilder, value: []const u64) ControllerError!void {
+        return self.builder().input(value);
+    }
+    pub fn list(self: *CooperativeErrorDataBuilder, value: u32) ControllerError!void {
+        return self.builder().list(value);
+    }
+    pub fn dictionary(self: *CooperativeErrorDataBuilder, value: u32) ControllerError!void {
+        return self.builder().dictionary(value);
+    }
+    pub fn clear(self: *CooperativeErrorDataBuilder) ControllerError!void {
+        return self.builder().clear();
+    }
+    pub fn seal(self: *CooperativeErrorDataBuilder) ControllerError!void {
+        return self.builder().apply(.{ .action = .error_data });
+    }
+    pub fn advance(self: *CooperativeErrorDataBuilder) ControllerError!CooperativeProgress {
+        return self.builder().advance();
+    }
+};

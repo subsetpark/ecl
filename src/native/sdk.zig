@@ -14,6 +14,8 @@ pub const Finalizer = ports.Finalizer;
 pub const CooperativeProgress = ports.CooperativeProgress;
 pub const ControllerError = ports.ControllerError;
 pub const MessageView = ports.MessageView;
+pub const ErrorDataBuilder = ports.ErrorDataBuilder;
+pub const CooperativeErrorDataBuilder = ports.CooperativeErrorDataBuilder;
 pub const MessageBuilder = ports.MessageBuilder;
 pub const PortCancellation = ports.Cancellation;
 

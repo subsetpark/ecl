@@ -5,8 +5,8 @@
 
 const builtin = @import("builtin");
 
-pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v16";
-pub const abi_version: u32 = 16;
+pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v17";
+pub const abi_version: u32 = 17;
 
 pub const max_error_message_bytes: u32 = 4096;
 pub const max_guest_scalar_bytes: u32 = 4096;
@@ -104,7 +104,7 @@ pub const PortCancellation = enum(u32) { close_resource, acknowledge, _ };
 
 /// Controller streams block only their private host controller. Zero bytes
 /// denotes request EOF or cancellation; failure is reported separately.
-pub const MessageBuildAction = enum(u32) { scalar = 0, copy_input = 1, copy_received = 2, list = 3, dictionary = 4, send = 7, result = 8, clear = 9, reply_endpoint = 10, child = 11, advance = 12, _ };
+pub const MessageBuildAction = enum(u32) { scalar = 0, copy_input = 1, copy_received = 2, list = 3, dictionary = 4, send = 7, result = 8, clear = 9, reply_endpoint = 10, child = 11, advance = 12, error_data = 13, _ };
 pub const ChildDependency = enum(u32) { independent, dependent, _ };
 pub const MessageBuildRequest = extern struct {
     size: u32 = @sizeOf(MessageBuildRequest),
@@ -135,6 +135,7 @@ pub const ControllerTable = extern struct {
     cancelled: *const fn (*anyopaque) callconv(.c) bool,
     acknowledge_cancellation: *const fn (*anyopaque) callconv(.c) bool,
     fail: *const fn (*anyopaque, ErrorKindWire, [*]const u8, u32) callconv(.c) void,
+    fail_streams: *const fn (*anyopaque, ErrorKindWire, [*]const u8, u32) callconv(.c) void,
     fail_resource: *const fn (*anyopaque, ErrorKindWire, [*]const u8, u32) callconv(.c) void,
     resolve_endpoint: *const fn (*anyopaque, *const anyopaque, EndpointOwner, u32, EndpointTransport, EndpointDirection) callconv(.c) bool,
     read_bytes: *const fn (*anyopaque, EndpointOwner, u32, [*]u8, u32) callconv(.c) ControllerRead,
@@ -259,6 +260,8 @@ pub const ValueView = extern struct {
     kind: ValueKindWire,
     scalar_bits: u64 = 0,
     aggregate_len: u64 = 0,
+    text: enum(u32) { none = 0, string = 1, _ } = .none,
+    reserved: u32 = 0,
     bytes_ptr: ?[*]const u8 = null,
     bytes_len: u64 = 0,
 };
@@ -498,7 +501,7 @@ comptime {
     assertRecord(Definition, 136, 8);
     assertRecord(PortBinding, 40, 8);
     assertRecord(OperationBinding, 32, 8);
-    assertRecord(ValueView, 40, 8);
+    assertRecord(ValueView, 48, 8);
     assertRecord(Scalar, 32, 8);
     assertRecord(InvokeResult, 16, 8);
     assertRecord(HostTable, 160, 8);
@@ -508,7 +511,7 @@ comptime {
     assertRecord(CooperativeDefinition, 40, 8);
     assertRecord(CooperativeTable, 88, 8);
     assertRecord(MessageBuildRequest, 72, 8);
-    assertRecord(ControllerTable, 160, 8);
+    assertRecord(ControllerTable, 168, 8);
     assertRecord(InstanceTable, 32, 8);
     assertRecord(NativeMemory, 24, 8);
     assertRecord(InstanceDefinition, 48, 8);
