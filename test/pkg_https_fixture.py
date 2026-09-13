@@ -45,9 +45,9 @@ def requirement(version: str, url: str, hash_value: str) -> str:
     return (
         "{'version \""
         + version
-        + "\" 'url \""
+        + "\" 'source {'kind 'archive 'url \""
         + url
-        + "\" 'hash \""
+        + "\"} 'hash \""
         + hash_value
         + "\"}"
     )
@@ -60,7 +60,7 @@ def manifest(name: str, version: str, requires: Mapping[str, str], *, source: bo
         for key in sorted(requires)
     )
     return (
-        "{'format 1 'name \""
+        "{'format 2 'name \""
         + name
         + "\" 'version \""
         + version

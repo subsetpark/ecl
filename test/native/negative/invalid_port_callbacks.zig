@@ -1,6 +1,6 @@
 const ecl = @import("ecl-native");
 comptime {
-    _ = ecl.Port(struct {
+    _ = ecl.Port(.{ .controller = struct {
         pub const name = "invalid";
         pub const State = u32;
         pub fn init() State {
@@ -9,5 +9,5 @@ comptime {
         pub fn open(_: *State) void {}
         pub fn cancel(_: *State) void {}
         pub fn deinit(_: *State) void {}
-    });
+    } });
 }

@@ -1,0 +1,1 @@
+{'format 1 'local "pkg" 'scopes {"pkg" {'root "../.." 'visible [] 'sources ["src/**/*.ecl" "test/acceptance/command.ecl"] 'artifacts []}}}

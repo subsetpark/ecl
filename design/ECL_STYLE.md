@@ -197,7 +197,7 @@ construction needs, bind those values inside, and collect the resulting list:
 ```ecl
 state wrap
 (|state|
- 'format 1
+ 'format 2
  'root state ['root 'name] at-path
  'packages state selected-packages
  'requires state resolved-requires)

@@ -7,8 +7,20 @@ const ports = @import("ports.zig");
 pub const declarations = @import("port-declarations");
 pub const Port = ports.Port;
 pub const Controller = ports.Controller;
+pub const Activity = ports.Activity;
+pub const Shutdown = ports.Shutdown;
+pub const Cooperative = ports.Cooperative;
+pub const Finalizer = ports.Finalizer;
+pub const PreparedFailure = ports.PreparedFailure;
+pub const CooperativeProgress = ports.CooperativeProgress;
 pub const ControllerError = ports.ControllerError;
 pub const MessageView = ports.MessageView;
+pub const CapacityFailure = ports.CapacityFailure;
+pub const RejectedOpen = ports.RejectedOpen;
+pub const RejectionProgress = ports.RejectionProgress;
+pub const RejectionResult = ports.RejectionResult;
+pub const ErrorDataBuilder = ports.ErrorDataBuilder;
+pub const CooperativeErrorDataBuilder = ports.CooperativeErrorDataBuilder;
 pub const MessageBuilder = ports.MessageBuilder;
 pub const PortCancellation = ports.Cancellation;
 
@@ -31,19 +43,196 @@ pub const BulkKind = abi.BulkKind;
 pub const UnitRead = union(enum) { units: struct { count: u32, bytes: bool }, yield_required, invalid };
 pub const Reschedule = capability.Reschedule;
 pub const CallbackResult = error{ OutOfMemory, InvalidValue }!Outcome;
+pub const InstanceProgress = enum { complete, pending };
+pub const InstanceResult = error{ OutOfMemory, Failed }!InstanceProgress;
+
+/// Instance-owned native storage authority. May be retained in extension state
+/// until its final retirement slice; it exposes no interpreter allocator.
+pub const NativeMemory = opaque {
+    fn wire(self: *const NativeMemory) *const abi.NativeMemory {
+        return @ptrCast(@alignCast(self));
+    }
+    pub fn allocate(self: *const NativeMemory, length: usize) error{OutOfMemory}![]align(64) u8 {
+        const handle = self.wire();
+        const pointer = handle.allocate(handle.context, length) orelse return error.OutOfMemory;
+        return pointer[0..length];
+    }
+    /// A native-storage allocator for std and native dependencies. It retains
+    /// this authority's accounting and lifetime, supports alignments through 64
+    /// bytes, and never grants access to interpreter values or heap ownership.
+    pub fn allocator(self: *const NativeMemory) std.mem.Allocator {
+        return .{ .ptr = @constCast(self), .vtable = &.{
+            .alloc = allocateStorage,
+            .resize = std.mem.Allocator.noResize,
+            .remap = std.mem.Allocator.noRemap,
+            .free = releaseStorage,
+        } };
+    }
+    fn allocateStorage(raw: *anyopaque, length: usize, alignment: std.mem.Alignment, _: usize) ?[*]u8 {
+        if (alignment.toByteUnits() > 64) return null;
+        const self: *const NativeMemory = @ptrCast(@alignCast(raw));
+        return (self.allocate(length) catch return null).ptr;
+    }
+    fn releaseStorage(raw: *anyopaque, bytes: []u8, _: std.mem.Alignment, _: usize) void {
+        const self: *const NativeMemory = @ptrCast(@alignCast(raw));
+        self.release(@alignCast(bytes));
+    }
+    /// Consumes a slice allocated by this authority, on every return.
+    pub fn release(self: *const NativeMemory, bytes: []align(64) u8) void {
+        const handle = self.wire();
+        handle.release(handle.context, bytes.ptr, bytes.len);
+    }
+};
+
+/// Borrowed only during one lifecycle slice. Native storage belongs to the
+/// issuing instance, whose retirement follows every call and resource pin.
+pub const InstanceContext = opaque {
+    const Adapter = struct { table: *const abi.InstanceTable, context: *anyopaque, budget: u32 };
+    fn adapter(self: *InstanceContext) *Adapter {
+        return @ptrCast(@alignCast(self));
+    }
+    pub fn configuration(self: *InstanceContext) []const u8 {
+        const table = self.adapter().table;
+        return table.configuration_ptr[0..@intCast(table.configuration_len)];
+    }
+    /// Set the immutable byte capacity of one resource endpoint during instance
+    /// initialization. Capacity must fit the issuing instance's host ceiling.
+    pub fn configureEndpoint(self: *InstanceContext, comptime P: type, comptime name: P.Endpoints.Name, capacity: usize) error{ OutOfMemory, Failed }!void {
+        const endpoint = comptime P.Endpoints.get(name);
+        comptime if (endpoint.owner != .resource or endpoint.transport != .bytes)
+            @compileError("ecl-native: instance capacity configures resource byte endpoints");
+        const owned = self.adapter();
+        switch (owned.table.configure_endpoint(owned.context, P.definition().identity.?, P.Endpoints.id(name), capacity)) {
+            .complete => {},
+            .out_of_memory => return error.OutOfMemory,
+            else => return error.Failed,
+        }
+    }
+    pub fn consume(self: *InstanceContext) bool {
+        const state = self.adapter();
+        if (state.budget == 0) return false;
+        state.budget -= 1;
+        return true;
+    }
+    pub fn allocate(self: *InstanceContext, length: usize) error{OutOfMemory}![]align(64) u8 {
+        return self.memory().allocate(length);
+    }
+    /// Consumes storage allocated by this instance; release cannot fail.
+    pub fn release(self: *InstanceContext, bytes: []align(64) u8) void {
+        self.memory().release(bytes);
+    }
+    pub fn memory(self: *InstanceContext) *const NativeMemory {
+        return @ptrCast(self.adapter().table.memory);
+    }
+};
+
+/// Lifecycle supplies State, init(), initialize(*State, *InstanceContext),
+/// and retire(*State, *InstanceContext). Every slice must obey consume().
+/// Retirement also runs after failed or cancelled initialization, and returns
+/// true only after all extension-owned storage has been released.
+pub fn Instance(comptime Lifecycle: type) type {
+    return struct {
+        pub const State = Lifecycle.State;
+        var identity_storage: u8 = 0;
+        pub fn identity() *const anyopaque {
+            return &identity_storage;
+        }
+        fn initState(raw: *anyopaque) callconv(.c) void {
+            const state: *State = @ptrCast(@alignCast(raw));
+            state.* = Lifecycle.init();
+        }
+        fn initialize(raw: *anyopaque, table: *const abi.InstanceTable, context: *anyopaque, budget: u32) callconv(.c) abi.InstanceProgress {
+            var adapter: InstanceContext.Adapter = .{ .table = table, .context = context, .budget = budget };
+            const progress = Lifecycle.initialize(@ptrCast(@alignCast(raw)), @as(*InstanceContext, @ptrCast(&adapter))) catch |err| return switch (err) {
+                error.OutOfMemory => .out_of_memory,
+                error.Failed => .failed,
+            };
+            return switch (progress) {
+                .complete => .complete,
+                .pending => .pending,
+            };
+        }
+        fn retire(raw: *anyopaque, table: *const abi.InstanceTable, context: *anyopaque, budget: u32) callconv(.c) bool {
+            var adapter: InstanceContext.Adapter = .{ .table = table, .context = context, .budget = budget };
+            return Lifecycle.retire(@ptrCast(@alignCast(raw)), @as(*InstanceContext, @ptrCast(&adapter)));
+        }
+        var definition_storage: abi.InstanceDefinition = .{
+            .state_size = @sizeOf(State),
+            .state_alignment = @alignOf(State),
+            .identity = &identity_storage,
+            .init_state = initState,
+            .initialize = initialize,
+            .retire = retire,
+        };
+        pub fn definition() *const abi.InstanceDefinition {
+            if (@TypeOf(Lifecycle.init) != fn () State or
+                @TypeOf(Lifecycle.initialize) != fn (*State, *InstanceContext) InstanceResult or
+                @TypeOf(Lifecycle.retire) != fn (*State, *InstanceContext) bool)
+                @compileError("ecl-native: invalid instance lifecycle signatures");
+            if (@sizeOf(State) == 0 or @sizeOf(State) > abi.max_port_state_bytes or @alignOf(State) > 64)
+                @compileError("ecl-native: invalid instance state size or alignment");
+            return &definition_storage;
+        }
+    };
+}
 
 pub fn factory(comptime name: []const u8, comptime doc: []const u8, comptime P: type) type {
     return portBinding(name, doc, P, .{ .kind = .factory });
 }
 
 fn portOperation(comptime P: type, comptime name: P.Operations.Name) type {
-    const entry = P.Operations.get(name);
-    return portBinding(P.Operations.publicName(name), entry.doc, P, .{
-        .kind = .operation,
-        .operation = @intFromEnum(name),
-        .lane = @intFromEnum(P.Operations.lane(name)),
-        .endpoints = P.Operations.endpointMask(name),
-    });
+    return overload(P.Operations.publicName(name), P.Operations.get(name).doc, .{.{ P, name }});
+}
+
+/// Export one operation selector over distinct declared resource kinds.
+/// Every member is a pair .{Port, operation}; each kind occurs exactly once.
+pub fn overload(comptime binding_name: []const u8, comptime document: []const u8, comptime members: anytype) type {
+    if (!identifier(binding_name) or document.len == 0) @compileError("ecl-native: operation selector requires a name and documentation");
+    if (members.len == 0 or members.len > abi.max_port_definitions) @compileError("ecl-native: operation selector requires 1 to 64 resource kinds");
+    for (members, 0..) |member, index| {
+        const P = member[0];
+        const operation: P.Operations.Name = member[1];
+        _ = P.Operations.get(operation);
+        for (0..index) |prior| if (members[prior][0] == P) @compileError("ecl-native: operation selector repeats a resource kind");
+    }
+    return struct {
+        pub const registered_port_binding = void;
+        pub const name = binding_name;
+        pub const uses_build_values = false;
+        pub const uses_reschedule = false;
+        var outputs = makeSlots(.{"capability"});
+        var inputs: [0]abi.EffectSlot = .{};
+        fn Choices(comptime Ports: anytype) type {
+            return struct {
+                var records: [members.len]abi.OperationBinding = records: {
+                    // SAFETY: every member fills exactly one record before publication.
+                    var result: [members.len]abi.OperationBinding = undefined;
+                    for (members, 0..) |member, index| {
+                        const P = member[0];
+                        const operation: P.Operations.Name = member[1];
+                        result[index] = .{
+                            .resource = resourceIndex(Ports, P),
+                            .operation = @intFromEnum(operation),
+                            .lane = @intFromEnum(P.Operations.lane(operation)),
+                            .endpoints = P.Operations.endpointMask(operation),
+                            .mode = P.operationMode(operation),
+                        };
+                    }
+                    break :records result;
+                };
+            };
+        }
+        pub fn definition(comptime Ports: anytype) abi.Definition {
+            return .{ .callback_index = 0, .name_ptr = name.ptr, .name_len = name.len, .doc_ptr = document.ptr, .doc_len = document.len, .input_count = 0, .inputs_ptr = &inputs, .output_count = 1, .outputs_ptr = &outputs, .binding = .{ .kind = .operation, .operation_count = members.len, .operations_ptr = &Choices(Ports).records } };
+        }
+        pub fn invoke(comptime _: anytype, _: *const abi.HostTable, _: *anyopaque, output: *abi.InvokeResult) void {
+            output.* = .{ .tag = .fail, .adapter_status = 2 };
+        }
+    };
+}
+fn resourceIndex(comptime Ports: anytype, comptime P: type) u32 {
+    for (Ports, 0..) |Declared, index| if (Declared == P) return @intCast(index);
+    @compileError("ecl-native: registered capability requires a declared port");
 }
 
 fn portEndpoint(comptime P: type, comptime name: P.Endpoints.Name) type {
@@ -78,10 +267,7 @@ fn portBinding(comptime binding_name: []const u8, comptime document: []const u8,
         var inputs: [0]abi.EffectSlot = .{};
         pub fn definition(comptime Ports: anytype) abi.Definition {
             var binding = metadata;
-            binding.resource = comptime index: {
-                for (Ports, 0..) |Declared, i| if (Declared == P) break :index @intCast(i);
-                @compileError("ecl-native: registered capability requires a declared port");
-            };
+            binding.resource = comptime resourceIndex(Ports, P);
             return .{ .callback_index = 0, .name_ptr = name.ptr, .name_len = name.len, .doc_ptr = document.ptr, .doc_len = document.len, .input_count = 0, .inputs_ptr = &inputs, .output_count = 1, .outputs_ptr = &outputs, .binding = binding };
         }
         pub fn invoke(comptime _: anytype, _: *const abi.HostTable, _: *anyopaque, output: *abi.InvokeResult) void {
@@ -139,6 +325,22 @@ pub fn Call(comptime effect_source: []const u8) type {
             if (index >= EffectSpec.inputs.len)
                 @compileError("ecl-native: input index exceeds the declared effect");
             return @ptrCast(&self.state().views[index].?);
+        }
+
+        /// Observe the nominal kind of a same-instance input resource, including
+        /// a closed resource. This grants neither a state borrow nor admission.
+        pub fn inputIsResource(self: *Self, comptime P: type, comptime index: usize) bool {
+            if (index >= EffectSpec.inputs.len) @compileError("ecl-native: input index exceeds the declared effect");
+            if (!@hasDecl(P, "ecl_port_marker")) @compileError("ecl-native: resource observation requires a declared Port type");
+            const invocation = &self.state().invocation;
+            const query = invocation.host.input_resource_kind orelse return false;
+            return query(invocation.context, index, P.definition().identity.?);
+        }
+
+        pub fn instance(self: *Self, comptime I: type) ?*I.State {
+            const invocation = &self.state().invocation;
+            const get = invocation.host.instance_state orelse return null;
+            return @ptrCast(@alignCast(get(invocation.context, I.identity()) orelse return null));
         }
 
         /// Copies a bounded run of Unicode scalar values or bytes into caller
@@ -461,7 +663,9 @@ pub const Linkage = enum { dynamic, static };
 fn portBindingCount(comptime Ports: anytype) usize {
     var count: usize = 0;
     for (Ports) |P| {
-        count += P.Operations.count;
+        for (std.meta.tags(P.Operations.Name)) |name| if (P.Operations.exported(name)) {
+            count += 1;
+        };
         count += P.Endpoints.count;
     }
     return count;
@@ -472,6 +676,7 @@ fn portBindings(comptime Ports: anytype) [portBindingCount(Ports)]type {
     var index: usize = 0;
     for (Ports) |P| {
         for (std.meta.tags(P.Operations.Name)) |name| {
+            if (!P.Operations.exported(name)) continue;
             bindings[index] = portOperation(P, name);
             index += 1;
         }
@@ -487,7 +692,7 @@ pub fn module(comptime spec: anytype) type {
     const Ports = if (@hasField(@TypeOf(spec), "ports")) spec.ports else .{};
     const explicit_words = if (@hasField(@TypeOf(spec), "words")) spec.words else .{};
     @setEvalBranchQuota(1000 + (explicit_words.len + portBindingCount(Ports)) * (explicit_words.len + portBindingCount(Ports)) * 16);
-    if (!identifier(spec.name)) @compileError("ecl-native: module name must be a nonempty identifier");
+    if (!moduleIdentifier(spec.name)) @compileError("ecl-native: module name must contain nonempty identifier segments");
     if (spec.doc.len == 0) @compileError("ecl-native: module documentation must not be empty");
     const module_linkage: Linkage = if (@hasField(@TypeOf(spec), "linkage")) spec.linkage else .dynamic;
     const words = explicit_words ++ portBindings(Ports);
@@ -564,6 +769,7 @@ pub fn module(comptime spec: anytype) type {
             .invoke = invoke,
             .port_count = Ports.len,
             .ports_ptr = &ports_storage,
+            .instance = if (@hasField(@TypeOf(spec), "instance")) spec.instance.definition() else null,
         };
 
         pub fn descriptor() *const abi.Descriptor {
@@ -682,6 +888,12 @@ fn makeSlots(comptime names: anytype) [names.len]abi.EffectSlot {
     return result;
 }
 
+fn moduleIdentifier(bytes: []const u8) bool {
+    var components = std.mem.splitScalar(u8, bytes, '.');
+    while (components.next()) |component| if (!identifier(component)) return false;
+    return true;
+}
+
 fn identifier(bytes: []const u8) bool {
     if (bytes.len == 0) return false;
     if (!asciiAlpha(bytes[0]) and bytes[0] != '_') return false;
@@ -693,3 +905,5 @@ fn identifier(bytes: []const u8) bool {
 fn asciiAlpha(byte: u8) bool {
     return std.ascii.isAlphabetic(byte);
 }
+
+pub const WorkQuantum = @import("port-declarations").WorkQuantum;

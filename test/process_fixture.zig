@@ -8,6 +8,16 @@ pub fn main(init: std.process.Init) !void {
     const arguments = try init.minimal.args.toSlice(init.arena.allocator());
     if (arguments.len < 2) return error.MissingMode;
     const mode = arguments[1];
+    if (std.mem.eql(u8, mode, "--ecl-private-git-helper")) {
+        if (init.environ_map.get("ECL_OOM_PROBE") != null) return error.InheritedEnvironment;
+        const dir = std.Io.Dir.cwd();
+        try dir.createDirPath(init.io, "repository/objects/nested");
+        try dir.writeFile(init.io, .{ .sub_path = "repository/objects/nested/object", .data = "object" });
+        try dir.writeFile(init.io, .{ .sub_path = "commit", .data = "a" ** 40 });
+        try dir.writeFile(init.io, .{ .sub_path = "manifest", .data = "{}" });
+        try dir.writeFile(init.io, .{ .sub_path = "artifact.tgz", .data = "ab" });
+        return;
+    }
     if (std.mem.eql(u8, mode, "inspect")) return inspect(init, arguments[2..]);
     if (std.mem.eql(u8, mode, "echo")) return echo(init);
     if (std.mem.eql(u8, mode, "split")) return split(init, arguments[2..]);

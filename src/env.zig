@@ -658,7 +658,22 @@ pub const EnvironmentView = enum(usize) {
     pub fn shapeGeneration(self: EnvironmentView) u64 {
         return self.target().shapeGeneration();
     }
+
+    /// Even revisions describe a published shape; odd revisions delimit the
+    /// publication window. A scope installs one environment for its lifetime.
+    pub fn observeShape(self: EnvironmentView) ?ShapeRevision {
+        const revision = self.target().shape_generation.load(.acquire);
+        if (revision & 1 != 0) return null;
+        return @enumFromInt(revision);
+    }
+
+    pub fn matchesShape(self: EnvironmentView, revision: ShapeRevision) bool {
+        return self.target().shape_generation.load(.acquire) == @intFromEnum(revision);
+    }
 };
+
+/// Observation metadata, meaningful only in the same live environment.
+pub const ShapeRevision = enum(u64) { _ };
 comptime {
     heap.requireOpaqueObservation(EnvironmentView);
 }
@@ -978,6 +993,7 @@ pub const Environment = struct {
                     const next = state.built;
                     published_cell.release();
                     self.candidate_cell = null;
+                    _ = self.environment.shape_generation.fetchAdd(1, .acq_rel);
                     self.environment.shapes.publish(next);
                     _ = self.environment.shape_generation.fetchAdd(1, .release);
                     self.environment.unlock();
@@ -1101,6 +1117,7 @@ pub const Environment = struct {
                     }
                     state.built.previous = self.environment.shapes.currentOwned();
                     const next = state.built;
+                    _ = self.environment.shape_generation.fetchAdd(1, .acq_rel);
                     self.environment.shapes.publish(next);
                     _ = self.environment.shape_generation.fetchAdd(1, .release);
                     self.environment.unlock();
@@ -1124,7 +1141,7 @@ pub const Environment = struct {
         return .init(self);
     }
     pub fn shapeGeneration(self: *const Environment) u64 {
-        return self.shape_generation.load(.acquire);
+        return self.shape_generation.load(.acquire) / 2;
     }
     fn freeze(self: *Environment) void {
         self.lockBlocking();

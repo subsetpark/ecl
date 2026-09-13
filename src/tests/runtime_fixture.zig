@@ -9,7 +9,7 @@ pub const Fixture = struct {
     cwd: [:0]u8,
     output: std.Io.Writer.Discarding = .init(&.{}),
     diagnostics: std.Io.Writer.Discarding = .init(&.{}),
-    roots: [1]@import("../filesystem_port.zig").Root,
+    roots: [1]@import("../session.zig").Filesystem.Root,
 
     pub fn init() !Fixture {
         var temporary = std.testing.tmpDir(.{});
@@ -48,6 +48,7 @@ pub const Options = struct {
     diagnostics: ?@FieldType(session.RuntimeInputs, "diagnostics") = null,
     tls_trust: ?@FieldType(session.RuntimeInputs, "tls_trust") = null,
     ecl_path: ?@FieldType(session.RuntimeInputs, "ecl_path") = null,
+    module_map: ?@FieldType(session.RuntimeInputs, "module_map") = null,
     environ: ?@FieldType(session.RuntimeInputs, "environ") = null,
     standard_input: ?@FieldType(session.RuntimeInputs, "standard_input") = null,
     initial_cwd: ?@FieldType(session.RuntimeInputs, "initial_cwd") = null,
@@ -56,5 +57,6 @@ pub const Options = struct {
     http_limits: ?@FieldType(session.RuntimeInputs, "http_limits") = null,
     net_limits: ?@FieldType(session.RuntimeInputs, "net_limits") = null,
     native_port_limits: ?@FieldType(session.RuntimeInputs, "native_port_limits") = null,
+    native_instances: ?@FieldType(session.RuntimeInputs, "native_instances") = null,
     clock: ?@FieldType(session.RuntimeInputs, "clock") = null,
 };

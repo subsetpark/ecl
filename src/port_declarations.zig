@@ -2,6 +2,8 @@
 //! private selectors from these names; neither authors nor ECL coordinate IDs.
 const std = @import("std");
 
+pub const max_activities = 4;
+
 pub const Direction = enum { input, output };
 pub const Transport = enum { bytes, messages };
 pub const Owner = enum { resource, exchange };
@@ -76,6 +78,11 @@ pub fn Operations(comptime Lane: type, comptime EndpointSet: type, comptime entr
         pub fn get(comptime name: Name) @TypeOf(@field(entries, @tagName(name))) {
             return @field(entries, @tagName(name));
         }
+        pub fn exported(comptime name: Name) bool {
+            const entry = get(name);
+            const visibility: enum { public, private } = if (@hasField(@TypeOf(entry), "visibility")) entry.visibility else .public;
+            return visibility == .public;
+        }
         pub fn publicName(comptime name: Name) []const u8 {
             const entry = get(name);
             return if (@hasField(@TypeOf(entry), "name")) entry.name else @tagName(name);
@@ -91,3 +98,20 @@ pub fn Operations(comptime Lane: type, comptime EndpointSet: type, comptime entr
         }
     };
 }
+
+/// Every bit pattern denotes a positive, bounded amount of scheduler work.
+/// Storing count-minus-one makes zero and unbounded grants unrepresentable.
+pub const WorkQuantum = enum(u16) {
+    q1 = 0,
+    q64 = 63,
+    q256 = 255,
+    q65536 = 65535,
+    _,
+    pub fn fromCount(amount: u32) error{InvalidLimits}!WorkQuantum {
+        if (amount == 0 or amount > 65536) return error.InvalidLimits;
+        return @enumFromInt(@as(u16, @intCast(amount - 1)));
+    }
+    pub fn count(self: WorkQuantum) u32 {
+        return @as(u32, @intFromEnum(self)) + 1;
+    }
+};

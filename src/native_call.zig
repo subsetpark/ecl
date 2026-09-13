@@ -728,6 +728,8 @@ pub fn begin(
 }
 
 const full_host_table = abi.HostTable{
+    .instance_state = hostInstanceState,
+    .input_resource_kind = hostInputResourceKind,
     .input = hostInput,
     .forward = hostForward,
     .scalar = hostScalar,
@@ -748,6 +750,17 @@ const full_host_table = abi.HostTable{
     .forward_path = hostForwardPath,
 };
 
+fn hostInputResourceKind(context: *anyopaque, index: u32, identity: *const anyopaque) callconv(.c) bool {
+    const call = transactionFrom(context);
+    if (call.terminal != .idle or index >= call.definition.effect.inputs) return false;
+    const item = call.activeEvaluator().nativeInputBorrowed(call.definition.effect.inputs, index);
+    return @import("native_port.zig").isResourceKind(item, call.instance, identity);
+}
+
+fn hostInstanceState(context: *anyopaque, identity: *const anyopaque) callconv(.c) ?*anyopaque {
+    return transactionFrom(context).instance.instanceState(identity);
+}
+
 fn transactionFrom(context: *anyopaque) *Transaction {
     return @ptrCast(@alignCast(context));
 }
@@ -767,7 +780,7 @@ fn writeView(call: *Transaction, item: Value, output: *abi.ValueView) abi.HostSt
             .bytes_ptr = intern.get(id.name).ptr,
             .bytes_len = intern.get(id.name).len,
         },
-        .list => |header| .{ .kind = .list, .aggregate_len = header.length() },
+        .list => |header| .{ .kind = .list, .aggregate_len = header.length(), .text = if (item.isString()) .string else .none },
         .dict => |header| .{ .kind = .dict, .aggregate_len = header.length() },
         .task => return call.rejectCapability("native words cannot observe task capabilities"),
         .module => return call.rejectCapability("native words cannot observe module capabilities"),

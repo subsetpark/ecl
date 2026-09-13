@@ -26,14 +26,14 @@ property. Each publishes
 ordinary module images and participates in registration, aliases, imports,
 reflection, and shadowing through the same language operations.
 
-`net.core.listener` and `proc.core.process` export the built-in factories used
-by `port.open`. They are ordinary standard-library words; opening a resource uses the
-Session's runtime I/O state.
-The public `net` and `proc` modules are ECL compositions over these registered
-capabilities and `port.*`. Their operation and endpoint selectors expose only
-their corresponding resources and streams. First-party adapters use typed backend calls;
-the extension adapter translates ABI v7 calls into the same runtime interfaces
-for controller execution, transport, cancellation, ownership, and cleanup.
+The bundled `net.core` and `proc.core` modules expose ordinary native factories
+and selectors. Their public `net` and `proc` APIs are ECL compositions over
+those capabilities and `port.*`. Both backends
+compile against `std`, the public SDK, and native dependencies, including in
+builds without maintained applications. ABI v24 uses the same descriptors and
+instance lifecycle for static and dynamic registration.
+The `fs` and `archive` modules use direct runtime primitives with the shared
+scope-owned port lifecycle, bounded work, and joined cleanup.
 
 Embedded names have precedence over filesystem modules. A file on `ECL_PATH`
 cannot replace an embedded module during automatic loading. A program may
@@ -45,13 +45,80 @@ replace a registration explicitly with `register` or `@defm`.
 tries `<module-name>.ecl` and then `<module-name>.eclmod`. The first existing
 candidate is authoritative, including any error raised while loading it.
 
-Filesystem search applies only when the current session has no discovered
-project. A project uses its lock-derived catalog as described under
-[Runtime module resolution](#runtime-module-resolution).
+Filesystem search applies only when the current Session has no module map.
+With a map, resolution uses only its visible artifacts and embedded modules.
 
 An ECL source candidate may register several modules. Successful loading
 requires the requested registration to exist after the source unit completes.
 All registrations from a failing source unit remain unavailable.
+
+### Module maps
+
+An `ecl.modules` document supplies inert module-resolution metadata. It contains
+no package versions, fetching instructions, or cache policy. The nearest such
+file is discovered by searching upward from the startup directory. `ecl --module-map FILE ...` selects a map explicitly;
+its path is relative to the caller's working directory. A malformed discovered
+or explicitly selected map fails Session construction, without falling back.
+
+```ecl
+{'format 1 'local "project" 'scopes {
+ "project" {'root "." 'visible ["library"]
+            'sources ["src/**/*.ecl"] 'artifacts []}
+ "library" {'root "installed/library" 'visible [] 'sources []
+            'artifacts [{'path "library.ecl" 'kind 'ecl
+                         'exports ["library"]}]}}}
+```
+
+Every scope has exactly `root`, `visible`, `sources`, and `artifacts` fields.
+Scope names are nonempty strings. Visibility includes the scope itself and
+only the explicitly listed direct edges; it is checked even for loaded
+modules. Missing, duplicate, or self visibility edges are invalid. Exported
+module names and artifact paths must be unique across the map. Artifacts in
+different scopes may reuse relative filenames when their roots differ.
+Artifact paths are relative, without empty, dot, parent, glob, or drive
+components. Scope roots resolve relative to the document containing them.
+
+Source patterns use `/` separators, `*` and `?` within segments, and `**` as a
+whole segment. Selected regular `.ecl` files are parsed without execution at
+Session startup. Literal top-level module declarations become exports;
+computed and nested registrations remain file-private. Explicit artifacts
+name their exports directly and are read only on first use. Kinds are `ecl`
+and `native`; a native artifact exports exactly one module and executes
+trusted native code through the ordinary extension boundary. Test discovery
+enumerates ECL artifacts from the designated `local` scope.
+
+A reference document has exactly this shape:
+
+```ecl
+{'format 1 'map ".ecl/generations/current/ecl.modules"}
+```
+
+The referenced document must be a complete map, never another reference.
+Its paths resolve relative to that document. Each Session captures its map
+once; later file additions appear in new Sessions without synchronization.
+Source execution remains lazy, once per artifact, with atomic registration.
+Startup performs no fetching or repair. Maps are bounded to 16 MiB, 4,096
+scopes and artifacts, 65,536 exports, 16 MiB per discovered source, and 64 MiB
+of discovered source text. Names and paths are at most 4,096 UTF-8 bytes and
+contain no control characters.
+
+`ecl check-map FILE` validates a document using the same parser, limits,
+reference resolution, and inert source discovery as Session startup. It exits
+zero with no output on success, one with a diagnostic for an invalid map or
+usage, and two on allocation failure. The filename resolves against the
+caller's working directory; paths inside the document resolve against that
+document. Validation does not construct a Session, inspect the caller's map,
+execute source or native artifacts, or write files. An explicit
+`--module-map` does not affect this command. This operation validates resolution
+metadata; artifact content verification remains the publisher's responsibility.
+
+`ecl check-map --document FILE -` reads at most 16 MiB from standard input and
+uses `FILE` as the containing document's path. Neither that file nor its parent
+directory needs to exist. Relative roots and a single map reference use the
+same rules as a file-backed map. This supports validation before publishing a
+staged document; validation never creates or replaces the named file. An input
+read or size failure exits one with a diagnostic. Plain `check-map -` is invalid
+because stdin alone does not identify a relative-path base.
 
 ### Native modules
 
@@ -60,8 +127,71 @@ module. Its descriptor declares the same canonical name requested by the
 loader. The complete word table validates before publication, and publication
 is atomic.
 
-The current pre-release native ABI is version 7, with entry symbol
-`ecl_module_abi_v7`. Native modules built for earlier versions must be rebuilt;
+The current pre-release native ABI is version 24, with entry symbol
+`ecl_module_abi_v24`. Resource authors choose `ecl.Port(.{ .controller = Spec })`
+or `ecl.Port(.{ .cooperative = Spec })`. Cooperative callbacks receive bounded
+work accounting, read-only Session-relative `monotonicMilliseconds`, and
+cancellable timer parking. Clock observation follows the host clock policy and
+grants no manual advancement authority. Their persistent builder begins
+aggregate construction and advances it explicitly; it has no blocking endpoints.
+A cooperative operation whose typed handler accepts `*ecl.Finalizer` seals its
+resource when admitted. Earlier admitted work and dependent children settle before
+the callback runs. It constructs and advances its result, then calls `beginCommit`
+before irreversible work. Commit freezes capability-free output; subsequent result
+mutation fails. Cancellation before commit joins resource cleanup. Cancellation
+after commit preserves the terminal result and joins the remaining bounded work.
+Success or failure leaves admission sealed until the caller closes the resource.
+A finalizer cannot create child resources or acquire streaming endpoints.
+
+Controller ports may declare up to four named `activities`, each carrying a
+handler and its resource byte endpoints. Each endpoint belongs to at most one
+activity. An activity receives `*ecl.Activity`, can use only its declared
+endpoints, and runs independently of operation calls. Returning finishes its
+outputs and rejects subsequent input writes; failures propagate to those streams.
+`Activity.finishInput` closes producer admission to a resource byte input while
+accepted writer turns and bytes drain. `Activity.stopOutput` immediately stops
+producers on a resource byte output, including admitted blocked writes; readers
+observe its accepted prefix followed by EOF. Neither operation grants access to
+stream contents, and neither replaces an already terminal error.
+`Activity.failStreams` fails all resource streams while preserving operation
+admission, buffered output, and already observed EOF. Resource close interrupts
+blocked transport and joins every activity before
+backend cleanup. Activity startup uses the same reserved controller capacity and
+failed-publication cleanup as operation lanes. A typed `*ecl.Shutdown` callback
+can call `finishInput` to stop producer admission while activities drain accepted
+bytes; it receives no stream consumer authority.
+
+`ecl.overload(name, doc, .{.{Port, operation}, ...})` exports one selector for
+distinct resource kinds. Each member keeps its own operation lane, endpoints, and
+execution mode. An operation declaration with `.visibility = .private` omits its
+individual export while remaining available to an overload. Duplicate kinds and
+members from undeclared ports are rejected.
+
+Native module names may contain nonempty dot-separated identifier segments;
+individual word and resource names remain unqualified. `ValueView.isString()` and
+`MessageView.isString()` expose the language string predicate without traversing
+or exposing heap representation.
+
+Controller and cooperative initialization, operations, and finalizers may prepare
+`errorData()` using scalar, input-copy, list, and dictionary construction. `seal()`
+requires a capability-free dictionary with at most four symbol keys. Cooperative
+construction must advance through completion before failing. The next failure
+reports those fields in its `'data`; joined close preserves them for repeated
+failure observation. Diagnostic builders share the callback construction stack;
+sealing consumes the dictionary. Finalizer commit freezes diagnostics together
+with ordinary result publication, so post-commit failures can use reserved data.
+
+A port may declare `CapacityFailure = ecl.CapacityFailure(Spec)` to report a
+resource-budget rejection using its own input validation and error data. The
+specification supplies typed state, initialization, a bounded `step`, and bounded
+`retire`. Its `RejectedOpen` context exposes input, instance state, work accounting,
+and diagnostics; it cannot create resources, use streams, park, or commit. The
+rejected opening consumes no resource slot and starts no controller. A normal
+failure joins its private retirement before returning the error; abandonment
+reserves bounded retirement and retains the instance until that work completes.
+Returning without a reported failure preserves the default capacity error.
+
+Native modules built for earlier versions must be rebuilt;
 the loader provides no legacy adapter.
 
 Each native word has a declared effect and nonempty documentation. Native
@@ -72,6 +202,47 @@ other error kinds remain reserved to the runtime.
 
 A loaded native module remains loaded for the session. Repeated resolution
 uses its existing registration.
+
+Hosts may supply `RuntimeInputs.native_instances` entries containing a module
+name, a deferred or eager descriptor registration, immutable configuration bytes,
+a native-memory ceiling, and optional
+resource limits. The Session copies the bytes. Duplicate names, invalid limits,
+and zero memory ceilings are rejected.
+Unconfigured modules receive empty configuration and a 64 MiB native-memory
+ceiling. Explicit resource limits give that instance independent capacity;
+otherwise resources use `native_port_limits`.
+Independent host service limits accept positive addressable resource counts and
+byte capacities. `max_live_ports = null` grants unlimited resource admission only
+when every resource kind in that descriptor is cooperative; controller descriptors
+reject that policy during loading. Such instances allocate no controller executor.
+The shared extension limits retain their bounded defaults and validation ceilings.
+A host-provided descriptor uses the same validation, instance initialization, and
+publication as a dynamic extension, and resolves without `ECL_PATH`. Its descriptor
+and code must remain immutable and alive for the Session lifetime. Bundled modules
+take precedence over host descriptors with the same name; host descriptors take
+precedence over filesystem modules. Configuration size is limited by host memory;
+extension initialization must still consume bounded work slices.
+During instance initialization, `configureEndpoint(Port, endpoint, capacity)` may
+set a declared resource byte endpoint's capacity within that instance's host ring
+ceiling. Each override is immutable after initialization. Other endpoint capacities
+retain their host defaults; factory arguments cannot change the policy.
+
+An SDK module can declare `.instance = ecl.Instance(Lifecycle)`. The lifecycle
+provides `State`, `init()`, `initialize(*State, *ecl.InstanceContext)`, and
+`retire(*State, *ecl.InstanceContext)`. Initialization returns `ecl.InstanceResult`
+(`complete`, `pending`, `OutOfMemory`, or `Failed`); retirement returns whether cleanup is complete.
+Each slice obeys `context.consume()`. Initialization may yield before publication;
+retirement runs even after failed initialization. `context.configuration()`
+borrows immutable bytes until instance retirement. `context.memory()` returns
+an opaque, retainable native-storage authority with allocation and consuming
+release operations. Its `allocator()` adapts that same accounted storage to
+`std.mem.Allocator` for native dependencies, with alignment up to 64 bytes;
+it does not expose the interpreter's allocator or permit heap-value construction. Allocations must be released through their issuing authority
+before final retirement. Callback and controller `instance(Instance)` access
+checks the declared type's identity and returns only that module's state.
+Concurrent callbacks must synchronize their shared extension state.
+Native allocation is closed once final instance retirement begins; cleanup
+must release its existing storage without allocating.
 
 Native modules may declare typed port kinds with persistent private state.
 The SDK's `Port` spec declares named endpoints and operations. Each operation
@@ -115,10 +286,35 @@ The controller-local `MessageBuilder` constructs scalars, nested lists and
 dictionaries, and copies permitted input capabilities without exposing ECL
 storage. Builder methods settle construction and validation in bounded host
 steps before returning; authors use ordinary `try` expressions.
+`byteList` constructs a list of integer bytes from a copied chunk of at most
+64 KiB, occupying one construction slot. Larger symbols use `beginSymbol` with
+the total UTF-8 byte count, `symbolChunk` with at most 256 bytes per call, and
+`endSymbol`. Chunks may split a UTF-8 sequence; completion validates the complete
+symbol. Until completion, only further chunks or `clear` are accepted. Partial
+buffers belong to the host and retire on failure or cancellation. Cooperative
+builders require `advance` after byte materialization and symbol completion.
+These operations are also available to finalizer and diagnostic builders.
 A sender's `send` and the builder's `result` consume the completed message on
 success. Failure retains it for cleanup or an explicit library decision.
 Construction errors invalidate the partial message, and `clear` explicitly
 starts another. Controller return discards unfinished work.
+An initializer can call `initializationResource(Port, path, lifetime)` to borrow
+native state from a same-instance resource in its configuration. The resource
+kind must match the declared `Port`; another instance never grants its state.
+The `.initialization` lifetime ends when initialization settles, while `.resource`
+lasts through private resource cleanup, including failed initialization. The host
+retains at most 16 distinct resources for each lifetime; repeated acquisition
+reuses an admitted loan. A closing or sealing issuer rejects new loans with
+`Closed` and joins admitted loans before cleanup or finalizer execution. Wrong
+kinds, foreign instances, invalid paths, and calls outside initialization return
+`InvalidValue`. Native pointers cannot escape their selected lifetime. Ordinary
+operations and finalizers cannot establish persistent resource dependencies.
+`child(Port, .inherited)` copies the parent's existing lifetime dependency, if
+any, without making the immediate parent a lifetime owner. Initialization still
+borrows that immediate parent until it settles. Later callbacks cannot borrow
+ancestor state through `parent`; closing an intermediate resource leaves inherited
+descendants admitted, while closing the lifetime ancestor joins them. A parent
+with no dependency creates an independent child in this mode.
 `child(Port, dependency)` replaces the builder's top configuration with a newly
 initialized resource of a kind registered by the same module instance. Earlier
 builder values remain available for aggregate construction. The host retains
@@ -126,11 +322,20 @@ provisional ownership until ECL receives or claims the containing value; failed
 creation retains the configuration and cleans up partial startup. The dependency
 argument is explicit: dependent children retire before the parent backend,
 while independent children can survive it. Cancellation interrupts blocked child
-startup. No child handle grants native code ECL storage or interpreter access.
+startup. Cooperative builders expose the same child construction and ownership
+contract. Their `advance()` returns completed, yielded, or parked; callbacks
+propagate pending progress until construction completes. A parked child uses a
+reserved readiness registration rather than polling or a controller thread.
+No child handle grants native code ECL storage or interpreter access.
 `Controller.parent(Port)` borrows the issuing parent's native state only for a
 dependent child of that registered kind in the same module instance. Roots,
 independent children, and wrong kinds return null. The borrow remains valid
-through child cleanup, including parent closure and scope transfers. Native
+through child cleanup, including parent closure and scope transfers.
+`initializationParent(Port)` is a separate borrow available only during
+initialization, including independent children. The parent remains alive until
+initialization finishes or failed construction joins cleanup. Native code may
+transfer independently owned storage through this borrow, but must not retain
+the parent pointer for later operations or cleanup. Native
 libraries synchronize shared state across controllers; this access grants no
 ECL heap, allocator, or interpreter authority.
 A message receiver's `reply` appends an opaque sender to the current builder.
@@ -179,11 +384,48 @@ It may overlap operation callbacks; `cancel` must interrupt its backend waits.
 Failure remains observable on repeated shutdown calls. Unsupported shutdown
 raises `'domain`, and abortive `port.close` remains available. Cancellation
 never promises to reverse external effects or accepted stream bytes.
+Native instance `port_limits` may select `callback_quantum` and
+`construction_quantum`. `NativeWorkQuantum.fromCount` accepts 1 through 65,536;
+its value representation cannot express a zero or unbounded grant. Defaults stay
+256 native work units per cooperative turn and 64 host construction units.
+The callback grant is a ceiling for initialization, operations, and joined
+retirement. An operation may share its remaining grant across callback,
+publication, and retirement phases; host transitions also consume work units.
+The construction grant bounds each host materialization slice, independently of
+message footprint and stack capacity. Grants belong to the registered instance
+and are unavailable in ECL resource-open parameters.
+Finalizers may prepare at most 32 immutable failure alternatives before commit.
+`prepareFailure` consumes a diagnostic dictionary into a bounded report; after
+builder advancement, `preparedFailure` returns an invocation-owned opaque token.
+After `beginCommit`, `failPrepared` selects one such token without allocating or
+mutating values. Tokens expire with their invocation and cannot select failures
+in another invocation. Ordinary callbacks cannot prepare or select alternatives.
+
+Instance port policy also bounds structured message bytes and nodes separately
+from builder stack slots. Factory and operation requests and native results use
+that instance's immutable grant. Copying a validated aggregate uses one stack
+slot regardless of its node count. Defaults remain 64 KiB, 4096 nodes, and 4096
+construction slots for ordinary extensions. ECL requests cannot replace a grant.
 These resource limits do not sandbox native code.
 
 Opening a shared library executes machine code before ECL validates its
 descriptor. Every directory used for native loading is a trusted-code
 boundary.
+
+Host native registration selects deferred loading or eager startup explicitly.
+Eager linked descriptors are validated and initialized before Session construction
+returns. The same initialized instance is used when its module is first called;
+its configuration and state survive until joined Session teardown. Invalid eager
+descriptors or initialization failure reject Session construction. Deferred
+registrations retain lazy validation and initialization.
+
+## Process execution
+
+The process backend is also an ordinary bundled SDK descriptor, including in
+builds without maintained applications. Host process limits and captured startup
+environment and directory configure its Session-local instance. Its resource
+budget is independent of unrelated native extensions, and ECL request fields
+cannot replace host configuration.
 
 ## Filesystem access
 
@@ -199,6 +441,15 @@ once at startup. Package commands add the `'project` root described below.
 Session construction opens the roots once; a relative, missing, non-directory,
 duplicate, or malformed root, a zero limit, or an unsupported target is a
 construction error distinct from allocation failure.
+
+Embedding uses `Session.Filesystem.Configuration` (also exported as
+`Filesystem` by the interpreter module), containing `Root` entries and `Limits`.
+Roots and immutable configuration belong to the Session's filesystem owner.
+Its resource budget is separate from native extensions. `max_transfer_bytes`
+limits whole-value reads, writes, and copies; `max_stream_transfer_bytes`
+limits the total bytes of an explicit writer stream. Both default to 1 GiB.
+Filesystem operations use direct bounded runtime drivers and shared retirement
+without per-resource controller threads or native message marshalling.
 
 Supported targets are Linux and macOS. Paths are UTF-8 slash paths; a host
 filename that is not valid UTF-8 cannot be listed and fails the whole listing.
@@ -221,6 +472,11 @@ locking, link creation, permission changes, timestamps, and Windows support are
 outside this contract.
 
 ## Network listeners
+
+The network backend is a statically registered SDK descriptor bundled even
+when maintained applications are disabled. Host `net_limits` configure its
+Session-local instance and independent resource budget; ECL open arguments
+cannot replace that configuration.
 
 Inbound TCP listening goes through the `net` module documented in
 `STDLIB.md`. A program requests a local address and port; port `0` requests
@@ -400,411 +656,46 @@ configuration.
 
 ## Projects and packages
 
-A project declares dependencies in `ecl.pkg` and records a resolved selection
-in `ecl.lock`. Both files contain one ECL data form. Readers parse and validate
-them without evaluation.
+The maintained application in `apps/pkg/` implements `ecl pkg` through the
+installed-application dispatch described below. It owns `ecl.pkg`, the portable
+version-controlled `ecl.lock`, source acquisition, dependency selection, cache
+policy, immutable generations, verification, and publication recovery.
+See its [application contract](../apps/pkg/README.md) and
+[manifest format](../apps/pkg/FORMATS.md).
 
-Module references continue to use module and binding names. Package paths,
-URLs, and versions stay in project data and the derived catalog.
+The interpreter reads only `ecl.modules`. A hand-written map supports imports
+and tests without a package application. A fresh checkout with a manifest and
+lock reproduces the exact locked graph through `ecl pkg sync`; updates require
+`ecl pkg update`. Each published generation retains its own resolution snapshot,
+so separate atomic updates of the root lock and active map never mix dependency
+state inside an existing runnable generation.
 
-### Project discovery
+## Installed applications
 
-The `ecl` command discovers a project by walking upward from the process
-working directory. The first directory containing `ecl.pkg` is the project
-root. Discovery stops at the filesystem root. `ecl.lock` is read only from
-the project root.
+An installation may provide applications beneath `share/ecl/apps/<name>/`,
+relative to the prefix containing `bin/ecl`. A name starts with an ASCII letter
+and contains only ASCII letters, digits, and hyphens, up to 64 bytes. Built-in
+CLI commands take precedence. Otherwise `ecl <name> ...` consults only that
+installation directory, never the project or `PATH`.
 
-The CLI captures its absolute startup directory once and uses it for project
-discovery across scripts, expressions, stdin evaluation, the REPL, and `ecl test`.
+Each application's `application.json` has exactly these fields:
 
-Discovery runs once per session. The resulting project, lock, and catalog
-state remains fixed for the lifetime of the session and all its units. A
-missing manifest or missing lock produces an
-absent project tier. An unreadable or invalid sibling lock is retained as a
-session error and is reported by the first non-embedded module lookup.
-
-### Versions
-
-A package version is a string with this grammar:
-
-```text
-version     := core ("-" prerelease)?
-core        := num "." num "." num
-num         := "0" | [1-9] [0-9]*
-prerelease  := ident ("." ident)*
-ident       := [0-9A-Za-z-]+
+```json
+{"format": 1, "entry": "main.ecl", "module_map": "ecl.modules"}
 ```
 
-A numeric prerelease identifier has no leading zero. Build metadata is outside
-the grammar, so any `+` makes the version malformed.
-
-Precedence follows Semantic Versioning 2.0.0 section 11:
-
-1. Compare major, minor, and patch numerically.
-2. A prerelease precedes the same core version without a prerelease.
-3. Compare prerelease identifiers from left to right. Numeric identifiers
-   precede alphanumeric identifiers; numeric identifiers compare numerically;
-   alphanumeric identifiers compare by ECL string order.
-4. When every shared identifier is equal, the shorter prerelease precedes the
-   longer one.
-
-The admitted grammar has a strict total order. Minimal version selection
-chooses among minimum versions declared by reachable manifests.
-
-### Manifest
-
-`ecl.pkg` has this shape:
-
-```ecl
-{'format 1
- 'name "my.proj"
- 'version "0.1.0"
- 'sources ["src/**/*.ecl"]
- 'exports ["my.proj"]
- 'requires
- {"statistics" {'package "foo"
-                 'version "1.2.0"
-                 'url "https://example.com/foo-1.2.0.tgz"
-                 'hash "sha256-<64 lowercase hex digits>"}}}
-```
-
-`'format` is the integer `1`. `'name` is the package's canonical name, and
-`'version` is its version. `'sources` lists portable source-file globs, and
-`'exports` lists exact public module names. `'requires` maps consumer-local aliases to requirements.
-
-A requirement contains exactly `'package`, `'version`, `'url`, and `'hash`.
-The version is a minimum. The URL begins with `https://`. The hash has the
-form `sha256-` followed by 64 lowercase hexadecimal digits. Aliases do not
-change ECL module names.
-
-Every dictionary key is declared by the format. A requirement cannot target
-the containing manifest's package. One consumer cannot target the same
-package through multiple aliases. Selected package names cannot overlap under
-the ownership rule below.
-
-Manifest values may contain ints, floats, chars, symbols, strings, lists, and
-dictionaries. An executable word anywhere in the value raises `'domain`.
-Comments are accepted by the reader and omitted by manifest rewrites.
-
-### Package names and exports
-
-A canonical package name contains dot-separated segments. Each segment
-matches `[a-z][a-z0-9-]*`. Every package name is also a valid module name.
-
-Package `foo` owns module namespaces `foo` and `foo.<rest>`. The ownership
-boundary is a dot, so `foo` owns `foo.bar` and excludes `foobar`.
-
-The source list contains distinct portable globs. Globs use relative
-`/`-separated paths and support `*`, `?`, and a whole-segment
-`**`. They exclude absolute paths, backslashes, and empty, `.`, or `..`
-segments. A glob may match no files; overlapping globs
-select a file only once. An empty source list is valid.
-
-Exports are distinct, exact, package-owned module names. Exporting a module
-does not export its dotted children. Each export must have one top-level
-literal declaration in the selected source files: a module-name symbol
-followed by `@defm`. A source file may export several modules, and every
-export maps to exactly one source file. File and directory names do not
-determine module names.
-
-Other registrations in a selected file are private to that file. They may
-use unrelated names and may be constructed dynamically with `@module` and
-`register`. Modules and their tests can use their defining file's private
-registrations. Other files cannot access those registrations, including files
-in the same package. Two files may independently register the same private
-name.
-
-Calling an exported module preserves the called code's defining-file
-visibility. Loading another file does not add its private registrations to
-the caller's environment. Module-authored quotations and module handles keep
-their defining-file context when passed elsewhere; passing such a value
-explicitly is distinct from making its private module name public.
-
-### Resolution
-
-`pkg.mvs.resolve` receives a validated root manifest and an exact-version
-manifest catalog:
-
-```ecl
-{"foo" {"1.2.0" <foo 1.2.0 manifest>
-        "1.5.0" <foo 1.5.0 manifest>}
- "bar" {"2.0.0" <bar 2.0.0 manifest>}}
-```
-
-Each outer key is a package name. Each inner key is a version, and the stored
-manifest has the same name and version. The root manifest is supplied
-separately.
-
-Resolution visits every exact `(package, version)` node reachable from the
-root requirements. It selects the greatest reachable declared minimum for each
-package and rejects an active-path requirement cycle. Unreachable catalog
-entries are ignored.
-
-The lock records the selected packages and every requirement edge from the
-root and selected manifests. Each selected version satisfies every recorded
-minimum.
-
-Traversal and diagnostics use canonical package, version, and requirer order.
-If declarations for one name and version share a hash and use different URLs,
-the lexicographically least URL is recorded. Different hashes conflict. A
-cycle reports its sorted distinct package names.
-
-Resolver failures use these messages and data fields:
-
-- malformed reachable version: `a reachable package version is malformed`,
-  with `'package`, `'required-package`, and `'version`;
-- missing manifest: `pkg.mvs.resolve is missing a declared manifest`, with
-  `'package`, `'required-package`, and `'version`;
-- hash conflict: `one package version has conflicting hashes`, with
-  `'package`, `'version`, `'left-package`, `'left-hash`, `'right-package`, and
-  `'right-hash`;
-- selected-prefix collision: `selected packages have overlapping prefixes`,
-  with `'left-package` and `'right-package`;
-- requirement cycle: `the package requirement graph has a cycle`, with
-  `'packages`.
-
-Wrong root and catalog containers retain their type diagnostics. Catalog
-identity mismatch reports `a catalog manifest must match its name and version
-keys`.
-
-### Lock file
-
-`ecl.lock` is derived project data with this shape:
-
-```ecl
-{'format 1
- 'root "my.proj"
- 'packages
- {"bar" {'version "0.3.0" 'url "https://…" 'hash "sha256-…"}
-  "foo" {'version "1.2.0" 'url "https://…" 'hash "sha256-…"}}
- 'requires
- {"foo" {"database" {'package "bar" 'version "0.3.0"}}
-  "my.proj" {"statistics" {'package "foo" 'version "1.2.0"}}}}
-```
-
-A cache-backed lock has exactly `'format`, `'root`, `'packages`, and
-`'requires`. A vendored lock also has `'store 'vendor`. No other store value
-is valid.
-
-`'packages` maps each selected package name to its version, URL, and hash.
-`'requires` maps each requiring package to its alias-to-minimum edges. The root
-always appears under its own name. A selected package with no requirements may
-be omitted from `'requires`.
-
-Package maps, requirer maps, and inner requirement maps use ascending key
-order. The writer uses canonical scalar spellings, places top-level and map
-entries on stable lines, and ends the file with a newline. Reading and writing
-a canonical lock reproduces its bytes. Lock rewrites omit comments.
-
-### Store and cache selection
-
-A store entry is the immutable directory
-`<name>-<version>-<hex>`, where `<hex>` is the package hash without its
-`sha256-` prefix. A present entry is reused and never overwritten.
-
-The shared store root is selected by the host, not by evaluated code, from
-the process environment at command startup:
-
-1. nonempty `ECL_CACHE` supplies the complete root;
-2. nonempty `XDG_CACHE_HOME` supplies `$XDG_CACHE_HOME/ecl/pkg`;
-3. nonempty `HOME` supplies `$HOME/.cache/ecl/pkg`;
-4. absence of all three leaves the `'cache` store unavailable, and the first
-   store operation that needs it fails with `'io` naming the three variables.
-
-An empty environment value is treated as absent. A relative selection is
-resolved once against the working directory captured at command startup.
-Package commands that may install (`add`, `sync`) create an absent cache
-directory at startup; read-only commands leave absence visible. A
-package-command Session holds the selected cache and the project's `vendor`
-directory as retained handles behind an opaque package authority; `pkg.store`
-words name a store as `'cache` or `'vendor` and an entry by canonical key. The
-vendor store is always the entry named `vendor` directly inside the discovered
-project root, opened without following a symlink; a project whose `vendor` is
-a link is rejected when the command starts, and no store is ever opened
-behind it. `pkg.store.present?` returns `0` for an absent
-entry and `1` for a real directory. Symlinks, other node kinds, access denial,
-and probe failures raise `'io` with the key as `'path`.
-
-### Package archives and publication
-
-A package artifact is a gzip-compressed tar byte list satisfying the archive
-rules above and these additional rules:
-
-- exactly one regular root file is named `ecl.pkg`;
-- the manifest is valid UTF-8 and valid format-1 package data;
-- ordinary directories and data files are allowed;
-- `.eclmod` files, links, and special nodes are forbidden;
-- the root names `.ecl-package.tgz` and `.ecl-package.catalog` are reserved;
-- every exported source file satisfies the manifest's glob, namespace,
-  uniqueness, and parse requirements.
-
-Installation parses package source to build the module catalog and never
-evaluates it. It writes `.ecl-package.catalog` into the staging directory before
-publication. The deterministic inert record carries its format, package name
-and version, actual archive SHA-256, selected relative source paths, and exact
-export mappings, including selected files without exports. Absolute paths and
-Session identities are never stored.
-
-`pkg.store.inspect` performs the full archive and package-layout scan and
-returns the exact root manifest text without creating a destination.
-`pkg.store.install` repeats validation at the mutation boundary, extracts to a
-unique sibling staging directory, and publishes with an absent-destination
-rename. It returns regular-file paths after commit. A destination conflict
-raises `'io` with `'destination-exists 1`; a caller may accept a concurrent
-winner after `present?` confirms a real directory.
-
-Each installed entry retains its source archive as a reserved seal.
-`pkg.store.verify` streams the seal, compares its SHA-256 with the lock, and
-compares the persisted catalog with one freshly derived from installed sources.
-It is read-only. `pkg.store.read-seal` verifies and returns the exact seal bytes
-independently of catalog metadata. It accepts no caller-selected child path.
-
-`pkg.store.ensure-catalog` accepts a store, key, package name, and expected hash.
-A valid current-format catalog requires no rebuild. Otherwise it verifies the
-retained archive seal and validates the installed source tree before atomically
-replacing the metadata. Failure or cancellation preserves prior metadata.
-Synchronization ensures catalogs for every selected existing cache or vendor
-entry before publishing the lock, including offline synchronization. Concurrent
-repairs publish complete equivalent metadata; dependency sources remain immutable.
-
-Project files are published through the `'project` filesystem root:
-`pkg.sync.write-project-file` uses `fs.create-text` for an absent file and the
-strict `fs.replace-text` otherwise, so a racing collision surfaces as the `fs`
-failure rather than becoming an upsert. Both publish through a private staging
-entry and preserve the prior file until the atomic commit.
-
-The package store exposes no general filesystem handles, recursive deletion,
-copy, rename, absolute path, or caller-selected garbage-collection root.
-
-### Synchronization
-
-`pkg.sync.run` receives a root manifest and performs a discovery pass followed
-by an installation pass inside a package-command Session, using the store the
-project lock selects.
-
-The discovery pass visits exact requirements in canonical order. A present
-store entry supplies its manifest locally through `pkg.store.manifest`. A
-missing entry is fetched with
-`http.get-bytes`; synchronization requires a successful status, computes the
-archive hash before inspection, validates the archive manifest, checks its
-exact package identity, and follows its requirements.
-
-HTTP status failure raises `'io` with `'package`, `'url`, and `'status`. Hash
-mismatch raises `'domain` with `'package`, `'declared-hash`, and
-`'actual-hash`. Manifest identity mismatch raises `'domain` with requested and
-actual names and versions. Archive errors carry the package and member when
-available. Discovery failure installs nothing and leaves the lock unchanged.
-
-After resolution, the installation pass visits selected packages in canonical
-order. It re-fetches each missing selection, repeats status, hash, archive, and
-identity validation, and installs the entry. Repeating verification at the
-publication boundary limits retained archive memory and makes the installer
-independent of discovery state.
-
-Synchronization writes `ecl.lock` only after every selected entry is present.
-It renders the lock once and publishes it with `pkg.sync.write-project-file`.
-Failure preserves the previous lock. Immutable entries installed before a later
-failure remain available for a subsequent run.
-
-`pkg.sync.run-offline` performs the same discovery, resolution, and
-publication using present store entries. It opens no network request.
-
-### Runtime module resolution
-
-A session without a discovered project resolves embedded modules and then
-uses `ECL_PATH`.
-
-A session with a discovered project resolves embedded modules and then uses
-its immutable lock-derived catalog. `ECL_PATH` is excluded from project
-resolution. A cache-backed lock uses the selected shared store; a vendored
-lock uses `<project-root>/vendor` and ignores cache environment variables.
-
-Session startup imports dependency catalogs after checking format and identity
-against the lock, assigning fresh package and artifact identities. Only root
-project sources are discovered dynamically. Missing, malformed, or incompatible
-metadata raises a package-specific error directing the user to `ecl pkg sync`;
-startup never scans dependency sources, writes repairs, or uses a legacy format.
-Source execution remains lazy: first use opens the required source artifact.
-
-The catalog maps each module to an exact package entry and source path. A
-missing selected directory raises `'io` and directs the user to `ecl pkg
-sync`. A module unavailable in the defining file and public catalog, or an
-export outside the current package's direct requirements, raises `'undefined-word`. Package lookup never falls through to
-`ECL_PATH` and never performs network or package writes.
-
-Runtime package visibility is lexical. Root and package code can resolve exports from their
-own package and packages named by their direct requirement edges. Loading a
-transitive package into the shared registry does not grant visibility to an
-unrelated caller.
-
-One source artifact is evaluated once. Its cataloged registrations and package
-provenance are verified before commit. Other files cannot resolve
-exports from an uncommitted artifact; the file being evaluated can use its
-own registrations as they are created.
-
-Runtime lookup uses these stable diagnostics:
-
-- missing entry: `locked package <package> is missing from the package store;
-  run ecl pkg sync`;
-- unavailable cache root: `locked package <package> has no package store; set
-  ECL_CACHE, XDG_CACHE_HOME, or HOME before running ecl pkg sync`;
-- failed entry probe: `cannot inspect locked package <package> in the package
-  store: <host-error>; run ecl pkg sync`;
-- invalid entry node: `locked package <package> is not a real package-store
-  directory; run ecl pkg sync`;
-- absent source: `locked module <module> is absent from package <package>`.
-
-The first four raise `'io`; the final message raises `'undefined-word`. An
-invalid discovered lock raises `'io` prefixed by `invalid project lock
-<path>:`.
-
-### Vendoring and cache collection
-
-`ecl pkg vendor` verifies every selected entry's seal and installs it at
-`<project-root>/vendor/<store-key>`. Existing vendor entries have their catalogs ensured, then their seals and
-catalog mappings verified; their source trees are preserved. After every entry is present, the command atomically rewrites the
-lock with `'store 'vendor`. Failure preserves the prior lock and may leave
-valid immutable entries for reuse. Repetition is idempotent.
-
-`ecl pkg gc <lock-file> [lock-file ...]` parses each named lock without
-evaluation and retains the union of their selected store keys. Each lock file
-is a canonical relative path beneath the working directory; an absolute or
-escaping path is a `'domain` error. Collection uses the shared cache the host
-selected at startup and preserves retained keys, symlinks, non-directory
-nodes, and unknown child names.
-
-An unretained real directory with a canonical store-key name is renamed to a
-private `.ecl-gc-*` name and deleted through bounded work without following
-links. A later collection finishes interrupted private entries. The reported
-count includes live entries detached by the current invocation.
-
-### Package commands
-
-`ecl pkg` dispatches to the ordinary `pkg.*` modules inside a package-command
-Session. Every command except `init` and `gc` uses project discovery and
-grants the discovered root to evaluated code as the `'project` filesystem root
-with `read-data`, `inspect`, `create`, and `replace`; the discovered path
-itself never enters evaluated code. `init` acts on the `'cwd` root.
-
-- `init [name]` creates `src/` and a format-1 manifest at version `0.1.0`, with
-  `sources ["src/**/*.ecl"]` and no exports. An existing source directory is
-  preserved. The working directory basename supplies the default name.
-  Manifest creation never replaces an existing or racing file.
-- `add <name> <version> <url>` fetches and validates an exact package, derives
-  its hash, and records the requirement through an atomic manifest rewrite.
-- `sync` performs network-enabled synchronization. `sync --offline` uses only
-  immutable store entries.
-- `tree` prints the lock root and dependency edges in requirer/package order.
-- `why <module>` prints one deterministic root-to-owner path.
-- `verify` streams and hashes every selected package seal and compares its
-  catalog with installed sources, without writes or network access.
-- `vendor` creates or verifies the project-local store and marks the lock as
-  vendored.
-- `gc <lock-file> [lock-file ...]` collects the shared cache against one or
-  more explicitly named locks.
-
-Successful package commands produce stable line-oriented output. Package and
-host failures remain structured ECL errors rendered by the process boundary.
+Both paths are nonempty UTF-8 paths beneath the application's directory,
+without empty, dot, parent, drive, or backslash components. Descriptors are
+limited to 16 KiB and entry source to 16 MiB. Unknown fields and unsupported
+formats are errors. A descriptor is data and executes no code.
+
+The entry script runs in an ordinary Session using the application's map.
+The caller's working directory, trailing arguments, environment, and standard
+streams are preserved, including standard input as data. The caller's project
+map, including an explicitly selected map, does not replace the application
+map. A malformed project therefore cannot prevent application startup. The
+application and its artifacts must be installed directly; startup does not
+fetch, synchronize, or bootstrap them through a package manager.
 
 ## The `ecl` command
 
@@ -845,15 +736,13 @@ The command reads these environment variables at startup:
 - `ECL_WORKERS` supplies a positive base-10 worker count and defaults to the
   CPU count;
 - `ECL_NATIVE_DIAGNOSTICS` enables native-loading diagnostics when present;
-- `ECL_CACHE`, `XDG_CACHE_HOME`, and `HOME` participate in package cache
-  selection as described above;
-- `HOME` also selects the REPL history path `.ecl_history`.
+- `HOME` selects the REPL history path `.ecl_history`.
 
 ### Standard input
 
 `io.stdin` is available in `-e` and script-file modes. It reads the complete
 input stream once. There is no ambient file access: file words live in `fs`
-and act beneath the `'cwd` root. Standard input carries program source in `ecl -` and in
+and act beneath the selected named root or directory resource. Standard input carries program source in `ecl -` and in
 non-terminal invocation with no arguments, so `io.stdin` raises `'io` in those
 modes. A second read also raises `'io`.
 
@@ -870,9 +759,8 @@ editor remains usable.
 
 ### Test command
 
-`ecl test` requires a lock-backed root project. It loads every source file
-selected by the root package's `sources`, including files with no exported
-modules, discovers their declared tests, and invokes the selected runner in a
+`ecl test` requires a module map with a designated local scope. It loads every
+ECL artifact in that scope, including files with no exported modules, discovers their declared tests, and invokes the selected runner in a
 Test Session. Each source artifact is loaded once, including when an earlier
 source already loaded it through an exported module. Private modules keep
 their defining-file visibility. Dependency sources are loaded only as needed.
@@ -918,3 +806,11 @@ The canonical layout follows these rules:
 - Navigation headers are derived from structural terminators. Existing header
   text is normalized. Dictionary-contained forms are excluded from header
   recognition.
+
+### Git dependency acquisition
+
+Git snapshot acquisition is provided by the independently loaded
+[Git extension](../extensions/git/README.md), built against the public native
+SDK. It accepts HTTPS source requests and streams deterministic archives. It
+has no package or installation policy; the package application validates the
+result using public archive and source-inspection facilities.

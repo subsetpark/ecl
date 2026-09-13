@@ -5,6 +5,118 @@ characterizations through public runtime surfaces. They are not portable
 constants. Regenerate a baseline on the target under discussion rather than
 copying timings from this file.
 
+The subsequent [direct filesystem measurements](performance/runtime-overhead.md#direct-filesystem-runtime)
+compare the restored direct runtime with both the pre-SDK baseline and the
+optimized SDK predecessor. The cutover measurements below remain historical
+evidence of the regression that motivated that change.
+
+## Complete bundled SDK cutover — 2026-09-13
+
+Zig 0.16.0, ReleaseSafe, native x86_64 Linux (kernel 7.1.9-1-MANJARO).
+The baseline is `8aae611`; the final build is `729304f` with the final child
+failure and filesystem publication fixes. Both use the unchanged public harness
+in `test/service_benchmark.py`. The final binary was built with `-Dapps=false`.
+Each workload has one warmup followed by five fresh processes, with other build
+and test jobs stopped. Times include startup and joined shutdown. Interpreter
+thread and peak RSS samples use `/proc` at 1 ms intervals; controlled peers and
+subprocesses are excluded.
+
+Filesystem directory creation retains 256 resources at once, repeated 16 times.
+Stat performs 10000 requests; reading transfers 64 files of 65536 bytes each.
+Staging cleanup creates and abandons eight trees of 128 empty directories.
+Network and process workloads are the same 32-resource workloads described below.
+
+| Workload | Backend | Seconds, five runs | Peak threads, five runs | Peak RSS KiB, five runs |
+|---|---|---|---|---|
+| filesystem-directory-resources | Interpreter | 0.433426, 0.485983, 0.498439, 0.612899, 0.886914 | 15, 15, 15, 15, 15 | 10548, 10328, 10428, 10276, 10340 |
+| filesystem-directory-resources | SDK | 3.786572, 3.784034, 4.161821, 3.768813, 4.445691 | 16, 16, 16, 16, 16 | 16376, 16344, 16372, 16360, 16336 |
+| filesystem-stat | Interpreter | 0.284972, 0.261406, 0.188306, 0.196192, 0.225153 | 1, 1, 1, 1, 1 | 5640, 5640, 5640, 5636, 5620 |
+| filesystem-stat | SDK | 33.685874, 41.609647, 41.624559, 33.266978, 33.206145 | 16, 16, 16, 16, 16 | 15032, 14864, 14936, 14896, 14892 |
+| filesystem-read | Interpreter | 0.040651, 0.048895, 0.044235, 0.036711, 0.043362 | 1, 1, 1, 1, 1 | 6048, 6048, 6048, 6044, 6048 |
+| filesystem-read | SDK | 0.515348, 0.510924, 0.489109, 0.491748, 0.483576 | 16, 16, 16, 16, 16 | 17912, 18060, 17692, 17708, 17708 |
+| filesystem-staging-cleanup | Interpreter | 0.281021, 0.277044, 0.295301, 0.298383, 0.347684 | 15, 15, 15, 15, 15 | 10372, 10400, 10336, 10404, 10404 |
+| filesystem-staging-cleanup | SDK | 3.376790, 4.180538, 4.685909, 4.935143, 4.742647 | 16, 16, 16, 16, 16 | 15404, 15356, 15236, 15232, 15376 |
+| network-connections | Interpreter | 0.365955, 0.274239, 0.284627, 0.325775, 0.357771 | 148, 148, 148, 148, 148 | 51116, 51124, 51120, 51136, 51312 |
+| network-connections | SDK | 0.176929, 0.175796, 0.179605, 0.163857, 0.161131 | 147, 147, 147, 147, 147 | 58228, 58232, 58232, 58208, 58260 |
+| process-duplex | Interpreter | 2.148608, 2.357761, 2.209333, 2.126780, 2.045827 | 220, 240, 237, 240, 240 | 81356, 81832, 82180, 82244, 82672 |
+| process-duplex | SDK | 2.318282, 1.790505, 2.147240, 2.020890, 2.159044 | 224, 218, 225, 234, 229 | 89016, 88476, 88520, 90356, 90148 |
+
+| Workload | Baseline median throughput | SDK median throughput |
+|---|---|---|
+| filesystem-directory-resources | 8217.7 units/s | 1081.7 units/s |
+| filesystem-stat | 44414.3 units/s | 296.9 units/s |
+| filesystem-read | 96727295.9 bytes/s | 8529371.4 bytes/s |
+| filesystem-staging-cleanup | 3467.6 units/s | 218.5 units/s |
+| network-connections | 98.2 units/s | 182.0 units/s |
+| process-duplex | 14.9 units/s | 14.9 units/s |
+
+The filesystem cutover regresses these workloads substantially: median elapsed
+time increases about 7.6× for directory resources, 150× for stat, 11.3× for reads,
+and 15.9× for staging cleanup. It also increases peak memory. Cooperative native
+work starts the shared scheduler pool and timer service; the old scalar stat
+and read paths used one thread in these workloads. The directory test still
+peaks at 16 threads with 256 simultaneously retained resources, confirming that
+filesystem resource creation introduces no per-resource controller thread.
+These measurements establish the regression, not an isolated causal profile.
+
+Every measured run verified its result and completed joined cleanup without a
+private `.ecl-fs-*` entry or abandoned destination. The final network median is
+0.176 s versus 0.326 s at baseline; process median is 2.147 s versus 2.149 s.
+Both consume more interpreter memory than baseline. Earlier intermediate
+network/process timings below are separate measurements and should not be
+substituted for the complete-cutover results.
+
+## Bundled network SDK migration — 2026-09-12
+
+Zig 0.16.0, ReleaseSafe, native x86_64 Linux (kernel 7.1.9-1-MANJARO).
+The baseline is `8aae611`; the SDK row is the network cutover together with
+its preceding common native-lifecycle changes. Each row has one warmup and five
+fresh CLI processes, with other build and test jobs stopped. The SDK binary was
+built with `-Dapps=false`, exercising bundled availability without applications.
+
+The public workload accepts 32 controlled loopback peers, retains all connections,
+closes their listener, then reads one byte and joins each connection's cleanup.
+It includes interpreter startup and shutdown. Thread and peak interpreter RSS
+samples come from `/proc` at 1 ms intervals; the host fixture is excluded. These
+measurements characterize this short lifecycle workload, not bulk TCP throughput.
+
+| Backend | Elapsed seconds, five runs | Peak threads, five runs | Peak RSS KiB, five runs |
+|---|---|---|---|
+| Interpreter network service | 0.365955, 0.274239, 0.284627, 0.325775, 0.357771 | 148, 148, 148, 148, 148 | 51116, 51124, 51120, 51136, 51312 |
+| Bundled SDK descriptor | 0.107063, 0.112998, 0.107756, 0.118275, 0.106031 | 147, 147, 147, 147, 147 | 57600, 57532, 57532, 57532, 57532 |
+
+Peak memory increased by about 6.3 MiB in this workload. The public network suite
+separately verifies immediate rebinding after joined close, independent accepted
+connections, reset handling, cancellation, capacity waiting, and backpressure.
+`test/service_benchmark.py --workload network-connections` reproduces the harness;
+its positional arguments are the ReleaseSafe binary and output JSON, followed by
+`--commit <source-revision>`.
+
+## Bundled process SDK migration — 2026-09-12
+
+Zig 0.16.0, ReleaseSafe, native x86_64 Linux (kernel 7.1.9-1-MANJARO).
+The baseline is `8aae611`; the SDK row is `47968e4` plus the process cutover.
+The SDK binary uses `-Dapps=false`. Each row has one warmup and five fresh CLI
+processes, with other build and test jobs finished during measurement.
+
+The public workload starts 32 concurrent `/bin/cat` processes through `proc.run`,
+sends 4096 bytes to each, concurrently captures their outputs, checks all returned
+lengths, and joins cleanup. Times include interpreter startup and shutdown. The
+1 ms `/proc` samples count interpreter threads and RSS, excluding child processes.
+This measures short process lifecycle and duplex transfer, not bulk pipe throughput.
+
+| Backend | Elapsed seconds, five runs | Peak threads, five runs | Peak RSS KiB, five runs |
+|---|---|---|---|
+| Interpreter process service | 2.148608, 2.357761, 2.209333, 2.126780, 2.045827 | 220, 240, 237, 240, 240 | 81356, 81832, 82180, 82244, 82672 |
+| Bundled SDK descriptor | 1.029935, 0.770128, 1.105366, 1.020238, 1.064394 | 219, 223, 234, 228, 219 | 85540, 87324, 90460, 87792, 86444 |
+
+Median elapsed time decreased from 2.149 s to 1.030 s; median peak interpreter
+RSS increased from 80.3 MiB to 85.3 MiB. The SDK supervisor owns the escalation
+deadline alongside reaping, with four declared activities per process. Public
+acceptance separately verifies process-group cleanup, cancellation, bounded
+capture, and preservation of backpressured output after natural exit.
+`test/service_benchmark.py --workload process-duplex` reproduces this workload.
+
 ## Further compile-time trials — 2026-09-11
 
 These incremental trials start at `5922754`, using the same Zig 0.16.0,

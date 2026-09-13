@@ -92,10 +92,10 @@ tier.
 - **Release candidate: `.github/workflows/release-candidate.yml`.** A manual
   exhaustive superset of the pull-request and post-merge matrices, plus the
   initialized-Session OOM sweeps and complete ReleaseFast suite, run once
-  against a candidate commit. Core, standard-library, package, and host OOM
-  families use independent runners and wall-clock budgets, and the dominant
-  package-sync operation partitions its allocation ordinals across four more
-  runners. A compile-only producer publishes their one shared ReleaseSafe Zig
+  against a candidate commit. Core, standard-library, module-map, and host OOM
+  families use independent runners and wall-clock budgets. Package policy runs
+  through the maintained application's ECL acceptance; allocation lifetimes
+  are covered at the public module, archive, filesystem, and native boundaries. A compile-only producer publishes their one shared ReleaseSafe Zig
   cache before those runners start. Its separate `oom` namespace prevents a
   parallel general job from claiming the immutable cache key first while still
   allowing the producer to restore a general ReleaseSafe cache as a fallback.

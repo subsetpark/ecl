@@ -267,7 +267,7 @@ fn startRequest(evaluator: *machine.Machine, comptime role: @import("../value.zi
     }
     const driver = try evaluator.allocator().create(Request);
     errdefer evaluator.allocator().destroy(driver);
-    const validated = try message.Message.create(evaluator.allocator(), input.borrow(), .{});
+    const validated = try message.Message.create(evaluator.allocator(), input.borrow(), if (role == .factory) factory.?.messageLimits() else operation_selector.?.messageLimits());
     driver.* = .{
         .capability = capability.take(),
         .kind = if (role == .operation_selector)
@@ -288,17 +288,19 @@ const Request = struct {
         operation: struct { resource: Value, selector: *exchanges.Selector },
     },
     message: *message.Message,
-    state: union(enum) { validating, ready, preparing: *factories.Opening, opening: Value, consumed } = .validating,
+    state: union(enum) { validating, ready, preparing: *factories.Opening, opening: Value, failed_open: struct { resource: Value, failure: @import("../port_error_data.zig").Observation }, consumed } = .validating,
 
     pub fn deinit(self: *Request, releases: *heap.ReleaseDomain, _: std.mem.Allocator) void {
-        switch (self.state) {
-            .opening => |item| {
-                Resource.fromValue(item).?.close();
-                releases.releaseValue(item);
-            },
-            .preparing => |opening| opening.release(),
-            .validating, .ready, .consumed => {},
+        const pending: ?Value = switch (self.state) {
+            .opening => |item| item,
+            .failed_open => |failed| failed.resource,
+            .preparing, .validating, .ready, .consumed => null,
+        };
+        if (pending) |item| {
+            Resource.fromValue(item).?.close();
+            releases.releaseValue(item);
         }
+        if (self.state == .preparing) self.state.preparing.release();
         self.message.retire(releases);
         releases.releaseValue(self.capability);
         switch (self.kind) {
@@ -332,6 +334,15 @@ const Request = struct {
             }
             return .yielded;
         }
+        if (self.state == .failed_open) {
+            const failed = self.state.failed_open;
+            const resource = Resource.fromValue(failed.resource).?;
+            if (!resource.joined()) {
+                try evaluator.park(.{ .external = resource.source() });
+                return .yielded;
+            }
+            return evaluator.failWithErrorData(failed.failure);
+        }
         if (self.state == .opening) {
             const item = self.state.opening;
             const resource = Resource.fromValue(item).?;
@@ -340,7 +351,11 @@ const Request = struct {
                     try evaluator.park(.{ .external = source });
                     return .yielded;
                 },
-                .failed => |failure| return transportFailure(evaluator, failure),
+                .failed => |failure| {
+                    resource.close();
+                    self.state = .{ .failed_open = .{ .resource = item, .failure = failure } };
+                    return .yielded;
+                },
                 .ready => {
                     const output = try evaluator.reserveStack(1);
                     self.state = .consumed;
@@ -377,10 +392,7 @@ const Request = struct {
 };
 
 fn factoryFailure(evaluator: *machine.Machine, failure: factories.Failure) machine.MachineError {
-    return switch (failure.report) {
-        .out_of_memory => error.OutOfMemory,
-        .report => |report| evaluator.failWithDetails(report.kind, report.message[0..report.len], failure.details),
-    };
+    return evaluator.failWithErrorData(failure);
 }
 fn transportFailure(evaluator: *machine.Machine, failure: bytes.Failure) machine.MachineError {
     return switch (failure) {
@@ -475,13 +487,13 @@ const Observe = struct {
                         .value => |item| return output.output(item),
                         .claimed => return evaluator.fail(.contract, "exchange result has already been claimed"),
                         .cancelled => return evaluator.fail(.cancelled, "exchange was cancelled"),
-                        .failed => |failure| return transportFailure(evaluator, failure),
+                        .failed => |failure| return evaluator.failWithErrorData(failure),
                     }
                 } else switch (exchange.completion()) {
                     .pending => try evaluator.park(.{ .external = exchange.source(.completion) }),
                     .ready => return .completed,
                     .cancelled => return evaluator.fail(.cancelled, "exchange was cancelled"),
-                    .failed => |failure| return transportFailure(evaluator, failure),
+                    .failed => |failure| return evaluator.failWithErrorData(failure),
                 }
             },
         }

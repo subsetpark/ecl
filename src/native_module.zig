@@ -12,6 +12,32 @@ const supported_platform = builtin.os.tag == .macos or
     (builtin.os.tag == .linux and builtin.link_libc and
         !(builtin.abi == .musl and builtin.link_mode == .static));
 
+/// Host-only registration policy. Input strings are copied by Owner.initConfigured;
+/// neither ECL factory arguments nor extension callbacks can select a policy.
+pub const Configuration = struct {
+    name: []const u8,
+    /// A linked descriptor and its code must remain immutable and alive for the
+    /// whole Session. It is validated lazily through the ordinary native loader.
+    registration: union(enum) {
+        deferred: ?*const abi.Descriptor,
+        eager: *const abi.Descriptor,
+    } = .{ .deferred = null },
+    bytes: []const u8 = "",
+    memory_limit: usize = 64 * 1024 * 1024,
+    port_limits: ?native_port.Limits = null,
+};
+const OwnedConfiguration = struct {
+    name: intern.ModuleName,
+    registration: union(enum) {
+        deferred: ?*const abi.Descriptor,
+        pending: *const abi.Descriptor,
+        initialized: struct { descriptor: *const abi.Descriptor, instance: *ModuleInstance },
+    },
+    bytes: []u8,
+    memory_limit: usize,
+    port_limits: ?native_port.Limits,
+};
+
 pub const LoadFailure = struct {
     bytes: [512]u8 = [_]u8{0} ** 512,
     len: usize = 0,
@@ -93,6 +119,8 @@ pub const LoadCursor = struct {
             image: ImagePin,
             validator: descriptor_api.ValidateCursor,
         },
+        initializing: *ModuleInstance,
+        cached: *ModuleInstance,
         complete,
     };
 
@@ -121,13 +149,49 @@ pub const LoadCursor = struct {
                 validating.validator.deinit();
                 validating.image.close();
             },
+            .initializing, .cached => |instance| instance.releasePin(),
             .complete => {},
         }
         self.state = .complete;
     }
 
     pub fn advance(self: *LoadCursor, budget: usize) error{OutOfMemory}!LoadProgress {
-        std.debug.assert(self.state == .validating and budget != 0);
+        std.debug.assert(self.state != .complete and budget != 0);
+        if (self.state == .cached) {
+            const instance = self.state.cached;
+            self.state = .complete;
+            return .{ .loaded = instance };
+        }
+        if (self.state == .initializing) {
+            const instance = self.state.initializing;
+            const state = instance.mutableState();
+            const lifecycle = switch (state.lifecycle) {
+                .stateless => {
+                    self.state = .complete;
+                    return .{ .loaded = instance };
+                },
+                .initializing => |lifecycle| lifecycle,
+                .initialized => unreachable,
+            };
+            const table = state.instanceTable();
+            switch (lifecycle.definition.initialize(lifecycle.storage.ptr, &table, state, @intCast(@min(budget, 256)))) {
+                .pending => return .pending,
+                .complete => {
+                    const completed = state.lifecycle.initializing;
+                    state.lifecycle = .{ .initialized = completed };
+                    self.state = .complete;
+                    return .{ .loaded = instance };
+                },
+                .out_of_memory => {
+                    self.deinit();
+                    return error.OutOfMemory;
+                },
+                .failed, _ => {
+                    self.deinit();
+                    return .{ .failure = .init("native instance initialization failed", .{}) };
+                },
+            }
+        }
         const validating = &self.state.validating;
         const progress = validating.validator.advance(budget) catch |err| switch (err) {
             error.OutOfMemory => {
@@ -158,8 +222,12 @@ pub const LoadCursor = struct {
                     .descriptor = descriptor,
                 } };
                 const initialized = initialize(validated);
-                const published = publish(initialized) catch return error.OutOfMemory;
-                break :complete .{ .loaded = published.published };
+                const published = publish(initialized) catch |err| return switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    error.InvalidConfiguration => .{ .failure = .init("native resource policy is incompatible with its descriptor", .{}) },
+                };
+                self.state = .{ .initializing = published.published };
+                break :complete .pending;
             },
         };
     }
@@ -174,7 +242,7 @@ fn initialize(loading: Loading) Loading {
     } };
 }
 
-fn publish(loading: Loading) error{OutOfMemory}!Loading {
+fn publish(loading: Loading) error{ OutOfMemory, InvalidConfiguration }!Loading {
     var initialized = loading.initialized;
     const owner = initialized.loader.owner();
     const state_value = owner.state().host.allocator().create(InstanceState) catch |err| {
@@ -187,7 +255,33 @@ fn publish(loading: Loading) error{OutOfMemory}!Loading {
         .owner = owner,
         .image = initialized.image,
         .descriptor = initialized.descriptor,
+        .memory = .{ .context = state_value, .allocate = InstanceState.allocateNative, .release = InstanceState.releaseNative },
     };
+    errdefer {
+        initialized.descriptor.deinit();
+        initialized.image.close();
+        owner.state().host.allocator().destroy(state_value);
+    }
+    if (owner.state().configuration(initialized.descriptor.name())) |configuration| {
+        state_value.configuration = configuration.bytes;
+        state_value.memory_limit = configuration.memory_limit;
+        if (configuration.port_limits) |limits| {
+            state_value.private_ports = owner.state().ports.initInstance(limits, initialized.descriptor) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidLimits => return error.InvalidConfiguration,
+            };
+        }
+    }
+    errdefer if (state_value.private_ports) |ports| ports.deinit();
+    if (initialized.descriptor.instance()) |definition| {
+        const storage = try state_value.host.allocator().alignedAlloc(u8, .@"64", definition.state_size);
+        definition.init_state(storage.ptr);
+        state_value.lifecycle = .{ .initializing = .{ .definition = definition, .storage = storage } };
+    }
+    std.Io.Threaded.mutexLock(&owner.state().retired_mutex);
+    state_value.next = owner.state().instances;
+    owner.state().instances = state_value;
+    std.Io.Threaded.mutexUnlock(&owner.state().retired_mutex);
     _ = owner.state().live_instances.fetchAdd(1, .monotonic);
     return .{ .published = @ptrCast(state_value) };
 }
@@ -203,6 +297,88 @@ const InstanceState = struct {
     overrun_count: std.atomic.Value(u64) = .init(0),
     diagnostic_emitted: std.atomic.Value(bool) = .init(false),
     retired_next: ?*InstanceState = null,
+    next: ?*InstanceState = null,
+    private_ports: ?*native_port.Owner = null,
+    configuration: []const u8 = "",
+    memory_limit: usize = 64 * 1024 * 1024,
+    memory_used: usize = 0,
+    memory_mutex: std.Io.Mutex = .init,
+    memory: abi.NativeMemory,
+    retirement: heap.ReleaseDomain.Retirement = .{},
+    lifecycle: union(enum) {
+        stateless,
+        initializing: Stateful,
+        initialized: Stateful,
+    } = .stateless,
+
+    const Stateful = struct {
+        definition: abi.InstanceDefinition,
+        storage: []align(64) u8,
+        endpoint_capacities: [abi.max_port_definitions]?*[64]usize = .{null} ** abi.max_port_definitions,
+    };
+    fn portOwner(self: *const InstanceState) *native_port.Owner {
+        return self.private_ports orelse self.owner.state().ports;
+    }
+    fn configureEndpoint(raw: *anyopaque, identity: *const anyopaque, endpoint_id: u32, capacity_wire: u64) callconv(.c) abi.InstanceProgress {
+        const self: *InstanceState = @ptrCast(@alignCast(raw));
+        const capacity = std.math.cast(usize, capacity_wire) orelse return .failed;
+        if (self.refs.load(.acquire) == 0 or endpoint_id >= 64 or capacity == 0 or capacity > self.portOwner().ringCapacityLimit()) return .failed;
+        const lifecycle = switch (self.lifecycle) {
+            .initializing => |*value| value,
+            else => return .failed,
+        };
+        var kind: u32 = 0;
+        while (kind < abi.max_port_definitions) : (kind += 1) {
+            const definition = self.descriptor.port(kind) orelse return .failed;
+            if (definition.wire.identity != identity) continue;
+            const endpoint = self.descriptor.endpoint(kind, @intCast(endpoint_id), .resource) orelse return .failed;
+            if (endpoint.transport != .bytes) return .failed;
+            const page = lifecycle.endpoint_capacities[kind] orelse allocation: {
+                const created = self.host.allocator().create([64]usize) catch return .out_of_memory;
+                created.* = .{0} ** 64;
+                lifecycle.endpoint_capacities[kind] = created;
+                break :allocation created;
+            };
+            page[endpoint_id] = capacity;
+            return .complete;
+        }
+        return .failed;
+    }
+    fn instanceTable(self: *InstanceState) abi.InstanceTable {
+        return .{ .configuration_ptr = self.configuration.ptr, .configuration_len = self.configuration.len, .memory = &self.memory, .configure_endpoint = configureEndpoint };
+    }
+    pub fn advanceRetirement(_: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *InstanceState) bool {
+        switch (self.lifecycle) {
+            .stateless => {},
+            .initializing, .initialized => |lifecycle| {
+                const table = self.instanceTable();
+                if (!lifecycle.definition.retire(lifecycle.storage.ptr, &table, self, 256)) return false;
+                for (lifecycle.endpoint_capacities) |page| if (page) |storage| allocator.destroy(storage);
+                allocator.free(lifecycle.storage);
+                self.lifecycle = .stateless;
+            },
+        }
+        self.owner.enqueueRetired(self);
+        return true;
+    }
+    fn allocateNative(raw: *anyopaque, size: u64) callconv(.c) ?[*]align(64) u8 {
+        const self: *InstanceState = @ptrCast(@alignCast(raw));
+        const length = std.math.cast(usize, size) orelse return null;
+        if (self.refs.load(.acquire) == 0) return null;
+        std.Io.Threaded.mutexLock(&self.memory_mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.memory_mutex);
+        if (length > self.memory_limit - self.memory_used) return null;
+        const bytes = self.host.allocator().alignedAlloc(u8, .@"64", length) catch return null;
+        self.memory_used += length;
+        return bytes.ptr;
+    }
+    fn releaseNative(raw: *anyopaque, bytes: [*]align(64) u8, size: u64) callconv(.c) void {
+        const self: *InstanceState = @ptrCast(@alignCast(raw));
+        std.Io.Threaded.mutexLock(&self.memory_mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.memory_mutex);
+        self.host.allocator().free(bytes[0..@intCast(size)]);
+        self.memory_used -= @intCast(size);
+    }
 };
 
 /// Nominal code-image and validated-metadata pin. Bindings can retain/release
@@ -230,7 +406,8 @@ pub const ModuleInstance = opaque {
     }
 
     /// Releases one image pin. Reaching the final pin performs only an O(1)
-    /// intrusive enqueue; descriptor destruction and dlclose require the
+    /// intrusive enqueue; bounded state cleanup runs through the issuing
+    /// retirement domain. Descriptor destruction and dlclose require the
     /// Session-owned `Owner.settle` authority.
     pub fn releasePin(self: *ModuleInstance) void {
         const state_value = self.mutableState();
@@ -238,7 +415,7 @@ pub const ModuleInstance = opaque {
         std.debug.assert(prior != 0);
         if (prior != 1) return;
         _ = state_value.refs.load(.acquire);
-        state_value.owner.enqueueRetired(state_value);
+        heap.hostDomain(state_value.host).retire(state_value, &state_value.retirement);
     }
 
     pub fn definitionCount(self: *const ModuleInstance) usize {
@@ -296,7 +473,28 @@ pub const ModuleInstance = opaque {
     }
 
     pub fn portAccess(self: *const ModuleInstance) *native_port.Access {
+        if (self.state().private_ports) |ports| return ports.access();
         return self.state().owner.state().ports.access();
+    }
+
+    pub fn endpointCapacity(self: *const ModuleInstance, kind: u32, endpoint: u6) usize {
+        const state_value = self.state();
+        switch (state_value.lifecycle) {
+            .initialized => |lifecycle| if (kind < lifecycle.endpoint_capacities.len) {
+                if (lifecycle.endpoint_capacities[kind]) |page| {
+                    if (page[endpoint] != 0) return page[endpoint];
+                }
+            },
+            .stateless => {},
+            .initializing => unreachable,
+        }
+        return state_value.portOwner().ringCapacityLimit();
+    }
+    pub fn instanceState(self: *const ModuleInstance, identity: *const anyopaque) ?*anyopaque {
+        return switch (self.state().lifecycle) {
+            .stateless => null,
+            .initializing, .initialized => |lifecycle| if (lifecycle.definition.identity == identity) lifecycle.storage.ptr else null,
+        };
     }
 
     pub fn validated(self: *const ModuleInstance) *const descriptor_api.ValidatedDescriptor {
@@ -325,6 +523,19 @@ const OwnerState = struct {
     retired_mutex: std.Io.Mutex = .init,
     retired_first: ?*InstanceState = null,
     retired_last: ?*InstanceState = null,
+    instances: ?*InstanceState = null,
+    configurations: []OwnedConfiguration = &.{},
+    fn configuration(self: *const OwnerState, name: intern.ModuleName) ?OwnedConfiguration {
+        var start: usize = 0;
+        var end = self.configurations.len;
+        while (start < end) {
+            const middle = start + (end - start) / 2;
+            const item = self.configurations[middle];
+            if (item.name == name) return item;
+            if (@intFromEnum(item.name) < @intFromEnum(name)) start = middle + 1 else end = middle;
+        }
+        return null;
+    }
 };
 
 const OwnerPhase = enum(u8) { open, closing, settled };
@@ -344,9 +555,68 @@ pub const Owner = opaque {
     }
 
     pub fn initWithPortLimits(host: *const heap.HostCleanup, limits: native_port.Limits) error{ OutOfMemory, InvalidLimits }!*Owner {
+        return initConfigured(host, limits, &.{}) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.InvalidLimits => error.InvalidLimits,
+            error.InvalidConfiguration => unreachable,
+        };
+    }
+
+    pub fn initConfigured(host: *const heap.HostCleanup, limits: native_port.Limits, configurations: []const Configuration) error{ OutOfMemory, InvalidLimits, InvalidConfiguration }!*Owner {
+        const owned = try initDeferred(host, limits, configurations);
+        errdefer owned.closeCalls().settle().deinit();
+        for (owned.state().configurations) |*configuration| {
+            const descriptor = switch (configuration.registration) {
+                .pending => |descriptor| descriptor,
+                .deferred => continue,
+                .initialized => unreachable,
+            };
+            var cursor = switch (owned.loader().startStatic(configuration.name, descriptor)) {
+                .loading => |cursor| cursor,
+                .failure => return error.InvalidConfiguration,
+            };
+            defer cursor.deinit();
+            const instance = while (true) switch (try cursor.advance(256)) {
+                .pending => {},
+                .failure => return error.InvalidConfiguration,
+                .loaded => |instance| break instance,
+            };
+            configuration.registration = .{ .initialized = .{ .descriptor = descriptor, .instance = instance } };
+        }
+        return owned;
+    }
+
+    fn initDeferred(host: *const heap.HostCleanup, limits: native_port.Limits, configurations: []const Configuration) error{ OutOfMemory, InvalidLimits, InvalidConfiguration }!*Owner {
+        const owned = try host.allocator().alloc(OwnedConfiguration, configurations.len);
+        var copied: usize = 0;
+        errdefer {
+            for (owned[0..copied]) |configuration| host.allocator().free(configuration.bytes);
+            host.allocator().free(owned);
+        }
+        for (configurations, 0..) |configuration, index| {
+            if (configuration.memory_limit == 0) return error.InvalidConfiguration;
+            if (configuration.port_limits) |port_limits| try port_limits.validateInstance();
+            const name = intern.internModuleName(configuration.name) catch |err| return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                error.InvalidName => error.InvalidConfiguration,
+            };
+            owned[index] = .{ .name = name, .registration = switch (configuration.registration) {
+                .deferred => |descriptor| .{ .deferred = descriptor },
+                .eager => |descriptor| .{ .pending = descriptor },
+            }, .bytes = try host.allocator().dupe(u8, configuration.bytes), .memory_limit = configuration.memory_limit, .port_limits = configuration.port_limits };
+            copied += 1;
+        }
+        std.mem.sort(OwnedConfiguration, owned, {}, struct {
+            fn less(_: void, left: OwnedConfiguration, right: OwnedConfiguration) bool {
+                return @intFromEnum(left.name) < @intFromEnum(right.name);
+            }
+        }.less);
+        for (owned, 0..) |configuration, index| {
+            if (index != 0 and owned[index - 1].name == configuration.name) return error.InvalidConfiguration;
+        }
         const state_value = try host.allocator().create(OwnerState);
         errdefer host.allocator().destroy(state_value);
-        state_value.* = .{ .host = host, .ports = try native_port.Owner.init(host, limits) };
+        state_value.* = .{ .host = host, .ports = try native_port.Owner.init(host, limits), .configurations = owned };
         return ownerFromState(state_value);
     }
 
@@ -406,6 +676,15 @@ pub const Loader = opaque {
         return @ptrCast(self);
     }
 
+    /// Observe only a host-registered linked descriptor; no extension receives
+    /// this loader authority or a module-name configuration lookup.
+    pub fn registeredDescriptor(self: *Loader, name: intern.ModuleName) ?*const abi.Descriptor {
+        return switch ((self.state().configuration(name) orelse return null).registration) {
+            .deferred => |descriptor| descriptor,
+            .pending => |descriptor| descriptor,
+            .initialized => |initialized| initialized.descriptor,
+        };
+    }
     pub fn startDynamic(
         self: *Loader,
         requested: intern.ModuleName,
@@ -449,6 +728,14 @@ pub const Loader = opaque {
             "static native module loading is closed during Session shutdown",
             .{},
         ) };
+        if (self.state().configuration(requested)) |configuration| switch (configuration.registration) {
+            .initialized => |initialized| {
+                if (initialized.descriptor != descriptor) return .{ .failure = .init("linked descriptor differs from the initialized registration", .{}) };
+                initialized.instance.retain();
+                return .{ .loading = .{ .loader = self, .state = .{ .cached = initialized.instance } } };
+            },
+            .deferred, .pending => {},
+        };
         return self.startDescribed(.{ .described = .{
             .loader = self,
             .requested = requested,
@@ -522,7 +809,20 @@ pub const ClosingOwner = opaque {
     pub fn settle(self: *ClosingOwner) *SettledOwner {
         const owner_value = self.owner();
         std.debug.assert(owner_value.state().phase.load(.acquire) == .closing);
+        for (owner_value.state().configurations) |*configuration| switch (configuration.registration) {
+            .initialized => |initialized| {
+                configuration.registration = .{ .deferred = initialized.descriptor };
+                initialized.instance.releasePin();
+            },
+            .deferred, .pending => {},
+        };
+        var next = owner_value.state().instances;
+        while (next) |instance| {
+            if (instance.private_ports) |ports| ports.deinit();
+            next = instance.next;
+        }
         owner_value.state().ports.deinit();
+        owner_value.state().host.drain();
         while (owner_value.popRetired()) |instance| {
             const allocator = instance.host.allocator();
             instance.descriptor.deinit();
@@ -544,6 +844,8 @@ pub const SettledOwner = opaque {
         const state_value: *OwnerState = @ptrCast(@alignCast(self));
         std.debug.assert(state_value.phase.load(.acquire) == .settled);
         const allocator = state_value.host.allocator();
+        for (state_value.configurations) |configuration| allocator.free(configuration.bytes);
+        allocator.free(state_value.configurations);
         allocator.destroy(state_value);
     }
 };

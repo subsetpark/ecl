@@ -1,6 +1,7 @@
 //! Internal port execution. Backends supply typed work and post-join retirement;
 //! the extension ABI is only one producer. No ECL worker joins a controller.
 const std = @import("std");
+const scheduler = @import("scheduler.zig");
 
 fn io() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
@@ -204,24 +205,63 @@ pub fn Group(comptime Cell: type, comptime Result: type, comptime lifetime: anyt
         const Terminal = Outcome(Result);
         const Data = struct {
             allocator: std.mem.Allocator,
-            executor: *Executor,
+            execution: union(enum) {
+                controller: *Executor,
+                cooperative: struct { work: *scheduler.Cooperative, advance: *const fn (*Cell) scheduler.Cooperative.Progress },
+            },
             cell: *Cell,
             mutex: std.Io.Mutex = .init,
             phase: union(enum) { provisional, open: usize, draining: struct { count: usize, outcome: Terminal }, retired } = .provisional,
+            pub fn retainReadiness(self: *Data) void {
+                lifetime.retain(self.cell);
+            }
+            pub fn releaseReadiness(self: *Data) void {
+                lifetime.release(self.cell);
+            }
+            pub fn advanceCooperative(self: *Data) scheduler.Cooperative.Progress {
+                return self.execution.cooperative.advance(self.cell);
+            }
+            pub fn finishCooperative(self: *Data) void {
+                const group: *Self = @ptrCast(self);
+                group.dropRoot(.{ .completed = {} });
+            }
         };
         fn data(self: *Self) *Data {
             return @ptrCast(@alignCast(self));
         }
         pub fn init(allocator: std.mem.Allocator, executor: *Executor, cell: *Cell) error{OutOfMemory}!*Self {
             const state = try allocator.create(Data);
-            state.* = .{ .allocator = allocator, .executor = executor, .cell = cell };
+            state.* = .{ .allocator = allocator, .execution = .{ .controller = executor }, .cell = cell };
             return @ptrCast(state);
+        }
+        pub fn initCooperative(worker: *const scheduler.WorkerScheduler, cell: *Cell, comptime advance: *const fn (*Cell) scheduler.Cooperative.Progress) error{ OutOfMemory, Io }!*Self {
+            if (Result != void) @compileError("cooperative resource groups complete through their resource state");
+            const allocator = worker.resourceCleanup().allocator();
+            const state = try allocator.create(Data);
+            errdefer allocator.destroy(state);
+            // The reservation only borrows this address. All payload fields
+            // are initialized before start can publish callback execution.
+            const work = try scheduler.Cooperative.create(worker, Data, state);
+            state.* = .{ .allocator = allocator, .execution = .{ .cooperative = .{ .work = work, .advance = advance } }, .cell = cell };
+            return @ptrCast(state);
+        }
+        pub fn wake(self: *Self) void {
+            switch (self.data().execution) {
+                .controller => {},
+                .cooperative => |cooperative| cooperative.work.wake(),
+            }
         }
         /// The resource's final destructor consumes the drained group storage.
         pub fn deinit(self: *Self) void {
             const state = self.data();
             switch (state.phase) {
-                .provisional, .retired => state.allocator.destroy(state),
+                .provisional, .retired => {
+                    switch (state.execution) {
+                        .controller => {},
+                        .cooperative => |cooperative| cooperative.work.deinit(),
+                    }
+                    state.allocator.destroy(state);
+                },
                 .open, .draining => @panic("destroying a live controller group"),
             }
         }
@@ -239,6 +279,10 @@ pub fn Group(comptime Cell: type, comptime Result: type, comptime lifetime: anyt
             std.Io.Threaded.mutexUnlock(&state.mutex);
             errdefer {
                 rollback(state.cell);
+                switch (state.execution) {
+                    .controller => {},
+                    .cooperative => |cooperative| cooperative.work.abandon(),
+                }
                 self.dropRoot(.aborted);
             }
             try @call(.auto, prepare, .{state.cell} ++ args);
@@ -250,7 +294,10 @@ pub fn Group(comptime Cell: type, comptime Result: type, comptime lifetime: anyt
                     values[0].dropRoot(.{ .completed = result });
                 }
             };
-            try state.executor.spawn(Root.main, .{self}, Root.retire);
+            switch (state.execution) {
+                .controller => |executor| try executor.spawn(Root.main, .{self}, Root.retire),
+                .cooperative => |cooperative| cooperative.work.start(),
+            }
         }
         fn acquire(self: *Self) bool {
             const state = self.data();
@@ -319,7 +366,11 @@ pub fn Group(comptime Cell: type, comptime Result: type, comptime lifetime: anyt
                     values[0].release();
                 }
             };
-            try self.data().executor.spawn(JobWork.main, .{ self, args }, JobWork.retire);
+            const executor = switch (self.data().execution) {
+                .controller => |executor| executor,
+                .cooperative => return error.Closed,
+            };
+            try executor.spawn(JobWork.main, .{ self, args }, JobWork.retire);
         }
     };
 }
@@ -374,11 +425,20 @@ pub const Execution = opaque {
 const CancellationPolicy = enum { release, acknowledge, close_resource };
 pub const CancelAction = enum { retired, interrupt, close_resource, settled };
 pub const Completion = enum { retired, close_resource };
+/// One bounded callback slice either retains its queue ownership or completes.
+pub const Progress = union(enum) { yielded, waiting, parked: scheduler.Deadline, completed };
+pub const Dispatch = union(enum) { idle, yielded, waiting, parked: scheduler.Deadline, completed };
 pub const ExecutionState = enum { preparing, queued, active, cancelling, reusable, cancelled, done };
 
 /// Invocation-local execution authority, minted only while lending a callback.
 pub const Running = opaque {
-    const Invocation = struct { context: *anyopaque, acknowledge: *const fn (*anyopaque) bool, cancelled: *const fn (*anyopaque) bool };
+    const Invocation = struct { context: *anyopaque, acknowledge: *const fn (*anyopaque) bool, cancelled: *const fn (*anyopaque) bool, commit: *const fn (*anyopaque) bool };
+    /// Linearizes irreversible work against cancellation. Success remains valid
+    /// across yielded retirement; it never releases execution ownership.
+    pub fn beginCommit(self: *Running) bool {
+        const state: *Invocation = @ptrCast(@alignCast(self));
+        return state.commit(state.context);
+    }
     pub fn acknowledgeCancellation(self: *Running) bool {
         const state: *Invocation = @ptrCast(@alignCast(self));
         return state.acknowledge(state.context);
@@ -410,7 +470,31 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
             next: ?*Node = null,
             phase: enum { queued, active, retired },
             execution: ExecutionState = .queued,
-            executing: bool = false,
+            invocation: union(enum) {
+                unstarted,
+                active: struct {
+                    progress: enum { running, suspended, returned },
+                    commitment: enum { reversible, committed } = .reversible,
+                },
+            } = .unstarted,
+
+            fn suspended(self: *Node) bool {
+                return self.invocation == .active and self.invocation.active.progress == .suspended;
+            }
+            fn settledInvocation(self: *Node) bool {
+                return self.invocation == .active and (self.invocation.active.progress == .returned or self.invocation.active.commitment == .committed);
+            }
+            fn commitErased(raw: *anyopaque) bool {
+                const self: *Node = @ptrCast(@alignCast(raw));
+                const cell = self.owner();
+                std.Io.Threaded.mutexLock(self.lane.mutex);
+                defer std.Io.Threaded.mutexUnlock(self.lane.mutex);
+                std.Io.Threaded.mutexLock(&cell.mutex);
+                defer std.Io.Threaded.mutexUnlock(&cell.mutex);
+                if (!owns_cell or self.execution != .active or self.invocation != .active or self.invocation.active.progress != .running) return false;
+                self.invocation.active.commitment = .committed;
+                return true;
+            }
 
             fn owner(self: *Node) *Cell {
                 return if (owns_cell) &self.cell else self.cell;
@@ -435,12 +519,13 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
                 switch (self.execution) {
                     .queued => self.execution = .active,
                     .active => {},
-                    .preparing, .cancelling, .reusable, .cancelled, .done => return false,
+                    .cancelling, .reusable => if (!self.suspended()) return false,
+                    .preparing, .cancelled, .done => return false,
                 }
                 return true;
             }
             fn requestCancellation(self: *Node) void {
-                if (owns_cell and self.execution == .active and !self.executing) return;
+                if (owns_cell and self.execution == .active and self.settledInvocation()) return;
                 switch (self.execution) {
                     .preparing, .queued, .active => self.execution = .cancelling,
                     .cancelling, .reusable, .cancelled, .done => {},
@@ -496,6 +581,11 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
                 if (node.execution != .preparing) return false;
                 node.execution = .queued;
                 return true;
+            }
+            /// Observed under the operation lock, like terminal execution state.
+            pub fn committed(self: *const Ticket) bool {
+                const node = self.entry();
+                return node.invocation == .active and node.invocation.active.commitment == .committed;
             }
             pub fn isCancelled(self: *const Ticket) bool {
                 return switch (self.status()) {
@@ -597,6 +687,12 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
         pub fn hasCapacity(self: *const Self, limit: usize) bool {
             return self.count < limit;
         }
+        /// Readiness for a writer-issued key, under the resource lock. Comparing
+        /// the queue head keeps erased readiness observations inside its owner.
+        pub fn writerReady(self: *const Self, key: u64) bool {
+            if (owns_cell) @compileError("writer readiness requires a writer lane");
+            return if (self.first) |node| @intFromPtr(node) == key else true;
+        }
         fn append(self: *Self, node: *Node) void {
             if (self.last) |last| last.next = node else self.first = node;
             self.last = node;
@@ -625,7 +721,7 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
                 node.next = null;
                 node.phase = if (lane.first == null) .active else .queued;
                 node.execution = .preparing;
-                node.executing = false;
+                node.invocation = .unstarted;
                 const ticket: *Ticket = @ptrCast(node);
                 @call(.auto, initialize, .{ &node.cell, ticket } ++ args);
                 lane.append(node);
@@ -644,7 +740,7 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
                 node.next = null;
                 node.phase = if (lane.first == null) .active else .queued;
                 node.execution = .queued;
-                node.executing = false;
+                node.invocation = .unstarted;
                 node.cell = cell;
                 callbacks.retain(cell);
                 lane.append(node);
@@ -657,36 +753,69 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
             node.lane = self;
             return @ptrCast(node);
         }
-        /// One lane executor owns dispatch. The runtime establishes both locks,
-        /// lends execution authority, and completes only after callback return.
+        fn executeToCompletion(cell: *Cell, running: *Running) Progress {
+            callbacks.execute(cell, running);
+            return .completed;
+        }
+        /// Controller execution uses the same dispatch and retirement protocol
+        /// as resumable execution, with one completing callback slice.
         pub fn runNext(self: *Self) bool {
+            return switch (self.advanceNext(executeToCompletion)) {
+                .idle => false,
+                .yielded, .waiting, .parked, .completed => true,
+            };
+        }
+        /// One lane executor owns dispatch. A yielded callback retains its FIFO
+        /// position and queue pin, including after its last observer disappears.
+        /// Cancellation of suspended work resumes that work to join its unwind.
+        pub fn advanceNext(self: *Self, comptime advance: *const fn (*Cell, *Running) Progress) Dispatch {
             const mutex = self.mutex;
             std.Io.Threaded.mutexLock(mutex);
             const node = self.first orelse {
                 std.Io.Threaded.mutexUnlock(mutex);
-                return false;
+                return .idle;
             };
             const cell = node.owner();
             std.Io.Threaded.mutexLock(&cell.mutex);
             if (node.execution == .preparing) {
                 std.Io.Threaded.mutexUnlock(&cell.mutex);
                 std.Io.Threaded.mutexUnlock(mutex);
-                return false;
+                return .idle;
             }
-            const execute = callbacks.runnable(cell) and node.begin();
-            node.executing = execute;
-            if (!execute) node.requestCancellation();
+            const execute = (node.suspended() or callbacks.runnable(cell)) and node.begin();
+            if (execute) {
+                switch (node.invocation) {
+                    .unstarted => node.invocation = .{ .active = .{ .progress = .running } },
+                    .active => |*active| active.progress = .running,
+                }
+            } else node.requestCancellation();
             std.Io.Threaded.mutexUnlock(&cell.mutex);
             std.Io.Threaded.mutexUnlock(mutex);
-            if (execute) {
-                var execution: Running.Invocation = .{ .context = node, .acknowledge = Node.acknowledgeErased, .cancelled = Node.cancelledErased };
-                callbacks.execute(cell, @as(*Running, @ptrCast(&execution)));
-                std.Io.Threaded.mutexLock(&cell.mutex);
-                node.executing = false;
-                std.Io.Threaded.mutexUnlock(&cell.mutex);
-            }
+            const progress = if (execute) blk: {
+                var execution: Running.Invocation = .{ .context = node, .acknowledge = Node.acknowledgeErased, .cancelled = Node.cancelledErased, .commit = Node.commitErased };
+                break :blk advance(cell, @as(*Running, @ptrCast(&execution)));
+            } else @as(Progress, .completed);
+            std.Io.Threaded.mutexLock(&cell.mutex);
+            if (node.invocation == .active) node.invocation.active.progress = switch (progress) {
+                .yielded, .waiting, .parked => .suspended,
+                .completed => .returned,
+            };
+            std.Io.Threaded.mutexUnlock(&cell.mutex);
             std.Io.Threaded.mutexLock(mutex);
             std.Io.Threaded.mutexLock(&cell.mutex);
+            switch (progress) {
+                .yielded, .waiting, .parked => {
+                    std.Io.Threaded.mutexUnlock(&cell.mutex);
+                    std.Io.Threaded.mutexUnlock(mutex);
+                    return switch (progress) {
+                        .yielded => .yielded,
+                        .waiting => .waiting,
+                        .parked => |deadline| .{ .parked = deadline },
+                        .completed => unreachable,
+                    };
+                },
+                .completed => {},
+            }
             const completion = self.finishAndRemove(node);
             callbacks.notifyOperation(cell);
             std.Io.Threaded.mutexUnlock(&cell.mutex);
@@ -694,7 +823,7 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
             std.Io.Threaded.mutexUnlock(mutex);
             callbacks.retireOperation(cell);
             node.release();
-            return true;
+            return .completed;
         }
         fn cancelNode(self: *Self, node: *Node, policy: CancellationPolicy) CancelAction {
             switch (node.execution) {
@@ -705,7 +834,7 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
                     return .retired;
                 },
                 .active => {
-                    if (owns_cell and !node.executing) return .settled;
+                    if (owns_cell and node.settledInvocation()) return .settled;
                     node.requestCancellation();
                     return switch (policy) {
                         .close_resource => .close_resource,
@@ -902,4 +1031,240 @@ test "native: prepared controller jobs reuse storage without allocator access" {
         try std.testing.expectEqual(index, probe.value);
     }
     try std.testing.expect(!failing.has_induced_failure);
+}
+
+test "native: resumable lanes join cancellation without allocating or losing FIFO ownership" {
+    const Probe = struct {
+        mutex: std.Io.Mutex = .init,
+        calls: usize = 0,
+        unwound: usize = 0,
+        destroyed: usize = 0,
+        completed: usize = 0,
+    };
+    const Operation = struct {
+        mutex: std.Io.Mutex = .init,
+        probe: *Probe,
+        remaining: usize = 2,
+        fn initialize(self: *@This(), _: anytype, probe: *Probe) void {
+            self.* = .{ .probe = probe };
+        }
+        fn deinit(self: *@This()) void {
+            self.probe.destroyed += 1;
+        }
+        fn runnable(_: *@This()) bool {
+            return true;
+        }
+        fn execute(_: *@This(), _: *Running) void {
+            unreachable;
+        }
+        fn advance(self: *@This(), running: *Running) Progress {
+            self.probe.calls += 1;
+            if (running.cancelled()) {
+                self.probe.unwound += 1;
+                if (self.remaining > 0) {
+                    self.remaining -= 1;
+                    return .yielded;
+                }
+                _ = running.acknowledgeCancellation();
+                return .completed;
+            }
+            if (self.remaining > 0) {
+                self.remaining -= 1;
+                return .yielded;
+            }
+            self.probe.completed += 1;
+            return .completed;
+        }
+        fn notify(_: *@This()) void {}
+        fn complete(_: *@This(), _: Completion) void {}
+        fn cancellation(_: *@This()) CallbackCancellation {
+            return .acknowledge;
+        }
+        fn cancelResource(_: *@This(), _: CancelAction) void {}
+        fn retire(_: *@This()) void {}
+    };
+    const Queue = Lane(Operation, .operation, .{ .deinit = Operation.deinit, .runnable = Operation.runnable, .execute = Operation.execute, .notifyOperation = Operation.notify, .completeResource = Operation.complete, .cancelPolicy = Operation.cancellation, .cancelResource = Operation.cancelResource, .retireOperation = Operation.retire });
+    var probe: Probe = .{};
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var lane = Queue.init(&probe.mutex);
+    const first = (try lane.prepare(failing.allocator())).admit(2, .{&probe}, Operation.initialize).?;
+    defer first.release();
+    const second = (try lane.prepare(failing.allocator())).admit(2, .{&probe}, Operation.initialize).?;
+    defer {
+        while (lane.advanceNext(Operation.advance) != .idle) {}
+    }
+    try std.testing.expectEqual(@as(Dispatch, .idle), lane.advanceNext(Operation.advance));
+    try std.testing.expect(first.publish());
+    try std.testing.expect(second.publish());
+    // Queue ownership alone keeps the second operation and its continuation.
+    second.release();
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectEqual(@as(Dispatch, .yielded), lane.advanceNext(Operation.advance));
+    first.cancel();
+    try std.testing.expectEqual(@as(Dispatch, .yielded), lane.advanceNext(Operation.advance));
+    try std.testing.expectEqual(@as(usize, 0), probe.completed);
+    try std.testing.expectEqual(@as(Dispatch, .completed), lane.advanceNext(Operation.advance));
+    try std.testing.expectEqual(ExecutionState.cancelled, first.status());
+    try std.testing.expectEqual(@as(usize, 2), probe.unwound);
+    try std.testing.expectEqual(@as(Dispatch, .yielded), lane.advanceNext(Operation.advance));
+    try std.testing.expectEqual(@as(Dispatch, .yielded), lane.advanceNext(Operation.advance));
+    try std.testing.expectEqual(@as(Dispatch, .completed), lane.advanceNext(Operation.advance));
+    try std.testing.expectEqual(@as(usize, 1), probe.completed);
+    try std.testing.expectEqual(@as(usize, 1), probe.destroyed);
+    try std.testing.expectEqual(@as(Dispatch, .idle), lane.advanceNext(Operation.advance));
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
+test "native: cooperative groups join scope cancellation and unwind failed publication" {
+    const heap = @import("heap.zig");
+    const external = @import("external.zig");
+    const transfers = @import("port_transfer.zig");
+    const Probe = struct {
+        const Cell = struct {
+            const Activity = Group(@This(), void, .{ .retain = retainReadiness, .release = releaseReadiness, .retireLocked = retire, .ownership = ownershipOf });
+            group: *Activity,
+            mutex: std.Io.Mutex = .init,
+            refs: std.atomic.Value(usize) = .init(0),
+            cancelled: std.atomic.Value(bool) = .init(false),
+            ready: std.Io.Event = .unset,
+            ownership: external.Ownership = .provisional,
+            retired: bool = false,
+            cleaned: bool = false,
+            reject: bool,
+            pub fn retainReadiness(self: *@This()) void {
+                _ = self.refs.fetchAdd(1, .monotonic);
+            }
+            pub fn releaseReadiness(self: *@This()) void {
+                _ = self.refs.fetchSub(1, .acq_rel);
+            }
+            pub fn retainExternalMember(self: *@This()) void {
+                self.retainReadiness();
+            }
+            pub fn releaseExternalMember(self: *@This()) void {
+                self.releaseReadiness();
+            }
+            pub fn cancelExternalMember(self: *@This(), _: *external.ScopeIdentity) void {
+                self.cancelled.store(true, .release);
+                self.group.wake();
+            }
+            fn ownershipOf(self: *@This()) *external.Ownership {
+                return &self.ownership;
+            }
+            fn prepare(self: *@This(), scope: *scheduler.TaskScope) error{ OutOfMemory, ScopeClosing }!void {
+                if (self.reject) return error.ScopeClosing;
+                try transfers.publishScope(@This(), self, scope, ownershipOf);
+            }
+            fn rollback(self: *@This()) void {
+                self.cancelled.store(true, .release);
+            }
+            fn runController(_: *Execution, _: *@This()) void {
+                unreachable;
+            }
+            fn advance(self: *@This()) scheduler.Cooperative.Progress {
+                if (self.cancelled.load(.acquire)) {
+                    self.cleaned = true;
+                    return .completed;
+                }
+                self.ready.set(io());
+                return .waiting;
+            }
+            fn retire(self: *@This(), _: Outcome(void)) void {
+                self.retired = true;
+            }
+        };
+        fn run(allocator: std.mem.Allocator, reject: bool) !void {
+            var cleanup = heap.testing.Cleanup.init(allocator);
+            defer cleanup.deinit();
+            var runtime = try scheduler.Scheduler.init(cleanup.capability(), .{ .worker_pool = 1 }, .manual);
+            var scope = scheduler.TaskScope.init(runtime.worker());
+            var live = true;
+            defer if (live) runtime.deinit(&scope);
+            // SAFETY: group is assigned before publication can invoke callbacks.
+            var cell: Cell = .{ .reject = reject, .group = undefined };
+            cell.group = try Cell.Activity.initCooperative(runtime.worker(), &cell, Cell.advance);
+            defer cell.group.deinit();
+            if (reject) {
+                try std.testing.expectError(error.ScopeClosing, cell.group.start(.{&scope}, Cell.prepare, Cell.runController, Cell.rollback));
+            } else {
+                try cell.group.start(.{&scope}, Cell.prepare, Cell.runController, Cell.rollback);
+                cell.ready.waitUncancelable(io());
+            }
+            runtime.deinit(&scope);
+            live = false;
+            try std.testing.expect(cell.retired);
+            try std.testing.expectEqual(!reject, cell.cleaned);
+            try std.testing.expectEqual(@as(usize, 0), cell.refs.load(.acquire));
+            // Group destruction above runs after the scheduler has gone away.
+        }
+    };
+    for ([_]bool{ false, true }) |reject|
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{reject});
+}
+
+test "native: committed lane invocation joins yielded retirement without cancellation relabeling" {
+    const Probe = struct {
+        mutex: std.Io.Mutex = .init,
+        committed: usize = 0,
+        cancelled: usize = 0,
+        destroyed: usize = 0,
+    };
+    const Operation = struct {
+        mutex: std.Io.Mutex = .init,
+        probe: *Probe,
+        commit_first: bool,
+        slice: usize = 0,
+        fn initialize(self: *@This(), _: anytype, probe: *Probe, commit_first: bool) void {
+            self.* = .{ .probe = probe, .commit_first = commit_first };
+        }
+        fn deinit(self: *@This()) void {
+            self.probe.destroyed += 1;
+        }
+        fn runnable(_: *@This()) bool {
+            return true;
+        }
+        fn execute(_: *@This(), _: *Running) void {
+            unreachable;
+        }
+        fn advance(self: *@This(), running: *Running) Progress {
+            defer self.slice += 1;
+            if (self.slice == 0 and !self.commit_first) return .yielded;
+            if (running.beginCommit()) {
+                self.probe.committed += 1;
+                if (running.cancelled()) self.probe.cancelled += 1;
+            } else if (running.cancelled()) {
+                self.probe.cancelled += 1;
+                _ = running.acknowledgeCancellation();
+            }
+            return if (self.slice < 2) .yielded else .completed;
+        }
+        fn notify(_: *@This()) void {}
+        fn complete(_: *@This(), _: Completion) void {}
+        fn cancellation(_: *@This()) CallbackCancellation {
+            return .close_resource;
+        }
+        fn cancelResource(_: *@This(), _: CancelAction) void {}
+        fn retire(_: *@This()) void {}
+    };
+    const Queue = Lane(Operation, .operation, .{ .deinit = Operation.deinit, .runnable = Operation.runnable, .execute = Operation.execute, .notifyOperation = Operation.notify, .completeResource = Operation.complete, .cancelPolicy = Operation.cancellation, .cancelResource = Operation.cancelResource, .retireOperation = Operation.retire });
+    for ([_]bool{ true, false }) |commit_first| {
+        var probe: Probe = .{};
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        var lane = Queue.init(&probe.mutex);
+        const ticket = (try lane.prepare(failing.allocator())).admit(1, .{ &probe, commit_first }, Operation.initialize).?;
+        defer ticket.release();
+        defer while (lane.advanceNext(Operation.advance) != .idle) {};
+        try std.testing.expect(ticket.publish());
+        failing.fail_index = failing.alloc_index;
+        try std.testing.expectEqual(@as(Dispatch, .yielded), lane.advanceNext(Operation.advance));
+        ticket.cancel();
+        try std.testing.expectEqual(@as(usize, 0), probe.destroyed);
+        try std.testing.expectEqual(@as(Dispatch, .yielded), lane.advanceNext(Operation.advance));
+        ticket.cancel();
+        try std.testing.expectEqual(@as(Dispatch, .completed), lane.advanceNext(Operation.advance));
+        try std.testing.expectEqual(if (commit_first) ExecutionState.done else ExecutionState.cancelled, ticket.status());
+        try std.testing.expectEqual(commit_first, ticket.committed());
+        try std.testing.expectEqual(@as(usize, if (commit_first) 3 else 0), probe.committed);
+        try std.testing.expectEqual(@as(usize, if (commit_first) 0 else 2), probe.cancelled);
+        try std.testing.expect(!failing.has_induced_failure);
+    }
 }

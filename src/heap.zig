@@ -1770,8 +1770,9 @@ pub const ReleaseDomain = struct {
     };
     const Wake = struct {
         context: *anyopaque,
-        wake_fn: *const fn (*anyopaque) void,
+        wake_fn: *const fn (*anyopaque, WakeReason) void,
     };
+    pub const WakeReason = enum { retirement_available, backpressure_relieved };
 
     /// The archive's O(1) notification that one code header it indexed is
     /// being destroyed, so the directory slot holding that header's lineage can
@@ -1788,7 +1789,8 @@ pub const ReleaseDomain = struct {
 
     allocator: std.mem.Allocator,
     queue_mutex: std.Io.Mutex = .init,
-    drain_mutex: std.Io.Mutex = .init,
+    claim_released: std.Io.Condition = .init,
+    execution: enum { empty, available, claimed } = .empty,
     first: ?*Header = null,
     last: ?*Header = null,
     retirement_first: ?*Retirement = null,
@@ -1921,8 +1923,10 @@ pub const ReleaseDomain = struct {
         std.debug.assert(object(header).next_destroy == null);
         if (self.last) |last| object(last).next_destroy = header else self.first = header;
         self.last = header;
+        const notify = self.execution == .empty;
+        if (notify) self.execution = .available;
         std.Io.Threaded.mutexUnlock(&self.queue_mutex);
-        self.notifyWork();
+        if (notify) self.notifyWork(.retirement_available);
     }
 
     fn enqueueRetirement(self: *ReleaseDomain, node: *Retirement, admission: Admission) void {
@@ -1931,12 +1935,14 @@ pub const ReleaseDomain = struct {
         std.debug.assert(node.next == null);
         if (self.retirement_last) |last| last.next = node else self.retirement_first = node;
         self.retirement_last = node;
+        const notify = self.execution == .empty;
+        if (notify) self.execution = .available;
         std.Io.Threaded.mutexUnlock(&self.queue_mutex);
-        self.notifyWork();
+        if (notify) self.notifyWork(.retirement_available);
     }
 
-    fn notifyWork(self: *ReleaseDomain) void {
-        if (self.wake) |wake| wake.wake_fn(wake.context);
+    fn notifyWork(self: *ReleaseDomain, reason: WakeReason) void {
+        if (self.wake) |wake| wake.wake_fn(wake.context, reason);
     }
 
     fn popZero(self: *ReleaseDomain) ?*Header {
@@ -1971,6 +1977,38 @@ pub const ReleaseDomain = struct {
         return self.first != null or self.retirement_first != null;
     }
 
+    /// Availability is distinct from backlog: an active claim owns all queued
+    /// descendants until its bounded turn ends.
+    pub fn hasAvailable(self: *ReleaseDomain) bool {
+        std.Io.Threaded.mutexLock(&self.queue_mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.queue_mutex);
+        return self.execution == .available;
+    }
+
+    pub const ExecutionClaim = opaque {
+        /// Consumes the claim, including when the budget leaves a continuation.
+        pub fn advance(self: *ExecutionClaim, budget: usize) bool {
+            const domain: *ReleaseDomain = @ptrCast(@alignCast(self));
+            std.debug.assert(budget != 0);
+            const empty = domain.advanceLocked(budget);
+            std.Io.Threaded.mutexLock(&domain.queue_mutex);
+            const notify = domain.first != null or domain.retirement_first != null;
+            domain.execution = if (notify) .available else .empty;
+            domain.claim_released.broadcast(std.Io.Threaded.global_single_threaded.io());
+            std.Io.Threaded.mutexUnlock(&domain.queue_mutex);
+            if (notify) domain.notifyWork(.retirement_available);
+            return empty;
+        }
+    };
+
+    pub fn claim(self: *ReleaseDomain) ?*ExecutionClaim {
+        std.Io.Threaded.mutexLock(&self.queue_mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.queue_mutex);
+        if (self.execution != .available) return null;
+        self.execution = .claimed;
+        return @ptrCast(self);
+    }
+
     /// Ordinary evaluation yields to reclamation at this backlog. This is an
     /// admission watermark, not a live-heap byte limit: already-running slices
     /// and retirement descendants may add their bounded work after it trips.
@@ -1983,7 +2021,7 @@ pub const ReleaseDomain = struct {
 
     fn completeOwner(self: *ReleaseDomain) void {
         const previous = self.pending_owners.fetchSub(1, .acq_rel);
-        if (previous == backlog_watermark) self.notifyWork();
+        if (previous == backlog_watermark) self.notifyWork(.backpressure_relieved);
     }
 
     /// Returns true when the queue is empty after at most `budget` object-edge
@@ -1991,18 +2029,21 @@ pub const ReleaseDomain = struct {
     /// serialized so every intrusive node has one active owner.
     pub fn advance(self: *ReleaseDomain, budget: usize) bool {
         std.debug.assert(budget != 0);
-        std.Io.Threaded.mutexLock(&self.drain_mutex);
-        defer std.Io.Threaded.mutexUnlock(&self.drain_mutex);
-        return self.advanceLocked(budget);
+        std.Io.Threaded.mutexLock(&self.queue_mutex);
+        while (self.execution == .claimed)
+            self.claim_released.waitUncancelable(std.Io.Threaded.global_single_threaded.io(), &self.queue_mutex);
+        self.execution = .claimed;
+        std.Io.Threaded.mutexUnlock(&self.queue_mutex);
+        const owned: *ExecutionClaim = @ptrCast(self);
+        return owned.advance(budget);
     }
 
     /// Scheduler-facing nonblocking turn. A second worker never queues behind
     /// the active retirement owner; it remains available for runnable work.
     pub fn tryAdvance(self: *ReleaseDomain, budget: usize) ?bool {
         std.debug.assert(budget != 0);
-        if (!self.drain_mutex.tryLock()) return null;
-        defer std.Io.Threaded.mutexUnlock(&self.drain_mutex);
-        return self.advanceLocked(budget);
+        const owned = self.claim() orelse return if (self.pending_owners.load(.acquire) == 0) true else null;
+        return owned.advance(budget);
     }
 
     fn advanceLocked(self: *ReleaseDomain, budget: usize) bool {
@@ -2111,6 +2152,59 @@ pub const ReleaseDomain = struct {
         }
     }
 };
+
+test "env: retirement claims coalesce descendant wakes and republish availability" {
+    const Probe = struct {
+        node: ReleaseDomain.Retirement = .{},
+        calls: usize = 0,
+        wakes: usize = 0,
+        pause: bool = false,
+        entered: std.Io.Event = .unset,
+        proceed: std.Io.Event = .unset,
+
+        pub fn wakeRetirement(self: *@This(), _: ReleaseDomain.WakeReason) void {
+            self.wakes += 1;
+        }
+
+        pub fn advanceRetirement(_: *ReleaseDomain, _: std.mem.Allocator, self: *@This()) bool {
+            self.calls += 1;
+            if (self.pause and self.calls == 1) {
+                self.entered.set(std.testing.io);
+                self.proceed.waitUncancelable(std.testing.io);
+            }
+            return self.calls == 2;
+        }
+
+        fn run(domain: *ReleaseDomain) void {
+            _ = domain.claim().?.advance(1);
+        }
+    };
+    var owner = HostOwner.init(std.testing.allocator);
+    const domain = owner.domain();
+    var first = Probe{ .pause = true };
+    var second = Probe{};
+    domain.attachWake(&first);
+    defer domain.detachWake();
+    defer owner.cleanup().drain();
+    try std.testing.expect(domain.claim() == null);
+    domain.retire(&first, &first.node);
+    errdefer first.proceed.set(std.testing.io);
+    try std.testing.expectEqual(@as(usize, 1), first.wakes);
+    const worker = try std.Thread.spawn(.{}, Probe.run, .{domain});
+    first.entered.waitUncancelable(std.testing.io);
+    const unavailable = !domain.hasAvailable() and domain.claim() == null;
+    domain.retire(&second, &second.node);
+    const coalesced = first.wakes == 1;
+    first.proceed.set(std.testing.io);
+    worker.join();
+    try std.testing.expect(unavailable and coalesced);
+    try std.testing.expect(domain.hasAvailable());
+    try std.testing.expectEqual(@as(usize, 2), first.wakes);
+    owner.cleanup().drain();
+    try std.testing.expectEqual(@as(usize, 2), first.calls);
+    try std.testing.expectEqual(@as(usize, 2), second.calls);
+    try std.testing.expect(!domain.hasAvailable());
+}
 
 test "retirement pressure charges active owners and continuations across quanta" {
     const Probe = struct {
@@ -2274,9 +2368,9 @@ fn CodeRetirementAdapters(comptime Owner: type) type {
 
 fn RetirementWakeAdapters(comptime Owner: type) type {
     return struct {
-        fn wake(raw: *anyopaque) void {
+        fn wake(raw: *anyopaque, reason: ReleaseDomain.WakeReason) void {
             const owner: *Owner = @ptrCast(@alignCast(raw));
-            Owner.wakeRetirement(owner);
+            Owner.wakeRetirement(owner, reason);
         }
     };
 }

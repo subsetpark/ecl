@@ -7,6 +7,38 @@ pub const Cancellation = declarations.Cancellation;
 
 const ControllerState = struct { table: *const abi.ControllerTable, context: *anyopaque, input_view: abi.ValueView = .{ .kind = .list } };
 pub const ControllerError = declarations.ControllerError;
+const ChildDependency = enum { independent, dependent, inherited };
+
+const ResourceLeaseLifetime = enum { initialization, resource };
+pub const ResourceLeaseError = error{ Closed, InvalidValue, Failed };
+fn acquireInitializationResource(comptime P: type, callback: ?abi.ResourceLeaseFn, context: *anyopaque, path: []const u64, lifetime: ResourceLeaseLifetime) ResourceLeaseError!*P.StateType {
+    if (!@hasDecl(P, "ecl_port_marker")) @compileError("ecl-native: resource lease requires a declared Port type");
+    if (path.len > abi.max_read_path_depth) return error.InvalidValue;
+    var output: ?*anyopaque = null;
+    const status = (callback orelse return error.InvalidValue)(context, P.kindIdentity(), path.ptr, @intCast(path.len), switch (lifetime) {
+        .initialization => .initialization,
+        .resource => .resource,
+    }, &output);
+    return switch (status) {
+        .ok => @ptrCast(@alignCast(output orelse return error.InvalidValue)),
+        .closed => error.Closed,
+        .failed => error.Failed,
+        .invalid, _ => error.InvalidValue,
+    };
+}
+
+fn childRequest(comptime P: type, dependency: ChildDependency) abi.MessageBuildRequest {
+    if (!@hasDecl(P, "ecl_port_marker")) @compileError("ecl-native: child requires a declared Port type");
+    return .{
+        .action = .child,
+        .kind_identity = P.kindIdentity(),
+        .count = @intFromEnum(switch (dependency) {
+            .independent => abi.ChildDependency.independent,
+            .dependent => abi.ChildDependency.dependent,
+            .inherited => abi.ChildDependency.inherited,
+        }),
+    };
+}
 
 fn require(status: abi.ControllerStatus) ControllerError!void {
     return switch (status) {
@@ -124,6 +156,9 @@ pub const MessageView = opaque {
         if (self.kind() != .symbol) return null;
         return self.wire().bytes_ptr.?[0..@intCast(self.wire().bytes_len)];
     }
+    pub fn isString(self: *const MessageView) bool {
+        return self.kind() == .list and self.wire().text == .string;
+    }
     pub fn length(self: *const MessageView) ?u64 {
         return switch (self.kind()) {
             .list, .dict => self.wire().aggregate_len,
@@ -143,11 +178,7 @@ pub const MessageBuilder = opaque {
     }
     fn apply(self: *MessageBuilder, request: abi.MessageBuildRequest) ControllerError!void {
         const owned = self.state();
-        switch (owned.table.build_message(owned.context, &request)) {
-            .ok => return,
-            .out_of_memory => return error.OutOfMemory,
-            else => return if (owned.table.cancelled(owned.context)) error.Cancelled else error.Failed,
-        }
+        return applyBuild(owned.table, owned.context, &request);
     }
     pub fn int(self: *MessageBuilder, item: i64) ControllerError!void {
         return self.apply(.{ .action = .scalar, .scalar = capability.Scalar.int(item).wire });
@@ -160,6 +191,21 @@ pub const MessageBuilder = opaque {
     }
     pub fn symbol(self: *MessageBuilder, bytes: []const u8) ControllerError!void {
         return self.apply(.{ .action = .scalar, .scalar = capability.Scalar.symbol(bytes).wire });
+    }
+    /// Copy at most 65536 bytes into one integer-byte list. The host owns
+    /// the copy before return; message footprint limits still apply.
+    pub fn byteList(self: *MessageBuilder, source: []const u8) ControllerError!void {
+        return self.apply(.{ .action = .bytes, .scalar = .{ .kind = .list, .bytes_ptr = source.ptr, .bytes_len = source.len } });
+    }
+    pub fn beginSymbol(self: *MessageBuilder, byte_count: usize) ControllerError!void {
+        return self.apply(.{ .action = .symbol_start, .scalar = .{ .kind = .int, .bits = byte_count } });
+    }
+    /// Append at most 256 bytes. UTF-8 sequences may cross chunk boundaries.
+    pub fn symbolChunk(self: *MessageBuilder, source: []const u8) ControllerError!void {
+        return self.apply(.{ .action = .symbol_chunk, .scalar = capability.Scalar.symbol(source).wire });
+    }
+    pub fn endSymbol(self: *MessageBuilder) ControllerError!void {
+        return self.apply(.{ .action = .symbol_end });
     }
     pub fn input(self: *MessageBuilder, path: []const u64) ControllerError!void {
         if (path.len > abi.max_read_path_depth) return error.InvalidValue;
@@ -175,16 +221,8 @@ pub const MessageBuilder = opaque {
     /// the host cleans up any failed child. Dependent children close and join
     /// before their issuing parent's backend is destroyed; scope transfer
     /// never detaches that dependency.
-    pub fn child(self: *MessageBuilder, comptime P: type, dependency: enum { independent, dependent }) ControllerError!void {
-        if (!@hasDecl(P, "ecl_port_marker")) @compileError("ecl-native: child requires a declared Port type");
-        return self.apply(.{
-            .action = .child,
-            .kind_identity = P.kindIdentity(),
-            .count = @intFromEnum(switch (dependency) {
-                .independent => abi.ChildDependency.independent,
-                .dependent => abi.ChildDependency.dependent,
-            }),
-        });
+    pub fn child(self: *MessageBuilder, comptime P: type, dependency: ChildDependency) ControllerError!void {
+        return self.apply(childRequest(P, dependency));
     }
     pub fn list(self: *MessageBuilder, count: u32) ControllerError!void {
         return self.apply(.{ .action = .list, .count = count });
@@ -203,8 +241,15 @@ pub const MessageBuilder = opaque {
 /// Available only on the controller. Streams may block this private thread;
 /// cancellation interrupts host stream waits. No ECL values are accessible.
 pub const Controller = opaque {
+    pub fn instance(self: *Controller, comptime I: type) ?*I.State {
+        const owned = self.state();
+        return @ptrCast(@alignCast(owned.table.instance_state(owned.context, I.identity()) orelse return null));
+    }
     fn state(self: *Controller) *ControllerState {
         return @ptrCast(@alignCast(self));
+    }
+    pub fn errorData(self: *Controller) *ErrorDataBuilder {
+        return @ptrCast(self);
     }
     pub fn builder(self: *Controller) *MessageBuilder {
         return @ptrCast(self);
@@ -235,6 +280,23 @@ pub const Controller = opaque {
         const owned = self.state();
         const pointer = owned.table.parent_state(owned.context, P.kindIdentity()) orelse return null;
         return @ptrCast(@alignCast(pointer));
+    }
+    /// Initialization-only borrow of a same-instance input resource. The host
+    /// owns the lease until initialization completes or this resource retires,
+    /// as selected. Closure stops new loans and joins admitted ones. Neither
+    /// the input value nor its native state may escape the selected lifetime.
+    pub fn initializationResource(self: *Controller, comptime P: type, path: []const u64, lifetime: ResourceLeaseLifetime) ResourceLeaseError!*P.StateType {
+        const owned = self.state();
+        return acquireInitializationResource(P, owned.table.initialization_resource, owned.context, path, lifetime);
+    }
+    /// Borrow the issuing parent's state only during initialization. This
+    /// also permits an independent child to take independently owned native
+    /// storage from its parent. Never retain this pointer after initialization;
+    /// use parent() when the child requires a lifetime dependency instead.
+    pub fn initializationParent(self: *Controller, comptime P: type) ?*P.StateType {
+        comptime if (!@hasDecl(P, "ecl_port_marker")) @compileError("ecl-native: parent requires a declared Port type");
+        const owned = self.state();
+        return @ptrCast(@alignCast(owned.table.initialization_parent(owned.context, P.kindIdentity()) orelse return null));
     }
     /// Borrowed view of the owned received message; the next view lookup
     /// invalidates this view. Message ownership is unchanged.
@@ -303,7 +365,16 @@ pub const Controller = opaque {
 /// waits. Optional `shutdown` runs independently of operation lanes, stops new
 /// admission, and is joined before `deinit`. It may race operation handlers and `cancel`;
 /// cancellation must interrupt its waits too. Cleanup runs even when `open` fails.
-pub fn Port(comptime Spec: type) type {
+/// Execution is an exhaustive author choice; neither mode can obtain the
+/// other mode's execution authority through its borrowed context.
+pub fn Port(comptime execution: union(enum) { controller: type, cooperative: type }) type {
+    return switch (execution) {
+        .controller => |Spec| ControllerPort(Spec),
+        .cooperative => |Spec| CooperativePort(Spec),
+    };
+}
+
+fn ControllerPort(comptime Spec: type) type {
     const Lane = if (@hasDecl(Spec, "Lane")) Spec.Lane else enum { operation };
     const cancellation: Cancellation = if (@hasDecl(Spec, "cancellation")) Spec.cancellation else .close_resource;
     comptime {
@@ -315,8 +386,8 @@ pub fn Port(comptime Spec: type) type {
             @compileError("ecl-native: Port Lane values must be contiguous from zero");
         if (cancellation == .acknowledge and (!@hasDecl(Spec, "cancelOperation") or @TypeOf(Spec.cancelOperation) != fn (*Spec.State, Lane) void))
             @compileError("ecl-native: recoverable cancellation requires fn cancelOperation(*State, Lane) void");
-        if (@hasDecl(Spec, "shutdown") and @TypeOf(Spec.shutdown) != fn (*Spec.State, *Controller) void)
-            @compileError("ecl-native: shutdown requires fn (*State, *Controller) void");
+        if (@hasDecl(Spec, "shutdown") and @TypeOf(Spec.shutdown) != fn (*Spec.State, *Shutdown) void)
+            @compileError("ecl-native: shutdown requires fn (*State, *Shutdown) void");
         for (.{ "State", "name", "init", "open", "cancel", "deinit" }) |name|
             if (!@hasDecl(Spec, name)) @compileError("ecl-native: Port spec requires State, name, init, open, cancel, and deinit");
         if (@sizeOf(Spec.State) == 0 or @sizeOf(Spec.State) > abi.max_port_state_bytes or @alignOf(Spec.State) > 64)
@@ -329,6 +400,19 @@ pub fn Port(comptime Spec: type) type {
     }
     const DeclaredEndpoints = declarations.Endpoints(if (@hasDecl(Spec, "endpoints")) Spec.endpoints else .{});
     const DeclaredOperations = declarations.Operations(Lane, DeclaredEndpoints, if (@hasDecl(Spec, "operations")) Spec.operations else .{});
+    const activity_entries = if (@hasDecl(Spec, "activities")) Spec.activities else .{};
+    const activity_fields = @import("std").meta.fields(@TypeOf(activity_entries));
+    if (activity_fields.len > @import("port-declarations").max_activities) @compileError("ecl-native: at most four resource activities may be declared");
+    const activity_definitions = blk: {
+        var values: [activity_fields.len]abi.ActivityDefinition = undefined;
+        var owned: u64 = 0;
+        for (activity_fields, 0..) |field, index| {
+            values[index] = activityDefinition(Spec.State, DeclaredEndpoints, @field(activity_entries, field.name));
+            if (owned & values[index].endpoints != 0) @compileError("ecl-native: resource endpoints belong to one activity");
+            owned |= values[index].endpoints;
+        }
+        break :blk values;
+    };
     comptime {
         for (@import("std").meta.tags(DeclaredOperations.Name)) |name| {
             if (@TypeOf(DeclaredOperations.get(name).handler) != fn (*Spec.State, *Controller) void and
@@ -342,15 +426,19 @@ pub fn Port(comptime Spec: type) type {
         pub const ecl_port_marker = void;
         pub const StateType = Spec.State;
         pub const LaneType = Lane;
+        pub fn operationMode(comptime _: Operations.Name) abi.OperationMode {
+            return .ordinary;
+        }
         pub const name = Spec.name;
         // A mutable object's address supplies nominal identity even when two
         // specs have identical names or the linker folds identical callbacks.
         var kind_identity: u8 = 0;
+        const activities = activity_definitions;
         fn kindIdentity() *const anyopaque {
             return &kind_identity;
         }
         pub fn definition() abi.PortDefinition {
-            return .{ .state_size = @sizeOf(Spec.State), .state_alignment = @alignOf(Spec.State), .name_ptr = name.ptr, .name_len = name.len, .init_state = initState, .initialize = initialize, .execute = execute, .cancel = cancelState, .cleanup = cleanup, .lane_count = @typeInfo(Lane).@"enum".fields.len, .cancellation = switch (cancellation) {
+            return .{ .capacity_failure = if (@hasDecl(Spec, "CapacityFailure")) Spec.CapacityFailure.definition() else null, .activity_count = activities.len, .activities_ptr = if (activities.len == 0) null else &activities, .state_size = @sizeOf(Spec.State), .state_alignment = @alignOf(Spec.State), .name_ptr = name.ptr, .name_len = name.len, .init_state = initState, .initialize = initialize, .execute = execute, .cancel = cancelState, .cleanup = cleanup, .lane_count = @typeInfo(Lane).@"enum".fields.len, .cancellation = switch (cancellation) {
                 .close_resource => .close_resource,
                 .acknowledge => .acknowledge,
             }, .cancel_operation = if (cancellation == .acknowledge) cancelOperation else null, .shutdown = if (@hasDecl(Spec, "shutdown")) shutdown else null, .identity = kindIdentity() };
@@ -397,6 +485,725 @@ pub fn Port(comptime Spec: type) type {
         }
         fn cleanup(raw: *anyopaque) callconv(.c) void {
             Spec.deinit(@ptrCast(@alignCast(raw)));
+        }
+    };
+}
+
+/// Graceful shutdown controls producer admission without acquiring stream data.
+pub const Shutdown = opaque {
+    fn controller(self: *Shutdown) *Controller {
+        return @ptrCast(self);
+    }
+    pub fn instance(self: *Shutdown, comptime I: type) ?*I.State {
+        return self.controller().instance(I);
+    }
+    pub fn input(self: *Shutdown, path: []const u64) ?*const MessageView {
+        return self.controller().input(path);
+    }
+    pub fn cancelled(self: *Shutdown) bool {
+        return self.controller().cancelled();
+    }
+    pub fn fail(self: *Shutdown, kind: capability.ErrorKind, message: []const u8) void {
+        self.controller().fail(kind, message);
+    }
+    pub fn failOutOfMemory(self: *Shutdown) void {
+        self.controller().failOutOfMemory();
+    }
+    /// Stop producer admission while allowing the resource activity to drain
+    /// every accepted byte. This grants no reader or writer endpoint authority.
+    pub fn finishInput(self: *Shutdown, comptime P: type, comptime name: P.Endpoints.Name) ControllerError!void {
+        const spec = comptime P.Endpoints.get(name);
+        comptime if (spec.owner != .resource or spec.transport != .bytes or spec.direction != .input)
+            @compileError("ecl-native: shutdown finishes resource byte inputs");
+        const owned = self.controller().state();
+        if (!owned.table.finish_input(owned.context, P.kindIdentity(), P.Endpoints.id(name))) return if (self.cancelled()) error.Cancelled else error.InvalidValue;
+    }
+};
+
+/// A joined resource activity owns only its declared byte-stream endpoints.
+/// It can supervise native I/O without borrowing an initialization callback.
+pub const Activity = opaque {
+    fn controller(self: *Activity) *Controller {
+        return @ptrCast(self);
+    }
+    pub fn instance(self: *Activity, comptime I: type) ?*I.State {
+        return self.controller().instance(I);
+    }
+    pub fn cancelled(self: *Activity) bool {
+        return self.controller().cancelled();
+    }
+    pub fn fail(self: *Activity, kind: capability.ErrorKind, message: []const u8) void {
+        self.controller().fail(kind, message);
+    }
+    /// Fail every resource stream while retaining resource operation admission.
+    /// Accepted output precedes the failure; stranded input is discarded.
+    pub fn failStreams(self: *Activity, kind: capability.ErrorKind, message: []const u8) void {
+        const bounded = capability.boundedErrorMessage(message);
+        const owned = self.controller().state();
+        owned.table.fail_streams(owned.context, kind, bounded.ptr, @intCast(bounded.len));
+    }
+    /// Stop new input writers and let accepted writer turns and bytes drain.
+    /// This grants no access to another activity's stream contents.
+    pub fn finishInput(self: *Activity, comptime P: type, comptime name: P.Endpoints.Name) ControllerError!void {
+        const spec = comptime P.Endpoints.get(name);
+        comptime if (spec.owner != .resource or spec.transport != .bytes or spec.direction != .input)
+            @compileError("ecl-native: activity finishes resource byte inputs");
+        const owned = self.controller().state();
+        if (!owned.table.finish_input(owned.context, P.kindIdentity(), P.Endpoints.id(name))) return if (self.cancelled()) error.Cancelled else error.InvalidValue;
+    }
+    /// Stop producers immediately, preserving accepted output followed by EOF.
+    /// An admitted blocked write is interrupted; this grants no data access.
+    pub fn stopOutput(self: *Activity, comptime P: type, comptime name: P.Endpoints.Name) ControllerError!void {
+        const spec = comptime P.Endpoints.get(name);
+        comptime if (spec.owner != .resource or spec.transport != .bytes or spec.direction != .output)
+            @compileError("ecl-native: activity stops resource byte outputs");
+        const owned = self.controller().state();
+        if (!owned.table.stop_output(owned.context, P.kindIdentity(), P.Endpoints.id(name))) return if (self.cancelled()) error.Cancelled else error.InvalidValue;
+    }
+    pub fn failResource(self: *Activity, kind: capability.ErrorKind, message: []const u8) void {
+        self.controller().failResource(kind, message);
+    }
+    pub fn failOutOfMemory(self: *Activity) void {
+        self.controller().failOutOfMemory();
+    }
+    pub fn endpoint(self: *Activity, comptime P: type, comptime name: P.Endpoints.Name) ControllerError!*Endpoint(P, name) {
+        const spec = comptime P.Endpoints.get(name);
+        comptime if (spec.owner != .resource or spec.transport != .bytes) @compileError("ecl-native: activities require resource byte endpoints");
+        return self.controller().endpoint(P, name);
+    }
+};
+
+fn activityMask(comptime EndpointSet: type, comptime endpoints: anytype) u64 {
+    var mask: u64 = 0;
+    for (endpoints) |name| {
+        const selected: EndpointSet.Name = name;
+        const endpoint = EndpointSet.get(selected);
+        if (endpoint.owner != .resource or endpoint.transport != .bytes) @compileError("ecl-native: activities require resource byte endpoints");
+        const bit = @as(u64, 1) << EndpointSet.id(selected);
+        if (mask & bit != 0) @compileError("ecl-native: duplicate activity endpoint");
+        mask |= bit;
+    }
+    return mask;
+}
+fn activityDefinition(comptime State: type, comptime EndpointSet: type, comptime entry: anytype) abi.ActivityDefinition {
+    if (@TypeOf(entry.handler) != fn (*State, *Activity) void and @TypeOf(entry.handler) != fn (*State, *Activity) ControllerError!void)
+        @compileError("ecl-native: activity handler requires resource state and activity context");
+    const Bridge = struct {
+        fn invoke(raw: *anyopaque, table: *const abi.ControllerTable, context: *anyopaque) callconv(.c) void {
+            var state: ControllerState = .{ .table = table, .context = context };
+            const activity: *Activity = @ptrCast(&state);
+            if (@typeInfo(@TypeOf(entry.handler)).@"fn".return_type.? == void) entry.handler(@as(*State, @ptrCast(@alignCast(raw))), activity) else entry.handler(@as(*State, @ptrCast(@alignCast(raw))), activity) catch |err| switch (err) {
+                error.OutOfMemory => activity.failOutOfMemory(),
+                error.Cancelled => if (!activity.cancelled()) activity.fail(.contract, "activity reported cancellation without a request"),
+                error.Failed => activity.fail(.io, "native activity failed"),
+                error.InvalidValue => activity.fail(.contract, "invalid activity capability or value"),
+            };
+        }
+    };
+    return .{ .endpoints = activityMask(EndpointSet, entry.endpoints), .execute = Bridge.invoke };
+}
+
+pub const CooperativeProgress = enum { completed, yielded, parked };
+const CooperativeState = struct { table: *const abi.CooperativeTable, context: *anyopaque, input_view: abi.ValueView = .{ .kind = .list } };
+
+/// Invocation-local cooperative authority. The ABI table itself withholds
+/// blocking streams, sends, and synchronous child initialization.
+pub const Cooperative = opaque {
+    fn state(self: *Cooperative) *CooperativeState {
+        return @ptrCast(@alignCast(self));
+    }
+    pub fn consume(self: *Cooperative, units: u32) bool {
+        const owned = self.state();
+        return owned.table.consume(owned.context, units);
+    }
+    /// Session-relative time from the same clock used by park, including
+    /// a host-configured manual clock. This grants no clock mutation authority.
+    pub fn monotonicMilliseconds(self: *Cooperative) ControllerError!i64 {
+        const owned = self.state();
+        const query = owned.table.monotonic_milliseconds orelse return error.InvalidValue;
+        return query(owned.context);
+    }
+    /// Capture a timer deadline now. Return parked only after this succeeds.
+    /// Cancellation wakes the parked invocation so its private unwind can join.
+    pub fn park(self: *Cooperative, milliseconds: u63) bool {
+        const owned = self.state();
+        return owned.table.park(owned.context, milliseconds);
+    }
+    pub fn input(self: *Cooperative, path: []const u64) ?*const MessageView {
+        if (path.len > abi.max_read_path_depth) return null;
+        const owned = self.state();
+        if (!owned.table.input(owned.context, path.ptr, @intCast(path.len), &owned.input_view)) return null;
+        return @ptrCast(&owned.input_view);
+    }
+    pub fn instance(self: *Cooperative, comptime I: type) ?*I.State {
+        const owned = self.state();
+        return @ptrCast(@alignCast(owned.table.instance_state(owned.context, I.identity()) orelse return null));
+    }
+    pub fn parent(self: *Cooperative, comptime P: type) ?*P.StateType {
+        comptime if (!@hasDecl(P, "ecl_port_marker")) @compileError("ecl-native: parent requires a declared Port type");
+        const owned = self.state();
+        return @ptrCast(@alignCast(owned.table.parent_state(owned.context, P.kindIdentity()) orelse return null));
+    }
+    /// Initialization-only borrow of a same-instance input resource. The host
+    /// owns the lease until initialization completes or this resource retires,
+    /// as selected. Closure stops new loans and joins admitted ones. Neither
+    /// the input value nor its native state may escape the selected lifetime.
+    pub fn initializationResource(self: *Cooperative, comptime P: type, path: []const u64, lifetime: ResourceLeaseLifetime) ResourceLeaseError!*P.StateType {
+        const owned = self.state();
+        return acquireInitializationResource(P, owned.table.initialization_resource, owned.context, path, lifetime);
+    }
+    /// Initialization-only parent borrow, including independently owned
+    /// children. It expires when initialization completes, fails, or is
+    /// cancelled, and must not be retained by operations or cleanup.
+    pub fn initializationParent(self: *Cooperative, comptime P: type) ?*P.StateType {
+        comptime if (!@hasDecl(P, "ecl_port_marker")) @compileError("ecl-native: parent requires a declared Port type");
+        const owned = self.state();
+        return @ptrCast(@alignCast(owned.table.initialization_parent(owned.context, P.kindIdentity()) orelse return null));
+    }
+    pub fn cancelled(self: *Cooperative) bool {
+        const owned = self.state();
+        return owned.table.cancelled(owned.context);
+    }
+    pub fn fail(self: *Cooperative, kind: capability.ErrorKind, message: []const u8) void {
+        const bounded = capability.boundedErrorMessage(message);
+        const owned = self.state();
+        owned.table.fail(owned.context, kind, bounded.ptr, @intCast(bounded.len));
+    }
+    pub fn failOutOfMemory(self: *Cooperative) void {
+        const owned = self.state();
+        owned.table.fail_allocation(owned.context);
+    }
+    pub fn errorData(self: *Cooperative) *CooperativeErrorDataBuilder {
+        return @ptrCast(self);
+    }
+    pub fn builder(self: *Cooperative) *CooperativeBuilder {
+        return @ptrCast(self);
+    }
+};
+
+/// Scalar writes complete immediately. Symbol, copy, and aggregate commands
+/// begin bounded construction; advance must finish them before another command.
+/// Symbols contain at most 256 bytes. Construction survives callback yields and
+/// its owner retires it on every completion or cancellation path.
+pub const CooperativeBuilder = opaque {
+    fn state(self: *CooperativeBuilder) *CooperativeState {
+        return @ptrCast(@alignCast(self));
+    }
+    fn apply(self: *CooperativeBuilder, request: abi.MessageBuildRequest) ControllerError!void {
+        const owned = self.state();
+        return applyBuild(owned.table, owned.context, &request);
+    }
+    pub fn int(self: *CooperativeBuilder, value: i64) ControllerError!void {
+        return self.apply(.{ .action = .scalar, .scalar = capability.Scalar.int(value).wire });
+    }
+    pub fn float(self: *CooperativeBuilder, value: f64) ControllerError!void {
+        return self.apply(.{ .action = .scalar, .scalar = capability.Scalar.float(value).wire });
+    }
+    pub fn char(self: *CooperativeBuilder, value: u32) ControllerError!void {
+        return self.apply(.{ .action = .scalar, .scalar = capability.Scalar.char(value).wire });
+    }
+    pub fn symbol(self: *CooperativeBuilder, bytes: []const u8) ControllerError!void {
+        return self.apply(.{ .action = .scalar, .scalar = capability.Scalar.symbol(bytes).wire });
+    }
+    /// Copy at most 65536 bytes into one integer-byte list. The host owns
+    /// the copy before return; message footprint limits still apply.
+    pub fn byteList(self: *CooperativeBuilder, source: []const u8) ControllerError!void {
+        return self.apply(.{ .action = .bytes, .scalar = .{ .kind = .list, .bytes_ptr = source.ptr, .bytes_len = source.len } });
+    }
+    pub fn beginSymbol(self: *CooperativeBuilder, byte_count: usize) ControllerError!void {
+        return self.apply(.{ .action = .symbol_start, .scalar = .{ .kind = .int, .bits = byte_count } });
+    }
+    /// Append at most 256 bytes. UTF-8 sequences may cross chunk boundaries.
+    pub fn symbolChunk(self: *CooperativeBuilder, source: []const u8) ControllerError!void {
+        return self.apply(.{ .action = .symbol_chunk, .scalar = capability.Scalar.symbol(source).wire });
+    }
+    pub fn endSymbol(self: *CooperativeBuilder) ControllerError!void {
+        return self.apply(.{ .action = .symbol_end });
+    }
+    pub fn input(self: *CooperativeBuilder, path: []const u64) ControllerError!void {
+        if (path.len > abi.max_read_path_depth) return error.InvalidValue;
+        return self.apply(.{ .action = .copy_input, .path = path.ptr, .depth = @intCast(path.len) });
+    }
+    pub fn list(self: *CooperativeBuilder, count: u32) ControllerError!void {
+        return self.apply(.{ .action = .list, .count = count });
+    }
+    pub fn dictionary(self: *CooperativeBuilder, pairs: u32) ControllerError!void {
+        return self.apply(.{ .action = .dictionary, .count = pairs });
+    }
+    /// Operation completion also advances pending result publication.
+    pub fn result(self: *CooperativeBuilder) ControllerError!void {
+        return self.apply(.{ .action = .result });
+    }
+    pub fn clear(self: *CooperativeBuilder) ControllerError!void {
+        return self.apply(.{ .action = .clear });
+    }
+    /// Begin replacing the top configuration with a provisionally owned child.
+    /// Advance validates, initializes, and waits without blocking a controller.
+    /// Failure retains private construction for joined cleanup.
+    pub fn child(self: *CooperativeBuilder, comptime P: type, dependency: ChildDependency) ControllerError!void {
+        return self.apply(childRequest(P, dependency));
+    }
+    /// Propagate yielded or parked progress from the callback. Only completed
+    /// permits the next construction command. Child parking owns a registered
+    /// readiness wait and does not poll or require a timer.
+    pub fn advance(self: *CooperativeBuilder) ControllerError!CooperativeProgress {
+        const owned = self.state();
+        return switch (owned.table.build_message(owned.context, &.{ .action = .advance })) {
+            .ok => .completed,
+            .yield_required => .yielded,
+            .parked => .parked,
+            .out_of_memory => error.OutOfMemory,
+            else => if (owned.table.cancelled(owned.context)) error.Cancelled else error.Failed,
+        };
+    }
+};
+
+fn applyBuild(table: anytype, context: *anyopaque, request: *const abi.MessageBuildRequest) ControllerError!void {
+    return switch (table.build_message(context, request)) {
+        .ok => {},
+        .out_of_memory => error.OutOfMemory,
+        else => if (table.cancelled(context)) error.Cancelled else error.Failed,
+    };
+}
+
+/// A sealing callback runs only after earlier work and dependent children join.
+/// Prepare and advance the complete result before requesting commit authority.
+/// Immutable failure alternative owned by one finalizer invocation. The token
+/// may be retained only until that operation's joined retirement completes.
+pub const PreparedFailure = opaque {};
+pub const Finalizer = opaque {
+    fn cooperative(self: *Finalizer) *Cooperative {
+        return @ptrCast(self);
+    }
+    pub fn consume(self: *Finalizer, units: u32) bool {
+        return self.cooperative().consume(units);
+    }
+    pub fn input(self: *Finalizer, path: []const u64) ?*const MessageView {
+        return self.cooperative().input(path);
+    }
+    pub fn instance(self: *Finalizer, comptime I: type) ?*I.State {
+        return self.cooperative().instance(I);
+    }
+    pub fn parent(self: *Finalizer, comptime P: type) ?*P.StateType {
+        return self.cooperative().parent(P);
+    }
+    pub fn cancelled(self: *Finalizer) bool {
+        return self.cooperative().cancelled();
+    }
+    pub fn fail(self: *Finalizer, kind: capability.ErrorKind, message: []const u8) void {
+        self.cooperative().fail(kind, message);
+    }
+    pub fn failOutOfMemory(self: *Finalizer) void {
+        self.cooperative().failOutOfMemory();
+    }
+    pub fn errorData(self: *Finalizer) *CooperativeErrorDataBuilder {
+        return @ptrCast(self);
+    }
+    pub fn builder(self: *Finalizer) *FinalizerBuilder {
+        return @ptrCast(self);
+    }
+    /// Consume the diagnostic dictionary at the builder top into a prepared
+    /// failure alternative. Advance construction before obtaining its token.
+    /// At most 32 alternatives may be prepared by one finalizer invocation.
+    pub fn prepareFailure(self: *Finalizer, kind: capability.ErrorKind, message: []const u8) ControllerError!void {
+        const bounded = capability.boundedErrorMessage(message);
+        return self.cooperative().builder().apply(.{ .action = .prepare_failure, .count = @intFromEnum(kind), .scalar = capability.Scalar.symbol(bounded).wire });
+    }
+    pub fn preparedFailure(self: *Finalizer) ControllerError!*const PreparedFailure {
+        const owned = self.cooperative().state();
+        const query = owned.table.prepared_failure orelse return error.InvalidValue;
+        return @ptrCast(query(owned.context) orelse return error.InvalidValue);
+    }
+    /// Select an already prepared failure after beginCommit. This performs no
+    /// allocation and accepts only a token issued by this invocation.
+    pub fn failPrepared(self: *Finalizer, failure: *const PreparedFailure) ControllerError!void {
+        const owned = self.cooperative().state();
+        const select = owned.table.select_failure orelse return error.InvalidValue;
+        if (!select(owned.context, failure)) return error.InvalidValue;
+    }
+    pub fn beginCommit(self: *Finalizer) ControllerError!void {
+        const owned = self.cooperative().state();
+        if (!owned.table.begin_commit(owned.context)) return if (self.cancelled()) error.Cancelled else error.InvalidValue;
+    }
+};
+
+/// Capability-free result construction. Finalizers cannot create descendants or
+/// transport endpoints; committing freezes further result mutation at the host.
+pub const FinalizerBuilder = opaque {
+    fn builder(self: *FinalizerBuilder) *CooperativeBuilder {
+        return @ptrCast(self);
+    }
+    pub fn int(self: *FinalizerBuilder, value: i64) ControllerError!void {
+        return self.builder().int(value);
+    }
+    pub fn float(self: *FinalizerBuilder, value: f64) ControllerError!void {
+        return self.builder().float(value);
+    }
+    pub fn char(self: *FinalizerBuilder, value: u32) ControllerError!void {
+        return self.builder().char(value);
+    }
+    pub fn symbol(self: *FinalizerBuilder, value: []const u8) ControllerError!void {
+        return self.builder().symbol(value);
+    }
+    pub fn byteList(self: *FinalizerBuilder, source: []const u8) ControllerError!void {
+        return self.builder().byteList(source);
+    }
+    pub fn beginSymbol(self: *FinalizerBuilder, byte_count: usize) ControllerError!void {
+        return self.builder().beginSymbol(byte_count);
+    }
+    pub fn symbolChunk(self: *FinalizerBuilder, source: []const u8) ControllerError!void {
+        return self.builder().symbolChunk(source);
+    }
+    pub fn endSymbol(self: *FinalizerBuilder) ControllerError!void {
+        return self.builder().endSymbol();
+    }
+    pub fn input(self: *FinalizerBuilder, value: []const u64) ControllerError!void {
+        return self.builder().input(value);
+    }
+    pub fn list(self: *FinalizerBuilder, value: u32) ControllerError!void {
+        return self.builder().list(value);
+    }
+    pub fn dictionary(self: *FinalizerBuilder, value: u32) ControllerError!void {
+        return self.builder().dictionary(value);
+    }
+    pub fn result(self: *FinalizerBuilder) ControllerError!void {
+        return self.builder().result();
+    }
+    pub fn clear(self: *FinalizerBuilder) ControllerError!void {
+        return self.builder().clear();
+    }
+    pub fn advance(self: *FinalizerBuilder) ControllerError!CooperativeProgress {
+        return self.builder().advance();
+    }
+};
+
+fn CooperativePort(comptime Spec: type) type {
+    const Lane = enum { operation };
+    const EndpointSet = declarations.Endpoints(.{});
+    const OperationSet = declarations.Operations(Lane, EndpointSet, Spec.operations);
+    comptime {
+        for (.{ "State", "name", "init", "open", "retireOperation", "retire", "operations" }) |name|
+            if (!@hasDecl(Spec, name)) @compileError("ecl-native: cooperative Port requires State, name, init, open, retireOperation, retire, and operations");
+        if (@sizeOf(Spec.State) == 0 or @sizeOf(Spec.State) > abi.max_port_state_bytes or @alignOf(Spec.State) > 64)
+            @compileError("ecl-native: Port State exceeds the supported size or alignment");
+        if (@TypeOf(Spec.init) != fn () Spec.State or
+            @TypeOf(Spec.retireOperation) != fn (*Spec.State, *Cooperative) CooperativeProgress or
+            @TypeOf(Spec.retire) != fn (*Spec.State, *Cooperative) CooperativeProgress)
+            @compileError("ecl-native: cooperative Port callbacks have invalid signatures");
+        if (@TypeOf(Spec.open) != fn (*Spec.State, *Cooperative) CooperativeProgress and
+            @TypeOf(Spec.open) != fn (*Spec.State, *Cooperative) ControllerError!CooperativeProgress)
+            @compileError("ecl-native: cooperative initialization requires cooperative context");
+        for (@import("std").meta.tags(OperationSet.Name)) |name|
+            validateCooperativeHandler(Spec.State, OperationSet.get(name).handler);
+    }
+    return opaque {
+        pub const ecl_port_marker = void;
+        pub const StateType = Spec.State;
+        pub const LaneType = Lane;
+        pub const Endpoints = EndpointSet;
+        pub const Operations = OperationSet;
+        pub fn operationMode(comptime operation: Operations.Name) abi.OperationMode {
+            return if (@typeInfo(@TypeOf(Operations.get(operation).handler)).@"fn".params[1].type.? == *Finalizer) .finalizer else .ordinary;
+        }
+        pub const name = Spec.name;
+        var identity: u8 = 0;
+        fn kindIdentity() *const anyopaque {
+            return &identity;
+        }
+        const callbacks: abi.CooperativeDefinition = .{ .initialize = initialize, .execute = execute, .retire_operation = retireOperation, .retire = retire };
+        pub fn definition() abi.PortDefinition {
+            return .{
+                .capacity_failure = if (@hasDecl(Spec, "CapacityFailure")) Spec.CapacityFailure.definition() else null,
+                .state_size = @sizeOf(Spec.State),
+                .state_alignment = @alignOf(Spec.State),
+                .name_ptr = name.ptr,
+                .name_len = name.len,
+                .init_state = initState,
+                .initialize = null,
+                .execute = null,
+                .cancel = null,
+                .cleanup = null,
+                .cancellation = .acknowledge,
+                .identity = kindIdentity(),
+                .execution = .cooperative,
+                .cooperative = &callbacks,
+            };
+        }
+        fn initState(raw: *anyopaque) callconv(.c) void {
+            const state: *Spec.State = @ptrCast(@alignCast(raw));
+            state.* = Spec.init();
+        }
+        fn initialize(raw: *anyopaque, table: *const abi.CooperativeTable, context: *anyopaque) callconv(.c) abi.CooperativeProgress {
+            return invoke(Spec.open, raw, table, context);
+        }
+        fn execute(raw: *anyopaque, code: u32, table: *const abi.CooperativeTable, context: *anyopaque) callconv(.c) abi.CooperativeProgress {
+            inline for (comptime @import("std").meta.tags(Operations.Name)) |operation| {
+                if (code == @intFromEnum(operation)) return invoke(Operations.get(operation).handler, raw, table, context);
+            }
+            table.fail(context, .contract, "unsupported registered operation", "unsupported registered operation".len);
+            return .completed;
+        }
+        fn retireOperation(raw: *anyopaque, table: *const abi.CooperativeTable, context: *anyopaque) callconv(.c) abi.CooperativeProgress {
+            return invoke(Spec.retireOperation, raw, table, context);
+        }
+        fn retire(raw: *anyopaque, table: *const abi.CooperativeTable, context: *anyopaque) callconv(.c) abi.CooperativeProgress {
+            return invoke(Spec.retire, raw, table, context);
+        }
+        fn invoke(comptime handler: anytype, raw: *anyopaque, table: *const abi.CooperativeTable, context: *anyopaque) abi.CooperativeProgress {
+            var state: CooperativeState = .{ .table = table, .context = context };
+            const call: *Cooperative = @ptrCast(&state);
+            const Context = @typeInfo(@TypeOf(handler)).@"fn".params[1].type.?;
+            const typed_call: Context = @ptrCast(&state);
+            const progress = if (@typeInfo(@TypeOf(handler)).@"fn".return_type.? == CooperativeProgress)
+                handler(@as(*Spec.State, @ptrCast(@alignCast(raw))), typed_call)
+            else
+                handler(@as(*Spec.State, @ptrCast(@alignCast(raw))), typed_call) catch |err| blk: {
+                    switch (err) {
+                        error.OutOfMemory => call.failOutOfMemory(),
+                        error.Cancelled => if (!call.cancelled()) call.fail(.contract, "cooperative callback reported cancellation without a request"),
+                        error.Failed => call.fail(.io, "cooperative resource operation failed"),
+                        error.InvalidValue => call.fail(.contract, "invalid cooperative capability or value"),
+                    }
+                    break :blk CooperativeProgress.completed;
+                };
+            return switch (progress) {
+                .completed => .completed,
+                .yielded => .yielded,
+                .parked => .parked,
+            };
+        }
+    };
+}
+
+fn validateCooperativeHandler(comptime State: type, comptime handler: anytype) void {
+    if (@TypeOf(handler) != fn (*State, *Cooperative) CooperativeProgress and
+        @TypeOf(handler) != fn (*State, *Cooperative) ControllerError!CooperativeProgress and
+        @TypeOf(handler) != fn (*State, *Finalizer) CooperativeProgress and
+        @TypeOf(handler) != fn (*State, *Finalizer) ControllerError!CooperativeProgress)
+        @compileError("ecl-native: cooperative handler requires resource state and cooperative context");
+}
+
+/// Bounded, capability-free diagnostic construction. Seal before failing.
+pub const ErrorDataBuilder = opaque {
+    fn builder(self: *ErrorDataBuilder) *MessageBuilder {
+        return @ptrCast(self);
+    }
+    pub fn int(self: *ErrorDataBuilder, value: i64) ControllerError!void {
+        return self.builder().int(value);
+    }
+    pub fn float(self: *ErrorDataBuilder, value: f64) ControllerError!void {
+        return self.builder().float(value);
+    }
+    pub fn char(self: *ErrorDataBuilder, value: u32) ControllerError!void {
+        return self.builder().char(value);
+    }
+    pub fn symbol(self: *ErrorDataBuilder, value: []const u8) ControllerError!void {
+        return self.builder().symbol(value);
+    }
+    pub fn byteList(self: *ErrorDataBuilder, source: []const u8) ControllerError!void {
+        return self.builder().byteList(source);
+    }
+    pub fn beginSymbol(self: *ErrorDataBuilder, byte_count: usize) ControllerError!void {
+        return self.builder().beginSymbol(byte_count);
+    }
+    pub fn symbolChunk(self: *ErrorDataBuilder, source: []const u8) ControllerError!void {
+        return self.builder().symbolChunk(source);
+    }
+    pub fn endSymbol(self: *ErrorDataBuilder) ControllerError!void {
+        return self.builder().endSymbol();
+    }
+    pub fn input(self: *ErrorDataBuilder, value: []const u64) ControllerError!void {
+        return self.builder().input(value);
+    }
+    pub fn list(self: *ErrorDataBuilder, value: u32) ControllerError!void {
+        return self.builder().list(value);
+    }
+    pub fn dictionary(self: *ErrorDataBuilder, value: u32) ControllerError!void {
+        return self.builder().dictionary(value);
+    }
+    pub fn clear(self: *ErrorDataBuilder) ControllerError!void {
+        return self.builder().clear();
+    }
+    pub fn seal(self: *ErrorDataBuilder) ControllerError!void {
+        return self.builder().apply(.{ .action = .error_data });
+    }
+};
+
+/// Bounded, capability-free diagnostic construction. Seal before failing.
+pub const CooperativeErrorDataBuilder = opaque {
+    fn builder(self: *CooperativeErrorDataBuilder) *CooperativeBuilder {
+        return @ptrCast(self);
+    }
+    pub fn int(self: *CooperativeErrorDataBuilder, value: i64) ControllerError!void {
+        return self.builder().int(value);
+    }
+    pub fn float(self: *CooperativeErrorDataBuilder, value: f64) ControllerError!void {
+        return self.builder().float(value);
+    }
+    pub fn char(self: *CooperativeErrorDataBuilder, value: u32) ControllerError!void {
+        return self.builder().char(value);
+    }
+    pub fn symbol(self: *CooperativeErrorDataBuilder, value: []const u8) ControllerError!void {
+        return self.builder().symbol(value);
+    }
+    pub fn byteList(self: *CooperativeErrorDataBuilder, source: []const u8) ControllerError!void {
+        return self.builder().byteList(source);
+    }
+    pub fn beginSymbol(self: *CooperativeErrorDataBuilder, byte_count: usize) ControllerError!void {
+        return self.builder().beginSymbol(byte_count);
+    }
+    pub fn symbolChunk(self: *CooperativeErrorDataBuilder, source: []const u8) ControllerError!void {
+        return self.builder().symbolChunk(source);
+    }
+    pub fn endSymbol(self: *CooperativeErrorDataBuilder) ControllerError!void {
+        return self.builder().endSymbol();
+    }
+    pub fn input(self: *CooperativeErrorDataBuilder, value: []const u64) ControllerError!void {
+        return self.builder().input(value);
+    }
+    pub fn list(self: *CooperativeErrorDataBuilder, value: u32) ControllerError!void {
+        return self.builder().list(value);
+    }
+    pub fn dictionary(self: *CooperativeErrorDataBuilder, value: u32) ControllerError!void {
+        return self.builder().dictionary(value);
+    }
+    pub fn clear(self: *CooperativeErrorDataBuilder) ControllerError!void {
+        return self.builder().clear();
+    }
+    pub fn seal(self: *CooperativeErrorDataBuilder) ControllerError!void {
+        return self.builder().apply(.{ .action = .error_data });
+    }
+    pub fn advance(self: *CooperativeErrorDataBuilder) ControllerError!CooperativeProgress {
+        return self.builder().advance();
+    }
+};
+
+pub const RejectionProgress = enum { yielded, completed };
+pub const RejectionResult = ControllerError!RejectionProgress;
+
+/// An already rejected opening may report module-specific validation and
+/// admission diagnostics. This capability cannot create or acquire resources.
+pub const RejectedOpen = opaque {
+    fn cooperative(self: *RejectedOpen) *Cooperative {
+        return @ptrCast(self);
+    }
+    pub fn input(self: *RejectedOpen, path: []const u64) ?*const MessageView {
+        return self.cooperative().input(path);
+    }
+    pub fn instance(self: *RejectedOpen, comptime I: type) ?*I.State {
+        return self.cooperative().instance(I);
+    }
+    pub fn consume(self: *RejectedOpen, units: u32) bool {
+        return self.cooperative().consume(units);
+    }
+    pub fn cancelled(self: *RejectedOpen) bool {
+        return self.cooperative().cancelled();
+    }
+    pub fn fail(self: *RejectedOpen, kind: capability.ErrorKind, message: []const u8) void {
+        self.cooperative().fail(kind, message);
+    }
+    pub fn failOutOfMemory(self: *RejectedOpen) void {
+        self.cooperative().failOutOfMemory();
+    }
+    pub fn errorData(self: *RejectedOpen) *RejectedErrorDataBuilder {
+        return @ptrCast(self);
+    }
+};
+pub const RejectedErrorDataBuilder = opaque {
+    fn builder(self: *RejectedErrorDataBuilder) *CooperativeErrorDataBuilder {
+        return @ptrCast(self);
+    }
+    pub fn int(self: *RejectedErrorDataBuilder, value: i64) ControllerError!void {
+        return self.builder().int(value);
+    }
+    pub fn float(self: *RejectedErrorDataBuilder, value: f64) ControllerError!void {
+        return self.builder().float(value);
+    }
+    pub fn char(self: *RejectedErrorDataBuilder, value: u32) ControllerError!void {
+        return self.builder().char(value);
+    }
+    pub fn symbol(self: *RejectedErrorDataBuilder, value: []const u8) ControllerError!void {
+        return self.builder().symbol(value);
+    }
+    pub fn byteList(self: *RejectedErrorDataBuilder, source: []const u8) ControllerError!void {
+        return self.builder().byteList(source);
+    }
+    pub fn beginSymbol(self: *RejectedErrorDataBuilder, byte_count: usize) ControllerError!void {
+        return self.builder().beginSymbol(byte_count);
+    }
+    pub fn symbolChunk(self: *RejectedErrorDataBuilder, source: []const u8) ControllerError!void {
+        return self.builder().symbolChunk(source);
+    }
+    pub fn endSymbol(self: *RejectedErrorDataBuilder) ControllerError!void {
+        return self.builder().endSymbol();
+    }
+    pub fn input(self: *RejectedErrorDataBuilder, value: []const u64) ControllerError!void {
+        return self.builder().input(value);
+    }
+    pub fn list(self: *RejectedErrorDataBuilder, count: u32) ControllerError!void {
+        return self.builder().list(count);
+    }
+    pub fn dictionary(self: *RejectedErrorDataBuilder, count: u32) ControllerError!void {
+        return self.builder().dictionary(count);
+    }
+    pub fn clear(self: *RejectedErrorDataBuilder) ControllerError!void {
+        return self.builder().clear();
+    }
+    pub fn seal(self: *RejectedErrorDataBuilder) ControllerError!void {
+        return self.builder().seal();
+    }
+    pub fn advance(self: *RejectedErrorDataBuilder) ControllerError!RejectionProgress {
+        return switch (try self.builder().advance()) {
+            .completed => .completed,
+            .yielded => .yielded,
+            .parked => error.InvalidValue,
+        };
+    }
+};
+pub fn CapacityFailure(comptime Spec: type) type {
+    comptime {
+        if (@sizeOf(Spec.State) == 0 or @sizeOf(Spec.State) > abi.max_port_state_bytes or @alignOf(Spec.State) > 64)
+            @compileError("ecl-native: invalid capacity failure state size or alignment");
+        if (@TypeOf(Spec.init) != fn () Spec.State or
+            @TypeOf(Spec.step) != fn (*Spec.State, *RejectedOpen) RejectionResult or
+            @TypeOf(Spec.retire) != fn (*Spec.State, *RejectedOpen) bool)
+            @compileError("ecl-native: invalid capacity failure lifecycle signatures");
+    }
+    return opaque {
+        const wire: abi.CapacityFailureDefinition = .{
+            .state_size = @sizeOf(Spec.State),
+            .state_alignment = @alignOf(Spec.State),
+            .init_state = initialize,
+            .step = step,
+            .retire = retire,
+        };
+        pub fn definition() *const abi.CapacityFailureDefinition {
+            return &wire;
+        }
+        fn initialize(raw: *anyopaque) callconv(.c) void {
+            const state: *Spec.State = @ptrCast(@alignCast(raw));
+            state.* = Spec.init();
+        }
+        fn step(raw: *anyopaque, table: *const abi.CooperativeTable, context: *anyopaque) callconv(.c) abi.CooperativeProgress {
+            var state: CooperativeState = .{ .table = table, .context = context };
+            const rejected: *RejectedOpen = @ptrCast(&state);
+            const progress = Spec.step(@ptrCast(@alignCast(raw)), rejected) catch |err| {
+                switch (err) {
+                    error.OutOfMemory => rejected.failOutOfMemory(),
+                    error.Cancelled => if (!rejected.cancelled()) rejected.fail(.contract, "rejection cancelled without a request"),
+                    error.Failed => rejected.fail(.io, "opening rejection failed"),
+                    error.InvalidValue => rejected.fail(.contract, "invalid opening rejection operation"),
+                }
+                return .completed;
+            };
+            return switch (progress) {
+                .completed => .completed,
+                .yielded => .yielded,
+            };
+        }
+        fn retire(raw: *anyopaque, table: *const abi.CooperativeTable, context: *anyopaque) callconv(.c) bool {
+            var state: CooperativeState = .{ .table = table, .context = context };
+            return Spec.retire(@ptrCast(@alignCast(raw)), @ptrCast(&state));
         }
     };
 }

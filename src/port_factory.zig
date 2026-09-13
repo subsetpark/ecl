@@ -1,106 +1,47 @@
-//! Registered resource opening. Adapters receive bounded input and execution
-//! services, never an interpreter or a backend-family discriminator.
-const std = @import("std");
+//! Registered resource opening through nominal, issuer-owned capabilities.
 const heap = @import("heap.zig");
+const native = @import("native_port.zig");
 const scheduler = @import("scheduler.zig");
 const external = @import("external.zig");
 const message = @import("port_message.zig");
 const Value = @import("value.zig").Value;
-const machine = @import("machine.zig");
-pub const Failure = struct {
-    report: @import("port_bytes.zig").Failure,
-    details: [3]?machine.ErrorDetail = @splat(null),
-    pub fn init(kind: machine.ErrorKind, text: []const u8) Failure {
-        return .{ .report = .init(kind, text) };
-    }
-};
+pub const Failure = @import("port_error_data.zig").Observation;
 
-pub const Context = struct {
-    scope: *scheduler.TaskScope,
-};
+pub const Context = struct { scope: *scheduler.TaskScope };
 pub const Start = union(enum) { resource: Value, opening: *Opening, failed: Failure };
 pub const Progress = union(enum) { yielded, pending: external.ReadinessSource, resource: Value, failed: Failure };
 
-const FactoryState = struct {
-    allocator: std.mem.Allocator,
-    adapter: *anyopaque,
-    open: *const fn (*anyopaque, Context, *const message.Validated) error{OutOfMemory}!Start,
-    release: *const fn (*anyopaque) void,
-};
 pub const Factory = opaque {
-    fn state(self: *Factory) *FactoryState {
-        return @ptrCast(@alignCast(self));
+    fn capability(self: *Factory) *native.RegisteredCapability {
+        return @ptrCast(self);
     }
-    /// Success consumes one adapter reference; failure retains it. The
-    /// published factory pins its issuer and its immutable service grants.
-    pub fn create(comptime Adapter: type, identity: u64, adapter: *Adapter) error{OutOfMemory}!Value {
-        const Bridge = struct {
-            fn typed(raw: *anyopaque) *Adapter {
-                return @ptrCast(@alignCast(raw));
-            }
-            fn open(raw: *anyopaque, context: Context, config: *const message.Validated) error{OutOfMemory}!Start {
-                return typed(raw).openResource(context, config);
-            }
-            fn release(raw: *anyopaque) void {
-                typed(raw).releasePort();
-            }
-        };
-        const allocator = adapter.allocator();
-        const owned = try allocator.create(FactoryState);
-        errdefer allocator.destroy(owned);
-        owned.* = .{ .allocator = allocator, .adapter = adapter, .open = Bridge.open, .release = Bridge.release };
-        return heap.createBorrowedPort(Factory, .factory, allocator, identity, @ptrCast(owned));
+    /// Success consumes the registration reference; failure retains it.
+    /// The registration itself stores the issuer and immutable descriptor index.
+    pub fn create(identity: u64, registration: *native.RegisteredCapability) error{OutOfMemory}!Value {
+        return heap.createBorrowedPort(Factory, .factory, registration.allocator(), identity, @ptrCast(registration));
+    }
+    pub fn messageLimits(self: *Factory) message.Limits {
+        return self.capability().messageLimits();
     }
     pub fn fromValue(item: Value) ?*Factory {
         if (item != .port) return null;
         return heap.portPayload(Factory, .factory, item.port);
     }
-    /// Borrows configuration and factory through the returned opening's
-    /// lifetime. A returned resource is owned by the caller and calling scope.
+    /// Borrows configuration and factory through the returned opening's lifetime.
     pub fn open(self: *Factory, context: Context, config: *const message.Validated) error{OutOfMemory}!Start {
-        return self.state().open(self.state().adapter, context, config);
+        return self.capability().openResource(context, config);
     }
     pub fn releasePort(self: *Factory) void {
-        const owned = self.state();
-        owned.release(owned.adapter);
-        owned.allocator.destroy(owned);
+        self.capability().releasePort();
     }
 };
 
-const OpeningState = struct {
-    allocator: std.mem.Allocator,
-    adapter: *anyopaque,
-    advance: *const fn (*anyopaque, usize) error{OutOfMemory}!Progress,
-    release: *const fn (*anyopaque) void,
-};
+/// Owns rejected-opening diagnostic work; release transfers it to retirement.
 pub const Opening = opaque {
-    fn state(self: *Opening) *OpeningState {
-        return @ptrCast(@alignCast(self));
-    }
-    /// Success consumes the prepared adapter; failure retains it. Releasing
-    /// an opening must retire all partial work in bounded time.
-    pub fn create(comptime Adapter: type, adapter: *Adapter) error{OutOfMemory}!*Opening {
-        const Bridge = struct {
-            fn typed(raw: *anyopaque) *Adapter {
-                return @ptrCast(@alignCast(raw));
-            }
-            fn advance(raw: *anyopaque, quantum: usize) error{OutOfMemory}!Progress {
-                return typed(raw).advance(quantum);
-            }
-            fn release(raw: *anyopaque) void {
-                typed(raw).release();
-            }
-        };
-        const owned = try adapter.allocator().create(OpeningState);
-        owned.* = .{ .allocator = adapter.allocator(), .adapter = adapter, .advance = Bridge.advance, .release = Bridge.release };
-        return @ptrCast(owned);
-    }
     pub fn advance(self: *Opening, quantum: usize) error{OutOfMemory}!Progress {
-        return self.state().advance(self.state().adapter, quantum);
+        return native.advanceOpening(self, quantum);
     }
     pub fn release(self: *Opening) void {
-        const owned = self.state();
-        owned.release(owned.adapter);
-        owned.allocator.destroy(owned);
+        native.retireOpening(self);
     }
 };

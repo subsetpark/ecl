@@ -5,17 +5,37 @@ const scheduler = @import("scheduler.zig");
 const messages = @import("port_messages.zig");
 const Publication = @import("port_resource.zig").Publication;
 const Failure = @import("port_bytes.zig").Failure;
+const diagnostics = @import("port_error_data.zig");
 const Value = @import("value.zig").Value;
 
 pub const Terminal = union(enum) { success, cancelled, failed: Failure };
-pub const Completion = union(enum) { pending, ready, cancelled, failed: Failure };
-pub const Claim = union(enum) { pending, claimed, value: Value, cancelled, failed: Failure };
+pub const Completion = union(enum) { pending, ready, cancelled, failed: diagnostics.Observation };
+pub const Claim = union(enum) { pending, claimed, value: Value, cancelled, failed: diagnostics.Observation };
 
+/// A prepared failure is borrowed from its issuing exchange through retirement.
+/// Its immutable report and diagnostics cannot be changed after construction.
+pub const PreparedFailure = opaque {};
+const Choice = struct {
+    failure: Failure,
+    details: *diagnostics.Owned,
+    next: ?*Choice = null,
+    fn capability(self: *Choice) *const PreparedFailure {
+        return @ptrCast(self);
+    }
+};
+const max_failure_choices = 32;
 const State = struct {
     host: *const heap.HostCleanup,
     mutex: std.Io.Mutex = .init,
-    phase: union(enum) { running, terminal: Terminal } = .running,
+    phase: union(enum) { running, frozen, terminal: Terminal } = .running,
+    details: ?*diagnostics.Owned = null,
+    choices: struct { first: ?*Choice = null, last: ?*Choice = null, count: usize = 0, selected: ?*Choice = null } = .{},
     value: union(enum) { available: *messages.Envelope, claimed, discarded, rejected },
+
+    /// Callers hold mutex while choosing the immutable terminal view.
+    fn diagnosticView(self: *const State) ?*const diagnostics.View {
+        return if (self.choices.selected) |choice| choice.details.view() else if (self.details) |details| details.view() else null;
+    }
 
     fn capability(self: *State) *Result {
         return @ptrCast(self);
@@ -39,6 +59,15 @@ pub const Result = opaque {
     pub fn release(self: *Result) void {
         const owned = self.state();
         if (owned.value == .available) owned.value.available.release();
+        if (owned.details) |details| details.release();
+        var choice = owned.choices.first;
+        // At most max_failure_choices records exist; diagnostic release only
+        // enqueues bounded value retirement in the issuing reclamation domain.
+        while (choice) |current| {
+            choice = current.next;
+            current.details.release();
+            owned.host.allocator().destroy(current);
+        }
         owned.host.allocator().destroy(owned);
     }
     /// Success consumes the envelope. Rejection retains it. Previous result
@@ -56,24 +85,99 @@ pub const Result = opaque {
         previous.release();
         return true;
     }
+    /// Success consumes diagnostics; rejection retains them. Final release owns
+    /// their retirement even after close discards ordinary result storage.
+    pub fn replaceDetails(self: *Result, incoming: *diagnostics.Owned) bool {
+        const owned = self.state();
+        std.Io.Threaded.mutexLock(&owned.mutex);
+        if (owned.phase != .running) {
+            std.Io.Threaded.mutexUnlock(&owned.mutex);
+            return false;
+        }
+        const previous = owned.details;
+        owned.details = incoming;
+        std.Io.Threaded.mutexUnlock(&owned.mutex);
+        if (previous) |details| details.release();
+        return true;
+    }
+    /// Success consumes diagnostics; failure retains them. Both the report and
+    /// diagnostic envelope are allocated before commit can freeze this result.
+    pub fn prepareFailure(self: *Result, failure: Failure, details: *diagnostics.Owned) error{ OutOfMemory, InvalidState, Overflow }!void {
+        const owned = self.state();
+        const choice = try owned.host.allocator().create(Choice);
+        errdefer owned.host.allocator().destroy(choice);
+        choice.* = .{ .failure = failure, .details = details };
+        std.Io.Threaded.mutexLock(&owned.mutex);
+        defer std.Io.Threaded.mutexUnlock(&owned.mutex);
+        if (owned.phase != .running) return error.InvalidState;
+        if (owned.choices.count == max_failure_choices) return error.Overflow;
+        if (owned.choices.last) |last| last.next = choice else owned.choices.first = choice;
+        owned.choices.last = choice;
+        owned.choices.count += 1;
+    }
+    pub fn preparedFailure(self: *Result) ?*const PreparedFailure {
+        const owned = self.state();
+        std.Io.Threaded.mutexLock(&owned.mutex);
+        defer std.Io.Threaded.mutexUnlock(&owned.mutex);
+        if (owned.phase != .running) return null;
+        return if (owned.choices.last) |choice| choice.capability() else null;
+    }
+    /// Selection performs no allocation or value mutation. Validate identity
+    /// against this issuer before dereferencing an extension-supplied token.
+    pub fn selectFailure(self: *Result, token: *const PreparedFailure) ?Failure {
+        const owned = self.state();
+        std.Io.Threaded.mutexLock(&owned.mutex);
+        defer std.Io.Threaded.mutexUnlock(&owned.mutex);
+        if (owned.phase != .frozen or owned.choices.selected != null) return null;
+        var cursor = owned.choices.first;
+        while (cursor) |choice| : (cursor = choice.next) {
+            if (choice.capability() != token) continue;
+            owned.choices.selected = choice;
+            return choice.failure;
+        }
+        return null;
+    }
+    /// Reserve immutable, capability-free output before irreversible work.
+    /// Rejection preserves the current result. No allocation or publication of
+    /// provisional resource attachments can follow this transition.
+    pub fn freeze(self: *Result) bool {
+        const owned = self.state();
+        std.Io.Threaded.mutexLock(&owned.mutex);
+        if (owned.phase == .terminal or owned.value != .available) {
+            std.Io.Threaded.mutexUnlock(&owned.mutex);
+            return false;
+        }
+        const view = owned.value.available.borrow();
+        const permitted = view.attachments().len == 0;
+        if (permitted) owned.phase = .frozen;
+        std.Io.Threaded.mutexUnlock(&owned.mutex);
+        view.release();
+        return permitted;
+    }
+    pub fn mutable(self: *Result) bool {
+        const owned = self.state();
+        std.Io.Threaded.mutexLock(&owned.mutex);
+        defer std.Io.Threaded.mutexUnlock(&owned.mutex);
+        return owned.phase == .running and owned.value == .available;
+    }
     /// Called only after controller return and cancellation acknowledgement.
     /// The first terminal fact wins; repeating observation cannot revise it.
     pub fn complete(self: *Result, terminal: Terminal) void {
         const owned = self.state();
         std.Io.Threaded.mutexLock(&owned.mutex);
         defer std.Io.Threaded.mutexUnlock(&owned.mutex);
-        if (owned.phase == .running) owned.phase = .{ .terminal = terminal };
+        if (owned.phase != .terminal) owned.phase = .{ .terminal = terminal };
     }
     pub fn completion(self: *Result) Completion {
         const owned = self.state();
         std.Io.Threaded.mutexLock(&owned.mutex);
         defer std.Io.Threaded.mutexUnlock(&owned.mutex);
         return switch (owned.phase) {
-            .running => .pending,
+            .running, .frozen => .pending,
             .terminal => |terminal| switch (terminal) {
                 .success => .ready,
                 .cancelled => .cancelled,
-                .failed => |failure| .{ .failed = failure },
+                .failed => |failure| .{ .failed = .{ .report = failure, .details = owned.diagnosticView() } },
             },
         };
     }
@@ -115,7 +219,7 @@ const ResultPublication = struct {
     }
     pub fn validate(self: *@This()) bool {
         switch (self.state.phase) {
-            .running => return false,
+            .running, .frozen => return false,
             .terminal => |terminal| switch (terminal) {
                 .success => {},
                 .cancelled => {
@@ -124,7 +228,7 @@ const ResultPublication = struct {
                     return false;
                 },
                 .failed => |failure| {
-                    self.result = .{ .failed = failure };
+                    self.result = .{ .failed = .{ .report = failure, .details = self.state.diagnosticView() } };
                     return false;
                 },
             },
@@ -132,7 +236,7 @@ const ResultPublication = struct {
         self.result = switch (self.state.value) {
             .claimed => .claimed,
             .rejected => .cancelled,
-            .discarded => .{ .failed = Failure.init(.io, "exchange result was discarded by close") },
+            .discarded => .{ .failed = .{ .report = Failure.init(.io, "exchange result was discarded by close") } },
             .available => .pending,
         };
         return self.state.value == .available and self.view != null and self.view.?.observes(self.state.value.available);

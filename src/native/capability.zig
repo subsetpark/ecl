@@ -232,6 +232,9 @@ pub const ValueView = opaque {
         };
     }
 
+    pub fn isString(self: *const ValueView) bool {
+        return self.kind() == .list and self.state().wire.text == .string;
+    }
     pub fn aggregateLength(self: *const ValueView) ?u64 {
         return switch (self.kind()) {
             .list, .dict => self.state().wire.aggregate_len,

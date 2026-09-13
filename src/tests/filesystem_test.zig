@@ -8,7 +8,7 @@
 //! right allocator (see `test_heap.zig`).
 const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
-const filesystem_port = @import("../filesystem_port.zig");
+const filesystem_module = @import("../session.zig").Filesystem;
 const session = @import("../session.zig");
 const support = @import("kernel_test_support.zig");
 const test_heap = @import("test_heap.zig");
@@ -16,7 +16,7 @@ const test_heap = @import("test_heap.zig");
 const allocator = std.testing.allocator;
 const io = std.testing.io;
 
-const Config = filesystem_port.Config;
+const Config = filesystem_module.Configuration;
 
 /// A temporary directory plus the absolute path that names it as a root.
 const Scratch = struct {
@@ -24,7 +24,7 @@ const Scratch = struct {
     path: [:0]u8,
     /// Backing storage for `filesystem`, so the returned configuration borrows this
     /// value rather than a temporary.
-    root_storage: [1]filesystem_port.Root,
+    root_storage: [1]filesystem_module.Root,
 
     fn init() !Scratch {
         var directory = std.testing.tmpDir(.{});
@@ -325,6 +325,7 @@ test "fs: options validation is a distinct Session construction failure" {
             .{ .name = "root", .absolute_path = scratch.path },
         } },
         .{ .roots = &.{.{ .name = "root", .absolute_path = scratch.path }}, .limits = .{ .max_transfer_bytes = 0 } },
+        .{ .roots = &.{.{ .name = "root", .absolute_path = scratch.path }}, .limits = .{ .max_stream_transfer_bytes = 0 } },
     };
     for (invalid) |options| {
         var heap: test_heap.SessionHeap = .init;
@@ -430,6 +431,147 @@ test "fs: text and byte reads round trip exactly across chunk boundaries" {
     try scratch.expectAbsent("nine");
 }
 
+test "fs: recursive directory operations preserve containment and existing parents" {
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    const options = scratch.filesystem();
+    try expectStack(options, "'root \"a/b/c\" fs.mkdirs 'root \"a/b/c\" fs.mkdirs " ++
+        "\"x\" 'root \"a/b/c/file\" fs.publish-text 'root \"a\" fs.remove-tree 'root \"a\" fs.exists?", "0");
+    try scratch.write("outside", "preserved");
+    try scratch.directory.dir.createDir(io, "tree", .default_dir);
+    try scratch.directory.dir.createDir(io, "tree/child", .default_dir);
+    try scratch.directory.dir.symLink(io, "../../outside", "tree/child/link", .{});
+    try expectStack(options, "'root \".\" fs.child-dir \"tree\" fs.remove-tree 'root \"outside\" fs.read-text", "\"preserved\"");
+    try scratch.directory.dir.symLink(io, "/", "escape", .{});
+    try expectFsFailure(options, "'root \"escape/forbidden\" fs.mkdirs", "io", "fs.mkdirs", "symlink-escape");
+    try expectFsFailure(options, "'root \"outside/child\" fs.mkdirs", "io", "fs.mkdirs", "not-directory");
+    try expectFsFailure(options, "'root \".\" fs.remove-tree", "domain", "fs.remove-tree", "invalid-path");
+    try expectStack(options, "'root \".\" fs.mkdirs", "");
+    try scratch.expectNoStaging(".");
+}
+
+test "fs: advisory locks serialize mutations and release after cancellation" {
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    const options = scratch.filesystem();
+    try scratch.write("counter", "0");
+    try runCase(options, .{ .worker_pool = 4 },
+        \\'root "." fs.child-dir 'd set
+        \\(d "mutex" fs.lock d "counter" fs.read-text 0 clock.sleep int 1 + str d "counter" fs.publish-text port.close) 'increment def
+        \\[] (increment) @spawn [] (increment) @spawn
+        \\task.await 'ok at len swap task.await 'ok at len d "counter" fs.read-text
+    , .{ .stack = "0 0 \"2\"" });
+    try runCase(options, .{ .worker_pool = 2 },
+        \\'root "mutex" fs.lock 'holder set
+        \\[] ('root "mutex" fs.lock port.close) @spawn 'waiter set
+        \\waiter 0 task.await-for 'err at 'kind at
+        \\waiter task.cancel waiter task.await 'err at 'kind at
+        \\holder port.close 'root "mutex" fs.lock port.close
+    , .{ .stack = "'timeout 'cancelled" });
+    try scratch.directory.dir.symLink(io, "counter", "link", .{});
+    try expectStack(options, "[] ('root \"link\" fs.lock) @attempt 'err at 'kind at", "'io");
+    try scratch.expectNoStaging(".");
+}
+
+test "fs: staging directories publish atomically and join descendant cleanup" {
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    const options = scratch.filesystem();
+    try runCase(options, .{ .worker_pool = 4 }, "'root \"published\" fs.stage-dir 's set s \"a\" fs.mkdirs " ++
+        "s \"a\" fs.child-dir 'child set child \".\" fs.child-dir 'grandchild set " ++
+        "\"contents\" grandchild \"file\" fs.publish-text s fs.commit-dir " ++
+        "'root \"published/a/file\" fs.read-text " ++
+        "[] (child \".\" fs.stat) @attempt 'err at 'kind at " ++
+        "[] (grandchild \".\" fs.stat) @attempt 'err at 'kind at", .{ .stack = "\"contents\" 'io 'io" });
+    try std.testing.expectEqual(@as(usize, 1), try scratch.entryCount("."));
+    try expectStack(options, "'root \"published\" fs.stage-dir 's set \"new\" s \"file\" fs.publish-text " ++
+        "[] (s fs.commit-dir) @attempt 'err at dup 'kind at swap 'data at 'reason at s port.close " ++
+        "'root \"published/a/file\" fs.read-text", "'io 'already-exists \"contents\"");
+    try std.testing.expectEqual(@as(usize, 1), try scratch.entryCount("."));
+    try expectStack(options, "'root \"abandoned\" fs.stage-dir 's set s \"a/b\" fs.mkdirs " ++
+        "s \"a\" fs.child-dir 'child set \"x\" child \"file\" fs.publish-text " ++
+        "s port.close [] (child \".\" fs.stat) @attempt 'err at 'kind at", "'io");
+    try std.testing.expectEqual(@as(usize, 1), try scratch.entryCount("."));
+    try expectStack(options, "'root \"scoped\" fs.stage-dir \"a/b\" fs.mkdirs", "");
+    try std.testing.expectEqual(@as(usize, 1), try scratch.entryCount("."));
+    try runCase(options, .{ .worker_pool = 4 }, "'root \"transferred\" fs.stage-dir 's set s \".\" fs.child-dir 'child set " ++
+        "child wrap [] (10000 clock.sleep pop) @give 't set " ++
+        "s fs.commit-dir t task.cancel t task.await pop " ++
+        "[] (child \".\" fs.stat) @attempt 'err at 'kind at", .{ .stack = "'io" });
+    try expectStack(options, "'root \"nested\" fs.stage-dir 's set s \"unpublished\" fs.stage-dir 'inner set " ++
+        "inner \"a/b\" fs.mkdirs s fs.commit-dir 'root \"nested\" fs.list len", "0");
+    try std.testing.expectEqual(@as(usize, 3), try scratch.entryCount("."));
+}
+
+test "fs: incremental enumeration owns its cursor and joins staging closure" {
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    try scratch.write("a", "a");
+    try scratch.write("b", "b");
+    try runCase(scratch.filesystem(), .{ .worker_pool = 4 }, "'root \".\" fs.open-list 'cursor set " ++
+        "[] (cursor fs.next-entry 'name at) @spawn 'a set " ++
+        "[] (cursor fs.next-entry 'name at) @spawn 'b set " ++
+        "a task.await 'ok at first b task.await 'ok at first 2 pack sort " ++
+        "cursor fs.next-entry cursor fs.next-entry cursor port.close " ++
+        "[] (cursor fs.next-entry) @attempt 'err at 'kind at", .{ .stack = "(\"a\" \"b\") {} {} 'io" });
+    try expectStack(scratch.filesystem(), "'root \"published\" fs.stage-dir 's set \"x\" s \"file\" fs.publish-text " ++
+        "s \".\" fs.open-list 'cursor set cursor fs.next-entry " ++
+        "s fs.commit-dir [] (cursor fs.next-entry) @attempt 'err at 'kind at", "{'name \"file\" 'kind 'file} 'io");
+    try scratch.directory.dir.symLink(io, "../outside", "link", .{});
+    try expectStack(scratch.filesystem(), "'root \".\" fs.open-list 'cursor set " ++
+        "4 (cursor fs.next-entry 'kind at) times 4 pack (str) each sort cursor port.close", "(\"'directory\" \"'file\" \"'file\" \"'symlink\")");
+}
+
+test "fs: staging closure joins concurrent and reused child groups" {
+    for ([_]session.Config{ .cooperative, .{ .worker_pool = 1 }, .{ .worker_pool = 4 } }) |config| {
+        var scratch = try Scratch.init();
+        defer scratch.deinit();
+        try runCase(scratch.filesystem(), config, "'root \"abandoned\" fs.stage-dir 'stage set " ++
+            "16 range (pop [] (stage \".\" fs.child-dir) @spawn) each " ++
+            "(task.await 'ok at first) each 'children set " ++
+            "16 (stage \".\" fs.child-dir port.close) times " ++
+            "stage port.close children " ++
+            "(wrap (\".\" fs.stat) @attempt 'err at 'kind at 'io match?) each sum", .{ .stack = "16" });
+        try scratch.expectNoStaging(".");
+    }
+}
+
+test "fs: cold worker pools join scope-owned filesystem resources" {
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    try runCase(scratch.filesystem(), .{ .worker_pool = 4 }, "'root \".\" fs.child-dir pop 'root \"mutex\" fs.lock pop " ++
+        "'root \"abandoned\" fs.stage-dir dup \"a/b\" fs.mkdirs pop", .{ .stack = "" });
+    try std.testing.expectEqual(@as(usize, 1), try scratch.entryCount("."));
+}
+
+test "fs: directory closure joins admitted descriptor leases" {
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    try runCase(scratch.filesystem(), .{ .worker_pool = 4 }, "'root \".\" fs.child-dir 'directory set directory \"file\" fs.open-writer 'writer set " ++
+        "[] (directory port.close) @spawn 'closing set " ++
+        "writer [65 66] fs.write-chunk writer fs.commit-file closing task.await pop " ++
+        "[] (directory \".\" fs.stat) @attempt 'err at 'kind at 'root \"file\" fs.read-text", .{ .stack = "'io \"AB\"" });
+}
+
+test "fs: directory resources own confined descriptors and close with their scope" {
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    const options = scratch.filesystem();
+    try scratch.write("file", "hello");
+    try scratch.directory.dir.createDir(io, "child", .default_dir);
+    try scratch.directory.dir.symLink(io, "../file", "child/outside", .{});
+    try expectStack(options, "'root \".\" fs.child-dir \"file\" fs.read-text", "\"hello\"");
+    const open = try std.fmt.allocPrint(allocator, "\"{s}\" fs.open-dir \"file\" fs.read-text", .{scratch.path});
+    defer allocator.free(open);
+    try expectStack(options, open, "\"hello\"");
+    try expectStack(options, "'root \"child\" fs.child-dir 'd set \"x\" d \"file\" fs.publish-text d \"file\" fs.read-text", "\"x\"");
+    try expectStack(options, "[] ('root \"child\" fs.child-dir \"outside\" fs.read-text) @attempt 'err at 'data at 'reason at", "'symlink-escape");
+    try expectStack(options, "'root \".\" fs.child-dir dup port.close port.close", "");
+    try runCase(options, .{ .worker_pool = 4 }, "[] ('root \".\" fs.child-dir) @spawn task.await 'ok at first wrap (\"file\" fs.read-text) @attempt 'err at 'kind at " ++
+        "'root \".\" fs.child-dir 'd set d wrap [] (port.close) @give task.await 'ok at len " ++
+        "[] (d \"file\" fs.read-text) @attempt 'err at 'kind at", .{ .stack = "'io 0 'io" });
+}
+
 test "fs: stat lstat exists and list describe entries exactly" {
     var scratch = try Scratch.init();
     defer scratch.deinit();
@@ -489,6 +631,18 @@ test "fs: create is exclusive and replace is strict" {
     try scratch.write("existing", "old");
 
     try expectStack(options, "\"héllo\" 'root \"new.txt\" fs.create-text 'root \"new.txt\" fs.read-text", "\"héllo\"");
+    try expectStack(options, "\"first\" 'root \"published\" fs.publish-text 'root \"published\" fs.read-text", "\"first\"");
+    try expectStack(options, "[0 255] 'root \"published\" fs.publish-bytes 'root \"published\" fs.read-bytes", "[0 255]");
+    try expectFsFailure(options, "\"x\" 'root \"dir\" fs.publish-text", "io", "fs.publish-text", "not-regular");
+    try expectFsFailure(options, "\"x\" 'root \"dangling\" fs.publish-text", "io", "fs.publish-text", "not-regular");
+    try scratch.expectNoStaging(".");
+    try runCase(options, .{ .worker_pool = 4 },
+        \\[] ("left" 'root "published" fs.publish-text) @spawn
+        \\[] ("right" 'root "published" fs.publish-text) @spawn
+        \\task.await 'ok at pop task.await 'ok at pop
+        \\'root "published" fs.read-text dup "left" match? swap "right" match? or
+    , .{ .stack = "1" });
+    try scratch.expectNoStaging(".");
     try expectStack(options, "[0 255] 'root \"new.bin\" fs.create-bytes 'root \"new.bin\" fs.read-bytes", "[0 255]");
     try expectStack(options, "\"\" 'root \"empty\" fs.create-text 'root \"empty\" fs.stat", "{'kind 'file 'size 0}");
     for ([_][]const u8{ "existing", "dir", "dangling", "new.txt" }) |collision| {
@@ -671,6 +825,8 @@ test "fs: cancellation before commit leaves the destination unchanged" {
     for ([_][]const u8{
         "\"new\" 'root \"existing\" fs.replace-text",
         "\"new\" 'root \"created\" fs.create-text",
+        "\"new\" 'root \"existing\" fs.publish-text",
+        "\"new\" 'root \"created\" fs.publish-text",
         "'root \"existing\" 'root \"copied\" fs.copy",
         "'root \".\" fs.list",
         "'root \"existing\" fs.read-text",
@@ -708,8 +864,7 @@ test "fs: the live-operation quota is released after each operation" {
     // Concurrent tasks contend for one slot. Whether they overlap is a
     // scheduling fact, so the assertion is the invariant: every outcome is
     // success or the limit reason, at least one succeeds, and the slot is
-    // free again afterwards. Exhaustion itself is proven deterministically
-    // by the filesystem port's own reservation test.
+    // free again afterwards. Explicit reservations prove exhaustion separately.
     const big = try allocator.alloc(u8, 512 * 1024);
     defer allocator.free(big);
     @memset(big, 'y');
@@ -795,4 +950,127 @@ test "fs: concurrent creates have exactly one winner and no staging residue" {
 test "fs: words cold-load through the builtin manifest and are documented" {
     try support.expectStack("'fs.read-text doc len 0 > 'path.normalize doc len 0 >", "1 1");
     try support.expectStack("'fs ('exists?) import 'path ('join) import (\"a\" \"b\") join", "\"a/b\"");
+}
+
+test "fs: streaming publication and reservations enforce total limits and rollback" {
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    const options: Config = .{ .roots = scratch.root_storage[0..], .limits = .{
+        .max_live_operations = 1,
+        .max_transfer_bytes = 1,
+        .max_stream_transfer_bytes = 4,
+    } };
+    try expectStack(options, "'root fs.reserve 'reservation set " ++
+        "[] ('root \".\" fs.stat) @attempt 'err at 'data at 'reason at " ++
+        "reservation \"published\" fs.open-writer 'writer set writer [65 66] fs.write-chunk writer [67 68] fs.write-chunk writer fs.commit-file " ++
+        "reservation \"aborted\" fs.open-writer 'writer set writer [65 66 67] fs.write-chunk " ++
+        "[] (writer [68 69] fs.write-chunk) @attempt 'err at 'data at 'reason at " ++
+        "[] (writer fs.commit-file) @attempt 'err at 'kind at writer port.close " ++
+        "reservation \"aborted\" fs.exists? reservation port.close " ++
+        "[] ('root \"published\" fs.read-bytes) @attempt 'err at 'data at 'reason at " ++
+        "'root \"published\" fs.stat 'size at", "'limit 'limit 'overflow 0 'limit 4");
+    const published = try scratch.read("published");
+    defer allocator.free(published);
+    try std.testing.expectEqualStrings("ABCD", published);
+    try scratch.expectAbsent("aborted");
+    try scratch.expectNoStaging(".");
+}
+
+test "fs: direct reservations follow derived roots and pair admission" {
+    for ([_]session.Config{ .cooperative, .{ .worker_pool = 1 }, .{ .worker_pool = 4 } }) |config| {
+        var scratch = try Scratch.init();
+        defer scratch.deinit();
+        try scratch.write("source", "data");
+        const options: Config = .{ .roots = scratch.root_storage[0..], .limits = .{ .max_live_operations = 2 } };
+        try runCase(options, config, "'root fs.reserve 'a set 'root fs.reserve 'b set " ++
+            "a \"source\" b \"copy\" fs.copy b \"copy\" fs.read-text " ++
+            "[] (a \"source\" b \"copy\" fs.copy) @attempt 'err at 'data at 'reason at " ++
+            "a \"source\" a \"same\" fs.copy a \"same\" fs.read-text " ++
+            "a \".\" fs.child-dir 'child set a port.close " ++
+            "[] ('root \".\" fs.stat) @attempt 'err at 'data at 'reason at " ++
+            "child port.close b port.close 'root \"copy\" fs.stat 'size at", .{ .stack = "\"data\" 'already-exists \"data\" 'limit 4" });
+    }
+}
+
+test "fs: completed operations release admission before the next call" {
+    for ([_]session.Config{ .cooperative, .{ .worker_pool = 1 }, .{ .worker_pool = 4 } }) |config| {
+        var scratch = try Scratch.init();
+        defer scratch.deinit();
+        const options: Config = .{ .roots = scratch.root_storage[0..], .limits = .{ .max_live_operations = 1 } };
+        try runCase(options, config, "64 (256 range (pop 'root \".\" fs.child-dir) each " ++
+            "(port.close 0) each pop) times 16384 " ++
+            "64 ([] ('root \"missing\" fs.read-text) @attempt 'err at 'data at 'reason at " ++
+            "'not-found match? {'kind 'user 'msg \"cleanup before failure delivery\"} assert) times", .{ .stack = "16384" });
+    }
+}
+
+test "fs: direct writers serialize chunks and preserve validation before admission" {
+    for ([_]session.Config{ .cooperative, .{ .worker_pool = 1 }, .{ .worker_pool = 4 } }) |config| {
+        var scratch = try Scratch.init();
+        defer scratch.deinit();
+        try runCase(scratch.filesystem(), config, "'root \"published\" fs.stage-dir 'stage set stage \"file\" fs.open-writer 'writer set " ++
+            "[] (writer [256] fs.write-chunk) @attempt 'err at 'kind at " ++
+            "32 range (pop [] (writer [65] fs.write-chunk) @spawn) each " ++
+            "(task.await 'ok at pop 0) each pop writer fs.commit-file stage fs.commit-dir " ++
+            "'root \"published/file\" fs.read-bytes dup len swap sum", .{ .stack = "'type 32 2080" });
+        try scratch.expectNoStaging(".");
+    }
+}
+
+test "fs: direct writer finalization joins admitted chunks" {
+    for ([_]session.Config{ .cooperative, .{ .worker_pool = 1 }, .{ .worker_pool = 4 } }) |config| {
+        var scratch = try Scratch.init();
+        defer scratch.deinit();
+        try runCase(scratch.filesystem(), config, "'root \"raced\" fs.open-writer 'writer set writer [65] fs.write-chunk " ++
+            "32 range (pop [] (writer [66] fs.write-chunk 1) @spawn) each 'tasks set " ++
+            "writer fs.commit-file tasks " ++
+            "(task.await dup 'ok dict.has? ('ok at first) " ++
+            "('err at 'kind at 'io match? {'kind 'user 'msg \"unadmitted write error\"} assert 0) if) each " ++
+            "sum 1 + 'root \"raced\" fs.read-bytes len =", .{ .stack = "1" });
+        try scratch.expectNoStaging(".");
+    }
+}
+
+test "fs: directory kinds and child errors retain public type precedence and context" {
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    try expectStack(scratch.filesystem(), "'root \".\" fs.open-list 'cursor set " ++
+        "[] (cursor \"bad/../path\" fs.stat) @attempt 'err at 'kind at cursor port.close " ++
+        "'root \".\" fs.child-dir 'directory set " ++
+        "[] (directory \"missing/child\" fs.child-dir) @attempt 'err at 'data at 'reason at " ++
+        "directory port.close " ++
+        "[] (directory \".\" fs.stage-dir) @attempt 'err at 'data at 'reason at " ++
+        "[] (directory \"child\" fs.child-dir) @attempt 'err at 'data at 'reason at", "'type 'not-found 'invalid-path 'io");
+}
+
+test "fs: concurrent symlink replacement cannot escape retained roots" {
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    try scratch.directory.dir.createDirPath(io, "root/inside");
+    try scratch.directory.dir.createDirPath(io, "outside");
+    try scratch.write("root/inside/file", "inside");
+    try scratch.write("outside/file", "outside");
+    const root_path = try scratch.directory.dir.realPathFileAlloc(io, "root", allocator);
+    defer allocator.free(root_path);
+    const Peer = struct {
+        dir: std.Io.Dir,
+        stop: std.atomic.Value(bool) = .init(false),
+        fn run(self: *@This()) void {
+            var escape = false;
+            while (!self.stop.load(.acquire)) {
+                self.dir.deleteFile(io, "root/pointer") catch {};
+                self.dir.symLink(io, if (escape) "../outside" else "inside", "root/pointer", .{}) catch {};
+                escape = !escape;
+            }
+        }
+    };
+    var peer: Peer = .{ .dir = scratch.directory.dir };
+    const thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
+    defer {
+        peer.stop.store(true, .release);
+        thread.join();
+    }
+    try expectStack(.{ .roots = &.{.{ .name = "root", .absolute_path = root_path }} }, "100 ([] ('root \"pointer/file\" fs.read-text) @attempt " ++
+        "dup 'ok dict.has? ('ok at first \"inside\" match? {'kind 'user 'msg \"confined content\"} assert) " ++
+        "('err at 'kind at 'io match? {'kind 'user 'msg \"portable race failure\"} assert) if) times", "");
 }

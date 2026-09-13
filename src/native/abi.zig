@@ -5,8 +5,8 @@
 
 const builtin = @import("builtin");
 
-pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v7";
-pub const abi_version: u32 = 7;
+pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v24";
+pub const abi_version: u32 = 24;
 
 pub const max_error_message_bytes: u32 = 4096;
 pub const max_guest_scalar_bytes: u32 = 4096;
@@ -74,6 +74,29 @@ pub const ValueKindWire = enum(u32) {
 
 pub const Candidate = u64;
 
+pub const InstanceProgress = enum(u32) { complete, pending, failed, out_of_memory, _ };
+pub const InstanceTable = extern struct {
+    configuration_ptr: [*]const u8,
+    configuration_len: u64,
+    memory: *const NativeMemory,
+    configure_endpoint: *const fn (*anyopaque, *const anyopaque, u32, u64) callconv(.c) InstanceProgress,
+};
+pub const NativeMemory = extern struct {
+    context: *anyopaque,
+    allocate: *const fn (*anyopaque, u64) callconv(.c) ?[*]align(64) u8,
+    release: *const fn (*anyopaque, [*]align(64) u8, u64) callconv(.c) void,
+};
+pub const InstanceDefinition = extern struct {
+    size: u32 = @sizeOf(InstanceDefinition),
+    state_size: u32,
+    state_alignment: u32,
+    identity: *const anyopaque,
+    init_state: StateInitFn,
+    initialize: *const fn (*anyopaque, *const InstanceTable, *anyopaque, u32) callconv(.c) InstanceProgress,
+    retire: *const fn (*anyopaque, *const InstanceTable, *anyopaque, u32) callconv(.c) bool,
+};
+pub const InstanceStateFn = *const fn (*anyopaque, *const anyopaque) callconv(.c) ?*anyopaque;
+
 pub const max_port_definitions = 64;
 pub const max_port_state_bytes = 1 << 20;
 pub const max_port_lanes = 16;
@@ -81,8 +104,8 @@ pub const PortCancellation = enum(u32) { close_resource, acknowledge, _ };
 
 /// Controller streams block only their private host controller. Zero bytes
 /// denotes request EOF or cancellation; failure is reported separately.
-pub const MessageBuildAction = enum(u32) { scalar = 0, copy_input = 1, copy_received = 2, list = 3, dictionary = 4, send = 7, result = 8, clear = 9, reply_endpoint = 10, child = 11, _ };
-pub const ChildDependency = enum(u32) { independent, dependent, _ };
+pub const MessageBuildAction = enum(u32) { scalar = 0, copy_input = 1, copy_received = 2, list = 3, dictionary = 4, send = 7, result = 8, clear = 9, reply_endpoint = 10, child = 11, advance = 12, error_data = 13, bytes = 14, symbol_start = 15, symbol_chunk = 16, symbol_end = 17, prepare_failure = 18, _ };
+pub const ChildDependency = enum(u32) { independent, dependent, inherited, _ };
 pub const MessageBuildRequest = extern struct {
     size: u32 = @sizeOf(MessageBuildRequest),
     action: MessageBuildAction,
@@ -96,7 +119,15 @@ pub const MessageBuildRequest = extern struct {
 };
 pub const ControllerStatus = enum(u32) { ok, eof, cancelled, failed, out_of_memory, invalid, _ };
 pub const ControllerRead = extern struct { status: ControllerStatus, count: u32 = 0 };
+pub const ResourceLeaseLifetime = enum(u32) { initialization, resource, _ };
+pub const ResourceLeaseStatus = enum(u32) { ok, closed, invalid, failed, _ };
+pub const ResourceLeaseFn = *const fn (*anyopaque, *const anyopaque, [*]const u64, u32, ResourceLeaseLifetime, *?*anyopaque) callconv(.c) ResourceLeaseStatus;
 pub const ControllerTable = extern struct {
+    initialization_resource: ?ResourceLeaseFn = null,
+    stop_output: *const fn (*anyopaque, *const anyopaque, u32) callconv(.c) bool,
+    finish_input: *const fn (*anyopaque, *const anyopaque, u32) callconv(.c) bool,
+    instance_state: InstanceStateFn,
+    initialization_parent: InstanceStateFn,
     parent_state: *const fn (*anyopaque, *const anyopaque) callconv(.c) ?*anyopaque,
     build_message: *const fn (*anyopaque, *const MessageBuildRequest) callconv(.c) HostStatus,
     fail_allocation: *const fn (*anyopaque) callconv(.c) void,
@@ -109,6 +140,7 @@ pub const ControllerTable = extern struct {
     cancelled: *const fn (*anyopaque) callconv(.c) bool,
     acknowledge_cancellation: *const fn (*anyopaque) callconv(.c) bool,
     fail: *const fn (*anyopaque, ErrorKindWire, [*]const u8, u32) callconv(.c) void,
+    fail_streams: *const fn (*anyopaque, ErrorKindWire, [*]const u8, u32) callconv(.c) void,
     fail_resource: *const fn (*anyopaque, ErrorKindWire, [*]const u8, u32) callconv(.c) void,
     resolve_endpoint: *const fn (*anyopaque, *const anyopaque, EndpointOwner, u32, EndpointTransport, EndpointDirection) callconv(.c) bool,
     read_bytes: *const fn (*anyopaque, EndpointOwner, u32, [*]u8, u32) callconv(.c) ControllerRead,
@@ -117,6 +149,48 @@ pub const ControllerTable = extern struct {
 };
 pub const PortControllerFn = *const fn (*anyopaque, *const ControllerTable, *anyopaque) callconv(.c) void;
 pub const PortOperationFn = *const fn (*anyopaque, u32, *const ControllerTable, *anyopaque) callconv(.c) void;
+pub const ResourceExecution = enum(u32) { controller, cooperative, _ };
+pub const CooperativeProgress = enum(u32) { completed, yielded, parked, _ };
+pub const CooperativeBuildStatus = enum(u32) { ok, out_of_memory, invalid, yield_required, parked, _ };
+pub const CooperativeTable = extern struct {
+    prepared_failure: ?*const fn (*anyopaque) callconv(.c) ?*const anyopaque = null,
+    select_failure: ?*const fn (*anyopaque, *const anyopaque) callconv(.c) bool = null,
+    initialization_resource: ?ResourceLeaseFn = null,
+    instance_state: InstanceStateFn,
+    initialization_parent: InstanceStateFn,
+    parent_state: @FieldType(ControllerTable, "parent_state"),
+    input: @FieldType(ControllerTable, "input"),
+    build_message: *const fn (*anyopaque, *const MessageBuildRequest) callconv(.c) CooperativeBuildStatus,
+    fail_allocation: @FieldType(ControllerTable, "fail_allocation"),
+    cancelled: @FieldType(ControllerTable, "cancelled"),
+    fail: @FieldType(ControllerTable, "fail"),
+    consume: *const fn (*anyopaque, u32) callconv(.c) bool,
+    park: *const fn (*anyopaque, u64) callconv(.c) bool,
+    begin_commit: *const fn (*anyopaque) callconv(.c) bool,
+    monotonic_milliseconds: ?*const fn (*anyopaque) callconv(.c) i64 = null,
+};
+pub const CooperativeFn = *const fn (*anyopaque, *const CooperativeTable, *anyopaque) callconv(.c) CooperativeProgress;
+pub const CooperativeOperationFn = *const fn (*anyopaque, u32, *const CooperativeTable, *anyopaque) callconv(.c) CooperativeProgress;
+pub const CooperativeDefinition = extern struct {
+    size: u32 = @sizeOf(CooperativeDefinition),
+    initialize: ?CooperativeFn,
+    execute: ?CooperativeOperationFn,
+    retire_operation: ?CooperativeFn,
+    retire: ?CooperativeFn,
+};
+pub const ActivityDefinition = extern struct {
+    size: u32 = @sizeOf(ActivityDefinition),
+    endpoints: u64,
+    execute: ?PortControllerFn,
+};
+pub const CapacityFailureDefinition = extern struct {
+    size: u32 = @sizeOf(CapacityFailureDefinition),
+    state_size: u32,
+    state_alignment: u32,
+    init_state: ?StateInitFn,
+    step: ?CooperativeFn,
+    retire: ?*const fn (*anyopaque, *const CooperativeTable, *anyopaque) callconv(.c) bool,
+};
 pub const PortDefinition = extern struct {
     size: u32 = @sizeOf(PortDefinition),
     state_size: u32,
@@ -133,6 +207,12 @@ pub const PortDefinition = extern struct {
     cancel_operation: ?*const fn (*anyopaque, u32) callconv(.c) void = null,
     shutdown: ?PortControllerFn = null,
     identity: ?*const anyopaque = null,
+    execution: ResourceExecution = .controller,
+    cooperative: ?*const CooperativeDefinition = null,
+    activity_count: u32 = 0,
+    activity_record_size: u32 = @sizeOf(ActivityDefinition),
+    activities_ptr: ?[*]const ActivityDefinition = null,
+    capacity_failure: ?*const CapacityFailureDefinition = null,
 };
 
 pub const CapabilityRequirement = extern struct {
@@ -146,22 +226,31 @@ pub const EffectSlot = extern struct {
     name_len: u64,
 };
 
+pub const OperationMode = enum(u32) { ordinary, finalizer, _ };
 pub const BindingKind = enum(u32) { call, factory, operation, endpoint, _ };
 pub const EndpointTransport = enum(u32) { bytes, messages, _ };
 pub const EndpointDirection = enum(u32) { input, output, _ };
 pub const EndpointOwner = enum(u32) { resource, exchange, _ };
 /// Registration metadata contains private controller selectors, never ECL
 /// values. The host validates and seals it into module-instance capabilities.
+pub const OperationBinding = extern struct {
+    size: u32 = @sizeOf(OperationBinding),
+    resource: u32,
+    operation: u32,
+    lane: u32,
+    endpoints: u64,
+    mode: OperationMode = .ordinary,
+};
 pub const PortBinding = extern struct {
     kind: BindingKind = .call,
     resource: u32 = 0,
-    operation: u32 = 0,
-    lane: u32 = 0,
-    endpoints: u64 = 0,
     endpoint: u32 = 0,
     transport: EndpointTransport = .bytes,
     direction: EndpointDirection = .input,
     owner: EndpointOwner = .exchange,
+    operation_count: u32 = 0,
+    operation_record_size: u32 = @sizeOf(OperationBinding),
+    operations_ptr: ?[*]const OperationBinding = null,
 };
 
 pub const Definition = extern struct {
@@ -189,6 +278,8 @@ pub const ValueView = extern struct {
     kind: ValueKindWire,
     scalar_bits: u64 = 0,
     aggregate_len: u64 = 0,
+    text: enum(u32) { none = 0, string = 1, _ } = .none,
+    reserved: u32 = 0,
     bytes_ptr: ?[*]const u8 = null,
     bytes_len: u64 = 0,
 };
@@ -331,6 +422,8 @@ pub const HostTable = extern struct {
     forward_path: ?ForwardPathFn = null,
     read_units: ?ReadUnitsFn = null,
     bulk_build: ?BulkBuildFn = null,
+    instance_state: ?InstanceStateFn = null,
+    input_resource_kind: ?*const fn (*anyopaque, u32, *const anyopaque) callconv(.c) bool = null,
 };
 
 pub const Invoke = *const fn (
@@ -358,6 +451,7 @@ pub const Descriptor = extern struct {
     port_count: u32 = 0,
     port_record_size: u32 = @sizeOf(PortDefinition),
     ports_ptr: ?[*]const PortDefinition = null,
+    instance: ?*const InstanceDefinition = null,
 };
 
 pub const EntryResult = extern struct {
@@ -418,21 +512,29 @@ fn assertRecord(comptime T: type, comptime expected_size: usize, comptime expect
 }
 
 comptime {
-    @setEvalBranchQuota(8000);
-    if (@sizeOf(usize) != 8) @compileError("native ABI v7 supports 64-bit targets only");
+    @setEvalBranchQuota(16000);
+    if (@sizeOf(usize) != 8) @compileError("native ABI supports 64-bit targets only");
 
     assertRecord(CapabilityRequirement, 8, 4);
     assertRecord(EffectSlot, 24, 8);
     assertRecord(Definition, 136, 8);
     assertRecord(PortBinding, 40, 8);
-    assertRecord(ValueView, 40, 8);
+    assertRecord(OperationBinding, 32, 8);
+    assertRecord(ValueView, 48, 8);
     assertRecord(Scalar, 32, 8);
     assertRecord(InvokeResult, 16, 8);
-    assertRecord(HostTable, 152, 8);
-    assertRecord(Descriptor, 104, 8);
-    assertRecord(PortDefinition, 96, 8);
+    assertRecord(HostTable, 168, 8);
+    assertRecord(Descriptor, 112, 8);
+    assertRecord(PortDefinition, 136, 8);
+    assertRecord(CapacityFailureDefinition, 40, 8);
+    assertRecord(ActivityDefinition, 24, 8);
+    assertRecord(CooperativeDefinition, 40, 8);
+    assertRecord(CooperativeTable, 120, 8);
     assertRecord(MessageBuildRequest, 72, 8);
-    assertRecord(ControllerTable, 136, 8);
+    assertRecord(ControllerTable, 184, 8);
+    assertRecord(InstanceTable, 32, 8);
+    assertRecord(NativeMemory, 24, 8);
+    assertRecord(InstanceDefinition, 48, 8);
     assertRecord(ControllerRead, 8, 4);
     assertRecord(EntryResult, 32, 8);
 

@@ -1,0 +1,1 @@
+args pkg.command.main

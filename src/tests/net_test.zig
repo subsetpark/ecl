@@ -10,8 +10,8 @@
 const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const fixture = @import("process_fixture_options");
-const net_port = @import("../net_port.zig");
-const process = @import("../process_port.zig");
+const bundled_net = @import("bundled-net");
+const process = @import("bundled-proc");
 const session = @import("../session.zig");
 const support = @import("kernel_test_support.zig");
 const test_heap = @import("test_heap.zig");
@@ -19,7 +19,7 @@ const test_heap = @import("test_heap.zig");
 const allocator = std.testing.allocator;
 const io = std.testing.io;
 const IpAddress = std.Io.net.IpAddress;
-const Limits = net_port.Limits;
+const Limits = bundled_net.Limits;
 
 const listen_ephemeral = "{'address \"127.0.0.1\" 'port 0} net.listen";
 
@@ -194,15 +194,19 @@ test "net: process endpoint selectors reject network resources" {
         "l wrap (proc.core.stdout port.endpoint) @attempt 'err at 'kind at l port.close", "'type");
 }
 
-test "net: zero listener capacity fails Session construction" {
+test "net: invalid service limits fail Session construction" {
     var output = std.Io.Writer.Discarding.init(&.{});
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
-    try std.testing.expectError(error.InvalidHostConfig, session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{
+    for ([_]Limits{
+        .{ .max_live_listeners = 0 },   .{ .kernel_backlog = 0 },
+        .{ .max_live_connections = 0 }, .{ .receive_capacity = 0 },
+        .{ .send_capacity = 0 },        .{ .max_live_listeners = std.math.maxInt(usize) },
+    }) |limits| try std.testing.expectError(error.InvalidHostConfig, session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{
         .io = io,
         .output = &output.writer,
         .diagnostics = &output.writer,
-        .net_limits = .{ .max_live_listeners = 0 },
+        .net_limits = limits,
     }), .default, .evaluate));
 }
 
@@ -869,6 +873,7 @@ test "net: a peer reset fails reads and address operations" {
         .word = "port.core.result",
         .message_contains = "failed",
     });
+    try runtime.run("c port.shutdown c port.shutdown c port.close l port.close");
 }
 
 test "net: accept parks at the live-connection quota and proceeds when a connection closes" {
@@ -1215,4 +1220,32 @@ test "net: EOF remains stable across endpoint borrows and resource closure" {
         joined = true;
         try expectPeerBytes(observed, "");
     }
+}
+
+test "net: configuration and structured quota errors survive full service capacity" {
+    var runtime: Runtime = .{};
+    try runtime.open(.{ .net = .{ .max_live_listeners = 1, .max_live_connections = 1 } }, .cooperative);
+    defer runtime.close();
+    const port = try listenerPort(&runtime);
+    const peer = try Peer.start(port, .read_until_eof);
+    defer {
+        runtime.close();
+        _ = peer.join();
+    }
+    try runtime.run("l net.accept 'c set");
+    try runtime.runError("42 net.listen", .{ .name = "validation at full capacity", .source = "42 net.listen", .kind = "type" });
+    try runtime.runError(listen_ephemeral, .{ .name = "structured quota", .source = listen_ephemeral, .kind = "domain", .data = &.{reason("limit")} });
+}
+
+test "net: bundled instances keep Session listener quotas independent" {
+    var first: Runtime = .{};
+    try first.open(.{ .net = .{ .max_live_listeners = 1 } }, .cooperative);
+    defer first.close();
+    var second: Runtime = .{};
+    try second.open(.{ .net = .{ .max_live_listeners = 2 } }, .cooperative);
+    defer second.close();
+    try first.run(listen_ephemeral ++ " 'l set " ++
+        "[] (" ++ listen_ephemeral ++ ") @attempt 'err at 'data at 'reason at 'limit match? {'kind 'user 'msg \"first quota\"} assert");
+    try second.run(listen_ephemeral ++ " 'a set " ++ listen_ephemeral ++ " 'b set a port.close b port.close");
+    try first.run("l port.close");
 }

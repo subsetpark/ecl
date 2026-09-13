@@ -1,5 +1,5 @@
 const ecl = @import("ecl-native");
-const P = ecl.Port(struct {
+const P = ecl.Port(.{ .controller = struct {
     pub const name = "direction";
     pub const State = u8;
     pub const endpoints = .{
@@ -12,7 +12,7 @@ const P = ecl.Port(struct {
     pub fn open(_: *State, _: *ecl.Controller) void {}
     pub fn cancel(_: *State) void {}
     pub fn deinit(_: *State) void {}
-});
+} });
 export fn probe(controller: *ecl.Controller) void {
     const output = controller.endpoint(P, .output) catch return;
     _ = @typeInfo(@TypeOf(output)).pointer.child.read;

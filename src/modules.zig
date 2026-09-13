@@ -1,6 +1,6 @@
 //! Per-session module registry with typed names and atomic generation publication.
 const std = @import("std");
-const pkg_lock = @import("pkg_lock.zig");
+const map_state = @import("module_snapshot.zig");
 const builtin = @import("builtin");
 const env = @import("env.zig");
 const value = @import("value.zig");
@@ -12,7 +12,6 @@ const snapshot_api = @import("snapshot.zig");
 const list = @import("list.zig");
 const kernel_storage = @import("kernel_storage.zig");
 const poll_api = @import("poll.zig");
-const pkg_catalog = @import("pkg_catalog.zig");
 
 /// Immutable metadata for one first-class module test. The executable body is
 /// deliberately absent from this public projection: discovery may expose
@@ -491,7 +490,7 @@ const ExecutionHome = struct {
 /// image back several independent registrations, and it keeps the value heap a
 /// DAG, because a registration retains an image and never the reverse.
 const ModuleImage = struct {
-    source: ?*const @import("pkg_lock.zig").SourceScope,
+    source: ?*const map_state.SourceScope,
     allocator: std.mem.Allocator,
     refs: std.atomic.Value(u32) = .init(1),
     environment: env.Environment,
@@ -527,7 +526,7 @@ const ModuleImage = struct {
     fn create(
         allocator: std.mem.Allocator,
         releases: *heap.ReleaseDomain,
-        source: ?*const @import("pkg_lock.zig").SourceScope,
+        source: ?*const map_state.SourceScope,
     ) error{OutOfMemory}!*ModuleImage {
         // No scope cell is minted here. An image needs one only if ECL source
         // is stamped against it, which `moduleOwned` arranges lazily; a registry
@@ -661,27 +660,27 @@ const ModuleImage = struct {
 /// state and arbiter reachable while old code can still name them.
 /// Nominal publication provenance. Embedded definitions retain their trusted
 /// origin. Cataloged code carries its defining-file capability, which also
-/// identifies its package and direct dependencies. Interactive root code has
-/// package authority without access to any file's private namespace.
+/// identifies its resolution scope and direct visibility. Interactive root code has
+/// local-scope visibility without access to any file's private namespace.
 /// Images preserve lexical file identity even when invoked without a
 /// registration or republished by another file.
 pub const RegistrationProvenance = union(enum) {
     ordinary,
     standard_library,
-    root_package: pkg_catalog.PackageId,
-    package: *const @import("pkg_lock.zig").SourceScope,
+    root_scope: map_state.ScopeId,
+    source: *const map_state.SourceScope,
 
-    pub fn packageId(self: RegistrationProvenance) ?pkg_catalog.PackageId {
+    pub fn scopeId(self: RegistrationProvenance) ?map_state.ScopeId {
         return switch (self) {
-            .root_package => |id| id,
-            .package => |source| source.package(),
+            .root_scope => |id| id,
+            .source => |source| source.scopeId(),
             .ordinary, .standard_library => null,
         };
     }
 
-    pub fn sourceScope(self: RegistrationProvenance) ?*const @import("pkg_lock.zig").SourceScope {
+    pub fn sourceScope(self: RegistrationProvenance) ?*const map_state.SourceScope {
         return switch (self) {
-            .package => |source| source,
+            .source => |source| source,
             else => null,
         };
     }
@@ -1255,7 +1254,7 @@ const TestAuthorityState = struct {
     // Session construction moves that wrapper into its core after minting this
     // seal; the backing identity remains stable.
     registry: Registry,
-    project: ?*const pkg_lock.ProjectLock,
+    project: ?*const map_state.Snapshot,
 };
 
 /// Session-owned capability seal for the closed test execution domain. A
@@ -1295,7 +1294,7 @@ pub const TestObservationAccess = opaque {
         const owner = self.state();
         return .{
             .project = owner.project,
-            .roots = if (owner.project) |project| project.rootSourceCursor() else null,
+            .roots = if (owner.project) |project| project.localSourceCursor() else null,
             .current = .init(&owner.registry),
         };
     }
@@ -1309,12 +1308,12 @@ pub const TestExecutionAccess = opaque {
         self: *const TestExecutionAccess,
         module_name: intern.ModuleName,
         test_name: intern.BindingName,
-        source: ?@import("pkg_catalog.zig").ArtifactId,
+        source: ?map_state.ArtifactId,
     ) ?Registry.TestLookupCursor {
         const owner = self.state();
         if (source) |id| {
             const project = owner.project orelse return null;
-            const scope = project.rootSource(id) orelse return null;
+            const scope = project.localSource(id) orelse return null;
             if (!project.artifactCommitted(id)) return null;
             return .init(scope.registry(), module_name, test_name);
         }
@@ -1325,10 +1324,10 @@ pub const TestExecutionAccess = opaque {
 /// Enumerates the public registry and each committed root source's private
 /// registry while retaining every active snapshot lease.
 pub const TestSessionDiscoveryCursor = struct {
-    project: ?*const pkg_lock.ProjectLock,
-    roots: ?pkg_lock.RootSourceCursor,
+    project: ?*const map_state.Snapshot,
+    roots: ?map_state.LocalSourceCursor,
     current: ?Registry.TestDiscoveryCursor,
-    source: ?@import("pkg_catalog.zig").ArtifactId = null,
+    source: ?map_state.ArtifactId = null,
 
     pub fn deinit(self: *TestSessionDiscoveryCursor) void {
         if (self.current) |*current| current.deinit();
@@ -1356,7 +1355,7 @@ pub const TestSessionDiscoveryCursor = struct {
                 }
                 return .pending;
             },
-            .complete, .invalid => {
+            .complete => {
                 roots.deinit();
                 self.roots = null;
             },
@@ -1394,7 +1393,7 @@ pub const ModuleHome = opaque {
         return registration.generation;
     }
     pub fn registrationProvenance(self: *const ModuleHome) RegistrationProvenance {
-        if (self.state().image.source) |source| return .{ .package = source };
+        if (self.state().image.source) |source| return .{ .source = source };
         const registration = self.state().registration orelse return .ordinary;
         return registration.provenance;
     }
@@ -2044,7 +2043,7 @@ const free_loading_owner: usize = 0;
 
 const LoadingKey = union(enum) {
     module: intern.ModuleName,
-    artifact: pkg_catalog.ArtifactId,
+    artifact: map_state.ArtifactId,
 
     fn eql(left: LoadingKey, right: LoadingKey) bool {
         return switch (left) {
@@ -2078,10 +2077,10 @@ const LoadingNode = struct {
 pub const ArtifactCommit = enum(u32) {
     _,
 
-    fn init(published: pkg_catalog.ArtifactId) ArtifactCommit {
+    fn init(published: map_state.ArtifactId) ArtifactCommit {
         return @enumFromInt(@intFromEnum(published));
     }
-    pub fn artifact(self: ArtifactCommit) pkg_catalog.ArtifactId {
+    pub fn artifact(self: ArtifactCommit) map_state.ArtifactId {
         return @enumFromInt(@intFromEnum(self));
     }
 };
@@ -2175,7 +2174,7 @@ pub const Registry = enum(usize) {
     /// Mint the capability seal owned by a test-mode Session. Its backing
     /// carries the registry rather than accepting one alongside the access
     /// token, so cross-Session authority substitution is unrepresentable.
-    pub fn createTestAuthority(self: *Registry, project: ?*const pkg_lock.ProjectLock) error{OutOfMemory}!TestAuthority {
+    pub fn createTestAuthority(self: *Registry, project: ?*const map_state.Snapshot) error{OutOfMemory}!TestAuthority {
         const state = try self.allocator().create(TestAuthorityState);
         state.* = .{ .registry = self.*, .project = project };
         return .init(state);
@@ -2187,35 +2186,6 @@ pub const Registry = enum(usize) {
 
     fn releaseDomain(self: *const Registry) *heap.ReleaseDomain {
         return heap.hostDomain(self.privateState().host);
-    }
-
-    /// Validate one fully materialized package tree through the same catalog
-    /// derivation used by Session startup. The opaque registry keeps the
-    /// allocator/reclamation capability correlated while exposing only the
-    /// package-boundary operation the installer needs.
-    /// Begin validating one staged package tree. The caller drives the
-    /// returned cursor in bounded steps and deinits it; a package tree holds
-    /// thousands of artifacts, so the walk cannot be one scheduler step.
-    pub fn readPackageCatalog(self: *const Registry, io: std.Io, input: pkg_catalog.PackageInput, hash: []const u8) pkg_catalog.BuildError!pkg_catalog.Catalog {
-        return pkg_catalog.read(self.privateState().host, io, input, hash);
-    }
-
-    pub fn beginPackageTreeValidation(
-        self: *const Registry,
-        io: std.Io,
-        package_name: []const u8,
-        root_dir: []const u8,
-        base_dir: ?std.Io.Dir,
-        diagnostic: *?[]u8,
-    ) error{OutOfMemory}!pkg_catalog.Build {
-        return pkg_catalog.Build.initOwned(
-            self.privateState().host,
-            io,
-            package_name,
-            root_dir,
-            base_dir,
-            diagnostic,
-        );
     }
 
     pub fn deinit(self: *Registry) void {
@@ -2338,7 +2308,7 @@ pub const Registry = enum(usize) {
 
     pub const DiscoveredTest = struct {
         module: intern.ModuleName,
-        source: ?@import("pkg_catalog.zig").ArtifactId = null,
+        source: ?map_state.ArtifactId = null,
         metadata: ModuleTestMetadata,
     };
     pub const TestDiscoveryProgress = poll.StreamProgress(DiscoveredTest);
@@ -2754,7 +2724,7 @@ pub const Registry = enum(usize) {
         return self.createSourceImage(null);
     }
 
-    pub fn createSourceImage(self: *Registry, source: ?*const @import("pkg_lock.zig").SourceScope) error{OutOfMemory}!OwnedImage {
+    pub fn createSourceImage(self: *Registry, source: ?*const map_state.SourceScope) error{OutOfMemory}!OwnedImage {
         return .init(try ModuleImage.create(self.allocator(), self.releaseDomain(), source));
     }
 
@@ -4400,7 +4370,7 @@ pub const Registry = enum(usize) {
 
     pub fn beginArtifactLoadingCursor(
         self: *Registry,
-        artifact: pkg_catalog.ArtifactId,
+        artifact: map_state.ArtifactId,
         owner: LoadingOwner,
     ) BeginLoadingCursor {
         const head = self.privateState().loading.load(.acquire);
