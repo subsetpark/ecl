@@ -1853,10 +1853,13 @@ pub const WorkerScheduler = enum(usize) {
         return @intCast(@divFloor(elapsed, std.time.ns_per_ms));
     }
 
-    pub fn wakeRetirement(self: *const WorkerScheduler) void {
+    pub fn wakeRetirement(self: *const WorkerScheduler, reason: heap.ReleaseDomain.WakeReason) void {
         const state_ = self.privateState();
         std.Io.Threaded.mutexLock(&state_.queue_mutex);
-        state_.queue_condition.broadcast(blockingIo());
+        switch (reason) {
+            .retirement_available => state_.queue_condition.signal(blockingIo()),
+            .backpressure_relieved => state_.queue_condition.broadcast(blockingIo()),
+        }
         std.Io.Threaded.mutexUnlock(&state_.queue_mutex);
     }
 
@@ -2427,22 +2430,24 @@ pub const WorkerScheduler = enum(usize) {
 
     fn runArbitrated(self: *const WorkerScheduler, arbitration: *ExecutorArbitration) bool {
         const state_ = self.privateState();
-        const retirement_ready = self.releaseDomain().hasPending();
         std.Io.Threaded.mutexLock(&state_.queue_mutex);
         self.grantAdmissionLocked();
-        const turn = arbitration.choose(state_.queue_first != null, retirement_ready) orelse {
+        const turn = arbitration.choose(state_.queue_first != null, self.releaseDomain().hasAvailable()) orelse {
             std.Io.Threaded.mutexUnlock(&state_.queue_mutex);
             return false;
         };
-        const entry = if (turn == .ready) self.popLocked() else null;
+        const claim = if (turn == .retirement) self.releaseDomain().claim() else null;
+        const entry = if (claim == null) self.popLocked() else null;
         std.Io.Threaded.mutexUnlock(&state_.queue_mutex);
         if (entry) |ready| {
             self.runEntry(ready);
             return true;
         }
-        if (self.releaseDomain().tryAdvance(ExecutorArbitration.retirement_quantum) == null)
-            std.Thread.yield() catch @panic("scheduler retirement arbitration yield failed");
-        return true;
+        if (claim) |owned| {
+            _ = owned.advance(ExecutorArbitration.retirement_quantum);
+            return true;
+        }
+        return false;
     }
 
     fn runEntry(self: *const WorkerScheduler, entry: *QueueEntry) void {
@@ -3205,7 +3210,7 @@ fn workerMain(scheduler: *const WorkerScheduler) void {
         if (scheduler.runArbitrated(&arbitration)) continue;
         std.Io.Threaded.mutexLock(&scheduler_state.queue_mutex);
         while (scheduler_state.queue_first == null and
-            !scheduler.releaseDomain().hasPending() and
+            !scheduler.releaseDomain().hasAvailable() and
             !scheduler_state.stopping)
         {
             scheduler.grantAdmissionLocked();

@@ -919,6 +919,13 @@ producers from continually outrunning reclamation. Root and worker turns
 attempt retirement without waiting behind another drainer, then return to
 execution and control; blocking host settlement joins remaining work at the
 public turn boundary.
+The domain grants one execution claim for destruction. Queued work owned by
+that claim is not eligible for another executor. Enqueue and claim release
+coordinate availability under the domain queue lock; wake delivery occurs
+after unlocking. Continuations coalesce their wakes until claim release,
+while relieving evaluation backpressure remains an independent wake event.
+Worker parking checks availability under the scheduler lock, so publication
+of available work either precedes that check or wakes the parked worker.
 
 Cold Sessions and blocking public turns also settle or transfer retirement.
 Memory left after readers drain must be bounded by live or peak simultaneous

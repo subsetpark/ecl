@@ -864,6 +864,7 @@ pub fn build(b: *std.Build) void {
             "concurrency:",
             "env: concurrent cell publication is lease-safe and TSan-clean",
             "env: concurrent readers writers and retirement reclaim production snapshots",
+            "env: retirement claims coalesce descendant wakes and republish availability",
             "registry: concurrent commits are linearized without lost names",
             "native:",
             "archive: unpack-tgz preserves existing destinations and has one concurrent winner",
