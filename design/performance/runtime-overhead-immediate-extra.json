@@ -1,0 +1,331 @@
+{
+  "optimization": "ReleaseSafe",
+  "affinity": [
+    4,
+    6
+  ],
+  "cases": {
+    "latency": [
+      "--latency-only",
+      "--quick"
+    ],
+    "deep-cleanup-0": [
+      "--source",
+      "0 10000 (wrap) times pop",
+      "--workers",
+      "0"
+    ],
+    "deep-cleanup-1": [
+      "--source",
+      "0 10000 (wrap) times pop",
+      "--workers",
+      "1"
+    ],
+    "deep-cleanup-8": [
+      "--source",
+      "0 10000 (wrap) times pop",
+      "--workers",
+      "8"
+    ]
+  },
+  "artifacts": {
+    "lookup": {
+      "path": "/home/zax/.cache/ecl-overhead/lookup-probation-bench/bin/ecl-bench-workdrivers",
+      "sha256": "69257c42edcf87ebb505cad1358c3ff9f12dee3d3b605a5e6f2755f32b3d8ca6"
+    },
+    "coalescing": {
+      "path": "/home/zax/.cache/ecl-overhead/coalescing-out/bin/ecl-bench-workdrivers",
+      "sha256": "53d1fb36a70c4fab7dc55b8757b1944435eb4089ee14d84a27fab01c147b2bf8"
+    }
+  },
+  "runs": [
+    {
+      "iteration": 0,
+      "variant": "lookup",
+      "case": "latency",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\nmixed-short-latency,1,200000,3,43,799783,1680154,1680154,341000,935000\ncancellation-latency,1,0,3,33,208005,279326,279326,403000,535000\nmixed-short-latency,8,200000,3,43,3106494,3255037,3255037,5202000,5445000\ncancellation-latency,8,0,3,33,388305,3327900,3327900,723000,6383000\n"
+    },
+    {
+      "iteration": 0,
+      "variant": "coalescing",
+      "case": "latency",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\nmixed-short-latency,1,200000,3,43,865889,918909,918909,366000,455000\ncancellation-latency,1,0,3,33,214304,216157,216157,423000,424000\nmixed-short-latency,8,200000,3,43,1325830,1422119,1422119,1733000,1811000\ncancellation-latency,8,0,3,33,465288,983248,983248,874000,1850000\n"
+    },
+    {
+      "iteration": 0,
+      "variant": "lookup",
+      "case": "deep-cleanup-0",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,0,0,1,40033,23255968,23255968,23255968,23208000,23208000\n"
+    },
+    {
+      "iteration": 0,
+      "variant": "coalescing",
+      "case": "deep-cleanup-0",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,0,0,1,40033,24551019,24551019,24551019,24504000,24504000\n"
+    },
+    {
+      "iteration": 0,
+      "variant": "lookup",
+      "case": "deep-cleanup-1",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,1,0,1,40033,20773418,20773418,20773418,20703000,20703000\n"
+    },
+    {
+      "iteration": 0,
+      "variant": "coalescing",
+      "case": "deep-cleanup-1",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,1,0,1,40033,21684600,21684600,21684600,21641000,21641000\n"
+    },
+    {
+      "iteration": 0,
+      "variant": "lookup",
+      "case": "deep-cleanup-8",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,8,0,1,40033,20501625,20501625,20501625,20450000,20450000\n"
+    },
+    {
+      "iteration": 0,
+      "variant": "coalescing",
+      "case": "deep-cleanup-8",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,8,0,1,40033,21541904,21541904,21541904,21497000,21497000\n"
+    },
+    {
+      "iteration": 1,
+      "variant": "coalescing",
+      "case": "latency",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\nmixed-short-latency,1,200000,3,43,910889,1646953,1646953,897000,1248000\ncancellation-latency,1,0,3,33,307196,325586,325586,394000,427000\nmixed-short-latency,8,200000,3,43,2979947,3577380,3577380,4942000,5079000\ncancellation-latency,8,0,3,33,502124,767102,767102,950000,1248000\n"
+    },
+    {
+      "iteration": 1,
+      "variant": "lookup",
+      "case": "latency",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\nmixed-short-latency,1,200000,3,43,965122,1117213,1117213,414000,1202000\ncancellation-latency,1,0,3,33,220556,325100,325100,430000,439000\nmixed-short-latency,8,200000,3,43,2954707,3188533,3188533,4977000,5306000\ncancellation-latency,8,0,3,33,249719,423465,423465,474000,615000\n"
+    },
+    {
+      "iteration": 1,
+      "variant": "coalescing",
+      "case": "deep-cleanup-0",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,0,0,1,40033,22788397,22788397,22788397,22740000,22740000\n"
+    },
+    {
+      "iteration": 1,
+      "variant": "lookup",
+      "case": "deep-cleanup-0",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,0,0,1,40033,22346716,22346716,22346716,22292000,22292000\n"
+    },
+    {
+      "iteration": 1,
+      "variant": "coalescing",
+      "case": "deep-cleanup-1",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,1,0,1,40033,21765167,21765167,21765167,21726000,21726000\n"
+    },
+    {
+      "iteration": 1,
+      "variant": "lookup",
+      "case": "deep-cleanup-1",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,1,0,1,40033,21952061,21952061,21952061,21895000,21895000\n"
+    },
+    {
+      "iteration": 1,
+      "variant": "coalescing",
+      "case": "deep-cleanup-8",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,8,0,1,40033,21946479,21946479,21946479,21897000,21897000\n"
+    },
+    {
+      "iteration": 1,
+      "variant": "lookup",
+      "case": "deep-cleanup-8",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,8,0,1,40033,23207262,23207262,23207262,23157000,23157000\n"
+    },
+    {
+      "iteration": 2,
+      "variant": "lookup",
+      "case": "latency",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\nmixed-short-latency,1,200000,3,43,1131148,1301087,1301087,921000,987000\ncancellation-latency,1,0,3,33,251259,311290,311290,399000,500000\nmixed-short-latency,8,200000,3,43,1533739,3444661,3444661,2115000,5722000\ncancellation-latency,8,0,3,33,360820,938679,938679,649000,1581000\n"
+    },
+    {
+      "iteration": 2,
+      "variant": "coalescing",
+      "case": "latency",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\nmixed-short-latency,1,200000,3,43,1318453,1710614,1710614,1034000,1270000\ncancellation-latency,1,0,3,33,316857,331588,331588,447000,479000\nmixed-short-latency,8,200000,3,43,3178668,3419422,3419422,5247000,5576000\ncancellation-latency,8,0,3,33,248846,479467,479467,498000,875000\n"
+    },
+    {
+      "iteration": 2,
+      "variant": "lookup",
+      "case": "deep-cleanup-0",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,0,0,1,40033,22528584,22528584,22528584,22477000,22477000\n"
+    },
+    {
+      "iteration": 2,
+      "variant": "coalescing",
+      "case": "deep-cleanup-0",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,0,0,1,40033,38496932,38496932,38496932,38414000,38414000\n"
+    },
+    {
+      "iteration": 2,
+      "variant": "lookup",
+      "case": "deep-cleanup-1",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,1,0,1,40033,22451489,22451489,22451489,22403000,22403000\n"
+    },
+    {
+      "iteration": 2,
+      "variant": "coalescing",
+      "case": "deep-cleanup-1",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,1,0,1,40033,22275892,22275892,22275892,22192000,22192000\n"
+    },
+    {
+      "iteration": 2,
+      "variant": "lookup",
+      "case": "deep-cleanup-8",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,8,0,1,40033,22382514,22382514,22382514,22339000,22339000\n"
+    },
+    {
+      "iteration": 2,
+      "variant": "coalescing",
+      "case": "deep-cleanup-8",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,8,0,1,40033,22860941,22860941,22860941,22805000,22805000\n"
+    },
+    {
+      "iteration": 3,
+      "variant": "coalescing",
+      "case": "latency",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\nmixed-short-latency,1,200000,3,43,1098568,1169166,1169166,538000,651000\ncancellation-latency,1,0,3,33,314287,355127,355127,451000,490000\nmixed-short-latency,8,200000,3,43,1821523,3271180,3271180,1473000,5473000\ncancellation-latency,8,0,3,33,1841197,3195628,3195628,3555000,6256000\n"
+    },
+    {
+      "iteration": 3,
+      "variant": "lookup",
+      "case": "latency",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\nmixed-short-latency,1,200000,3,43,919642,1043940,1043940,561000,988000\ncancellation-latency,1,0,3,33,298162,342631,342631,501000,594000\nmixed-short-latency,8,200000,3,43,3205907,3315040,3315040,5456000,5523000\ncancellation-latency,8,0,3,33,605350,2940122,2940122,1156000,5811000\n"
+    },
+    {
+      "iteration": 3,
+      "variant": "coalescing",
+      "case": "deep-cleanup-0",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,0,0,1,40033,24455224,24455224,24455224,24362000,24362000\n"
+    },
+    {
+      "iteration": 3,
+      "variant": "lookup",
+      "case": "deep-cleanup-0",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,0,0,1,40033,23703640,23703640,23703640,23624000,23624000\n"
+    },
+    {
+      "iteration": 3,
+      "variant": "coalescing",
+      "case": "deep-cleanup-1",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,1,0,1,40033,22911444,22911444,22911444,22864000,22864000\n"
+    },
+    {
+      "iteration": 3,
+      "variant": "lookup",
+      "case": "deep-cleanup-1",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,1,0,1,40033,24097678,24097678,24097678,24050000,24050000\n"
+    },
+    {
+      "iteration": 3,
+      "variant": "coalescing",
+      "case": "deep-cleanup-8",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,8,0,1,40033,23995490,23995490,23995490,23941000,23941000\n"
+    },
+    {
+      "iteration": 3,
+      "variant": "lookup",
+      "case": "deep-cleanup-8",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,8,0,1,40033,22841327,22841327,22841327,22797000,22797000\n"
+    },
+    {
+      "iteration": 4,
+      "variant": "lookup",
+      "case": "latency",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\nmixed-short-latency,1,200000,3,43,1438049,1654276,1654276,1317000,1526000\ncancellation-latency,1,0,3,33,346394,386974,386974,476000,547000\nmixed-short-latency,8,200000,3,43,2942536,3360633,3360633,4880000,5569000\ncancellation-latency,8,0,3,33,1342826,3114435,3114435,2463000,6148000\n"
+    },
+    {
+      "iteration": 4,
+      "variant": "coalescing",
+      "case": "latency",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\nmixed-short-latency,1,200000,3,43,1001397,1003013,1003013,541000,934000\ncancellation-latency,1,0,3,33,304229,368985,368985,456000,534000\nmixed-short-latency,8,200000,3,43,3118383,3462604,3462604,5247000,5737000\ncancellation-latency,8,0,3,33,599857,3592985,3592985,1011000,4167000\n"
+    },
+    {
+      "iteration": 4,
+      "variant": "lookup",
+      "case": "deep-cleanup-0",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,0,0,1,40033,23028758,23028758,23028758,22949000,22949000\n"
+    },
+    {
+      "iteration": 4,
+      "variant": "coalescing",
+      "case": "deep-cleanup-0",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,0,0,1,40033,39472805,39472805,39472805,39379000,39379000\n"
+    },
+    {
+      "iteration": 4,
+      "variant": "lookup",
+      "case": "deep-cleanup-1",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,1,0,1,40033,23258585,23258585,23258585,23205000,23205000\n"
+    },
+    {
+      "iteration": 4,
+      "variant": "coalescing",
+      "case": "deep-cleanup-1",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,1,0,1,40033,22710096,22710096,22710096,22658000,22658000\n"
+    },
+    {
+      "iteration": 4,
+      "variant": "lookup",
+      "case": "deep-cleanup-8",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,8,0,1,40033,23777434,23777434,23777434,23714000,23714000\n"
+    },
+    {
+      "iteration": 4,
+      "variant": "coalescing",
+      "case": "deep-cleanup-8",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,8,0,1,40033,23915499,23915499,23915499,23840000,23840000\n"
+    },
+    {
+      "iteration": 5,
+      "variant": "coalescing",
+      "case": "latency",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\nmixed-short-latency,1,200000,3,43,1659111,1743010,1743010,1250000,1537000\ncancellation-latency,1,0,3,33,240913,290808,290808,434000,476000\nmixed-short-latency,8,200000,3,43,1777650,1927838,1927838,2202000,2315000\ncancellation-latency,8,0,3,33,534356,1119604,1119604,1020000,2175000\n"
+    },
+    {
+      "iteration": 5,
+      "variant": "lookup",
+      "case": "latency",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\nmixed-short-latency,1,200000,3,43,971978,979433,979433,469000,739000\ncancellation-latency,1,0,3,33,338086,348801,348801,478000,497000\nmixed-short-latency,8,200000,3,43,3323139,3396420,3396420,5539000,5633000\ncancellation-latency,8,0,3,33,730838,860896,860896,1403000,1649000\n"
+    },
+    {
+      "iteration": 5,
+      "variant": "coalescing",
+      "case": "deep-cleanup-0",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,0,0,1,40033,24579512,24579512,24579512,24526000,24526000\n"
+    },
+    {
+      "iteration": 5,
+      "variant": "lookup",
+      "case": "deep-cleanup-0",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,0,0,1,40033,23748943,23748943,23748943,23697000,23697000\n"
+    },
+    {
+      "iteration": 5,
+      "variant": "coalescing",
+      "case": "deep-cleanup-1",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,1,0,1,40033,23863071,23863071,23863071,23795000,23795000\n"
+    },
+    {
+      "iteration": 5,
+      "variant": "lookup",
+      "case": "deep-cleanup-1",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,1,0,1,40033,22685300,22685300,22685300,22640000,22640000\n"
+    },
+    {
+      "iteration": 5,
+      "variant": "coalescing",
+      "case": "deep-cleanup-8",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,8,0,1,40033,22936160,22936160,22936160,22865000,22865000\n"
+    },
+    {
+      "iteration": 5,
+      "variant": "lookup",
+      "case": "deep-cleanup-8",
+      "output": "# schema=ecl.workdrivers.timing.v7\n# WorkDriver baseline (timing)\noptimize=ReleaseSafe,target=x86_64-linux,zig=0.16.0,root_counters=false\ncase,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\ncustom,8,0,1,40033,22846788,22846788,22846788,22769000,22769000\n"
+    }
+  ]
+}

@@ -3097,12 +3097,14 @@ test "native: instance work quanta preserve bounds across callback and construct
         defer runtime.deinit();
         const source = try std.fmt.allocPrint(std.testing.allocator, "instanceprobe.packed-cooperative [] port.open 'resource set " ++
             "resource instanceprobe.packed-initial-budget [] port.call {d} = {{'kind 'user 'msg \"initialization grant\"}} assert " ++
-            "resource instanceprobe.packed-budget [] port.call {d} = {{'kind 'user 'msg \"callback grant\"}} assert " ++
-            "instanceprobe.work-operation-retired {d} = {{'kind 'user 'msg \"operation retirement grant\"}} assert " ++
+            "resource instanceprobe.packed-budget [] port.call dup 0 > swap {d} <= and {{'kind 'user 'msg \"callback grant\"}} assert " ++
+            "instanceprobe.work-operation-retired dup 0 > swap {d} <= and {{'kind 'user 'msg \"operation retirement grant\"}} assert " ++
             "resource instanceprobe.cooperative-packed-values 1 port.call dup first sum 10813440 = {{'kind 'user 'msg \"bounded materialization preserves bytes\"}} assert 1 at str len 301 = {{'kind 'user 'msg \"bounded materialization preserves symbols\"}} assert " ++
             "resource port.close instanceprobe.work-retired {d} = {{'kind 'user 'msg \"resource retirement grant\"}} assert", .{ amount, amount, amount, amount });
         defer std.testing.allocator.free(source);
         try expectOk(&runtime, source);
+        // Construction must progress even after the callback spends its grant.
+        try expectOk(&runtime, "instanceprobe.cooperative [] port.open dup instanceprobe.seal 0 port.call 42 = {'kind 'user 'msg \"one-credit finalizer progress\"} assert port.close");
     };
 }
 

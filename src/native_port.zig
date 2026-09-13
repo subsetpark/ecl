@@ -889,7 +889,10 @@ const ControllerContext = struct {
     cooperative: ?struct { budget: u32, wait: union(enum) { none, timer: scheduler.Deadline, readiness } = .none } = null,
     symbol_bytes: [256]u8 = @splat(0),
     fn beginCooperativeSlice(self: *ControllerContext) void {
-        self.cooperative = .{ .budget = self.cell.adapter.owner.limits.callback_quantum.count() };
+        self.cooperative = .{ .budget = @intCast(@min(
+            self.cell.adapter.owner.limits.callback_quantum.count(),
+            self.cell.scheduler.remainingCooperativeWork(),
+        )) };
     }
     fn cancellation(self: *ControllerContext) *const std.atomic.Value(bool) {
         return if (self.operation()) |op| &op.transport_cancelled else &self.cell.closed;
@@ -1674,8 +1677,10 @@ fn buildCooperative(ctx: *ControllerContext, request: *const abi.MessageBuildReq
     return .ok;
 }
 fn cooperativeConsume(raw: *anyopaque, units: u32) callconv(.c) bool {
-    if (context(raw).cooperative) |*work| {
+    const ctx = context(raw);
+    if (ctx.cooperative) |*work| {
         if (units == 0 or units > work.budget) return false;
+        if (!ctx.cell.scheduler.consumeCooperativeWork(units)) return false;
         work.budget -= units;
         return true;
     }
@@ -1782,43 +1787,51 @@ const CooperativeInvocation = struct {
         ctx.beginCooperativeSlice();
         if (running.cancelled() and self.phase != .finished) self.phase = .retiring;
         const callbacks = adapter.cell.adapter.definition.execution.cooperative;
-        switch (self.phase) {
-            .callback => {
-                const progress = cooperativeProgress(ctx, callbacks.execute(adapter.cell.adapter.backend.ptr, adapter.code, &cooperative_table, ctx));
-                lock(&operation.mutex);
-                const failed = adapter.failure != null;
-                const committed = operation.ticket.committed();
-                unlock(&operation.mutex);
-                if (failed or progress == .completed) {
-                    if (!failed and operation.mode == .finalizer and !committed)
-                        recordControllerFailure(ctx, .init(.contract, "finalizer completed without committing"));
+        while (true) {
+            switch (self.phase) {
+                .callback => callback_phase: {
+                    const progress = cooperativeProgress(ctx, callbacks.execute(adapter.cell.adapter.backend.ptr, adapter.code, &cooperative_table, ctx));
+                    lock(&operation.mutex);
+                    const failed = adapter.failure != null;
+                    const committed = operation.ticket.committed();
+                    unlock(&operation.mutex);
+                    if (failed or progress == .completed) {
+                        if (!failed and operation.mode == .finalizer and !committed)
+                            recordControllerFailure(ctx, .init(.contract, "finalizer completed without committing"));
+                        self.phase = .retiring;
+                        if (!failed and ctx.builder == .cooperative) switch (ctx.builder.cooperative.phase) {
+                            .idle => {},
+                            .result => self.phase = .publishing,
+                            .working, .error_data, .failure_choice, .child_configuration, .child => recordControllerFailure(ctx, .init(.contract, "cooperative callback completed unfinished construction")),
+                        };
+                        break :callback_phase;
+                    }
+                    return operationProgress(progress);
+                },
+                .publishing => {
+                    const status = cooperativeBuildMessage(ctx, &.{ .action = .advance });
+                    if (status == .yield_required) return .yielded;
                     self.phase = .retiring;
-                    if (!failed and ctx.builder == .cooperative) switch (ctx.builder.cooperative.phase) {
-                        .idle => {},
-                        .result => self.phase = .publishing,
-                        .working, .error_data, .failure_choice, .child_configuration, .child => recordControllerFailure(ctx, .init(.contract, "cooperative callback completed unfinished construction")),
-                    };
-                    return .yielded;
-                }
-                return operationProgress(progress);
-            },
-            .publishing => {
-                const status = cooperativeBuildMessage(ctx, &.{ .action = .advance });
-                if (status == .yield_required) return .yielded;
+                },
+                .retiring => {
+                    const progress = cooperativeProgress(ctx, callbacks.retire_operation(adapter.cell.adapter.backend.ptr, &cooperative_table, ctx));
+                    if (progress != .completed) return operationProgress(progress);
+                    ctx.deinit();
+                    self.phase = .finished;
+                    lock(&operation.mutex);
+                    _ = running.acknowledgeCancellation();
+                    unlock(&operation.mutex);
+                    return .completed;
+                },
+                .finished => unreachable,
+            }
+            // Moving to another host phase spends the same allowance as
+            // extension work. An explicit callback yield always returns above.
+            if (!cooperativeConsume(ctx, 1) or ctx.cooperative.?.budget == 0) return .yielded;
+            if (running.cancelled()) {
                 self.phase = .retiring;
                 return .yielded;
-            },
-            .retiring => {
-                const progress = cooperativeProgress(ctx, callbacks.retire_operation(adapter.cell.adapter.backend.ptr, &cooperative_table, ctx));
-                if (progress != .completed) return operationProgress(progress);
-                ctx.deinit();
-                self.phase = .finished;
-                lock(&operation.mutex);
-                _ = running.acknowledgeCancellation();
-                unlock(&operation.mutex);
-                return .completed;
-            },
-            .finished => unreachable,
+            }
         }
     }
     fn operationProgress(progress: scheduler.Cooperative.Progress) controllers.Progress {

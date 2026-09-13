@@ -1,5 +1,102 @@
 # Shared runtime overhead
 
+## Bounded operation completion
+
+This iteration follows `2c6006c`. It retains coalescing of callback, result
+publication, and operation retirement within a scheduled cooperative turn.
+One allowance covers extension work and host phase transitions; explicit yield,
+parking, cancellation unwind, and exhaustion return to arbitration. Host
+construction retains its separate bounded grant, so a callback that spends its
+last credit can still advance an already-started construction. No executor
+placement changes or experimental switches remain.
+
+A second prototype attempted the first slice of an admitted operation on the
+current eligible executor. It reserved the ordinary continuation and ownership
+before publication, shared the evaluation allowance, rejected recursive
+dispatch, respected retirement arbitration, and excluded worker-pool embedding
+callers. It did not establish an additional benefit above variation and is not
+retained. In particular, the cached-stat workload did not justify moving
+potentially blocking filesystem work onto an embedding caller.
+
+Measurements use native x86_64 Linux, Zig 0.16.0, ReleaseSafe, identical CPU
+affinity 4,6, the same 64 KiB stat input, one warmup and five fresh-process
+repetitions. Variant order alternates. Timing ran without concurrent task builds,
+tests, or profiling; the unrelated host workload remained active. CLI cases
+measure whole-process elapsed time. Native benchmark cases measure the program
+after setup, perform 1,000 operations, and assert the exact callback/retirement
+count after joined close. Stat and direct-native cases perform 10,000 requests.
+
+| Case | Lookup seconds | Coalescing seconds | First-slice prototype seconds |
+|---|---:|---:|---:|
+| Public stat, default pool | 17.662 | 17.214 | 17.502 |
+| Public stat, one worker | 17.005 | 16.760 | 16.658 |
+| Public stat, cooperative | 16.463 | 16.897 | 16.397 |
+| Direct native request, one worker | 8.531 | 8.364 | 8.309 |
+| Native operation, cooperative root | 0.783 | 0.781 | 0.778 |
+| Native operation, one-worker root | 0.784 | 0.761 | 0.761 |
+| Native operation, eight-worker root | 0.814 | 0.794 | 0.810 |
+| Native operation, one-worker task | 0.731 | 0.726 | 0.726 |
+| Native operation, eight-worker task | 1.384 | 1.360 | 1.345 |
+
+The one-worker root case supports retaining coalescing: its median improves
+2.9%, with disjoint ranges of 0.774684–0.797129 and 0.749824–0.765334 seconds.
+First-slice execution adds no measurable benefit in that case. Its eight-worker
+task median improves another 1.0%, but the coalescing and first-slice ranges
+overlap (1.324828–1.396548 versus 1.262333–1.357364 seconds). Other timing
+changes also have overlapping ranges. These measurements do not establish a
+general stat or native-operation speedup. The earlier migration baseline remains
+far faster on stat; restoring that backend's performance is not established.
+
+Five separate fresh-process allocation probes confirm that the one-worker task
+uses 186,734 allocations instead of 188,732, with the same 843,335-byte peak
+in every run. Eight-worker allocation medians fall from 188,732 to 188,646.
+Eight-worker peak memory has a higher median, 570,469 versus 478,209 bytes;
+the ranges overlap at 510,825–775,118 versus 477,489–667,444 bytes. This is a
+transient scheduling tradeoff, not evidence of identical memory use in all
+modes. All samples remain below the unchanged one-worker peak, and exact
+joined-cleanup assertions pass. The optimization adds no per-operation heap
+storage. Public SDK budget observations report retirement grants of 254 after
+coalescing versus 256 before, confirming that host transitions share the grant.
+
+Separate instruction diagnostics investigate the cooperative stat median's
+2.6% increase. User instructions are essentially unchanged:
+127,867,613,164 versus 127,874,367,837 (+0.005%); cycles increase 3.0%.
+A whole-process 10,000-operation native CLI diagnostic instead increases
+instructions 1.1% (60,087,979,644 to 60,764,132,248) and cycles 3.5%.
+These single diagnostics are not timing repetitions and do not support a
+universal improvement. The retained benefit is the measured one-worker case
+and reduced allocations. A separate 199 Hz native profile loses no samples;
+dispatch, resolution, idiom execution, lexical lookup, and memory initialization
+remain prominent (8.62%, 8.53%, 7.65%, 7.31%, and 7.22%, respectively).
+
+Five fresh-process comparisons of mixed short-task latency, cancellation, and
+10,000-level recursive value creation plus joined cleanup have overlapping
+before/after ranges. The cooperative deep-value median rises from 23.029 to
+24.580 ms, with ranges 22.347–23.749 and 22.788–39.473 ms; one- and
+eight-worker medians are effectively unchanged. No repeatable fairness or
+cleanup regression is established by those probes.
+
+The raw [three-variant measurements](runtime-overhead-immediate-timing.json)
+include elapsed/user/system time, context switches, counters, programs, fixture
+identity, and artifact SHA-256 values. The retained CLI SHA-256 is
+`06b246fb9b362c543e7b032cc4265973a922fc5b44cf37da2bc65f6e3ab391fe`.
+The [allocation repetitions](runtime-overhead-immediate-memory.json),
+[public grant observations](runtime-overhead-immediate-grants.json), and
+[latency/cleanup repetitions](runtime-overhead-immediate-extra.json) preserve
+the additional evidence. The first-slice artifact identities remain in the raw
+comparison even though its code is rejected.
+
+Verification passed: `zig build check test-native-runtime precommit`, the
+initialized-Session `test-oom-surfaces -Doom-filter='cooperative native'`
+resource/message/child-publication probes, and Docker Ubuntu/glibc `test-tsan`.
+The one-credit finalizer assertion was deliberately broken, observed failing,
+restored, and verified through the static and dynamic native fixtures. The
+retained source patch against `2c6006c` has SHA-256
+`5c72ba6c792859625a30e0e111e2203ec17147da12c72055390d622c170aac8f`.
+The native ABI remains 24. The subsequent filesystem direction is a direct
+runtime implementation targeting the pre-SDK performance envelope; these
+shared-runtime improvements alone do not resolve its overhead.
+
 ## Guarded plain lookup
 
 The lookup iteration follows `d2f81a9`. It retains the 16-entry binding cache

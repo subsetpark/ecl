@@ -1906,6 +1906,15 @@ Only owner-issued creation installs dependency membership; scope transfer cannot
 reparent a resource. Heap identity release closes unpublished resources, while
 controller, scope, and readiness pins release metadata without changing use.
 
+Cooperative operation phases may continue within one executor turn. The turn
+lends a consumable allowance capped by the instance callback grant and the
+executor’s remaining work. Extension work and transitions between callback,
+result publication, and operation retirement spend that allowance. Explicit
+yield, parking, dependencies, cancellation unwind, or exhaustion ends the
+turn. Each materialization advance retains its separate construction bound;
+spending callback credits cannot prevent pending construction from progressing.
+Publication and cleanup ownership are reserved before execution is reachable.
+
 Graceful shutdown closes operation admission and runs one registered callback
 on an independently reserved control lane. Its terminal outcome is stable.
 Abortive close interrupts that callback through the same bounded cancellation

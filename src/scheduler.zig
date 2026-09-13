@@ -8,6 +8,14 @@ const env = @import("env.zig");
 const modules = @import("modules.zig");
 const core = @import("scheduler_core.zig");
 const external = @import("external.zig");
+const poll = @import("poll.zig");
+
+// A callback borrows only the current executor's allowance. No pointer to a
+// stack-owned budget crosses a suspension or enters an extension descriptor.
+threadlocal var cooperative_turn: ?struct {
+    worker: *const WorkerScheduler,
+    budget: *poll.WorkBudget,
+} = null;
 
 const Value = value.Value;
 const ListHandle = value.ListHandle;
@@ -1740,11 +1748,18 @@ pub const Cooperative = opaque {
         if (timer_pin) release(parent);
     }
     fn run(self: *Cooperative) void {
+        var budget = poll.WorkBudget.init(machine.kernel_poll_quantum);
+        self.runWithBudget(&budget);
+    }
+    fn runWithBudget(self: *Cooperative, budget: *poll.WorkBudget) void {
         const owned = self.state();
         std.Io.Threaded.mutexLock(&owned.mutex);
         owned.phase = .{ .running = false };
         std.Io.Threaded.mutexUnlock(&owned.mutex);
+        const previous_turn = cooperative_turn;
+        cooperative_turn = .{ .worker = owned.worker, .budget = budget };
         const progress = owned.advance(owned.parent);
+        cooperative_turn = previous_turn;
         std.Io.Threaded.mutexLock(&owned.mutex);
         const notified = owned.phase.running;
         switch (progress) {
@@ -1861,6 +1876,18 @@ pub const WorkerScheduler = enum(usize) {
             .backpressure_relieved => state_.queue_condition.broadcast(blockingIo()),
         }
         std.Io.Threaded.mutexUnlock(&state_.queue_mutex);
+    }
+
+    pub fn remainingCooperativeWork(self: *const WorkerScheduler) usize {
+        const turn = cooperative_turn orelse return 0;
+        return if (turn.worker == self) turn.budget.remaining else 0;
+    }
+
+    pub fn consumeCooperativeWork(self: *const WorkerScheduler, units: usize) bool {
+        const turn = cooperative_turn orelse return false;
+        if (turn.worker != self or units == 0 or units > turn.budget.remaining) return false;
+        _ = turn.budget.take(units);
+        return true;
     }
 
     fn shutdown(self: *const WorkerScheduler, root_scope: *TaskScope) void {
