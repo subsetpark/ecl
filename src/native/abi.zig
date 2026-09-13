@@ -5,8 +5,8 @@
 
 const builtin = @import("builtin");
 
-pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v14";
-pub const abi_version: u32 = 14;
+pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v15";
+pub const abi_version: u32 = 15;
 
 pub const max_error_message_bytes: u32 = 4096;
 pub const max_guest_scalar_bytes: u32 = 4096;
@@ -214,17 +214,24 @@ pub const EndpointDirection = enum(u32) { input, output, _ };
 pub const EndpointOwner = enum(u32) { resource, exchange, _ };
 /// Registration metadata contains private controller selectors, never ECL
 /// values. The host validates and seals it into module-instance capabilities.
+pub const OperationBinding = extern struct {
+    size: u32 = @sizeOf(OperationBinding),
+    resource: u32,
+    operation: u32,
+    lane: u32,
+    endpoints: u64,
+    mode: OperationMode = .ordinary,
+};
 pub const PortBinding = extern struct {
     kind: BindingKind = .call,
     resource: u32 = 0,
-    operation: u32 = 0,
-    lane: u32 = 0,
-    endpoints: u64 = 0,
     endpoint: u32 = 0,
     transport: EndpointTransport = .bytes,
     direction: EndpointDirection = .input,
     owner: EndpointOwner = .exchange,
-    operation_mode: OperationMode = .ordinary,
+    operation_count: u32 = 0,
+    operation_record_size: u32 = @sizeOf(OperationBinding),
+    operations_ptr: ?[*]const OperationBinding = null,
 };
 
 pub const Definition = extern struct {
@@ -488,8 +495,9 @@ comptime {
 
     assertRecord(CapabilityRequirement, 8, 4);
     assertRecord(EffectSlot, 24, 8);
-    assertRecord(Definition, 144, 8);
-    assertRecord(PortBinding, 48, 8);
+    assertRecord(Definition, 136, 8);
+    assertRecord(PortBinding, 40, 8);
+    assertRecord(OperationBinding, 32, 8);
     assertRecord(ValueView, 40, 8);
     assertRecord(Scalar, 32, 8);
     assertRecord(InvokeResult, 16, 8);

@@ -244,6 +244,8 @@ const repository_verification_files = [_][]const u8{
     "test/native/negative/invalid_port_callbacks.zig",
     "test/native/negative/cooperative_blocking_endpoint.zig",
     "test/native/negative/cooperative_commit_authority.zig",
+    "test/native/negative/overload_duplicate_resource.zig",
+    "test/native/negative/overload_undeclared_resource.zig",
     "test/native/negative/finalizer_child_creation.zig",
     "test/native/negative/activity_construction_authority.zig",
     "test/native/negative/shutdown_stream_authority.zig",

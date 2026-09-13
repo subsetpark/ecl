@@ -174,14 +174,58 @@ pub fn factory(comptime name: []const u8, comptime doc: []const u8, comptime P: 
 }
 
 fn portOperation(comptime P: type, comptime name: P.Operations.Name) type {
-    const entry = P.Operations.get(name);
-    return portBinding(P.Operations.publicName(name), entry.doc, P, .{
-        .kind = .operation,
-        .operation = @intFromEnum(name),
-        .operation_mode = P.operationMode(name),
-        .lane = @intFromEnum(P.Operations.lane(name)),
-        .endpoints = P.Operations.endpointMask(name),
-    });
+    return overload(P.Operations.publicName(name), P.Operations.get(name).doc, .{.{ P, name }});
+}
+
+/// Export one operation selector over distinct declared resource kinds.
+/// Every member is a pair .{Port, operation}; each kind occurs exactly once.
+pub fn overload(comptime binding_name: []const u8, comptime document: []const u8, comptime members: anytype) type {
+    if (!identifier(binding_name) or document.len == 0) @compileError("ecl-native: operation selector requires a name and documentation");
+    if (members.len == 0 or members.len > abi.max_port_definitions) @compileError("ecl-native: operation selector requires 1 to 64 resource kinds");
+    for (members, 0..) |member, index| {
+        const P = member[0];
+        const operation: P.Operations.Name = member[1];
+        _ = P.Operations.get(operation);
+        for (0..index) |prior| if (members[prior][0] == P) @compileError("ecl-native: operation selector repeats a resource kind");
+    }
+    return struct {
+        pub const registered_port_binding = void;
+        pub const name = binding_name;
+        pub const uses_build_values = false;
+        pub const uses_reschedule = false;
+        var outputs = makeSlots(.{"capability"});
+        var inputs: [0]abi.EffectSlot = .{};
+        fn Choices(comptime Ports: anytype) type {
+            return struct {
+                var records: [members.len]abi.OperationBinding = records: {
+                    // SAFETY: every member fills exactly one record before publication.
+                    var result: [members.len]abi.OperationBinding = undefined;
+                    for (members, 0..) |member, index| {
+                        const P = member[0];
+                        const operation: P.Operations.Name = member[1];
+                        result[index] = .{
+                            .resource = resourceIndex(Ports, P),
+                            .operation = @intFromEnum(operation),
+                            .lane = @intFromEnum(P.Operations.lane(operation)),
+                            .endpoints = P.Operations.endpointMask(operation),
+                            .mode = P.operationMode(operation),
+                        };
+                    }
+                    break :records result;
+                };
+            };
+        }
+        pub fn definition(comptime Ports: anytype) abi.Definition {
+            return .{ .callback_index = 0, .name_ptr = name.ptr, .name_len = name.len, .doc_ptr = document.ptr, .doc_len = document.len, .input_count = 0, .inputs_ptr = &inputs, .output_count = 1, .outputs_ptr = &outputs, .binding = .{ .kind = .operation, .operation_count = members.len, .operations_ptr = &Choices(Ports).records } };
+        }
+        pub fn invoke(comptime _: anytype, _: *const abi.HostTable, _: *anyopaque, output: *abi.InvokeResult) void {
+            output.* = .{ .tag = .fail, .adapter_status = 2 };
+        }
+    };
+}
+fn resourceIndex(comptime Ports: anytype, comptime P: type) u32 {
+    for (Ports, 0..) |Declared, index| if (Declared == P) return @intCast(index);
+    @compileError("ecl-native: registered capability requires a declared port");
 }
 
 fn portEndpoint(comptime P: type, comptime name: P.Endpoints.Name) type {
@@ -216,10 +260,7 @@ fn portBinding(comptime binding_name: []const u8, comptime document: []const u8,
         var inputs: [0]abi.EffectSlot = .{};
         pub fn definition(comptime Ports: anytype) abi.Definition {
             var binding = metadata;
-            binding.resource = comptime index: {
-                for (Ports, 0..) |Declared, i| if (Declared == P) break :index @intCast(i);
-                @compileError("ecl-native: registered capability requires a declared port");
-            };
+            binding.resource = comptime resourceIndex(Ports, P);
             return .{ .callback_index = 0, .name_ptr = name.ptr, .name_len = name.len, .doc_ptr = document.ptr, .doc_len = document.len, .input_count = 0, .inputs_ptr = &inputs, .output_count = 1, .outputs_ptr = &outputs, .binding = binding };
         }
         pub fn invoke(comptime _: anytype, _: *const abi.HostTable, _: *anyopaque, output: *abi.InvokeResult) void {
@@ -605,7 +646,9 @@ pub const Linkage = enum { dynamic, static };
 fn portBindingCount(comptime Ports: anytype) usize {
     var count: usize = 0;
     for (Ports) |P| {
-        count += P.Operations.count;
+        for (std.meta.tags(P.Operations.Name)) |name| if (P.Operations.exported(name)) {
+            count += 1;
+        };
         count += P.Endpoints.count;
     }
     return count;
@@ -616,6 +659,7 @@ fn portBindings(comptime Ports: anytype) [portBindingCount(Ports)]type {
     var index: usize = 0;
     for (Ports) |P| {
         for (std.meta.tags(P.Operations.Name)) |name| {
+            if (!P.Operations.exported(name)) continue;
             bindings[index] = portOperation(P, name);
             index += 1;
         }

@@ -45,12 +45,15 @@ pub const RegisteredCapability = opaque {
         return borrowRegisteredEndpoint(source, self);
     }
     pub fn acceptsOperation(self: *RegisteredCapability, source: Value) bool {
-        return fromValue(source, self.instance(), self.definition().operation.resource) != null;
+        for (self.definition().operation) |operation| if (fromValue(source, self.instance(), operation.resource) != null) return true;
+        return false;
     }
     pub fn beginOperation(self: *RegisteredCapability, source: Value, scope: *scheduler.TaskScope, request: *const port_message.Validated) exchanges.AdmitError!exchanges.Admission {
-        const operation = self.definition().operation;
-        const cell = fromValue(source, self.instance(), operation.resource) orelse return error.WrongKind;
-        return cell.admitOnLane(.{ .code = operation.code, .lane = operation.lane, .endpoints = operation.endpoints, .mode = operation.mode }, scope, request);
+        for (self.definition().operation) |operation| {
+            const cell = fromValue(source, self.instance(), operation.resource) orelse continue;
+            return cell.admitOnLane(.{ .code = operation.code, .lane = operation.lane, .endpoints = operation.endpoints, .mode = operation.mode }, scope, request);
+        }
+        return error.WrongKind;
     }
     pub fn openResource(self: *RegisteredCapability, opening: factories.Context, config: *const port_message.Validated) error{OutOfMemory}!factories.Start {
         const issuer = self.instance();

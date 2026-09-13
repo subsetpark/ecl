@@ -105,6 +105,7 @@ const Resource = ecl.Port(.{ .controller = struct {
     pub const name = "resource";
     pub const State = struct { value: i64 = 0 };
     pub const operations = .{
+        .private_value = .{ .name = "hidden-value", .visibility = .private, .doc = "Private controller selector member.", .handler = read, .lane = .operation, .endpoints = .{} },
         .value = .{ .doc = "Read the host-configured value.", .handler = read, .lane = .operation, .endpoints = .{} },
         .child = .{ .doc = "Create an independent child using its initialization borrow.", .handler = child, .lane = .operation, .endpoints = .{} },
         .cooperative_child = .{ .name = "cooperative-child", .doc = "Create an independent cooperative child using its initialization borrow.", .handler = cooperativeChild, .lane = .operation, .endpoints = .{} },
@@ -170,6 +171,7 @@ const CooperativeResource = ecl.Port(.{
             final_slices: u32 = 8,
         };
         pub const operations = .{
+            .private_value = .{ .name = "hidden-value", .visibility = .private, .doc = "Private cooperative selector member.", .handler = borrowed, .lane = .operation, .endpoints = .{} },
             .seal = .{ .doc = "Seal admission and commit a prepared result.", .handler = seal, .lane = .operation, .endpoints = .{} },
             .values = .{ .doc = "Build a result over several bounded slices.", .handler = values, .lane = .operation, .endpoints = .{} },
             .park = .{ .doc = "Park until cancelled, then join private retirement.", .handler = park, .lane = .operation, .endpoints = .{} },
@@ -492,6 +494,8 @@ pub const Extension = ecl.module(.{
     .instance = Instance,
     .ports = .{ Resource, CooperativeResource, ActivityResource },
     .words = .{
+        ecl.overload("private-value", "Read privately declared operation members.", .{ .{ Resource, .private_value }, .{ CooperativeResource, .private_value } }),
+        ecl.overload("shared-value", "Read either controller or cooperative resource state.", .{ .{ Resource, .value }, .{ CooperativeResource, .borrowed } }),
         ecl.word("next", "Read and increment instance state.", value),
         ecl.word("allocate", "Allocate and release native storage.", allocations),
         ecl.word("memory-allocator", "Use accounted native storage with standard allocation APIs.", memoryAllocator),

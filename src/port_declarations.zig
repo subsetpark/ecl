@@ -78,6 +78,11 @@ pub fn Operations(comptime Lane: type, comptime EndpointSet: type, comptime entr
         pub fn get(comptime name: Name) @TypeOf(@field(entries, @tagName(name))) {
             return @field(entries, @tagName(name));
         }
+        pub fn exported(comptime name: Name) bool {
+            const entry = get(name);
+            const visibility: enum { public, private } = if (@hasField(@TypeOf(entry), "visibility")) entry.visibility else .public;
+            return visibility == .public;
+        }
         pub fn publicName(comptime name: Name) []const u8 {
             const entry = get(name);
             return if (@hasField(@TypeOf(entry), "name")) entry.name else @tagName(name);

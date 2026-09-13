@@ -1642,6 +1642,12 @@ publication or ownership-transfer authority. Initial requests, messages, and
 terminal results all cross this boundary before delivery.
 
 Native port definitions are copied and validated with the module descriptor.
+An operation selector owns a validated, immutable set of choices with one entry
+per resource kind. Each choice binds its operation, lane, endpoint permissions,
+and finalization mode together. Admission selects only a resource from that same
+instance and passes the complete choice to the common lifecycle; it cannot combine
+metadata from different kinds. Descriptor retirement owns the copied choice set.
+
 Their identity is the pinned module instance and validated definition index;
 names are descriptive metadata. Typed SDK adapters expose backend state only
 to controller callbacks. Validated definitions distinguish callable words from

@@ -2103,3 +2103,8 @@ test "oom: standard-library and host: native instance endpoint policy" {
     };
     try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, Probe.run);
 }
+
+test "oom: standard-library and host: native operation overload registration" {
+    try requireSelectedOomTest(@src());
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortProbe("instanceprobe.shared-value pop instanceprobe.private-value pop", "").run);
+}

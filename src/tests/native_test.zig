@@ -763,10 +763,14 @@ test "native: registered descriptors reject undeclared kinds lanes and endpoints
     definitions[0].binding.resource = 1;
     try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &raw);
     definitions = original;
-    definitions[1].binding.lane = 1;
+    var operation = original[1].binding.operations_ptr.?[0];
+    definitions[1].binding.operations_ptr = @ptrCast(&operation);
+    operation.lane = 1;
     try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &raw);
     definitions = original;
-    definitions[1].binding.endpoints = 2;
+    operation = original[1].binding.operations_ptr.?[0];
+    definitions[1].binding.operations_ptr = @ptrCast(&operation);
+    operation.endpoints = 2;
     try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &raw);
     definitions = original;
     definitions[2].binding.endpoint = 64;
@@ -2386,10 +2390,12 @@ test "native: finalizer descriptors reject controller and unknown operation mode
     raw.definitions_ptr = definitions.ptr;
     const requested = try intern.internModuleName("instanceprobe");
     for (definitions) |*definition| {
-        if (definition.binding.kind != .operation or definition.binding.resource != 0) continue;
-        definition.binding.operation_mode = .finalizer;
+        if (definition.binding.kind != .operation or definition.binding.operations_ptr.?[0].resource != 0) continue;
+        var operation = definition.binding.operations_ptr.?[0];
+        definition.binding.operations_ptr = @ptrCast(&operation);
+        operation.mode = .finalizer;
         try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &raw);
-        definition.binding.operation_mode = @enumFromInt(1234);
+        operation.mode = @enumFromInt(1234);
         try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &raw);
         return;
     }
@@ -2577,4 +2583,51 @@ test "native: instance endpoint policy rejects invalid capacities and cleans fai
         defer runtime.deinit();
         try expectOk(&runtime, "[] (instanceprobe.next) @attempt 'err at 'kind at 'io match? {'kind 'user 'msg \"instance policy rejected\"} assert");
     }
+}
+
+test "native: operation overloads dispatch distinct resource kinds through shared lifecycle" {
+    try expectCooperativeAcceptance("instanceprobe.resource [] port.open (|p| p instanceprobe.shared-value [] port.call 65 = {'kind 'user 'msg \"controller member\"} assert " ++
+        "p instanceprobe.private-value [] port.call 65 = {'kind 'user 'msg \"private controller member\"} assert p port.close) call " ++
+        "instanceprobe.cooperative [] port.open (|p| p instanceprobe.shared-value [] port.call 65 = {'kind 'user 'msg \"cooperative member\"} assert " ++
+        "p instanceprobe.private-value [] port.call 65 = {'kind 'user 'msg \"private cooperative member\"} assert p port.close) call " ++
+        "instanceprobe.activity [] port.open (|p| p wrap (instanceprobe.shared-value [] port.call) @attempt 'err at 'kind at 'type match? {'kind 'user 'msg \"foreign resource rejected\"} assert p port.close) call");
+}
+
+test "native: operation overload descriptors reject incomplete and conflicting choices" {
+    var host = heap.HostOwner.init(std.testing.allocator);
+    defer host.cleanup().drain();
+    const extension = @import("native-instance").Extension.descriptor();
+    var raw = extension.*;
+    const definitions = try std.testing.allocator.dupe(abi.Definition, extension.definitions_ptr[0..extension.definition_count]);
+    defer std.testing.allocator.free(definitions);
+    raw.definitions_ptr = definitions.ptr;
+    const requested = try intern.internModuleName("instanceprobe");
+    for (definitions) |*definition| {
+        if (definition.binding.kind != .operation or definition.binding.operation_count != 2) continue;
+        const original = definition.binding;
+        definition.binding.operation_count = 0;
+        try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &raw);
+        definition.binding = original;
+        definition.binding.operation_count = 65;
+        try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &raw);
+        definition.binding = original;
+        definition.binding.operations_ptr = null;
+        try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &raw);
+        definition.binding = original;
+        definition.binding.operation_record_size = 0;
+        try expectReject(error.RecordSizeMismatch, host.cleanup(), requested, &raw);
+        definition.binding = original;
+        var choices: [2]abi.OperationBinding = original.operations_ptr.?[0..2].*;
+        definition.binding.operations_ptr = &choices;
+        choices[1].resource = choices[0].resource;
+        try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &raw);
+        choices = original.operations_ptr.?[0..2].*;
+        choices[1].resource = 64;
+        try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &raw);
+        choices = original.operations_ptr.?[0..2].*;
+        choices[0].endpoints = 1;
+        try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &raw);
+        return;
+    }
+    return error.TestUnexpectedResult;
 }

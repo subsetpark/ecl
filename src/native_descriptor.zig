@@ -53,18 +53,17 @@ pub const CallDefinition = struct {
     deinit_continuation: ?abi.StateDeinitFn,
 };
 
+pub const OperationChoice = struct {
+    resource: u32,
+    code: u32,
+    lane: u32,
+    endpoints: u64,
+    mode: @import("port_operation.zig").Mode,
+};
 pub const PortCapability = union(enum) {
     factory: u32,
-    operation: struct { resource: u32, code: u32, lane: u32, endpoints: u64, mode: @import("port_operation.zig").Mode },
+    operation: []const OperationChoice,
     endpoint: EndpointDefinition,
-
-    pub fn resource(self: PortCapability) u32 {
-        return switch (self) {
-            .factory => |kind| kind,
-            .operation => |operation| operation.resource,
-            .endpoint => |endpoint| endpoint.resource,
-        };
-    }
 };
 
 pub const EndpointDefinition = struct {
@@ -99,36 +98,58 @@ pub const PortDefinition = struct {
 };
 const PortDefinitions = [abi.max_port_definitions]?PortDefinition;
 
-fn portCapability(binding: abi.PortBinding) PortCapability {
+fn endpointCapability(binding: abi.PortBinding) EndpointDefinition {
+    return .{
+        .resource = binding.resource,
+        .id = @intCast(binding.endpoint),
+        .transport = switch (binding.transport) {
+            .bytes => .bytes,
+            .messages => .messages,
+            _ => unreachable,
+        },
+        .direction = switch (binding.direction) {
+            .input => .input,
+            .output => .output,
+            _ => unreachable,
+        },
+        .owner = switch (binding.owner) {
+            .resource => .resource,
+            .exchange => .exchange,
+            _ => unreachable,
+        },
+    };
+}
+fn portCapability(allocator: std.mem.Allocator, binding: abi.PortBinding) ValidateError!PortCapability {
     return switch (binding.kind) {
         .factory => .{ .factory = binding.resource },
-        .operation => .{ .operation = .{ .resource = binding.resource, .code = binding.operation, .lane = binding.lane, .endpoints = binding.endpoints, .mode = switch (binding.operation_mode) {
-            .ordinary => .ordinary,
-            .finalizer => .finalizer,
-            _ => unreachable,
-        } } },
-        .endpoint => .{ .endpoint = .{
-            .resource = binding.resource,
-            .id = @intCast(binding.endpoint),
-            .transport = switch (binding.transport) {
-                .bytes => .bytes,
-                .messages => .messages,
-                _ => unreachable,
-            },
-            .direction = switch (binding.direction) {
-                .input => .input,
-                .output => .output,
-                _ => unreachable,
-            },
-            .owner = switch (binding.owner) {
-                .resource => .resource,
-                .exchange => .exchange,
-                _ => unreachable,
-            },
-        } },
-        .call => unreachable,
-        _ => unreachable,
+        .operation => choices: {
+            const records = try RecordArray(abi.OperationBinding).init(binding.operations_ptr orelse return error.InvalidPortDefinition, binding.operation_count, binding.operation_record_size);
+            const owned = try allocator.alloc(OperationChoice, binding.operation_count);
+            errdefer allocator.free(owned);
+            for (owned, 0..) |*choice, index| {
+                const record = try records.read(index);
+                choice.* = .{ .resource = record.resource, .code = record.operation, .lane = record.lane, .endpoints = record.endpoints, .mode = switch (record.mode) {
+                    .ordinary => .ordinary,
+                    .finalizer => .finalizer,
+                    _ => unreachable,
+                } };
+            }
+            break :choices .{ .operation = owned };
+        },
+        .endpoint => .{ .endpoint = endpointCapability(binding) },
+        else => unreachable,
     };
+}
+fn retireDefinition(allocator: std.mem.Allocator, releases: *heap.ReleaseDomain, definition: ValidatedDefinition) void {
+    releases.releaseHeader(env.documentationHeader(definition.doc));
+    definition.effect.retire(releases);
+    switch (definition.body) {
+        .call => {},
+        .port => |port| switch (port) {
+            .operation => |choices| allocator.free(choices),
+            .factory, .endpoint => {},
+        },
+    }
 }
 
 const DescriptorState = struct {
@@ -148,8 +169,7 @@ const DescriptorState = struct {
         const releases = heap.hostDomain(self.host);
         releases.releaseHeader(env.documentationHeader(self.doc));
         for (self.definitions) |definition| {
-            releases.releaseHeader(env.documentationHeader(definition.doc));
-            definition.effect.retire(releases);
+            retireDefinition(allocator, releases, definition);
         }
         allocator.free(self.definitions);
         allocator.free(self.requirements);
@@ -587,19 +607,20 @@ pub const ValidateCursor = struct {
                 const definition = definition_effect.build.definition;
                 const name = definition_effect.build.name;
                 const document = definition_effect.doc;
+                const body: @FieldType(ValidatedDefinition, "body") = if (definition.binding.kind == .call) .{ .call = .{
+                    .callback_index = definition.callback_index,
+                    .continuation_size = definition.continuation_size,
+                    .continuation_alignment = definition.continuation_alignment,
+                    .init_continuation = definition.init_continuation,
+                    .deinit_continuation = definition.deinit_continuation,
+                } } else .{ .port = portCapability(self.host.allocator(), definition.binding) catch |err| return self.reject(err, @intCast(definition_index)) };
                 const effect = definition_effect.builder.take();
                 definition_effect.builder.deinit();
                 module.definitions[module.definition_index] = .{
                     .name = name,
                     .doc = document,
                     .effect = effect,
-                    .body = if (definition.binding.kind == .call) .{ .call = .{
-                        .callback_index = definition.callback_index,
-                        .continuation_size = definition.continuation_size,
-                        .continuation_alignment = definition.continuation_alignment,
-                        .init_continuation = definition.init_continuation,
-                        .deinit_continuation = definition.deinit_continuation,
-                    } } else .{ .port = portCapability(definition.binding) },
+                    .body = body,
                 };
                 module.definition_index += 1;
                 self.state = .{ .definition = module };
@@ -776,8 +797,9 @@ pub const ValidateCursor = struct {
                 switch (module.definitions[module.binding_index].body) {
                     .call => {},
                     .port => |binding| switch (binding) {
-                        .operation => |operation| if (operation.endpoints & ~module.endpoint_masks[operation.resource] != 0)
-                            return error.InvalidPortDefinition,
+                        .operation => |choices| for (choices) |operation| {
+                            if (operation.endpoints & ~module.endpoint_masks[operation.resource] != 0) return error.InvalidPortDefinition;
+                        },
                         .factory, .endpoint => {},
                     },
                 }
@@ -863,7 +885,7 @@ pub const ValidateCursor = struct {
             .factory, .operation, .endpoint => {},
             _ => return error.InvalidPortDefinition,
         }
-        if (!hasCapability(module, .ports) or binding.resource >= module.descriptor.port_count or
+        if (!hasCapability(module, .ports) or (binding.kind != .operation and binding.resource >= module.descriptor.port_count) or
             definition.input_count != 0 or definition.output_count != 1 or
             definition.continuation_size != 0 or definition.continuation_alignment != 0 or
             definition.init_continuation != null or definition.deinit_continuation != null)
@@ -871,11 +893,22 @@ pub const ValidateCursor = struct {
         switch (binding.kind) {
             .factory => {},
             .operation => {
-                if (binding.lane >= module.ports[binding.resource].?.wire.lane_count) return error.InvalidPortDefinition;
-                switch (binding.operation_mode) {
-                    .ordinary => {},
-                    .finalizer => if (module.ports[binding.resource].?.execution != .cooperative) return error.InvalidPortDefinition,
-                    _ => return error.InvalidPortDefinition,
+                if (binding.operation_count == 0 or binding.operation_count > abi.max_port_definitions) return error.InvalidPortDefinition;
+                const records = try RecordArray(abi.OperationBinding).init(binding.operations_ptr orelse return error.InvalidPortDefinition, binding.operation_count, binding.operation_record_size);
+                var seen: u64 = 0;
+                for (0..binding.operation_count) |index| {
+                    const operation = try records.read(index);
+                    try validateRecordSize(operation.size, @sizeOf(abi.OperationBinding));
+                    if (operation.resource >= module.descriptor.port_count) return error.InvalidPortDefinition;
+                    const bit = @as(u64, 1) << @as(u6, @intCast(operation.resource));
+                    if (seen & bit != 0) return error.InvalidPortDefinition;
+                    seen |= bit;
+                    if (operation.lane >= module.ports[operation.resource].?.wire.lane_count) return error.InvalidPortDefinition;
+                    switch (operation.mode) {
+                        .ordinary => {},
+                        .finalizer => if (module.ports[operation.resource].?.execution != .cooperative) return error.InvalidPortDefinition,
+                        _ => return error.InvalidPortDefinition,
+                    }
                 }
             },
             .endpoint => {
@@ -897,7 +930,7 @@ pub const ValidateCursor = struct {
                 const bit = @as(u64, 1) << @as(u6, @intCast(binding.endpoint));
                 if (mask.* & bit != 0) return error.DuplicateDefinition;
                 mask.* |= bit;
-                const endpoint_value = portCapability(binding).endpoint;
+                const endpoint_value = endpointCapability(binding);
                 const slot = &module.endpoints[@as(usize, binding.resource) * 64 + binding.endpoint];
                 switch (endpoint_value.owner) {
                     .resource => slot.resource = endpoint_value,
@@ -979,8 +1012,7 @@ pub const ValidateCursor = struct {
         releases.releaseHeader(env.documentationHeader(module.doc));
         self.host.allocator().free(module.endpoints);
         for (module.definitions[0..module.definition_index]) |definition| {
-            releases.releaseHeader(env.documentationHeader(definition.doc));
-            definition.effect.retire(releases);
+            retireDefinition(self.host.allocator(), releases, definition);
         }
         self.host.allocator().free(module.definitions);
         self.host.allocator().free(module.requirements);
