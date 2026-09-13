@@ -644,9 +644,12 @@ const OperationAdapter = struct {
         const parent = self.cell;
         const owner = parent.adapter.owner;
         const provisional = try operation.childGroup();
+        const inherited = if (dependency == .inherited) try parent.inheritChildGroup() else null;
+        defer if (inherited) |group| group.release();
         const dependent: ?Cell.Parent = .{ .cell = parent, .group = try parent.childGroup(), .lifetime = switch (dependency) {
             .dependent => .resource,
             .independent => .initialization,
+            .inherited => .{ .inherited = inherited },
             _ => unreachable,
         } };
         const cell = Resource.create(owner, .{ parent.adapter.instance, kind, configuration, parent.scheduler }, ResourceAdapter.initializeAllocation) catch |err| return switch (err) {
@@ -896,7 +899,7 @@ fn childRequest(ctx: *ControllerContext, request: *const abi.MessageBuildRequest
     const identity = request.kind_identity orelse return error.InvalidValue;
     const dependency: abi.ChildDependency = @enumFromInt(request.count);
     switch (dependency) {
-        .independent, .dependent => {},
+        .independent, .dependent, .inherited => {},
         _ => return error.InvalidState,
     }
     var index: u32 = 0;
@@ -925,7 +928,7 @@ fn controllerParent(raw: *anyopaque, identity: *const anyopaque) callconv(.c) ?*
     defer unlock(&cell.mutex);
     const parent = switch (cell.dependency) {
         .attached => |attachment| attachment.parent,
-        .independent, .initializing, .retired => return null,
+        .independent, .initializing, .inherited, .retired => return null,
     };
     if (parent.adapter.instance != cell.adapter.instance or parent.adapter.definition.wire.identity != identity) return null;
     // Membership remains attached until child cleanup and controller join.
@@ -940,8 +943,9 @@ fn controllerInitializationParent(raw: *anyopaque, identity: *const anyopaque) c
     lock(&cell.mutex);
     defer unlock(&cell.mutex);
     const parent = switch (cell.dependency) {
-        .attached, .initializing => |attachment| attachment.parent,
-        .independent, .retired => return null,
+        .attached => |attachment| attachment.parent,
+        .initializing => |attachment| attachment.origin.parent,
+        .independent, .inherited, .retired => return null,
     };
     if (parent.adapter.instance != cell.adapter.instance or parent.adapter.definition.wire.identity != identity) return null;
     return parent.adapter.backend.ptr;

@@ -183,6 +183,7 @@ const CooperativeResource = ecl.Port(.{
             .borrowed = .{ .doc = "Read an independently copied initialization value.", .handler = borrowed, .lane = .operation, .endpoints = .{} },
             .message = .{ .doc = "Construct a heterogeneous message using bounded SDK builders.", .handler = message, .lane = .operation, .endpoints = .{} },
             .spawn = .{ .name = "cooperative-spawn", .doc = "Create an independent child through resumable construction.", .handler = spawn, .lane = .operation, .endpoints = .{} },
+            .inherited = .{ .name = "cooperative-inherited", .doc = "Inherit the lifetime group without retaining the immediate parent.", .handler = inherited, .lane = .operation, .endpoints = .{} },
             .dependent = .{ .name = "cooperative-dependent", .doc = "Create a dependent child through resumable construction.", .handler = dependent, .lane = .operation, .endpoints = .{} },
         };
         pub fn init() State {
@@ -259,12 +260,15 @@ const CooperativeResource = ecl.Port(.{
             return .completed;
         }
         fn spawn(state: *State, context: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
-            return createChild(state, context, false);
+            return createChild(state, context, .independent);
         }
         fn dependent(state: *State, context: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
-            return createChild(state, context, true);
+            return createChild(state, context, .dependent);
         }
-        fn createChild(state: *State, context: *ecl.Cooperative, comptime dependent_child: bool) ecl.ControllerError!ecl.CooperativeProgress {
+        fn inherited(state: *State, context: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
+            return createChild(state, context, .inherited);
+        }
+        fn createChild(state: *State, context: *ecl.Cooperative, comptime dependency: anytype) ecl.ControllerError!ecl.CooperativeProgress {
             const builder = context.builder();
             const instance = context.instance(Instance).?;
             if (state.creating == .start) instance.child_advances.store(0, .release);
@@ -280,7 +284,7 @@ const CooperativeResource = ecl.Port(.{
                     state.creating = .configuration;
                 },
                 .configuration => {
-                    try builder.child(CooperativeResource, if (dependent_child) .dependent else .independent);
+                    try builder.child(CooperativeResource, dependency);
                     state.creating = .child;
                 },
                 .child => {

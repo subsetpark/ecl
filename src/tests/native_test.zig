@@ -2979,3 +2979,41 @@ test "native: bounded constructors reject excessive and incomplete chunks and re
         \\instanceprobe.packed-cooperative [] port.open (|p| p instanceprobe.packed-park [] port.begin (|x| (instanceprobe.packed-started 0 =) (0 clock.sleep) while x port.cancel x port.close) call p port.close) call
     );
 }
+
+test "native: inherited child lifetimes survive intermediate closure and join their ancestor" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    for ([_]bool{ true, false }) |linked| {
+        var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+            .ecl_path = if (linked) null else native_fixture.directory,
+            .native_instances = &.{.{ .name = "instanceprobe", .bytes = "A", .registration = .{ .deferred = if (linked) @import("native-instance").Extension.descriptor() else null } }},
+        }), .{ .worker_pool = 4 }, .evaluate);
+        defer runtime.deinit();
+        try expectOk(&runtime,
+            \\instanceprobe.cooperative [] port.open 'ancestor set
+            \\ancestor instanceprobe.cooperative-dependent 0 port.call 'middle set
+            \\middle instanceprobe.cooperative-inherited 0 port.call 'child set
+            \\child instanceprobe.cooperative-inherited 0 port.call 'grandchild set
+            \\middle port.close
+            \\child instanceprobe.borrowed [] port.call 67 = {'kind 'user 'msg "copied immediate initialization state"} assert
+            \\grandchild instanceprobe.borrowed [] port.call 68 = {'kind 'user 'msg "transitive inherited initialization"} assert
+            \\child port.close
+            \\grandchild instanceprobe.borrowed [] port.call 68 = {'kind 'user 'msg "intermediate closure preserves descendants"} assert
+            \\grandchild wrap [] (instanceprobe.park [] port.call pop) @give 'descendant-task set
+            \\(instanceprobe.started 1 = not) (0 clock.sleep) while
+            \\ancestor port.close
+            \\descendant-task task.await 'err dict.has? {'kind 'user 'msg "transferred inherited dependency"} assert
+            \\grandchild wrap (instanceprobe.borrowed [] port.call) @attempt 'err dict.has? {'kind 'user 'msg "ancestor joins inherited descendants"} assert grandchild port.close
+            \\instanceprobe.cooperative [] port.open 'independent set
+            \\independent instanceprobe.cooperative-inherited 0 port.call 'detached set
+            \\independent port.close
+            \\detached instanceprobe.borrowed [] port.call pop detached port.close
+            \\instanceprobe.cooperative [] port.open 'last-parent set
+            \\last-parent instanceprobe.cooperative-dependent 0 port.call 'last-middle set
+            \\last-middle wrap (instanceprobe.cooperative-inherited 1 port.call) @attempt 'err at 'kind at 'io match? {'kind 'user 'msg "failed inherited initialization"} assert
+            \\last-middle wrap (instanceprobe.cooperative-inherited 2 port.call pop) @spawn 'initializing-child set
+            \\(instanceprobe.started 2 = not) (0 clock.sleep) while
+            \\last-parent port.close initializing-child task.await 'err dict.has? {'kind 'user 'msg "ancestor closure joins unpublished inherited child"} assert last-middle port.close
+        );
+    }
+}

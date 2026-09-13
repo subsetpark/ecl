@@ -1968,6 +1968,13 @@ borrows require a dependent child and remain valid through its retirement.
 Neither scope transfer nor an independent child's publication can upgrade the
 temporary borrow into a lifetime dependency.
 
+Inherited native children retain an ancestor group independently from their
+temporary initialization-parent membership. Successful initialization consumes
+only the temporary membership; failed initialization retains both through joined
+retirement. The inherited group grants lifetime and cancellation authority without
+exposing ancestor state, so intermediate resource closure cannot invalidate or
+cancel descendants attached to the ancestor. Group pins and membership detachment
+belong to the common resource lifecycle.
 Cooperative child construction reserves a readiness registration before child
 publication. The suspended invocation owns both that registration and its
 provisional child through initialization, replacement, or failed construction.

@@ -32,7 +32,7 @@ Session's runtime I/O state.
 The public `net` and `proc` modules are ECL compositions over these registered
 capabilities and `port.*`. Their operation and endpoint selectors expose only
 their corresponding resources and streams. First-party adapters use typed backend calls;
-the extension adapter translates ABI v20 calls into the same runtime interfaces
+the extension adapter translates ABI v21 calls into the same runtime interfaces
 for controller execution, transport, cancellation, ownership, and cleanup.
 
 Embedded names have precedence over filesystem modules. A file on `ECL_PATH`
@@ -128,7 +128,7 @@ loader. The complete word table validates before publication, and publication
 is atomic.
 
 The current pre-release native ABI is version 19, with entry symbol
-`ecl_module_abi_v20`. Resource authors choose `ecl.Port(.{ .controller = Spec })`
+`ecl_module_abi_v21`. Resource authors choose `ecl.Port(.{ .controller = Spec })`
 or `ecl.Port(.{ .cooperative = Spec })`. Cooperative callbacks receive bounded
 work accounting, read-only Session-relative `monotonicMilliseconds`, and
 cancellable timer parking. Clock observation follows the host clock policy and
@@ -298,6 +298,12 @@ A sender's `send` and the builder's `result` consume the completed message on
 success. Failure retains it for cleanup or an explicit library decision.
 Construction errors invalidate the partial message, and `clear` explicitly
 starts another. Controller return discards unfinished work.
+`child(Port, .inherited)` copies the parent's existing lifetime dependency, if
+any, without making the immediate parent a lifetime owner. Initialization still
+borrows that immediate parent until it settles. Later callbacks cannot borrow
+ancestor state through `parent`; closing an intermediate resource leaves inherited
+descendants admitted, while closing the lifetime ancestor joins them. A parent
+with no dependency creates an independent child in this mode.
 `child(Port, dependency)` replaces the builder's top configuration with a newly
 initialized resource of a kind registered by the same module instance. Earlier
 builder values remain available for aggregate construction. The host retains

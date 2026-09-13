@@ -2248,3 +2248,12 @@ test "oom: standard-library and host: native bounded value construction" {
         "",
     ).run);
 }
+
+test "oom: standard-library and host: native inherited child lifetime" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortProbe(
+        "instanceprobe.cooperative [] port.open dup instanceprobe.cooperative-dependent 0 port.call " ++
+            "dup instanceprobe.cooperative-inherited 0 port.call swap port.close swap port.close port.close",
+        "",
+    ).run);
+}

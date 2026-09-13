@@ -34,8 +34,10 @@ pub fn Resource(comptime Adapter: type) type {
             .retireAfterUnlock = retireDependency,
         });
         const Transfer = transfers.ScopeTransfer(Cell, transferOwnership, transferLive);
-        pub const Parent = struct { cell: *Cell, group: *scheduler.ExternalGroup, lifetime: enum { initialization, resource } = .resource };
-        const Attachment = struct { parent: *Cell, membership: external.ScopeMembership };
+        pub const Parent = struct { cell: *Cell, group: *scheduler.ExternalGroup, lifetime: union(enum) { initialization, resource, inherited: ?*scheduler.ExternalGroup } = .resource };
+        const Attachment = struct { parent: *Cell, group: *scheduler.ExternalGroup, membership: external.ScopeMembership };
+        const Inherited = struct { group: *scheduler.ExternalGroup, membership: external.ScopeMembership };
+        const Initializing = struct { origin: Attachment, inherited: ?Inherited = null };
         pub const Admission = @import("port_exchange.zig").Admission;
         adapter: Adapter,
         allocator: std.mem.Allocator,
@@ -54,7 +56,8 @@ pub fn Resource(comptime Adapter: type) type {
         publication: ?*resource_api.PublicationAuthority = null,
         dependency: union(enum) {
             independent,
-            initializing: Attachment,
+            initializing: Initializing,
+            inherited: Inherited,
             attached: Attachment,
             retired,
         } = .independent,
@@ -317,7 +320,10 @@ pub fn Resource(comptime Adapter: type) type {
             lock(&self.mutex);
             defer unlock(&self.mutex);
             const dependent = switch (self.dependency) {
-                .attached, .initializing => |attachment| attachment.membership.authorizesCancellation(scope),
+                .attached => |attachment| attachment.membership.authorizesCancellation(scope),
+                .inherited => |attachment| attachment.membership.authorizesCancellation(scope),
+                .initializing => |attachment| attachment.origin.membership.authorizesCancellation(scope) or
+                    (if (attachment.inherited) |inherited| inherited.membership.authorizesCancellation(scope) else false),
                 .independent, .retired => false,
             };
             if (self.ownership.authorizesCancellation(scope) or dependent) self.closeLocked();
@@ -424,8 +430,9 @@ pub fn Resource(comptime Adapter: type) type {
             // outside this lock; parent retirement can wake immediately.
             var temporary: ?external.ScopeMembership = null;
             if (!self.closed.load(.acquire) and self.dependency == .initializing) {
-                temporary = self.dependency.initializing.membership;
-                self.dependency = .independent;
+                const initializing = self.dependency.initializing;
+                temporary = initializing.origin.membership;
+                self.dependency = if (initializing.inherited) |inherited| .{ .inherited = inherited } else .independent;
             }
             unlock(&self.mutex);
             if (temporary) |*membership| membership.detach();
@@ -449,13 +456,40 @@ pub fn Resource(comptime Adapter: type) type {
         }
         fn retireDependency(self: *Cell) void {
             lock(&self.mutex);
-            var token: ?external.ScopeMembership = switch (self.dependency) {
-                .attached, .initializing => |attachment| attachment.membership,
-                .independent, .retired => null,
-            };
+            const previous = self.dependency;
             self.dependency = .retired;
             unlock(&self.mutex);
-            if (token) |*membership| membership.detach();
+            var inherited: ?Inherited = null;
+            var origin: ?external.ScopeMembership = null;
+            switch (previous) {
+                .attached => |attachment| origin = attachment.membership,
+                .initializing => |attachment| {
+                    origin = attachment.origin.membership;
+                    inherited = attachment.inherited;
+                },
+                .inherited => |attachment| inherited = attachment,
+                .independent, .retired => {},
+            }
+            if (inherited) |*attachment| {
+                attachment.membership.detach();
+                attachment.group.release();
+            }
+            if (origin) |*membership| membership.detach();
+        }
+        /// Returns an owned group pin; the caller releases it on either outcome.
+        /// An inherited lifetime does not grant access to the ancestor's state.
+        pub fn inheritChildGroup(self: *Cell) error{Closed}!?*scheduler.ExternalGroup {
+            lock(&self.mutex);
+            defer unlock(&self.mutex);
+            if (self.closed.load(.acquire)) return error.Closed;
+            const group = switch (self.dependency) {
+                .attached => |attachment| attachment.group,
+                .inherited => |attachment| attachment.group,
+                .initializing => |attachment| if (attachment.inherited) |inherited| inherited.group else return null,
+                .independent, .retired => return null,
+            };
+            group.retain();
+            return group;
         }
         pub fn childrenClosed(self: *Cell) void {
             self.controllers.wake();
@@ -495,8 +529,8 @@ pub fn Resource(comptime Adapter: type) type {
                 pub fn publish(item: *@This(), tokens: [16]?external.ScopeMembership) void {
                     if (item.parent) |parent| {
                         item.cell.dependency = switch (parent.lifetime) {
-                            .initialization => .{ .initializing = .{ .parent = parent.cell, .membership = tokens[0].? } },
-                            .resource => .{ .attached = .{ .parent = parent.cell, .membership = tokens[0].? } },
+                            .initialization, .inherited => .{ .initializing = .{ .origin = .{ .parent = parent.cell, .group = parent.group, .membership = tokens[0].? } } },
+                            .resource => .{ .attached = .{ .parent = parent.cell, .group = parent.group, .membership = tokens[0].? } },
                         };
                     } else item.cell.ownership = .{ .owned = tokens[0].? };
                 }
@@ -510,6 +544,29 @@ pub fn Resource(comptime Adapter: type) type {
                 incoming = .{null} ** 16;
                 incoming[0] = external.scopeMember(Cell, self);
                 if (!try parent.group.publish(incoming, &publication)) return error.ScopeClosing;
+                if (parent.lifetime == .inherited) if (parent.lifetime.inherited) |group| {
+                    const Inheritance = struct {
+                        cell: *Cell,
+                        group: *scheduler.ExternalGroup,
+                        pub fn lock(item: *@This()) void {
+                            std.Io.Threaded.mutexLock(&item.cell.mutex);
+                        }
+                        pub fn unlock(item: *@This()) void {
+                            std.Io.Threaded.mutexUnlock(&item.cell.mutex);
+                        }
+                        pub fn validate(item: *@This()) bool {
+                            return !item.cell.closed.load(.acquire) and item.cell.dependency == .initializing and item.cell.dependency.initializing.inherited == null;
+                        }
+                        pub fn publish(item: *@This(), tokens: [16]?external.ScopeMembership) void {
+                            item.group.retain();
+                            item.cell.dependency.initializing.inherited = .{ .group = item.group, .membership = tokens[0].? };
+                        }
+                    };
+                    var inheritance: Inheritance = .{ .cell = self, .group = group };
+                    incoming = .{null} ** 16;
+                    incoming[0] = external.scopeMember(Cell, self);
+                    if (!try group.publish(incoming, &inheritance)) return error.ScopeClosing;
+                };
             }
         }
         fn runLane(self: *Cell, index: usize) void {

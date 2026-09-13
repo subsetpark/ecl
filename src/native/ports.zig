@@ -7,7 +7,7 @@ pub const Cancellation = declarations.Cancellation;
 
 const ControllerState = struct { table: *const abi.ControllerTable, context: *anyopaque, input_view: abi.ValueView = .{ .kind = .list } };
 pub const ControllerError = declarations.ControllerError;
-const ChildDependency = enum { independent, dependent };
+const ChildDependency = enum { independent, dependent, inherited };
 
 fn childRequest(comptime P: type, dependency: ChildDependency) abi.MessageBuildRequest {
     if (!@hasDecl(P, "ecl_port_marker")) @compileError("ecl-native: child requires a declared Port type");
@@ -17,6 +17,7 @@ fn childRequest(comptime P: type, dependency: ChildDependency) abi.MessageBuildR
         .count = @intFromEnum(switch (dependency) {
             .independent => abi.ChildDependency.independent,
             .dependent => abi.ChildDependency.dependent,
+            .inherited => abi.ChildDependency.inherited,
         }),
     };
 }
