@@ -137,10 +137,6 @@ pub const ProcessAccess = opaque {};
 /// operation accounting remain private to `filesystem_port.zig`.
 pub const FilesystemAccess = opaque {};
 
-/// Opaque access to Session-owned listeners and connections. Socket ownership,
-/// limits, and accounting remain private to `net_port.zig`.
-pub const NetAccess = opaque {};
-
 pub const Wake = enum {
     ready,
     io,

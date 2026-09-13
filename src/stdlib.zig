@@ -105,7 +105,7 @@ const modules = [_]Module{
         .name = "<stdlib:net>",
         .text = @embedFile("stdlib/net.ecl"),
     } } },
-    .{ .name = "net.core", .entry = .{ .bindings = @import("net_adapter.zig").registration } },
+    .{ .name = "net.core", .entry = .{ .native = @import("bundled-net").Extension.descriptor() } },
     .{ .name = "path", .entry = .{ .source = .{
         .name = "<stdlib:path>",
         .text = @embedFile("stdlib/path.ecl"),

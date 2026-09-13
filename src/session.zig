@@ -25,7 +25,7 @@ const session_options = @import("session_options");
 const stdlib = @import("stdlib.zig");
 const process_port = @import("process_port.zig");
 const filesystem_port = @import("filesystem_port.zig");
-const net_port = @import("net_port.zig");
+const bundled_net = @import("bundled-net");
 const http_service = @import("http_service.zig");
 pub const Value = value.Value;
 /// Session construction distinguishes invalid runtime configuration from
@@ -108,7 +108,7 @@ pub const RuntimeInputs = struct {
     initial_cwd: []const u8,
     process_limits: process_port.Limits = .{},
     filesystem: filesystem_port.Config = .{},
-    net_limits: net_port.Limits = .{},
+    net_limits: bundled_net.Limits = .{},
     http_limits: http_service.Limits = .{},
     /// Real clocks by default; deterministic overrides are internal test inputs.
     clock: ClockPolicy = .{},
@@ -229,7 +229,6 @@ const SessionCore = struct {
     native_owner: *native_module.Owner,
     process_owner: *process_port.ProcessOwner,
     filesystem_owner: *filesystem_port.FilesystemOwner,
-    net_owner: *net_port.NetOwner,
     http_owner: *http_service.Owner,
     stack: std.ArrayList(Value) = .empty,
     archive_owner: spans.SpanArchiveOwner,
@@ -341,7 +340,21 @@ pub const Session = enum(usize) {
         try prims.install(&building);
         var registry = try modules.Registry.init(host_owner.cleanup());
         errdefer registry.deinit();
-        const native_owner = native_module.Owner.initConfigured(host_owner.cleanup(), host.native_port_limits, host.native_instances) catch |err| return switch (err) {
+        host.net_limits.validate() catch return error.InvalidHostConfig;
+        const net_configuration = host.net_limits.encode();
+        const native_configurations = try allocator.alloc(native_module.Configuration, host.native_instances.len + 1);
+        defer allocator.free(native_configurations);
+        @memcpy(native_configurations[0..host.native_instances.len], host.native_instances);
+        native_configurations[host.native_instances.len] = .{
+            .name = "net.core",
+            .bytes = &net_configuration,
+            .memory_limit = std.math.maxInt(usize),
+            .port_limits = .{
+                .max_live_ports = host.net_limits.max_live_listeners + host.net_limits.max_live_connections,
+                .ring_capacity = @max(host.net_limits.receive_capacity, host.net_limits.send_capacity),
+            },
+        };
+        const native_owner = native_module.Owner.initConfigured(host_owner.cleanup(), host.native_port_limits, native_configurations) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.InvalidLimits, error.InvalidConfiguration => error.InvalidHostConfig,
         };
@@ -434,19 +447,6 @@ pub const Session = enum(usize) {
             filesystem_owner.deinit();
             allocator.destroy(filesystem_owner);
         }
-        const net_owner = owner: {
-            const owned = try allocator.create(net_port.NetOwner);
-            errdefer allocator.destroy(owned);
-            owned.* = net_port.NetOwner.init(host_owner.cleanup(), host.io, host.net_limits) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.InvalidConfig => return error.InvalidHostConfig,
-            };
-            break :owner owned;
-        };
-        errdefer {
-            net_owner.deinit();
-            allocator.destroy(net_owner);
-        }
         var argv = heap.OwnedValue.init(
             release_domain,
             try argumentsValue(allocator, release_domain, arguments),
@@ -469,7 +469,6 @@ pub const Session = enum(usize) {
             .native_owner = native_owner,
             .process_owner = process_owner,
             .filesystem_owner = filesystem_owner,
-            .net_owner = net_owner,
             .http_owner = http_owner,
             .archive_owner = archive_owner,
             .archive = archive,
@@ -530,8 +529,6 @@ pub const Session = enum(usize) {
         // them while the issuing Owner is still alive, then let that host-only
         // authority tear down descriptors/images and drain their ECL values.
         host.drain();
-        core.net_owner.deinit();
-        core.allocator().destroy(core.net_owner);
         core.process_owner.deinit();
         core.allocator().destroy(core.process_owner);
         core.environ.deinit();
@@ -606,7 +603,6 @@ pub const Session = enum(usize) {
                     .host_io = core.host_io,
                     .process_access = core.process_owner.access(),
                     .filesystem_access = core.filesystem_owner.access(),
-                    .net_access = core.net_owner.access(),
                     .http_access = core.http_owner.access(),
                     .wall_clock = core.wall_clock,
                     .environ = core.environ.view(),

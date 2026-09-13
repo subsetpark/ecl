@@ -991,22 +991,9 @@ fn stdlibSessionAllocationProbe(
                 "[] ({'address \"127.0.0.1\" 'port 1} net.listen) @attempt pop " ++
                 "[] ({'address \"127.0.0.1\" 'port 0} net.listen net.local-address) @spawn task.await pop",
         ),
-        // A live exchange has scheduling-dependent readiness cardinality (the
-        // acceptor thread may fill the slot before or after the driver's first
-        // poll), so like the process surface it cannot be an oracle for
-        // allocation ordinals; the connection cell's own lifecycle is swept
-        // by a unit test in net_port.zig. Here every ordinal is deterministic
-        // under the cooperative scheduler: a child parks in accept with no
-        // peer, the parent closes the listener, and the child fails closed.
-        // These probes are ECL source only and `net` has no outbound connect
-        // word, so no program here can hold a connection, which is why the
-        // connection words' drivers are not reachable from any allocation
-        // probe. The drain wait `net.close` parks on is swept instead by
-        // `connectionLifecycle` in net_port.zig, which can supply a real peer
-        // and still keep its ordinals deterministic. The close driver itself
-        // takes field ownership, so `startDriver` retires it on allocation
-        // failure through machinery the core probes already sweep; `accept`,
-        // `read`, and `write` still construct theirs by hand.
+        // Listener closure cancels an accept with no peer. Accepted socket
+        // construction and stream transport have separate controlled-peer
+        // probes below using concurrent allocation-failure replay.
         .net_connection => try runOk(
             &runtime,
             "oom-net-connection.ecl",
@@ -2194,4 +2181,11 @@ test "oom: standard-library and host: native capacity rejection" {
         }
     };
     try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, Probe.run);
+}
+
+test "oom: standard-library and host: accepted connection SDK lifecycle" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NetAcceptResultProbe(
+        "port.call dup net.local-address pop dup net.peer-address pop dup [120] net.write dup port.shutdown port.close",
+    ).run);
 }

@@ -5,6 +5,32 @@ characterizations through public runtime surfaces. They are not portable
 constants. Regenerate a baseline on the target under discussion rather than
 copying timings from this file.
 
+## Bundled network SDK migration — 2026-09-12
+
+Zig 0.16.0, ReleaseSafe, native x86_64 Linux (kernel 7.1.9-1-MANJARO).
+The baseline is `8aae611`; the SDK row is the network cutover together with
+its preceding common native-lifecycle changes. Each row has one warmup and five
+fresh CLI processes, with other build and test jobs stopped. The SDK binary was
+built with `-Dapps=false`, exercising bundled availability without applications.
+
+The public workload accepts 32 controlled loopback peers, retains all connections,
+closes their listener, then reads one byte and joins each connection's cleanup.
+It includes interpreter startup and shutdown. Thread and peak interpreter RSS
+samples come from `/proc` at 1 ms intervals; the host fixture is excluded. These
+measurements characterize this short lifecycle workload, not bulk TCP throughput.
+
+| Backend | Elapsed seconds, five runs | Peak threads, five runs | Peak RSS KiB, five runs |
+|---|---|---|---|
+| Interpreter network service | 0.365955, 0.274239, 0.284627, 0.325775, 0.357771 | 148, 148, 148, 148, 148 | 51116, 51124, 51120, 51136, 51312 |
+| Bundled SDK descriptor | 0.107063, 0.112998, 0.107756, 0.118275, 0.106031 | 147, 147, 147, 147, 147 | 57600, 57532, 57532, 57532, 57532 |
+
+Peak memory increased by about 6.3 MiB in this workload. The public network suite
+separately verifies immediate rebinding after joined close, independent accepted
+connections, reset handling, cancellation, capacity waiting, and backpressure.
+`test/service_benchmark.py --workload network-connections` reproduces the harness;
+its positional arguments are the ReleaseSafe binary and output JSON, followed by
+`--commit <source-revision>`.
+
 ## Further compile-time trials — 2026-09-11
 
 These incremental trials start at `5922754`, using the same Zig 0.16.0,

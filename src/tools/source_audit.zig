@@ -24,6 +24,7 @@ const source_groups = [_]SourceGroup{
     // Distribution extensions compile against only the public SDK and native
     // dependencies; they remain production inputs to every applicable audit.
     .{ .production = true, .files = &.{"../extensions/git/git.zig"}, .sources = &.{source_audit_options.git_extension_source} },
+    .{ .production = true, .files = &.{"../extensions/net/net.zig"}, .sources = &.{source_audit_options.net_extension_source} },
     // Exact, non-rehashing map construction and resumable interning keep
     // user-sized storage work outside scheduler-native stacks.
     embeddedGroup(true, &.{
@@ -101,9 +102,9 @@ const source_groups = [_]SourceGroup{
     // vocabulary in external.zig and are opened only by their Session-owned
     // owner.
     embeddedGroup(true, &.{
-        "scheduler.zig",       "scheduler_core.zig", "external.zig",      "process_port.zig",    "console.zig",       "task_prims.zig",     "filesystem_port.zig", "directory_resource.zig", "directory_stage.zig", "directory_order.zig",   "archive_document.zig",
-        "net_port.zig",        "byte_ring.zig",      "port_transfer.zig", "port_controller.zig", "port_message.zig",  "port_failure.zig",   "port_builder.zig",    "port_bytes.zig",         "port_messages.zig",   "port_declarations.zig", "port_resource.zig",
-        "module_bindings.zig", "port_endpoint.zig",  "port_result.zig",   "port_error_data.zig", "port_exchange.zig", "port_operation.zig", "port_service.zig",    "port_factory.zig",       "process_adapter.zig", "net_adapter.zig",       "http_service.zig",
+        "scheduler.zig",     "scheduler_core.zig", "external.zig",        "process_port.zig",  "console.zig",        "task_prims.zig",   "filesystem_port.zig", "directory_resource.zig", "directory_stage.zig",   "directory_order.zig", "archive_document.zig",
+        "byte_ring.zig",     "port_transfer.zig",  "port_controller.zig", "port_message.zig",  "port_failure.zig",   "port_builder.zig", "port_bytes.zig",      "port_messages.zig",      "port_declarations.zig", "port_resource.zig",   "module_bindings.zig",
+        "port_endpoint.zig", "port_result.zig",    "port_error_data.zig", "port_exchange.zig", "port_operation.zig", "port_service.zig", "port_factory.zig",    "process_adapter.zig",    "http_service.zig",
     }),
     // The installed author SDK, its sized ABI records, validation, loader,
     // and transactional-call boundary form one separately rooted component.
@@ -345,9 +346,9 @@ fn auditExtensionImports() bool {
             const close = tokenizer.next();
             const spelling = source[argument.loc.start..argument.loc.end];
             if (open.tag != .l_paren or argument.tag != .string_literal or close.tag != .r_paren or
-                (!std.mem.eql(u8, spelling, "\"std\"") and !std.mem.eql(u8, spelling, "\"ecl-native\"")))
+                (!std.mem.eql(u8, spelling, "\"std\"") and !std.mem.eql(u8, spelling, "\"builtin\"") and !std.mem.eql(u8, spelling, "\"ecl-native\"")))
             {
-                std.log.err("extension boundary: {s} may import only std and ecl-native", .{file});
+                std.log.err("extension boundary: {s} may import only std, compiler target metadata, and ecl-native", .{file});
                 failed = true;
             }
         }

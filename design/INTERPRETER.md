@@ -62,7 +62,7 @@ The main components are these:
 | Scheduler | Green units, structured task scopes, task and external waits, cancellation, timers, external membership, and retirement service | `scheduler_core.zig`, `scheduler.zig`, `external.zig`, `task_prims.zig` |
 | Port controllers | Typed job submission, FIFO admission and cancellation, independent execution, joined retirement, and shared scope lifetime | `port_controller.zig`, `port_transfer.zig` |
 | Process ports | POSIX process-group ownership, bounded pipe queues, and terminal publication | `process_port.zig`, `stdlib/proc.zig` |
-| Network listeners and connections | Normalized IP literals, scope-owned listening sockets, demand-gated accept, bounded connection queues serviced by controller threads, and idempotent close | `net_port.zig`, `stdlib/net.zig` |
+| Network listeners and connections | Normalized IP literals, scope-owned listening sockets, demand-gated accept, bounded connection queues serviced by controller threads, and idempotent close | `extensions/net/net.zig`, `stdlib/net.ecl` |
 | Boundary layers | Embedded modules, native extensions, rendering, terminal safety, the REPL, and the CLI | `prelude.zig`, `stdlib.zig`, `native_*.zig`, `print.zig`, `console.zig`, `line_editor.zig`, `main.zig` |
 
 ### Position in the design space
@@ -1514,7 +1514,8 @@ all resource transports while the backend retains admission to report its termin
 state. Output buffers and terminal EOF retain their existing observation order.
 Cooperative initialization owns its construction continuation until completion
 or joined cancellation, including every partial validation and diagnostic value.
-Built-in controllers do not pass through the extension ABI.
+The remaining interpreter-owned process controller uses the common lifecycle
+without passing through the extension ABI.
 
 Process resource metadata pins its issuing instance through final reclamation.
 Connection metadata carries the same issuer lifetime. Its outgoing transport
@@ -1573,8 +1574,13 @@ site. Malformed response values stay ordinary data; malformed wire output is
 unreachable.
 
 `net` and `proc` are ECL modules over registered factory, operation, and endpoint
-capabilities. Their adapters own host authority and typed socket or process
-state. Public words create resources and exchanges through the common vocabulary.
+capabilities. The bundled network descriptor uses the public native ABI and owns
+its immutable limits, socket state, and admission counts in a Session-local SDK
+instance. Listener and connection kinds have separate lifetimes: accepted
+connections retain their instance independently of the listener. Declared byte
+activities drain accepted output and join before socket disposal. No Session
+network owner or interpreter-facing socket adapter exists. The process adapter
+still owns typed process state through the common vocabulary.
 The process `run` composition owns a child scope, drains both outputs alongside
 input and completion tasks, applies bounded capture and an optional task deadline,
 and joins that scope before returning or raising an error.
@@ -1584,7 +1590,8 @@ and joins that scope before returning or raising an error.
 Distribution extensions participate in the exhaustive production-source audit.
 Each classified source is embedded from its classified path, so diagnostics and
 rule enforcement cannot diverge through independently maintained source lists.
-Their build graph supplies only the public SDK and native dependencies; the
+Their build graph supplies only the public SDK, compiler target metadata, and
+native dependencies; the
 import audit rejects interpreter imports. The Git snapshot extension runs as an
 ordinary registered port. Its controller invocation owns the complete native
 object graph and private scratch repository through joined teardown. One

@@ -20,7 +20,7 @@
 //! process.
 const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
-const net_port = @import("../net_port.zig");
+const bundled_net = @import("bundled-net");
 const session = @import("../session.zig");
 const support = @import("kernel_test_support.zig");
 const test_heap = @import("test_heap.zig");
@@ -29,7 +29,7 @@ const allocator = std.testing.allocator;
 const io = std.testing.io;
 const IpAddress = std.Io.net.IpAddress;
 const posix = std.posix;
-const Limits = net_port.Limits;
+const Limits = bundled_net.Limits;
 
 /// One Session plus the writers it borrows. Open it in place and never move
 /// it afterwards: the Session holds pointers into this struct.

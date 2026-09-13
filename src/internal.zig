@@ -41,7 +41,6 @@ pub const scheduler = @import("scheduler.zig");
 pub const external = @import("external.zig");
 pub const process_port = @import("process_port.zig");
 pub const filesystem_port = @import("filesystem_port.zig");
-pub const net_port = @import("net_port.zig");
 pub const port_message = @import("port_message.zig");
 pub const directory_order = @import("directory_order.zig");
 pub const task_prims = @import("task_prims.zig");
@@ -85,7 +84,6 @@ test {
     _ = external;
     _ = process_port;
     _ = filesystem_port;
-    _ = net_port;
     _ = directory_order;
     _ = task_prims;
     _ = test_prims;

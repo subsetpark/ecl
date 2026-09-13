@@ -642,6 +642,7 @@ pub fn build(b: *std.Build) void {
     });
     const audit_options = b.addOptions();
     audit_options.addOption([:0]const u8, "git_extension_source", @embedFile("extensions/git/git.zig"));
+    audit_options.addOption([:0]const u8, "net_extension_source", @embedFile("extensions/net/net.zig"));
     audit_options.addOption(
         []const u8,
         "formal_values",
@@ -1056,9 +1057,6 @@ pub fn build(b: *std.Build) void {
             // peer thread; one case waits out a 20 ms read deadline, none
             // sleeps, and there is no fixture process.
             "tests.http_server_test.",
-            // The listener and connection controller's own unit tests: loopback
-            // sockets through the cell API without a Session, sub-second.
-            "net_port.",
             "byte_ring.test.",
             // Kind conversions and the reserved `core.` qualifier. Every case
             // is a handful of scalar words through the public Session and the
@@ -1336,6 +1334,14 @@ fn configureRuntime(
     module.link_libc = true;
     module.addImport("native-abi", abi);
     module.addImport("ecl-native", sdk);
+    const net = module.owner.createModule(.{
+        .root_source_file = module.owner.path("extensions/net/net.zig"),
+        .target = module.resolved_target,
+        .optimize = module.optimize,
+        .sanitize_thread = module.sanitize_thread,
+    });
+    net.addImport("ecl-native", sdk);
+    module.addImport("bundled-net", net);
     module.addImport("port-declarations", sdk.import_table.get("port-declarations").?);
     module.addOptions("session_options", options);
 }

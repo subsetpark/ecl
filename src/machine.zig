@@ -1861,7 +1861,6 @@ pub const RuntimeContext = struct {
     host_io: std.Io,
     process_access: *external.ProcessAccess,
     filesystem_access: *external.FilesystemAccess,
-    net_access: *external.NetAccess,
     http_access: *@import("http_service.zig").Access,
     wall_clock: WallClock,
     environ: Environ,

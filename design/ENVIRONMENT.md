@@ -26,7 +26,7 @@ property. Each publishes
 ordinary module images and participates in registration, aliases, imports,
 reflection, and shadowing through the same language operations.
 
-`net.core.listener` and `proc.core.process` export the built-in factories used
+`net.core.listener` and `proc.core.process` export the bundled factories used
 by `port.open`. They are ordinary standard-library words; opening a resource uses the
 Session's runtime I/O state.
 The public `net` and `proc` modules are ECL compositions over these registered
@@ -393,6 +393,11 @@ locking, link creation, permission changes, timestamps, and Windows support are
 outside this contract.
 
 ## Network listeners
+
+The network backend is a statically registered SDK descriptor bundled even
+when maintained applications are disabled. Host `net_limits` configure its
+Session-local instance and independent resource budget; ECL open arguments
+cannot replace that configuration.
 
 Inbound TCP listening goes through the `net` module documented in
 `STDLIB.md`. A program requests a local address and port; port `0` requests
