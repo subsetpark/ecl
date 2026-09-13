@@ -171,12 +171,18 @@ A loaded native module remains loaded for the session. Repeated resolution
 uses its existing registration.
 
 Hosts may supply `RuntimeInputs.native_instances` entries containing a module
-name, immutable configuration bytes, a native-memory ceiling, and optional
+name, an optional linked descriptor, immutable configuration bytes, a native-memory ceiling, and optional
 resource limits. The Session copies the bytes. Duplicate names, invalid limits,
-zero memory ceilings, and configurations larger than 64 KiB are rejected.
+and zero memory ceilings are rejected.
 Unconfigured modules receive empty configuration and a 64 MiB native-memory
 ceiling. Explicit resource limits give that instance independent capacity;
 otherwise resources use `native_port_limits`.
+A host-provided descriptor uses the same validation, instance initialization, and
+publication as a dynamic extension, and resolves without `ECL_PATH`. Its descriptor
+and code must remain immutable and alive for the Session lifetime. Bundled modules
+take precedence over host descriptors with the same name; host descriptors take
+precedence over filesystem modules. Configuration size is limited by host memory;
+extension initialization must still consume bounded work slices.
 During instance initialization, `configureEndpoint(Port, endpoint, capacity)` may
 set a declared resource byte endpoint's capacity within that instance's host ring
 ceiling. Each override is immutable after initialization. Other endpoint capacities

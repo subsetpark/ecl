@@ -2108,3 +2108,23 @@ test "oom: standard-library and host: native operation overload registration" {
     try requireSelectedOomTest(@src());
     try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortProbe("instanceprobe.shared-value pop instanceprobe.private-value pop", "").run);
 }
+
+test "oom: standard-library and host: host static native registration" {
+    try requireSelectedOomTest(@src());
+    const Probe = struct {
+        fn run(failing: *std.testing.FailingAllocator, failure_offset: ?usize) !usize {
+            var locked = LockedAllocator{ .child = failing.allocator() };
+            var inputs = try runtime_fixture.Fixture.init();
+            defer inputs.deinit();
+            var runtime = try session.Session.init(locked.allocator(), &.{}, inputs.inputs(.{
+                .native_instances = &.{.{ .name = "instanceprobe", .bytes = "A", .descriptor = @import("native-instance").Extension.descriptor() }},
+            }), .cooperative, .evaluate);
+            defer runtime.deinit();
+            const first = failing.alloc_index;
+            if (failure_offset) |offset| failing.fail_index = first + offset;
+            try runOk(&runtime, "native-static.ecl", "instanceprobe.next pop");
+            return first;
+        }
+    };
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, Probe.run);
+}

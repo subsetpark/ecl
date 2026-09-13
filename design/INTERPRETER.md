@@ -1591,6 +1591,11 @@ registered-capability pins. State retirement uses the common bounded retirement
 domain, including for instances that never published a binding; it admits no new
 native allocations. The host joins that work before unloading the image.
 
+Host registration policy is copied and sorted during Session construction.
+Name resolution and instance publication use the same immutable index, with
+bounded binary lookup. A registered static descriptor enters the ordinary loader
+and owns the same instance lifecycle as a dynamic image.
+
 Host configuration is copied during Session construction and bound to a loaded
 instance by the host registration policy. An extension sees only its immutable
 configuration bytes and its own native storage authority; no extension-facing

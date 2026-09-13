@@ -1839,6 +1839,12 @@ pub const InheritedContext = struct {
         };
     }
 
+    fn libraries(self: *const InheritedContext) EmbeddedLibraries {
+        return switch (self.phase) {
+            .bootstrap => .bundled,
+            .runtime => |context| .{ .registered = context.native_loader },
+        };
+    }
     pub fn runtime(self: *const InheritedContext) *const RuntimeContext {
         return switch (self.phase) {
             .runtime => |*context| context,
@@ -3014,10 +3020,10 @@ pub const Unit = struct {
         try self.lifetime.adopt(self.allocator, owned);
     }
     /// Sized to the drivers that opt in, checked by `inlineDriverCapable`.
-    /// The idiom driver with its owned lexical cursor is 648 bytes on the
-    /// 64-bit targets. Round to the slot alignment, preserving its complete
-    /// ownership state without falling back to a per-dispatch allocation.
-    pub const driver_slot_len = 656;
+    /// The idiom driver is 672 bytes on 64-bit targets, including the native
+    /// registration authority retained by qualified-name resolution. Round to
+    /// the slot alignment while preserving the complete ownership state.
+    pub const driver_slot_len = 672;
     pub const driver_slot_align = 16;
 
     fn acquireInlineDriver(self: *Unit, comptime Driver: type) ?*Driver {
@@ -3773,7 +3779,7 @@ pub const Machine = struct {
                         .granted => |lease| {
                             cursor.deinit();
                             if (evaluator.unit.inherited.module_snapshot != null and
-                                stdlib.find(intern.get(intern.moduleId(self.request.module.name))) == null)
+                                evaluator.unit.inherited.libraries().find(self.request.module.name) == null)
                             {
                                 self.state.borrowMut().* = .{ .map_lookup = .{
                                     .loading = .init(lease),
@@ -3810,7 +3816,7 @@ pub const Machine = struct {
                         // The embedded manifest is consulted before the
                         // search path: a stdlib name resolves without filesystem lookup
                         // and no ECL_PATH, and no path module can shadow one.
-                        if (stdlib.find(intern.get(intern.moduleId(self.request.module.name)))) |entry| {
+                        if (evaluator.unit.inherited.libraries().find(self.request.module.name)) |entry| {
                             try self.beginEmbedded(evaluator, &loading, entry);
                             continue;
                         }
@@ -7933,8 +7939,22 @@ pub const ResolutionProgress = poll_api.Progress(ResolutionOutcome);
 /// One visibility boundary for named module observation. Private registrations
 /// are searched only in the lexical source; public lookup never searches other
 /// files' private registries, regardless of their load state.
+const EmbeddedLibraries = union(enum) {
+    bundled,
+    registered: *native_module.Loader,
+    fn find(self: EmbeddedLibraries, name: intern.ModuleName) ?stdlib.Entry {
+        if (stdlib.find(intern.get(intern.moduleId(name)))) |entry| return entry;
+        switch (self) {
+            .bundled => {},
+            .registered => |loader| if (loader.registeredDescriptor(name)) |descriptor| return .{ .native = descriptor },
+        }
+        return null;
+    }
+};
+
 pub const ModuleLookupCursor = struct {
     registry: *modules.Registry,
+    libraries: EmbeddedLibraries,
     project: ?*const map_state.Snapshot,
     context: modules.RegistrationProvenance,
     name: intern.ModuleName,
@@ -7946,19 +7966,19 @@ pub const ModuleLookupCursor = struct {
     },
     pub const owned_disposal: heap.OwnedDisposal = .deinit;
 
-    pub fn init(registry: *modules.Registry, project: ?*const map_state.Snapshot, context: modules.RegistrationProvenance, name: intern.ModuleName) ModuleLookupCursor {
-        var result: ModuleLookupCursor = .{ .registry = registry, .project = project, .context = context, .name = name, .state = .complete };
+    pub fn init(registry: *modules.Registry, project: ?*const map_state.Snapshot, libraries: EmbeddedLibraries, context: modules.RegistrationProvenance, name: intern.ModuleName) ModuleLookupCursor {
+        var result: ModuleLookupCursor = .{ .registry = registry, .libraries = libraries, .project = project, .context = context, .name = name, .state = .complete };
         if (context.sourceScope()) |local| result.state = .{ .private = local.registry().acquireCursor(name) } else result.beginPublic();
         return result;
     }
 
     pub fn atCurrent(evaluator: *Machine, name: intern.ModuleName) ModuleLookupCursor {
-        return .init(evaluator.unit.inherited.registry, evaluator.unit.inherited.module_snapshot, evaluator.unit.current.?.site.registration_provenance, name);
+        return .init(evaluator.unit.inherited.registry, evaluator.unit.inherited.module_snapshot, evaluator.unit.inherited.libraries(), evaluator.unit.current.?.site.registration_provenance, name);
     }
 
     fn beginPublic(self: *ModuleLookupCursor) void {
         if (self.project) |project| {
-            if (stdlib.find(intern.get(intern.moduleId(self.name))) == null and
+            if (self.libraries.find(self.name) == null and
                 !(if (self.context.sourceScope()) |source| source.exports(self.name) else false))
             {
                 self.state = .{ .catalog = project.lookupCursor(self.context.scopeId(), intern.get(intern.moduleId(self.name))) };
@@ -8062,6 +8082,7 @@ pub const ResolutionCursor = struct {
     };
     allocator: std.mem.Allocator,
     registry: *modules.Registry,
+    libraries: EmbeddedLibraries,
     module_snapshot: ?*const map_state.Snapshot,
     context: modules.RegistrationProvenance,
     module_access: *const modules.ExecutionAccess,
@@ -8130,6 +8151,7 @@ pub const ResolutionCursor = struct {
             .local_cache_scope = local_cache_scope,
             .allocator = evaluator.unit.allocator,
             .registry = evaluator.unit.inherited.registry,
+            .libraries = evaluator.unit.inherited.libraries(),
             .module_snapshot = evaluator.unit.inherited.module_snapshot,
             .context = context,
             .module_access = evaluator.unit.module_access,
@@ -8331,7 +8353,7 @@ pub const ResolutionCursor = struct {
                         self.phase = .complete;
                         break :result .{ .complete = .{ .unresolved = .qualified } };
                     };
-                    self.work = .{ .acquisition = ModuleLookupCursor.init(self.registry, self.module_snapshot, self.context, self.prefix.?) };
+                    self.work = .{ .acquisition = ModuleLookupCursor.init(self.registry, self.module_snapshot, self.libraries, self.context, self.prefix.?) };
                     self.phase = .qualified_acquire;
                     break :result .pending;
                 },

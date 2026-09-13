@@ -51,7 +51,6 @@ test "native: instance policies reject duplicate names and invalid limits" {
     const invalid = [_][]const native_module.Configuration{
         &.{.{ .name = "" }},
         &.{.{ .name = "instanceprobe", .memory_limit = 0 }},
-        &.{.{ .name = "instanceprobe", .bytes = "x" ** (64 * 1024 + 1) }},
         &.{.{ .name = "instanceprobe", .port_limits = .{ .max_live_ports = 0 } }},
         &.{ .{ .name = "instanceprobe" }, .{ .name = "instanceprobe" } },
     };
@@ -2630,4 +2629,50 @@ test "native: operation overload descriptors reject incomplete and conflicting c
         return;
     }
     return error.TestUnexpectedResult;
+}
+
+test "native: host static and dynamic registration share instance and resource behavior" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    for ([_]bool{ true, false }) |linked| {
+        var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+            .ecl_path = if (linked) null else native_fixture.directory,
+            .native_instances = &.{.{
+                .name = "instanceprobe",
+                .bytes = "A",
+                .descriptor = if (linked) @import("native-instance").Extension.descriptor() else null,
+                .port_limits = .{ .max_live_ports = 2, .ring_capacity = 8 },
+            }},
+        }), .cooperative, .language_tests);
+        defer runtime.deinit();
+        try expectOk(&runtime, "instanceprobe.next 65 = {'kind 'user 'msg \"host configuration\"} assert " ++
+            "instanceprobe.resource 999 port.open dup instanceprobe.shared-value [] port.call 66 = {'kind 'user 'msg \"registered selector\"} assert port.close " ++
+            "instanceprobe.cooperative [] port.open dup instanceprobe.seal 0 port.call 42 = {'kind 'user 'msg \"registered finalizer\"} assert port.close " ++
+            "instanceprobe.activity [] port.open (|p| p instanceprobe.activity-in port.endpoint dup [65] port.write port.finish " ++
+            "p instanceprobe.activity-out port.endpoint dup 8 port.read [65] match? {'kind 'user 'msg \"registered stream\"} assert 8 port.read empty? {'kind 'user 'msg \"registered EOF\"} assert p port.close) call");
+    }
+}
+
+test "native: host static registration rejects stale ABI and failed initialization" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    var raw = @import("native-instance").Extension.descriptor().*;
+    for ([_]bool{ true, false }) |stale| {
+        raw.abi_version = abi.abi_version + @as(u32, @intFromBool(stale));
+        var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+            .native_instances = &.{.{ .name = "instanceprobe", .bytes = if (stale) "A" else "fail", .descriptor = &raw }},
+        }), .cooperative, .language_tests);
+        defer runtime.deinit();
+        try expectOk(&runtime, "[] (instanceprobe.next) @attempt 'err at 'kind at 'io match? {'kind 'user 'msg \"static load rejected\"} assert");
+    }
+}
+
+test "native: large host configuration initializes in bounded slices" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+        .native_instances = &.{.{ .name = "instanceprobe", .bytes = "x" ** 65537, .descriptor = @import("native-instance").Extension.descriptor() }},
+    }), .cooperative, .language_tests);
+    defer runtime.deinit();
+    try expectOk(&runtime, "instanceprobe.next 7864440 = {'kind 'user 'msg \"complete host configuration\"} assert");
 }

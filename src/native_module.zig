@@ -16,12 +16,16 @@ const supported_platform = builtin.os.tag == .macos or
 /// neither ECL factory arguments nor extension callbacks can select a policy.
 pub const Configuration = struct {
     name: []const u8,
+    /// A linked descriptor and its code must remain immutable and alive for the
+    /// whole Session. It is validated lazily through the ordinary native loader.
+    descriptor: ?*const abi.Descriptor = null,
     bytes: []const u8 = "",
     memory_limit: usize = 64 * 1024 * 1024,
     port_limits: ?native_port.Limits = null,
 };
 const OwnedConfiguration = struct {
     name: intern.ModuleName,
+    descriptor: ?*const abi.Descriptor,
     bytes: []u8,
     memory_limit: usize,
     port_limits: ?native_port.Limits,
@@ -242,17 +246,14 @@ fn publish(loading: Loading) error{OutOfMemory}!Loading {
         initialized.image.close();
         owner.state().host.allocator().destroy(state_value);
     }
-    for (owner.state().configurations) |configuration| {
-        if (configuration.name == initialized.descriptor.name()) {
-            state_value.configuration = configuration.bytes;
-            state_value.memory_limit = configuration.memory_limit;
-            if (configuration.port_limits) |limits| {
-                state_value.private_ports = owner.state().ports.initInstance(limits) catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    error.InvalidLimits => unreachable,
-                };
-            }
-            break;
+    if (owner.state().configuration(initialized.descriptor.name())) |configuration| {
+        state_value.configuration = configuration.bytes;
+        state_value.memory_limit = configuration.memory_limit;
+        if (configuration.port_limits) |limits| {
+            state_value.private_ports = owner.state().ports.initInstance(limits) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidLimits => unreachable,
+            };
         }
     }
     errdefer if (state_value.private_ports) |ports| ports.deinit();
@@ -507,6 +508,17 @@ const OwnerState = struct {
     retired_last: ?*InstanceState = null,
     instances: ?*InstanceState = null,
     configurations: []OwnedConfiguration = &.{},
+    fn configuration(self: *const OwnerState, name: intern.ModuleName) ?OwnedConfiguration {
+        var start: usize = 0;
+        var end = self.configurations.len;
+        while (start < end) {
+            const middle = start + (end - start) / 2;
+            const item = self.configurations[middle];
+            if (item.name == name) return item;
+            if (@intFromEnum(item.name) < @intFromEnum(name)) start = middle + 1 else end = middle;
+        }
+        return null;
+    }
 };
 
 const OwnerPhase = enum(u8) { open, closing, settled };
@@ -541,15 +553,22 @@ pub const Owner = opaque {
             host.allocator().free(owned);
         }
         for (configurations, 0..) |configuration, index| {
-            if (configuration.bytes.len > 64 * 1024 or configuration.memory_limit == 0) return error.InvalidConfiguration;
+            if (configuration.memory_limit == 0) return error.InvalidConfiguration;
             if (configuration.port_limits) |port_limits| try port_limits.validate();
             const name = intern.internModuleName(configuration.name) catch |err| return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 error.InvalidName => error.InvalidConfiguration,
             };
-            for (owned[0..index]) |prior| if (prior.name == name) return error.InvalidConfiguration;
-            owned[index] = .{ .name = name, .bytes = try host.allocator().dupe(u8, configuration.bytes), .memory_limit = configuration.memory_limit, .port_limits = configuration.port_limits };
+            owned[index] = .{ .name = name, .descriptor = configuration.descriptor, .bytes = try host.allocator().dupe(u8, configuration.bytes), .memory_limit = configuration.memory_limit, .port_limits = configuration.port_limits };
             copied += 1;
+        }
+        std.mem.sort(OwnedConfiguration, owned, {}, struct {
+            fn less(_: void, left: OwnedConfiguration, right: OwnedConfiguration) bool {
+                return @intFromEnum(left.name) < @intFromEnum(right.name);
+            }
+        }.less);
+        for (owned, 0..) |configuration, index| {
+            if (index != 0 and owned[index - 1].name == configuration.name) return error.InvalidConfiguration;
         }
         const state_value = try host.allocator().create(OwnerState);
         errdefer host.allocator().destroy(state_value);
@@ -613,6 +632,11 @@ pub const Loader = opaque {
         return @ptrCast(self);
     }
 
+    /// Observe only a host-registered linked descriptor; no extension receives
+    /// this loader authority or a module-name configuration lookup.
+    pub fn registeredDescriptor(self: *Loader, name: intern.ModuleName) ?*const abi.Descriptor {
+        return (self.state().configuration(name) orelse return null).descriptor;
+    }
     pub fn startDynamic(
         self: *Loader,
         requested: intern.ModuleName,

@@ -585,7 +585,7 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseSafe,
     });
     configureRuntime(oom_mod, native_abi, native_sdk, test_options);
-    addTestInputs(oom_mod, &.{}, &host_fixture_inputs);
+    addTestInputs(oom_mod, &.{.{ .name = "native-instance", .module = native_instance }}, &host_fixture_inputs);
     const oom_tests = b.addTest(.{
         .root_module = oom_mod,
         // Compile one stable artifact for every OOM family. Runtime selection
