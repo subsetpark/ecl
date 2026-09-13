@@ -2131,12 +2131,12 @@ mutex-protected transition; the terminated leader remains waitable until the
 final group signal, preventing signal delivery to a reused process identity.
 The SDK instance outlives all retained resources and their joined reclamation.
 
-A shared exchange owner carries scope membership, cancellation settlement,
-provisional child ownership, terminal results, and readiness for registered
-controller adapters. The typed adapter supplies execution and transport, while
-the exchange owner makes cleanup wait for lane retirement and child closure.
-Adapter state contains domain selectors and backend failure data; the shared
-owner observes semantic terminal outcomes without knowing their source.
+Concrete native resource and exchange owners carry scope membership,
+cancellation settlement, provisional child ownership, terminal results, and
+readiness. Native backend state supplies ABI execution and transport; lifecycle
+owners make cleanup wait for lane retirement and child closure. These owners
+share controller lanes, scope transfer, and reclamation with direct resources
+without a second generic backend interface.
 
 Callback operations expose observation and cancellation handles. The runtime
 claims the active turn under the resource and operation locks, lends an

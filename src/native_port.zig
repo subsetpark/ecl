@@ -260,7 +260,7 @@ pub const Access = opaque {
     /// its independent retained reference before any controller starts.
     pub fn createConfigured(self: *Access, instance: *native.ModuleInstance, kind: u32, scope: *scheduler.TaskScope, config: *const port_message.Validated) CreateError!Value {
         const owner = self.state();
-        const cell = Resource.create(owner, .{ instance, kind, config, scope.scheduler }, ResourceAdapter.initializeAllocation) catch |err| return switch (err) {
+        const cell = Resource.create(owner, .{ instance, kind, config, scope.scheduler }, ResourceBackend.initializeAllocation) catch |err| return switch (err) {
             error.InvalidLimits => error.InsufficientLanes,
             else => |failure| failure,
         };
@@ -285,10 +285,10 @@ pub const Access = opaque {
     }
 };
 
-pub const Cell = @import("port_service.zig").Resource(ResourceAdapter);
+pub const Cell = @import("port_service.zig").Resource;
 const ResourceLoans = struct {
     slots: [16]?*Cell.Lease = .{null} ** 16,
-    fn acquire(self: *ResourceLoans, target: *Cell) error{ Closed, Overflow }!*ResourceAdapter {
+    fn acquire(self: *ResourceLoans, target: *Cell) error{ Closed, Overflow }!*ResourceBackend {
         for (self.slots) |loan| if (loan) |held| {
             if (held.adapter() == &target.adapter) return held.adapter();
         };
@@ -306,9 +306,7 @@ const ResourceLoans = struct {
         };
     }
 };
-const ResourceAdapter = struct {
-    pub const Exchange = @import("port_operation.zig").Exchange(OperationAdapter);
-    pub const Request = struct { code: u32, lane: u32, endpoints: u64, mode: @import("port_operation.zig").Mode };
+pub const ResourceBackend = struct {
     owner: *OwnerState,
     instance: *native.ModuleInstance,
     kind: u32,
@@ -319,32 +317,26 @@ const ResourceAdapter = struct {
     input_loans: ResourceLoans = .{},
     message_budget: *message_transport.Budget,
     resource_pipes: [64]?Protocol.Transport = .{null} ** 64,
-    pub fn allocator(self: *const ResourceAdapter) std.mem.Allocator {
+    pub fn allocator(self: *const ResourceBackend) std.mem.Allocator {
         return self.owner.host.allocator();
     }
-    pub fn executor(self: *const ResourceAdapter) *controllers.Executor {
+    pub fn executor(self: *const ResourceBackend) *controllers.Executor {
         return switch (self.owner.execution) {
             .controller => |owner| owner.access(),
             .cooperative => unreachable,
         };
     }
-    pub fn nextIdentity(self: *ResourceAdapter) u64 {
+    pub fn nextIdentity(self: *ResourceBackend) u64 {
         lock(&self.owner.mutex);
         defer unlock(&self.owner.mutex);
         const identity = self.owner.identity;
         self.owner.identity +%= 1;
         return identity;
     }
-    pub fn operationLane(_: *ResourceAdapter, selected: Request) u32 {
-        return selected.lane;
-    }
-    pub fn prepareOperation(_: *ResourceAdapter, cell: *Cell, selected: Request, request: *const port_message.Validated, lane: *Operation.Lane) error{OutOfMemory}!*Operation.Prepared {
-        return OperationAdapter.prepare(cell, selected.code, selected.lane, selected.endpoints, selected.mode, request, lane);
-    }
-    pub fn retire(_: *ResourceAdapter, cell: *Cell) void {
+    pub fn retire(_: *ResourceBackend, cell: *Cell) void {
         Resource.retire(cell);
     }
-    pub fn destroy(self: *ResourceAdapter, cell: *Cell) void {
+    pub fn destroy(self: *ResourceBackend, cell: *Cell) void {
         if (self.configuration) |config| heap.hostDomain(self.owner.host).releaseValue(config);
         for (self.resource_pipes) |pipe| if (pipe) |transport| transport.release();
         self.message_budget.release();
@@ -352,15 +344,15 @@ const ResourceAdapter = struct {
         cell.allocator.free(self.backend);
         Resource.destroy(cell);
     }
-    pub fn initState(self: *ResourceAdapter) void {
+    pub fn initState(self: *ResourceBackend) void {
         self.definition.wire.init_state.?(self.backend.ptr);
     }
-    pub fn initializeBackend(self: *ResourceAdapter, cell: *Cell) void {
+    pub fn initializeBackend(self: *ResourceBackend, cell: *Cell) void {
         var ctx: ControllerContext = .{ .cell = cell, .invocation = .initialize };
         defer ctx.deinit();
         self.definition.wire.initialize.?(self.backend.ptr, &controller_table, &ctx);
     }
-    pub fn runActivity(self: *ResourceAdapter, cell: *Cell, index: u32) void {
+    pub fn runActivity(self: *ResourceBackend, cell: *Cell, index: u32) void {
         const activity = self.definition.execution.controller.activities[index].?;
         var ctx: ControllerContext = .{ .cell = cell, .invocation = .{ .activity = .{ .index = index } } };
         defer ctx.deinit();
@@ -372,7 +364,7 @@ const ResourceAdapter = struct {
             if (ctx.invocation.activity.failure) |failure| pair.fail(semanticFailure(failure), endpoint.direction == .input) else if (endpoint.direction == .input) pair.fail(.init(.io, "native input consumer completed"), true) else pair.finish();
         }
     }
-    pub fn advanceInitialize(self: *ResourceAdapter, cell: *Cell) scheduler.Cooperative.Progress {
+    pub fn advanceInitialize(self: *ResourceBackend, cell: *Cell) scheduler.Cooperative.Progress {
         if (self.initialization_context == null) {
             const ctx = self.allocator().create(ControllerContext) catch {
                 cell.failInitialization(.out_of_memory);
@@ -391,14 +383,14 @@ const ResourceAdapter = struct {
         }
         return progress;
     }
-    fn retireInitializationContext(self: *ResourceAdapter) void {
+    fn retireInitializationContext(self: *ResourceBackend) void {
         if (self.initialization_context) |ctx| {
             self.initialization_context = null;
             ctx.deinit();
             self.allocator().destroy(ctx);
         }
     }
-    pub fn advanceCleanup(self: *ResourceAdapter, cell: *Cell) scheduler.Cooperative.Progress {
+    pub fn advanceCleanup(self: *ResourceBackend, cell: *Cell) scheduler.Cooperative.Progress {
         self.retireInitializationContext();
         var ctx: ControllerContext = .{ .cell = cell, .invocation = .cleanup };
         ctx.beginCooperativeSlice();
@@ -407,23 +399,23 @@ const ResourceAdapter = struct {
         if (progress == .completed) self.input_loans.release();
         return progress;
     }
-    pub fn cancel(self: *ResourceAdapter) void {
+    pub fn cancel(self: *ResourceBackend) void {
         switch (self.definition.execution) {
             .controller => self.definition.wire.cancel.?(self.backend.ptr),
             .cooperative => {},
         }
     }
-    pub fn failTransport(self: *ResourceAdapter) void {
+    pub fn failTransport(self: *ResourceBackend) void {
         for (self.resource_pipes) |pipe| if (pipe) |transport| transport.fail(.init(.io, "native resource is closed"), true);
     }
-    pub fn abortTransport(self: *ResourceAdapter) void {
+    pub fn abortTransport(self: *ResourceBackend) void {
         for (self.resource_pipes) |pipe| if (pipe) |transport| transport.abort();
     }
-    pub fn cleanup(self: *ResourceAdapter) void {
+    pub fn cleanup(self: *ResourceBackend) void {
         self.definition.wire.cleanup.?(self.backend.ptr);
         self.input_loans.release();
     }
-    pub fn shutdown(self: *ResourceAdapter, cell: *Cell) ?byte_transport.Failure {
+    pub fn shutdown(self: *ResourceBackend, cell: *Cell) ?byte_transport.Failure {
         var ctx: ControllerContext = .{ .cell = cell, .invocation = .{ .shutdown = null } };
         defer ctx.deinit();
         self.definition.wire.shutdown.?(self.backend.ptr, &controller_table, &ctx);
@@ -436,7 +428,7 @@ const ResourceAdapter = struct {
         errdefer memory.free(state);
         const message_budget = try message_transport.Budget.create(owner.host, owner.limits.message_queue_bytes);
         errdefer message_budget.release();
-        const adapter: ResourceAdapter = .{ .owner = owner, .instance = instance, .kind = kind, .definition = definition, .backend = state, .message_budget = message_budget };
+        const adapter: ResourceBackend = .{ .owner = owner, .instance = instance, .kind = kind, .definition = definition, .backend = state, .message_budget = message_budget };
         switch (definition.execution) {
             .controller => try cell.initialize(adapter, worker, definition.wire.lane_count, owner.limits.max_operations, definition.wire.shutdown != null, definition.execution.controller.activityCount()),
             .cooperative => try cell.initializeCooperative(adapter, worker, definition.wire.lane_count, owner.limits.max_operations),
@@ -533,8 +525,8 @@ const Protocol = struct {
     }
 };
 
-pub const Operation = @import("port_operation.zig").Exchange(OperationAdapter);
-const OperationAdapter = struct {
+pub const Operation = @import("port_operation.zig").Exchange;
+pub const OperationBackend = struct {
     const ControllerFailure = struct { value: Failure, disposition: enum { operation, resource } };
     cell: *Cell,
     code: u32,
@@ -543,26 +535,17 @@ const OperationAdapter = struct {
     failure: ?ControllerFailure = null,
     endpoints: u64,
     continuation: ?*CooperativeInvocation = null,
-    pub fn allocator(self: *const OperationAdapter) std.mem.Allocator {
+    pub fn allocator(self: *const OperationBackend) std.mem.Allocator {
         return self.cell.allocator;
     }
-    pub fn scheduler(self: *OperationAdapter) *const @import("scheduler.zig").WorkerScheduler {
-        return self.cell.scheduler;
-    }
-    pub fn resourceMutex(self: *OperationAdapter) *std.Io.Mutex {
-        return &self.cell.mutex;
-    }
-    pub fn admittedLocked(self: *OperationAdapter) void {
+    pub fn admittedLocked(self: *OperationBackend) void {
         self.cell.changed.broadcast(io());
         self.cell.controllers.wake();
     }
-    pub fn retireValue(self: *OperationAdapter, item: Value) void {
+    pub fn retireValue(self: *OperationBackend, item: Value) void {
         heap.hostDomain(self.cell.adapter.owner.host).releaseValue(item);
     }
-    pub fn retainResource(self: *OperationAdapter) void {
-        self.cell.retainReadiness();
-    }
-    pub fn deinit(self: *OperationAdapter) void {
+    pub fn deinit(self: *OperationBackend) void {
         if (self.continuation) |continuation| {
             continuation.deinit();
             self.allocator().destroy(continuation);
@@ -570,10 +553,10 @@ const OperationAdapter = struct {
         self.protocol.deinit(self.cell);
         self.cell.releaseReadiness();
     }
-    pub fn terminal(self: *OperationAdapter) results.Terminal {
+    pub fn terminal(self: *OperationBackend) results.Terminal {
         return if (self.failure) |failure| .{ .failed = semanticFailure(failure.value) } else .success;
     }
-    pub fn abortTransport(self: *OperationAdapter) void {
+    pub fn abortTransport(self: *OperationBackend) void {
         for (self.protocol.pipes) |transport| if (transport) |pair| switch (pair) {
             .messages => |channel| channel.queue.abort(),
             .bytes => {},
@@ -595,29 +578,26 @@ const OperationAdapter = struct {
         errdefer if (continuation) |owned| cell.allocator.destroy(owned);
         return Operation.prepare(.{ .cell = cell, .code = code, .lane = lane, .protocol = protocol, .endpoints = endpoints, .continuation = continuation }, terminal_value, queue, mode);
     }
-    pub fn runnable(self: *OperationAdapter) bool {
-        return !self.cell.closed.load(.acquire);
-    }
-    pub fn execute(self: *OperationAdapter, operation: *Operation, running: *controllers.Running) void {
+    pub fn execute(self: *OperationBackend, operation: *Operation, running: *controllers.Running) void {
         var ctx: ControllerContext = .{ .cell = self.cell, .invocation = .{ .operation = .{ .value = operation, .running = running } } };
         defer ctx.deinit();
         self.cell.adapter.definition.wire.execute.?(self.cell.adapter.backend.ptr, self.code, &controller_table, &ctx);
     }
-    pub fn advanceCooperative(self: *OperationAdapter, operation: *Operation, running: *controllers.Running) controllers.Progress {
+    pub fn advanceCooperative(self: *OperationBackend, operation: *Operation, running: *controllers.Running) controllers.Progress {
         return self.continuation.?.advance(self, operation, running);
     }
-    pub fn completeResourceLocked(self: *OperationAdapter, outcome: controllers.Completion) void {
+    pub fn completeResourceLocked(self: *OperationBackend, outcome: controllers.Completion) void {
         if (outcome == .close_resource or (self.failure != null and self.failure.?.disposition == .resource)) self.cell.closeLocked();
         self.cell.waits.notifyLocked(self.cell);
     }
-    pub fn cancelPolicy(self: *OperationAdapter) controllers.CallbackCancellation {
+    pub fn cancelPolicy(self: *OperationBackend) controllers.CallbackCancellation {
         return switch (self.cell.adapter.definition.wire.cancellation) {
             .close_resource => .close_resource,
             .acknowledge => .acknowledge,
             _ => unreachable,
         };
     }
-    pub fn cancelResourceLocked(self: *OperationAdapter, action: controllers.CancelAction) void {
+    pub fn cancelResourceLocked(self: *OperationBackend, action: controllers.CancelAction) void {
         const cell = self.cell;
         switch (action) {
             .close_resource => cell.closeLocked(),
@@ -633,7 +613,7 @@ const OperationAdapter = struct {
             .settled => {},
         }
     }
-    pub fn notifyTransport(self: *OperationAdapter, operation: *Operation) void {
+    pub fn notifyTransport(self: *OperationBackend, operation: *Operation) void {
         if (operation.ticket.isCancelled()) {
             for (self.cell.adapter.resource_pipes) |pipe| if (pipe) |transport| transport.interrupt();
         }
@@ -653,7 +633,7 @@ const OperationAdapter = struct {
             };
         }
     }
-    fn stageChild(self: *OperationAdapter, operation: *Operation, kind: u32, configuration: *const port_message.Validated, dependency: abi.ChildDependency) CreateError!Value {
+    fn stageChild(self: *OperationBackend, operation: *Operation, kind: u32, configuration: *const port_message.Validated, dependency: abi.ChildDependency) CreateError!Value {
         const item = try self.startChild(operation, kind, configuration, dependency, .controller);
         errdefer heap.hostDomain(self.cell.adapter.owner.host).releaseValue(item);
         const cell = resource_api.Resource.project(Cell, item).?;
@@ -669,7 +649,7 @@ const OperationAdapter = struct {
     fn StartedChild(comptime mode: ChildMode) type {
         return if (mode == .controller) Value else struct { value: Value, readiness: external.RegisterResult };
     }
-    fn startChild(self: *OperationAdapter, operation: *Operation, kind: u32, configuration: *const port_message.Validated, dependency: abi.ChildDependency, comptime mode: ChildMode) CreateError!StartedChild(mode) {
+    fn startChild(self: *OperationBackend, operation: *Operation, kind: u32, configuration: *const port_message.Validated, dependency: abi.ChildDependency, comptime mode: ChildMode) CreateError!StartedChild(mode) {
         const parent = self.cell;
         const owner = parent.adapter.owner;
         const provisional = try operation.childGroup();
@@ -681,7 +661,7 @@ const OperationAdapter = struct {
             .inherited => .{ .inherited = inherited },
             _ => unreachable,
         } };
-        const cell = Resource.create(owner, .{ parent.adapter.instance, kind, configuration, parent.scheduler }, ResourceAdapter.initializeAllocation) catch |err| return switch (err) {
+        const cell = Resource.create(owner, .{ parent.adapter.instance, kind, configuration, parent.scheduler }, ResourceBackend.initializeAllocation) catch |err| return switch (err) {
             error.InvalidLimits => error.InsufficientLanes,
             else => |failure| failure,
         };
@@ -919,7 +899,7 @@ const ControllerContext = struct {
 const ChildRequest = struct { kind: u32, dependency: abi.ChildDependency };
 const CooperativeConstruction = struct {
     value: *message_builder.ResumableBuilder,
-    phase: union(enum) { idle, working, result, error_data, failure_choice: Failure, child_configuration: ChildRequest, child: OperationAdapter.StartedChild(.cooperative) } = .idle,
+    phase: union(enum) { idle, working, result, error_data, failure_choice: Failure, child_configuration: ChildRequest, child: OperationBackend.StartedChild(.cooperative) } = .idle,
     fn retire(self: *CooperativeConstruction, host: *const heap.HostCleanup) void {
         if (self.phase == .child) {
             switch (self.phase.child.readiness) {
@@ -1483,7 +1463,7 @@ fn recordControllerFailure(ctx: *ControllerContext, failure: Failure) void {
         .operation => unreachable,
     }
 }
-fn recordOperationFailure(op: *Operation, failure: OperationAdapter.ControllerFailure) void {
+fn recordOperationFailure(op: *Operation, failure: OperationBackend.ControllerFailure) void {
     lock(&op.mutex);
     defer unlock(&op.mutex);
     if (op.adapter.failure) |*prior| {
@@ -1758,7 +1738,7 @@ const CooperativeInvocation = struct {
             .live => |*ctx| ctx.deinit(),
         }
     }
-    fn advance(self: *CooperativeInvocation, adapter: *OperationAdapter, operation: *Operation, running: *controllers.Running) controllers.Progress {
+    fn advance(self: *CooperativeInvocation, adapter: *OperationBackend, operation: *Operation, running: *controllers.Running) controllers.Progress {
         if (self.context == .reserved) self.context = .{ .live = .{
             .cell = adapter.cell,
             .invocation = .{ .operation = .{ .value = operation, .running = null } },
