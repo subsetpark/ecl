@@ -522,6 +522,20 @@ test "fs: incremental enumeration owns its cursor and joins staging closure" {
         "4 (cursor fs.next-entry 'kind at) times 4 pack (str) each sort cursor port.close", "(\"'directory\" \"'file\" \"'file\" \"'symlink\")");
 }
 
+test "fs: staging closure joins concurrent and reused child groups" {
+    for ([_]session.Config{ .cooperative, .{ .worker_pool = 1 }, .{ .worker_pool = 4 } }) |config| {
+        var scratch = try Scratch.init();
+        defer scratch.deinit();
+        try runCase(scratch.filesystem(), config, "'root \"abandoned\" fs.stage-dir 'stage set " ++
+            "16 range (pop [] (stage \".\" fs.child-dir) @spawn) each " ++
+            "(task.await 'ok at first) each 'children set " ++
+            "16 (stage \".\" fs.child-dir port.close) times " ++
+            "stage port.close children " ++
+            "(wrap (\".\" fs.stat) @attempt 'err at 'kind at 'io match?) each sum", .{ .stack = "16" });
+        try scratch.expectNoStaging(".");
+    }
+}
+
 test "fs: cold worker pools join scope-owned filesystem resources" {
     var scratch = try Scratch.init();
     defer scratch.deinit();

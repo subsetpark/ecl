@@ -119,6 +119,18 @@ fn Handle(comptime Object: type) type {
             if (access) |authority| fs.retireHandle(authority, self, &self.retirement);
         }
         fn childGroup(self: *Cell, scope: *scheduler.TaskScope) error{ OutOfMemory, ScopeClosing }!*scheduler.ExternalGroup {
+            std.Io.Threaded.mutexLock(&self.mutex);
+            if (self.phase != .open) {
+                std.Io.Threaded.mutexUnlock(&self.mutex);
+                return error.ScopeClosing;
+            }
+            if (self.children == .open) {
+                const group = self.children.open;
+                group.retain();
+                std.Io.Threaded.mutexUnlock(&self.mutex);
+                return group;
+            }
+            std.Io.Threaded.mutexUnlock(&self.mutex);
             const candidate = try scheduler.ExternalGroup.create(scope.scheduler, Cell, self);
             std.Io.Threaded.mutexLock(&self.mutex);
             if (self.phase != .open) {

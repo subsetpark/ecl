@@ -875,6 +875,7 @@ pub fn build(b: *std.Build) void {
             "fs: advisory locks serialize mutations and release after cancellation",
             "fs: directory closure joins admitted descriptor leases",
             "fs: staging directories publish atomically and join descendant cleanup",
+            "fs: staging closure joins concurrent and reused child groups",
             "fs: cold worker pools join scope-owned filesystem resources",
             "fs: incremental enumeration owns its cursor and joins staging closure",
             "fs: directory resources own confined descriptors and close with their scope",

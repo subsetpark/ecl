@@ -1488,7 +1488,9 @@ Each Session I/O service owns its registered library instance and a complete
 I/O backend.
 A module candidate publishes sealed capabilities as literal word
 bodies and pins its instance until publication or abandonment. Capability
-values retain that identity independently of service cleanup. Module registration
+values retain that identity independently of service cleanup. Factory and selector
+facades share their sealed registration storage; the registration owns the instance
+pin and descriptor index without a separately allocated dispatch wrapper. Module registration
 binds the Session I/O backend inside the adapter, so module loading does not
 select a resource backend. A generic module-constant provider carries names,
 effects, documentation, and sealed values; domain adapters own their declarations
@@ -1506,7 +1508,9 @@ transfers it to bounded reclamation while retaining the same instance lifetime.
 A rejected opening has no resource-creation, endpoint, or commit authority.
 The opening borrows its factory and validated request until retirement. It derives
 its scheduler from the calling scope and never receives an interpreter callback.
-Bounded diagnostic details retain their values before the request retires.
+Bounded diagnostic details retain their values before the request retires. Factory
+failures, resource initialization, and exchange results use the same diagnostic
+observation representation. Rejected openings own their diagnostic state directly.
 Resource initialization and exchange results own immutable capability-free
 error dictionaries through final release, independently of backend cleanup or
 ordinary result discard. Terminal observations borrow that storage under their
@@ -1520,8 +1524,8 @@ acquiring data authority. Finishing joins admitted writer turns; stopping ends
 those turns immediately while retaining the accepted prefix and terminal facts.
 Cooperative initialization owns its construction continuation until completion
 or joined cancellation, including every partial validation and diagnostic value.
-The remaining interpreter-owned process controller uses the common lifecycle
-without passing through the extension ABI.
+Controller, cooperative, and rejected-opening construction share value-request
+decoding while retaining separate publication authority and execution progression.
 
 Process resource metadata pins its issuing instance through final reclamation.
 Connection metadata carries the same issuer lifetime. Its outgoing transport

@@ -66,10 +66,10 @@ pub const RegisteredCapability = opaque {
             error.Limit => if (issuer.validated().port(self.definition().factory).?.capacity_failure != null)
                 .{ .opening = try RejectedOpening.create(issuer, self.definition().factory, config) }
             else
-                .{ .failed = factories.Failure.init(.domain, "port resource capacity is exhausted") },
-            error.InsufficientLanes => .{ .failed = factories.Failure.init(.domain, "port resource capacity is exhausted") },
-            error.Closed, error.Io => .{ .failed = factories.Failure.init(.io, "port resource creation failed") },
-            error.ScopeClosing => .{ .failed = factories.Failure.init(.cancelled, "port scope is closing") },
+                .{ .failed = .{ .report = .init(.domain, "port resource capacity is exhausted") } },
+            error.InsufficientLanes => .{ .failed = .{ .report = .init(.domain, "port resource capacity is exhausted") } },
+            error.Closed, error.Io => .{ .failed = .{ .report = .init(.io, "port resource creation failed") } },
+            error.ScopeClosing => .{ .failed = .{ .report = .init(.cancelled, "port scope is closing") } },
         };
         return .{ .resource = resource };
     }
@@ -94,9 +94,9 @@ pub fn sealCapability(instance: *native.ModuleInstance, index: u32) error{OutOfM
     unlock(&owner.mutex);
     const capability: *RegisteredCapability = @ptrCast(owned);
     const result = switch (instance.definition(index).body.port) {
-        .factory => try factories.Factory.create(RegisteredCapability, identity, capability),
-        .operation => try exchanges.Selector.create(RegisteredCapability, identity, capability),
-        .endpoint => try endpoint_api.Selector.create(RegisteredCapability, identity, capability),
+        .factory => try factories.Factory.create(identity, capability),
+        .operation => try exchanges.Selector.create(identity, capability),
+        .endpoint => try endpoint_api.Selector.create(identity, capability),
     };
     instance.retain();
     return result;
@@ -1075,6 +1075,59 @@ fn builderSymbolLength(request: *const abi.MessageBuildRequest) message_builder.
     if (request.scalar.size != @sizeOf(abi.Scalar) or request.scalar.kind != .int) return error.InvalidValue;
     return std.math.cast(usize, request.scalar.bits) orelse return error.Overflow;
 }
+const ValueBuildProgress = enum { idle, working };
+
+/// Decode common ABI value construction once. Resumable callers supply stable
+/// symbol storage; publication and execution authority remain with each caller.
+fn buildValue(builder: anytype, request: *const abi.MessageBuildRequest, input: ?Value, symbol_storage: ?[]u8) message_builder.Error!?ValueBuildProgress {
+    switch (request.action) {
+        .scalar => {
+            const scalar = request.scalar;
+            if (scalar.size != @sizeOf(abi.Scalar)) return error.InvalidState;
+            switch (scalar.kind) {
+                .int => try builder.int(@bitCast(scalar.bits)),
+                .float => try builder.float(@bitCast(scalar.bits)),
+                .char => try builder.char(scalar.bits),
+                .symbol => {
+                    const limit = if (symbol_storage) |storage| storage.len else 64 * 1024;
+                    if (scalar.bytes_len > limit) return error.Overflow;
+                    const length: usize = @intCast(scalar.bytes_len);
+                    const bytes = if (length == 0) "" else (scalar.bytes_ptr orelse return error.InvalidValue)[0..length];
+                    if (symbol_storage) |storage| {
+                        @memcpy(storage[0..length], bytes);
+                        try builder.symbol(storage[0..length]);
+                    } else try builder.symbol(bytes);
+                    return .working;
+                },
+                else => return error.InvalidValue,
+            }
+            return .idle;
+        },
+        .copy_input => try builder.copy(try inputValue(input, request)),
+        .bytes => try builder.byteList(try builderBytes(request, .list)),
+        .symbol_start => {
+            try builder.beginSymbolChunks(try builderSymbolLength(request));
+            return .idle;
+        },
+        .symbol_chunk => {
+            try builder.symbolChunk(try builderBytes(request, .symbol));
+            return .idle;
+        },
+        .symbol_end => try builder.endSymbol(),
+        .list => try builder.list(request.count),
+        .dictionary => try builder.dictionary(request.count),
+        .clear => try builder.clear(),
+        else => return null,
+    }
+    return .working;
+}
+
+fn inputValue(root: ?Value, request: *const abi.MessageBuildRequest) message_builder.Error!Value {
+    if (request.depth > abi.max_read_path_depth) return error.InvalidValue;
+    const path: []const u64 = if (request.depth == 0) &.{} else (request.path orelse return error.InvalidValue)[0..request.depth];
+    return valueAtPath(root orelse return error.InvalidState, path) orelse error.InvalidValue;
+}
+
 fn controllerBuildMessage(raw: *anyopaque, request: *const abi.MessageBuildRequest) callconv(.c) abi.HostStatus {
     const ctx = context(raw);
     return buildMessage(ctx, request) catch |err| constructionFailure(ctx, err);
@@ -1109,31 +1162,10 @@ fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest
         ctx.builder = .{ .controller = builder };
     }
     const builder = ctx.builder.controller;
+    const input = if (op) |operation| operation.adapter.protocol.parameters else ctx.cell.adapter.configuration;
+    if (try buildValue(builder, request, input, null) != null) return .ok;
     switch (request.action) {
-        .scalar => {
-            if (request.scalar.size != @sizeOf(abi.Scalar)) return error.InvalidState;
-            const scalar = request.scalar;
-            switch (scalar.kind) {
-                .int => try builder.int(@bitCast(scalar.bits)),
-                .float => try builder.float(@bitCast(scalar.bits)),
-                .char => try builder.char(scalar.bits),
-                .symbol => {
-                    if (scalar.bytes_len > 64 * 1024) return error.Overflow;
-                    const bytes = if (scalar.bytes_len == 0) "" else (scalar.bytes_ptr orelse return error.InvalidValue)[0..@intCast(scalar.bytes_len)];
-                    try builder.symbol(bytes);
-                },
-                .word, .list, .dict, .port => return error.InvalidValue,
-                _ => return error.InvalidValue,
-            }
-        },
-        .copy_input, .copy_received => {
-            if (request.depth > abi.max_read_path_depth) return error.InvalidValue;
-            const path = if (request.depth == 0) &.{} else (request.path orelse return error.InvalidValue)[0..request.depth];
-            const root = if (request.action == .copy_received)
-                (ctx.received orelse return error.InvalidState).value()
-            else if (op) |operation| operation.adapter.protocol.parameters else (ctx.cell.adapter.configuration orelse return error.InvalidState);
-            try builder.copy(valueAtPath(root, path) orelse return error.InvalidValue);
-        },
+        .copy_received => try builder.copy(try inputValue(if (ctx.received) |received| received.value() else null, request)),
         .reply_endpoint => {
             if (request.endpoint >= 64) return error.InvalidState;
             const parent = controllerEndpointParent(ctx, request.owner) orelse return error.InvalidState;
@@ -1166,13 +1198,6 @@ fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest
             }
             try builder.replaceChild(child);
         },
-        .bytes => try builder.byteList(try builderBytes(request, .list)),
-        .symbol_start => try builder.beginSymbolChunks(try builderSymbolLength(request)),
-        .symbol_chunk => try builder.symbolChunk(try builderBytes(request, .symbol)),
-        .symbol_end => try builder.endSymbol(),
-        .list => try builder.list(request.count),
-        .dictionary => try builder.dictionary(request.count),
-        .clear => try builder.clear(),
         .send => {
             try builder.finish();
 
@@ -1206,7 +1231,7 @@ fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest
             try builder.consume();
         },
         .advance, .prepare_failure => return error.InvalidState,
-        _ => return error.InvalidState,
+        else => return error.InvalidState,
     }
 
     return .ok;
@@ -1600,51 +1625,12 @@ fn buildCooperative(ctx: *ControllerContext, request: *const abi.MessageBuildReq
         return .ok;
     }
     if (building.phase != .idle) return error.InvalidState;
+    const input = if (operation) |op| op.adapter.protocol.parameters else ctx.cell.adapter.configuration;
+    if (try buildValue(builder, request, input, &ctx.symbol_bytes)) |progress| {
+        if (progress == .working) building.phase = .working;
+        return .ok;
+    }
     switch (request.action) {
-        .scalar => {
-            if (request.scalar.size != @sizeOf(abi.Scalar)) return error.InvalidState;
-            const scalar = request.scalar;
-            switch (scalar.kind) {
-                .int => try builder.int(@bitCast(scalar.bits)),
-                .float => try builder.float(@bitCast(scalar.bits)),
-                .char => try builder.char(scalar.bits),
-                .symbol => {
-                    if (scalar.bytes_len > ctx.symbol_bytes.len) return error.Overflow;
-                    const size: usize = @intCast(scalar.bytes_len);
-                    const bytes = if (size == 0) "" else (scalar.bytes_ptr orelse return error.InvalidValue)[0..size];
-                    @memcpy(ctx.symbol_bytes[0..size], bytes);
-                    try builder.symbol(ctx.symbol_bytes[0..size]);
-                    building.phase = .working;
-                },
-                .word, .list, .dict, .port => return error.InvalidValue,
-                _ => return error.InvalidValue,
-            }
-        },
-        .bytes => {
-            try builder.byteList(try builderBytes(request, .list));
-            building.phase = .working;
-        },
-        .symbol_start => try builder.beginSymbolChunks(try builderSymbolLength(request)),
-        .symbol_chunk => try builder.symbolChunk(try builderBytes(request, .symbol)),
-        .symbol_end => {
-            try builder.endSymbol();
-            building.phase = .working;
-        },
-        .copy_input => {
-            if (request.depth > abi.max_read_path_depth) return error.InvalidValue;
-            const path: []const u64 = if (request.depth == 0) &.{} else (request.path orelse return error.InvalidValue)[0..request.depth];
-            const input = valueAtPath(if (operation) |op| op.adapter.protocol.parameters else (ctx.cell.adapter.configuration orelse return error.InvalidState), path) orelse return error.InvalidValue;
-            try builder.copy(input);
-            building.phase = .working;
-        },
-        .list => {
-            try builder.list(request.count);
-            building.phase = .working;
-        },
-        .dictionary => {
-            try builder.dictionary(request.count);
-            building.phase = .working;
-        },
         .result => {
             if (operation == null) return error.InvalidState;
             try builder.finish();
@@ -1653,10 +1639,6 @@ fn buildCooperative(ctx: *ControllerContext, request: *const abi.MessageBuildReq
         .error_data => {
             try builder.finish();
             building.phase = .error_data;
-        },
-        .clear => {
-            try builder.clear();
-            building.phase = .working;
         },
         .child => {
             const selected = try childRequest(ctx, request);
@@ -1672,7 +1654,7 @@ fn buildCooperative(ctx: *ControllerContext, request: *const abi.MessageBuildReq
             building.phase = .{ .failure_choice = failure };
         },
         .copy_received, .send, .reply_endpoint, .advance => return error.InvalidState,
-        _ => return error.InvalidState,
+        else => return error.InvalidState,
     }
     return .ok;
 }
@@ -1844,6 +1826,16 @@ const CooperativeInvocation = struct {
     }
 };
 
+/// The opaque opening owns the diagnostic state directly, without an erased wrapper.
+pub fn advanceOpening(opening: *factories.Opening, quantum: usize) error{OutOfMemory}!factories.Progress {
+    const owned: *RejectedOpening = @ptrCast(@alignCast(opening));
+    return owned.advance(quantum);
+}
+pub fn retireOpening(opening: *factories.Opening) void {
+    const owned: *RejectedOpening = @ptrCast(@alignCast(opening));
+    owned.release();
+}
+
 /// A failed admission owns only diagnostic work. It cannot consume a resource
 /// permit or start a controller. Its issuing instance owns all allocation and
 /// retirement authority, including cancellation before an error is published.
@@ -1875,11 +1867,10 @@ const RejectedOpening = struct {
         const backend = try memory.alignedAlloc(u8, .@"64", definition.state_size);
         errdefer memory.free(backend);
         owned.* = .{ .instance = instance, .definition = definition, .phase = .{ .reporting = backend }, .input_value = configuration.value() };
-        const opening = try factories.Opening.create(RejectedOpening, owned);
         instance.retain();
         heap.retainValue(owned.input_value);
         definition.init_state(backend.ptr);
-        return opening;
+        return @ptrCast(owned);
     }
     pub fn advance(self: *RejectedOpening, quantum: usize) error{OutOfMemory}!factories.Progress {
         self.budget = @intCast(@min(quantum, self.instance.portAccess().state().limits.callback_quantum.count()));
@@ -1904,7 +1895,7 @@ const RejectedOpening = struct {
         }
         return .{ .failed = .{
             .report = semanticFailure(self.failure orelse .init(.domain, "port resource capacity is exhausted")),
-            .diagnostics = if (self.details) |details| details.view() else null,
+            .details = if (self.details) |details| details.view() else null,
         } };
     }
     pub fn release(self: *RejectedOpening) void {
@@ -2003,53 +1994,11 @@ const RejectedOpening = struct {
             return .ok;
         }
         if (self.construction != .idle) return error.InvalidState;
+        if (try buildValue(builder, request, self.input_value, &self.symbol_bytes)) |progress| {
+            if (progress == .working) self.construction = .working;
+            return .ok;
+        }
         switch (request.action) {
-            .scalar => {
-                if (request.scalar.size != @sizeOf(abi.Scalar)) return error.InvalidState;
-                const scalar = request.scalar;
-                switch (scalar.kind) {
-                    .int => try builder.int(@bitCast(scalar.bits)),
-                    .float => try builder.float(@bitCast(scalar.bits)),
-                    .char => try builder.char(scalar.bits),
-                    .symbol => {
-                        if (scalar.bytes_len > self.symbol_bytes.len) return error.Overflow;
-                        const length: usize = @intCast(scalar.bytes_len);
-                        const bytes = if (length == 0) "" else (scalar.bytes_ptr orelse return error.InvalidValue)[0..length];
-                        @memcpy(self.symbol_bytes[0..length], bytes);
-                        try builder.symbol(self.symbol_bytes[0..length]);
-                        self.construction = .working;
-                    },
-                    else => return error.InvalidValue,
-                }
-            },
-            .bytes => {
-                try builder.byteList(try builderBytes(request, .list));
-                self.construction = .working;
-            },
-            .symbol_start => try builder.beginSymbolChunks(try builderSymbolLength(request)),
-            .symbol_chunk => try builder.symbolChunk(try builderBytes(request, .symbol)),
-            .symbol_end => {
-                try builder.endSymbol();
-                self.construction = .working;
-            },
-            .copy_input => {
-                if (request.depth > abi.max_read_path_depth) return error.InvalidValue;
-                const path: []const u64 = if (request.depth == 0) &.{} else (request.path orelse return error.InvalidValue)[0..request.depth];
-                try builder.copy(valueAtPath(self.input_value, path) orelse return error.InvalidValue);
-                self.construction = .working;
-            },
-            .list => {
-                try builder.list(request.count);
-                self.construction = .working;
-            },
-            .dictionary => {
-                try builder.dictionary(request.count);
-                self.construction = .working;
-            },
-            .clear => {
-                try builder.clear();
-                self.construction = .working;
-            },
             .error_data => {
                 try builder.finish();
                 self.construction = .sealing;

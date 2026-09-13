@@ -10,47 +10,24 @@ const Value = @import("value.zig").Value;
 pub const Direction = enum { reader, writer, sender, receiver };
 pub const BorrowError = error{ OutOfMemory, WrongKind, Unsupported };
 
-const SelectorState = struct {
-    allocator: std.mem.Allocator,
-    payload: *anyopaque,
-    borrow: *const fn (*anyopaque, Value) BorrowError!Value,
-    release: *const fn (*anyopaque) void,
-};
-
+const RegisteredCapability = @import("native_port.zig").RegisteredCapability;
 pub const Selector = opaque {
-    fn state(self: *Selector) *SelectorState {
-        return @ptrCast(@alignCast(self));
+    fn capability(self: *Selector) *RegisteredCapability {
+        return @ptrCast(self);
     }
-    /// Success consumes the adapter reference. Failure leaves it owned by the
-    /// caller. The adapter validates issuing identity before lending an endpoint.
-    pub fn create(comptime Adapter: type, identity: u64, adapter: *Adapter) error{OutOfMemory}!Value {
-        const allocator = adapter.allocator();
-        const Bridge = struct {
-            fn borrow(raw: *anyopaque, source: Value) BorrowError!Value {
-                const typed: *Adapter = @ptrCast(@alignCast(raw));
-                return typed.borrowEndpoint(source);
-            }
-            fn release(raw: *anyopaque) void {
-                const typed: *Adapter = @ptrCast(@alignCast(raw));
-                typed.releasePort();
-            }
-        };
-        const owned = try allocator.create(SelectorState);
-        errdefer allocator.destroy(owned);
-        owned.* = .{ .allocator = allocator, .payload = adapter, .borrow = Bridge.borrow, .release = Bridge.release };
-        return heap.createBorrowedPort(Selector, .endpoint_selector, allocator, identity, @ptrCast(owned));
+    /// Success consumes the registration reference; failure retains it.
+    pub fn create(identity: u64, registration: *RegisteredCapability) error{OutOfMemory}!Value {
+        return heap.createBorrowedPort(Selector, .endpoint_selector, registration.allocator(), identity, @ptrCast(registration));
     }
     pub fn fromValue(item: Value) ?*Selector {
         if (item != .port) return null;
         return heap.portPayload(Selector, .endpoint_selector, item.port);
     }
     pub fn borrow(self: *Selector, source: Value) BorrowError!Value {
-        return self.state().borrow(self.state().payload, source);
+        return self.capability().borrowEndpoint(source);
     }
     pub fn releasePort(self: *Selector) void {
-        const owned = self.state();
-        owned.release(owned.payload);
-        owned.allocator.destroy(owned);
+        self.capability().releasePort();
     }
 };
 

@@ -11,59 +11,30 @@ pub const Interest = enum { completion, cleanup };
 pub const Admission = union(enum) { exchange: Value, pending: external.ReadinessSource, closed, unsupported };
 pub const AdmitError = error{ OutOfMemory, ScopeClosing, WrongKind };
 
-const SelectorState = struct {
-    message_limits: message.Limits,
-    allocator: std.mem.Allocator,
-    payload: *anyopaque,
-    accepts: *const fn (*anyopaque, Value) bool,
-    begin: *const fn (*anyopaque, Value, *scheduler.TaskScope, *const message.Validated) AdmitError!Admission,
-    release: *const fn (*anyopaque) void,
-};
+const RegisteredCapability = @import("native_port.zig").RegisteredCapability;
 pub const Selector = opaque {
-    fn state(self: *Selector) *SelectorState {
-        return @ptrCast(@alignCast(self));
+    fn capability(self: *Selector) *RegisteredCapability {
+        return @ptrCast(self);
     }
-    /// Consumes the adapter reference on success; failure retains it. The
-    /// adapter binds the selector's resource kind and issuing module identity.
-    pub fn create(comptime Adapter: type, identity: u64, adapter: *Adapter) error{OutOfMemory}!Value {
-        const SelectorBridge = struct {
-            fn typed(raw: *anyopaque) *Adapter {
-                return @ptrCast(@alignCast(raw));
-            }
-            fn accepts(raw: *anyopaque, source: Value) bool {
-                return typed(raw).acceptsOperation(source);
-            }
-            fn begin(raw: *anyopaque, source: Value, scope: *scheduler.TaskScope, request: *const message.Validated) AdmitError!Admission {
-                return typed(raw).beginOperation(source, scope, request);
-            }
-            fn release(raw: *anyopaque) void {
-                typed(raw).releasePort();
-            }
-        };
-        const allocator = adapter.allocator();
-        const owned = try allocator.create(SelectorState);
-        errdefer allocator.destroy(owned);
-        owned.* = .{ .message_limits = if (@hasDecl(Adapter, "messageLimits")) adapter.messageLimits() else .{}, .allocator = allocator, .payload = adapter, .accepts = SelectorBridge.accepts, .begin = SelectorBridge.begin, .release = SelectorBridge.release };
-        return heap.createBorrowedPort(Selector, .operation_selector, allocator, identity, @ptrCast(owned));
-    }
-    /// The issuer's immutable validation grant, retained with this capability.
-    pub fn messageLimits(self: *Selector) message.Limits {
-        return self.state().message_limits;
+    /// Success consumes the registration reference; failure retains it.
+    pub fn create(identity: u64, registration: *RegisteredCapability) error{OutOfMemory}!Value {
+        return heap.createBorrowedPort(Selector, .operation_selector, registration.allocator(), identity, @ptrCast(registration));
     }
     pub fn fromValue(item: Value) ?*Selector {
         if (item != .port) return null;
         return heap.portPayload(Selector, .operation_selector, item.port);
     }
+    pub fn messageLimits(self: *Selector) message.Limits {
+        return self.capability().messageLimits();
+    }
     pub fn accepts(self: *Selector, source: Value) bool {
-        return self.state().accepts(self.state().payload, source);
+        return self.capability().acceptsOperation(source);
     }
     pub fn begin(self: *Selector, source: Value, scope: *scheduler.TaskScope, request: *const message.Validated) AdmitError!Admission {
-        return self.state().begin(self.state().payload, source, scope, request);
+        return self.capability().beginOperation(source, scope, request);
     }
     pub fn releasePort(self: *Selector) void {
-        const owned = self.state();
-        owned.release(owned.payload);
-        owned.allocator.destroy(owned);
+        self.capability().releasePort();
     }
 };
 
