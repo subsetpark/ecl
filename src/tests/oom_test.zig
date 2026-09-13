@@ -2239,3 +2239,12 @@ test "oom: standard-library and host: native instance message budgets" {
     };
     try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, Probe.run);
 }
+
+test "oom: standard-library and host: native bounded value construction" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortProbe(
+        "instanceprobe.packed-cooperative [] port.open dup instanceprobe.cooperative-packed-values 0 port.call pop port.close " ++
+            "instanceprobe.packed-controller [] port.open dup instanceprobe.controller-packed-values 0 port.call pop port.close",
+        "",
+    ).run);
+}

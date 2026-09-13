@@ -11,6 +11,8 @@ const poll = @import("poll.zig");
 
 pub const Error = error{ OutOfMemory, InvalidState, InvalidValue, Overflow, DuplicateKey, Cancelled };
 pub const Limits = struct { message: message.Limits = .{}, stack_slots: usize = 4096 };
+pub const max_byte_chunk = 64 * 1024;
+pub const max_symbol_chunk = 256;
 const quantum = 64;
 const Dictionary = struct {
     start: usize,
@@ -20,7 +22,9 @@ const Dictionary = struct {
 };
 const Phase = union(enum) {
     idle,
-    symbol: struct { bytes: []const u8, index: usize = 0, cursor: ?intern.InternInsertionCursor = null },
+    symbol: struct { bytes: []const u8, owned: bool = false, index: usize = 0, cursor: ?intern.InternInsertionCursor = null },
+    symbol_staging: struct { bytes: []u8, filled: usize = 0 },
+    byte_list: struct { bytes: []u8, materializer: list.ByteListMaterializer },
     validating: struct { message: *message.Message, purpose: enum { append, finish, child } },
     list: struct { start: usize, materializer: list.ValueMaterializer },
     dictionary: Dictionary,
@@ -72,7 +76,13 @@ const State = struct {
     fn releasePhase(self: *State) void {
         const releases = heap.hostDomain(self.host);
         switch (self.phase) {
-            .idle, .symbol, .retiring, .failed => {},
+            .idle, .retiring, .failed => {},
+            .symbol => |symbol| if (symbol.owned) self.host.allocator().free(symbol.bytes),
+            .symbol_staging => |staging| self.host.allocator().free(staging.bytes),
+            .byte_list => |*building| {
+                building.materializer.retire(releases);
+                self.host.allocator().free(building.bytes);
+            },
             .validating => |validation| validation.message.retire(releases),
             .ready, .child_configuration => |ready| ready.retire(releases),
             .list => |*building| building.materializer.retire(releases),
@@ -89,13 +99,14 @@ const State = struct {
     }
     fn advance(self: *State) Error!poll.Progress(void) {
         switch (self.phase) {
-            .idle, .ready, .child_configuration => return .complete,
+            .idle, .ready, .child_configuration, .symbol_staging => return .complete,
             .failed => return error.InvalidState,
             .symbol => |*symbol| {
                 if (symbol.cursor) |*cursor| switch (try cursor.advance()) {
                     .pending => return .pending,
                     .complete => |id| {
                         self.pushOwned(.{ .symbol = id });
+                        if (symbol.owned) self.host.allocator().free(symbol.bytes);
                         self.phase = .idle;
                         return .complete;
                     },
@@ -109,6 +120,16 @@ const State = struct {
                 }
                 if (symbol.index == symbol.bytes.len) symbol.cursor = intern.insertionCursor(symbol.bytes);
                 return .pending;
+            },
+            .byte_list => |*building| switch (try building.materializer.advance(quantum)) {
+                .pending => return .pending,
+                .complete => |item| {
+                    building.materializer.deinit();
+                    self.host.allocator().free(building.bytes);
+                    self.pushOwned(item);
+                    self.phase = .idle;
+                    return .complete;
+                },
             },
             .validating => |validation| {
                 var budget = poll.WorkBudget.init(quantum);
@@ -239,6 +260,52 @@ pub const Builder = opaque {
         try self.state().requireSlot();
         try self.state().charge(.{ .nodes = 1, .bytes = bytes.len });
         self.state().phase = .{ .symbol = .{ .bytes = bytes } };
+    }
+    /// Copies at most one bounded byte chunk before returning; materialization
+    /// owns that copy until completion or joined retirement.
+    pub fn byteList(self: *Builder, source: []const u8) Error!void {
+        try self.beginBytes(source);
+        try self.drive();
+    }
+    fn beginBytes(self: *Builder, source: []const u8) Error!void {
+        const owned = self.state();
+        try owned.requireIdle();
+        try owned.requireSlot();
+        if (source.len > max_byte_chunk) return error.Overflow;
+        try owned.charge(.{ .nodes = source.len + 1, .bytes = source.len * 8 });
+        const copied = try owned.host.allocator().dupe(u8, source);
+        owned.phase = .{ .byte_list = .{ .bytes = copied, .materializer = .init(owned.host.allocator(), copied) } };
+    }
+    /// Reserve one symbol without borrowing native storage across callbacks.
+    /// Only bounded chunks, completion, or clear are admitted until it settles.
+    pub fn beginSymbolChunks(self: *Builder, byte_count: usize) Error!void {
+        const owned = self.state();
+        try owned.requireIdle();
+        try owned.requireSlot();
+        try owned.charge(.{ .nodes = 1, .bytes = byte_count });
+        const buffer = try owned.host.allocator().alloc(u8, byte_count);
+        owned.phase = .{ .symbol_staging = .{ .bytes = buffer } };
+    }
+    pub fn symbolChunk(self: *Builder, source: []const u8) Error!void {
+        const owned = self.state();
+        if (owned.cancelled()) return error.Cancelled;
+        if (owned.phase != .symbol_staging) return error.InvalidState;
+        const staging = &owned.phase.symbol_staging;
+        if (source.len > max_symbol_chunk or source.len > staging.bytes.len - staging.filled) return error.Overflow;
+        @memcpy(staging.bytes[staging.filled..][0..source.len], source);
+        staging.filled += source.len;
+    }
+    pub fn endSymbol(self: *Builder) Error!void {
+        try self.beginEndSymbol();
+        try self.drive();
+    }
+    fn beginEndSymbol(self: *Builder) Error!void {
+        const owned = self.state();
+        if (owned.cancelled()) return error.Cancelled;
+        if (owned.phase != .symbol_staging) return error.InvalidState;
+        const staging = owned.phase.symbol_staging;
+        if (staging.filled != staging.bytes.len) return error.InvalidValue;
+        owned.phase = .{ .symbol = .{ .bytes = staging.bytes, .owned = true } };
     }
     /// Borrows input on either outcome. Success retains its validated value.
     pub fn copy(self: *Builder, input: Value) Error!void {
@@ -414,6 +481,18 @@ pub const ResumableBuilder = opaque {
     /// Borrows bytes through completion of advance or retirement.
     pub fn symbol(self: *ResumableBuilder, bytes: []const u8) Error!void {
         return self.builder().beginSymbol(bytes);
+    }
+    pub fn byteList(self: *ResumableBuilder, source: []const u8) Error!void {
+        return self.builder().beginBytes(source);
+    }
+    pub fn beginSymbolChunks(self: *ResumableBuilder, byte_count: usize) Error!void {
+        return self.builder().beginSymbolChunks(byte_count);
+    }
+    pub fn symbolChunk(self: *ResumableBuilder, source: []const u8) Error!void {
+        return self.builder().symbolChunk(source);
+    }
+    pub fn endSymbol(self: *ResumableBuilder) Error!void {
+        return self.builder().beginEndSymbol();
     }
     pub fn copy(self: *ResumableBuilder, input: Value) Error!void {
         return self.builder().beginCopy(input);

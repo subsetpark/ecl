@@ -5,8 +5,8 @@
 
 const builtin = @import("builtin");
 
-pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v19";
-pub const abi_version: u32 = 19;
+pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v20";
+pub const abi_version: u32 = 20;
 
 pub const max_error_message_bytes: u32 = 4096;
 pub const max_guest_scalar_bytes: u32 = 4096;
@@ -104,7 +104,7 @@ pub const PortCancellation = enum(u32) { close_resource, acknowledge, _ };
 
 /// Controller streams block only their private host controller. Zero bytes
 /// denotes request EOF or cancellation; failure is reported separately.
-pub const MessageBuildAction = enum(u32) { scalar = 0, copy_input = 1, copy_received = 2, list = 3, dictionary = 4, send = 7, result = 8, clear = 9, reply_endpoint = 10, child = 11, advance = 12, error_data = 13, _ };
+pub const MessageBuildAction = enum(u32) { scalar = 0, copy_input = 1, copy_received = 2, list = 3, dictionary = 4, send = 7, result = 8, clear = 9, reply_endpoint = 10, child = 11, advance = 12, error_data = 13, bytes = 14, symbol_start = 15, symbol_chunk = 16, symbol_end = 17, _ };
 pub const ChildDependency = enum(u32) { independent, dependent, _ };
 pub const MessageBuildRequest = extern struct {
     size: u32 = @sizeOf(MessageBuildRequest),
@@ -160,6 +160,7 @@ pub const CooperativeTable = extern struct {
     consume: *const fn (*anyopaque, u32) callconv(.c) bool,
     park: *const fn (*anyopaque, u64) callconv(.c) bool,
     begin_commit: *const fn (*anyopaque) callconv(.c) bool,
+    monotonic_milliseconds: ?*const fn (*anyopaque) callconv(.c) i64 = null,
 };
 pub const CooperativeFn = *const fn (*anyopaque, *const CooperativeTable, *anyopaque) callconv(.c) CooperativeProgress;
 pub const CooperativeOperationFn = *const fn (*anyopaque, u32, *const CooperativeTable, *anyopaque) callconv(.c) CooperativeProgress;
@@ -520,7 +521,7 @@ comptime {
     assertRecord(CapacityFailureDefinition, 40, 8);
     assertRecord(ActivityDefinition, 24, 8);
     assertRecord(CooperativeDefinition, 40, 8);
-    assertRecord(CooperativeTable, 88, 8);
+    assertRecord(CooperativeTable, 96, 8);
     assertRecord(MessageBuildRequest, 72, 8);
     assertRecord(ControllerTable, 176, 8);
     assertRecord(InstanceTable, 32, 8);

@@ -993,6 +993,15 @@ fn valueAtPath(root: Value, path: []const u64) ?Value {
     }
     return item;
 }
+fn builderBytes(request: *const abi.MessageBuildRequest, kind: abi.ValueKindWire) message_builder.Error![]const u8 {
+    if (request.scalar.size != @sizeOf(abi.Scalar) or request.scalar.kind != kind) return error.InvalidValue;
+    const length = std.math.cast(usize, request.scalar.bytes_len) orelse return error.Overflow;
+    return if (length == 0) "" else (request.scalar.bytes_ptr orelse return error.InvalidValue)[0..length];
+}
+fn builderSymbolLength(request: *const abi.MessageBuildRequest) message_builder.Error!usize {
+    if (request.scalar.size != @sizeOf(abi.Scalar) or request.scalar.kind != .int) return error.InvalidValue;
+    return std.math.cast(usize, request.scalar.bits) orelse return error.Overflow;
+}
 fn controllerBuildMessage(raw: *anyopaque, request: *const abi.MessageBuildRequest) callconv(.c) abi.HostStatus {
     const ctx = context(raw);
     return buildMessage(ctx, request) catch |err| constructionFailure(ctx, err);
@@ -1076,6 +1085,10 @@ fn buildMessage(ctx: *ControllerContext, request: *const abi.MessageBuildRequest
             defer heap.hostDomain(ctx.cell.adapter.owner.host).releaseValue(child);
             try builder.replaceChild(child);
         },
+        .bytes => try builder.byteList(try builderBytes(request, .list)),
+        .symbol_start => try builder.beginSymbolChunks(try builderSymbolLength(request)),
+        .symbol_chunk => try builder.symbolChunk(try builderBytes(request, .symbol)),
+        .symbol_end => try builder.endSymbol(),
         .list => try builder.list(request.count),
         .dictionary => try builder.dictionary(request.count),
         .clear => try builder.clear(),
@@ -1510,6 +1523,16 @@ fn buildCooperative(ctx: *ControllerContext, request: *const abi.MessageBuildReq
                 _ => return error.InvalidValue,
             }
         },
+        .bytes => {
+            try builder.byteList(try builderBytes(request, .list));
+            building.phase = .working;
+        },
+        .symbol_start => try builder.beginSymbolChunks(try builderSymbolLength(request)),
+        .symbol_chunk => try builder.symbolChunk(try builderBytes(request, .symbol)),
+        .symbol_end => {
+            try builder.endSymbol();
+            building.phase = .working;
+        },
         .copy_input => {
             if (request.depth > abi.max_read_path_depth) return error.InvalidValue;
             const path: []const u64 = if (request.depth == 0) &.{} else (request.path orelse return error.InvalidValue)[0..request.depth];
@@ -1601,7 +1624,12 @@ fn cooperativeBeginCommit(raw: *anyopaque) callconv(.c) bool {
     return running.beginCommit();
 }
 
+fn cooperativeMonotonicMilliseconds(raw: *anyopaque) callconv(.c) i64 {
+    return context(raw).cell.scheduler.monotonicMilliseconds();
+}
+
 const cooperative_table: abi.CooperativeTable = .{
+    .monotonic_milliseconds = cooperativeMonotonicMilliseconds,
     .begin_commit = cooperativeBeginCommit,
     .instance_state = controllerInstance,
     .initialization_parent = controllerInitializationParent,
@@ -1862,6 +1890,16 @@ const RejectedOpening = struct {
                     },
                     else => return error.InvalidValue,
                 }
+            },
+            .bytes => {
+                try builder.byteList(try builderBytes(request, .list));
+                self.construction = .working;
+            },
+            .symbol_start => try builder.beginSymbolChunks(try builderSymbolLength(request)),
+            .symbol_chunk => try builder.symbolChunk(try builderBytes(request, .symbol)),
+            .symbol_end => {
+                try builder.endSymbol();
+                self.construction = .working;
             },
             .copy_input => {
                 if (request.depth > abi.max_read_path_depth) return error.InvalidValue;

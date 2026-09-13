@@ -32,7 +32,7 @@ Session's runtime I/O state.
 The public `net` and `proc` modules are ECL compositions over these registered
 capabilities and `port.*`. Their operation and endpoint selectors expose only
 their corresponding resources and streams. First-party adapters use typed backend calls;
-the extension adapter translates ABI v19 calls into the same runtime interfaces
+the extension adapter translates ABI v20 calls into the same runtime interfaces
 for controller execution, transport, cancellation, ownership, and cleanup.
 
 Embedded names have precedence over filesystem modules. A file on `ECL_PATH`
@@ -128,9 +128,11 @@ loader. The complete word table validates before publication, and publication
 is atomic.
 
 The current pre-release native ABI is version 19, with entry symbol
-`ecl_module_abi_v19`. Resource authors choose `ecl.Port(.{ .controller = Spec })`
+`ecl_module_abi_v20`. Resource authors choose `ecl.Port(.{ .controller = Spec })`
 or `ecl.Port(.{ .cooperative = Spec })`. Cooperative callbacks receive bounded
-work accounting and cancellable timer parking. Their persistent builder begins
+work accounting, read-only Session-relative `monotonicMilliseconds`, and
+cancellable timer parking. Clock observation follows the host clock policy and
+grants no manual advancement authority. Their persistent builder begins
 aggregate construction and advances it explicitly; it has no blocking endpoints.
 A cooperative operation whose typed handler accepts `*ecl.Finalizer` seals its
 resource when admitted. Earlier admitted work and dependent children settle before
@@ -284,6 +286,14 @@ The controller-local `MessageBuilder` constructs scalars, nested lists and
 dictionaries, and copies permitted input capabilities without exposing ECL
 storage. Builder methods settle construction and validation in bounded host
 steps before returning; authors use ordinary `try` expressions.
+`byteList` constructs a list of integer bytes from a copied chunk of at most
+64 KiB, occupying one construction slot. Larger symbols use `beginSymbol` with
+the total UTF-8 byte count, `symbolChunk` with at most 256 bytes per call, and
+`endSymbol`. Chunks may split a UTF-8 sequence; completion validates the complete
+symbol. Until completion, only further chunks or `clear` are accepted. Partial
+buffers belong to the host and retire on failure or cancellation. Cooperative
+builders require `advance` after byte materialization and symbol completion.
+These operations are also available to finalizer and diagnostic builders.
 A sender's `send` and the builder's `result` consume the completed message on
 success. Failure retains it for cleanup or an explicit library decision.
 Construction errors invalidate the partial message, and `clear` explicitly

@@ -185,6 +185,7 @@ pub fn build(b: *std.Build) void {
         .{ .file = "activity_finish_output", .message = "ecl-native: activity finishes resource byte inputs" },
         .{ .file = "activity_stop_input", .message = "ecl-native: activity stops resource byte outputs" },
         .{ .file = "rejected_open_resource_authority", .message = "no field or member function named 'builder' in 'ports.RejectedOpen'" },
+        .{ .file = "rejected_open_clock_authority", .message = "no field or member function named 'monotonicMilliseconds' in 'ports.RejectedOpen'" },
         .{ .file = "rejected_open_child_authority", .message = "no field or member function named 'child' in 'ports.RejectedErrorDataBuilder'" },
         .{ .file = "invalid_instance_callbacks", .message = "ecl-native: invalid instance lifecycle signatures" },
         .{ .file = "cooperative_blocking_endpoint", .message = "no field or member function named 'endpoint' in 'ports.Cooperative'" },

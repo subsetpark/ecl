@@ -2043,7 +2043,11 @@ Structured native message grants belong to the registered instance. Factory and
 operation capabilities retain the issuer's immutable validation limits, and native
 builders derive the same grant from their resource owner. Message footprint and
 construction stack capacity are separate bounds: copying a large validated
-aggregate occupies one stack slot. No request can choose its own policy or
+aggregate occupies one stack slot. Byte-list materialization owns a bounded
+copy and advances incrementally. Chunked symbol construction owns an exactly
+sized staging buffer until complete UTF-8 validation and interning settle;
+partial input never borrows native memory across callbacks. Every construction
+phase carries its own joined cleanup. No request can choose its own policy or
 increase another instance's budget; ordinary extension defaults remain unchanged.
 The native descriptor selects controller or cooperative execution exhaustively.
 Cooperative resources use one serial resumable lane and reserve their scheduler

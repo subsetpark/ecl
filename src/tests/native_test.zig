@@ -2933,3 +2933,49 @@ test "native: instance message grants preserve default limits and bound construc
             "instanceprobe.cooperative [] port.open (|p| p wrap (instanceprobe.values 5 port.call) @attempt 'err at 'kind at 'overflow match? {'kind 'user 'msg \"separate construction bound\"} assert p port.close) call");
     }
 }
+
+test "native: bounded byte and symbol construction works through every SDK builder" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    for ([_]bool{ true, false }) |linked| {
+        var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+            .clock = .{ .monotonic = .manual },
+            .ecl_path = if (linked) null else native_fixture.directory,
+            .native_instances = &.{.{ .name = "instanceprobe", .registration = .{ .deferred = if (linked) @import("native-instance").Extension.descriptor() else null }, .port_limits = .{ .max_live_ports = 1, .message_limits = .{ .nodes = 65550, .bytes = 525000 }, .builder_slots = 4 } }},
+        }), .cooperative, .evaluate);
+        defer runtime.deinit();
+        try expectOk(&runtime,
+            \\(dup len 2 = {'kind 'user 'msg "two values"} assert dup first dup len 65536 = {'kind 'user 'msg "full byte chunk"} assert first 165 = {'kind 'user 'msg "byte value"} assert 1 at str len 301 = {'kind 'user 'msg "chunked UTF8 symbol"} assert) 'check-packed set
+            \\instanceprobe.packed-controller [] port.open (|p|
+            \\  p instanceprobe.controller-packed-values 1 port.call check-packed call
+            \\  p wrap (instanceprobe.controller-packed-diagnostic 1 port.call) @attempt 'err at 'data at 'payload at check-packed call
+            \\  p port.close) call
+            \\instanceprobe.packed-cooperative [] port.open (|p|
+            \\  p instanceprobe.cooperative-packed-values 1 port.call check-packed call
+            \\  p wrap (instanceprobe.cooperative-packed-diagnostic 1 port.call) @attempt 'err at 'data at 'payload at check-packed call
+            \\  [] (instanceprobe.packed-cooperative [] port.open) @attempt 'err at 'data at 'payload at first [165 165] match? {'kind 'user 'msg "capacity diagnostic builder"} assert
+            \\  p instanceprobe.packed-clock [] port.call 0 = {'kind 'user 'msg "manual clock origin"} assert
+            \\  p port.close) call
+            \\instanceprobe.packed-cooperative [] port.open (|p| p instanceprobe.packed-finalize 1 port.call check-packed call p port.close) call
+            \\instanceprobe.packed-cooperative [] port.open (|p| p wrap (instanceprobe.packed-finalize-error 1 port.call) @attempt 'err at 'data at 'payload at check-packed call p port.close) call
+        );
+        try runtime.advanceManualClock(123);
+        try expectOk(&runtime, "instanceprobe.packed-cooperative [] port.open dup instanceprobe.packed-clock [] port.call 123 = {'kind 'user 'msg \"issuer clock\"} assert port.close");
+    }
+}
+
+test "native: bounded constructors reject excessive and incomplete chunks and retire parked symbols" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+        .clock = .{ .monotonic = .manual },
+        .native_instances = &.{.{ .name = "instanceprobe", .registration = .{ .deferred = @import("native-instance").Extension.descriptor() } }},
+    }), .cooperative, .evaluate);
+    defer runtime.deinit();
+    try expectOk(&runtime,
+        \\instanceprobe.packed-cooperative [] port.open (|p| p wrap (instanceprobe.cooperative-packed-values 2 port.call) @attempt 'err at 'kind at 'overflow match? {'kind 'user 'msg "chunk limit"} assert p port.close) call
+        \\instanceprobe.packed-cooperative [] port.open (|p| p wrap (instanceprobe.cooperative-packed-values 4 port.call) @attempt 'err at 'kind at 'overflow match? {'kind 'user 'msg "chunk limit"} assert p port.close) call
+        \\instanceprobe.packed-controller [] port.open (|p| p wrap (instanceprobe.controller-packed-values 3 port.call) @attempt 'err at 'kind at 'type match? {'kind 'user 'msg "incomplete symbol"} assert p port.close) call
+        \\instanceprobe.packed-cooperative [] port.open (|p| p instanceprobe.packed-park [] port.begin (|x| (instanceprobe.packed-started 0 =) (0 clock.sleep) while x port.cancel x port.close) call p port.close) call
+    );
+}

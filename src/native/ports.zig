@@ -173,6 +173,21 @@ pub const MessageBuilder = opaque {
     pub fn symbol(self: *MessageBuilder, bytes: []const u8) ControllerError!void {
         return self.apply(.{ .action = .scalar, .scalar = capability.Scalar.symbol(bytes).wire });
     }
+    /// Copy at most 65536 bytes into one integer-byte list. The host owns
+    /// the copy before return; message footprint limits still apply.
+    pub fn byteList(self: *MessageBuilder, source: []const u8) ControllerError!void {
+        return self.apply(.{ .action = .bytes, .scalar = .{ .kind = .list, .bytes_ptr = source.ptr, .bytes_len = source.len } });
+    }
+    pub fn beginSymbol(self: *MessageBuilder, byte_count: usize) ControllerError!void {
+        return self.apply(.{ .action = .symbol_start, .scalar = .{ .kind = .int, .bits = byte_count } });
+    }
+    /// Append at most 256 bytes. UTF-8 sequences may cross chunk boundaries.
+    pub fn symbolChunk(self: *MessageBuilder, source: []const u8) ControllerError!void {
+        return self.apply(.{ .action = .symbol_chunk, .scalar = capability.Scalar.symbol(source).wire });
+    }
+    pub fn endSymbol(self: *MessageBuilder) ControllerError!void {
+        return self.apply(.{ .action = .symbol_end });
+    }
     pub fn input(self: *MessageBuilder, path: []const u64) ControllerError!void {
         if (path.len > abi.max_read_path_depth) return error.InvalidValue;
         return self.apply(.{ .action = .copy_input, .path = path.ptr, .depth = @intCast(path.len) });
@@ -574,6 +589,13 @@ pub const Cooperative = opaque {
         const owned = self.state();
         return owned.table.consume(owned.context, units);
     }
+    /// Session-relative time from the same clock used by park, including
+    /// a host-configured manual clock. This grants no clock mutation authority.
+    pub fn monotonicMilliseconds(self: *Cooperative) ControllerError!i64 {
+        const owned = self.state();
+        const query = owned.table.monotonic_milliseconds orelse return error.InvalidValue;
+        return query(owned.context);
+    }
     /// Capture a timer deadline now. Return parked only after this succeeds.
     /// Cancellation wakes the parked invocation so its private unwind can join.
     pub fn park(self: *Cooperative, milliseconds: u63) bool {
@@ -647,6 +669,21 @@ pub const CooperativeBuilder = opaque {
     }
     pub fn symbol(self: *CooperativeBuilder, bytes: []const u8) ControllerError!void {
         return self.apply(.{ .action = .scalar, .scalar = capability.Scalar.symbol(bytes).wire });
+    }
+    /// Copy at most 65536 bytes into one integer-byte list. The host owns
+    /// the copy before return; message footprint limits still apply.
+    pub fn byteList(self: *CooperativeBuilder, source: []const u8) ControllerError!void {
+        return self.apply(.{ .action = .bytes, .scalar = .{ .kind = .list, .bytes_ptr = source.ptr, .bytes_len = source.len } });
+    }
+    pub fn beginSymbol(self: *CooperativeBuilder, byte_count: usize) ControllerError!void {
+        return self.apply(.{ .action = .symbol_start, .scalar = .{ .kind = .int, .bits = byte_count } });
+    }
+    /// Append at most 256 bytes. UTF-8 sequences may cross chunk boundaries.
+    pub fn symbolChunk(self: *CooperativeBuilder, source: []const u8) ControllerError!void {
+        return self.apply(.{ .action = .symbol_chunk, .scalar = capability.Scalar.symbol(source).wire });
+    }
+    pub fn endSymbol(self: *CooperativeBuilder) ControllerError!void {
+        return self.apply(.{ .action = .symbol_end });
     }
     pub fn input(self: *CooperativeBuilder, path: []const u64) ControllerError!void {
         if (path.len > abi.max_read_path_depth) return error.InvalidValue;
@@ -750,6 +787,18 @@ pub const FinalizerBuilder = opaque {
     }
     pub fn symbol(self: *FinalizerBuilder, value: []const u8) ControllerError!void {
         return self.builder().symbol(value);
+    }
+    pub fn byteList(self: *FinalizerBuilder, source: []const u8) ControllerError!void {
+        return self.builder().byteList(source);
+    }
+    pub fn beginSymbol(self: *FinalizerBuilder, byte_count: usize) ControllerError!void {
+        return self.builder().beginSymbol(byte_count);
+    }
+    pub fn symbolChunk(self: *FinalizerBuilder, source: []const u8) ControllerError!void {
+        return self.builder().symbolChunk(source);
+    }
+    pub fn endSymbol(self: *FinalizerBuilder) ControllerError!void {
+        return self.builder().endSymbol();
     }
     pub fn input(self: *FinalizerBuilder, value: []const u64) ControllerError!void {
         return self.builder().input(value);
@@ -894,6 +943,18 @@ pub const ErrorDataBuilder = opaque {
     pub fn symbol(self: *ErrorDataBuilder, value: []const u8) ControllerError!void {
         return self.builder().symbol(value);
     }
+    pub fn byteList(self: *ErrorDataBuilder, source: []const u8) ControllerError!void {
+        return self.builder().byteList(source);
+    }
+    pub fn beginSymbol(self: *ErrorDataBuilder, byte_count: usize) ControllerError!void {
+        return self.builder().beginSymbol(byte_count);
+    }
+    pub fn symbolChunk(self: *ErrorDataBuilder, source: []const u8) ControllerError!void {
+        return self.builder().symbolChunk(source);
+    }
+    pub fn endSymbol(self: *ErrorDataBuilder) ControllerError!void {
+        return self.builder().endSymbol();
+    }
     pub fn input(self: *ErrorDataBuilder, value: []const u64) ControllerError!void {
         return self.builder().input(value);
     }
@@ -927,6 +988,18 @@ pub const CooperativeErrorDataBuilder = opaque {
     }
     pub fn symbol(self: *CooperativeErrorDataBuilder, value: []const u8) ControllerError!void {
         return self.builder().symbol(value);
+    }
+    pub fn byteList(self: *CooperativeErrorDataBuilder, source: []const u8) ControllerError!void {
+        return self.builder().byteList(source);
+    }
+    pub fn beginSymbol(self: *CooperativeErrorDataBuilder, byte_count: usize) ControllerError!void {
+        return self.builder().beginSymbol(byte_count);
+    }
+    pub fn symbolChunk(self: *CooperativeErrorDataBuilder, source: []const u8) ControllerError!void {
+        return self.builder().symbolChunk(source);
+    }
+    pub fn endSymbol(self: *CooperativeErrorDataBuilder) ControllerError!void {
+        return self.builder().endSymbol();
     }
     pub fn input(self: *CooperativeErrorDataBuilder, value: []const u64) ControllerError!void {
         return self.builder().input(value);
@@ -994,6 +1067,18 @@ pub const RejectedErrorDataBuilder = opaque {
     }
     pub fn symbol(self: *RejectedErrorDataBuilder, value: []const u8) ControllerError!void {
         return self.builder().symbol(value);
+    }
+    pub fn byteList(self: *RejectedErrorDataBuilder, source: []const u8) ControllerError!void {
+        return self.builder().byteList(source);
+    }
+    pub fn beginSymbol(self: *RejectedErrorDataBuilder, byte_count: usize) ControllerError!void {
+        return self.builder().beginSymbol(byte_count);
+    }
+    pub fn symbolChunk(self: *RejectedErrorDataBuilder, source: []const u8) ControllerError!void {
+        return self.builder().symbolChunk(source);
+    }
+    pub fn endSymbol(self: *RejectedErrorDataBuilder) ControllerError!void {
+        return self.builder().endSymbol();
     }
     pub fn input(self: *RejectedErrorDataBuilder, value: []const u64) ControllerError!void {
         return self.builder().input(value);

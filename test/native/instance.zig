@@ -12,6 +12,7 @@ const Lifecycle = struct {
         cooperative_started: std.atomic.Value(i64) = .init(0),
         child_advances: std.atomic.Value(i64) = .init(0),
         capacity_retired: std.atomic.Value(i64) = .init(0),
+        packed_started: std.atomic.Value(i64) = .init(0),
         capacity_started: std.atomic.Value(i64) = .init(0),
     };
     pub fn init() State {
@@ -530,13 +531,16 @@ pub const Extension = ecl.module(.{
     .name = "instanceprobe",
     .doc = "Instance isolation and retirement probe.",
     .instance = Instance,
-    .ports = .{ Resource, CooperativeResource, ActivityResource, DiagnosticController, DiagnosticCooperative },
+    .ports = .{ Resource, CooperativeResource, ActivityResource, DiagnosticController, DiagnosticCooperative, PackedController, PackedCooperative },
     .words = .{
         ecl.overload("private-value", "Read privately declared operation members.", .{ .{ Resource, .private_value }, .{ CooperativeResource, .private_value } }),
         ecl.overload("shared-value", "Read either controller or cooperative resource state.", .{ .{ Resource, .value }, .{ CooperativeResource, .borrowed } }),
         ecl.word("string-fact", "Observe the semantic string predicate.", isString),
+        ecl.factory("packed-controller", "Open a bounded native value constructor.", PackedController),
+        ecl.factory("packed-cooperative", "Open a resumable native value constructor.", PackedCooperative),
         ecl.factory("diagnostic-controller", "Open a controller diagnostic probe.", DiagnosticController),
         ecl.factory("diagnostic-cooperative", "Open a cooperative diagnostic probe.", DiagnosticCooperative),
+        ecl.word("packed-started", "Observe partial symbol construction before parking.", packedStarted),
         ecl.word("capacity-started", "Observe rejected opening work.", capacityStarted),
         ecl.word("capacity-retirements", "Observe settled capacity rejection cleanup.", capacityRetirements),
         ecl.word("next", "Read and increment instance state.", value),
@@ -774,4 +778,174 @@ pub const EagerExtension = ecl.module(.{
     .doc = "Observe a controlled startup input through instance initialization.",
     .instance = EagerState,
     .words = .{ecl.word("value", "Read the captured byte.", eagerValue)},
+});
+
+fn packedStarted(call: *ecl.Call("-- count")) ecl.CallbackResult {
+    return call.complete(.{ecl.Scalar.int(call.instance(Instance).?.packed_started.load(.acquire))});
+}
+const packed_bytes = [_]u8{165} ** (65536 + 1);
+const packed_symbol = "λ" ** 300;
+const PackedConstruction = struct {
+    mode: i64 = 0,
+    phase: enum { header, bytes, symbol, chunks, symbol_end, list, dictionary, finish, done } = .header,
+    offset: usize = 0,
+    fn step(self: *PackedConstruction, builder: anytype, comptime diagnostic: bool) ecl.ControllerError!ecl.CooperativeProgress {
+        if (comptime @hasDecl(@typeInfo(@TypeOf(builder)).pointer.child, "advance")) {
+            const progress = try builder.advance();
+            if (progress == .yielded) return .yielded;
+            if (progress != .completed) return error.InvalidValue;
+        }
+        switch (self.phase) {
+            .header => {
+                if (diagnostic) try builder.symbol("payload");
+                self.phase = .bytes;
+            },
+            .bytes => {
+                const length: usize = switch (self.mode) {
+                    1 => 65536,
+                    2 => 65537,
+                    else => 2,
+                };
+                try builder.byteList(packed_bytes[0..length]);
+                self.phase = .symbol;
+            },
+            .symbol => {
+                try builder.beginSymbol(packed_symbol.len);
+                self.phase = .chunks;
+            },
+            .chunks => {
+                const end = @min(self.offset + (if (self.mode == 4) @as(usize, 257) else 255), packed_symbol.len);
+                try builder.symbolChunk(packed_symbol[self.offset..end]);
+                self.offset = end;
+                if (end == packed_symbol.len or self.mode == 3) self.phase = .symbol_end;
+            },
+            .symbol_end => {
+                try builder.endSymbol();
+                self.phase = .list;
+            },
+            .list => {
+                try builder.list(2);
+                self.phase = if (diagnostic) .dictionary else .finish;
+            },
+            .dictionary => {
+                try builder.dictionary(1);
+                self.phase = .finish;
+            },
+            .finish => {
+                if (diagnostic) try builder.seal() else try builder.result();
+                self.phase = .done;
+            },
+            .done => return .completed,
+        }
+        return .yielded;
+    }
+};
+const PackedController = ecl.Port(.{ .controller = struct {
+    pub const name = "packed-controller";
+    pub const State = struct { unused: u8 = 0 };
+    pub const operations = .{
+        .values = .{ .name = "controller-packed-values", .doc = "Build bounded bytes and a chunked symbol.", .handler = values, .lane = .operation, .endpoints = .{} },
+        .diagnose = .{ .name = "controller-packed-diagnostic", .doc = "Build bounded diagnostic values.", .handler = diagnose, .lane = .operation, .endpoints = .{} },
+    };
+    pub fn init() State {
+        return .{};
+    }
+    pub fn open(_: *State, _: *ecl.Controller) void {}
+    pub fn cancel(_: *State) void {}
+    pub fn deinit(_: *State) void {}
+    fn values(_: *State, ctx: *ecl.Controller) ecl.ControllerError!void {
+        var building: PackedConstruction = .{ .mode = ctx.input(&.{}).?.int() orelse 0 };
+        while (try building.step(ctx.builder(), false) != .completed) {}
+    }
+    fn diagnose(_: *State, ctx: *ecl.Controller) ecl.ControllerError!void {
+        var building: PackedConstruction = .{ .mode = ctx.input(&.{}).?.int() orelse 0 };
+        while (try building.step(ctx.errorData(), true) != .completed) {}
+        ctx.fail(.io, "packed diagnostic");
+    }
+} });
+const PackedCooperative = ecl.Port(.{ .cooperative = struct {
+    pub const name = "packed-cooperative";
+    pub const State = struct { building: PackedConstruction = .{}, parked: bool = false };
+    pub const CapacityFailure = PackedRejection;
+    pub const operations = .{
+        .values = .{ .name = "cooperative-packed-values", .doc = "Build bytes and a symbol over bounded slices.", .handler = values, .lane = .operation, .endpoints = .{} },
+        .diagnose = .{ .name = "cooperative-packed-diagnostic", .doc = "Build resumable diagnostic values.", .handler = diagnose, .lane = .operation, .endpoints = .{} },
+        .finalize = .{ .name = "packed-finalize", .doc = "Commit a bounded constructed result.", .handler = finalize, .lane = .operation, .endpoints = .{} },
+        .finalize_error = .{ .name = "packed-finalize-error", .doc = "Commit with bounded constructed diagnostics.", .handler = finalizeError, .lane = .operation, .endpoints = .{} },
+        .clock = .{ .name = "packed-clock", .doc = "Read the Session-relative monotonic clock.", .handler = clock, .lane = .operation, .endpoints = .{} },
+        .park = .{ .name = "packed-park", .doc = "Park with a partly supplied symbol until cancellation.", .handler = park, .lane = .operation, .endpoints = .{} },
+    };
+    pub fn init() State {
+        return .{};
+    }
+    pub fn open(_: *State, _: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
+        return .completed;
+    }
+    fn prepare(state: *State, ctx: anytype) void {
+        if (state.building.phase == .header) state.building.mode = ctx.input(&.{}).?.int() orelse 0;
+    }
+    fn values(state: *State, ctx: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
+        prepare(state, ctx);
+        return state.building.step(ctx.builder(), false);
+    }
+    fn diagnose(state: *State, ctx: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
+        prepare(state, ctx);
+        const progress = try state.building.step(ctx.errorData(), true);
+        if (progress == .completed) ctx.fail(.io, "packed diagnostic");
+        return progress;
+    }
+    fn finalize(state: *State, ctx: *ecl.Finalizer) ecl.ControllerError!ecl.CooperativeProgress {
+        prepare(state, ctx);
+        const progress = try state.building.step(ctx.builder(), false);
+        if (progress == .completed) try ctx.beginCommit();
+        return progress;
+    }
+    fn finalizeError(state: *State, ctx: *ecl.Finalizer) ecl.ControllerError!ecl.CooperativeProgress {
+        prepare(state, ctx);
+        const progress = try state.building.step(ctx.errorData(), true);
+        if (progress == .completed) {
+            try ctx.beginCommit();
+            ctx.fail(.io, "committed packed diagnostic");
+        }
+        return progress;
+    }
+    fn clock(_: *State, ctx: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
+        try ctx.builder().int(try ctx.monotonicMilliseconds());
+        try ctx.builder().result();
+        return .completed;
+    }
+    fn park(state: *State, ctx: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
+        if (!state.parked) {
+            try ctx.builder().beginSymbol(600);
+            try ctx.builder().symbolChunk("prefix");
+            state.parked = true;
+            _ = ctx.instance(Instance).?.packed_started.fetchAdd(1, .release);
+        }
+        if (!ctx.park(3_600_000)) return error.InvalidValue;
+        return .parked;
+    }
+    pub fn retireOperation(state: *State, _: *ecl.Cooperative) ecl.CooperativeProgress {
+        state.* = .{};
+        return .completed;
+    }
+    pub fn retire(_: *State, _: *ecl.Cooperative) ecl.CooperativeProgress {
+        return .completed;
+    }
+} });
+const PackedRejection = ecl.CapacityFailure(struct {
+    pub const State = PackedConstruction;
+    pub fn init() State {
+        return .{};
+    }
+    pub fn step(state: *State, ctx: *ecl.RejectedOpen) ecl.RejectionResult {
+        const progress = try state.step(ctx.errorData(), true);
+        if (progress == .completed) {
+            ctx.fail(.domain, "packed capacity diagnostic");
+            return .completed;
+        }
+        return .yielded;
+    }
+    pub fn retire(_: *State, _: *ecl.RejectedOpen) bool {
+        return true;
+    }
 });
