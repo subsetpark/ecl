@@ -23,7 +23,7 @@ const console_api = @import("console.zig");
 const map_state = @import("module_snapshot.zig");
 const session_options = @import("session_options");
 const stdlib = @import("stdlib.zig");
-const process_port = @import("process_port.zig");
+const bundled_proc = @import("bundled-proc");
 const filesystem_port = @import("filesystem_port.zig");
 const bundled_net = @import("bundled-net");
 const http_service = @import("http_service.zig");
@@ -106,7 +106,7 @@ pub const RuntimeInputs = struct {
     standard_input: machine.StandardInput.Availability = .data,
     /// Absolute startup directory for process execution and module-map discovery.
     initial_cwd: []const u8,
-    process_limits: process_port.Limits = .{},
+    process_limits: bundled_proc.Limits = .{},
     filesystem: filesystem_port.Config = .{},
     net_limits: bundled_net.Limits = .{},
     http_limits: http_service.Limits = .{},
@@ -227,7 +227,7 @@ const SessionCore = struct {
     registry: modules.Registry,
     test_authority: ?modules.TestAuthority,
     native_owner: *native_module.Owner,
-    process_owner: *process_port.ProcessOwner,
+    startup_cwd: []const u8,
     filesystem_owner: *filesystem_port.FilesystemOwner,
     http_owner: *http_service.Owner,
     stack: std.ArrayList(Value) = .empty,
@@ -342,7 +342,7 @@ pub const Session = enum(usize) {
         errdefer registry.deinit();
         host.net_limits.validate() catch return error.InvalidHostConfig;
         const net_configuration = host.net_limits.encode();
-        const native_configurations = try allocator.alloc(native_module.Configuration, host.native_instances.len + 1);
+        const native_configurations = try allocator.alloc(native_module.Configuration, host.native_instances.len + 2);
         defer allocator.free(native_configurations);
         @memcpy(native_configurations[0..host.native_instances.len], host.native_instances);
         native_configurations[host.native_instances.len] = .{
@@ -352,6 +352,20 @@ pub const Session = enum(usize) {
             .port_limits = .{
                 .max_live_ports = host.net_limits.max_live_listeners + host.net_limits.max_live_connections,
                 .ring_capacity = @max(host.net_limits.receive_capacity, host.net_limits.send_capacity),
+            },
+        };
+        const process_configuration = bundled_proc.Configuration.encode(allocator, host.process_limits, host.initial_cwd, host.environ) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.InvalidConfig => error.InvalidHostConfig,
+        };
+        defer allocator.free(process_configuration);
+        native_configurations[host.native_instances.len + 1] = .{
+            .name = "proc.core",
+            .bytes = process_configuration,
+            .memory_limit = std.math.maxInt(usize),
+            .port_limits = .{
+                .max_live_ports = host.process_limits.max_live_ports,
+                .ring_capacity = @max(host.process_limits.stdin_capacity, host.process_limits.stdout_capacity, host.process_limits.stderr_capacity),
             },
         };
         const native_owner = native_module.Owner.initConfigured(host_owner.cleanup(), host.native_port_limits, native_configurations) catch |err| return switch (err) {
@@ -415,25 +429,8 @@ pub const Session = enum(usize) {
             error.InvalidConfig => error.InvalidHostConfig,
         };
         errdefer snapshot.deinit();
-        const process_owner = owner: {
-            const owned = try allocator.create(process_port.ProcessOwner);
-            errdefer allocator.destroy(owned);
-            owned.* = process_port.ProcessOwner.init(
-                host_owner.cleanup(),
-                host.io,
-                host.initial_cwd,
-                host.process_limits,
-                snapshot.view(),
-            ) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.InvalidConfig => return error.InvalidHostConfig,
-            };
-            break :owner owned;
-        };
-        errdefer {
-            process_owner.deinit();
-            allocator.destroy(process_owner);
-        }
+        const startup_cwd = try allocator.dupe(u8, host.initial_cwd);
+        errdefer allocator.free(startup_cwd);
         const filesystem_owner = owner: {
             const owned = try allocator.create(filesystem_port.FilesystemOwner);
             errdefer allocator.destroy(owned);
@@ -467,7 +464,7 @@ pub const Session = enum(usize) {
             .registry = registry,
             .test_authority = test_authority,
             .native_owner = native_owner,
-            .process_owner = process_owner,
+            .startup_cwd = startup_cwd,
             .filesystem_owner = filesystem_owner,
             .http_owner = http_owner,
             .archive_owner = archive_owner,
@@ -529,8 +526,7 @@ pub const Session = enum(usize) {
         // them while the issuing Owner is still alive, then let that host-only
         // authority tear down descriptors/images and drain their ECL values.
         host.drain();
-        core.process_owner.deinit();
-        core.allocator().destroy(core.process_owner);
+        core.allocator().free(core.startup_cwd);
         core.environ.deinit();
         const settled_native_owner = closing_native_owner.settle();
         host.drain();
@@ -601,7 +597,7 @@ pub const Session = enum(usize) {
                     .native_loader = core.native_owner.loader(),
                     .console = &core.console,
                     .host_io = core.host_io,
-                    .process_access = core.process_owner.access(),
+                    .startup_cwd = core.startup_cwd,
                     .filesystem_access = core.filesystem_owner.access(),
                     .http_access = core.http_owner.access(),
                     .wall_clock = core.wall_clock,

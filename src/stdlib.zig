@@ -99,7 +99,7 @@ const modules = [_]Module{
         .name = "<stdlib:proc>",
         .text = @embedFile("stdlib/proc.ecl"),
     } } },
-    .{ .name = "proc.core", .entry = .{ .bindings = @import("process_adapter.zig").registration } },
+    .{ .name = "proc.core", .entry = .{ .native = @import("bundled-proc").Extension.descriptor() } },
     .{ .name = "fs", .entry = .{ .builtin = &fs_module.words } },
     .{ .name = "net", .entry = .{ .source = .{
         .name = "<stdlib:net>",

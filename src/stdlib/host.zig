@@ -3,7 +3,6 @@ const std = @import("std");
 const env = @import("../env.zig");
 const heap = @import("../heap.zig");
 const machine = @import("../machine.zig");
-const process = @import("../process_port.zig");
 const storage = @import("../kernel_storage.zig");
 
 pub const words = [_]env.BuiltinWord{
@@ -38,7 +37,7 @@ const Metadata = struct {
         if (self.state == .query) {
             const runtime = evaluator.unit.inherited.runtime();
             const bytes = switch (self.query) {
-                .cwd => process.startupDirectory(runtime.process_access),
+                .cwd => runtime.startup_cwd,
                 .executable => path: {
                     const length = std.process.executablePath(runtime.host_io, &self.buffer) catch
                         return evaluator.fail(.io, "cannot determine current executable path");

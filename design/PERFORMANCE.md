@@ -31,6 +31,31 @@ connections, reset handling, cancellation, capacity waiting, and backpressure.
 its positional arguments are the ReleaseSafe binary and output JSON, followed by
 `--commit <source-revision>`.
 
+## Bundled process SDK migration — 2026-09-12
+
+Zig 0.16.0, ReleaseSafe, native x86_64 Linux (kernel 7.1.9-1-MANJARO).
+The baseline is `8aae611`; the SDK row is `47968e4` plus the process cutover.
+The SDK binary uses `-Dapps=false`. Each row has one warmup and five fresh CLI
+processes, with other build and test jobs finished during measurement.
+
+The public workload starts 32 concurrent `/bin/cat` processes through `proc.run`,
+sends 4096 bytes to each, concurrently captures their outputs, checks all returned
+lengths, and joins cleanup. Times include interpreter startup and shutdown. The
+1 ms `/proc` samples count interpreter threads and RSS, excluding child processes.
+This measures short process lifecycle and duplex transfer, not bulk pipe throughput.
+
+| Backend | Elapsed seconds, five runs | Peak threads, five runs | Peak RSS KiB, five runs |
+|---|---|---|---|
+| Interpreter process service | 2.148608, 2.357761, 2.209333, 2.126780, 2.045827 | 220, 240, 237, 240, 240 | 81356, 81832, 82180, 82244, 82672 |
+| Bundled SDK descriptor | 1.029935, 0.770128, 1.105366, 1.020238, 1.064394 | 219, 223, 234, 228, 219 | 85540, 87324, 90460, 87792, 86444 |
+
+Median elapsed time decreased from 2.149 s to 1.030 s; median peak interpreter
+RSS increased from 80.3 MiB to 85.3 MiB. The SDK supervisor owns the escalation
+deadline alongside reaping, with four declared activities per process. Public
+acceptance separately verifies process-group cleanup, cancellation, bounded
+capture, and preservation of backpressured output after natural exit.
+`test/service_benchmark.py --workload process-duplex` reproduces this workload.
+
 ## Further compile-time trials — 2026-09-11
 
 These incremental trials start at `5922754`, using the same Zig 0.16.0,

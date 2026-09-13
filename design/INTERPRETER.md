@@ -61,7 +61,7 @@ The main components are these:
 | Bulk execution | Pervasive scalar semantics, typed flat loops, and guarded source-phrase recognition | `kernel_*.zig`, `kernels.zig`, `idioms.zig` |
 | Scheduler | Green units, structured task scopes, task and external waits, cancellation, timers, external membership, and retirement service | `scheduler_core.zig`, `scheduler.zig`, `external.zig`, `task_prims.zig` |
 | Port controllers | Typed job submission, FIFO admission and cancellation, independent execution, joined retirement, and shared scope lifetime | `port_controller.zig`, `port_transfer.zig` |
-| Process ports | POSIX process-group ownership, bounded pipe queues, and terminal publication | `process_port.zig`, `stdlib/proc.zig` |
+| Process ports | POSIX process-group ownership, bounded pipe queues, and terminal publication | `extensions/proc/proc.zig`, `stdlib/proc.ecl` |
 | Network listeners and connections | Normalized IP literals, scope-owned listening sockets, demand-gated accept, bounded connection queues serviced by controller threads, and idempotent close | `extensions/net/net.zig`, `stdlib/net.ecl` |
 | Boundary layers | Embedded modules, native extensions, rendering, terminal safety, the REPL, and the CLI | `prelude.zig`, `stdlib.zig`, `native_*.zig`, `print.zig`, `console.zig`, `line_editor.zig`, `main.zig` |
 
@@ -175,18 +175,14 @@ TLS verification overrides are internal deterministic-testing inputs. They
 confer no permissions and introduce no command-line modes.
 
 The dependency-neutral `startup_environment.zig` owns validated environment
-entries and backing bytes together with their allocator. Session owns this one
-snapshot; evaluation and the process owner borrow immutable views. Shutdown and
-initialization rollback release the snapshot only after its dependent owners;
-normal teardown first joins the scheduler and destroys the process owner. Child
-environment maps retain their independent overrides.
-
-The process owner requires an explicit startup directory and retains its owned
-sentinel-terminated copy, together with live-count, queue, and capture limits.
-Its opaque `ProcessAccess` lets Units
-request operations without obtaining the owner, scheduler scope, process cell,
-group identifier, or PID. Executable and working-directory syntax is validated
-at the process boundary; the operating system determines access.
+entries and backing bytes together with their allocator. Session owns the
+read-only metadata snapshot and startup directory through evaluation shutdown.
+The bundled process SDK instance independently owns its immutable startup
+configuration and queue, capture, and live-resource limits. Child environment
+maps apply per-request overrides without changing either captured snapshot.
+Executable and working-directory syntax is validated at the process boundary;
+the operating system determines access. Units obtain only ordinary registered
+process capabilities, never process-group identifiers or native owner access.
 
 The filesystem owner opens named roots once and owns their handles and the
 live-operation quota. Invalid roots or limits fail construction with
@@ -1582,8 +1578,9 @@ its immutable limits, socket state, and admission counts in a Session-local SDK
 instance. Listener and connection kinds have separate lifetimes: accepted
 connections retain their instance independently of the listener. Declared byte
 activities drain accepted output and join before socket disposal. No Session
-network owner or interpreter-facing socket adapter exists. The process adapter
-still owns typed process state through the common vocabulary.
+network owner or interpreter-facing socket adapter exists. The bundled process
+descriptor likewise owns its native child, pipe, and supervision state through
+the SDK instance and common resource lifecycle.
 The process `run` composition owns a child scope, drains both outputs alongside
 input and completion tasks, applies bounded capture and an optional task deadline,
 and joins that scope before returning or raising an error.
@@ -2055,14 +2052,17 @@ The service owns backend activity through a dependent group and joins it before
 resource cleanup becomes observable. Both task scopes and dependent groups use
 one atomic initial-membership publication boundary.
 
-The process adapter retains an owned parsed specification through asynchronous
-initialization. Its pipe and supervision activity belongs to the common
-resource's dependent activity group, so transferring the resource transfers
-responsibility for joining that activity. Process exit and resource closure
-are separate terminal facts: exit settles wait operations, while closure
-retires the service and its controller capacity. The issuing process owner
-outlives retained resource identities and their reclamation, including after
-scope cleanup has joined execution.
+The process SDK parses an owned specification before native startup. Its three
+pipe activities and supervisor belong to the common resource activity group,
+so resource transfer also transfers responsibility for joining them. Process
+exit and resource closure are separate terminal facts: exit and settled input
+complete wait operations, while closure joins all output and retires capacity.
+Natural exit preserves accepted output until readers drain. Explicit termination
+stops stream admission and preserves the accepted output prefix while native
+pipes drain through EOF. Group signaling and the authorization to reap share a
+mutex-protected transition; the terminated leader remains waitable until the
+final group signal, preventing signal delivery to a reused process identity.
+The SDK instance outlives all retained resources and their joined reclamation.
 
 A shared exchange owner carries scope membership, cancellation settlement,
 provisional child ownership, terminal results, and readiness for registered

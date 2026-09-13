@@ -129,10 +129,6 @@ pub fn WaitList(comptime Cell: type) type {
     };
 }
 
-/// Opaque access to Session-owned processes. Controller ownership, startup
-/// inputs, and resource limits remain private to `process_port.zig`.
-pub const ProcessAccess = opaque {};
-
 /// Opaque access to named filesystem roots. Directory handles, limits, and
 /// operation accounting remain private to `filesystem_port.zig`.
 pub const FilesystemAccess = opaque {};

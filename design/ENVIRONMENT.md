@@ -362,6 +362,14 @@ Opening a shared library executes machine code before ECL validates its
 descriptor. Every directory used for native loading is a trusted-code
 boundary.
 
+## Process execution
+
+The process backend is also an ordinary bundled SDK descriptor, including in
+builds without maintained applications. Host process limits and captured startup
+environment and directory configure its Session-local instance. Its resource
+budget is independent of unrelated native extensions, and ECL request fields
+cannot replace host configuration.
+
 ## Filesystem access
 
 Filesystem work goes through the `fs` module and the `path` module documented

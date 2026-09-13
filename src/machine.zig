@@ -1859,7 +1859,7 @@ pub const RuntimeContext = struct {
     native_loader: *native_module.Loader,
     console: *console_api.Console,
     host_io: std.Io,
-    process_access: *external.ProcessAccess,
+    startup_cwd: []const u8,
     filesystem_access: *external.FilesystemAccess,
     http_access: *@import("http_service.zig").Access,
     wall_clock: WallClock,
