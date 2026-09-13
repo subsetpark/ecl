@@ -3017,3 +3017,68 @@ test "native: inherited child lifetimes survive intermediate closure and join th
         );
     }
 }
+
+test "native: initialization input leases join closing issuers and preserve temporary borrows" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    for ([_]bool{ true, false }) |linked| {
+        var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+            .ecl_path = if (linked) null else native_fixture.directory,
+            .native_instances = &.{
+                .{ .name = "instanceprobe", .bytes = "A", .port_limits = .{ .max_live_ports = 64, .message_limits = .{ .capabilities = 31 } }, .registration = .{ .deferred = if (linked) @import("native-instance").Extension.descriptor() else null } },
+                .{ .name = "loanforeign", .bytes = "B", .registration = .{ .deferred = @import("native-instance").ForeignLoanExtension.descriptor() } },
+            },
+        }), .{ .worker_pool = 4 }, .evaluate);
+        defer runtime.deinit();
+        for ([_][]const u8{ "controller", "cooperative" }) |mode| {
+            const source = try std.fmt.allocPrint(std.testing.allocator, "instanceprobe.resource [] port.open 'target set " ++
+                "instanceprobe.{s}-loan target 0 pair port.open 'loan set " ++
+                "target wrap (port.close) @spawn 'closer set " ++
+                "([] (target instanceprobe.value [] port.call pop) @attempt 'err dict.has? not) (0 clock.sleep) while " ++
+                "loan instanceprobe.{s}-loan-read [] port.call 65 = {{'kind 'user 'msg \"admitted native state survives closure\"}} assert " ++
+                "loan instanceprobe.{s}-loan-probe [] port.call 1 = {{'kind 'user 'msg \"operation cannot acquire lifetime loans\"}} assert " ++
+                "[] (instanceprobe.cooperative-loan target 0 pair port.open) @attempt 'err at 'kind at 'io match? {{'kind 'user 'msg \"closed issuer rejects new lease\"}} assert " ++
+                "loan port.close closer task.await 'ok dict.has? {{'kind 'user 'msg \"issuer joins loan retirement\"}} assert target port.close " ++
+                "instanceprobe.resource [] port.open 'temporary-target set " ++
+                "instanceprobe.{s}-loan temporary-target 1 pair port.open 'temporary set " ++
+                "temporary-target port.close temporary instanceprobe.{s}-loan-read [] port.call 65 = {{'kind 'user 'msg \"temporary loan consumed at readiness\"}} assert temporary port.close", .{ mode, mode, mode, mode, mode });
+            defer std.testing.allocator.free(source);
+            try expectOk(&runtime, source);
+        }
+        try expectOk(&runtime,
+            \\17 (instanceprobe.resource [] port.open) times 17 pack 'pool set
+            \\instanceprobe.cooperative-loan pool first 4 pair port.open port.close
+            \\[] (instanceprobe.cooperative-loan pool first 5 pool 3 pack port.open) @attempt 'err at 'kind at 'overflow match? {'kind 'user 'msg "distinct native lease capacity"} assert
+            \\pool (port.close 0) each pop
+            \\instanceprobe.resource [] port.open 'owned-input set
+            \\[] (loanforeign.loan owned-input 0 pair port.open) @attempt 'err at 'kind at 'type match? {'kind 'user 'msg "instance-bound resource lease"} assert
+            \\[] (instanceprobe.cooperative-loan owned-input 2 pair port.open) @attempt 'err at 'kind at 'io match? {'kind 'user 'msg "failed initializer releases resource lease"} assert owned-input port.close
+            \\instanceprobe.packed-controller [] port.open 'wrong-kind set
+            \\[] (instanceprobe.cooperative-loan wrong-kind 0 pair port.open) @attempt 'err at 'kind at 'type match? {'kind 'user 'msg "nominal resource kind"} assert wrong-kind port.close
+            \\instanceprobe.resource [] port.open 'parked-target set
+            \\[] (instanceprobe.cooperative-loan parked-target 3 pair port.open port.close) @spawn 'opening set
+            \\(instanceprobe.started 5 = not) (0 clock.sleep) while
+            \\parked-target wrap (port.close) @spawn 'parked-closer set
+            \\opening task.cancel opening task.await 'err dict.has? {'kind 'user 'msg "cancel unpublished lease owner"} assert
+            \\parked-closer task.await 'ok dict.has? {'kind 'user 'msg "cancelled initializer joins issuer"} assert
+        );
+    }
+}
+
+test "native: admitted input leases settle before finalizer execution" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+        .native_instances = &.{.{ .name = "instanceprobe", .bytes = "A", .registration = .{ .deferred = @import("native-instance").Extension.descriptor() } }},
+    }), .{ .worker_pool = 4 }, .evaluate);
+    defer runtime.deinit();
+    try expectOk(&runtime,
+        \\instanceprobe.cooperative [] port.open 'target set
+        \\instanceprobe.finalization-loan target 0 pair port.open 'loan set
+        \\target wrap (instanceprobe.seal 0 port.call) @spawn 'commit-task set
+        \\([] (target instanceprobe.values 0 port.call pop) @attempt 'err dict.has? not) (0 clock.sleep) while
+        \\instanceprobe.started 0 = {'kind 'user 'msg "finalizer waits for admitted leases"} assert
+        \\loan instanceprobe.finalization-loan-read [] port.call 65 = {'kind 'user 'msg "lease remains valid while sealed"} assert
+        \\loan port.close commit-task task.await 'ok at first 42 = {'kind 'user 'msg "finalizer resumes after release"} assert target port.close
+    );
+}

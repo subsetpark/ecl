@@ -2257,3 +2257,13 @@ test "oom: standard-library and host: native inherited child lifetime" {
         "",
     ).run);
 }
+
+test "oom: standard-library and host: native initializer input leases" {
+    try requireSelectedOomTest(@src());
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortProbe(
+        "instanceprobe.resource [] port.open 'root set " ++
+            "instanceprobe.cooperative-loan root 0 pair port.open port.close " ++
+            "instanceprobe.controller-loan root 1 pair port.open port.close root port.close",
+        "",
+    ).run);
+}

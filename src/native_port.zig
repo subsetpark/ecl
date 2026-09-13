@@ -283,6 +283,26 @@ pub const Access = opaque {
 };
 
 pub const Cell = @import("port_service.zig").Resource(ResourceAdapter);
+const ResourceLoans = struct {
+    slots: [16]?*Cell.Lease = .{null} ** 16,
+    fn acquire(self: *ResourceLoans, target: *Cell) error{ Closed, Overflow }!*ResourceAdapter {
+        for (self.slots) |loan| if (loan) |held| {
+            if (held.adapter() == &target.adapter) return held.adapter();
+        };
+        for (&self.slots) |*slot| if (slot.* == null) {
+            const lease = try target.acquireLease();
+            slot.* = lease;
+            return lease.adapter();
+        };
+        return error.Overflow;
+    }
+    fn release(self: *ResourceLoans) void {
+        for (&self.slots) |*slot| if (slot.*) |loan| {
+            slot.* = null;
+            loan.release();
+        };
+    }
+};
 const ResourceAdapter = struct {
     pub const Exchange = @import("port_operation.zig").Exchange(OperationAdapter);
     pub const Request = struct { code: u32, lane: u32, endpoints: u64, mode: @import("port_operation.zig").Mode };
@@ -293,6 +313,7 @@ const ResourceAdapter = struct {
     backend: []align(64) u8,
     configuration: ?Value = null,
     initialization_context: ?*ControllerContext = null,
+    input_loans: ResourceLoans = .{},
     message_budget: *message_transport.Budget,
     resource_pipes: [64]?Protocol.Transport = .{null} ** 64,
     pub fn allocator(self: *const ResourceAdapter) std.mem.Allocator {
@@ -378,7 +399,9 @@ const ResourceAdapter = struct {
         self.retireInitializationContext();
         var ctx: ControllerContext = .{ .cell = cell, .invocation = .cleanup, .cooperative = .{} };
         defer ctx.deinit();
-        return cooperativeProgress(&ctx, self.definition.execution.cooperative.retire(self.backend.ptr, &cooperative_table, &ctx));
+        const progress = cooperativeProgress(&ctx, self.definition.execution.cooperative.retire(self.backend.ptr, &cooperative_table, &ctx));
+        if (progress == .completed) self.input_loans.release();
+        return progress;
     }
     pub fn cancel(self: *ResourceAdapter) void {
         switch (self.definition.execution) {
@@ -394,6 +417,7 @@ const ResourceAdapter = struct {
     }
     pub fn cleanup(self: *ResourceAdapter) void {
         self.definition.wire.cleanup.?(self.backend.ptr);
+        self.input_loans.release();
     }
     pub fn shutdown(self: *ResourceAdapter, cell: *Cell) ?byte_transport.Failure {
         var ctx: ControllerContext = .{ .cell = cell, .invocation = .{ .shutdown = null } };
@@ -851,6 +875,7 @@ const ControllerContext = struct {
     cell: *Cell,
     invocation: union(enum) { initialize, operation: struct { value: *Operation, running: ?*controllers.Running }, activity: struct { index: u32, failure: ?Failure = null }, shutdown: ?Failure, cleanup },
     received: ?*message_transport.Envelope = null,
+    input_loans: ResourceLoans = .{},
     builder: union(enum) {
         none,
         controller: *message_builder.Builder,
@@ -862,6 +887,7 @@ const ControllerContext = struct {
         return if (self.operation()) |op| &op.transport_cancelled else &self.cell.closed;
     }
     fn deinit(self: *ControllerContext) void {
+        self.input_loans.release();
         if (self.received) |item| item.release();
         self.received = null;
         switch (self.builder) {
@@ -949,6 +975,29 @@ fn controllerInitializationParent(raw: *anyopaque, identity: *const anyopaque) c
     };
     if (parent.adapter.instance != cell.adapter.instance or parent.adapter.definition.wire.identity != identity) return null;
     return parent.adapter.backend.ptr;
+}
+
+fn controllerInitializationResource(raw: *anyopaque, identity: *const anyopaque, path: [*]const u64, depth: u32, lifetime: abi.ResourceLeaseLifetime, output: *?*anyopaque) callconv(.c) abi.ResourceLeaseStatus {
+    const ctx = context(raw);
+    if (ctx.invocation != .initialize or depth > abi.max_read_path_depth or ctx.cell.closed.load(.acquire)) return .invalid;
+    const loans = switch (lifetime) {
+        .initialization => &ctx.input_loans,
+        .resource => &ctx.cell.adapter.input_loans,
+        _ => return .invalid,
+    };
+    const root = ctx.cell.adapter.configuration orelse return .invalid;
+    const item = valueAtPath(root, path[0..depth]) orelse return .invalid;
+    const target = resource_api.Resource.project(Cell, item) orelse return .invalid;
+    if (target == ctx.cell or target.adapter.instance != ctx.cell.adapter.instance or target.adapter.definition.wire.identity != identity) return .invalid;
+    const borrowed = loans.acquire(target) catch |err| return switch (err) {
+        error.Closed => .closed,
+        error.Overflow => blk: {
+            recordControllerFailure(ctx, .init(.overflow, "native initializer exceeds resource lease capacity"));
+            break :blk .failed;
+        },
+    };
+    output.* = borrowed.backend.ptr;
+    return .ok;
 }
 
 fn controllerInstance(raw: *anyopaque, identity: *const anyopaque) callconv(.c) ?*anyopaque {
@@ -1418,7 +1467,7 @@ fn controllerStopOutput(raw: *anyopaque, identity: *const anyopaque, index: u32)
     return true;
 }
 
-const controller_table: abi.ControllerTable = .{ .stop_output = controllerStopOutput, .fail_streams = controllerFailStreams, .finish_input = controllerFinishInput, .instance_state = controllerInstance, .initialization_parent = controllerInitializationParent, .resolve_endpoint = controllerResolveEndpoint, .read_bytes = controllerReadBytes, .write_bytes = controllerWriteBytes, .receive_event = controllerReceiveEvent, .fail_resource = controllerFailResource, .parent_state = controllerParent, .discard_message = controllerDiscardMessage, .build_message = controllerBuildMessage, .fail_allocation = controllerFailAllocation, .received_message = controllerReceivedMessage, .forward_message = controllerForwardMessage, .result_message = controllerResultMessage, .input = controllerInput, .finish_endpoint = controllerFinishEndpoint, .cancelled = controllerCancelled, .acknowledge_cancellation = controllerAcknowledge, .fail = controllerFail };
+const controller_table: abi.ControllerTable = .{ .initialization_resource = controllerInitializationResource, .stop_output = controllerStopOutput, .fail_streams = controllerFailStreams, .finish_input = controllerFinishInput, .instance_state = controllerInstance, .initialization_parent = controllerInitializationParent, .resolve_endpoint = controllerResolveEndpoint, .read_bytes = controllerReadBytes, .write_bytes = controllerWriteBytes, .receive_event = controllerReceiveEvent, .fail_resource = controllerFailResource, .parent_state = controllerParent, .discard_message = controllerDiscardMessage, .build_message = controllerBuildMessage, .fail_allocation = controllerFailAllocation, .received_message = controllerReceivedMessage, .forward_message = controllerForwardMessage, .result_message = controllerResultMessage, .input = controllerInput, .finish_endpoint = controllerFinishEndpoint, .cancelled = controllerCancelled, .acknowledge_cancellation = controllerAcknowledge, .fail = controllerFail };
 
 pub fn fromValue(value: Value, instance: *native.ModuleInstance, kind: u32) ?*Cell {
     const handle = switch (value) {
@@ -1633,6 +1682,7 @@ fn cooperativeMonotonicMilliseconds(raw: *anyopaque) callconv(.c) i64 {
 }
 
 const cooperative_table: abi.CooperativeTable = .{
+    .initialization_resource = controllerInitializationResource,
     .monotonic_milliseconds = cooperativeMonotonicMilliseconds,
     .begin_commit = cooperativeBeginCommit,
     .instance_state = controllerInstance,

@@ -107,7 +107,7 @@ const ForeignPort = ecl.Port(.{ .controller = struct {
 const Resource = ecl.Port(.{ .controller = struct {
     pub const name = "resource";
     pub const CapacityFailure = CapacityReporter;
-    pub const State = struct { value: i64 = 0 };
+    pub const State = struct { value: i64 = 0, cancelled: std.atomic.Value(bool) = .init(false) };
     pub const operations = .{
         .private_value = .{ .name = "hidden-value", .visibility = .private, .doc = "Private controller selector member.", .handler = read, .lane = .operation, .endpoints = .{} },
         .value = .{ .doc = "Read the host-configured value.", .handler = read, .lane = .operation, .endpoints = .{} },
@@ -125,8 +125,12 @@ const Resource = ecl.Port(.{ .controller = struct {
             state.value = parent.value + 10;
         }
     }
-    pub fn cancel(_: *State) void {}
-    pub fn deinit(_: *State) void {}
+    pub fn cancel(state: *State) void {
+        state.cancelled.store(true, .release);
+    }
+    pub fn deinit(state: *State) void {
+        state.value = -1;
+    }
     fn read(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
         if (controller.initializationParent(Resource) != null) return error.InvalidValue;
         const builder = controller.builder();
@@ -535,11 +539,14 @@ pub const Extension = ecl.module(.{
     .name = "instanceprobe",
     .doc = "Instance isolation and retirement probe.",
     .instance = Instance,
-    .ports = .{ Resource, CooperativeResource, ActivityResource, DiagnosticController, DiagnosticCooperative, PackedController, PackedCooperative },
+    .ports = .{ Resource, CooperativeResource, ActivityResource, DiagnosticController, DiagnosticCooperative, PackedController, PackedCooperative, ControllerLoan, CooperativeLoan, FinalizationLoan },
     .words = .{
         ecl.overload("private-value", "Read privately declared operation members.", .{ .{ Resource, .private_value }, .{ CooperativeResource, .private_value } }),
         ecl.overload("shared-value", "Read either controller or cooperative resource state.", .{ .{ Resource, .value }, .{ CooperativeResource, .borrowed } }),
         ecl.word("string-fact", "Observe the semantic string predicate.", isString),
+        ecl.factory("controller-loan", "Borrow an input resource through controller initialization.", ControllerLoan),
+        ecl.factory("cooperative-loan", "Borrow an input resource through cooperative initialization.", CooperativeLoan),
+        ecl.factory("finalization-loan", "Hold a cooperative target through finalization admission.", FinalizationLoan),
         ecl.factory("packed-controller", "Open a bounded native value constructor.", PackedController),
         ecl.factory("packed-cooperative", "Open a resumable native value constructor.", PackedCooperative),
         ecl.factory("diagnostic-controller", "Open a controller diagnostic probe.", DiagnosticController),
@@ -952,4 +959,130 @@ const PackedRejection = ecl.CapacityFailure(struct {
     pub fn retire(_: *State, _: *ecl.RejectedOpen) bool {
         return true;
     }
+});
+
+fn LoanState(comptime Parent: type) type {
+    return struct {
+        borrowed: ?*Parent.StateType = null,
+        copied: i64 = 0,
+        mode: i64 = 0,
+        remaining: usize = 513,
+        fn parentValue(parent: *Parent.StateType) i64 {
+            return if (Parent == Resource) parent.value else parent.copied_parent.?;
+        }
+        fn acquire(self: *@This(), ctx: anytype) ecl.ControllerError!void {
+            self.mode = ctx.input(&.{1}).?.int() orelse return error.InvalidValue;
+            const borrowed = ctx.initializationResource(Parent, &.{0}, if (self.mode == 1) .initialization else .resource) catch |err| switch (err) {
+                error.Closed => {
+                    ctx.fail(.io, "input resource closed");
+                    return error.Failed;
+                },
+                error.InvalidValue => {
+                    ctx.fail(.type, "input resource has another issuer or kind");
+                    return error.Failed;
+                },
+                error.Failed => return error.Failed,
+            };
+            if (self.mode == 4) for (0..32) |_| {
+                const again = ctx.initializationResource(Parent, &.{0}, .resource) catch return error.Failed;
+                if (again != borrowed) return error.InvalidValue;
+            };
+            if (self.mode == 5) for (0..17) |index| {
+                _ = ctx.initializationResource(Parent, &.{ 2, index }, .resource) catch return error.Failed;
+            };
+            self.copied = parentValue(borrowed);
+            self.borrowed = if (self.mode == 1) null else borrowed;
+            if (self.mode == 2) {
+                ctx.fail(.io, "requested failure after input lease");
+                return error.Failed;
+            }
+        }
+        fn read(self: *@This(), ctx: anytype) ecl.ControllerError!void {
+            try ctx.builder().int(if (self.borrowed) |borrowed| parentValue(borrowed) else self.copied);
+            try ctx.builder().result();
+        }
+        fn probe(_: *@This(), ctx: anytype) ecl.ControllerError!void {
+            _ = ctx.initializationResource(Parent, &.{0}, .resource) catch |err| {
+                if (err != error.InvalidValue) return error.InvalidValue;
+                try ctx.builder().int(1);
+                try ctx.builder().result();
+                return;
+            };
+            return error.InvalidValue;
+        }
+    };
+}
+const ControllerLoan = ecl.Port(.{ .controller = struct {
+    pub const name = "controller-loan";
+    pub const State = LoanState(Resource);
+    pub const operations = .{
+        .read = .{ .name = "controller-loan-read", .doc = "Read admitted native state through its lifetime lease.", .handler = read, .lane = .operation, .endpoints = .{} },
+        .probe = .{ .name = "controller-loan-probe", .doc = "Reject lifetime acquisition after initialization.", .handler = probe, .lane = .operation, .endpoints = .{} },
+    };
+    pub fn init() State {
+        return .{};
+    }
+    pub fn open(state: *State, ctx: *ecl.Controller) void {
+        state.acquire(ctx) catch |err| switch (err) {
+            error.OutOfMemory => ctx.failOutOfMemory(),
+            error.Cancelled, error.Failed => {},
+            error.InvalidValue => ctx.fail(.type, "invalid lease configuration"),
+        };
+    }
+    pub fn cancel(_: *State) void {}
+    pub fn deinit(_: *State) void {}
+    fn read(state: *State, ctx: *ecl.Controller) ecl.ControllerError!void {
+        try state.read(ctx);
+    }
+    fn probe(state: *State, ctx: *ecl.Controller) ecl.ControllerError!void {
+        try state.probe(ctx);
+    }
+} });
+fn CooperativeLoanType(comptime Parent: type, comptime resource_name: []const u8) type {
+    return ecl.Port(.{ .cooperative = struct {
+        pub const name = resource_name;
+        pub const State = LoanState(Parent);
+        pub const operations = .{
+            .read = .{ .name = resource_name ++ "-read", .doc = "Read admitted native state through its lifetime lease.", .handler = read, .lane = .operation, .endpoints = .{} },
+            .probe = .{ .name = resource_name ++ "-probe", .doc = "Reject lifetime acquisition after initialization.", .handler = probe, .lane = .operation, .endpoints = .{} },
+        };
+        pub fn init() State {
+            return .{};
+        }
+        pub fn open(state: *State, ctx: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
+            try state.acquire(ctx);
+            if (state.mode == 3) {
+                ctx.instance(Instance).?.cooperative_started.store(5, .release);
+                if (!ctx.park(3_600_000)) return error.InvalidValue;
+                return .parked;
+            }
+            return .completed;
+        }
+        fn read(state: *State, ctx: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
+            try state.read(ctx);
+            return .completed;
+        }
+        fn probe(state: *State, ctx: *ecl.Cooperative) ecl.ControllerError!ecl.CooperativeProgress {
+            try state.probe(ctx);
+            return .completed;
+        }
+        pub fn retireOperation(_: *State, _: *ecl.Cooperative) ecl.CooperativeProgress {
+            return .completed;
+        }
+        pub fn retire(state: *State, ctx: *ecl.Cooperative) ecl.CooperativeProgress {
+            while (state.remaining != 0 and ctx.consume(1)) state.remaining -= 1;
+            return if (state.remaining == 0) .completed else .yielded;
+        }
+    } });
+}
+const CooperativeLoan = CooperativeLoanType(Resource, "cooperative-loan");
+const FinalizationLoan = CooperativeLoanType(CooperativeResource, "finalization-loan");
+
+pub const ForeignLoanExtension = ecl.module(.{
+    .linkage = .static,
+    .name = "loanforeign",
+    .doc = "Separate instance for native input lease authority checks.",
+    .instance = Instance,
+    .ports = .{ Resource, CooperativeLoan },
+    .words = .{ ecl.factory("resource", "Create a separately issued resource.", Resource), ecl.factory("loan", "Attempt a separately issued resource loan.", CooperativeLoan) },
 });

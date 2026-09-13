@@ -47,6 +47,7 @@ pub fn Resource(comptime Adapter: type) type {
         operation_capacity: u32,
         graceful: bool,
         activity_count: u32 = 0,
+        lease_count: usize = 0,
         refs: std.atomic.Value(u32) = .init(1),
         closed: std.atomic.Value(bool) = .init(false),
         mutex: std.Io.Mutex = .init,
@@ -136,6 +137,10 @@ pub fn Resource(comptime Adapter: type) type {
                                         unlock(&self.mutex);
                                         return .waiting;
                                     };
+                                    if (self.lease_count != 0) {
+                                        unlock(&self.mutex);
+                                        return .waiting;
+                                    }
                                     self.admission = .sealing_execution;
                                 },
                                 .sealing_execution => {},
@@ -176,6 +181,10 @@ pub fn Resource(comptime Adapter: type) type {
                         unlock(&self.mutex);
                         return .waiting;
                     };
+                    if (self.lease_count != 0) {
+                        unlock(&self.mutex);
+                        return .waiting;
+                    }
                     self.phase = .cleaning;
                     unlock(&self.mutex);
                     return .yielded;
@@ -221,6 +230,9 @@ pub fn Resource(comptime Adapter: type) type {
                 children.close();
                 children.join(execution);
             }
+            lock(&self.mutex);
+            while (self.lease_count != 0) self.changed.waitUncancelable(io(), &self.mutex);
+            unlock(&self.mutex);
             self.adapter.cleanup();
             lock(&self.mutex);
             self.phase = .cleaned;
@@ -490,6 +502,33 @@ pub fn Resource(comptime Adapter: type) type {
             };
             group.retain();
             return group;
+        }
+        /// One admitted native-state lease. Closing the issuer stops new leases;
+        /// joined cleanup and finalization wait for every existing lease.
+        pub const Lease = opaque {
+            fn cell(self: *Lease) *Cell {
+                return @ptrCast(@alignCast(self));
+            }
+            pub fn adapter(self: *Lease) *Adapter {
+                return &self.cell().adapter;
+            }
+            pub fn release(self: *Lease) void {
+                const target = self.cell();
+                lock(&target.mutex);
+                target.lease_count -= 1;
+                target.controllers.wake();
+                target.changed.broadcast(io());
+                unlock(&target.mutex);
+                target.releaseReadiness();
+            }
+        };
+        pub fn acquireLease(self: *Cell) error{Closed}!*Lease {
+            lock(&self.mutex);
+            defer unlock(&self.mutex);
+            if (self.phase != .open or self.admission != .open or self.closed.load(.acquire)) return error.Closed;
+            self.lease_count += 1;
+            self.retainReadiness();
+            return @ptrCast(self);
         }
         pub fn childrenClosed(self: *Cell) void {
             self.controllers.wake();

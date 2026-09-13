@@ -1968,6 +1968,16 @@ borrows require a dependent child and remain valid through its retirement.
 Neither scope transfer nor an independent child's publication can upgrade the
 temporary borrow into a lifetime dependency.
 
+Native input-state leases are minted only during resource initialization and
+validate both the declared kind and registered instance. The borrower owns a
+bounded collection of opaque leases; each lease binds its issuing cell, native
+state lifetime, and joined release. Temporary initialization collections and
+resource-lifetime collections retire at their respective ownership boundaries.
+Issuers close lease admission with resource admission and wait for existing loans
+before private cleanup or finalizer execution. Because an unpublished initializer
+can only borrow already initialized resources and operations cannot add persistent
+loans, resource dependencies remain acyclic. Closing an issuer does not revoke an
+admitted loan; the borrower's scope and resource lifecycle drive its retirement.
 Inherited native children retain an ancestor group independently from their
 temporary initialization-parent membership. Successful initialization consumes
 only the temporary membership; failed initialization retains both through joined

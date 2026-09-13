@@ -9,6 +9,24 @@ const ControllerState = struct { table: *const abi.ControllerTable, context: *an
 pub const ControllerError = declarations.ControllerError;
 const ChildDependency = enum { independent, dependent, inherited };
 
+const ResourceLeaseLifetime = enum { initialization, resource };
+pub const ResourceLeaseError = error{ Closed, InvalidValue, Failed };
+fn acquireInitializationResource(comptime P: type, callback: ?abi.ResourceLeaseFn, context: *anyopaque, path: []const u64, lifetime: ResourceLeaseLifetime) ResourceLeaseError!*P.StateType {
+    if (!@hasDecl(P, "ecl_port_marker")) @compileError("ecl-native: resource lease requires a declared Port type");
+    if (path.len > abi.max_read_path_depth) return error.InvalidValue;
+    var output: ?*anyopaque = null;
+    const status = (callback orelse return error.InvalidValue)(context, P.kindIdentity(), path.ptr, @intCast(path.len), switch (lifetime) {
+        .initialization => .initialization,
+        .resource => .resource,
+    }, &output);
+    return switch (status) {
+        .ok => @ptrCast(@alignCast(output orelse return error.InvalidValue)),
+        .closed => error.Closed,
+        .failed => error.Failed,
+        .invalid, _ => error.InvalidValue,
+    };
+}
+
 fn childRequest(comptime P: type, dependency: ChildDependency) abi.MessageBuildRequest {
     if (!@hasDecl(P, "ecl_port_marker")) @compileError("ecl-native: child requires a declared Port type");
     return .{
@@ -262,6 +280,14 @@ pub const Controller = opaque {
         const owned = self.state();
         const pointer = owned.table.parent_state(owned.context, P.kindIdentity()) orelse return null;
         return @ptrCast(@alignCast(pointer));
+    }
+    /// Initialization-only borrow of a same-instance input resource. The host
+    /// owns the lease until initialization completes or this resource retires,
+    /// as selected. Closure stops new loans and joins admitted ones. Neither
+    /// the input value nor its native state may escape the selected lifetime.
+    pub fn initializationResource(self: *Controller, comptime P: type, path: []const u64, lifetime: ResourceLeaseLifetime) ResourceLeaseError!*P.StateType {
+        const owned = self.state();
+        return acquireInitializationResource(P, owned.table.initialization_resource, owned.context, path, lifetime);
     }
     /// Borrow the issuing parent's state only during initialization. This
     /// also permits an independent child to take independently owned native
@@ -617,6 +643,14 @@ pub const Cooperative = opaque {
         comptime if (!@hasDecl(P, "ecl_port_marker")) @compileError("ecl-native: parent requires a declared Port type");
         const owned = self.state();
         return @ptrCast(@alignCast(owned.table.parent_state(owned.context, P.kindIdentity()) orelse return null));
+    }
+    /// Initialization-only borrow of a same-instance input resource. The host
+    /// owns the lease until initialization completes or this resource retires,
+    /// as selected. Closure stops new loans and joins admitted ones. Neither
+    /// the input value nor its native state may escape the selected lifetime.
+    pub fn initializationResource(self: *Cooperative, comptime P: type, path: []const u64, lifetime: ResourceLeaseLifetime) ResourceLeaseError!*P.StateType {
+        const owned = self.state();
+        return acquireInitializationResource(P, owned.table.initialization_resource, owned.context, path, lifetime);
     }
     /// Initialization-only parent borrow, including independently owned
     /// children. It expires when initialization completes, fails, or is
