@@ -730,3 +730,48 @@ const CapacityReporter = ecl.CapacityFailure(struct {
         return true;
     }
 });
+
+const EagerState = ecl.Instance(struct {
+    pub const State = struct { file: ?std.Io.File = null, value: u8 = 0, phase: enum { open, read, close, ready } = .open };
+    pub fn init() State {
+        return .{};
+    }
+    pub fn initialize(state: *State, context: *ecl.InstanceContext) ecl.InstanceResult {
+        if (!context.consume()) return .pending;
+        const io = std.Io.Threaded.global_single_threaded.io();
+        switch (state.phase) {
+            .open => {
+                state.file = std.Io.Dir.cwd().openFile(io, context.configuration(), .{}) catch return error.Failed;
+                state.phase = .read;
+            },
+            .read => {
+                const count = state.file.?.readStreaming(io, &.{std.mem.asBytes(&state.value)}) catch return error.Failed;
+                if (count != 1) return error.Failed;
+                state.phase = .close;
+            },
+            .close => {
+                state.file.?.close(io);
+                state.file = null;
+                state.phase = .ready;
+            },
+            .ready => return .complete,
+        }
+        return .pending;
+    }
+    pub fn retire(state: *State, context: *ecl.InstanceContext) bool {
+        if (!context.consume()) return false;
+        if (state.file) |file| file.close(std.Io.Threaded.global_single_threaded.io());
+        state.file = null;
+        return true;
+    }
+});
+fn eagerValue(call: *ecl.Call("-- value")) ecl.CallbackResult {
+    return call.complete(.{ecl.Scalar.int(call.instance(EagerState).?.value)});
+}
+pub const EagerExtension = ecl.module(.{
+    .linkage = .static,
+    .name = "eagerprobe",
+    .doc = "Observe a controlled startup input through instance initialization.",
+    .instance = EagerState,
+    .words = .{ecl.word("value", "Read the captured byte.", eagerValue)},
+});

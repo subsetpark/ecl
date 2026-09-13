@@ -18,14 +18,21 @@ pub const Configuration = struct {
     name: []const u8,
     /// A linked descriptor and its code must remain immutable and alive for the
     /// whole Session. It is validated lazily through the ordinary native loader.
-    descriptor: ?*const abi.Descriptor = null,
+    registration: union(enum) {
+        deferred: ?*const abi.Descriptor,
+        eager: *const abi.Descriptor,
+    } = .{ .deferred = null },
     bytes: []const u8 = "",
     memory_limit: usize = 64 * 1024 * 1024,
     port_limits: ?native_port.Limits = null,
 };
 const OwnedConfiguration = struct {
     name: intern.ModuleName,
-    descriptor: ?*const abi.Descriptor,
+    registration: union(enum) {
+        deferred: ?*const abi.Descriptor,
+        pending: *const abi.Descriptor,
+        initialized: struct { descriptor: *const abi.Descriptor, instance: *ModuleInstance },
+    },
     bytes: []u8,
     memory_limit: usize,
     port_limits: ?native_port.Limits,
@@ -113,6 +120,7 @@ pub const LoadCursor = struct {
             validator: descriptor_api.ValidateCursor,
         },
         initializing: *ModuleInstance,
+        cached: *ModuleInstance,
         complete,
     };
 
@@ -141,7 +149,7 @@ pub const LoadCursor = struct {
                 validating.validator.deinit();
                 validating.image.close();
             },
-            .initializing => |instance| instance.releasePin(),
+            .initializing, .cached => |instance| instance.releasePin(),
             .complete => {},
         }
         self.state = .complete;
@@ -149,6 +157,11 @@ pub const LoadCursor = struct {
 
     pub fn advance(self: *LoadCursor, budget: usize) error{OutOfMemory}!LoadProgress {
         std.debug.assert(self.state != .complete and budget != 0);
+        if (self.state == .cached) {
+            const instance = self.state.cached;
+            self.state = .complete;
+            return .{ .loaded = instance };
+        }
         if (self.state == .initializing) {
             const instance = self.state.initializing;
             const state = instance.mutableState();
@@ -550,6 +563,30 @@ pub const Owner = opaque {
     }
 
     pub fn initConfigured(host: *const heap.HostCleanup, limits: native_port.Limits, configurations: []const Configuration) error{ OutOfMemory, InvalidLimits, InvalidConfiguration }!*Owner {
+        const owned = try initDeferred(host, limits, configurations);
+        errdefer owned.closeCalls().settle().deinit();
+        for (owned.state().configurations) |*configuration| {
+            const descriptor = switch (configuration.registration) {
+                .pending => |descriptor| descriptor,
+                .deferred => continue,
+                .initialized => unreachable,
+            };
+            var cursor = switch (owned.loader().startStatic(configuration.name, descriptor)) {
+                .loading => |cursor| cursor,
+                .failure => return error.InvalidConfiguration,
+            };
+            defer cursor.deinit();
+            const instance = while (true) switch (try cursor.advance(256)) {
+                .pending => {},
+                .failure => return error.InvalidConfiguration,
+                .loaded => |instance| break instance,
+            };
+            configuration.registration = .{ .initialized = .{ .descriptor = descriptor, .instance = instance } };
+        }
+        return owned;
+    }
+
+    fn initDeferred(host: *const heap.HostCleanup, limits: native_port.Limits, configurations: []const Configuration) error{ OutOfMemory, InvalidLimits, InvalidConfiguration }!*Owner {
         const owned = try host.allocator().alloc(OwnedConfiguration, configurations.len);
         var copied: usize = 0;
         errdefer {
@@ -563,7 +600,10 @@ pub const Owner = opaque {
                 error.OutOfMemory => error.OutOfMemory,
                 error.InvalidName => error.InvalidConfiguration,
             };
-            owned[index] = .{ .name = name, .descriptor = configuration.descriptor, .bytes = try host.allocator().dupe(u8, configuration.bytes), .memory_limit = configuration.memory_limit, .port_limits = configuration.port_limits };
+            owned[index] = .{ .name = name, .registration = switch (configuration.registration) {
+                .deferred => |descriptor| .{ .deferred = descriptor },
+                .eager => |descriptor| .{ .pending = descriptor },
+            }, .bytes = try host.allocator().dupe(u8, configuration.bytes), .memory_limit = configuration.memory_limit, .port_limits = configuration.port_limits };
             copied += 1;
         }
         std.mem.sort(OwnedConfiguration, owned, {}, struct {
@@ -639,7 +679,11 @@ pub const Loader = opaque {
     /// Observe only a host-registered linked descriptor; no extension receives
     /// this loader authority or a module-name configuration lookup.
     pub fn registeredDescriptor(self: *Loader, name: intern.ModuleName) ?*const abi.Descriptor {
-        return (self.state().configuration(name) orelse return null).descriptor;
+        return switch ((self.state().configuration(name) orelse return null).registration) {
+            .deferred => |descriptor| descriptor,
+            .pending => |descriptor| descriptor,
+            .initialized => |initialized| initialized.descriptor,
+        };
     }
     pub fn startDynamic(
         self: *Loader,
@@ -684,6 +728,14 @@ pub const Loader = opaque {
             "static native module loading is closed during Session shutdown",
             .{},
         ) };
+        if (self.state().configuration(requested)) |configuration| switch (configuration.registration) {
+            .initialized => |initialized| {
+                if (initialized.descriptor != descriptor) return .{ .failure = .init("linked descriptor differs from the initialized registration", .{}) };
+                initialized.instance.retain();
+                return .{ .loading = .{ .loader = self, .state = .{ .cached = initialized.instance } } };
+            },
+            .deferred, .pending => {},
+        };
         return self.startDescribed(.{ .described = .{
             .loader = self,
             .requested = requested,
@@ -757,6 +809,13 @@ pub const ClosingOwner = opaque {
     pub fn settle(self: *ClosingOwner) *SettledOwner {
         const owner_value = self.owner();
         std.debug.assert(owner_value.state().phase.load(.acquire) == .closing);
+        for (owner_value.state().configurations) |*configuration| switch (configuration.registration) {
+            .initialized => |initialized| {
+                configuration.registration = .{ .deferred = initialized.descriptor };
+                initialized.instance.releasePin();
+            },
+            .deferred, .pending => {},
+        };
         var next = owner_value.state().instances;
         while (next) |instance| {
             if (instance.private_ports) |ports| ports.deinit();

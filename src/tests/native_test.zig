@@ -2640,7 +2640,7 @@ test "native: host static and dynamic registration share instance and resource b
             .native_instances = &.{.{
                 .name = "instanceprobe",
                 .bytes = "A",
-                .descriptor = if (linked) @import("native-instance").Extension.descriptor() else null,
+                .registration = .{ .deferred = if (linked) @import("native-instance").Extension.descriptor() else null },
                 .port_limits = .{ .max_live_ports = 2, .ring_capacity = 8 },
             }},
         }), .cooperative, .language_tests);
@@ -2660,7 +2660,7 @@ test "native: host static registration rejects stale ABI and failed initializati
     for ([_]bool{ true, false }) |stale| {
         raw.abi_version = abi.abi_version + @as(u32, @intFromBool(stale));
         var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
-            .native_instances = &.{.{ .name = "instanceprobe", .bytes = if (stale) "A" else "fail", .descriptor = &raw }},
+            .native_instances = &.{.{ .name = "instanceprobe", .bytes = if (stale) "A" else "fail", .registration = .{ .deferred = &raw } }},
         }), .cooperative, .language_tests);
         defer runtime.deinit();
         try expectOk(&runtime, "[] (instanceprobe.next) @attempt 'err at 'kind at 'io match? {'kind 'user 'msg \"static load rejected\"} assert");
@@ -2671,7 +2671,7 @@ test "native: large host configuration initializes in bounded slices" {
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
-        .native_instances = &.{.{ .name = "instanceprobe", .bytes = "x" ** 65537, .descriptor = @import("native-instance").Extension.descriptor() }},
+        .native_instances = &.{.{ .name = "instanceprobe", .bytes = "x" ** 65537, .registration = .{ .deferred = @import("native-instance").Extension.descriptor() } }},
     }), .cooperative, .language_tests);
     defer runtime.deinit();
     try expectOk(&runtime, "instanceprobe.next 7864440 = {'kind 'user 'msg \"complete host configuration\"} assert");
@@ -2683,8 +2683,8 @@ test "native: cooperative instance resources have independent unlimited admissio
     var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
         .native_port_limits = .{ .max_live_ports = 1 },
         .native_instances = &.{
-            .{ .name = "cooperative.probe", .bytes = "A", .descriptor = @import("native-instance").CooperativeOnly.descriptor(), .port_limits = .{ .max_live_ports = null } },
-            .{ .name = "instanceprobe", .descriptor = @import("native-instance").Extension.descriptor() },
+            .{ .name = "cooperative.probe", .bytes = "A", .registration = .{ .deferred = @import("native-instance").CooperativeOnly.descriptor() }, .port_limits = .{ .max_live_ports = null } },
+            .{ .name = "instanceprobe", .registration = .{ .deferred = @import("native-instance").Extension.descriptor() } },
         },
     }), .cooperative, .language_tests);
     defer runtime.deinit();
@@ -2696,7 +2696,7 @@ test "native: unlimited resource policy rejects controller descriptors" {
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
-        .native_instances = &.{.{ .name = "instanceprobe", .descriptor = @import("native-instance").Extension.descriptor(), .port_limits = .{ .max_live_ports = null } }},
+        .native_instances = &.{.{ .name = "instanceprobe", .registration = .{ .deferred = @import("native-instance").Extension.descriptor() }, .port_limits = .{ .max_live_ports = null } }},
     }), .cooperative, .language_tests);
     defer runtime.deinit();
     try expectOk(&runtime, "[] (instanceprobe.next) @attempt 'err at 'kind at 'io match? {'kind 'user 'msg \"controller policy rejected\"} assert");
@@ -2706,7 +2706,7 @@ test "native: host service budgets exceed shared extension ceilings independentl
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
-        .native_instances = &.{.{ .name = "instanceprobe", .bytes = "A", .descriptor = @import("native-instance").Extension.descriptor(), .memory_limit = std.math.maxInt(usize), .port_limits = .{ .max_live_ports = 4097, .ring_capacity = 16 * 1024 * 1024 + 1 } }},
+        .native_instances = &.{.{ .name = "instanceprobe", .bytes = "A", .registration = .{ .deferred = @import("native-instance").Extension.descriptor() }, .memory_limit = std.math.maxInt(usize), .port_limits = .{ .max_live_ports = 4097, .ring_capacity = 16 * 1024 * 1024 + 1 } }},
     }), .cooperative, .language_tests);
     defer runtime.deinit();
     try expectOk(&runtime, "instanceprobe.next 65 = {'kind 'user 'msg \"independent service grant\"} assert");
@@ -2718,7 +2718,7 @@ test "native: structured diagnostics survive initialization and joined exchange 
     for ([_]bool{ true, false }) |linked| {
         var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
             .ecl_path = if (linked) null else native_fixture.directory,
-            .native_instances = &.{.{ .name = "instanceprobe", .descriptor = if (linked) @import("native-instance").Extension.descriptor() else null }},
+            .native_instances = &.{.{ .name = "instanceprobe", .registration = .{ .deferred = if (linked) @import("native-instance").Extension.descriptor() else null } }},
         }), .cooperative, .language_tests);
         defer runtime.deinit();
         try expectOk(&runtime,
@@ -2779,7 +2779,7 @@ test "native: capacity rejection preserves validation diagnostics and bounded cl
         inline for (.{ "resource", "cooperative" }) |resource_name| {
             var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
                 .ecl_path = if (linked) null else native_fixture.directory,
-                .native_instances = &.{.{ .name = "instanceprobe", .descriptor = if (linked) @import("native-instance").Extension.descriptor() else null, .port_limits = .{ .max_live_ports = 1 } }},
+                .native_instances = &.{.{ .name = "instanceprobe", .registration = .{ .deferred = if (linked) @import("native-instance").Extension.descriptor() else null }, .port_limits = .{ .max_live_ports = 1 } }},
             }), .cooperative, .language_tests);
             defer runtime.deinit();
             try expectOk(&runtime, "instanceprobe." ++ resource_name ++ " [] port.open (|p| " ++
@@ -2833,7 +2833,7 @@ test "native: activity supervision stops output and drains input without data au
     for ([_]bool{ true, false }) |linked| {
         var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
             .ecl_path = if (linked) null else native_fixture.directory,
-            .native_instances = &.{.{ .name = "instanceprobe", .descriptor = if (linked) @import("native-instance").Extension.descriptor() else null, .port_limits = .{ .ring_capacity = 2 } }},
+            .native_instances = &.{.{ .name = "instanceprobe", .registration = .{ .deferred = if (linked) @import("native-instance").Extension.descriptor() else null }, .port_limits = .{ .ring_capacity = 2 } }},
         }), .cooperative, .language_tests);
         defer runtime.deinit();
         try expectOk(&runtime, "instanceprobe.activity 8 port.open (|p| " ++
@@ -2843,5 +2843,63 @@ test "native: activity supervision stops output and drains input without data au
             "4 port.read [] match? {'kind 'user 'msg \"stopped output EOF\"} assert " ++
             "p instanceprobe.activity-health [] port.call 102 = {'kind 'user 'msg \"input drained to EOF\"} assert " ++
             "p port.close) call");
+    }
+}
+
+test "native: eager registration captures startup inputs before first module use" {
+    var directory = std.testing.tmpDir(.{});
+    defer directory.cleanup();
+    try directory.dir.writeFile(std.testing.io, .{ .sub_path = "input", .data = "A" });
+    const path = try directory.dir.realPathFileAlloc(std.testing.io, "input", std.testing.allocator);
+    defer std.testing.allocator.free(path);
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    var eager = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+        .native_instances = &.{.{ .name = "eagerprobe", .bytes = path, .registration = .{ .eager = @import("native-instance").EagerExtension.descriptor() } }},
+    }), .cooperative, .evaluate);
+    defer eager.deinit();
+    var deferred = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+        .native_instances = &.{.{ .name = "eagerprobe", .bytes = path, .registration = .{ .deferred = @import("native-instance").EagerExtension.descriptor() } }},
+    }), .cooperative, .evaluate);
+    defer deferred.deinit();
+    try directory.dir.writeFile(std.testing.io, .{ .sub_path = "input", .data = "B" });
+    try expectOk(&eager, "eagerprobe.value 65 = {'kind 'user 'msg \"eager startup capture\"} assert eagerprobe.value 65 = {'kind 'user 'msg \"cached startup instance\"} assert");
+    try expectOk(&deferred, "eagerprobe.value 66 = {'kind 'user 'msg \"deferred startup capture\"} assert");
+}
+
+test "native: eager registration rejects stale descriptors and initialization failure during Session construction" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    for ([_]bool{ true, false }) |stale| {
+        var descriptor = @import("native-instance").Extension.descriptor().*;
+        if (stale) descriptor.abi_version -= 1;
+        try std.testing.expectError(error.InvalidHostConfig, session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+            .native_instances = &.{.{ .name = "instanceprobe", .bytes = "fail", .registration = .{ .eager = &descriptor } }},
+        }), .cooperative, .evaluate));
+    }
+}
+
+fn eagerAllocationProbe(memory: std.mem.Allocator, fail_second: bool) !void {
+    var host = heap.HostOwner.init(memory);
+    defer host.cleanup().drain();
+    const result = native_module.Owner.initConfigured(host.cleanup(), .{}, &.{
+        .{ .name = "instanceprobe", .bytes = "capacity3", .registration = .{ .eager = @import("native-instance").Extension.descriptor() }, .port_limits = .{ .ring_capacity = 8 } },
+        .{ .name = "cooperative.probe", .bytes = if (fail_second) "fail" else "A", .registration = .{ .eager = @import("native-instance").CooperativeOnly.descriptor() }, .port_limits = .{ .max_live_ports = null } },
+    });
+    if (fail_second) {
+        const unexpected = result catch |err| switch (err) {
+            error.InvalidConfiguration => return,
+            else => return err,
+        };
+        unexpected.closeCalls().settle().deinit();
+        return error.TestUnexpectedResult;
+    }
+    const owner = try result;
+    owner.closeCalls().settle().deinit();
+}
+test "native: eager initialization allocation failures join all completed and partial instances" {
+    for ([_]bool{ false, true }) |fail_second| {
+        try eagerAllocationProbe(std.testing.allocator, fail_second);
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, eagerAllocationProbe, .{fail_second});
     }
 }

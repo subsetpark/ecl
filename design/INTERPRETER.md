@@ -2032,6 +2032,13 @@ owned until joined resource cleanup. Finalizers reserve immutable, capability-fr
 result storage before the lane grants irreversible-work authority. Result mutation
 is unavailable after reservation, and resource cancellation preserves committed
 execution and its terminal result while joining all remaining slices.
+Host registration selects deferred discovery or an eager linked descriptor.
+Eager startup uses the ordinary bounded descriptor validator and instance
+lifecycle before Session publication. Its initialized instance pin belongs to the
+registration; later module publication borrows that cached instance rather than
+reinitializing it. The registration releases its pin during joined owner
+settlement, after admission closes. Startup failure retires every completed and
+partial instance through the same reclamation protocol as lazy loading.
 The native descriptor selects controller or cooperative execution exhaustively.
 Cooperative resources use one serial resumable lane and reserve their scheduler
 continuation before publication. Operation state retains its construction owner

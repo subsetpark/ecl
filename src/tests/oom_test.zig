@@ -2104,7 +2104,7 @@ test "oom: standard-library and host: host static native registration" {
             var inputs = try runtime_fixture.Fixture.init();
             defer inputs.deinit();
             var runtime = try session.Session.init(locked.allocator(), &.{}, inputs.inputs(.{
-                .native_instances = &.{.{ .name = "instanceprobe", .bytes = "A", .descriptor = @import("native-instance").Extension.descriptor() }},
+                .native_instances = &.{.{ .name = "instanceprobe", .bytes = "A", .registration = .{ .deferred = @import("native-instance").Extension.descriptor() } }},
             }), .cooperative, .evaluate);
             defer runtime.deinit();
             const first = failing.alloc_index;
@@ -2124,7 +2124,7 @@ test "oom: standard-library and host: unlimited cooperative instance resource" {
             var inputs = try runtime_fixture.Fixture.init();
             defer inputs.deinit();
             var runtime = try session.Session.init(locked.allocator(), &.{}, inputs.inputs(.{
-                .native_instances = &.{.{ .name = "cooperative.probe", .descriptor = @import("native-instance").CooperativeOnly.descriptor(), .port_limits = .{ .max_live_ports = null } }},
+                .native_instances = &.{.{ .name = "cooperative.probe", .registration = .{ .deferred = @import("native-instance").CooperativeOnly.descriptor() }, .port_limits = .{ .max_live_ports = null } }},
             }), .cooperative, .evaluate);
             defer runtime.deinit();
             const first = failing.alloc_index;
@@ -2170,7 +2170,7 @@ test "oom: standard-library and host: native capacity rejection" {
             defer inputs.deinit();
             var runtime = try session.Session.init(locked.allocator(), &.{}, inputs.inputs(.{
                 .native_port_limits = .{ .max_live_ports = 1 },
-                .native_instances = &.{.{ .name = "instanceprobe", .descriptor = @import("native-instance").Extension.descriptor() }},
+                .native_instances = &.{.{ .name = "instanceprobe", .registration = .{ .deferred = @import("native-instance").Extension.descriptor() } }},
             }), .cooperative, .evaluate);
             defer runtime.deinit();
             try runOk(&runtime, "native-rejection-setup.ecl", "instanceprobe.resource [] port.open 'p set");
@@ -2198,4 +2198,24 @@ test "oom: standard-library and host: native activity stream supervision" {
             "p instanceprobe.activity-out port.endpoint 8 port.read pop p port.close) call",
         "",
     ).run);
+}
+
+test "oom: standard-library and host: host eager native registration" {
+    try requireSelectedOomTest(@src());
+    const Probe = struct {
+        fn run(failing: *std.testing.FailingAllocator, failure_offset: ?usize) !usize {
+            var locked = LockedAllocator{ .child = failing.allocator() };
+            var inputs = try runtime_fixture.Fixture.init();
+            defer inputs.deinit();
+            var runtime = try session.Session.init(locked.allocator(), &.{}, inputs.inputs(.{
+                .native_instances = &.{.{ .name = "instanceprobe", .bytes = "A", .registration = .{ .eager = @import("native-instance").Extension.descriptor() } }},
+            }), .cooperative, .evaluate);
+            defer runtime.deinit();
+            const first = failing.alloc_index;
+            if (failure_offset) |offset| failing.fail_index = first + offset;
+            try runOk(&runtime, "native-static.ecl", "instanceprobe.next pop");
+            return first;
+        }
+    };
+    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, Probe.run);
 }
