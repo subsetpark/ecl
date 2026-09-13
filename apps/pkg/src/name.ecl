@@ -46,11 +46,19 @@
    (7 drop (len 64 =) ((hex-chars in?) all?) bi and)]
   cond) 'hash? def
 
+ ### defp port-suffix?
+ (suffix -- bool : "Accept no port or a colon followed by zero or more ASCII decimal digits.")
+ (dup empty? (pop 1)
+  (dup ":" str.starts? swap 1 drop ("0123456789" in?) all? and) if) 'port-suffix? defp
+
  ### defp hostname?
  (authority -- bool : "Require a host before an optional port, including bracketed IPv6 hosts.")
  (dup "[" str.starts?
-  (dup "]" str.contains? swap 1 drop "]" split first empty? not and)
-  (":" split first empty? not) if) 'hostname? defp
+  (1 drop "]" split dup len 2 =
+   (|parts| parts first empty? not parts 1 at port-suffix? and) (pop 0) if)
+  (dup ":" split first
+   (|authority host| host empty? not authority host len drop port-suffix? and) call)
+  if) 'hostname? defp
 
  ### def url?
  (value -- bool : "Return 1 for a nonempty HTTPS URL.")
