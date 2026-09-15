@@ -54,7 +54,7 @@ The main components are these:
 | Component | Responsibility | Primary implementation |
 | --- | --- | --- |
 | Session | Lifetime root, persistent operand stack, host services, and unit transaction | `session.zig` |
-| Reader and source archive | Turn source into executable values while retaining optional diagnostic lineage | `lexer.zig`, `reader_*.zig`, `binder.zig`, `spans.zig` |
+| Reader and source archive | Turn source into executable values while retaining optional diagnostic lineage | `lexer.zig`, `reader_*.zig`, `locals.zig`, `spans.zig` |
 | Value heap | Values, specialized list storage, dictionaries, ownership, and reclamation | `value.zig`, `heap.zig`, `list.zig`, `dict.zig`, `intern.zig` |
 | Names and modules | Late binding, scopes, immutable module images, generations, and durable module state | `env.zig`, `modules.zig` |
 | Frame machine | Dispatch quotations, represent continuations, enforce application boundaries, and construct errors | `machine.zig` |
@@ -334,9 +334,9 @@ register VM, spend representation complexity to reduce those costs and expose
 an optimization target. ecl concentrates its optimization budget on the array
 operations that dominate useful data work.
 
-### Binder syntax lowers once, at read time
+### Locals syntax lowers once, at read time
 
-Head binders are the one general source lowering. `binder.zig` validates
+Locals declarations are the one general source lowering. `locals.zig` validates
 local names and rewrites local loads into private core operations over a
 Unit-owned locals stack. A local may not cross into a nested quotation; source
 must use explicit quotation construction such as `partial` when it wants value

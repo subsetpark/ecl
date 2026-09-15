@@ -187,13 +187,13 @@ const dispatch_free = [_]Case{
         .per_element = 0,
     },
     .{
-        .name = "head binder, two reads",
+        .name = "locals declaration, two reads",
         .setup = "{d} range",
         .workload = "(|x| x x +) each len",
         .per_element = 0,
     },
     .{
-        .name = "head binder, three names",
+        .name = "locals declaration, three names",
         .setup = "{d} range",
         .workload = "(|a| a a a + +) each len",
         .per_element = 0,

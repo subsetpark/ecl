@@ -2592,11 +2592,11 @@ pub const Unit = struct {
     /// from the new one, so it is kept here instead of being freed and
     /// reallocated per element.
     spare_scope: ?*env.Scope = null,
-    /// Head-binder locals. A binder's names live here for the length of the
+    /// Locals. The declared names live here for the length of the
     /// quotation body that introduced them, never on the operand stack, so a
     /// body's declared stack effect describes its operands alone and an
     /// ordinary form between two local reads needs no shuffling to see past
-    /// them. Reads are top-relative: the last name a binder introduced is
+    /// them. Reads are top-relative: the last local introduced is
     /// index 0.
     locals: std.ArrayList(Value) = .empty,
     pub fn init(
@@ -3317,8 +3317,8 @@ pub const Machine = struct {
         }
         heap.destroyDriver(self.unit.releases, self.unit.allocator, driver);
     }
-    /// Moves the top `count` operands into the unit's head-binder locals, the
-    /// binder's first name ending on top. The operand stack is machine-owned,
+    /// Moves the top `count` operands into the unit's locals, the
+    /// first declared local ending on top. The operand stack is machine-owned,
     /// so the move lives here and the primitive keeps only its validation.
     pub fn bindLocals(self: *Machine, count: usize) error{OutOfMemory}!void {
         try self.unit.locals.ensureUnusedCapacity(self.unit.allocator, count);
@@ -5734,7 +5734,7 @@ pub const Machine = struct {
         }
     }
 
-    /// Reader-lowered binders end in `<count> _dl`. That cleanup must run
+    /// Reader-lowered locals end in `<count> _dl`. That cleanup must run
     /// after the authored final form, but it does not make a final control
     /// transfer semantically non-tail. The exact reserved epilogue is the only
     /// continuation shape granted this exception.

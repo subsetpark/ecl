@@ -34,7 +34,7 @@ wrap
 Use vertical layout when its shape carries information: one branch per line,
 one computed dictionary field per line, or one stage per line in a longer
 pipeline. Indent continuation lines one level beneath their enclosing
-quotation or binder.
+quotation or locals declaration.
 
 Keep `put` construction visibly staged when an existing collection, key, and
 computed value coexist on the stack. Do not shorten it by changing the order
@@ -127,7 +127,7 @@ quotations over the same pair of inputs.
 ### Locals must change the flow
 
 Do not bind locals when every bound name appears only at the beginning of the
-quotation body, exactly once and in binding order. Removing that binder leaves
+quotation body, exactly once and in binding order. Removing those locals leaves
 the same values in the same positions and makes the stack flow direct.
 
 Prefer:
@@ -144,7 +144,7 @@ over:
 
 Use locals when they make a real dataflow change visible: a value is reused,
 arguments are reordered, or a name is referenced after intervening work. The
-point is not to avoid binders; it is to avoid binders that only repeat the
+point is not to avoid locals; it is to avoid locals that only repeat the
 quotation's input stack.
 
 ### Captures
@@ -157,7 +157,7 @@ state package version requirer 4 pack (catalog-manifest) with
 ```
 
 Do not build a chain of `partial` applications for the same quotation.
-Reusable captures are explicit: a binder local may not cross a quotation
+Reusable captures are explicit: a local may not cross a quotation
 boundary by name. Construct a new quotation with `partial` or `with`, then bind
 the captured value inside it.
 
@@ -222,7 +222,7 @@ such as `dict.keys`, `dict.has?`, and `dict.merge` stay qualified; `put` and
 
 ## Names should expose structure
 
-Name binder locals for their role: `entry`, `requirement`, `manifest`, or
+Name locals for their role: `entry`, `requirement`, `manifest`, or
 `state` is more useful than `x` when the value has a stable meaning. Short
 algebraic names remain appropriate for genuinely generic combinators.
 

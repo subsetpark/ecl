@@ -850,7 +850,7 @@ pub const Environment = struct {
         return .{
             .lookup = null,
             // A lookup may find a reserved name; only publication may not use
-            // one. The runtime installs the words it reserves — the head-binder
+            // one. The runtime installs the words it reserves — the locals
             // backend — and a gate that refused to resolve them would reserve
             // them from their only legitimate caller. Nothing else can reach
             // this map under a reserved name, because every publishing path

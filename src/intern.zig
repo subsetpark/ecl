@@ -14,8 +14,8 @@ const bucket_count = 16 * 1024;
 const no_entry = std.math.maxInt(u32);
 
 /// Nominal identifier accepted at namespace-publication boundaries. Raw
-/// intern ids remain useful for resolution, but cannot be passed to a binder,
-/// module registry, or environment writer without validation.
+/// intern ids remain useful for resolution, but cannot be passed to a definition
+/// writer, module registry, or environment writer without validation.
 pub const BindingName = enum(u32) { _ };
 pub const NamespaceName = BindingName;
 pub const ModuleName = enum(u32) { _ };
@@ -664,9 +664,9 @@ pub fn isReservedBytes(name: []const u8) bool {
         std.mem.eql(u8, name, lexer.row_token);
 }
 
-/// Every binding name the language reserves for itself. The head-binder
+/// Every binding name the language reserves for itself. The locals
 /// backend is reserved because the reader emits those three words into every
-/// lowered binder body: a session definition of `_gl` would otherwise
+/// lowered locals body: a session definition of `_gl` would otherwise
 /// silently change what `|x|` means everywhere.
 pub fn isReservedWordBytes(name: []const u8) bool {
     return isReservedBytes(name) or

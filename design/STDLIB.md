@@ -161,7 +161,7 @@ evaluated before the name is validated, so the two spellings agree on every
 observable outcome.
 
 The name is last, matching `def` and `set`: the bound name sits nearest
-the binder. Registration is therefore `values (body) 'name @defm`. See
+the defining word. Registration is therefore `values (body) 'name @defm`. See
 Modules.
 
 ### @each
@@ -1052,7 +1052,7 @@ followed by its body through the standard source formatter, with its
 width-aware layout and no navigation header, name, or `def`/`defp` terminator.
 What prints is what is stored: a name bound by `set` prints its annotation and
 literal-capture body; the producing `set` spelling is discarded.
-Reader-built bodies retain a shared slice of their source unit, so head binders
+Reader-built bodies retain a shared slice of their source unit, so locals declarations
 print with their authored local names even though execution uses the lowered
 `_ll`/`_gl`/`_dl` quotation. Runtime-constructed bodies without source
 provenance fall back to their canonical value form. Native origins are

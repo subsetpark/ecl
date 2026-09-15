@@ -1241,4 +1241,4 @@ test "environment and registry APIs propagate every allocation failure" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, registryAllocationProbe, .{});
 }
 
-// ── Milestone 10 (one-binder-merge) ──────────────────────────────────────
+// ── Milestone 10 (one-definition-merge) ──────────────────────────────────────

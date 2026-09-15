@@ -14,7 +14,7 @@ pub const equal = @import("equal.zig");
 pub const dict = @import("dict.zig");
 pub const print = @import("print.zig");
 pub const lexer = @import("lexer.zig");
-pub const binder = @import("binder.zig");
+pub const locals = @import("locals.zig");
 pub const reader = @import("reader.zig");
 pub const formatter = @import("formatter.zig");
 pub const line_editor = @import("line_editor.zig");
@@ -58,7 +58,7 @@ test {
     _ = dict;
     _ = print;
     _ = lexer;
-    _ = binder;
+    _ = locals;
     _ = reader;
     _ = formatter;
     _ = line_editor;

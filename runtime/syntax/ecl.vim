@@ -17,7 +17,7 @@ syntax region eclString start=/"/ skip=/\\\\\|\\"/ end=/"/ contains=eclEscape
 " such as `\(` owns its delimiter rather than being split into two groups.
 syntax match eclDelimiter /[(){}]/
 syntax match eclDelimiter /\[\|\]/
-syntax match eclBinder /|/
+syntax match eclLocals /|/
 syntax match eclReserved /;/
 
 " Atom boundaries mirror the reader: comma is whitespace, while semicolon
@@ -53,7 +53,7 @@ highlight default link eclCharacter Character
 highlight default link eclSymbol Constant
 highlight default link eclDefinition Keyword
 highlight default link eclDelimiter Delimiter
-highlight default link eclBinder Operator
+highlight default link eclLocals Operator
 highlight default link eclReserved Error
 
 let b:current_syntax = 'ecl'

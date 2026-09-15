@@ -7,7 +7,7 @@ const equal = @import("../equal.zig");
 const list = @import("../list.zig");
 const printer = @import("../print.zig");
 const lexer = @import("../lexer.zig");
-const binder = @import("../binder.zig");
+const locals = @import("../locals.zig");
 const reader = @import("../reader.zig");
 const spans = @import("../spans.zig");
 const testgen = @import("testgen.zig");
@@ -34,14 +34,14 @@ fn materializeRoot(
     };
 }
 
-test "empty binder lowering rejects before acquiring storage" {
+test "empty locals lowering rejects before acquiring storage" {
     var host = heap.HostOwner.init(std.testing.allocator);
     defer host.cleanup().drain();
     var diag: lexer.Diag = .{};
 
     try std.testing.expectError(
         error.Parse,
-        binder.LowerCursor.init(
+        locals.LowerCursor.init(
             std.testing.allocator,
             host.domain(),
             &.{},
@@ -50,7 +50,7 @@ test "empty binder lowering rejects before acquiring storage" {
             &diag,
         ),
     );
-    try std.testing.expectEqualStrings("a binder must contain at least one name", diag.text());
+    try std.testing.expectEqualStrings("a locals declaration must contain at least one name", diag.text());
 }
 
 test "span archive rejects a substitutable provenance issuer" {
@@ -341,7 +341,7 @@ test "reader fixtures remain byte-for-byte anchors" {
     );
 }
 
-test "reader yields inside lexical binder span and top-form traversals" {
+test "reader yields inside lexical locals span and top-form traversals" {
     const allocator = std.testing.allocator;
     const comment = try repeatedSource(allocator, "#", "a", 40_000, "");
     defer allocator.free(comment);
@@ -356,10 +356,10 @@ test "reader yields inside lexical binder span and top-form traversals" {
     try expectReadNeedsSteps(string, 1024);
 
     // Validation plus tokenization stays below one quantum; lowering the
-    // large binder body is the traversal that crosses it.
-    const binder_source = try repeatedSource(allocator, "(|x| ", "1 ", 14_000, ")");
-    defer allocator.free(binder_source);
-    try expectReadNeedsSteps(binder_source, 65_536);
+    // large locals body is the traversal that crosses it.
+    const locals_source = try repeatedSource(allocator, "(|x| ", "1 ", 14_000, ")");
+    defer allocator.free(locals_source);
+    try expectReadNeedsSteps(locals_source, 65_536);
 
     // The first copy into list storage stays below the boundary; copying its
     // element spans is what consumes the remainder.
@@ -408,9 +408,9 @@ test "reader bounds long classification and post-growth materialization" {
     defer allocator.free(string);
     try expectReadNeedsSteps(string, 65_536);
 
-    const binder_output = try repeatedSource(allocator, "(|x| ", "1 ", 32_769, ")");
-    defer allocator.free(binder_output);
-    try expectReadNeedsSteps(binder_output, 65_536);
+    const locals_output = try repeatedSource(allocator, "(|x| ", "1 ", 32_769, ")");
+    defer allocator.free(locals_output);
+    try expectReadNeedsSteps(locals_output, 65_536);
 
     const task_marker = try repeatedSource(allocator, "<task:", "0", 70_000, ">");
     defer allocator.free(task_marker);

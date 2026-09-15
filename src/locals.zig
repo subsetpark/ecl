@@ -1,4 +1,4 @@
-//! Reader-time lowering of head binders into ordinary point-free forms.
+//! Reader-time lowering of locals declarations into ordinary point-free forms.
 
 const std = @import("std");
 const value = @import("value.zig");
@@ -37,14 +37,14 @@ pub const Lowered = struct {
 };
 pub const LowerProgress = poll.Progress(Lowered);
 
-/// Resumable binder validation and lowering. One call performs at most one
+/// Resumable locals validation and lowering. One call performs at most one
 /// token byte, hash-table probe, nested-list edge, or output operation.
 pub const LowerCursor = struct {
     allocator: std.mem.Allocator,
     releases: *heap.ReleaseDomain,
     names: []const Name,
     body: []const SpannedValue,
-    binder_span: Span,
+    locals_span: Span,
     diag: *Diag,
     local_indices: []?usize,
     state: State,
@@ -120,11 +120,11 @@ pub const LowerCursor = struct {
         releases: *heap.ReleaseDomain,
         names: []const Name,
         body: []const SpannedValue,
-        binder_span: Span,
+        locals_span: Span,
         diag: *Diag,
     ) Error!LowerCursor {
         if (names.len == 0) {
-            diag.set(binder_span, "a binder must contain at least one name");
+            diag.set(locals_span, "a locals declaration must contain at least one name");
             return error.Parse;
         }
         const local_indices = try allocator.alloc(?usize, body.len);
@@ -133,7 +133,7 @@ pub const LowerCursor = struct {
             .releases = releases,
             .names = names,
             .body = body,
-            .binder_span = binder_span,
+            .locals_span = locals_span,
             .diag = diag,
             .local_indices = local_indices,
             .state = .{ .locals_init = LocalMap.initCursor(allocator, names.len) },
@@ -147,7 +147,7 @@ pub const LowerCursor = struct {
     }
 
     fn failName(self: *LowerCursor, name: Name) error{Parse} {
-        self.diag.setFmt(name.span, "invalid binder name `{s}`", .{name.bytes});
+        self.diag.setFmt(name.span, "invalid local name `{s}`", .{name.bytes});
         return error.Parse;
     }
 
@@ -197,7 +197,7 @@ pub const LowerCursor = struct {
                 .complete => |inserted| {
                     const name = self.names[put.index];
                     if (!inserted) {
-                        self.diag.setFmt(name.span, "duplicate binder name `{s}`", .{name.bytes});
+                        self.diag.setFmt(name.span, "duplicate local name `{s}`", .{name.bytes});
                         return error.Parse;
                     }
                     const next = put.index + 1;
@@ -336,14 +336,14 @@ pub const LowerCursor = struct {
     }
 
     fn atom(self: *LowerCursor, output: *Output, item: Value) void {
-        append(output, .{ .value = item, .span = self.binder_span });
+        append(output, .{ .value = item, .span = self.locals_span });
     }
 
     fn advanceOutput(self: *LowerCursor, output: *Output) LowerProgress {
         if (output.body_index == self.body.len) {
             // `drop-locals` is the body's last act rather than something
             // threaded through it: the names never sat on the operand stack,
-            // so nothing between here and the binder had to see past them.
+            // so nothing between here and the declaration had to see past them.
             switch (output.epilogue_step) {
                 0 => {
                     self.atom(output, .{ .int = @intCast(self.names.len) });

@@ -6,7 +6,7 @@ const value = @import("value.zig");
 const heap = @import("heap.zig");
 const intern = @import("intern.zig");
 const lexer = @import("lexer.zig");
-const binder = @import("binder.zig");
+const locals = @import("locals.zig");
 const poll = @import("poll.zig");
 const reader = @import("reader_types.zig");
 const storage = @import("kernel_storage.zig");
@@ -16,8 +16,8 @@ const text_buffer = @import("text_buffer.zig");
 
 const Value = value.Value;
 const Span = lexer.Span;
-const FormList = poll.ChunkList(binder.SpannedValue);
-const NameList = poll.ChunkList(binder.Name);
+const FormList = poll.ChunkList(locals.SpannedValue);
+const NameList = poll.ChunkList(locals.Name);
 const TokenList = poll.ChunkList(Token);
 const CodepointList = poll.ChunkList(u32);
 const SpanList = poll.ChunkList(Span);
@@ -949,12 +949,12 @@ const ContainerKind = enum {
 };
 
 const Context = struct {
-    const BinderState = union(enum) {
+    const LocalsState = union(enum) {
         unavailable,
         unchecked,
         body,
         names: Span,
-        body_with_binder,
+        body_with_locals,
     };
 
     kind: ContainerKind,
@@ -963,7 +963,7 @@ const Context = struct {
     source_end: usize = 0,
     body: FormList,
     names: NameList,
-    binder: BinderState,
+    locals: LocalsState,
 
     fn init(allocator: std.mem.Allocator, kind: ContainerKind, start: Span, source_start: usize) Context {
         return .{
@@ -972,11 +972,11 @@ const Context = struct {
             .source_start = source_start,
             .body = .init(allocator),
             .names = .init(allocator),
-            .binder = if (kind == .dictionary) .unavailable else .unchecked,
+            .locals = if (kind == .dictionary) .unavailable else .unchecked,
         };
     }
-    fn hasBinder(self: *const Context) bool {
-        return self.binder == .body_with_binder;
+    fn hasLocals(self: *const Context) bool {
+        return self.locals == .body_with_locals;
     }
     fn deinit(self: *Context, releases: *heap.ReleaseDomain) void {
         self.body.retire(releases);
@@ -989,7 +989,7 @@ const Context = struct {
     }
 };
 
-const CollectionProgress = poll.Progress(binder.SpannedValue);
+const CollectionProgress = poll.Progress(locals.SpannedValue);
 const CollectionBuilder = struct {
     allocator: std.mem.Allocator,
     releases: *heap.ReleaseDomain,
@@ -1001,13 +1001,13 @@ const CollectionBuilder = struct {
     state: State = .allocate_body,
 
     const Forms = union(enum) {
-        body: []binder.SpannedValue,
+        body: []locals.SpannedValue,
         lowered: struct {
-            forms: []binder.SpannedValue,
+            forms: []locals.SpannedValue,
             values: heap.OwnedValueBuffer,
         },
 
-        fn elements(self: *const Forms) []const binder.SpannedValue {
+        fn elements(self: *const Forms) []const locals.SpannedValue {
             return switch (self.*) {
                 .body => |forms| forms,
                 .lowered => |lowered| lowered.forms,
@@ -1031,25 +1031,25 @@ const CollectionBuilder = struct {
     const State = union(enum) {
         allocate_body,
         copy_body: struct {
-            body: []binder.SpannedValue,
+            body: []locals.SpannedValue,
             iterator: FormList.Iterator,
             index: usize = 0,
         },
-        allocate_names: []binder.SpannedValue,
+        allocate_names: []locals.SpannedValue,
         copy_names: struct {
-            body: []binder.SpannedValue,
-            names: []binder.Name,
+            body: []locals.SpannedValue,
+            names: []locals.Name,
             iterator: NameList.Iterator,
             index: usize = 0,
         },
         prepare_lower: struct {
-            body: []binder.SpannedValue,
-            names: []binder.Name,
+            body: []locals.SpannedValue,
+            names: []locals.Name,
         },
         lowering: struct {
-            body: []binder.SpannedValue,
-            names: []binder.Name,
-            cursor: binder.LowerCursor,
+            body: []locals.SpannedValue,
+            names: []locals.Name,
+            cursor: locals.LowerCursor,
         },
         scan_lowered_spans: struct {
             forms: Forms,
@@ -1082,14 +1082,14 @@ const CollectionBuilder = struct {
             result: Value,
             writer: reader.SpanTable.PutCursor,
         },
-        allocate_pairs: []binder.SpannedValue,
+        allocate_pairs: []locals.SpannedValue,
         copy_pairs: struct {
-            body: []binder.SpannedValue,
+            body: []locals.SpannedValue,
             pairs: []dict.Pair,
             index: usize = 0,
         },
         materialize_dict: struct {
-            body: []binder.SpannedValue,
+            body: []locals.SpannedValue,
             pairs: []dict.Pair,
             materializer: dict.Materializer,
         },
@@ -1186,7 +1186,7 @@ const CollectionBuilder = struct {
     fn advance(self: *CollectionBuilder) (error{ OutOfMemory, Parse })!CollectionProgress {
         return switch (self.state) {
             .allocate_body => result: {
-                const body = try self.allocator.alloc(binder.SpannedValue, self.context.body.count);
+                const body = try self.allocator.alloc(locals.SpannedValue, self.context.body.count);
                 self.state = .{ .copy_body = .{
                     .body = body,
                     .iterator = self.context.body.iterator(),
@@ -1199,7 +1199,7 @@ const CollectionBuilder = struct {
                 break :result .pending;
             } else result: {
                 const body = copy.body;
-                self.state = if (self.context.hasBinder())
+                self.state = if (self.context.hasLocals())
                     .{ .allocate_names = body }
                 else if (self.context.kind == .dictionary)
                     .{ .allocate_pairs = body }
@@ -1208,7 +1208,7 @@ const CollectionBuilder = struct {
                 break :result .pending;
             },
             .allocate_names => |body| result: {
-                const names = try self.allocator.alloc(binder.Name, self.context.names.count);
+                const names = try self.allocator.alloc(locals.Name, self.context.names.count);
                 self.state = .{ .copy_names = .{
                     .body = body,
                     .names = names,
@@ -1228,7 +1228,7 @@ const CollectionBuilder = struct {
                 break :result .pending;
             },
             .prepare_lower => |*preparation| result: {
-                const lowerer = try binder.LowerCursor.init(
+                const lowerer = try locals.LowerCursor.init(
                     self.allocator,
                     self.releases,
                     preparation.names,
@@ -1524,7 +1524,7 @@ const ParserCursor = struct {
             .complete => unreachable,
         };
     }
-    fn appendOwned(self: *ParserCursor, form: binder.SpannedValue) error{OutOfMemory}!void {
+    fn appendOwned(self: *ParserCursor, form: locals.SpannedValue) error{OutOfMemory}!void {
         try self.values.appendOwned(form.value);
         const destination = if (self.contexts.topPtr()) |context| &context.body else &self.output.?;
         try destination.append(form);
@@ -1547,7 +1547,7 @@ const ParserCursor = struct {
                 return error.Parse;
             },
             .bar => {
-                self.diag.set(token.span, "`|` is legal only around a list's leading binder");
+                self.diag.set(token.span, "`|` is legal only around a list's leading locals declaration");
                 return error.Parse;
             },
             .open_paren, .open_square, .open_dict, .close_paren, .close_square, .close_dict => unreachable,
@@ -1592,30 +1592,30 @@ const ParserCursor = struct {
             else => null,
         };
     }
-    fn handleBinder(self: *ParserCursor, token: Token) (error{ OutOfMemory, Parse })!bool {
+    fn handleLocals(self: *ParserCursor, token: Token) (error{ OutOfMemory, Parse })!bool {
         const context = self.contexts.topPtr().?;
-        switch (context.binder) {
+        switch (context.locals) {
             .unchecked => {
                 if (token.kind == .bar) {
-                    context.binder = .{ .names = token.span };
+                    context.locals = .{ .names = token.span };
                     return true;
                 }
-                context.binder = .body;
+                context.locals = .body;
                 return false;
             },
-            .unavailable, .body, .body_with_binder => return false,
+            .unavailable, .body, .body_with_locals => return false,
             .names => {},
         }
         if (token.kind == .bar) {
             if (context.names.count == 0) {
-                self.diag.set(context.binder.names, "a binder must contain at least one name");
+                self.diag.set(context.locals.names, "a locals declaration must contain at least one name");
                 return error.Parse;
             }
-            context.binder = .body_with_binder;
+            context.locals = .body_with_locals;
             return true;
         }
         if (token.kind != .atom) {
-            self.diag.set(token.span, "binder names must be unquoted, unqualified symbols");
+            self.diag.set(token.span, "local names must be unquoted, unqualified symbols");
             return error.Parse;
         }
         try context.names.append(.{ .bytes = token.bytes, .span = token.span });
@@ -1655,7 +1655,7 @@ const ParserCursor = struct {
         context = undefined;
     }
     fn processToken(self: *ParserCursor, token: Token) (error{ OutOfMemory, Parse })!void {
-        if (self.contexts.topPtr() != null and try self.handleBinder(token)) return;
+        if (self.contexts.topPtr() != null and try self.handleLocals(token)) return;
         if (openKind(token.kind)) |kind| {
             if (self.context_depth == max_nesting_depth) {
                 self.diag.set(token.span, "form nesting too deep");
@@ -1670,9 +1670,9 @@ const ParserCursor = struct {
     }
     fn eof(self: *ParserCursor) ParseProgress {
         if (self.contexts.topPtr()) |context| {
-            if (context.binder == .names) return .{ .incomplete = .{
-                .message = "unclosed binder; expected `|`",
-                .span = context.binder.names,
+            if (context.locals == .names) return .{ .incomplete = .{
+                .message = "unclosed locals declaration; expected `|`",
+                .span = context.locals.names,
             } };
             return .{ .incomplete = .{
                 .message = switch (context.kind) {

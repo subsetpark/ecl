@@ -693,7 +693,7 @@ const Formatter = struct {
     fn nested(self: *Formatter, sequence: Sequence) Error!NestedDoc {
         var output: std.ArrayList(*const Doc) = .empty;
         defer output.deinit(self.allocator());
-        const binder = binderBounds(sequence);
+        const locals = localsBounds(sequence);
         var have_content = false;
         var previous_comment = false;
         var previous_form: ?usize = null;
@@ -759,7 +759,7 @@ const Formatter = struct {
                 } else if (have_content) {
                     if (previous_comment) {
                         try self.appendHardlines(&output, @min(@max(newlines, 1), 2));
-                    } else if (!tightBinderGap(binder, previous_form, part_index)) {
+                    } else if (!tightLocalsGap(locals, previous_form, part_index)) {
                         if (newlines > 0) {
                             try self.appendHardlines(&output, @min(newlines, 2));
                         } else {
@@ -770,9 +770,9 @@ const Formatter = struct {
                 } else if (newlines > 0) {
                     try self.appendHardlines(&output, @min(newlines, 2));
                 }
-                if (binder) |bounds| {
+                if (locals) |bounds| {
                     if (part_index == bounds.open) {
-                        try output.append(self.allocator(), try self.formatBinder(sequence, bounds));
+                        try output.append(self.allocator(), try self.formatLocals(sequence, bounds));
                     } else if (part_index > bounds.close) {
                         try output.append(self.allocator(), try self.form(sequence, part_index));
                     }
@@ -808,7 +808,7 @@ const Formatter = struct {
     fn appendHardlines(self: *Formatter, output: *std.ArrayList(*const Doc), count: usize) Error!void {
         for (0..count) |_| try output.append(self.allocator(), try self.docs.hardline());
     }
-    fn formatBinder(self: *Formatter, sequence: Sequence, bounds: BinderBounds) Error!*const Doc {
+    fn formatLocals(self: *Formatter, sequence: Sequence, bounds: LocalsBounds) Error!*const Doc {
         var names: std.ArrayList(*const Doc) = .empty;
         defer names.deinit(self.allocator());
         for (sequence.parts[bounds.open + 1 .. bounds.close]) |part| switch (part) {
@@ -1283,8 +1283,8 @@ fn attachedDefinitionAfterComment(sequence: Sequence, index: usize) ?HeaderTarge
 fn ordinaryDefinitionComment(bytes: []const u8) bool {
     return bytes.len > 0 and bytes[0] == '#' and (bytes.len == 1 or bytes[1] != '#');
 }
-const BinderBounds = struct { open: usize, close: usize };
-fn binderBounds(sequence: Sequence) ?BinderBounds {
+const LocalsBounds = struct { open: usize, close: usize };
+fn localsBounds(sequence: Sequence) ?LocalsBounds {
     var open: ?usize = null;
     var names: usize = 0;
     for (sequence.parts, 0..) |part, index| switch (part) {
@@ -1304,10 +1304,10 @@ fn binderBounds(sequence: Sequence) ?BinderBounds {
     };
     return null;
 }
-fn tightBinderGap(bounds: ?BinderBounds, previous: ?usize, current: usize) bool {
-    const binder = bounds orelse return false;
+fn tightLocalsGap(bounds: ?LocalsBounds, previous: ?usize, current: usize) bool {
+    const locals = bounds orelse return false;
     const prior = previous orelse return false;
-    return prior >= binder.open and current <= binder.close;
+    return prior >= locals.open and current <= locals.close;
 }
 fn wordBytes(form_item: *const Form) ?[]const u8 {
     const bytes = switch (form_item.kind) {

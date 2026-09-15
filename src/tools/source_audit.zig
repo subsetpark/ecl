@@ -33,11 +33,11 @@ const source_groups = [_]SourceGroup{
         "equal.zig",       "dict.zig",                "print.zig",  "poll.zig",
         "text_buffer.zig", "startup_environment.zig",
     }),
-    // Tokenization, parsing, binder lowering, exact materialization, and
+    // Tokenization, parsing, locals lowering, exact materialization, and
     // provenance publication all carry nominal resumable state. The larger
     // boundary replaces native-stack control flow.
     embeddedGroup(true, &.{
-        "lexer.zig", "binder.zig", "reader_types.zig", "reader.zig", "reader_cursor.zig",
+        "lexer.zig", "locals.zig", "reader_types.zig", "reader.zig", "reader_cursor.zig",
     }),
     // Resumable primitive shells own inputs and exact-size partial outputs;
     // their nominal driver states replace cancellation-only native stacks.
@@ -1137,7 +1137,7 @@ fn auditUnitConstructorSpelling() bool {
 }
 
 /// Whether `source` binds `name` with `def` or `defp`: the quoted spelling
-/// followed by whitespace and the binder, the shape every checked-in
+/// followed by whitespace and the definition word, the shape every checked-in
 /// definition ends in.
 fn definesQuotedName(source: []const u8, name: []const u8) bool {
     var scan: usize = 0;
@@ -1148,9 +1148,9 @@ fn definesQuotedName(source: []const u8, name: []const u8) bool {
         if (!std.mem.eql(u8, source[start..end], name)) continue;
         var rest = end;
         while (rest < source.len and std.ascii.isWhitespace(source[rest])) rest += 1;
-        const binder_end = preludeTokenEnd(source, rest);
-        const binder = source[rest..binder_end];
-        if (std.mem.eql(u8, binder, "def") or std.mem.eql(u8, binder, "defp")) return true;
+        const definition_end = preludeTokenEnd(source, rest);
+        const definition = source[rest..definition_end];
+        if (std.mem.eql(u8, definition, "def") or std.mem.eql(u8, definition, "defp")) return true;
     }
     return false;
 }

@@ -553,7 +553,7 @@ test "nested in-place applications finish in one unwind" {
         .{ .name = "tri", .source = "3 (1 +) (2 *) (3 -) tri", .expected = "4 6 0" },
         .{ .name = "tri2", .source = "3 4 (+) (*) (-) tri2", .expected = "7 12 -1" },
         .{ .name = "dip inside times", .source = "5 2 (9 (1 +) dip pop) times", .expected = "7" },
-        .{ .name = "binder body under dip", .source = "10 20 (|lo hi| hi lo - lo +) call", .expected = "20" },
+        .{ .name = "locals body under dip", .source = "10 20 (|lo hi| hi lo - lo +) call", .expected = "20" },
     });
 }
 

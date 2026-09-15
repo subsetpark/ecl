@@ -144,7 +144,7 @@ a second grammar.
 - Tokens are separated by whitespace: Unicode whitespace, plus comma —
   `,` is whitespace, so pasted `[1, 2, 3]` reads as `[1 2 3]`.
 - `;` is reserved: a parse error outside strings and comments.
-- `|` is a reserved delimiter: legal only as the binder markers
+- `|` is a reserved delimiter: legal only as the locals markers
   immediately after `(` or `[` (see Forms); anywhere else it is a parse
   error.
 - Every reader-produced token carries provenance (source name, line,
@@ -200,9 +200,9 @@ character data.
 ```ebnf
 program  :=  form*
 form     :=  list | dict | atom
-list     :=  "(" binder? form* ")"  |  "[" binder? form* "]"
+list     :=  "(" locals? form* ")"  |  "[" locals? form* "]"
 dict     :=  "{" (form form)* "}"
-binder   :=  "|" name+ "|"           # names: distinct unqualified symbols
+locals   :=  "|" name+ "|"           # names: distinct unqualified symbols
 ```
 
 - `( )` and `[ ]` construct the same kind of value — a list of the
@@ -216,15 +216,16 @@ binder   :=  "|" name+ "|"           # names: distinct unqualified symbols
   word key `foo` without resolving either name. An odd form count and a
   duplicate key are parse errors. `{}` is the empty dict. When entries
   require computation, build a flat entry list and use `dict.from-flat`.
-- The binder is the locals sugar: `(|lo hi| hi lo - rand lo +)`,
-  `(|x| x x *) each`. It is legal only immediately after `(` or `[` and is
-  desugared to point-free code before the list value exists — the stored
-  list contains no binder and no local names. Bind order: the leftmost
+- Locals name a quotation's inputs: `(|lo hi| hi lo - rand lo +)`,
+  `(|x| x x *) each`. A locals declaration is legal only immediately after
+  `(` or `[` and is desugared to point-free code before the list value
+  exists — the stored list contains no locals declaration or local names.
+  Bind order: the leftmost
   name takes the deepest value, so `10 20 (|lo hi| …)` gives `lo` = 10 and
   `hi` = 20 — names read in argument order. Names must be distinct
-  unqualified symbols; the empty binder `(||)` is a parse error; the exact
-  names `--` and `:` are parse errors in a binder. A local name is not
-  visible inside a nested quotation within the binder body; referencing
+  unqualified symbols; an empty locals declaration `(||)` is a parse error;
+  the exact names `--` and `:` are parse errors as local names. A local is not
+  visible inside a nested quotation within the declaring body; referencing
   one there is an error whose message identifies `partial` as construction of
   a reusable capturing quotation. The sugar does not involve `set`; locals and
   environment assignment are unrelated mechanisms.
@@ -637,7 +638,7 @@ representations but expose the same binding model.
   present; an unannotated `set` has no effect or documentation, and nothing
   distinguishes it from the corresponding `literal` plus `def` spelling. `set`
   assigns the environment and introduces no lexical binding. For ordinary local
-  values, prefer stack flow or binder locals.
+  values, prefer stack flow or locals.
 - Redefinition (`def` or `set` over an existing name) replaces the
   complete binding snapshot: omitting an effect or docstring clears the
   old one. Code holding the old body keeps running it safely.
@@ -727,7 +728,7 @@ The exact names `--`, `:`, and `...` are reserved against binding:
 they remain legal word and symbol values and can be built into
 annotations at runtime, but cannot be introduced as definitions, values,
 locals, module names, aliases, exports, or native entries. Binding attempts are `'domain`;
-binder use is a parse error. Longer names containing the same punctuation
+use as a local name is a parse error. Longer names containing the same punctuation
 remain legal.
 
 ## Pervasion and conformability

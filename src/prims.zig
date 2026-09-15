@@ -47,12 +47,12 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "args", .primitive = args, .effect = "-- arguments", .doc = "Return the process arguments as a list of strings." },
         .{ .name = "exit", .primitive = exit, .effect = "status --", .doc = "Request root-session termination with the given exit status." },
         .{ .name = "getenv", .primitive = getenv, .effect = "name -- string", .doc = "Return an environment variable's value from the session snapshot." },
-        .{ .name = "_ll", .primitive = bindLocals, .effect = "... n --", .doc = "Move the top n values into the head-binder locals, last name first. " ++
+        .{ .name = "_ll", .primitive = bindLocals, .effect = "... n --", .doc = "Move the top n values into the locals, last name first. " ++
             "The reader emits this; write `|a b|` instead." },
-        .{ .name = "_gl", .primitive = readLocal, .effect = "n -- x", .doc = "Copy head-binder local n, counting from the most recently bound name. " ++
+        .{ .name = "_gl", .primitive = readLocal, .effect = "n -- x", .doc = "Copy local n, counting from the most recently bound name. " ++
             "The reader emits this; write the local's name instead." },
-        .{ .name = "_dl", .primitive = unbindLocals, .effect = "n --", .doc = "Discard the top n head-binder locals. The reader emits this at the end " ++
-            "of a binder body." },
+        .{ .name = "_dl", .primitive = unbindLocals, .effect = "n --", .doc = "Discard the top n locals. The reader emits this at the end " ++
+            "of the declaring quotation body." },
     };
     try core.installBuiltins(&definitions);
     try combinators.install(core);
@@ -61,13 +61,13 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     try task_prims.install(core);
     try test_prims.install(core);
 }
-/// Head-binder backend: `_ll` loads locals, `_gl` gets one, `_dl` drops them.
+/// Locals backend: `_ll` loads locals, `_gl` gets one, `_dl` drops them.
 /// The reader lowers `|a b|` into these three, and they are reserved binding
 /// names so a session definition cannot change what a local read means. The
 /// underscore marks them as reader-internal vocabulary and keeps three ordinary
 /// words out of the reservation. They move values between the operand stack and the unit's
 /// locals, which is storage the reader alone addresses: every index the three
-/// ever see was computed by the binder from names it had already resolved.
+/// ever see was computed by the locals lowerer from names it had already resolved.
 fn bindLocals(evaluator: *Machine) MachineError!void {
     var count_value = try evaluator.popValue();
     defer count_value.deinit();

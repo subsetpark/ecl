@@ -735,7 +735,7 @@ test "io.pp and io.prin write through and writer failures become io errors" {
     try std.testing.expectEqualStrings("io", try errorKind(allocator, failure));
 }
 
-test "inline control and reader-lowered binders execute" {
+test "inline control and reader-lowered locals execute" {
     const allocator = std.testing.allocator;
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);

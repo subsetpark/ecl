@@ -244,7 +244,7 @@ test "multiline documentation is normalized and see prints annotation and canoni
     );
 }
 
-test "see retains source binders while execution uses their lowered body" {
+test "see retains source locals while execution uses their lowered body" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
     var runtime_inputs = try runtime_fixture.Fixture.init();
@@ -455,7 +455,7 @@ test "long annotation traversal and reflection observe cancellation" {
     try expectErrorContains(&name_runtime, lookup_source, "'kind 'undefined-word");
 }
 
-// ── Milestone 10 (one-binder-merge) ──────────────────────────────────────
+// ── Milestone 10 (one-definition-merge) ──────────────────────────────────────
 // The merge makes `v 'name set` observationally `v literal 'name def`:
 // bindings have one kind, bare reference always applies a stored body, and
 // a "value" is a word whose body is the literal capture `((v) first)`. Since
