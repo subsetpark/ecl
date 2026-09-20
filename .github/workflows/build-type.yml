@@ -35,6 +35,9 @@ on:
       run_native_acceptance:
         default: false
         type: boolean
+      run_memcheck:
+        default: false
+        type: boolean
       run_fuzz:
         default: false
         type: boolean
@@ -289,6 +292,50 @@ jobs:
           docker exec --env OPTIMIZE="$OPTIMIZE" ecl-ci sh -euxc
           'cd /build; timeout 10m zig build test-native-acceptance
           -Doptimize="$OPTIMIZE" --summary all --test-timeout 5m < /dev/null'
+
+      - name: Valgrind Memcheck
+        if: inputs.run_memcheck
+        run: |
+          docker exec --env OPTIMIZE="$OPTIMIZE" ecl-ci bash -euo pipefail -c '
+            cd /build
+            test "$OPTIMIZE" = ReleaseSafe
+            export DEBIAN_FRONTEND=noninteractive
+            timeout 5m apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3 install -y --no-install-recommends valgrind < /dev/null
+            timeout 10m zig build -Dapps=false -Doptimize="$OPTIMIZE" --summary all < /dev/null
+            timeout 10m zig build native-sample-fixture -Dapps=false -Doptimize="$OPTIMIZE" --summary all < /dev/null
+
+            memcheck() {
+              local name="$1" expected="$2" output report status
+              shift 2
+              output="$(mktemp)"
+              report="$(mktemp)"
+              if timeout 3m valgrind --tool=memcheck --error-exitcode=97 \
+                  --leak-check=full --errors-for-leak-kinds=definite,possible \
+                  --track-origins=yes --log-file="$report" "$@" \
+                  < /dev/null > "$output"; then
+                status=0
+              else
+                status=$?
+              fi
+              cat "$report"
+              if [ "$status" -ne 0 ]; then
+                cat "$output"
+                echo "$name failed with status $status" >&2
+                return "$status"
+              fi
+              if ! printf "%s\n" "$expected" | cmp -s - "$output"; then
+                cat "$output"
+                echo "$name produced unexpected output" >&2
+                return 1
+              fi
+              rm -f "$output" "$report"
+            }
+
+            memcheck core 7 ./zig-out/bin/ecl -e "3 4 +"
+            memcheck json 1 ./zig-out/bin/ecl -e "\"[1,2,[3]]\" dup json.parse json.emit match?"
+            export ECL_PATH="$PWD/zig-out/native-fixture"
+            memcheck native 42 ./zig-out/bin/ecl -e "41 sample.increment"
+          '
 
       - name: Standalone Git snapshot acceptance
         if: inputs.run_native_acceptance

@@ -73,9 +73,10 @@ tier.
   `zig build check` when all you need is “does the tree still compile.”
 - **CI: `.github/workflows/ci.yml`.** Pull requests run the Debug precommit
   tier and one complete ReleaseSafe suite, with the public formatter, native
-  SDK rejection, PTY, and standalone native acceptance surfaces. Pushes to
-  master and manual runs add the full Debug suite, bounded fuzz campaigns,
-  eight-worker concurrency, differential, TSan, and ReleaseFast snapshots.
+  SDK rejection, PTY, standalone native acceptance, and Linux Valgrind Memcheck
+  over short core, JSON, and native CLI paths. Pushes to master and manual
+  runs add the full Debug suite, bounded fuzz campaigns, eight-worker
+  concurrency, differential, TSan, and ReleaseFast snapshots.
   Each optimization mode owns one long-lived job so its later tiers reuse its
   Zig cache and emitted artifacts. The reusable build-type workflow also
   persists host-mounted Zig local and global caches under a key containing the

@@ -66,6 +66,8 @@ pub fn build(b: *std.Build) void {
     });
     fixture.root_module.link_libc = true;
     const fixture_install = native_build.installExtension(b, fixture, "native-fixture");
+    const sample_fixture_step = b.step("native-sample-fixture", "Build the sample native extension for CLI memory checks");
+    sample_fixture_step.dependOn(fixture_install);
     const native_fixture_step = b.step("native-fixture", "Build the native SDK fixture artifacts");
     native_fixture_step.dependOn(fixture_install);
     const fixture_files = b.addWriteFiles();

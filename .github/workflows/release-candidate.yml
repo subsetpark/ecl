@@ -36,6 +36,7 @@ jobs:
       run_full_suite: true
       run_repl: true
       run_native_acceptance: true
+      run_memcheck: true
       run_workers_eight: true
       run_performance_smoke: true
 
