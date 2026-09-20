@@ -80,6 +80,8 @@ jobs:
       OOM_FILTER: ${{ inputs.oom_filter }}
       PANT_VERSION: 0.24.0
       ZIG_VERSION: 0.16.0
+      VALGRIND_VERSION: 3.27.1
+      VALGRIND_SHA256: 5d589152eb8071c02feab8ce6ab719e431a1fbc3e2b1700f5432632a8b9264dc
       ZIG_GLOBAL_CACHE_HOST: /tmp/ecl-zig-cache/global
       ZIG_LOCAL_CACHE_HOST: /tmp/ecl-zig-cache/local
 
@@ -293,23 +295,46 @@ jobs:
           'cd /build; timeout 10m zig build test-native-acceptance
           -Doptimize="$OPTIMIZE" --summary all --test-timeout 5m < /dev/null'
 
+      - name: Install pinned Valgrind
+        if: inputs.run_memcheck
+        run: |
+          timeout 20m docker exec \
+            --env VALGRIND_VERSION="$VALGRIND_VERSION" \
+            --env VALGRIND_SHA256="$VALGRIND_SHA256" \
+            ecl-ci bash -euo pipefail -c '
+            export DEBIAN_FRONTEND=noninteractive
+            # Memcheck needs loader symbols from libc6-dbg on Ubuntu.
+            timeout 5m apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3 install -y --no-install-recommends build-essential bzip2 libc6-dbg < /dev/null
+            timeout 2m curl -fsSL --retry 3 --connect-timeout 15 --max-time 90 \
+              -o /tmp/valgrind.tar.bz2 "https://sourceware.org/pub/valgrind/valgrind-$VALGRIND_VERSION.tar.bz2" < /dev/null
+            echo "$VALGRIND_SHA256  /tmp/valgrind.tar.bz2" | sha256sum -c -
+            mkdir -p /tmp/valgrind-src
+            tar -C /tmp/valgrind-src --strip-components=1 -xjf /tmp/valgrind.tar.bz2
+            cd /tmp/valgrind-src
+            timeout 2m ./configure --prefix=/opt/valgrind --enable-only64bit < /dev/null
+            timeout 10m make -j2 < /dev/null
+            timeout 1m make install < /dev/null
+            test "$(/opt/valgrind/bin/valgrind --version)" = "valgrind-$VALGRIND_VERSION"
+            /opt/valgrind/bin/valgrind --version
+          ' < /dev/null
+
       - name: Valgrind Memcheck
         if: inputs.run_memcheck
         run: |
           docker exec --env OPTIMIZE="$OPTIMIZE" ecl-ci bash -euo pipefail -c '
             cd /build
             test "$OPTIMIZE" = ReleaseSafe
-            export DEBIAN_FRONTEND=noninteractive
-            timeout 5m apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3 install -y --no-install-recommends valgrind < /dev/null
-            timeout 10m zig build -Dapps=false -Doptimize="$OPTIMIZE" --summary all < /dev/null
-            timeout 10m zig build native-sample-fixture -Dapps=false -Doptimize="$OPTIMIZE" --summary all < /dev/null
+            # Host CPU detection can emit instructions Valgrind cannot decode.
+            # Use the baseline CPU for both the CLI and its loaded extension.
+            timeout 10m zig build -Dcpu=baseline -Dapps=false -Doptimize="$OPTIMIZE" --summary all < /dev/null
+            timeout 10m zig build native-sample-fixture -Dcpu=baseline -Dapps=false -Doptimize="$OPTIMIZE" --summary all < /dev/null
 
             memcheck() {
               local name="$1" expected="$2" output report status
               shift 2
               output="$(mktemp)"
               report="$(mktemp)"
-              if timeout 3m valgrind --tool=memcheck --error-exitcode=97 \
+              if timeout 3m /opt/valgrind/bin/valgrind --tool=memcheck --error-exitcode=97 \
                   --leak-check=full --errors-for-leak-kinds=definite,possible \
                   --track-origins=yes --log-file="$report" "$@" \
                   < /dev/null > "$output"; then
