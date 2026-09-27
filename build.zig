@@ -999,9 +999,9 @@ pub fn build(b: *std.Build) void {
     );
     for (analyzed_roots) |analyzed| {
         const analysis = b.addTest(.{ .root_module = analyzed });
-        analysis.linkage = runtime_linkage;
         // No binary is requested, so this is analysis only: the expensive
-        // codegen and link stages never run.
+        // codegen and link stages never run. Do not impose runtime linkage:
+        // pure-Zig test roots have no shared library to satisfy -dynamic.
         analysis.generated_bin = null;
         analysis_step.dependOn(&analysis.step);
     }
