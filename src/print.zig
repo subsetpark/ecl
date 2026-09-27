@@ -803,7 +803,8 @@ fn writeFloat(cursor: *RenderCursor, number: f64, writer: *std.Io.Writer) std.Io
     // subnormals exceed 128 bytes. Derive the bound from the formatter rather
     // than imposing a second, narrower limit on the f64 value domain.
     var buffer: [std.fmt.float.bufferSize(.decimal, f64)]u8 = undefined;
-    const rendered = std.fmt.float.render(&buffer, number, .{ .mode = .decimal }) catch unreachable;
+    const rendered = std.fmt.float.render(&buffer, number, .{ .mode = .decimal }) catch
+        @panic("decimal float rendering exceeded its type-derived buffer");
     try cursor.writeAll(writer, rendered);
     if (std.mem.indexOfAny(u8, rendered, ".eE") == null) try cursor.writeAll(writer, ".0");
 }
