@@ -1065,9 +1065,9 @@ fn applyReduction(
         try evaluator.pushOwned(accumulator.take());
         return;
     }
-    // Over a numeric leaf with an accumulator the operation preserves, the
-    // reduction is one typed sequential pass instead of one cursor and one
-    // scheduler turn per element. Association stays strictly left-to-right, so
+    // Over a numeric leaf with an accumulator that stabilizes after at most
+    // one scalar step, reduction is one typed sequential pass instead of one
+    // cursor and one scheduler turn per element. Association stays left-to-right, so
     // float sums keep the generic route's bits.
     if (numeric.typedReduceCandidate(operation, input, initial)) {
         return numeric.idiomReduceStart(operation)(evaluator, input, initial, scan, start, consumed);

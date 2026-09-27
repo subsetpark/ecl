@@ -701,6 +701,7 @@ fn projectSessionInitializationProbe(allocator: std.mem.Allocator) !void {
 }
 
 const StdlibSurface = enum {
+    transitioning_reductions,
     archive_view,
     archive_resource,
     directory_enumeration,
@@ -804,6 +805,13 @@ fn stdlibSessionAllocationProbe(
     if (failure_offset) |offset| failing.fail_index = first_failure_index + offset;
 
     switch (surface) {
+        .transitioning_reductions => try runOk(
+            &runtime,
+            "oom-transitioning-reductions.ecl",
+            "[1.0 2.0] 0 (+) fold pop [1.0 2.0] 0 (+) scan pop " ++
+                "[2.0] 8 (*) scan pop " ++
+                "[] ([1e308 1e308] 0 (+) scan) @attempt pop",
+        ),
         .root_source_preload => {
             while (true) switch (try runtime.advanceLocalPreload()) {
                 .pending => {},
@@ -1287,6 +1295,11 @@ fn checkStdlibSurface(comptime surface: StdlibSurface) !void {
         std.heap.smp_allocator,
         SurfaceProbe(surface).run,
     );
+}
+
+test "oom: standard-library and host: transitioning reductions" {
+    try requireSelectedOomTest(@src());
+    try checkStdlibSurface(.transitioning_reductions);
 }
 
 fn nativePortForwardingProbe(

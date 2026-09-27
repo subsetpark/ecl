@@ -639,6 +639,44 @@ test "idioms: length each preserves errors dictionaries shadowing and generated 
     try expectHits("(pop 99) 'len def [[1] []] (len) each", 0);
 }
 
+test "idioms: transitioning reduction seeds preserve exact scalar semantics" {
+    for ([_][]const u8{
+        // No reducer invocation for empty inputs or singleton fold1.
+        "[] 0 (+) fold",                           "[] 0 (+) scan",                                      "[] 'seed (+) fold",
+        "[7] (/) fold1",                           "[0] (/) fold1",                                      "[1.5] (+) fold1",
+        // Promotion, first scan slot, non-associativity and signed zero.
+        "[1.5] 0 (+) fold",                        "[1.5] 0 (+) scan",                                   "[1.5 2.5 3.5] 0 (+) fold",
+        "[1.5 2.5 3.5] 0 (+) scan",                "[1e16 1.0 -1e16] 0 (+) fold",                        "[1e16 1.0 -1e16] 0 (+) scan",
+        "[-0.0 -0.0] 0 (+) scan",                  "[-0.0 1.0] 0 (*) scan",                              "[0.5 0.25] 8 (-) scan",
+        "[2 4] 16 (/) fold",                       "[2 4] 16 (/) scan",                                  "[16 2 4] (/) fold1",
+        "[2 3] 2 (pow) scan",                      "[2 3] 2 (atan2) scan",
+        // Other reducer quotations remain generic. Comparisons must not
+        // pre-convert either seed and lose mixed numeric precision.
+                                      "[1 0] 0.5 (>) scan",
+        "[1.0 0.0] 0.5 (=) scan",                  "[9007199254740992.0 1.0] 9007199254740993 (=) scan", "[9007199254740993 1] 9007199254740992.0 (<) scan",
+        // Complete fault dictionaries, including source site and trace, at
+        // both the transition and a later stable step.
+        "[0 2] 16 (/) fold",                       "[0 2] 16 (/) scan",                                  "[2 0] 16 (/) fold",
+        "[2 0] 16 (/) scan",                       "[-1.0 2.0] 0 (/) scan",                              "[0.0] 0 (/) scan",
+        "[1e308 1e308] 0 (+) fold",                "[1e308 1e308] 0 (+) scan",                           "[1e308] 2 (*) scan",
+        "[inf -inf] 0 (+) fold",                   "[inf -inf] 0 (+) scan",                              "[inf 2.0] 0 (*) scan",
+        // Non-fixpoint or non-leaf shapes and overridden bindings stay generic.
+        "[1.0 2.0] 0 (min) scan",                  "[1.0 -2.0] 0 (max) scan",                            "[1 2.0 3] 0 (+) scan",
+        "[[1.0] [2.0]] 0 (+) scan",                "[1.0 'bad] 0 (+) fold",                              "[1.0 2.0] 0 (+ dup pop) scan",
+        "(pop pop 7) '+ def [1.0 2.0] 0 (+) scan",
+    }) |source| compareModesExactly(source) catch |err| {
+        std.log.err("transitioning reduction differential failed for `{s}`", .{source});
+        return err;
+    };
+    // Resumption preserves all scan entries, not merely the final value;
+    // faults on the far side of a quantum keep their full source metadata.
+    for ([_][]const u8{
+        "65537 range 0.0 * 0.1 + 0 (+) scan",
+        "65537 range 0.0 * 65536 inf put 0 (*) fold",
+        "65537 range 0.0 * 65536 inf put 0 (*) scan",
+    }) |source| try compareModesExactly(source);
+}
+
 test "idioms: boolean folds and fold1 preserve seeds errors and bindings" {
     for ([_][]const u8{
         "[1 0 1] 1 (and) fold",                   "[0 0 1] 0 (or) fold",

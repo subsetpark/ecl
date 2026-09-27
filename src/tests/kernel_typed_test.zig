@@ -23,6 +23,43 @@ const intern = @import("../intern.zig");
 
 const allocator = std.testing.allocator;
 
+test "typed kernels: transitioning reduction seeds use bounded typed passes" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    const quantum = kernels.support.poll_quantum;
+    for ([_]usize{ quantum - 1, quantum, quantum + 1, quantum * 2 + 1 }) |length| {
+        const numbers = try allocator.alloc(f64, length);
+        defer allocator.free(numbers);
+        @memset(numbers, 1.0);
+        for ([_][]const u8{ "sum", "0 (+) fold", "0 (+) scan last" }) |source| {
+            try runtime.pushOwned(try list.fromF64Slice(allocator, numbers));
+            switch (try runtime.runUnit("<transitioning-reduction>", source)) {
+                .ok => {},
+                .err => |failure| {
+                    runtime.release(failure);
+                    return error.TestUnexpectedResult;
+                },
+                .incomplete => return error.TestUnexpectedResult,
+            }
+            const items = runtime.stackItems();
+            try std.testing.expectEqual(@as(usize, 1), items.len);
+            try std.testing.expect(items[0] == .float);
+            try std.testing.expectEqual(@as(f64, @floatFromInt(length)), items[0].float);
+            // Observe before cleanup starts another Unit. The lower bound
+            // protects polling; the upper bound catches generic per-element
+            // dispatch even though it computes the same answer.
+            const polls = runtime.lastPolls();
+            try std.testing.expect(polls >= length / quantum);
+            try std.testing.expect(polls <= length / quantum + 16);
+            try clearStack(&runtime);
+        }
+    }
+    try expectFaultRetainsInput(&runtime, try buildFloats(.specialized, &.{std.math.inf(f64)}), "0 (*) scan");
+    try expectFaultRetainsInput(&runtime, try buildFloats(.specialized, &.{ std.math.inf(f64), -std.math.inf(f64) }), "0 (+) scan");
+}
+
 /// Renders one case's whole observable outcome: the stack as printed, or the
 /// error dict as printed. Comparing these strings compares values,
 /// representations, brackets, string forms, float bits, error kinds, messages,

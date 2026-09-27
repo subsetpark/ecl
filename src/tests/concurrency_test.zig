@@ -283,6 +283,28 @@ test "concurrency: tasks snapshots include pending descendants in @spawn preorde
     try std.testing.expectEqualStrings("", actual.bytes());
 }
 
+test "concurrency: transitioning reductions share inputs and remain cancellable" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    // Construct once in the parent; children borrow the same float leaf.
+    // Worker-count gates run this at both one and eight workers.
+    try runOk(&runtime, "131073 range 0.0 * 1.0 + 'reduction-input set " ++
+        "[0 1 2 3] [] (pop reduction-input 0 (+) fold reduction-input 0 (+) scan last pair) @each " ++
+        "[[131073.0 131073.0] [131073.0 131073.0] [131073.0 131073.0] [131073.0 131073.0]] match?");
+    var actual = try display(&runtime);
+    try std.testing.expectEqualStrings("1", actual.bytes());
+    actual.deinit();
+    // Repeated reductions keep the child alive independently of worker speed;
+    // a peer can finish and the child can then be cancelled and joined.
+    try runOk(&runtime, "pop [] ((1) (reduction-input 0 (+) fold pop reduction-input 0 (+) scan pop) while) @spawn " ++
+        "[] (7) @spawn task.await pop dup task.cancel task.await 'err at 'kind at");
+    actual = try display(&runtime);
+    defer actual.deinit();
+    try std.testing.expectEqualStrings("'cancelled", actual.bytes());
+}
+
 test "concurrency: one-worker kernel safe points let another unit progress" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
