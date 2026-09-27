@@ -12,6 +12,69 @@ const reader = @import("../reader.zig");
 const spans = @import("../spans.zig");
 const testgen = @import("testgen.zig");
 
+fn expectFloatToken(source: []const u8, expected: f64) !void {
+    const actual = lexer.classify(source);
+    try std.testing.expect(actual == .float);
+    try std.testing.expectEqual(@as(u64, @bitCast(expected)), @as(u64, @bitCast(actual.float)));
+}
+
+test "decimal literals round-trip float bits without exponent scaling or double rounding" {
+    const allocator = std.testing.allocator;
+    inline for (.{
+        .{ "1e308", @as(f64, 1e308) },
+        .{ "0.3", @as(f64, 0.3) },
+        .{ "5e-324", std.math.floatTrueMin(f64) },
+        .{ "-5e-324", -std.math.floatTrueMin(f64) },
+        .{ "1.7976931348623157e308", std.math.floatMax(f64) },
+        .{ "0e999999999999999999999999", @as(f64, 0.0) },
+        .{ "-0.0e999999999999999999999999", @as(f64, -0.0) },
+        .{ "-1e-999999999999999999999999", @as(f64, -0.0) },
+    }) |case| try expectFloatToken(case[0], case[1]);
+
+    // Every finite binary exponent, both signs, and boundary fraction bits.
+    // Canonical output must read back to the same payload, not merely a
+    // numerically close value. Construct values independently of the lexer.
+    for (0..2047) |exponent| {
+        for ([_]u64{ 0, 1, (1 << 52) - 1 }) |fraction| {
+            for ([_]u64{ 0, 1 << 63 }) |sign| {
+                const bits: u64 = sign | (@as(u64, @intCast(exponent)) << 52) | fraction;
+                const number: f64 = @bitCast(bits);
+                const text = try printer.toOwnedString(allocator, .{ .float = number });
+                defer allocator.free(text);
+                try expectFloatToken(text, number);
+            }
+        }
+    }
+
+    const halfway = "1.00000000000000011102230246251565404236316680908203125";
+    try expectFloatToken(halfway, 1.0);
+    const zeros = "0" ** 1000;
+    try expectFloatToken(halfway ++ zeros, 1.0);
+    try expectFloatToken(halfway ++ zeros ++ "1", @bitCast(@as(u64, 0x3ff0000000000001)));
+
+    // The exponent bound must account for token length, rather than changing
+    // a finite value when a long fractional prefix cancels a large exponent.
+    const long = try std.mem.concat(allocator, u8, &.{ "0.", "0" ** 1_000_000, "1e1000001" });
+    defer allocator.free(long);
+    var cursor = lexer.ClassifyCursor.init(long);
+    var steps: usize = 0;
+    while (true) {
+        steps += 1;
+        switch (cursor.advance()) {
+            .pending => {},
+            .complete => |result| {
+                try std.testing.expect(result == .float);
+                try std.testing.expectEqual(@as(f64, 1.0), result.float);
+                break;
+            },
+        }
+    }
+    try std.testing.expectEqual(long.len + 1, steps);
+    try std.testing.expect(lexer.classify("1e309") == .out_of_range);
+    for ([_][]const u8{ "1e", "1e+", ".1", "1.", "1.0_0", "1e+-2", "1e2e3" }) |source|
+        try std.testing.expect(lexer.classify(source) == .word);
+}
+
 fn retireReadCursor(cursor: *reader.ReadCursor, releases: *heap.ReleaseDomain) void {
     while (!cursor.advanceRetirement()) _ = releases.advance(256);
 }

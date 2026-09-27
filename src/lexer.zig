@@ -243,12 +243,13 @@ pub const ClassifyCursor = struct {
     exponent_digits: usize = 0,
     exponent_sign_seen: bool = false,
     exponent_negative: bool = false,
-    explicit_exponent: i64 = 0,
-    significand: u64 = 0,
+    explicit_exponent: i128 = 0,
+    // Binary64 rounding needs at most 768 significant decimal digits, plus
+    // whether any discarded digit is nonzero (also the std parser's bound).
+    significand: [768]u8,
     significand_digits: usize = 0,
-    significant_started: bool = false,
     total_significant: usize = 0,
-    round_up: bool = false,
+    sticky: bool = false,
 
     pub fn init(token: []const u8) ClassifyCursor {
         var unsigned = token;
@@ -263,6 +264,9 @@ pub const ClassifyCursor = struct {
             .unsigned = if (hex) unsigned[2..] else unsigned,
             .negative = negative,
             .hex = hex,
+            // SAFETY: only the prefix counted by significand_digits is read;
+            // advance initializes each byte before extending that prefix.
+            .significand = undefined,
         };
     }
     fn finishInteger(self: *ClassifyCursor) Classification {
@@ -281,14 +285,29 @@ pub const ClassifyCursor = struct {
             (self.dot_seen and self.mantissa_after == 0) or
             (self.exponent_seen and self.exponent_digits == 0) or
             (!self.dot_seen and !self.exponent_seen)) return .word;
+        if (self.significand_digits == 0) return .{ .float = if (self.negative) -0.0 else 0.0 };
         const omitted = self.total_significant - self.significand_digits;
-        var significand = self.significand;
-        if (self.round_up and significand != std.math.maxInt(u64)) significand += 1;
-        const fraction_digits: i64 = @intCast(self.mantissa_after);
-        const exponent = (if (self.exponent_negative) -self.explicit_exponent else self.explicit_exponent) -
-            fraction_digits + @as(i64, @intCast(omitted));
-        var number = @as(f64, @floatFromInt(significand)) * std.math.pow(f64, 10.0, @floatFromInt(exponent));
-        if (self.negative) number = -number;
+        var exponent = (if (self.exponent_negative) -self.explicit_exponent else self.explicit_exponent) -
+            @as(i128, @intCast(self.mantissa_after)) + @as(i128, @intCast(omitted));
+        // Parse only bounded scratch, never the original user-sized token.
+        // Reserve a sign, a sticky digit, 'e', and a signed i128 exponent.
+        var buffer: [768 + 43]u8 = undefined;
+        var index: usize = 0;
+        if (self.negative) {
+            buffer[index] = '-';
+            index += 1;
+        }
+        @memcpy(buffer[index..][0..self.significand_digits], self.significand[0..self.significand_digits]);
+        index += self.significand_digits;
+        if (self.sticky) {
+            buffer[index] = '1';
+            index += 1;
+            exponent -= 1;
+        }
+        const suffix = std.fmt.bufPrint(buffer[index..], "e{d}", .{exponent}) catch
+            @panic("normalized decimal exceeded its bounded scratch buffer");
+        const number = std.fmt.parseFloat(f64, buffer[0 .. index + suffix.len]) catch
+            @panic("normalized decimal has invalid syntax");
         return if (std.math.isFinite(number)) .{ .float = number } else .{ .out_of_range = .float };
     }
     pub fn advance(self: *ClassifyCursor) ClassifyProgress {
@@ -338,16 +357,19 @@ pub const ClassifyCursor = struct {
             }
             if (self.exponent_seen) {
                 self.exponent_digits += 1;
-                self.explicit_exponent = @min(1_000_000, self.explicit_exponent * 10 + byte - '0');
+                // Beyond this bound no mantissa in this token can cancel the
+                // exponent back into binary64 range. i128 also makes the
+                // accumulation and later usize-sized adjustments overflow-free.
+                const limit = @as(i128, @intCast(self.token.len)) + 1024;
+                self.explicit_exponent = @min(limit, self.explicit_exponent * 10 + byte - '0');
             } else {
                 if (self.dot_seen) self.mantissa_after += 1 else self.mantissa_before += 1;
-                if (byte != '0' or self.significant_started) {
-                    self.significant_started = true;
+                if (byte != '0' or self.significand_digits != 0) {
                     self.total_significant += 1;
-                    if (self.significand_digits < 19) {
-                        self.significand = self.significand * 10 + byte - '0';
+                    if (self.significand_digits < self.significand.len) {
+                        self.significand[self.significand_digits] = byte;
                         self.significand_digits += 1;
-                    } else if (self.total_significant == 20 and byte >= '5') self.round_up = true;
+                    } else if (byte != '0') self.sticky = true;
                 }
             }
             return .pending;

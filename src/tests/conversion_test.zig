@@ -206,6 +206,9 @@ test "conversion: float accepts floats, ints, and numeric literals only" {
     try expectStack(&runtime, "2.5 float", "2.5");
     try expectStack(&runtime, "3 float", "3.0");
     try expectStack(&runtime, "\"2.5e1\" float \"7\" float", "25.0 7.0");
+    try expectStack(&runtime, "\"0.3\" float", "0.3");
+    try expectStack(&runtime, "\"5e-324\" float 0.0 >", "1");
+    try expectStack(&runtime, "\"-0e999999999999999999999\" float", "-0.0");
     try expectError(&runtime, "\"abc\" float", &.{ "'kind 'parse", "numeric literal" });
     try expectError(&runtime, "\"\" float", &.{"'kind 'parse"});
     try expectError(&runtime, "\\a float", &.{"'kind 'type"});

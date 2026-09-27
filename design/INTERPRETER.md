@@ -306,6 +306,14 @@ Synchronous hosts call a blocking facade that drives the same reader
 continuation to completion. CLI, scheduler, and test entry points therefore
 share one parser semantics.
 
+Numeric classification consumes one byte per cursor step. Decimal floats keep
+only a bounded significant-digit prefix and a sticky bit, then round once to
+binary64 through a bounded normalized token. The terminal conversion never
+rescans user-sized input or scales separately rounded significand and exponent
+values. Exponent saturation accounts for the original token length so a long
+fraction and its cancelling exponent still denote the same value. Source
+literals and string-to-number conversions share this classification boundary.
+
 The reader distinguishes three outcomes:
 
 - a complete root quotation;
