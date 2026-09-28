@@ -766,6 +766,142 @@ test "typed kernels: explicit vector cores preserve lanes tails broadcasts alias
     }
 }
 
+/// Runs `source` over `inputs` and asserts the language error names `kind` at
+/// logical `index`. Parity with the generic route proves the whole outcome;
+/// this pins the one fact parity cannot, that the case faulted at all.
+fn expectFaultAt(
+    runtime: *session.Session,
+    inputs: []const value.Value,
+    source: []const u8,
+    kind: []const u8,
+    index: usize,
+) !void {
+    const rendered = try outcome(runtime, inputs, source);
+    defer allocator.free(rendered);
+    var kind_buffer: [64]u8 = undefined;
+    var index_buffer: [64]u8 = undefined;
+    const kind_needle = try std.fmt.bufPrint(&kind_buffer, "'kind '{s} ", .{kind});
+    const index_needle = try std.fmt.bufPrint(&index_buffer, "'index {d} '", .{index});
+    std.testing.expect(std.mem.indexOf(u8, rendered, kind_needle) != null and
+        std.mem.indexOf(u8, rendered, index_needle) != null) catch |err| {
+        std.log.err("`{s}` rendered {s}; wanted kind {s} at index {d}", .{ source, rendered, kind, index });
+        return err;
+    };
+}
+
+test "typed kernels: checked float vector arithmetic matches the scalar fault contract" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+
+    const length = flat.block_size * 2 + 3;
+    const left = try allocator.alloc(f64, length);
+    defer allocator.free(left);
+    const right = try allocator.alloc(f64, length);
+    defer allocator.free(right);
+    for (left, right, 0..) |*a, *b, index| {
+        a.* = @as(f64, @floatFromInt(@as(i64, @intCast(index % 31)) - 15)) + 0.25;
+        b.* = @as(f64, @floatFromInt(7 - @as(i64, @intCast(index % 19)))) - 0.5;
+    }
+
+    // Full vectors, the tail, both broadcast directions, and self-aliasing, with
+    // exact float bits compared against the generic route.
+    inline for ([_][]const u8{ "+", "-", "*", "/" }) |word| {
+        try expectParity(&runtime, .{ .float_pair = .{ .left = left, .right = right } }, word);
+        try expectParity(&runtime, .{ .floats = left }, "3.5 " ++ word);
+        try expectParity(&runtime, .{ .floats = left }, "3.5 swap " ++ word);
+        try expectParity(&runtime, .{ .floats = right }, "dup " ++ word);
+    }
+
+    // Signed zero survives every vector operation bit for bit.
+    const zeroes = [_]f64{ -0.0, 0.0, -0.0, 0.0, -0.0 };
+    try expectParity(&runtime, .{ .floats = &zeroes }, "-1.0 *");
+    try expectParity(&runtime, .{ .floats = &zeroes }, "0.0 +");
+    try expectParity(&runtime, .{ .floats = &zeroes }, "-0.0 +");
+    try expectParity(&runtime, .{ .floats = &zeroes }, "-0.0 -");
+    try expectParity(&runtime, .{ .floats = &zeroes }, "-1.0 /");
+
+    // One exceptional lane among ordinary ones. `kind == null` is a case the
+    // scalar authority accepts: an infinite operand propagates rather than
+    // overflowing, and the vector mask must not flag it.
+    const inf = std.math.inf(f64);
+    const nan = std.math.nan(f64);
+    const Case = struct { special: f64, source: []const u8, kind: ?[]const u8 };
+    const cases = [_]Case{
+        .{ .special = nan, .source = "2.0 +", .kind = "domain" },
+        .{ .special = nan, .source = "2.0 swap -", .kind = "domain" },
+        .{ .special = nan, .source = "2.0 *", .kind = "domain" },
+        .{ .special = nan, .source = "2.0 /", .kind = "domain" },
+        .{ .special = inf, .source = "2.0 +", .kind = null },
+        .{ .special = -inf, .source = "2.0 *", .kind = null },
+        .{ .special = inf, .source = "2.0 swap /", .kind = null },
+        .{ .special = inf, .source = "inf -", .kind = "domain" },
+        .{ .special = 0.0, .source = "inf *", .kind = "domain" },
+        .{ .special = 1.0e308, .source = "1.0e308 +", .kind = "overflow" },
+        .{ .special = -1.0e308, .source = "1.0e308 swap -", .kind = "overflow" },
+        .{ .special = 1.0e308, .source = "10.0 *", .kind = "overflow" },
+        .{ .special = 1.0e-308, .source = "1.0e308 swap /", .kind = "overflow" },
+        .{ .special = 0.0, .source = "1.0 swap /", .kind = "domain" },
+        .{ .special = -0.0, .source = "1.0 swap /", .kind = "domain" },
+    };
+    for (cases) |case| {
+        for ([_]usize{ 0, 1, flat.block_size - 1, flat.block_size, length - 1 }) |position| {
+            @memset(left, 1.5);
+            left[position] = case.special;
+            // A later exceptional lane in the same block must not displace the
+            // first one's report.
+            if (position + 2 < length) left[position + 2] = case.special;
+            try expectParity(&runtime, .{ .floats = left }, case.source);
+            const kind = case.kind orelse continue;
+            try expectFaultAt(&runtime, &.{try buildFloats(.specialized, left)}, case.source, kind, position);
+            try expectFaultRetainsInput(&runtime, try buildFloats(.specialized, left), case.source);
+        }
+    }
+
+    // A zero divisor broadcast from the right faults at the first lane.
+    @memset(left, 1.5);
+    inline for ([_][]const u8{ "0.0 /", "-0.0 /" }) |source| {
+        try expectParity(&runtime, .{ .floats = left }, source);
+        try expectFaultAt(&runtime, &.{try buildFloats(.specialized, left)}, source, "domain", 0);
+        try expectFaultRetainsInput(&runtime, try buildFloats(.specialized, left), source);
+    }
+
+    // An infinite dividend over a signed zero yields a propagating infinity,
+    // so only the divisor test itself can report the lane.
+    for ([_]f64{ 0.0, -0.0 }) |zero| {
+        for ([_]usize{ 0, 1, flat.block_size, length - 1 }) |position| {
+            @memset(left, 1.5);
+            @memset(right, 2.0);
+            left[position] = std.math.copysign(inf, zero);
+            right[position] = zero;
+            try expectParity(&runtime, .{ .float_pair = .{ .left = left, .right = right } }, "/");
+            try expectFaultAt(
+                &runtime,
+                &.{ try buildFloats(.specialized, left), try buildFloats(.specialized, right) },
+                "/",
+                "domain",
+                position,
+            );
+        }
+    }
+
+    // Leaf by leaf: the fault lane comes from the right operand.
+    @memset(left, 1.0e308);
+    for ([_]usize{ 0, flat.block_size, length - 1 }) |position| {
+        @memset(right, 1.0);
+        right[position] = 1.0e308;
+        try expectParity(&runtime, .{ .float_pair = .{ .left = left, .right = right } }, "+");
+        try expectFaultAt(
+            &runtime,
+            &.{ try buildFloats(.specialized, left), try buildFloats(.specialized, right) },
+            "+",
+            "overflow",
+            position,
+        );
+    }
+}
+
 test "typed kernels: temporary bytes are bounded by output plus one kernel chunk under a DebugAllocator limit" {
     // The session enforces the bound directly under a
     // `DebugAllocator` whose live-byte limit is the output buffer plus one

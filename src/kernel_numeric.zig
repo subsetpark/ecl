@@ -1235,7 +1235,8 @@ fn binaryLoopPolicy(
         // block mask even though ordinary comparisons and selection cannot
         // otherwise fail.
         .eq, .ne, .lt, .gt, .le, .ge, .min, .max => .vector_checked,
-        .add, .sub, .mul, .div, .pow, .atan2 => .scalar_checked,
+        .add, .sub, .mul, .div => .vector_checked,
+        .pow, .atan2 => .scalar_checked,
         .int_div, .mod, .and_word, .or_word, .band, .bor, .bxor, .bsl, .bsr => .scalar_checked,
     };
     if (left == .byte and right == .byte) return switch (operation) {
@@ -1759,6 +1760,25 @@ noinline fn replayCharacterBinary(left: *const FlatScalarOperand, right: *const 
     unreachable;
 }
 
+/// The lanes `numericBinary` or `divide` would reject, given that at least one
+/// result lane is non-finite. `checkedFloat` makes NaN a domain fault and an
+/// infinity an overflow unless an operand was already non-finite; `divide`
+/// rejects either signed zero before dividing.
+fn exactFloatFaults(
+    comptime operation: BinaryOp,
+    comptime lanes: comptime_int,
+    a: @Vector(lanes, f64),
+    b: @Vector(lanes, f64),
+    result: @Vector(lanes, f64),
+) @Vector(lanes, bool) {
+    @branchHint(.cold);
+    const inf: @Vector(lanes, f64) = @splat(std.math.inf(f64));
+    const propagating = !(@abs(a) < inf) | !(@abs(b) < inf);
+    var faults = (result != result) | ((@abs(result) == inf) & !propagating);
+    if (operation == .div) faults = faults | (b == @as(@Vector(lanes, f64), @splat(0.0)));
+    return faults;
+}
+
 /// One charged chunk of a binary typed operation.
 fn binaryStep(
     comptime operation: BinaryOp,
@@ -1857,6 +1877,29 @@ fn binaryStep(
                 };
                 const no_overflow: @Vector(lanes, u1) = @splat(0);
                 return .{ .values = result[0], .faults = result[1] != no_overflow };
+            }
+            if (left_class == .real and right_class == .real and
+                (operation == .add or operation == .sub or operation == .mul or operation == .div))
+            {
+                // The mask must be exactly the scalar authority's fault set, not
+                // a superset: a faulted block replays through `numericBinary` or
+                // `divide`, and a lane the scalar accepts leaves that replay with
+                // nothing to report. Strict float mode keeps each lane's bits
+                // identical to the scalar operation, with no contraction.
+                const inf: @Vector(lanes, f64) = @splat(std.math.inf(f64));
+                const result = switch (operation) {
+                    .add => a + b,
+                    .sub => a - b,
+                    .mul => a * b,
+                    .div => a / b,
+                    else => unreachable,
+                };
+                // Every fault has a non-finite result, including division by
+                // either signed zero, so finite lanes need no further test.
+                const finite = @abs(result) < inf;
+                const clean: @Vector(lanes, bool) = @splat(false);
+                if (@reduce(.And, finite)) return .{ .values = result, .faults = clean };
+                return .{ .values = result, .faults = exactFloatFaults(operation, lanes, a, b, result) };
             }
             const nan = (a != a) | (b != b);
             const ones: @Vector(lanes, i64) = @splat(1);
