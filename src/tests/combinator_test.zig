@@ -609,6 +609,32 @@ test "nested application unwind polls before completion" {
     try std.testing.expectEqual(@as(usize, depth + 1), runtime.stackItems().len);
 }
 
+test "cancellation retires continuation-installed work before failure unwind" {
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+
+    var source: std.ArrayList(u8) = .empty;
+    defer source.deinit(std.testing.allocator);
+    // The conflict quotation cancels its own task as its final form. The
+    // padding leaves exactly one fuel charge for the merge continuation,
+    // which installs its materialization driver before cancellation is polled.
+    try source.appendSlice(std.testing.allocator, "[] (");
+    for (0..506) |_| try source.appendSlice(std.testing.allocator, "0 pop ");
+    try source.appendSlice(
+        std.testing.allocator,
+        "0 {'a 1} {'a 2} (pop pop victim task.cancel) dict.merge-with pop pop) " ++
+            "@spawn dup 'victim set task.await 'err at 'kind at",
+    );
+    try std.testing.expect((try runtime.runUnit("<driver-cancel>", source.items)) == .ok);
+    var display = try runtime.stackDisplay();
+    defer display.deinit();
+    try std.testing.expectEqualStrings("'cancelled", display.bytes());
+}
+
 test "empty inline iterations remain cancellable and bounded-frame" {
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);

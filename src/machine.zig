@@ -9627,7 +9627,10 @@ pub fn outcomeDict(
     return dict.fromUniquePairs(allocator, releases, &.{.{ .{ .symbol = key }, payload }});
 }
 fn startFailure(self: *Machine) error{OutOfMemory}!void {
-    std.debug.assert(!self.unit.hasWorkDriver() and self.unit.hasPendingFailure());
+    std.debug.assert(self.unit.hasPendingFailure());
+    // Failure entry owns the native tail too: it must be detached before the
+    // frame unwinder can replace it with the failure driver.
+    clearWorkDriver(self.unit);
     const capacity = std.math.add(usize, self.unit.frames.items.len, 3) catch
         return error.OutOfMemory;
     const trace = try self.unit.allocator.alloc(intern.TraceWord, capacity);
