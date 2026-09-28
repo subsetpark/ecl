@@ -600,7 +600,7 @@ Counters over 10,000 float elements, one worker, instrumented ReleaseSafe:
 | `(1 + 1 +) each` | 20,009 | 13 | 0 | 19,996 |
 | `(sq) each`, `sq` a source word | 10,015 | 17 | 19,996 | 29,994 |
 | `((1 +) call dup *) each` | 30,009 | 17 | 0 | 39,992 |
-| `(|x| x x *) each` | 50,009 | 40,011 | 0 | 9,998 |
+| `(\|x\| x x *) each` | 50,009 | 40,011 | 0 | 9,998 |
 | `(dup 'k set k *) each` | 170,013 | 170,013 | 0 | 19,996 |
 
 Allocations, transitions, application resumes, and handoffs are unchanged.
