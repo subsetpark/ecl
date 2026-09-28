@@ -540,11 +540,11 @@ test "linrec: empty post retains explicit depth frames and cancellation reaches 
 }
 
 test "nested in-place applications finish in one unwind" {
-    // Each finished application continuation records one accounted native
-    // step, and the machine loop consumes one per pass: an inner application
-    // completing inside an outer one has to end the pass rather than resume
-    // the next continuation. `dip` recognition made the shape ordinary, since
-    // `bi` and `tri` apply a quotation beneath one.
+    // An inner application completing inside an outer one resumes the outer
+    // continuation in the same unwind; each finished continuation spends
+    // dispatch fuel, so the unwind is bounded like a run of forms. `dip`
+    // recognition made the shape ordinary, since `bi` and `tri` apply a
+    // quotation beneath one.
     try support.expectStacks(&.{
         .{ .name = "nested times", .source = "1 2 (1 (10 *) times) times", .expected = "100" },
         .{ .name = "nested dip", .source = "1 (2 (3 (4 5 +) dip) dip) dip", .expected = "9 3 2 1" },
@@ -555,6 +555,32 @@ test "nested in-place applications finish in one unwind" {
         .{ .name = "dip inside times", .source = "5 2 (9 (1 +) dip pop) times", .expected = "7" },
         .{ .name = "locals body under dip", .source = "10 20 (|lo hi| hi lo - lo +) call", .expected = "20" },
     });
+}
+
+test "application continuations spend fuel rather than scheduler slices" {
+    // A finished continuation charges the same fuel a fetched form does. An
+    // empty body dispatches no form, so its iterations reach the exhaustion
+    // safe point only through that charge: one poll per fuel quantum, not one
+    // per iteration, and never zero.
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    const iterations = 100_000;
+    switch (try runtime.runUnit("<continuation-fuel>", "100000 () times")) {
+        .ok => {},
+        .err => |failure| {
+            runtime.release(failure);
+            return error.TestUnexpectedResult;
+        },
+        .incomplete => return error.TestUnexpectedResult,
+    }
+    const polls = runtime.lastPolls();
+    try std.testing.expect(polls >= iterations / 4096);
+    try std.testing.expect(polls <= iterations / 256);
+    try std.testing.expect(runtime.lastMaxFrames() <= 2);
 }
 
 test "empty inline iterations remain cancellable and bounded-frame" {

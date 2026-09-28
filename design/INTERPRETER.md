@@ -1108,10 +1108,11 @@ sanitizers.
 
 ### Fuel and drivers define safe points
 
-Each Unit has dispatch fuel. Fetching a form spends fuel; a long primitive
-spends bounded work through its driver. At exhaustion the machine checks
-cancellation and yields. A scheduler slice therefore has a bound independent
-of the total source or collection size.
+Each Unit has dispatch fuel. Fetching a form spends fuel, and so does resuming
+a finished application continuation; a long primitive spends bounded work
+through its driver. At exhaustion the machine checks cancellation and yields.
+A scheduler slice therefore has a bound independent of the total source or
+collection size, including for a body that dispatches no form.
 A suspended driver owns the stack handoff it needs. It cannot keep a mutable
 slice of the operand stack while another continuation runs, and a park request
 defines who owns its payload until delivery, cancellation, or teardown.

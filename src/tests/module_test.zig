@@ -233,15 +233,17 @@ test "module: an unknown long module prefix remains cancellable while it is inte
     const qualified = try intern.intern(qualified_bytes);
 
     // Load task operations before the timed scenario. Cooperative FIFO
-    // scheduling gives each seeded task one bounded opening
-    // turn before its body runs. The target spends its first evaluation turn
-    // resolving the long qualified word. Its second turn advances one prefix-
-    // interning slice and yields part-way through name validation; the seeded
-    // canceller then runs and requests cancellation before the target's third
-    // turn.
+    // scheduling alternates the two tasks' slices. The target resolves the
+    // long qualified word across its first slices and advances one prefix-
+    // interning slice before yielding part-way through name validation. The
+    // canceller first spends one dispatch-fuel quantum and a half on empty
+    // iterations, which costs it one extra slice, so its cancellation request
+    // lands after that interning slice and before the target's next one.
+    // Measured window: delays from one to two quanta cancel mid-interning;
+    // three let the target finish.
     const source =
         "1 pack (execute) @spawn dup 'target set " ++
-        "1 pack (task.cancel) @spawn task.await pop target task.await";
+        "1 pack (1536 () times task.cancel) @spawn task.await pop target task.await";
 
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();

@@ -114,6 +114,8 @@ const full_call_site_sizes = [_]usize{ 1, 32, 1_024, 65_536 };
 const quick_call_site_sizes = [_]usize{ 32, 4_096 };
 const full_local_call_site_sizes = [_]usize{ 1, 32, 1_024, 65_536 };
 const quick_local_call_site_sizes = [_]usize{ 32, 4_096 };
+const full_application_sizes = [_]usize{ 1, 32, 1_024, 65_536 };
+const quick_application_sizes = [_]usize{ 32, 4_096 };
 
 fn timevalNs(value: std.posix.timeval) u64 {
     return @intCast(value.sec * std.time.ns_per_s + value.usec * std.time.ns_per_us);
@@ -403,6 +405,45 @@ fn runMaterializerBudget(
     }
 }
 
+/// Repeated application continuations: an unrecognized `each` body, an empty
+/// `times` body that dispatches no form, and a two-word `times` body. These
+/// isolate what each finished application costs the scheduler, separately
+/// from the body's own dispatch.
+fn runApplicationContinuations(
+    io: std.Io,
+    out: *std.Io.Writer,
+    mode: Mode,
+    sizes: []const usize,
+    repetitions: usize,
+) !void {
+    for ([_]usize{ 1, 8 }) |workers| {
+        for (sizes) |size| {
+            const setup = try std.fmt.allocPrint(std.heap.smp_allocator, "{d} range 0.0 * 1.0 +", .{size});
+            defer std.heap.smp_allocator.free(setup);
+            try printCase(io, out, mode, workers, size, .{
+                .name = "generic-each-body",
+                .setup = setup,
+                .workload = "(dup *) each len",
+            }, repetitions);
+            const empty_times = try std.fmt.allocPrint(std.heap.smp_allocator, "{d} () times", .{size});
+            defer std.heap.smp_allocator.free(empty_times);
+            try printCase(io, out, mode, workers, size, .{
+                .name = "empty-times-body",
+                .setup = "0",
+                .workload = empty_times,
+            }, repetitions);
+            const counting_times = try std.fmt.allocPrint(std.heap.smp_allocator, "{d} (1 +) times", .{size});
+            defer std.heap.smp_allocator.free(counting_times);
+            try printCase(io, out, mode, workers, size, .{
+                .name = "counting-times-body",
+                .setup = "0",
+                .workload = counting_times,
+            }, repetitions);
+            try out.flush();
+        }
+    }
+}
+
 /// Separates a cold canonical qualified call from repeated execution of one
 /// reader-owned call site. The quotation passed to `times` is one stable code
 /// root, so every iteration after the first is eligible for the same cache
@@ -485,6 +526,7 @@ pub fn main(init: std.process.Init) !void {
     var call_site_only = false;
     var local_call_site_only = false;
     var latency_only = false;
+    var application_only = false;
     var custom_source: ?[]const u8 = null;
     var custom_setup: []const u8 = "";
     var custom_workers: usize = 1;
@@ -501,6 +543,7 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, arg, "--call-site-only")) call_site_only = true;
         if (std.mem.eql(u8, arg, "--local-call-site-only")) local_call_site_only = true;
         if (std.mem.eql(u8, arg, "--latency-only")) latency_only = true;
+        if (std.mem.eql(u8, arg, "--application-only")) application_only = true;
     }
     if ((mode == .counters) != ecl.machine.root_execution_metrics_enabled)
         return error.InstrumentationModeMismatch;
@@ -532,6 +575,14 @@ pub fn main(init: std.process.Init) !void {
         }, 1);
     } else if (latency_only) {
         try runLatency(init.io, out, mode, repetitions, quick);
+    } else if (application_only) {
+        try runApplicationContinuations(
+            init.io,
+            out,
+            mode,
+            if (quick) &quick_application_sizes else &full_application_sizes,
+            repetitions,
+        );
     } else if (call_site_only) {
         try runQualifiedCallSite(
             init.io,
@@ -595,6 +646,13 @@ pub fn main(init: std.process.Init) !void {
             out,
             mode,
             if (quick) &quick_local_call_site_sizes else &full_local_call_site_sizes,
+            repetitions,
+        );
+        try runApplicationContinuations(
+            init.io,
+            out,
+            mode,
+            if (quick) &quick_application_sizes else &full_application_sizes,
             repetitions,
         );
         try runLatency(init.io, out, mode, repetitions, quick);

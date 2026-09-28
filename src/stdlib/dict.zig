@@ -756,7 +756,7 @@ const MergeWithApplication = struct {
         _: *machine.ApplicationContractSite,
     ) MachineError!?machine.ApplicationStep {
         evaluator.setActiveWord(self.state.borrow().word);
-        try evaluator.yieldNativeStep();
+        evaluator.chargeContinuationStep();
         const observed = window.observed(evaluator.unit.stack.items.len) orelse 0;
         if (observed != 1)
             return evaluator.fail(.contract, "dict.merge-with quotation must return one value");
