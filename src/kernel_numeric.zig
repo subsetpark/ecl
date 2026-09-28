@@ -834,14 +834,18 @@ fn bitwiseShift(left: Value, right: Value, shift_left: bool) ScalarError!Value {
         pattern >> amount) };
 }
 
-fn add(left: Value, right: Value) ScalarError!Value {
+/// `inline` so a typed reduction's inlined `scalarBinary` folds the character
+/// tests below along with the tag dispatch; LLVM keeps these out of line
+/// otherwise, and the call stays in the element loop.
+inline fn add(left: Value, right: Value) ScalarError!Value {
     if (left == .char and right == .int) return offsetChar(left.char, right.int);
     if (left == .int and right == .char) return offsetChar(right.char, left.int);
     if (left == .char or right == .char) return error.Type;
     return numericBinary(left, right, .add);
 }
 
-fn sub(left: Value, right: Value) ScalarError!Value {
+/// `inline` for the same reason as `add`.
+inline fn sub(left: Value, right: Value) ScalarError!Value {
     if (left == .char and right == .char) {
         return .{ .int = @as(i64, left.char) - @as(i64, right.char) };
     }
@@ -2767,11 +2771,16 @@ fn reduceStep(
                 const piece = flat.blockRange(range, offset);
                 block.reset();
                 for (piece.start..piece.end) |index| {
-                    const next = scalarBinary(
+                    // Both operand tags are comptime-known here, so inlining
+                    // the scalar authority lets its type dispatch fold away and
+                    // leaves the checked arithmetic itself in the loop. An
+                    // out-of-line call boxed and redispatched every element,
+                    // and was most of a float reduction's cost.
+                    const next = @call(.always_inline, scalarBinary, .{
                         operation,
                         accumulator_class.boxed(accumulated(state)),
                         element_class.boxed(elements[index]),
-                    ) catch |fault| {
+                    }) catch |fault| {
                         // A sequential fold's first fault is the fault: there is
                         // no later element whose result could precede it, so the
                         // failure is reported where it happened. A recognized
