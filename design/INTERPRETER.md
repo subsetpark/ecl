@@ -1017,6 +1017,14 @@ occupies its original scan position. The driver owns only stable state, without
 changing reduction order, scalar faults, or consumed inputs. Empty reductions
 and singleton `fold1` bypass this transition as they bypass the reducer itself.
 
+A reduction whose accumulator is itself a list steps through pervasion. After
+its first step, a fold owns each intermediate accumulator and hands that
+ownership to the step's cursor rather than lending it. The cursor then owns the
+value on every outcome: an admitted root leaf may be claimed as the step's
+output buffer, and an unclaimed root is retired with the cursor. Only the root
+operand is offered; a descended element belongs to its spine. Borrowed seeds and
+retained scan outputs are only lent.
+
 ### Scalar semantics remain the oracle
 
 Typed loops implement the same conversions, overflow rules, fault indices,

@@ -581,6 +581,24 @@ test "empty inline iterations remain cancellable and bounded-frame" {
     try std.testing.expect(runtime.lastMaxFrames() <= 2);
 }
 
+test "combinators: vector reductions reuse only accumulators they own" {
+    try support.expectStacks(&.{
+        // Later steps take over the previous accumulator's buffer, including
+        // an integer buffer retagged in place as floats.
+        .{ .name = "float rows", .source = "[[1.0 2.0] [3.0 4.0] [5.0 6.0]] (+) fold1", .expected = "[9.0 12.0]" },
+        .{ .name = "integer accumulator retagged as floats", .source = "[[1 2] [3 4] [0.5 0.5] [1 1]] (+) fold1", .expected = "[5.5 7.5]" },
+        .{ .name = "scalar accumulator meeting a row", .source = "[1 2 [3]] (+) fold1", .expected = "[6]" },
+        // A seed is the caller's and a scan accumulator is a published
+        // element; neither may be written in place.
+        .{ .name = "vector seed survives", .source = "[0.0 0.0] 'seed set [[1.0 2.0] [3.0 4.0]] seed (+) fold seed", .expected = "[4.0 6.0] [0.0 0.0]" },
+        .{ .name = "scan keeps every accumulator", .source = "[[1.0 2.0] [3.0 4.0] [5.0 6.0]] [0.0 0.0] (+) scan", .expected = "([1.0 2.0]\n [4.0 6.0]\n [9.0 12.0])" },
+        .{ .name = "rows survive", .source = "[[1 2] [3 4] [5 6]] dup (+) fold1 pop", .expected = "([1 2]\n [3 4]\n [5 6])" },
+        // Roots without a flat leaf keep the generic route.
+        .{ .name = "nested rows", .source = "[[[1 2] [3 4]] [[5 6] [7 8]] [[1 1] [1 1]]] (+) fold1", .expected = "([7 9]\n [11 13])" },
+        .{ .name = "dict rows", .source = "[{'a 1} {'a 2} {'a 3}] (+) fold1", .expected = "{'a 6}" },
+    });
+}
+
 test "combinators: loops guards reductions and result materialization stay cancellable" {
     try expectCancelledAfterSetup("70001 range (pop ()) each", "cond", .automatic);
     try expectCancelledAfterSetup("70000 range", "(dup pop) each", .generic_only);
@@ -588,6 +606,7 @@ test "combinators: loops guards reductions and result materialization stay cance
     try expectCancelledAfterSetup("70000 range -1 =", "first-where", .automatic);
     try expectCancelledAfterSetup("70000 range", "-1 find", .automatic);
     try expectCancelledAfterSetup("70000 range", "0 (+) fold", .automatic);
+    try expectCancelledAfterSetup("3 range (pop 70000 range 1.0 *) each", "(+) fold1", .automatic);
     // The idiom loop consumes fewer than one kernel quantum; its second
     // traversal, result specialization, is what crosses the poll boundary.
     try expectCancelledAfterSetup("40000 range", "(1 +) each", .automatic);

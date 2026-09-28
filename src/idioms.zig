@@ -1106,13 +1106,29 @@ const ReductionDriver = struct {
     ) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (!self.materializing and self.initialized < self.input.list.length()) {
-            if (self.cursor == null) self.cursor = .init(try .initBinary(
-                evaluator.releaseDomain(),
-                evaluator.allocator(),
-                self.operation,
-                self.accumulator.borrow().value(),
-                list.atUnchecked(self.input, self.initialized),
-            ));
+            if (self.cursor == null) {
+                const row = list.atUnchecked(self.input, self.initialized);
+                // A fold's intermediate accumulator is solely this driver's,
+                // so the step may take over its buffer. A seed is borrowed
+                // from the caller and a scan accumulator is a retained
+                // output; both are only lent.
+                self.cursor = .init(if (!self.scan and self.accumulator.borrow() == .owned)
+                    try .initBinaryOwningLeft(
+                        evaluator.releaseDomain(),
+                        evaluator.allocator(),
+                        self.operation,
+                        .init(evaluator.releaseDomain(), self.accumulator.borrowMut().takeOwned()),
+                        row,
+                    )
+                else
+                    try .initBinary(
+                        evaluator.releaseDomain(),
+                        evaluator.allocator(),
+                        self.operation,
+                        self.accumulator.borrow().value(),
+                        row,
+                    ));
+            }
             const next = switch (try self.cursor.?.borrowMut().advance(evaluator, machine.kernel_poll_quantum)) {
                 .pending => return .yielded,
                 .complete => |result| result,
@@ -1151,6 +1167,9 @@ const ReductionDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
+/// `transferred` is observed both after final publication and mid-fold, while
+/// the step's cursor owns the previous accumulator; `replaceOwned` then
+/// installs the step's result without releasing anything.
 const Accumulator = union(enum) {
     borrowed: Value,
     owned: Value,

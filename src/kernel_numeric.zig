@@ -174,6 +174,11 @@ pub const PervadeCursor = struct {
     allocator: std.mem.Allocator,
     frames: poll.ChunkStack(Frame),
     last: ?Value = null,
+    /// The depth-0 left operand, when the caller handed its ownership over
+    /// rather than lending it. Only this value may be offered as a reuse
+    /// candidate: a descended element with one reference is owned by its
+    /// spine, not by this operation.
+    root: ?heap.OwnedValue = null,
 
     const BinaryNode = struct {
         operation: BinaryOp,
@@ -273,6 +278,23 @@ pub const PervadeCursor = struct {
         return .{ .releases = releases, .allocator = allocator, .frames = frames };
     }
 
+    /// Like `initBinary`, but consumes `left`: the cursor owns it on success
+    /// and on failure. An admitted typed root leaf may then be claimed as the
+    /// step's output buffer; otherwise the cursor releases it at `deinit`.
+    pub fn initBinaryOwningLeft(
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+        operation: BinaryOp,
+        left: heap.OwnedValue,
+        right: Value,
+    ) error{OutOfMemory}!PervadeCursor {
+        var owned = left;
+        errdefer owned.deinit();
+        var cursor = try initBinary(releases, allocator, operation, owned.borrow(), right);
+        cursor.root = owned;
+        return cursor;
+    }
+
     pub fn initUnary(
         releases: *heap.ReleaseDomain,
         allocator: std.mem.Allocator,
@@ -291,6 +313,7 @@ pub const PervadeCursor = struct {
     }
 
     pub fn deinit(self: *PervadeCursor) void {
+        if (self.root) |*root| root.deinit();
         if (self.last) |last| self.releases.releaseValue(last);
         while (self.frames.pop()) |frame_value| {
             var frame = frame_value;
@@ -351,6 +374,7 @@ pub const PervadeCursor = struct {
                 node.operation,
                 node.left,
                 node.right,
+                self.rootCandidate(node),
                 .{},
             )) |typed_value| {
                 var typed = typed_value;
@@ -380,6 +404,17 @@ pub const PervadeCursor = struct {
         }
         self.last = selectScalar(node.operation)(node.left, node.right) catch |fault|
             return scalarFailure(evaluator, fault, node.logical_index);
+    }
+
+    /// Descended nodes are always deeper than zero, so only the initial node
+    /// can be the owned root.
+    fn rootCandidate(self: *PervadeCursor, node: BinaryNode) ?*heap.OwnedValue {
+        if (node.depth != 0) return null;
+        const root = if (self.root) |*owned| owned else return null;
+        // A scalar root meeting a list has no buffer to offer.
+        if (root.item == null or node.left != .list) return null;
+        std.debug.assert(root.borrow() == .list and node.left.list == root.borrow().list);
+        return root;
     }
 
     fn startUnary(self: *PervadeCursor, evaluator: *Machine, node: UnaryNode) MachineError!void {
@@ -2135,6 +2170,8 @@ const NumericBinaryPlan = opaque {
     /// On success the returned payload owns its readers and output, including
     /// any consumed reuse candidate. On allocation failure inputs remain owned
     /// by the caller. No fallible operation follows a successful reuse claim.
+    /// The candidate is always the left operand, offered for a leaf on either
+    /// side of a leaf; a scalar left has no buffer to reuse.
     fn prepare(
         self: *const NumericBinaryPlan,
         evaluator: *Machine,
@@ -2145,7 +2182,7 @@ const NumericBinaryPlan = opaque {
         report: FaultReport,
     ) error{OutOfMemory}!NestedTyped {
         const data: *const Data = @ptrCast(@alignCast(self));
-        const reuse = if (data.shape == .leaf_scalar) reuse_candidate else null;
+        const reuse = if (data.shape == .scalar_leaf) null else reuse_candidate;
         const acquired = switch (data.out) {
             inline else => |out| try acquireOutput(evaluator, out, reuse, length),
         };
@@ -2416,6 +2453,7 @@ fn buildNestedTypedNumericBinary(
     operation: BinaryOp,
     left_item: Value,
     right_item: Value,
+    reuse_candidate: ?*heap.OwnedValue,
     report: FaultReport,
 ) MachineError!?NestedTyped {
     const left_leaf = leafNumber(left_item);
@@ -2435,18 +2473,21 @@ fn buildNestedTypedNumericBinary(
     const left_class = left_leaf orelse left_scalar.?;
     const right_class = right_leaf orelse right_scalar.?;
     const plan = NumericBinaryPlan.select(operation, left_class, right_class, shape) orelse return null;
-    return try plan.prepare(evaluator, left_item, right_item, null, length, report);
+    return try plan.prepare(evaluator, left_item, right_item, reuse_candidate, length, report);
 }
 
+/// `reuse_candidate` must own `left`, and reaches only the numeric builder:
+/// character states have no owned root to adopt.
 fn buildNestedTypedBinary(
     evaluator: *Machine,
     operation: BinaryOp,
     left: Value,
     right: Value,
+    reuse_candidate: ?*heap.OwnedValue,
     report: FaultReport,
 ) MachineError!?NestedTyped {
     if (try buildNestedTypedCharBinary(evaluator, operation, left, right, report)) |typed| return typed;
-    const numeric = try buildNestedTypedNumericBinary(evaluator, operation, left, right, report);
+    const numeric = try buildNestedTypedNumericBinary(evaluator, operation, left, right, reuse_candidate, report);
     if (numeric) |typed| return typed;
     _ = try rejectUnsupportedFlatBinary(evaluator, operation, left, right, report);
     return null;

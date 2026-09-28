@@ -702,6 +702,7 @@ fn projectSessionInitializationProbe(allocator: std.mem.Allocator) !void {
 
 const StdlibSurface = enum {
     transitioning_reductions,
+    owned_reductions,
     archive_view,
     archive_resource,
     directory_enumeration,
@@ -811,6 +812,18 @@ fn stdlibSessionAllocationProbe(
             "[1.0 2.0] 0 (+) fold pop [1.0 2.0] 0 (+) scan pop " ++
                 "[2.0] 8 (*) scan pop " ++
                 "[] ([1e308 1e308] 0 (+) scan) @attempt pop",
+        ),
+        // An adopting step allocates nothing once its claim succeeds, so the
+        // nested and dict rows are what reach allocation failure while a
+        // cursor owns the handed-over accumulator.
+        .owned_reductions => try runOk(
+            &runtime,
+            "oom-owned-reductions.ecl",
+            "[[1.0 2.0] [3.0 4.0] [5.0 6.0]] (+) fold1 pop [[1 2] [3 4] [0.5 0.5]] (+) fold1 pop " ++
+                "[[1.0 2.0] [3.0 4.0]] [0.0 0.0] (+) fold pop " ++
+                "[[[1.0] [2.0]] [[3.0] [4.0]] [[5.0] [6.0]]] (+) fold1 pop " ++
+                "[{'a 1.0} {'a 2.0} {'a 3.0}] (+) fold1 pop " ++
+                "[] ([[1.0 2.0] [1e308 1e308] [1e308 1e308]] (+) fold1) @attempt pop",
         ),
         .root_source_preload => {
             while (true) switch (try runtime.advanceLocalPreload()) {
@@ -1300,6 +1313,11 @@ fn checkStdlibSurface(comptime surface: StdlibSurface) !void {
 test "oom: standard-library and host: transitioning reductions" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.transitioning_reductions);
+}
+
+test "oom: standard-library and host: owned reductions" {
+    try requireSelectedOomTest(@src());
+    try checkStdlibSurface(.owned_reductions);
 }
 
 fn nativePortForwardingProbe(
