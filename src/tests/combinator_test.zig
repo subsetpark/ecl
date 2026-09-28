@@ -583,6 +583,32 @@ test "application continuations spend fuel rather than scheduler slices" {
     try std.testing.expect(runtime.lastMaxFrames() <= 2);
 }
 
+test "nested application unwind polls before completion" {
+    const depth = 1100;
+    var source: std.ArrayList(u8) = .empty;
+    defer source.deinit(std.testing.allocator);
+    for (0..depth) |_| try source.appendSlice(std.testing.allocator, "1 (");
+    try source.appendSlice(std.testing.allocator, "0");
+    for (0..depth) |_| try source.appendSlice(std.testing.allocator, ") dip ");
+
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    switch (try runtime.runUnit("<nested-application-fuel>", source.items)) {
+        .ok => {},
+        .err => |failure| {
+            runtime.release(failure);
+            return error.TestUnexpectedResult;
+        },
+        .incomplete => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(runtime.lastPolls() >= 3);
+    try std.testing.expectEqual(@as(usize, depth + 1), runtime.stackItems().len);
+}
+
 test "empty inline iterations remain cancellable and bounded-frame" {
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);

@@ -6849,14 +6849,10 @@ fn loop(self: *Machine) MachineError!RunStatus {
                 },
             };
             if (!resumed) return .completed;
-            // A frame continuation may replace its native-stack tail with an
-            // owned driver. Let that driver run before dispatching the parent
-            // Eval which resumeFrames may also have restored.
-            if (self.unit.hasWorkDriver()) continue;
         }
-        // Exhaustion is checked before an exhausted Eval is retired: a body
-        // that dispatched nothing spent its fuel in its continuation, and this
-        // is the only safe point that run of continuations can reach.
+        // Exhaustion is checked before another continuation, an owned driver,
+        // or an exhausted Eval runs. A body that dispatched nothing spent its
+        // fuel in its continuation.
         if (self.unit.fuel == 0) {
             self.unit.polls += 1;
             self.unit.fuel = fuel_quantum;
@@ -6868,6 +6864,10 @@ fn loop(self: *Machine) MachineError!RunStatus {
             }
             return .yielded;
         }
+        // A frame continuation may replace its native-stack tail with an
+        // owned driver. Let that driver run before dispatching the parent
+        // Eval which resumeFrames may also have restored.
+        if (self.unit.hasWorkDriver()) continue;
         const current = &self.unit.current.?;
         if (!current.hasInstructions()) {
             self.retireCompletedEval(current.*);
@@ -8825,7 +8825,7 @@ fn prepareEffectCheck(
     };
 }
 fn resumeFrames(self: *Machine) MachineError!bool {
-    while (self.unit.frames.pop()) |frame| switch (frame) {
+    while (self.unit.fuel != 0) switch (self.unit.frames.pop() orelse return false) {
         .eval => |continuation| {
             self.unit.current = continuation;
             return true;
@@ -8914,9 +8914,8 @@ fn resumeFrames(self: *Machine) MachineError!bool {
             // Native work installed by an application continuation is the
             // continuation's tail. Do not cross later continuation frames until
             // that owned work has produced its stack result. A continuation
-            // that installed nothing has charged its fuel; the unwind goes on
-            // to the next frame, and the loop's exhaustion check bounds how
-            // many finish in one slice.
+            // that installed nothing has charged its fuel; the next frame is
+            // resumed only while fuel remains.
             if (self.unit.hasWorkDriver()) return true;
         },
         .qualified_after_load => |continuation| {
@@ -8979,7 +8978,9 @@ fn resumeFrames(self: *Machine) MachineError!bool {
             }
         },
     };
-    return false;
+    // Even if this was the last frame, the evaluator must poll cancellation
+    // and yield before reporting completion.
+    return true;
 }
 fn finishEffectCheck(self: *Machine, check: *EffectCheck) MachineError!void {
     check.restoreActive(self.unit);

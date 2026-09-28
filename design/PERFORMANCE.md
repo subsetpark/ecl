@@ -644,7 +644,7 @@ p50 in microseconds, counters from the instrumented pass.
 | counting-times-body | 65,536 | 15,193 | 7,513 | 65,664 | 192 | 65,667 | 195 |
 
 Allocations, logical transitions, driver resumes, and application resumes are
-identical in both variants. The empty body's 64 polls and 64 handoffs at 65,536
+identical in both variants. The empty body's 65 polls and 64 handoffs at 65,536
 iterations are the fuel quantum doing its job: the slice bound survives without
 a per-iteration handoff. The remaining generic-`each` cost is the body's two
 `DispatchDriver` resumes per element, which miss every call-site cache because
