@@ -595,10 +595,10 @@ Counters over 10,000 float elements, one worker, instrumented ReleaseSafe:
 
 | Body | Driver resumes before | after | Polls before | after |
 |---|---:|---:|---:|---:|
-| `(|x| x) each` | 30,009 | 9 | 40,066 | 10,066 |
-| `(|x| x x *) each` | 50,009 | 10,009 | 60,095 | 20,095 |
-| `(|x y| y x +) zip-with` | 50,009 | 10,009 | 60,095 | 20,095 |
-| `(|x| x 1 +) times` | 30,005 | 5 | 40,082 | 10,082 |
+| `(\|x\| x) each` | 30,009 | 9 | 40,066 | 10,066 |
+| `(\|x\| x x *) each` | 50,009 | 10,009 | 60,095 | 20,095 |
+| `(\|x y\| y x +) zip-with` | 50,009 | 10,009 | 60,095 | 20,095 |
+| `(\|x\| x 1 +) times` | 30,005 | 5 | 40,082 | 10,082 |
 
 The one resume per element that remains in the `each` and `zip-with` rows is
 the body word `*` or `+` in the child scope, which the separate child-scope
@@ -610,10 +610,10 @@ milliseconds:
 
 | Workload | master | branch |
 |---|---:|---:|
-| `(|x| x) each`, 100k floats ×10 | 1,846 | 264 |
-| `(|x| x x *) each`, 100k floats ×10 | 1,776 | 495 |
-| `(|x y| y x +) zip-with`, 100k ×10 | 1,800 | 559 |
-| `1000000 (|x| x 1 +) times` | 1,145 | 249 |
+| `(\|x\| x) each`, 100k floats ×10 | 1,846 | 264 |
+| `(\|x\| x x *) each`, 100k floats ×10 | 1,776 | 495 |
+| `(\|x y\| y x +) zip-with`, 100k ×10 | 1,800 | 559 |
+| `1000000 (\|x\| x 1 +) times` | 1,145 | 249 |
 | `1000000 (1 +) times`, control | 308 | 290 |
 | `() each`, 100k ×10, control | 172 | 168 |
 
