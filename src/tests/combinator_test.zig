@@ -599,6 +599,46 @@ test "combinators: vector reductions reuse only accumulators they own" {
     });
 }
 
+test "combinators: body words resolve through an unbound child as in its parent" {
+    // A body word carries the stamp of the scope that read it and runs in a
+    // child that bound nothing, so it resolves exactly as it would in the
+    // parent and its call site may be cached. The moment the child binds,
+    // that equivalence ends for the rest of the element, and the next element
+    // starts from a fresh, unbound child again.
+    try support.expectStacks(&.{
+        .{ .name = "plain body", .source = "[1 2 3] (dup *) each", .expected = "[1 4 9]" },
+        .{ .name = "body that binds after a cached word", .source = "[1 2 3] (dup 'k set k *) each", .expected = "[1 4 9]" },
+        .{ .name = "body that binds before a cached word", .source = "[5 7] ('k set k dup *) each", .expected = "[25 49]" },
+        .{ .name = "shadowing a cached word in one element only", .source = "[1 2 3] (dup 2 = ((pop 42 42) 'dup def) () if dup *) each", .expected = "[1 1764 9]" },
+        .{ .name = "nested application under the child", .source = "[1 2 3] ((1 +) call dup *) each", .expected = "[4 9 16]" },
+        .{ .name = "locals body", .source = "[1 2 3] (|x| x x *) each", .expected = "[1 4 9]" },
+        .{ .name = "redefinition between applications", .source = "(dup *) 'sq def [1 2 3] (sq) each (pop 7) 'sq def [1 2 3] (sq) each", .expected = "[1 4 9] [7 7 7]" },
+        .{ .name = "child bindings do not survive the element", .source = "[1 2] ('k set 0) each pop [] (k) @attempt result.ok?", .expected = "0" },
+    });
+}
+
+test "combinators: cached body words spend no kernel polls per element" {
+    // Each word dispatched through the resolution driver polls once. A body
+    // whose words hit the call-site cache polls only at its continuation, so
+    // the count stays near one per element rather than one per word.
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    const count = 4096;
+    switch (try runtime.runUnit("<cached-body>", "4096 range 0.0 * 1.0 + (dup * 1 +) each len")) {
+        .ok => {},
+        .err => |failure| {
+            runtime.release(failure);
+            return error.TestUnexpectedResult;
+        },
+        .incomplete => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(runtime.lastPolls() <= count + count / 64 + 64);
+}
+
 test "locals: the reserved backend words behave and blame as before" {
     // `_ll`, `_gl`, and `_dl` are reserved from every publication, so they are
     // bound to their primitives without a lookup. Values, nesting, sharing a

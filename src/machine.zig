@@ -6096,22 +6096,22 @@ pub const Machine = struct {
         var borrowed_cell: ?*env.ScopeCell = null;
         errdefer if (borrowed_cell) |cell| cell.releaseBorrow();
 
-        // Is this occurrence stamped with the activation's own scope? One
-        // integer compare, ahead of everything else, because straight-line code
-        // resolving in its own chain is the overwhelming common case and it
-        // needs no proof beyond the activation that is already running it.
+        // Is this occurrence stamped with a scope the activation resolves in
+        // directly? That is the running scope itself, or an ancestor the
+        // running scope reaches through scopes that bound nothing: a
+        // combinator body runs in such a child, and the words in it carry the
+        // stamp of the scope that read them. Straight-line code resolving in
+        // its own chain is the overwhelming common case and needs no proof
+        // beyond the activation that is already running it.
         //
         // This generalizes the activation-held arm from anchors to scope ids:
         // where that compare covered a foreign word in the same image, this
-        // covers the word's scope being the running one outright, so the
+        // covers the word's scope being the running chain outright, so the
         // directory walk, the cell, the owner load, and `encloses` are all
         // skipped rather than merely cheapened.
         const running_site = self.unit.current.?.site;
-        const plain_cache_scope: ?env.ScopeId = if (word.scope != 0 and
-            @intFromEnum(running_site.resolution_scope_id) == word.scope)
-            running_site.resolution_scope_id
-        else
-            null;
+        const stamped_scope = stampedResolutionScope(running_site, word.scope);
+        const plain_cache_scope: ?env.ScopeId = if (stamped_scope) |scope| scope.cellId() else null;
         var observe_plain = false;
         if (plain_cache_scope) |scope_id| {
             switch (self.unit.module_call_sites.lookupPlain(
@@ -6138,7 +6138,7 @@ pub const Machine = struct {
                 },
             }
         }
-        const local_context = LocalCacheContext.init(running_site, word.scope);
+        const local_context = LocalCacheContext.init(running_site, stamped_scope);
         if (local_context) |context| {
             switch (self.unit.module_call_sites.lookupLocal(
                 cached_site,
@@ -6160,9 +6160,7 @@ pub const Machine = struct {
             }
         }
         const local_cache_scope: ?resolution_core.GuardContext = if (plain_cache_scope) |scope_id| .{ .scope_id = scope_id, .pool = if (observe_plain) &self.unit.module_call_sites.guards else null } else null;
-        if (word.scope != 0 and
-            @intFromEnum(running_site.resolution_scope_id) == word.scope)
-        {
+        if (stamped_scope != null) {
             self.unit.active_word = .plain(word.name);
             try self.startDriver(DispatchDriver{
                 .word = word.name,
@@ -7735,24 +7733,37 @@ const CallSiteCacheLookup = union(enum) {
     hit: Resolution,
 };
 
+/// The scope carrying `stamp` when the running activation resolves there
+/// directly: the running scope itself, or an ancestor reached only through
+/// scopes with no environment. Such a scope contributes no lookup, so resolving
+/// from the running scope is resolving in that ancestor, and a guard observed
+/// from the running scope records each empty position and goes stale the
+/// moment one of them binds. Recomputed on every dispatch: `set` in a body
+/// materializes the child between one word and the next, and the answer for
+/// the next word must change with it.
+fn stampedResolutionScope(site: ExecutionSite, stamp: u32) ?*env.Scope {
+    if (stamp == 0) return null;
+    var node: ?*env.Scope = site.resolution_scope;
+    while (node) |scope| : (node = scope.parent) {
+        if (@intFromEnum(scope.cellId()) == stamp) return scope;
+        if (scope.environmentOrNull() != null) return null;
+    }
+    return null;
+}
+
 /// Proof that this occurrence resolves directly in the exact module root the
-/// running activation already owns. Scope and home travel together so a cache
-/// hit cannot accidentally borrow one image's cell and another registration's
-/// state authority.
+/// running activation already owns, itself or through children that bound
+/// nothing. Scope and home travel together so a cache hit cannot accidentally
+/// borrow one image's cell and another registration's state authority.
 const LocalCacheContext = struct {
     scope_id: env.ScopeId,
     home: *modules.ModuleHome,
 
-    fn init(site: ExecutionSite, word_scope: u32) ?LocalCacheContext {
-        if (word_scope == 0 or
-            @intFromEnum(site.resolution_scope_id) != word_scope)
-        {
-            return null;
-        }
-        const scope = site.resolution_scope orelse return null;
+    fn init(site: ExecutionSite, stamped_scope: ?*env.Scope) ?LocalCacheContext {
+        const scope = stamped_scope orelse return null;
         if (!scope.isModuleRoot()) return null;
         return .{
-            .scope_id = site.resolution_scope_id,
+            .scope_id = scope.cellId(),
             .home = site.home orelse return null,
         };
     }
