@@ -500,6 +500,34 @@ test "allocation: dispatch spends nothing per element" {
     for (dispatch_free) |case| try expectBudget(case);
 }
 
+/// A recognized vector reduction owns every accumulator after its first step,
+/// so each later step takes over that buffer instead of allocating an output
+/// leaf. Without the handoff each row costs a fresh leaf (two allocations).
+const owned_accumulation = [_]Case{
+    .{
+        .name = "float rows fold1",
+        .setup = "{d} range (pop [1.0 2.0]) each",
+        .workload = "(+) fold1 len",
+        .per_element = 0,
+    },
+    .{
+        .name = "integer rows fold1",
+        .setup = "{d} range (pop [1 2]) each",
+        .workload = "(+) fold1 len",
+        .per_element = 0,
+    },
+    .{
+        .name = "float rows fold from a vector seed",
+        .setup = "{d} range (pop [1.0 2.0]) each",
+        .workload = "[0.0 0.0] (*) fold len",
+        .per_element = 0,
+    },
+};
+
+test "allocation: vector reductions reuse their owned accumulator" {
+    for (owned_accumulation) |case| try expectBudget(case);
+}
+
 /// Membership over a generic spine, which the typed scan declines. Its cursor
 /// normally needs only one frame, now held by `ChunkStack` without allocating.
 /// A list needle still pays to construct its pervasive result; the scalar

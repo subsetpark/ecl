@@ -902,6 +902,65 @@ test "typed kernels: checked float vector arithmetic matches the scalar fault co
     }
 }
 
+test "typed kernels: adopted leaf-leaf outputs roll back when a later block faults" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+
+    const length = flat.block_size * 3 + 5;
+    const fault_index = flat.block_size + 7;
+    var index_text: [32]u8 = undefined;
+    const index_needle = try std.fmt.bufPrint(&index_text, "'index {d} '", .{fault_index});
+
+    // `dup 0 +` makes a solely owned copy, which `swap +` takes over as its
+    // output; block 0 is stored into it before block 1 overflows.
+    const numbers = try allocator.alloc(i64, length);
+    defer allocator.free(numbers);
+    for (numbers, 0..) |*number, index| number.* = @intCast(index);
+    numbers[fault_index] = @divTrunc(std.math.maxInt(i64), 2) + 1;
+    try expectParity(&runtime, .{ .ints = numbers }, "dup 0 + swap +");
+    {
+        const rendered = try outcome(&runtime, &.{try buildInts(.specialized, numbers)}, "dup 0 + swap +");
+        defer allocator.free(rendered);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "'kind 'overflow") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, index_needle) != null);
+    }
+    try expectFaultRetainsInput(&runtime, try buildInts(.specialized, numbers), "dup 0 + swap +");
+
+    // A recognized vector fold: the second step takes over the first step's
+    // result and overflows after storing block 0 into it.
+    const row_a = try allocator.alloc(f64, length);
+    defer allocator.free(row_a);
+    const row_b = try allocator.alloc(f64, length);
+    defer allocator.free(row_b);
+    const row_c = try allocator.alloc(f64, length);
+    defer allocator.free(row_c);
+    for (row_a, row_b, row_c, 0..) |*a, *b, *c, index| {
+        const base: f64 = @floatFromInt(index);
+        a.* = base + 0.5;
+        b.* = base * 2.0;
+        c.* = -base;
+    }
+    row_a[fault_index] = 1.0e308;
+    row_b[fault_index] = 0.0;
+    row_c[fault_index] = 1.0e308;
+    var rows = [_]value.Value{
+        try buildFloats(.specialized, row_a),
+        try buildFloats(.specialized, row_b),
+        try buildFloats(.specialized, row_c),
+    };
+    defer for (rows) |row| runtime.release(row);
+    {
+        const spine = try list.fromValues(allocator, &rows);
+        const rendered = try outcome(&runtime, &.{spine}, "(+) fold1");
+        defer allocator.free(rendered);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "'kind 'overflow") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, index_needle) != null);
+    }
+    try expectFaultRetainsInput(&runtime, try list.fromValues(allocator, &rows), "(+) fold1");
+}
+
 test "typed kernels: temporary bytes are bounded by output plus one kernel chunk under a DebugAllocator limit" {
     // The session enforces the bound directly under a
     // `DebugAllocator` whose live-byte limit is the output buffer plus one

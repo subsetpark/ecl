@@ -305,6 +305,28 @@ test "concurrency: transitioning reductions share inputs and remain cancellable"
     try std.testing.expectEqualStrings("'cancelled", actual.bytes());
 }
 
+test "concurrency: vector reductions own their accumulator across safe points" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    // Children share the rows; each owns only its own accumulators. Rows are
+    // longer than one kernel quantum, so a step that has taken over its
+    // accumulator reaches a safe point mid-row.
+    try runOk(&runtime, "3 range (pop 131073 range 0.0 * 1.0 +) each 'rows set " ++
+        "[0 1 2 3] [] (pop rows (+) fold1 first) @each [3.0 3.0 3.0 3.0] match?");
+    var actual = try display(&runtime);
+    try std.testing.expectEqualStrings("1", actual.bytes());
+    actual.deinit();
+    // Cancellation can land while a cursor owns the handed-over accumulator;
+    // the testing allocator reports a leaked or doubly released root.
+    try runOk(&runtime, "pop [] ((1) (rows (+) fold1 pop) while) @spawn " ++
+        "[] (7) @spawn task.await pop dup task.cancel task.await 'err at 'kind at");
+    actual = try display(&runtime);
+    defer actual.deinit();
+    try std.testing.expectEqualStrings("'cancelled", actual.bytes());
+}
+
 test "concurrency: one-worker kernel safe points let another unit progress" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
