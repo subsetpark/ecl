@@ -2630,9 +2630,9 @@ pub fn typedBinaryCandidate(operation: BinaryOp, left: Value, right: Value) bool
 /// each step consumes the previous accumulator, so the loop may not be
 /// reordered, blocked out of order, or reassociated — float sums stay
 /// bit-identical to the generic route by construction rather than by policy. The
-/// accumulator's class must be a fixpoint of the operation, which is what makes
-/// one monomorphic loop enough; a class that would change part way through
-/// (an int accumulator meeting float elements) belongs to the generic route.
+/// accumulator's class must reach a fixpoint after at most one scalar step.
+/// That step retains the original seed's semantics; the driver then owns only
+/// a stable accumulator and needs one monomorphic loop.
 const TypedAccumulator = union(enum) {
     integer: i64,
     real: f64,
@@ -2751,8 +2751,7 @@ fn reduceStep(
 }
 
 /// Whether a recognized `fold`/`scan` over these operands is a typed sequential
-/// loop. The accumulator class must be a fixpoint of the operation so one
-/// monomorphic loop covers every step.
+/// loop. The accumulator class must stabilize after at most one scalar step.
 pub fn typedReduceCandidate(operation: BinaryOp, input: Value, initial: Value) bool {
     const element_class = leafNumber(input) orelse return false;
     const accumulator_class = scalarNumber(initial) orelse return false;
@@ -2760,26 +2759,37 @@ pub fn typedReduceCandidate(operation: BinaryOp, input: Value, initial: Value) b
     return NumericReducePlan.select(operation, accumulator_class, element_class, false) != null;
 }
 
-/// Only fixpoint accumulator/element pairs can construct a reduction plan.
-/// The plan owns classification for both the guard and the entry point.
+/// The opaque plan binds a possible seed transition to its stable loop and
+/// output representation. Guard and entry use the same classification.
 const NumericReducePlan = opaque {
-    const Data = struct { accumulator: Number, element: Number, scan: bool, step: TypedReduceStep };
+    const Data = struct {
+        accumulator: Number,
+        element: Number,
+        scan: bool,
+        seed_step: ?ScalarBinary,
+        step: TypedReduceStep,
+    };
 
     fn select(operation: BinaryOp, accumulator: Number, element: Number, scan: bool) ?*const NumericReducePlan {
+        @setEvalBranchQuota(4000);
         return switch (operation) {
             inline else => |selected| blk: {
                 // Scalar accumulators have no byte storage class.
                 inline for ([_]Number{ .integer, .real }) |candidate_accumulator| {
                     inline for (number_classes) |candidate_element| {
                         const out = comptime binaryResult(selected, candidate_accumulator, candidate_element);
-                        if (comptime out == null or out.? != candidate_accumulator) continue;
+                        if (comptime out == null or out.? == .byte) continue;
+                        // A known first result is insufficient: every later
+                        // result must have that same representation as well.
+                        if (comptime binaryResult(selected, out.?, candidate_element) != out) continue;
                         inline for ([_]bool{ false, true }) |candidate_scan| {
                             if (accumulator == candidate_accumulator and element == candidate_element and scan == candidate_scan) {
                                 const data = comptime Data{
-                                    .accumulator = candidate_accumulator,
+                                    .accumulator = out.?,
                                     .element = candidate_element,
                                     .scan = candidate_scan,
-                                    .step = reduceStep(selected, candidate_accumulator, candidate_element, candidate_scan),
+                                    .seed_step = if (out.? == candidate_accumulator) null else selectScalar(selected),
+                                    .step = reduceStep(selected, out.?, candidate_element, candidate_scan),
                                 };
                                 break :blk @ptrCast(&data);
                             }
@@ -2793,24 +2803,41 @@ const NumericReducePlan = opaque {
 
     /// Borrows the caller's values. Acquired readers and output are consumed
     /// locally on preparation failure, and by startDriver on either outcome.
+    /// The combinator handles empty folds/scans and singleton fold1 before
+    /// entry, so cursor_start always identifies a remaining input element.
     fn start(self: *const NumericReducePlan, evaluator: *Machine, input: Value, initial: Value, cursor_start: usize, consumed: usize) MachineError!void {
         const data: *const Data = @ptrCast(@alignCast(self));
         const length: usize = @intCast(input.list.length());
+        const seed = if (data.seed_step) |step| first: {
+            // Charge even this single step to the shared budget: many short
+            // reductions must not evade cancellation. Do not pre-cast initial;
+            // mixed numeric comparisons in particular would lose information.
+            try evaluator.advanceKernel(1);
+            break :first step(initial, list.atUnchecked(input, cursor_start)) catch |fault| {
+                const diagnostic = scalarDiagnostic(fault);
+                return evaluator.fail(diagnostic.kind, diagnostic.message);
+            };
+        } else initial;
         var state = TypedReduceState{
             .input = acquireOperand(data.element, input),
             .output = null,
             .accumulator = switch (data.accumulator) {
                 .byte => unreachable,
-                .integer => .{ .integer = initial.int },
-                .real => .{ .real = initial.float },
+                .integer => .{ .integer = seed.int },
+                .real => .{ .real = seed.float },
             },
-            .cursor = .{ .index = cursor_start, .length = length },
+            .cursor = .{ .index = cursor_start + @intFromBool(data.seed_step != null), .length = length },
         };
         var held_locally = true;
         errdefer if (held_locally) state.retire(evaluator.releaseDomain());
         if (data.scan) state.output = switch (data.accumulator) {
             .byte => unreachable,
             inline else => |out| (try acquireOutput(evaluator, out, null, length)).output,
+        };
+        if (data.scan and data.seed_step != null) switch (data.accumulator) {
+            .byte => unreachable,
+            .integer => state.output.?.store(.integer, cursor_start, &.{seed.int}),
+            .real => state.output.?.store(.real, cursor_start, &.{seed.float}),
         };
         held_locally = false;
         return evaluator.startDriver(TypedReduceDriver{

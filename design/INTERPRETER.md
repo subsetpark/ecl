@@ -1000,10 +1000,14 @@ cannot choose a loop independently of its storage contract. Only reachable
 class and shape combinations instantiate loops. Allocation, ownership transfer,
 and driver setup stay outside the operation-by-representation expansion, while
 the bounded element loops retain their concrete types.
-Sequential reductions use the same separation: a static plan admits only
-accumulator classes that remain stable under the operation, and owns selection
-for both the recognition guard and entry. Shared preparation acquires storage
-without changing the reduction order, scan publication, or consumed inputs.
+Sequential reductions use the same separation: a static plan admits accumulator
+classes that stabilize after at most one scalar operation, and owns selection
+for both the recognition guard and entry. A transitioning seed participates in
+the first operation with its original type; its result, not a pre-conversion,
+establishes the stable accumulator. That step shares the unit's work budget and
+occupies its original scan position. The driver owns only stable state, without
+changing reduction order, scalar faults, or consumed inputs. Empty reductions
+and singleton `fold1` bypass this transition as they bypass the reducer itself.
 
 ### Scalar semantics remain the oracle
 
