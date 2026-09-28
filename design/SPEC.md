@@ -166,8 +166,9 @@ characters. An atom is classified whole-token, in this order:
    - float64: `digits . digits` with an optional exponent (`e`/`E`,
      optional sign), or `digits` followed by an exponent. Digits are
      required on both sides of `.` — `.5` and `5.` therefore lex as words.
-     `_` is not permitted in float literals. A literal that overflows
-     float64 is a parse error.
+     `_` is not permitted in float literals. Decimal values round to the
+     nearest float64, with ties to even, including subnormals and signed
+     zero on underflow. A literal that overflows float64 is a parse error.
    - The whole tokens `inf`, `+inf`, and `-inf` are float literals (they
      are numbers, so the names leave the word namespace). NaN has no
      literal; NaN values do not exist (see Numbers).
