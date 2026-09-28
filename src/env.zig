@@ -1903,6 +1903,7 @@ const EnvState = struct {
     cells: std.ArrayList(*ScopeCell) = .empty,
     cells_mutex: std.Io.Mutex = .init,
     scopes: ScopeIndex = .{},
+    locals_words: intern.LocalsWords,
 };
 
 pub const Env = enum(usize) {
@@ -1918,11 +1919,13 @@ pub const Env = enum(usize) {
         const host = host_owner.cleanup();
         const allocator = host.allocator();
         const releases = heap.hostDomain(host);
+        const locals_words = try intern.LocalsWords.mint();
         const backing = try allocator.create(EnvState);
         backing.* = .{
             .host = host,
             .core = Environment.init(allocator, releases),
             .session = Environment.init(allocator, releases),
+            .locals_words = locals_words,
             // SAFETY: the cell needs the Env handle that this very allocation
             // becomes, so it is filled in on the next line, before `backing`
             // escapes and before anything can read it.
@@ -2088,6 +2091,10 @@ pub const Env = enum(usize) {
         return .{ .cell = cell };
     }
 
+    /// The reserved locals backend, bindable without a lookup in any scope.
+    pub fn localsWords(self: *const Env) intern.LocalsWords {
+        return self.privateState().locals_words;
+    }
     pub fn coreView(self: *const Env) EnvironmentView {
         return .init(&self.privateState().core);
     }

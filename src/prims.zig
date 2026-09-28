@@ -68,7 +68,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
 /// words out of the reservation. They move values between the operand stack and the unit's
 /// locals, which is storage the reader alone addresses: every index the three
 /// ever see was computed by the locals lowerer from names it had already resolved.
-fn bindLocals(evaluator: *Machine) MachineError!void {
+pub fn bindLocals(evaluator: *Machine) MachineError!void {
     var count_value = try evaluator.popValue();
     defer count_value.deinit();
     if (count_value.borrow() != .int) return evaluator.typeError("an integer local count");
@@ -79,7 +79,7 @@ fn bindLocals(evaluator: *Machine) MachineError!void {
     return evaluator.bindLocals(count);
 }
 
-fn readLocal(evaluator: *Machine) MachineError!void {
+pub fn readLocal(evaluator: *Machine) MachineError!void {
     var index_value = try evaluator.popValue();
     defer index_value.deinit();
     if (index_value.borrow() != .int) return evaluator.typeError("an integer _gl index");
@@ -91,7 +91,7 @@ fn readLocal(evaluator: *Machine) MachineError!void {
     return evaluator.readLocal(index);
 }
 
-fn unbindLocals(evaluator: *Machine) MachineError!void {
+pub fn unbindLocals(evaluator: *Machine) MachineError!void {
     var count_value = try evaluator.popValue();
     defer count_value.deinit();
     if (count_value.borrow() != .int) return evaluator.typeError("an integer local count");

@@ -19,6 +19,7 @@ const kernel_storage = @import("kernel_storage.zig");
 const console_api = @import("console.zig");
 const task_join_core = @import("task_join_core.zig");
 const resolution_core = @import("resolution_core.zig");
+const prims = @import("prims.zig");
 const map_state = @import("module_snapshot.zig");
 const external = @import("external.zig");
 pub const Value = value.Value;
@@ -5745,7 +5746,7 @@ pub const Machine = struct {
         const count = list.atUnchecked(.{ .list = current.code }, current.nextIndex());
         const drop = list.atUnchecked(.{ .list = current.code }, current.nextIndex() + 1);
         return count == .int and count.int >= 0 and
-            drop == .word and std.mem.eql(u8, intern.get(drop.word.name), "_dl") and
+            drop == .word and drop.word.name == self.unit.environment.localsWords().drop and
             @as(usize, @intCast(count.int)) <= self.unit.locals.items.len;
     }
     /// Starts one quotation application behind a base-index stack barrier.
@@ -7187,7 +7188,31 @@ fn dispatch(self: *Machine, form: Value) MachineError!void {
         .word => |reference| reference,
         .int, .float, .char, .symbol, .list, .dict, .task, .module, .port => return self.pushBorrowed(form),
     };
+    // The locals backend is reserved from every publication, so in every scope
+    // these three names can only mean their core primitives. Every lowered
+    // locals body runs them, so they skip resolution and its caches outright.
+    const locals = self.unit.environment.localsWords();
+    if (word.name == locals.get) return invokeBuiltin(self, .plain(word.name), prims.readLocal);
+    if (word.name == locals.load) return invokeBuiltin(self, .plain(word.name), prims.bindLocals);
+    if (word.name == locals.drop) return invokeBuiltin(self, .plain(word.name), prims.unbindLocals);
     try self.executeWord(word);
+}
+
+/// Runs a builtin under `trace_word`, translating its failure payload the one
+/// way resolved execution does.
+fn invokeBuiltin(self: *Machine, trace_word: intern.TraceWord, primitive: env.PrimitiveImpl) MachineError!void {
+    self.unit.active_word = trace_word;
+    primitive(self) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Ecl => {
+            const failure_value = self.takePrimitiveFailure() orelse
+                EclErr.init(.domain, "builtin primitive returned error.Ecl without a failure payload");
+            return self.installPrimitiveFailure(failure_value);
+        },
+    };
+    if (self.takePrimitiveFailure()) |failure_value| {
+        return self.installPrimitiveFailure(failure_value);
+    }
 }
 const DispatchDriver = struct {
     word: u32,
@@ -7603,17 +7628,7 @@ fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
         },
         .builtin => |primitive| {
             if (cross_home_effect) |effect| try self.beginInvocation(effect, resolved.trace_word);
-            primitive(self) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.Ecl => {
-                    const failure_value = self.takePrimitiveFailure() orelse
-                        EclErr.init(.domain, "builtin primitive returned error.Ecl without a failure payload");
-                    return self.installPrimitiveFailure(failure_value);
-                },
-            };
-            if (self.takePrimitiveFailure()) |failure_value| {
-                return self.installPrimitiveFailure(failure_value);
-            }
+            try invokeBuiltin(self, resolved.trace_word, primitive);
         },
         .native => |callable| {
             if (cross_home) {

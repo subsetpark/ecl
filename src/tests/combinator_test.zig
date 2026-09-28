@@ -599,6 +599,56 @@ test "combinators: vector reductions reuse only accumulators they own" {
     });
 }
 
+test "locals: the reserved backend words behave and blame as before" {
+    // `_ll`, `_gl`, and `_dl` are reserved from every publication, so they are
+    // bound to their primitives without a lookup. Values, nesting, sharing a
+    // body between applications, and the blamed word on failure are what a
+    // program can observe of that.
+    try support.expectStacks(&.{
+        .{ .name = "read twice", .source = "[1 2 3] (|x| x x *) each", .expected = "[1 4 9]" },
+        .{ .name = "two names", .source = "3 4 (|a b| b a -) call", .expected = "1" },
+        .{ .name = "three names", .source = "1 2 3 (|a b c| c b a) call", .expected = "3 2 1" },
+        .{ .name = "definition applied per element", .source = "(|x| x 1 +) 'inc def [1 2] (inc) each", .expected = "[2 3]" },
+        .{ .name = "sequential applications", .source = "1 (|x| x) call 2 (|y| y) call +", .expected = "3" },
+        .{ .name = "locals under zip-with", .source = "[1 2] [10 20] (|x y| y x -) zip-with", .expected = "[9 18]" },
+        .{ .name = "a list is one value", .source = "[] (|x| x) call", .expected = "()" },
+    });
+    try support.expectErrors(&.{
+        .{ .name = "binding blames the load word", .source = "(|x| x) call", .kind = "underflow", .word = "_ll" },
+        .{ .name = "binding inside a definition traces both", .source = "(|x| x) 'f def f", .kind = "underflow", .word = "_ll" },
+        .{ .name = "the backend names stay reserved", .source = "(|x| x) '_gl def", .kind = "domain", .word = "def" },
+        .{ .name = "nor can they be unset", .source = "'_ll unset", .kind = "domain", .word = "unset" },
+        .{ .name = "a direct read outside any locals blames the read word", .source = "0 _gl", .kind = "domain", .word = "_gl" },
+    });
+    // The lowered spelling is callable as written; nothing about direct
+    // binding hides the words.
+    try support.expectStacks(&.{
+        .{ .name = "lowered form called directly", .source = "1 1 _ll 0 _gl 1 _dl", .expected = "1" },
+    });
+}
+
+test "locals: the backend words spend no kernel polls per element" {
+    // A word resolved through the driver polls once. The three locals words
+    // are dispatched without resolution, so a body of only locals reads polls
+    // at its continuation and nowhere else.
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    const count = 4096;
+    switch (try runtime.runUnit("<locals-body>", "4096 range 0.0 * 1.0 + (|x| x) each len")) {
+        .ok => {},
+        .err => |failure| {
+            runtime.release(failure);
+            return error.TestUnexpectedResult;
+        },
+        .incomplete => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(runtime.lastPolls() <= count + count / 64 + 64);
+}
+
 test "combinators: loops guards reductions and result materialization stay cancellable" {
     try expectCancelledAfterSetup("70001 range (pop ()) each", "cond", .automatic);
     try expectCancelledAfterSetup("70000 range", "(dup pop) each", .generic_only);

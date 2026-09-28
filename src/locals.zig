@@ -416,7 +416,7 @@ pub const LowerCursor = struct {
                 break :result .pending;
             },
             .word_start => |*words_state| result: {
-                const names = [_][]const u8{ "_ll", "_gl", "_dl" };
+                const names = [_][]const u8{ intern.locals_load, intern.locals_get, intern.locals_drop };
                 if (words_state.index == names.len) {
                     const words = words_state.words;
                     self.state = .{ .size = .{ .words = words } };

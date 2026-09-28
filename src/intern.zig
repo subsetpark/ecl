@@ -664,13 +664,36 @@ pub fn isReservedBytes(name: []const u8) bool {
         std.mem.eql(u8, name, lexer.row_token);
 }
 
+/// The locals backend's three spellings. The reader lowers `|a b|` into
+/// them: load the declared names, get one by index, drop them at the end.
+pub const locals_load = "_ll";
+pub const locals_get = "_gl";
+pub const locals_drop = "_dl";
+
+/// The locals backend's interned names. Because they are reserved from every
+/// publication, in every scope they can only mean their core primitives, and
+/// a dispatcher holding these ids may bind them without a lookup.
+pub const LocalsWords = struct {
+    load: u32,
+    get: u32,
+    drop: u32,
+
+    pub fn mint() error{OutOfMemory}!LocalsWords {
+        return .{
+            .load = try intern(locals_load),
+            .get = try intern(locals_get),
+            .drop = try intern(locals_drop),
+        };
+    }
+};
+
 /// Every binding name the language reserves for itself. The locals
 /// backend is reserved because the reader emits those three words into every
 /// lowered locals body: a session definition of `_gl` would otherwise
 /// silently change what `|x|` means everywhere.
 pub fn isReservedWordBytes(name: []const u8) bool {
     return isReservedBytes(name) or
-        std.mem.eql(u8, name, "_ll") or
-        std.mem.eql(u8, name, "_gl") or
-        std.mem.eql(u8, name, "_dl");
+        std.mem.eql(u8, name, locals_load) or
+        std.mem.eql(u8, name, locals_get) or
+        std.mem.eql(u8, name, locals_drop);
 }

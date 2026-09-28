@@ -574,6 +574,49 @@ retains one two-way cache implementation with no experimental or legacy
 control branch; the two focused cases and local hit/miss counters remain in
 schema `ecl.workdrivers.*.v6`.
 
+## Locals backend words bind without resolution — 2026-09-28
+
+The reader lowers `|a b|` into the three reserved words `_ll`, `_gl`, and
+`_dl`, emitted with no scope stamp. An unstamped word takes the general path:
+a `DispatchDriver` resume, a resolution walk through the running chain to
+core, and no cache entry, ever, because the `.core` result has no guard
+context. A locals body therefore paid one full resolution per local read and
+two more per activation, on top of its body words. The lowered `(|x| x x *)`
+is `1 _ll 0 _gl 0 _gl * 1 _dl`: four resolutions per element.
+
+Because only core may publish those names, in every scope they can mean only
+their core primitives. `dispatch` now compares the word's interned name with
+the three ids the environment minted at construction and calls the primitive
+directly, under the same trace word and failure translation a resolved core
+builtin gets. Reflection, direct calls such as `0 _gl`, the reservation on
+`def`/`set`/`unset`, and every blamed word are unchanged.
+
+Counters over 10,000 float elements, one worker, instrumented ReleaseSafe:
+
+| Body | Driver resumes before | after | Polls before | after |
+|---|---:|---:|---:|---:|
+| `(\|x\| x) each` | 30,009 | 9 | 40,066 | 10,066 |
+| `(\|x\| x x *) each` | 50,009 | 10,009 | 60,095 | 20,095 |
+| `(\|x y\| y x +) zip-with` | 50,009 | 10,009 | 60,095 | 20,095 |
+| `(\|x\| x 1 +) times` | 30,005 | 5 | 40,082 | 10,082 |
+
+The one resume per element that remains in the `each` and `zip-with` rows is
+the body word `*` or `+` in the child scope, which the separate child-scope
+cache change removes. Allocations, transitions, application resumes, and
+handoffs are unchanged.
+
+ReleaseFast on macOS arm64, five interleaved runs each, medians, internal
+milliseconds:
+
+| Workload | master | branch |
+|---|---:|---:|
+| `(\|x\| x) each`, 100k floats ×10 | 1,846 | 264 |
+| `(\|x\| x x *) each`, 100k floats ×10 | 1,776 | 495 |
+| `(\|x y\| y x +) zip-with`, 100k ×10 | 1,800 | 559 |
+| `1000000 (\|x\| x 1 +) times` | 1,145 | 249 |
+| `1000000 (1 +) times`, control | 308 | 290 |
+| `() each`, 100k ×10, control | 172 | 168 |
+
 ## CSV and table primitives — 2026-09-10
 
 Baseline is the committed columnar implementation `05454f6`; updated is the
