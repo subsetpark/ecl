@@ -6138,7 +6138,7 @@ pub const Machine = struct {
                 },
             }
         }
-        const local_context = LocalCacheContext.init(running_site, stamped_scope);
+        const local_context = LocalCacheContext.init(running_site, stamped_scope, self.unit.module_access);
         if (local_context) |context| {
             switch (self.unit.module_call_sites.lookupLocal(
                 cached_site,
@@ -7759,12 +7759,18 @@ const LocalCacheContext = struct {
     scope_id: env.ScopeId,
     home: *modules.ModuleHome,
 
-    fn init(site: ExecutionSite, stamped_scope: ?*env.Scope) ?LocalCacheContext {
+    fn init(
+        site: ExecutionSite,
+        stamped_scope: ?*env.Scope,
+        access: *const modules.ExecutionAccess,
+    ) ?LocalCacheContext {
         const scope = stamped_scope orelse return null;
         if (!scope.isModuleRoot()) return null;
+        const home = site.home orelse return null;
+        if (home.scope(access) != scope) return null;
         return .{
             .scope_id = scope.cellId(),
-            .home = site.home orelse return null,
+            .home = home,
         };
     }
 };

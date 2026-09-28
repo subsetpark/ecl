@@ -667,7 +667,9 @@ scope the running activation resolves in directly: the running scope, or an
 ancestor reached only through scopes that have no environment, such as the
 child a combinator applies its body in. The reach is established afresh at
 every dispatch, so a child that binds a name leaves the cache for the rest of
-that application. Guards retain revisions rather
+that application. A module-local cache context also requires the activation's
+home to belong to the stamped module root; foreign homes use ordinary
+resolution. Guards retain revisions rather
 than snapshot readers, so a dormant entry cannot prevent reclamation of
 publication history. Execution context and the existing module generation
 guards continue to determine
