@@ -799,10 +799,12 @@ fn writeFloat(cursor: *RenderCursor, number: f64, writer: *std.Io.Writer) std.Io
     if (std.math.isInf(number)) {
         return cursor.writeAll(writer, if (number < 0) "-inf" else "inf");
     }
-    var buffer: [128]u8 = undefined;
-    var fixed = std.Io.Writer.fixed(&buffer);
-    fixed.print("{}", .{number}) catch unreachable;
-    const rendered = fixed.buffered();
+    // Default float formatting is decimal, whose extreme finite values and
+    // subnormals exceed 128 bytes. Derive the bound from the formatter rather
+    // than imposing a second, narrower limit on the f64 value domain.
+    var buffer: [std.fmt.float.bufferSize(.decimal, f64)]u8 = undefined;
+    const rendered = std.fmt.float.render(&buffer, number, .{ .mode = .decimal }) catch
+        @panic("decimal float rendering exceeded its type-derived buffer");
     try cursor.writeAll(writer, rendered);
     if (std.mem.indexOfAny(u8, rendered, ".eE") == null) try cursor.writeAll(writer, ".0");
 }
@@ -894,6 +896,57 @@ test "canonical printer renders the public value syntax" {
     const dictionary = try dict.fromPairs(allocator, cleanup.domain(), &.{.{ .{ .symbol = a }, .{ .int = 1 } }});
     defer cleanup.releaseValue(dictionary);
     try expectPrint("{'a 1}", dictionary);
+}
+
+test "float rendering covers decimal extremes and round-trips finite bits" {
+    const allocator = std.testing.allocator;
+    const cases = .{
+        .{ @as(f64, 1e127), "1" ++ "0" ** 127 ++ ".0" },
+        .{ @as(f64, 1e128), "1" ++ "0" ** 128 ++ ".0" },
+        .{ @as(f64, -1e308), "-1" ++ "0" ** 308 ++ ".0" },
+        .{ std.math.floatTrueMin(f64), "0." ++ "0" ** 323 ++ "5" },
+        .{ -std.math.floatTrueMin(f64), "-0." ++ "0" ** 323 ++ "5" },
+    };
+    inline for (cases) |case| {
+        const scalar = Value{ .float = case[0] };
+        try expectPrint(case[1], scalar);
+        const display = try toOwnedDisplayString(allocator, scalar);
+        defer allocator.free(display);
+        try std.testing.expectEqualStrings(case[1], display);
+    }
+    // Sweep every finite binary exponent, both signs, and low/high fraction
+    // boundaries. Parsing is an independent oracle for exact float bits,
+    // including subnormals, maximum finite values, and signed zero.
+    for (0..2047) |exponent| {
+        for ([_]u64{ 0, 1, (1 << 52) - 1 }) |fraction| {
+            for ([_]u64{ 0, 1 << 63 }) |sign| {
+                const bits: u64 = sign | (@as(u64, @intCast(exponent)) << 52) | fraction;
+                const rendered = try toOwnedString(allocator, .{ .float = @bitCast(bits) });
+                defer allocator.free(rendered);
+                const reparsed = try std.fmt.parseFloat(f64, rendered);
+                try std.testing.expectEqual(bits, @as(u64, @bitCast(reparsed)));
+                try std.testing.expect(std.mem.indexOfAny(u8, rendered, ".eE") != null);
+            }
+        }
+    }
+    // A caller's short sink is still an ordinary write error, not a panic in
+    // the printer's own scalar staging buffer.
+    var short_buffer: [8]u8 = undefined;
+    var short_writer = std.Io.Writer.fixed(&short_buffer);
+    try std.testing.expectError(error.WriteFailed, printWithAllocator(
+        allocator,
+        .{ .float = std.math.floatMax(f64) },
+        &short_writer,
+    ));
+    const Probe = struct {
+        fn run(failing: std.mem.Allocator) !void {
+            const canonical = try toOwnedString(failing, .{ .float = std.math.floatMax(f64) });
+            defer failing.free(canonical);
+            const display = try toOwnedDisplayString(failing, .{ .float = -std.math.floatTrueMin(f64) });
+            defer failing.free(display);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(allocator, Probe.run, .{});
 }
 
 test "char and string escapes follow the grammar" {
