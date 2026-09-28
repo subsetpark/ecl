@@ -833,8 +833,8 @@ Each pass through the loop performs the first applicable action:
 3. advance an installed work driver;
 4. honor a requested process exit;
 5. resume a saved frame when no quotation is current;
-6. return from a completed quotation;
-7. check fuel and cancellation at a safe point; or
+6. check fuel and cancellation at a safe point;
+7. return from a completed quotation; or
 8. fetch and dispatch one form.
 
 That ordering is part of the machine's design. A driver completes before the
