@@ -132,6 +132,27 @@ test "numeric: fault blocks report first index before aliased stores" {
             .word = "+",
             .data = &.{.{ .name = "index", .expected = .{ .int = 256 } }},
         },
+        .{
+            .name = "float division by zero in a second block",
+            .source = "300 range 1.0 * 256 - 1.0 swap /",
+            .kind = "domain",
+            .word = "/",
+            .data = &.{.{ .name = "index", .expected = .{ .int = 256 } }},
+        },
+        .{
+            .name = "finite float addition overflows",
+            .source = "[1.0 1.0e308 1.0e308] 1.0e308 +",
+            .kind = "overflow",
+            .word = "+",
+            .data = &.{.{ .name = "index", .expected = .{ .int = 1 } }},
+        },
+        .{
+            .name = "an infinite operand propagates until it meets its negation",
+            .source = "[1.0 inf 2.0] [2.0 1.0 inf] * inf -",
+            .kind = "domain",
+            .word = "-",
+            .data = &.{.{ .name = "index", .expected = .{ .int = 1 } }},
+        },
     });
 }
 
