@@ -826,20 +826,20 @@ const PervadeEachDriver = struct {
                 evaluator.allocator(),
             ));
             switch (try self.cursor.?.borrowMut().advance(evaluator, evaluator.workBudget())) {
-                .pending => return .yielded,
+                .pending => return .stepped,
                 .complete => |result| {
                     self.cursor.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                     self.cursor = null;
                     self.results.borrowMut().appendOwned(result);
                     self.index += 1;
-                    return .yielded;
+                    return .stepped;
                 },
             }
         }
         if (self.materializer == null)
             self.materializer = .init(.init(evaluator.allocator(), self.results.borrow().values()));
         return switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
-            .pending => .yielded,
+            .pending => .stepped,
             .complete => |result| completed: {
                 popRelease(evaluator, self.consumed);
                 break :completed .{ .output = result };

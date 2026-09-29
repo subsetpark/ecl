@@ -103,7 +103,7 @@ const StrDriver = struct {
         const phase = self.work.borrowMut();
         return switch (phase.*) {
             .rendering => |*renderer| switch (try renderer.advance(evaluator.workBudget())) {
-                .pending => .yielded,
+                .pending => .stepped,
                 .complete => |bytes| transitioned: {
                     renderer.deinit();
                     phase.* = .{ .materializing = .{
@@ -201,7 +201,7 @@ const HasDriver = struct {
     pub fn advance(evaluator: *Machine, self: *HasDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (try self.cursor.borrowMut().advance(evaluator.workBudget())) {
-            .pending => .yielded,
+            .pending => .stepped,
             .complete => |found| .{ .output = .{ .int = @intFromBool(found != null) } },
         };
     }

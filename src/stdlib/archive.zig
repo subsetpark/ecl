@@ -200,7 +200,7 @@ const Sha256Driver = struct {
             self.text = .init(.init(evaluator.allocator(), &self.rendered));
         }
         return switch (try self.text.?.borrowMut().advance(evaluator.workBudget())) {
-            .pending => .yielded,
+            .pending => .stepped,
             .complete => |result| .{ .output = result },
         };
     }

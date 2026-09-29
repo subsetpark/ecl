@@ -170,13 +170,13 @@ const StackSnapshotDriver = struct {
 
         if (self.materializer == null) {
             self.materializer = .init(.init(evaluator.allocator(), self.snapshot.borrow().items()));
-            return .yielded;
+            return .stepped;
         }
         if (self.result == null) switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
-            .pending => return .yielded,
+            .pending => return .stepped,
             .complete => |result| {
                 self.result = .init(result);
-                return .yielded;
+                return .stepped;
             },
         };
 
@@ -275,7 +275,7 @@ const MatchDriver = struct {
     pub fn advance(evaluator: *Machine, self: *MatchDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (try self.cursor.borrowMut().advance(evaluator.workBudget())) {
-            .pending => .yielded,
+            .pending => .stepped,
             .complete => |matches| .{ .output = .{ .int = @intFromBool(matches) } },
         };
     }
@@ -419,7 +419,7 @@ const BytesToCharsDriver = struct {
             .complete => |bytes| {
                 self.bytes = .init(bytes);
                 self.text = .init(.init(evaluator.allocator(), self.bytes.?.borrowMut().bytes()));
-                return .yielded;
+                return .stepped;
             },
         };
         return switch (self.text.?.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
@@ -467,11 +467,11 @@ const StringBytesDriver = struct {
             .complete => |encoded| {
                 self.encoded = .init(encoded);
                 self.materializer = .init(.init(evaluator.allocator(), self.encoded.?.borrow()));
-                return .yielded;
+                return .stepped;
             },
         };
         return switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
-            .pending => .yielded,
+            .pending => .stepped,
             .complete => |result| .{ .output = result },
         };
     }
@@ -561,7 +561,7 @@ const SymbolConversionDriver = struct {
             .complete => |spelling| {
                 self.spelling = .init(spelling);
                 self.validation = .init(spelling);
-                return .yielded;
+                return .stepped;
             },
         };
         const work = evaluator.workBudget();
@@ -747,7 +747,7 @@ const RaiseDriver = struct {
             .lookup => {
                 if (self.field_index == self.keys.len) {
                     self.phase = .finish;
-                    return .yielded;
+                    return .stepped;
                 }
                 if (self.lookup == null) self.lookup = .init(.initHeader(
                     evaluator.allocator(),
@@ -755,13 +755,13 @@ const RaiseDriver = struct {
                     .{ .symbol = self.keys[self.field_index] },
                 ));
                 switch (try self.lookup.?.borrowMut().advance(evaluator.workBudget())) {
-                    .pending => return .yielded,
+                    .pending => return .stepped,
                     .complete => |found| {
                         self.lookup.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                         self.lookup = null;
                         try self.validateField(evaluator, found);
                         if (self.phase == .lookup) self.field_index += 1;
-                        return .yielded;
+                        return .stepped;
                     },
                 }
             },
@@ -778,7 +778,7 @@ const RaiseDriver = struct {
                     self.field_index += 1;
                     self.phase = .lookup;
                 }
-                return .yielded;
+                return .stepped;
             },
             .finish => {
                 const raised = self.raised.take();
@@ -832,7 +832,7 @@ const PpDriver = struct {
     pub fn advance(evaluator: *Machine, self: *PpDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (try self.render.borrowMut().advance(evaluator.workBudget())) {
-            .pending => .yielded,
+            .pending => .stepped,
             .complete => |rendered| completed: {
                 defer evaluator.allocator().free(rendered);
                 evaluator.unit.inherited.runtime().console.writeOutput(rendered, true) catch
@@ -875,7 +875,7 @@ const StackDisplayDriver = struct {
                 ));
             }
             switch (try self.render.?.borrowMut().advance(evaluator.workBudget())) {
-                .pending => return .yielded,
+                .pending => return .stepped,
                 .complete => |text| {
                     self.render.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                     self.render = null;
@@ -994,14 +994,14 @@ const GetenvDriver = struct {
             if (self.lookup == null)
                 self.lookup = evaluator.environLookup(self.name.?.borrow());
             switch (self.lookup.?.advance(evaluator.workBudget())) {
-                .pending => return .yielded,
+                .pending => return .stepped,
                 .complete => |found| {
                     const bytes = found orelse return evaluator.unsetEnvironVariable(
                         self.name.?.borrow(),
                         self.name_value.borrow(),
                     );
                     self.text = .init(.init(evaluator.allocator(), bytes));
-                    return .yielded;
+                    return .stepped;
                 },
             }
         }

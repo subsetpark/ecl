@@ -116,7 +116,7 @@ const FileDriver = struct {
     pub fn advance(evaluator: *Machine, self: *FileDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (try self.text.borrowMut().advance(evaluator.workBudget())) {
-            .pending => .yielded,
+            .pending => .stepped,
             .complete => |result| .{ .output = result },
         };
     }

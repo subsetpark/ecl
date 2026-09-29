@@ -379,7 +379,7 @@ const CompareDriver = struct {
     pub fn advance(evaluator: *Machine, self: *CompareDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (self.cursor.advance(evaluator.workBudget())) {
-            .pending => .yielded,
+            .pending => .stepped,
             .not_comparable => evaluator.typeError("two comparable numbers, chars, or strings"),
             .complete => |ordering| .{ .output = .{ .int = switch (ordering) {
                 .lt => -1,

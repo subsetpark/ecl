@@ -4429,7 +4429,7 @@ pub const Machine = struct {
             try evaluator.pollKernel();
             switch (self.state.borrowMut().*) {
                 .validate => |*loader| switch (try loader.borrowMut().advance(evaluator.workBudget())) {
-                    .pending => return .yielded,
+                    .pending => return .stepped,
                     .failure => |failure| return self.failLoad(evaluator, failure.text()),
                     .loaded => |instance| {
                         loader.deinit(evaluator.releaseDomain(), evaluator.allocator());

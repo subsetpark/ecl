@@ -1302,10 +1302,10 @@ const CollectedDriver = struct {
         try evaluator.pollKernel();
         if (self.result == null) {
             switch (try self.materializer.borrowMut().advance(evaluator.workBudget())) {
-                .pending => return .yielded,
+                .pending => return .stepped,
                 .complete => |result| {
                     self.result = .init(result);
-                    return .yielded;
+                    return .stepped;
                 },
             }
         }
@@ -1730,7 +1730,7 @@ const InfraResultDriver = struct {
                 .pending => return .stepped,
                 .complete => |result| {
                     self.result = .init(result);
-                    return .yielded;
+                    return .stepped;
                 },
             }
         }

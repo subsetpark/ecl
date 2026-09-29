@@ -161,7 +161,7 @@ const PervadeDriver = struct {
     pub fn advance(evaluator: *Machine, self: *PervadeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (try self.cursor.borrowMut().advance(evaluator, evaluator.workBudget())) {
-            .pending => .yielded,
+            .pending => .stepped,
             .complete => |result| .{ .output = result },
         };
     }

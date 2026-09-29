@@ -285,7 +285,7 @@ const AssociateDriver = struct {
     pub fn advance(evaluator: *Machine, self: *AssociateDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (try self.materializer.borrowMut().advance(evaluator.workBudget())) {
-            .pending => .yielded,
+            .pending => .stepped,
             .duplicate_key => unreachable,
             .complete => |dictionary| .{ .output = dictionary },
         };
@@ -323,12 +323,12 @@ const FromFlatDriver = struct {
                 list.atUnchecked(self.entries.borrow(), self.index * 2),
                 list.atUnchecked(self.entries.borrow(), self.index * 2 + 1),
             };
-            if (self.index != flat_pairs.len) return .yielded;
+            if (self.index != flat_pairs.len) return .stepped;
             self.materializer = .init(try .init(evaluator.allocator(), flat_pairs, true));
-            return .yielded;
+            return .stepped;
         }
         return switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
-            .pending => .yielded,
+            .pending => .stepped,
             .duplicate_key => evaluator.fail(.domain, "dict.from-flat received a duplicate key"),
             .complete => |dictionary| .{ .output = dictionary },
         };

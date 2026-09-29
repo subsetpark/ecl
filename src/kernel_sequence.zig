@@ -155,7 +155,7 @@ const IndexDriver = struct {
     pub fn advance(evaluator: *Machine, self: *IndexDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (try self.cursor.borrowMut().advance(evaluator, evaluator.workBudget())) {
-            .pending => .yielded,
+            .pending => .stepped,
             .complete => |result| .{ .output = result },
         };
     }
@@ -183,13 +183,13 @@ const FlatGatherDriver = struct {
                 if (offset >= source.list.length()) return evaluator.fail(.domain, "at index is out of bounds");
                 self.values.borrowMut().appendBorrowed(list.atUnchecked(source, offset));
             }
-            return .yielded;
+            return .stepped;
         }
-        if (!self.cursor.complete()) return .yielded;
+        if (!self.cursor.complete()) return .stepped;
         if (self.materializer == null)
             self.materializer = .init(.initOwned(evaluator.allocator(), self.values.borrowMut().take()));
         return switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
-            .pending => .yielded,
+            .pending => .stepped,
             .complete => |result| .{ .output = result },
         };
     }
@@ -207,7 +207,7 @@ const DictAtDriver = struct {
     pub fn advance(evaluator: *Machine, self: *DictAtDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (try self.cursor.borrowMut().advance(evaluator.workBudget())) {
-            .pending => .yielded,
+            .pending => .stepped,
             .complete => |maybe_result| result: {
                 const found = maybe_result orelse
                     return evaluator.fail(.domain, "at could not find the dict key");
@@ -841,7 +841,7 @@ const MembershipDriver = struct {
     pub fn advance(evaluator: *Machine, self: *MembershipDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (try self.cursor.borrowMut().advance(evaluator, evaluator.workBudget())) {
-            .pending => .yielded,
+            .pending => .stepped,
             .complete => |result| .{ .output = result },
         };
     }
@@ -1491,7 +1491,7 @@ const ShapeDriver = struct {
     pub fn advance(evaluator: *Machine, self: *ShapeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.dimensions == null) switch (try self.cursor.borrowMut().advance(evaluator.workBudget())) {
-            .pending => return .yielded,
+            .pending => return .stepped,
             .ragged => return evaluator.fail(.shape, "shape requires a rectangular list"),
             .too_deep => return evaluator.fail(.shape, "shape nesting exceeds 256 levels"),
             .complete => |dimensions| self.dimensions = .init(dimensions),
@@ -1551,7 +1551,7 @@ const FlipDriver = struct {
                     if (list.atUnchecked(self.collection.borrow(), next.*) == .list)
                         return evaluator.fail(.shape, "flip requires rows of the same length");
                 }
-                if (next.* != rows) return .yielded;
+                if (next.* != rows) return .stepped;
                 try evaluator.pushBorrowed(self.collection.borrow());
                 return .completed;
             },
@@ -1562,27 +1562,27 @@ const FlipDriver = struct {
                     if (row != .list or row.list.length() != validation.columns)
                         return evaluator.fail(.shape, "flip requires rows of the same length");
                 }
-                if (validation.next != rows) return .yielded;
+                if (validation.next != rows) return .stepped;
                 if (validation.columns == 0) return evaluator.fail(
                     .shape,
                     "flip cannot retain trailing axes after a transposed zero dimension",
                 );
                 self.validation = .{ .ready = validation.columns };
-                return .yielded;
+                return .stepped;
             },
             .ready => |columns| columns,
         };
         if (self.result_rows == null) {
             self.result_rows = .init(try .init(evaluator.releaseDomain(), columns));
             self.cells = .init(try evaluator.allocator().alloc(Value, rows));
-            return .yielded;
+            return .stepped;
         }
         if (self.outer) |*outer| return switch (try outer.borrowMut().advance(evaluator.workBudget())) {
-            .pending => .yielded,
+            .pending => .stepped,
             .complete => |result| .{ .output = result },
         };
         if (self.inner) |*inner| switch (try inner.borrowMut().advance(evaluator.workBudget())) {
-            .pending => return .yielded,
+            .pending => return .stepped,
             .complete => |row_value| {
                 inner.deinit(evaluator.releaseDomain(), evaluator.allocator());
                 self.inner = null;
@@ -1595,7 +1595,7 @@ const FlipDriver = struct {
                         self.result_rows.?.borrow().values(),
                     ));
                 }
-                return .yielded;
+                return .stepped;
             },
         };
         const end = @min(self.row + machine.kernel_poll_quantum, rows);
@@ -1607,7 +1607,7 @@ const FlipDriver = struct {
             evaluator.allocator(),
             self.cells.?.borrow(),
         ));
-        return .yielded;
+        return .stepped;
     }
 
     pub const ownership: heap.DriverOwnership = .fields;
@@ -1882,14 +1882,14 @@ const ReshapeDriver = struct {
                 self.volume = std.math.mul(usize, self.volume, self.dimensions.borrow()[self.dimension_index]) catch
                     return evaluator.fail(.overflow, "reshape volume overflows addressable size");
             }
-            return .yielded;
+            return .stepped;
         }
         if (self.builder) |*builder| return switch (try builder.borrowMut().advance(evaluator.workBudget())) {
-            .pending => .yielded,
+            .pending => .stepped,
             .complete => |result| .{ .output = result },
         };
         switch (try self.ravel.borrowMut().advance(evaluator.workBudget())) {
-            .pending => return .yielded,
+            .pending => return .stepped,
             .too_deep => return evaluator.fail(.shape, "reshape data nesting exceeds 256 levels"),
             .complete => |count| if (!self.ravel_filling) {
                 self.flat = .init(try evaluator.allocator().alloc(Value, count));
@@ -1901,7 +1901,7 @@ const ReshapeDriver = struct {
                 self.ravel.deinit(evaluator.releaseDomain(), evaluator.allocator());
                 self.ravel = .init(next);
                 self.ravel_filling = true;
-                return .yielded;
+                return .stepped;
             } else {
                 std.debug.assert(count == self.flat.?.borrow().len);
                 if (self.volume > 0 and count == 0) return evaluator.fail(
@@ -1914,7 +1914,7 @@ const ReshapeDriver = struct {
                     self.dimensions.borrow(),
                     self.flat.?.borrow(),
                 ));
-                return .yielded;
+                return .stepped;
             },
         }
     }
