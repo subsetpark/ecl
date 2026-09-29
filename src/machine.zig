@@ -2547,9 +2547,9 @@ pub const Unit = struct {
     arguments: Value,
     cancelled: *const std.atomic.Value(bool),
     fuel: u32 = fuel_quantum,
-    /// The unit's one allowance for logical kernel work. Cursors doing this
-    /// unit's work draw on it through `Machine.workBudget`; only the machine
-    /// refills it, at the boundary where it polls cancellation.
+    /// The unit's one allowance for logical kernel work in a turn. Cursors
+    /// doing this unit's work draw on it through `Machine.workBudget`, and
+    /// exhausting it ends the turn: only the start of the next turn refills it.
     kernel_budget: poll_api.WorkBudget = .init(kernel_poll_quantum),
     polls: u64 = 0,
     root_execution_metrics: if (root_execution_metrics_enabled) RootExecutionMetrics else void = if (root_execution_metrics_enabled) .{} else {},
@@ -3140,9 +3140,6 @@ pub fn PathActionDriver(
 
 pub const Machine = struct {
     unit: *Unit,
-    /// A Machine lives for one scheduler turn. Once the unit's kernel budget
-    /// is exhausted in the turn, stepped drivers surrender it.
-    kernel_quantum_spent: bool = false,
     pub fn allocator(self: *const Machine) std.mem.Allocator {
         return self.unit.allocator;
     }
@@ -5618,12 +5615,11 @@ pub const Machine = struct {
             return self.fail(.cancelled, "unit cancelled");
         }
     }
-    /// Charges logical kernel work against one unit-wide budget. Keeping the
-    /// remainder on Unit means ragged recursion and consecutive short loops
-    /// cannot evade the 65,536-element cancellation bound by resetting a
-    /// local index. Calls are bounded to one quantum; a block that reaches
-    /// the boundary polls before executing and is charged to the fresh
-    /// interval in full.
+    /// Charges logical kernel work against the unit's one budget for the turn.
+    /// Keeping the remainder on Unit means ragged recursion and consecutive
+    /// short loops cannot evade the 65,536-element cancellation bound by
+    /// resetting a local index. Calls are bounded to one quantum; a block that
+    /// reaches the boundary polls before executing and exhausts the turn.
     pub fn advanceKernel(self: *Machine, amount: usize) MachineError!void {
         _ = try self.chargeKernel(amount);
     }
@@ -5641,25 +5637,22 @@ pub const Machine = struct {
     pub fn workBudget(self: *Machine) *poll_api.WorkBudget {
         return &self.unit.kernel_budget;
     }
-    /// Polls cancellation, then refills the unit's allowance and records that
-    /// this turn spent a quantum.
-    fn kernelBoundary(self: *Machine) MachineError!void {
-        try self.pollKernel();
-        self.unit.kernel_budget = .init(kernel_poll_quantum);
-        self.kernel_quantum_spent = true;
-    }
+    /// Charges work that has already been committed, such as an inline kernel
+    /// block that cannot stop part way. A charge that reaches the end of the
+    /// turn's allowance polls cancellation and leaves the allowance exhausted:
+    /// it never begins a second quantum within the same turn.
     fn chargeKernel(self: *Machine, amount: usize) MachineError!bool {
         std.debug.assert(amount <= kernel_poll_quantum);
         if (amount == 0) return false;
         if (comptime root_execution_metrics_enabled)
             self.unit.root_execution_metrics.logical_transitions += amount;
-        var reached_boundary = false;
         if (amount >= self.unit.kernel_budget.remaining) {
-            try self.kernelBoundary();
-            reached_boundary = true;
+            try self.pollKernel();
+            self.unit.kernel_budget.remaining = 0;
+            return true;
         }
         self.unit.kernel_budget.remaining -= amount;
-        return reached_boundary;
+        return false;
     }
     /// Consumes a quotation header and applies it inline.
     pub fn callOwned(self: *Machine, quotation: *Header) error{OutOfMemory}!void {
@@ -6755,6 +6748,10 @@ pub fn initializeSource(
 }
 
 pub fn runSlice(unit: *Unit) MachineError!RunStatus {
+    // Each turn begins with one full kernel quantum. The charge that exhausted
+    // the previous one already polled cancellation, and every driver polls
+    // before it draws.
+    unit.kernel_budget = .init(kernel_poll_quantum);
     var evaluator = Machine{ .unit = unit };
     defer unit.dropSpareScope();
     const status = loop(&evaluator) catch |err| switch (err) {
@@ -6846,22 +6843,10 @@ fn loop(self: *Machine) MachineError!RunStatus {
                             continue;
                         },
                     };
-                    if (self.kernel_quantum_spent) return .yielded;
+                    if (self.unit.kernel_budget.exhausted()) return .yielded;
                     continue;
                 },
-                .yielded => {
-                    if (self.unit.hasParkRequest()) return .parked;
-                    // A driver may yield on the exhaustion its cursors caused;
-                    // settling here keeps the next turn from starting empty.
-                    if (self.unit.kernel_budget.exhausted()) self.kernelBoundary() catch |err| switch (err) {
-                        error.OutOfMemory => return error.OutOfMemory,
-                        error.Ecl => {
-                            try startFailure(self);
-                            continue;
-                        },
-                    };
-                    return .yielded;
-                },
+                .yielded => return if (self.unit.hasParkRequest()) .parked else .yielded,
                 .completed => {
                     clearWorkDriver(self.unit);
                     continue;
