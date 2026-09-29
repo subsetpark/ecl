@@ -314,6 +314,35 @@ test "scheduler shell property: generated public waits always quiesce" {
     });
 }
 
+test "scheduler shell property: a cold builtin load finishes within its unit's turn" {
+    // Loading a builtin module is many small bounded steps. They spend the
+    // unit's own quota rather than a scheduler turn each, so on one worker
+    // the loading child finishes before a competitor that needs a few turns.
+    const source =
+        "'task ('await-any) import " ++
+        "[] ('json ('parse) import 0) @spawn " ++
+        "[] (1500 (1 pop) times 1) @spawn " ++
+        "pair task.await-any pop";
+    var environment = std.process.Environ.Map.init(allocator);
+    defer environment.deinit();
+    try environment.put("ECL_WORKERS", "1");
+    var result = cli.runOptions(.{
+        .argv = &.{ build_options.ecl_exe, source },
+        .environ_map = &environment,
+        .timeout = .{
+            .duration = .{
+                .clock = .awake,
+                .raw = .fromSeconds(scenario_timeout_seconds),
+            },
+        },
+    }) catch |err| switch (err) {
+        error.Timeout => return error.SchedulerLivenessFailure,
+        else => |other| return other,
+    };
+    defer result.deinit();
+    try result.expect(.{ .exit_code = 0, .stdout = "0\n", .stderr = "" });
+}
+
 test "scheduler shell property: process waits cancel and quiesce" {
     const process_exe = try std.Io.Dir.cwd().realPathFileAlloc(
         std.testing.io,
