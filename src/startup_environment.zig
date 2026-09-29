@@ -1,5 +1,6 @@
 //! Immutable startup environment shared by evaluation and child processes.
 const std = @import("std");
+const poll = @import("poll.zig");
 
 pub const EnvironmentEntry = struct { name: []const u8, value: []const u8 };
 
@@ -15,16 +16,14 @@ pub const View = struct {
         name: []const u8,
         index: usize = 0,
 
-        pub fn advance(self: *LookupCursor, budget: usize) union(enum) { pending, complete: ?[]const u8 } {
-            std.debug.assert(budget != 0);
-            var remaining = budget;
-            while (remaining != 0 and self.index != self.entries.len) : (remaining -= 1) {
+        pub fn advance(self: *LookupCursor, work: *poll.WorkBudget) union(enum) { pending, complete: ?[]const u8 } {
+            while (self.index != self.entries.len) {
+                if (!work.spend()) return .pending;
                 const entry = self.entries[self.index];
                 self.index += 1;
                 if (std.mem.eql(u8, entry.name, self.name)) return .{ .complete = entry.value };
             }
-            if (self.index == self.entries.len) return .{ .complete = null };
-            return .pending;
+            return .{ .complete = null };
         }
     };
 
@@ -84,7 +83,7 @@ pub const Snapshot = struct {
 
 fn expectLookup(view: View, name: []const u8, expected: ?[]const u8) !void {
     var cursor = view.lookupCursor(name);
-    while (true) switch (cursor.advance(1)) {
+    while (true) switch (poll.advanceWithin(&cursor, 1)) {
         .pending => {},
         .complete => |actual| {
             if (expected) |text| {

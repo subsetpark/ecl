@@ -320,7 +320,7 @@ const Request = struct {
         }
         if (self.state == .preparing) {
             const opening = self.state.preparing;
-            switch (try opening.advance(machine.kernel_poll_quantum)) {
+            switch (try opening.advance(evaluator.workBudget())) {
                 .yielded => {},
                 .pending => |source| try evaluator.park(.{ .external = source }),
                 .failed => |failure| return factoryFailure(evaluator, failure),

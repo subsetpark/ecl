@@ -8,7 +8,6 @@ const env = @import("env.zig");
 const heap = @import("heap.zig");
 const intern = @import("intern.zig");
 const list = @import("list.zig");
-const poll = @import("poll.zig");
 const machine = @import("machine.zig");
 const native_module = @import("native_module.zig");
 const value = @import("value.zig");
@@ -299,25 +298,19 @@ const ListBuild = struct {
             },
             .materializing => {},
         }
-        if (call.budget == 0) {
-            call.yield_requested = true;
-            return null;
+        const materializing = &self.state.materializing;
+        switch (try materializing.materializer.advance(call.activeEvaluator().workBudget())) {
+            .pending => {
+                call.yield_requested = true;
+                return null;
+            },
+            .complete => |result| {
+                materializing.materializer.deinit();
+                materializing.source.retirePartial(call.releases);
+                self.state = .{ .complete = result };
+                return result;
+            },
         }
-        while (call.budget != 0) {
-            call.budget -= 1;
-            const materializing = &self.state.materializing;
-            switch (try poll.advanceWithin(&materializing.materializer, 1)) {
-                .pending => {},
-                .complete => |result| {
-                    materializing.materializer.deinit();
-                    materializing.source.retirePartial(call.releases);
-                    self.state = .{ .complete = result };
-                    return result;
-                },
-            }
-        }
-        call.yield_requested = true;
-        return null;
     }
 
     fn retire(self: *ListBuild, releases: *heap.ReleaseDomain) void {
@@ -416,33 +409,27 @@ const DictBuild = struct {
             },
             .materializing => {},
         }
-        if (call.budget == 0) {
-            call.yield_requested = true;
-            return null;
+        const materializing = &self.state.materializing;
+        switch (try materializing.materializer.advance(call.activeEvaluator().workBudget())) {
+            .pending => {
+                call.yield_requested = true;
+                return null;
+            },
+            .duplicate_key => {
+                materializing.materializer.retire(call.releases);
+                materializing.keys.retirePartial(call.releases);
+                materializing.values.retirePartial(call.releases);
+                self.state = .rejected;
+                return null;
+            },
+            .complete => |result| {
+                materializing.materializer.deinit();
+                materializing.keys.retirePartial(call.releases);
+                materializing.values.retirePartial(call.releases);
+                self.state = .{ .complete = result };
+                return result;
+            },
         }
-        while (call.budget != 0) {
-            call.budget -= 1;
-            const materializing = &self.state.materializing;
-            switch (try poll.advanceWithin(&materializing.materializer, 1)) {
-                .pending => {},
-                .duplicate_key => {
-                    materializing.materializer.retire(call.releases);
-                    materializing.keys.retirePartial(call.releases);
-                    materializing.values.retirePartial(call.releases);
-                    self.state = .rejected;
-                    return null;
-                },
-                .complete => |result| {
-                    materializing.materializer.deinit();
-                    materializing.keys.retirePartial(call.releases);
-                    materializing.values.retirePartial(call.releases);
-                    self.state = .{ .complete = result };
-                    return result;
-                },
-            }
-        }
-        call.yield_requested = true;
-        return null;
     }
 
     fn retire(self: *DictBuild, releases: *heap.ReleaseDomain) void {
@@ -493,7 +480,6 @@ const Transaction = struct {
     candidate_generation: u32 = 0,
     terminal: Terminal = .idle,
     continuation: ?[]align(64) u8 = null,
-    budget: u32 = 0,
     yield_requested: bool = false,
 
     fn create(
@@ -651,7 +637,6 @@ const Transaction = struct {
         self.active_evaluator = evaluator;
         defer self.active_evaluator = null;
         try evaluator.pollKernel();
-        self.budget = machine.kernel_poll_quantum;
         self.yield_requested = false;
         self.candidate_generation +%= 1;
         if (self.candidate_generation == 0) self.candidate_generation = 1;
@@ -790,12 +775,10 @@ fn writeView(call: *Transaction, item: Value, output: *abi.ValueView) abi.HostSt
     return .ok;
 }
 
+/// Extension work draws on the calling unit's budget. A request the budget
+/// cannot cover spends what remains and asks the extension to yield.
 fn charge(call: *Transaction, units: u32) abi.HostStatus {
-    if (units <= call.budget) {
-        call.budget -= units;
-        return .ok;
-    }
-    call.budget = 0;
+    if (call.activeEvaluator().workBudget().take(units) == units) return .ok;
     call.yield_requested = true;
     return .yield_required;
 }

@@ -1,4 +1,5 @@
 //! Registered resource opening through nominal, issuer-owned capabilities.
+const poll = @import("poll.zig");
 const heap = @import("heap.zig");
 const native = @import("native_port.zig");
 const scheduler = @import("scheduler.zig");
@@ -38,8 +39,8 @@ pub const Factory = opaque {
 
 /// Owns rejected-opening diagnostic work; release transfers it to retirement.
 pub const Opening = opaque {
-    pub fn advance(self: *Opening, quantum: usize) error{OutOfMemory}!Progress {
-        return native.advanceOpening(self, quantum);
+    pub fn advance(self: *Opening, work: *poll.WorkBudget) error{OutOfMemory}!Progress {
+        return native.advanceOpening(self, work);
     }
     pub fn release(self: *Opening) void {
         native.retireOpening(self);

@@ -993,7 +993,7 @@ const GetenvDriver = struct {
         if (self.text == null) {
             if (self.lookup == null)
                 self.lookup = evaluator.environLookup(self.name.?.borrow());
-            switch (self.lookup.?.advance(machine.kernel_poll_quantum)) {
+            switch (self.lookup.?.advance(evaluator.workBudget())) {
                 .pending => return .yielded,
                 .complete => |found| {
                     const bytes = found orelse return evaluator.unsetEnvironVariable(
