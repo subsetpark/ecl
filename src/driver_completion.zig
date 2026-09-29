@@ -21,10 +21,11 @@ pub const Completion = struct {
                 .completed => self.phase = .{ .success = null },
                 .output => |value| self.phase = .{ .success = value },
             }
-            // Cleanup receives its own bounded allowance on the next turn.
-            return .yielded;
         }
-        for (0..machine.kernel_poll_quantum) |_| {
+        // Cleanup draws on the unit's budget but yields rather than stepping
+        // when it is spent: it must finish whether or not the unit is cancelled.
+        const work = evaluator.workBudget();
+        while (work.spend()) {
             if (!driver.advanceCleanup(evaluator.releaseDomain(), evaluator.allocator())) continue;
             const outcome = self.phase;
             self.phase = .settled;

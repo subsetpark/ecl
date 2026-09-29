@@ -1021,7 +1021,7 @@ const MergeDriver = struct {
                         key,
                     ),
                 };
-                switch (try poll.advanceWithin(&self.work.borrowMut().finding, 1)) {
+                switch (try self.work.borrowMut().finding.advance(work)) {
                     .pending => _ = work.spend(),
                     .complete => {
                         const found = self.work.borrowMut().finding.foundIndex();
@@ -1151,10 +1151,9 @@ fn SplitDriver(comptime text_kind: value.HeapKind, comptime separator_kind: valu
         }
 
         pub fn advance(evaluator: *Machine, self: *Self) MachineError!machine.WorkProgress {
-            const context = support.Context{ .evaluator = evaluator };
-            var budget = @max(context.remaining(), 1);
-            try context.advance(budget);
-            while (budget != 0) switch (self.phase) {
+            try evaluator.pollKernel();
+            const work = evaluator.workBudget();
+            while (!work.exhausted()) switch (self.phase) {
                 .scan => {
                     const text_slice = self.text.borrow().slice();
                     const separator_slice = self.separator.borrow().slice();
@@ -1200,20 +1199,18 @@ fn SplitDriver(comptime text_kind: value.HeapKind, comptime separator_kind: valu
                         self.cursor += 1;
                         self.match_index = 0;
                     }
-                    budget -= 1;
+                    _ = work.spend();
                 },
                 .profile_part => {
                     const part_len = self.part_end - self.part_start;
-                    const end = @min(self.codepoint_index + budget, part_len);
-                    const copied = end - self.codepoint_index;
+                    const end = self.codepoint_index + work.take(part_len - self.codepoint_index);
                     while (self.codepoint_index != end) : (self.codepoint_index += 1) {
                         self.part_max_codepoint = @max(
                             self.part_max_codepoint,
                             self.text.borrow().slice()[self.part_start + self.codepoint_index],
                         );
                     }
-                    budget -= copied;
-                    if (self.codepoint_index != part_len or budget == 0) return .yielded;
+                    if (self.codepoint_index != part_len) return .stepped;
                     self.part_writer = .init(try kernel_flat.CodepointWriter.init(
                         evaluator.allocator(),
                         part_len,
@@ -1228,14 +1225,11 @@ fn SplitDriver(comptime text_kind: value.HeapKind, comptime separator_kind: valu
                         self.parts.borrowMut().appendOwned(self.part_writer.?.borrowMut().finish());
                         self.part_writer = null;
                         self.phase = .scan;
-                        if (part_len == 0) budget -= 1;
-                        return .yielded;
+                        if (part_len == 0) _ = work.spend();
+                        continue;
                     }
                     var block: [kernel_flat.block_size]u32 = undefined;
-                    const copied = @min(
-                        @min(budget, kernel_flat.block_size),
-                        part_len - self.codepoint_index,
-                    );
+                    const copied = work.take(@min(kernel_flat.block_size, part_len - self.codepoint_index));
                     for (
                         self.text.borrow().slice()[self.part_start + self.codepoint_index ..][0..copied],
                         block[0..copied],
@@ -1245,10 +1239,9 @@ fn SplitDriver(comptime text_kind: value.HeapKind, comptime separator_kind: valu
                         block[0..copied],
                     );
                     self.codepoint_index += copied;
-                    budget -= copied;
                 },
-                .materialize_result => switch (try poll.advanceWithin(self.result_materializer.?.borrowMut(), budget)) {
-                    .pending => return .yielded,
+                .materialize_result => switch (try self.result_materializer.?.borrowMut().advance(work)) {
+                    .pending => return .stepped,
                     .complete => |result| {
                         self.result_materializer.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                         self.result_materializer = null;
@@ -1259,7 +1252,7 @@ fn SplitDriver(comptime text_kind: value.HeapKind, comptime separator_kind: valu
                     },
                 },
             };
-            return .yielded;
+            return .stepped;
         }
     };
 }
@@ -1297,29 +1290,26 @@ const JoinDriver = struct {
     source: ?heap.Owned(AnyCharReader) = null,
 
     pub fn advance(evaluator: *Machine, self: *JoinDriver) MachineError!machine.WorkProgress {
-        const context = support.Context{ .evaluator = evaluator };
-        var budget = @max(context.remaining(), 1);
-        try context.advance(budget);
+        try evaluator.pollKernel();
+        const work = evaluator.workBudget();
         var block: [kernel_flat.block_size]u32 = undefined;
-        while (budget != 0) switch (self.phase) {
+        while (!work.exhausted()) switch (self.phase) {
             .count => {
                 const count: usize = @intCast(self.parts.borrow().list.length());
                 if (self.part_index == count) {
                     if (!self.separator_profiled and count > 1) {
                         if (self.source == null) self.source = .init(AnyCharReader.acquire(self.separator.borrow()));
                         const source_count = self.source.?.borrow().len();
-                        const copied = @min(@min(budget, kernel_flat.block_size), source_count - self.source_index);
+                        const copied = work.take(@min(kernel_flat.block_size, source_count - self.source_index));
                         self.source.?.borrow().copyCodepoints(self.source_index, block[0..copied]);
                         for (block[0..copied]) |codepoint| self.max_codepoint = @max(self.max_codepoint, codepoint);
                         self.source_index += copied;
-                        budget -= copied;
-                        if (self.source_index != source_count) return .yielded;
+                        if (self.source_index != source_count) return .stepped;
                         self.source.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                         self.source = null;
                         self.source_index = 0;
                         self.separator_profiled = true;
-                        if (budget == 0) return .yielded;
-                        budget -= 1;
+                        if (!work.spend()) return .stepped;
                         continue;
                     }
                     self.separator_profiled = true;
@@ -1349,18 +1339,16 @@ const JoinDriver = struct {
                     self.source = .init(AnyCharReader.acquire(part));
                 }
                 const source_count = self.source.?.borrow().len();
-                const copied = @min(@min(budget, kernel_flat.block_size), source_count - self.source_index);
+                const copied = work.take(@min(kernel_flat.block_size, source_count - self.source_index));
                 self.source.?.borrow().copyCodepoints(self.source_index, block[0..copied]);
                 for (block[0..copied]) |codepoint| self.max_codepoint = @max(self.max_codepoint, codepoint);
                 self.source_index += copied;
-                budget -= copied;
-                if (self.source_index != source_count) return .yielded;
+                if (self.source_index != source_count) return .stepped;
                 self.source.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                 self.source = null;
                 self.source_index = 0;
                 self.part_index += 1;
-                if (budget == 0) return .yielded;
-                budget -= 1;
+                if (!work.spend()) return .stepped;
             },
             .fill => {
                 const count: usize = @intCast(self.parts.borrow().list.length());
@@ -1384,10 +1372,10 @@ const JoinDriver = struct {
                         self.separator_mode = false;
                         self.part_index += 1;
                     } else self.separator_mode = true;
-                    budget -= 1;
+                    _ = work.spend();
                     continue;
                 }
-                const copied = @min(@min(budget, kernel_flat.block_size), source_count - self.source_index);
+                const copied = work.take(@min(kernel_flat.block_size, source_count - self.source_index));
                 self.source.?.borrow().copyCodepoints(
                     self.source_index,
                     block[0..copied],
@@ -1395,10 +1383,9 @@ const JoinDriver = struct {
                 self.writer.?.borrowMut().writeCodepoints(self.output_index, block[0..copied]);
                 self.output_index += copied;
                 self.source_index += copied;
-                budget -= copied;
             },
         };
-        return .yielded;
+        return .stepped;
     }
 };
 

@@ -574,7 +574,7 @@ test "sorted unique names share one resumable post-collection pipeline" {
     var cursor = try SortedUniqueNameCursor.init(allocator, &found);
     defer cursor.deinit();
     var pending: usize = 0;
-    var names = while (true) switch (try poll.advanceWithin(&cursor, 1)) {
+    var names = while (true) switch (try poll.testing.advanceWithin(&cursor, 1)) {
         .pending => pending += 1,
         .complete => |result| break result,
     };

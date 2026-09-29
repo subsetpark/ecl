@@ -17,7 +17,6 @@ const MachineError = machine.MachineError;
 /// Removal advances one owner transition per cursor step. Keep its scheduler
 /// slice small enough that cancellation can run after the directory close edge
 /// while a user-sized durable stack is still retiring.
-const removal_poll_quantum: usize = 256;
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     try definition_prims.install(core);
     const definitions = comptime [_]env.BuiltinWord{
@@ -129,8 +128,8 @@ const UnmoduleDriver = struct {
     cursor: ?heap.Owned(modules.Registry.RemovalCursor) = null,
     pub fn advance(evaluator: *Machine, self: *UnmoduleDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        var budget: usize = removal_poll_quantum;
-        while (budget != 0) : (budget -= 1) {
+        const work = evaluator.workBudget();
+        while (work.spend()) {
             if (self.cursor == null) switch (self.validation.advance()) {
                 .pending => continue,
                 .complete => |maybe_name| {
@@ -158,6 +157,7 @@ const UnmoduleDriver = struct {
                 ),
             }) {
                 .pending => {},
+                .blocked => return .yielded,
                 // The close edge has transferred all remaining ownership to
                 // scheduler retirement. Yield before polling cancellation
                 // again so abandoning this Unit cannot abandon module state.
@@ -165,7 +165,7 @@ const UnmoduleDriver = struct {
                 .complete => return .completed,
             }
         }
-        return .yielded;
+        return .stepped;
     }
 };
 
@@ -635,7 +635,7 @@ const WordsDriver = struct {
                 },
                 .item => |name| try self.append(name),
             },
-            .postprocess => |*cursor| switch (try poll_api.advanceWithin(cursor.borrowMut(), 1)) {
+            .postprocess => |*cursor| switch (try cursor.borrowMut().advance(work)) {
                 .pending => {},
                 .complete => |names| {
                     cursor.deinit(evaluator.releaseDomain(), evaluator.allocator());
@@ -660,7 +660,7 @@ const WordsDriver = struct {
                 const owned_names = actions.names.take();
                 self.state.borrowMut().* = .{ .render = .init(owned_names) };
             },
-            .render => |*names| switch (try poll_api.advanceWithin(self.actions.borrowMut(), 1)) {
+            .render => |*names| switch (try self.actions.borrowMut().advance(work)) {
                 .pending => {},
                 .complete => |bytes| {
                     self.state.borrowMut().* = .{ .write = .{

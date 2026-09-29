@@ -1253,7 +1253,7 @@ pub const SpanArchive = enum(usize) {
                     }
                     break :result .pending;
                 },
-                .materializing => |*materializing| switch (try poll.advanceWithin(&materializing.materializer, 1)) {
+                .materializing => |*materializing| switch (try poll.advanceOne(&materializing.materializer)) {
                     .pending => .pending,
                     .complete => |root| result: {
                         materializing.materializer.deinit();

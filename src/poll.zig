@@ -59,11 +59,11 @@ pub fn unbounded() WorkBudget {
     return .{ .remaining = std.math.maxInt(usize) };
 }
 
-/// Advances a cursor against a private allowance of `units`. Transitional:
-/// each caller is a driver loop that still meters itself rather than drawing
-/// on its unit's budget, and moves to that budget with its driver.
-pub fn advanceWithin(cursor: anytype, units: usize) AdvanceResult(@TypeOf(cursor)) {
-    var work: WorkBudget = .{ .remaining = units };
+/// One unit of a budgeted cursor, as one transition of a single-step cursor
+/// whose caller charges one unit per call. This is the only budget a
+/// production caller may create outside an owner's allowance.
+pub fn advanceOne(cursor: anytype) AdvanceResult(@TypeOf(cursor)) {
+    var work: WorkBudget = .{ .remaining = 1 };
     return cursor.advance(&work);
 }
 
@@ -71,6 +71,15 @@ fn AdvanceResult(comptime Pointer: type) type {
     const Cursor = @typeInfo(Pointer).pointer.child;
     return @typeInfo(@TypeOf(Cursor.advance)).@"fn".return_type.?;
 }
+
+/// Test-only drivers that exercise a cursor's resumption at a chosen grain.
+pub const testing = if (@import("builtin").is_test) struct {
+    /// Advances a cursor against a private allowance of `units`.
+    pub fn advanceWithin(cursor: anytype, units: usize) AdvanceResult(@TypeOf(cursor)) {
+        var work: WorkBudget = .{ .remaining = units };
+        return cursor.advance(&work);
+    }
+} else struct {};
 
 /// Drive a fallible cursor to completion, lending it a fresh allowance of
 /// `units` on each advance. For callers that exercise a cursor's resumption at

@@ -197,7 +197,7 @@ fn fuzzNativeDescriptor(_: void, smith: *std.testing.Smith) !void {
     };
     var cursor = native_descriptor.ValidateCursor.init(host.cleanup(), requested, &raw);
     defer cursor.deinit();
-    while (true) switch (poll.advanceWithin(&cursor, 1 + smith.index(32)) catch |err| switch (err) {
+    while (true) switch (poll.testing.advanceWithin(&cursor, 1 + smith.index(32)) catch |err| switch (err) {
         error.OutOfMemory => return err,
         else => return,
     }) {

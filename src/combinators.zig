@@ -1097,7 +1097,7 @@ const UpdateWorkDriver = struct {
                     ));
                 }
                 if (work.exhausted()) return .stepped;
-                const progress = try poll.advanceWithin(state.finder.?.borrowMut(), 1);
+                const progress = try state.finder.?.borrowMut().advance(work);
                 _ = work.spend();
                 switch (progress) {
                     .pending => {},

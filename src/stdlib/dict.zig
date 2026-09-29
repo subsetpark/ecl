@@ -9,7 +9,6 @@
 const value = @import("../value.zig");
 const heap = @import("../heap.zig");
 const list = @import("../list.zig");
-const poll = @import("../poll.zig");
 const intern = @import("../intern.zig");
 const env = @import("../env.zig");
 const machine = @import("../machine.zig");
@@ -188,7 +187,7 @@ const DictLookupDriver = struct {
                 self.dictionary.borrow().dict,
                 list.atUnchecked(self.keys.borrow(), self.index),
             ));
-            switch (try poll.advanceWithin(self.cursor.?.borrowMut(), 1)) {
+            switch (try self.cursor.?.borrowMut().advance(work)) {
                 .pending => {},
                 .complete => |found| {
                     self.output.?.borrowMut().appendBorrowed(found orelse if (self.fallback) |*fallback| fallback.borrow() else return evaluator.fail(.domain, "dict.at could not find the dict key"));
@@ -611,7 +610,7 @@ const DictSelectDriver = struct {
                     self.key_index += 1;
                 }
                 if (work.exhausted()) return .stepped;
-                const find_progress = try poll.advanceWithin(self.finder.?.borrowMut(), 1);
+                const find_progress = try self.finder.?.borrowMut().advance(work);
                 _ = work.spend();
                 switch (find_progress) {
                     .pending => {},
@@ -816,7 +815,7 @@ const MergeWithWorkDriver = struct {
                         key,
                     ),
                 };
-                switch (try poll.advanceWithin(&state.work.borrowMut().finding, 1)) {
+                switch (try state.work.borrowMut().finding.advance(work)) {
                     .pending => _ = work.spend(),
                     .complete => {
                         const found = state.work.borrowMut().finding.foundIndex();

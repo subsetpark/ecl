@@ -233,20 +233,19 @@ fn TypedGradeDriver(comptime kind: value.HeapKind) type {
                     const range = (try self.cursor.nextRange(context)).?;
                     const indices = self.indices.borrow();
                     for (range.start..range.end) |index| indices[index] = index;
-                    if (!self.cursor.complete()) return .yielded;
+                    if (!self.cursor.complete()) return .stepped;
                     self.sort = .init(try Sort.init(
                         evaluator.allocator(),
                         indices,
                         self.collection.borrow().slice(),
                     ));
                     self.phase = .sort;
-                    return .yielded;
+                    return .stepped;
                 },
                 .sort => {
-                    const charge = @max(context.remaining(), 1);
-                    try context.advance(charge);
-                    switch (poll.advanceWithin(self.sort.?.borrowMut(), charge)) {
-                        .pending => return .yielded,
+                    try evaluator.pollKernel();
+                    switch (self.sort.?.borrowMut().advance(evaluator.workBudget())) {
+                        .pending => return .stepped,
                         .complete => {
                             self.sort.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                             self.sort = null;
@@ -258,7 +257,7 @@ fn TypedGradeDriver(comptime kind: value.HeapKind) type {
                             }
                             self.cursor = kernel_flat.FlatCursor.init(count);
                             self.phase = .output;
-                            return .yielded;
+                            return .stepped;
                         },
                     }
                 },
@@ -280,7 +279,7 @@ fn TypedGradeDriver(comptime kind: value.HeapKind) type {
                         }
                         offset += piece.len();
                     }
-                    if (!self.cursor.complete()) return .yielded;
+                    if (!self.cursor.complete()) return .stepped;
                     return self.finish(evaluator);
                 },
             }
@@ -453,7 +452,7 @@ const GradeDriver = struct {
                 } };
             },
             .compare => |*compare| {
-                switch (poll.advanceWithin(&compare.cursor, 1)) {
+                switch (compare.cursor.advance(work)) {
                     .pending => return .stepped,
                     .not_comparable => return evaluator.failAtIndex(
                         .type,
@@ -603,11 +602,10 @@ fn TypedDistinctDriver(comptime kind: value.HeapKind) type {
         output_index: usize = 0,
 
         pub fn advance(evaluator: *Machine, self: *Self) MachineError!machine.WorkProgress {
-            const context = support.Context{ .evaluator = evaluator };
-            var budget = @max(context.remaining(), 1);
-            try context.advance(budget);
+            try evaluator.pollKernel();
+            const work = evaluator.workBudget();
             const source: []const Element = self.source.borrow().slice();
-            while (budget != 0) {
+            while (!work.exhausted()) {
                 if (self.item_index == source.len) {
                     if (self.phase == .count) {
                         self.writer = .init(try heap.LeafWriter(kind).init(
@@ -635,16 +633,16 @@ fn TypedDistinctDriver(comptime kind: value.HeapKind) type {
                     }
                     self.item_index += 1;
                     self.candidate = 0;
-                    budget -= 1;
+                    _ = work.spend();
                     continue;
                 }
                 if (source[self.candidate] == source[self.item_index]) {
                     self.item_index += 1;
                     self.candidate = 0;
                 } else self.candidate += 1;
-                budget -= 1;
+                _ = work.spend();
             }
-            return .yielded;
+            return .stepped;
         }
     };
 }
@@ -700,7 +698,7 @@ const DistinctDriver = struct {
                 self.results.borrow()[self.candidate],
                 list.atUnchecked(self.collection.borrow(), self.item_index),
             ));
-            switch (try poll.advanceWithin(self.matcher.?.borrowMut(), 1)) {
+            switch (try self.matcher.?.borrowMut().advance(work)) {
                 .pending => _ = work.spend(),
                 .complete => |matches| {
                     self.matcher.?.deinit(evaluator.releaseDomain(), evaluator.allocator());

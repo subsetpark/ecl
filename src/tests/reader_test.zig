@@ -88,7 +88,7 @@ fn materializeRoot(
     var materializer = archive.rootMaterializer(values);
     var completed = false;
     defer if (!completed) materializer.retire(releases);
-    while (true) switch (try poll.advanceWithin(&materializer, 2)) {
+    while (true) switch (try poll.testing.advanceWithin(&materializer, 2)) {
         .pending => {},
         .complete => |root| {
             materializer.deinit();

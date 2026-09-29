@@ -186,7 +186,7 @@ const DiscoveryDriver = struct {
             .sort => {
                 if (self.sorter == null)
                     self.sorter = try .init(evaluator.allocator(), self.items.items, {});
-                switch (poll.advanceWithin(&self.sorter.?, 1)) {
+                switch (self.sorter.?.advance(work)) {
                     .pending => _ = work.spend(),
                     .complete => {
                         self.sorter.?.deinit();

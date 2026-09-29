@@ -31,7 +31,7 @@ fn instanceConstructionWithCutoff(allocator: std.mem.Allocator, cutoff: ?usize) 
     var cursor = owner.loader().startStatic(requested, @import("native-instance").Extension.descriptor()).loading;
     defer cursor.deinit();
     var advances: usize = 0;
-    while (cutoff == null or advances < cutoff.?) : (advances += 1) switch (try poll.advanceWithin(&cursor, 1)) {
+    while (cutoff == null or advances < cutoff.?) : (advances += 1) switch (try poll.testing.advanceWithin(&cursor, 1)) {
         .pending => {},
         .loaded => |instance| {
             instance.releasePin();
@@ -969,7 +969,7 @@ fn validate(
 ) descriptor_api.ValidateError!*descriptor_api.ValidatedDescriptor {
     var cursor = descriptor_api.ValidateCursor.init(host, requested, raw);
     defer cursor.deinit();
-    while (true) switch (try poll.advanceWithin(&cursor, 7)) {
+    while (true) switch (try poll.testing.advanceWithin(&cursor, 7)) {
         .pending => {},
         .complete => |validated| return validated,
     };
@@ -984,7 +984,7 @@ fn expectReject(
     var cursor = descriptor_api.ValidateCursor.init(host, requested, raw);
     defer cursor.deinit();
     while (true) {
-        const progress = poll.advanceWithin(&cursor, 5) catch |err| {
+        const progress = poll.testing.advanceWithin(&cursor, 5) catch |err| {
             try std.testing.expectEqual(expected, err);
             return;
         };
@@ -1387,7 +1387,7 @@ test "native: the static transport publishes a linked descriptor through the sam
         },
     };
     defer loader.deinit();
-    const loaded = while (true) switch (try poll.advanceWithin(&loader, 7)) {
+    const loaded = while (true) switch (try poll.testing.advanceWithin(&loader, 7)) {
         .pending => {},
         .loaded => |instance| break instance,
         .failure => |failure| {
@@ -2561,7 +2561,7 @@ fn endpointPolicyAllocationProbe(allocator: std.mem.Allocator) !void {
     const requested = try intern.internModuleName("instanceprobe");
     var cursor = owner.loader().startStatic(requested, @import("native-instance").Extension.descriptor()).loading;
     defer cursor.deinit();
-    while (true) switch (try poll.advanceWithin(&cursor, 1)) {
+    while (true) switch (try poll.testing.advanceWithin(&cursor, 1)) {
         .pending => {},
         .loaded => |instance| {
             instance.releasePin();

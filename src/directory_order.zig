@@ -156,7 +156,7 @@ fn expectOrdered(comptime count: usize, seed: u64) !void {
     }
     var orderer = try Orderer(Named, namedLess).init(allocator, &list);
     var steps: usize = 0;
-    while (poll.advanceWithin(&orderer, 64) == .pending) steps += 1;
+    while (poll.testing.advanceWithin(&orderer, 64) == .pending) steps += 1;
     // Collection alone needs more than a dozen quanta at these sizes, so a
     // single-step completion would be a bounded-work regression.
     try std.testing.expect(steps > 15);
@@ -190,7 +190,7 @@ test "directory ordering is resumable and matches a reference sort" {
         defer small.deinit();
         for (names[0..count]) |*name| try small.append(.{ .name = name });
         var small_orderer = try Orderer(Named, namedLess).init(allocator, &small);
-        while (poll.advanceWithin(&small_orderer, 1) == .pending) {}
+        while (poll.testing.advanceWithin(&small_orderer, 1) == .pending) {}
         const ordered = small_orderer.take();
         defer allocator.free(ordered);
         try std.testing.expectEqual(count, ordered.len);

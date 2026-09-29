@@ -20,7 +20,6 @@ const poll = @import("../poll.zig");
 const Value = value.Value;
 const Machine = machine.Machine;
 const MachineError = machine.MachineError;
-const work_quantum = machine.kernel_poll_quantum;
 const max_uncompressed_bytes: usize = 1_073_741_824;
 const max_members: usize = 100_000;
 const max_path_bytes: usize = 4096;
@@ -190,7 +189,7 @@ const Sha256Driver = struct {
         };
         const input = self.bytes.?.borrow().bytes();
         if (self.index != input.len) {
-            const end = @min(self.index + work_quantum, input.len);
+            const end = self.index + evaluator.workBudget().take(input.len - self.index);
             self.hasher.update(input[self.index..end]);
             self.index = end;
             return .yielded;
@@ -564,7 +563,7 @@ const UnpackDriver = struct {
             .decompress => |*decompression| self.decompress(evaluator, decompression),
             .verify => |*verification| self.verifyGzip(evaluator, verification),
             .allocate_slots => |*allocation| self.allocateSlots(allocation),
-            .initialize_slots => |*initialization| self.initializeSlots(initialization),
+            .initialize_slots => |*initialization| self.initializeSlots(evaluator, initialization),
         };
     }
 
@@ -791,7 +790,7 @@ const UnpackDriver = struct {
     ) MachineError!driver_completion.Progress {
         const output = decompression.tar.borrow();
         if (decompression.index != output.len) {
-            const end = @min(decompression.index + work_quantum, output.len);
+            const end = decompression.index + evaluator.workBudget().take(output.len - decompression.index);
             const read = decompression.decoder.borrowMut().read(output[decompression.index..end]) catch
                 return self.failDomain(evaluator, "malformed gzip archive");
             if (read == 0) return self.failDomain(evaluator, "gzip size does not match its footer");
@@ -820,7 +819,7 @@ const UnpackDriver = struct {
     ) MachineError!driver_completion.Progress {
         const output = verification.tar.borrow();
         if (verification.index != output.len) {
-            const end = @min(verification.index + work_quantum, output.len);
+            const end = verification.index + evaluator.workBudget().take(output.len - verification.index);
             verification.crc.update(output[verification.index..end]);
             verification.index = end;
             return .yielded;
@@ -855,10 +854,11 @@ const UnpackDriver = struct {
 
     fn initializeSlots(
         self: *UnpackDriver,
+        evaluator: *Machine,
         initialization: *@FieldType(Parsing, "initialize_slots"),
     ) MachineError!driver_completion.Progress {
         const slots = initialization.slots.borrow();
-        const end = @min(initialization.index + work_quantum, slots.len);
+        const end = initialization.index + evaluator.workBudget().take(slots.len - initialization.index);
         @memset(slots[initialization.index..end], null);
         initialization.index = end;
         if (end != slots.len) return .yielded;
@@ -1036,7 +1036,7 @@ const UnpackDriver = struct {
     ) MachineError!driver_completion.Progress {
         const tar = archive.tar.borrow();
         const payload_end = scan.record_end - 1;
-        const end = @min(scan.scan_offset + work_quantum, payload_end);
+        const end = scan.scan_offset + evaluator.workBudget().take(payload_end - scan.scan_offset);
         const equals_relative = std.mem.indexOfScalar(u8, tar[scan.scan_offset..end], '=') orelse {
             scan.scan_offset = end;
             if (end == payload_end) return self.failDomain(evaluator, "PAX record lacks a value");
@@ -1092,8 +1092,8 @@ const UnpackDriver = struct {
         insertion: *@FieldType(ScanWork, "insert_member"),
     ) MachineError!driver_completion.Progress {
         const entry = &insertion.entry;
-        var remaining = work_quantum;
-        while (remaining != 0) : (remaining -= 1) {
+        const work = evaluator.workBudget();
+        while (work.spend()) {
             const slot = &archive.slots.borrow()[insertion.slot];
             if (slot.*) |prior| {
                 if (std.mem.eql(u8, prior.path, entry.path))
@@ -1120,7 +1120,7 @@ const UnpackDriver = struct {
         scanning: *Scanning,
     ) MachineError!driver_completion.Progress {
         const tar = archive.tar.borrow();
-        const end = @min(scanning.context.tar_offset + work_quantum, tar.len);
+        const end = scanning.context.tar_offset + evaluator.workBudget().take(tar.len - scanning.context.tar_offset);
         for (tar[scanning.context.tar_offset..end]) |byte| if (byte != 0)
             return self.failDomain(evaluator, "tar data follows its end marker");
         scanning.context.tar_offset = end;
@@ -1164,8 +1164,8 @@ const UnpackDriver = struct {
             },
             .next => {},
         }
-        var remaining = work_quantum;
-        while (remaining != 0) : (remaining -= 1) {
+        const work = evaluator.workBudget();
+        while (work.spend()) {
             const entry = paths.iterator.next() orelse {
                 const inputs = paths.inputs;
                 scanning.work = .{ .materialize_result = .{
@@ -1351,7 +1351,7 @@ const UnpackDriver = struct {
                 },
                 .file => |*file_state| {
                     if (file_state.written != file_state.entry.size) {
-                        const end = @min(file_state.written + work_quantum, file_state.entry.size);
+                        const end = file_state.written + evaluator.workBudget().take(file_state.entry.size - file_state.written);
                         const source = archive.tar.borrow()[file_state.entry.data_offset + file_state.written .. file_state.entry.data_offset + end];
                         file_state.file.writePositionalAll(io, source, file_state.written) catch |err|
                             return self.failIo(evaluator, "cannot write archive file", err);

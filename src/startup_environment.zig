@@ -83,7 +83,7 @@ pub const Snapshot = struct {
 
 fn expectLookup(view: View, name: []const u8, expected: ?[]const u8) !void {
     var cursor = view.lookupCursor(name);
-    while (true) switch (poll.advanceWithin(&cursor, 1)) {
+    while (true) switch (poll.testing.advanceWithin(&cursor, 1)) {
         .pending => {},
         .complete => |actual| {
             if (expected) |text| {

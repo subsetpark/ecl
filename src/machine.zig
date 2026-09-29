@@ -37,12 +37,6 @@ const ApplicationProvenanceNonce = enum(u32) { _ };
 var next_application_provenance_nonce: std.atomic.Value(u64) = .init(1);
 const fuel_quantum: u32 = 1024;
 pub const kernel_poll_quantum: u32 = 65_536;
-/// Elements of a construction body re-scoped, and seed values materialized,
-/// per scheduler step. Deliberately the same small scale as
-/// `par_each_work_quantum` rather than the kernel quantum: both of these are
-/// bounded traversals whose whole purpose is to keep a user-sized construction
-/// off one step, and a 65,536-element slice is not a bound anyone would feel.
-pub const construction_work_quantum: usize = 256;
 pub const IdiomMode = enum { automatic, generic_only };
 pub const ErrorKind = enum {
     underflow,
@@ -4152,7 +4146,7 @@ pub const Machine = struct {
                     };
                     self.state.borrowMut().* = .{ .path_value = next };
                 },
-                .path_value => |*path| switch (poll_api.advanceWithin(path.materializer.borrowMut(), 1) catch |err| switch (err) {
+                .path_value => |*path| switch (path.materializer.borrowMut().advance(work) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.InvalidUtf8 => return evaluator.fail(.io, "module path is not valid UTF-8"),
                 }) {
@@ -9407,26 +9401,24 @@ const SeedMaterializer = struct {
     fn advance(
         self: *SeedMaterializer,
         unit: *Unit,
-        budget: usize,
+        work: *poll_api.WorkBudget,
     ) error{OutOfMemory}!bool {
         if (!self.deep_done) {
-            if (try self.copy(unit, self.deep.?.borrow(), budget)) {
-                self.deep_done = true;
-                self.next = 0;
-            }
-            return false;
+            if (!try self.copy(unit, self.deep.?.borrow(), work)) return false;
+            self.deep_done = true;
+            self.next = 0;
         }
-        return self.copy(unit, self.seeds.borrow(), budget);
+        return self.copy(unit, self.seeds.borrow(), work);
     }
 
     fn copy(
         self: *SeedMaterializer,
         unit: *Unit,
         source: *Header,
-        budget: usize,
+        work: *poll_api.WorkBudget,
     ) error{OutOfMemory}!bool {
         const count: usize = @intCast(source.length());
-        const end = @min(self.next + budget, count);
+        const end = self.next + work.take(count - self.next);
         try unit.stack.ensureUnusedCapacity(unit.allocator, end - self.next);
         for (self.next..end) |index| {
             const item = list.atUnchecked(.{ .list = source }, index);
@@ -9520,13 +9512,12 @@ const ConstructionDriver = struct {
         try evaluator.pollKernel();
         switch (self.state.borrowMut().*) {
             .rescope => |*rescope| {
-                var work: poll_api.WorkBudget = .init(construction_work_quantum);
-                const progress = rescope.cursor.borrowMut().advance(&work) catch |err| switch (err) {
+                const progress = rescope.cursor.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.InvalidProvenance => @panic("archive refused its own completed re-scope publication"),
                 };
                 const stamped = switch (progress) {
-                    .pending => return .yielded,
+                    .pending => return .stepped,
                     .complete => |header| header,
                 };
                 rescope.cursor.deinit(evaluator.releaseDomain(), evaluator.allocator());
@@ -9535,7 +9526,7 @@ const ConstructionDriver = struct {
                     .body = .init(stamped),
                 };
                 self.state.borrowMut().* = .{ .open = next };
-                return .yielded;
+                return .stepped;
             },
             .open => |*open| {
                 // The body is consumed by the open, on success and on failure
@@ -9559,7 +9550,7 @@ const ConstructionDriver = struct {
                 }
                 open.target.deinit(evaluator.releaseDomain(), evaluator.allocator());
                 self.state.borrowMut().* = .seed;
-                return .yielded;
+                return .stepped;
             },
             .seed => {
                 // A construction that only had a body to re-scope reaches this
@@ -9567,8 +9558,8 @@ const ConstructionDriver = struct {
                 if (self.materializer) |*materializer| {
                     return if (try materializer.borrowMut().advance(
                         evaluator.unit,
-                        construction_work_quantum,
-                    )) .completed else .yielded;
+                        evaluator.workBudget(),
+                    )) .completed else .stepped;
                 }
                 return .completed;
             },
@@ -9589,8 +9580,8 @@ const ChildSeedDriver = struct {
         try evaluator.pollKernel();
         return if (try self.materializer.borrowMut().advance(
             evaluator.unit,
-            construction_work_quantum,
-        )) .completed else .yielded;
+            evaluator.workBudget(),
+        )) .completed else .stepped;
     }
 };
 

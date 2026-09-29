@@ -27,7 +27,6 @@ const value = @import("../value.zig");
 const Machine = machine.Machine;
 const MachineError = machine.MachineError;
 const Value = value.Value;
-const work_quantum = machine.kernel_poll_quantum;
 
 pub const words = [_]env.BuiltinWord{
     .{ .name = "reserve", .doc = "( root -- reservation ) Retain one filesystem admission across derived operations.", .primitive = reserve },
@@ -305,7 +304,7 @@ const WriteChunk = struct {
             .validating => |*index| {
                 const count = self.payload.list.length();
                 if (self.payload.list.kind() != .leaf_u8) {
-                    const end = @min(index.* + work_quantum, count);
+                    const end = index.* + evaluator.workBudget().take(count - index.*);
                     while (index.* < end) : (index.* += 1) {
                         const item = list.atUnchecked(self.payload, index.*);
                         if (item != .int or item.int < 0 or item.int > 255)

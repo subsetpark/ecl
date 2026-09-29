@@ -2,7 +2,6 @@
 const std = @import("std");
 const value = @import("value.zig");
 const heap = @import("heap.zig");
-const poll = @import("poll.zig");
 const list = @import("list.zig");
 const intern = @import("intern.zig");
 const lexer = @import("lexer.zig");
@@ -771,7 +770,7 @@ const WhichDriver = struct {
                     shadows.emit_name = false;
                 }
             },
-            .render => |*context| switch (try poll.advanceWithin(self.actions.borrowMut(), 1)) {
+            .render => |*context| switch (try self.actions.borrowMut().advance(work)) {
                 .pending => {},
                 .complete => |bytes| {
                     const moved = context.*;
@@ -961,7 +960,7 @@ const SeeDriver = struct {
                 },
             },
             .plan => |*plan| try self.advancePlan(plan),
-            .render => |*context| switch (try poll.advanceWithin(self.actions.borrowMut(), 1)) {
+            .render => |*context| switch (try self.actions.borrowMut().advance(work)) {
                 .pending => {},
                 .complete => |source| {
                     const moved = context.*;

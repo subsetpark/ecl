@@ -11,7 +11,6 @@ const scheduler_api = @import("scheduler.zig");
 const Value = value.Value;
 const Machine = machine.Machine;
 const MachineError = machine.MachineError;
-const par_each_work_quantum: usize = 256;
 
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     const definitions = comptime [_]env.BuiltinWord{
@@ -395,7 +394,7 @@ const ParEachDriver = struct {
     ) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const count: usize = @intCast(self.sequence.borrow().list.length());
-        const end = @min(self.index + par_each_work_quantum, count);
+        const end = self.index + evaluator.workBudget().take(count - self.index);
         while (self.index != end) : (self.index += 1) {
             const element = list.atUnchecked(self.sequence.borrow(), self.index);
             const borrowed = self.input.borrow().borrow();
@@ -407,7 +406,7 @@ const ParEachDriver = struct {
             );
             self.tasks.borrowMut().appendOwned(task);
         }
-        if (self.index != count) return .yielded;
+        if (self.index != count) return .stepped;
         const task_values = self.tasks.borrowMut().takeList();
         evaluator.retireDriver(self);
         try evaluator.beginTaskJoinOwned(task_values);
