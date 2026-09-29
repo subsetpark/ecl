@@ -825,7 +825,7 @@ const PervadeEachDriver = struct {
                 evaluator.releaseDomain(),
                 evaluator.allocator(),
             ));
-            switch (try self.cursor.?.borrowMut().advance(evaluator, machine.kernel_poll_quantum)) {
+            switch (try self.cursor.?.borrowMut().advance(evaluator, evaluator.workBudget())) {
                 .pending => return .yielded,
                 .complete => |result| {
                     self.cursor.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
@@ -1129,8 +1129,8 @@ const ReductionDriver = struct {
                         row,
                     ));
             }
-            const next = switch (try self.cursor.?.borrowMut().advance(evaluator, machine.kernel_poll_quantum)) {
-                .pending => return .yielded,
+            const next = switch (try self.cursor.?.borrowMut().advance(evaluator, evaluator.workBudget())) {
+                .pending => return .stepped,
                 .complete => |result| result,
             };
             self.cursor.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
@@ -1142,7 +1142,7 @@ const ReductionDriver = struct {
                 self.accumulator.borrowMut().replaceOwned(evaluator.releaseDomain(), next);
             }
             self.initialized += 1;
-            return .yielded;
+            return .stepped;
         }
         if (!self.scan) {
             popRelease(evaluator, self.consumed);
@@ -1156,7 +1156,7 @@ const ReductionDriver = struct {
             self.materializing = true;
         }
         return switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
-            .pending => .yielded,
+            .pending => .stepped,
             .complete => |result| completed: {
                 popRelease(evaluator, 3);
                 break :completed .{ .output = result };

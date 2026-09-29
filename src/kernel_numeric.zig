@@ -160,7 +160,7 @@ const PervadeDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *PervadeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        return switch (try self.cursor.borrowMut().advance(evaluator, machine.kernel_poll_quantum)) {
+        return switch (try self.cursor.borrowMut().advance(evaluator, evaluator.workBudget())) {
             .pending => .yielded,
             .complete => |result| .{ .output = result },
         };
@@ -326,11 +326,9 @@ pub const PervadeCursor = struct {
     pub fn advance(
         self: *PervadeCursor,
         evaluator: *Machine,
-        budget: usize,
+        work: *poll.WorkBudget,
     ) MachineError!PervadeProgress {
-        std.debug.assert(budget != 0);
-        var remaining = budget;
-        while (remaining != 0) : (remaining -= 1) {
+        while (work.spend()) {
             var frame = self.frames.pop() orelse {
                 const result = self.last.?;
                 self.last = null;
@@ -340,10 +338,10 @@ pub const PervadeCursor = struct {
                 .binary => |node| try self.startBinary(evaluator, node),
                 .unary => |node| try self.startUnary(evaluator, node),
                 .list => |*list_frame| {
-                    if (!try self.advanceList(evaluator, list_frame, remaining)) return .pending;
+                    if (!try self.advanceList(list_frame, work)) return .pending;
                 },
                 .dictionary => |*dict_frame| {
-                    if (!try self.advanceDict(evaluator, dict_frame, remaining)) return .pending;
+                    if (!try self.advanceDict(dict_frame, work)) return .pending;
                 },
                 .typed => |*typed| {
                     errdefer typed.retire(self.releases);
@@ -464,11 +462,11 @@ pub const PervadeCursor = struct {
             return scalarFailure(evaluator, fault, node.logical_index);
     }
 
+    /// False means the allowance was spent before this frame could continue.
     fn advanceList(
         self: *PervadeCursor,
-        _: *Machine,
         frame: *ListFrame,
-        budget: usize,
+        work: *poll.WorkBudget,
     ) MachineError!bool {
         errdefer frame.deinit(self.releases);
         if (frame.result) |result| {
@@ -508,7 +506,7 @@ pub const PervadeCursor = struct {
         if (frame.materializer == null)
             frame.materializer = .init(self.allocator, frame.values.values());
         try self.frames.reserve(1);
-        switch (try poll.advanceWithin(&frame.materializer.?, budget)) {
+        switch (try frame.materializer.?.advance(work)) {
             .pending => {
                 self.frames.pushReserved(.{ .list = frame.* });
                 return false;
@@ -516,7 +514,7 @@ pub const PervadeCursor = struct {
             .complete => |result| {
                 frame.result = result;
                 self.frames.pushReserved(.{ .list = frame.* });
-                return false;
+                return true;
             },
         }
     }
@@ -548,11 +546,11 @@ pub const PervadeCursor = struct {
         } });
     }
 
+    /// False means the allowance was spent before this frame could continue.
     fn advanceDict(
         self: *PervadeCursor,
-        _: *Machine,
         frame: *DictFrame,
-        budget: usize,
+        work: *poll.WorkBudget,
     ) MachineError!bool {
         errdefer frame.deinit(self.releases, self.allocator);
         if (frame.phase == .release) {
@@ -579,7 +577,7 @@ pub const PervadeCursor = struct {
                 false,
             );
             try self.frames.reserve(1);
-            switch (try poll.advanceWithin(&frame.materializer.?, budget)) {
+            switch (try frame.materializer.?.advance(work)) {
                 .pending => {
                     self.frames.pushReserved(.{ .dictionary = frame.* });
                     return false;
@@ -591,7 +589,7 @@ pub const PervadeCursor = struct {
                     frame.result = result;
                     frame.phase = .release;
                     self.frames.pushReserved(.{ .dictionary = frame.* });
-                    return false;
+                    return true;
                 },
             }
         }
@@ -674,7 +672,7 @@ pub const PervadeCursor = struct {
                     dict.keyAt(other.dict, frame.candidate),
                 );
                 try self.frames.reserve(2);
-                switch (try poll.advanceWithin(&frame.match_cursor.?, budget)) {
+                switch (try frame.match_cursor.?.advance(work)) {
                     .pending => {
                         self.frames.pushReserved(.{ .dictionary = frame.* });
                         return false;
@@ -685,13 +683,13 @@ pub const PervadeCursor = struct {
                         if (!matches) {
                             frame.candidate += 1;
                             self.frames.pushReserved(.{ .dictionary = frame.* });
-                            return false;
+                            return true;
                         }
                         if (frame.phase == .right) {
                             frame.index += 1;
                             frame.candidate = 0;
                             self.frames.pushReserved(.{ .dictionary = frame.* });
-                            return false;
+                            return true;
                         }
                         const index = frame.index;
                         const candidate = frame.candidate;
@@ -705,7 +703,7 @@ pub const PervadeCursor = struct {
                             .depth = frame.depth + 1,
                             .logical_index = index,
                         } });
-                        return false;
+                        return true;
                     },
                 }
             },
