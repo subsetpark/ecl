@@ -2210,17 +2210,17 @@ const TaskJoinCleanup = union(enum) {
 /// evaluator destroys the driver before committing that value to the stack,
 /// so stack-growth failure always has exactly one resumable owner.
 ///
-/// `stepped` and `yielded` separate progress from surrender. A driver that
-/// finished a bounded step reports `stepped` with the logical elements that
-/// step performed; the evaluator charges them to the unit's kernel fuel and
-/// keeps the turn until a kernel quantum has been spent in it. `yielded` ends
-/// the turn: the driver cannot progress until another unit does, or spent an
-/// allowance it does not report.
+/// `stepped` and `yielded` separate progress from surrender. A driver whose
+/// work drew on the unit's budget and is not finished reports `stepped`; the
+/// evaluator charges the step itself one unit and keeps the turn until a
+/// kernel quantum has been spent in it. `yielded` ends the turn: the driver
+/// cannot progress until another unit does, or spent an allowance it does not
+/// draw from the unit's budget.
 pub const WorkProgress = union(enum) {
     completed,
     output: Value,
     reserved_output: struct { reservation: StackReservation, value: Value },
-    stepped: usize,
+    stepped,
     yielded,
     detached,
     failed,
@@ -2546,7 +2546,10 @@ pub const Unit = struct {
     arguments: Value,
     cancelled: *const std.atomic.Value(bool),
     fuel: u32 = fuel_quantum,
-    kernel_fuel: u32 = kernel_poll_quantum,
+    /// The unit's one allowance for logical kernel work. Cursors doing this
+    /// unit's work draw on it through `Machine.workBudget`; only the machine
+    /// refills it, at the boundary where it polls cancellation.
+    kernel_budget: poll_api.WorkBudget = .init(kernel_poll_quantum),
     polls: u64 = 0,
     root_execution_metrics: if (root_execution_metrics_enabled) RootExecutionMetrics else void = if (root_execution_metrics_enabled) .{} else {},
     module_call_sites: ModuleCallSiteCache = .{},
@@ -3136,8 +3139,8 @@ pub fn PathActionDriver(
 
 pub const Machine = struct {
     unit: *Unit,
-    /// A Machine lives for one scheduler turn. Once any charge in the turn
-    /// crosses the kernel quantum, stepped drivers surrender the turn.
+    /// A Machine lives for one scheduler turn. Once the unit's kernel budget
+    /// is exhausted in the turn, stepped drivers surrender it.
     kernel_quantum_spent: bool = false,
     pub fn allocator(self: *const Machine) std.mem.Allocator {
         return self.unit.allocator;
@@ -4302,11 +4305,11 @@ pub const Machine = struct {
                             "builtin module declares an invalid word name",
                         ),
                     }) {
-                        .pending => return .{ .stepped = 1 },
+                        .pending => return .stepped,
                         .complete => |candidate| {
                             var built = candidate;
                             self.candidate = .init(built.seal());
-                            return .{ .stepped = 1 };
+                            return .stepped;
                         },
                     }
                 }
@@ -4316,7 +4319,7 @@ pub const Machine = struct {
                     .standard_library,
                     &evaluator.unit.turn_authority,
                 ));
-                return .{ .stepped = 1 };
+                return .stepped;
             }
             switch (self.commit.?.borrowMut().advance() catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -4326,7 +4329,7 @@ pub const Machine = struct {
                     .{ intern.get(intern.moduleId(self.name)), @errorName(err) },
                 ),
             }) {
-                .pending => return .{ .stepped = 1 },
+                .pending => return .stepped,
                 .blocked => return .yielded,
                 .complete => {},
             }
@@ -4409,7 +4412,7 @@ pub const Machine = struct {
                     .loaded => |instance| {
                         loader.deinit(evaluator.releaseDomain(), evaluator.allocator());
                         self.state.borrowMut().* = .{ .loaded = .init(instance) };
-                        return .{ .stepped = 1 };
+                        return .stepped;
                     },
                 },
                 .loaded => |*instance| {
@@ -4421,10 +4424,10 @@ pub const Machine = struct {
                         .instance = .init(instance.take()),
                         .publication = .init(publication),
                     } };
-                    return .{ .stepped = 1 };
+                    return .stepped;
                 },
                 .definitions => |*definitions| switch (try definitions.publication.borrowMut().advance()) {
-                    .pending => return .{ .stepped = 1 },
+                    .pending => return .stepped,
                     .complete => |candidate| {
                         const instance = definitions.instance.take();
                         definitions.publication.deinit(
@@ -4444,7 +4447,7 @@ pub const Machine = struct {
                             .candidate = .init(sealed.take()),
                             .cursor = .init(cursor),
                         } };
-                        return .{ .stepped = 1 };
+                        return .stepped;
                     },
                 },
                 .commit => |*commit| switch (commit.cursor.borrowMut().advance() catch |err| switch (err) {
@@ -4455,7 +4458,7 @@ pub const Machine = struct {
                         .{ intern.get(intern.moduleId(self.name)), @errorName(err) },
                     ),
                 }) {
-                    .pending => return .{ .stepped = 1 },
+                    .pending => return .stepped,
                     .blocked => return .yielded,
                     .complete => {
                         const next: State = .{ .published = .{
@@ -5628,7 +5631,21 @@ pub const Machine = struct {
     /// the range the budget can pay for, rather than discovering the boundary
     /// mid-chunk.
     pub fn remainingKernelFuel(self: *const Machine) usize {
-        return self.unit.kernel_fuel;
+        return self.unit.kernel_budget.remaining;
+    }
+    /// The unit's kernel allowance for work done on its behalf in this turn.
+    /// A cursor draws on it directly and hands the same pointer to any cursor
+    /// it drives, so nested work cannot begin a quantum of its own. The
+    /// machine settles exhaustion after the driver returns.
+    pub fn workBudget(self: *Machine) *poll_api.WorkBudget {
+        return &self.unit.kernel_budget;
+    }
+    /// Polls cancellation, then refills the unit's allowance and records that
+    /// this turn spent a quantum.
+    fn kernelBoundary(self: *Machine) MachineError!void {
+        try self.pollKernel();
+        self.unit.kernel_budget = .init(kernel_poll_quantum);
+        self.kernel_quantum_spent = true;
     }
     fn chargeKernel(self: *Machine, amount: usize) MachineError!bool {
         std.debug.assert(amount <= kernel_poll_quantum);
@@ -5636,13 +5653,11 @@ pub const Machine = struct {
         if (comptime root_execution_metrics_enabled)
             self.unit.root_execution_metrics.logical_transitions += amount;
         var reached_boundary = false;
-        if (amount >= self.unit.kernel_fuel) {
-            try self.pollKernel();
-            self.unit.kernel_fuel = kernel_poll_quantum;
-            self.kernel_quantum_spent = true;
+        if (amount >= self.unit.kernel_budget.remaining) {
+            try self.kernelBoundary();
             reached_boundary = true;
         }
-        self.unit.kernel_fuel -= @intCast(amount);
+        self.unit.kernel_budget.remaining -= amount;
         return reached_boundary;
     }
     /// Consumes a quotation header and applies it inline.
@@ -6819,10 +6834,11 @@ fn loop(self: *Machine) MachineError!RunStatus {
                 }
             };
             switch (progress) {
-                .stepped => |cost| {
+                .stepped => {
                     std.debug.assert(!self.unit.hasParkRequest());
-                    std.debug.assert(cost != 0);
-                    self.advanceKernel(cost) catch |err| switch (err) {
+                    // The step's own cost: a driver that drew nothing from the
+                    // budget still cannot keep the turn indefinitely.
+                    self.advanceKernel(1) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         error.Ecl => {
                             try startFailure(self);
@@ -6832,7 +6848,19 @@ fn loop(self: *Machine) MachineError!RunStatus {
                     if (self.kernel_quantum_spent) return .yielded;
                     continue;
                 },
-                .yielded => return if (self.unit.hasParkRequest()) .parked else .yielded,
+                .yielded => {
+                    if (self.unit.hasParkRequest()) return .parked;
+                    // A driver may yield on the exhaustion its cursors caused;
+                    // settling here keeps the next turn from starting empty.
+                    if (self.unit.kernel_budget.exhausted()) self.kernelBoundary() catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        error.Ecl => {
+                            try startFailure(self);
+                            continue;
+                        },
+                    };
+                    return .yielded;
+                },
                 .completed => {
                     clearWorkDriver(self.unit);
                     continue;
@@ -7546,7 +7574,7 @@ const QualifiedRegistrationDriver = struct {
     pub fn advance(evaluator: *Machine, self: *QualifiedRegistrationDriver) MachineError!WorkProgress {
         try evaluator.pollKernel();
         switch (self.acquisition.borrowMut().advance()) {
-            .pending => return .{ .stepped = 1 },
+            .pending => return .stepped,
             .complete => |maybe_generation| {
                 const checked_name = if (self.artifact) |artifact|
                     evaluator.unit.inherited.module_snapshot.?.artifactModules(artifact)[self.module_index]
@@ -7592,7 +7620,7 @@ const QualifiedRegistrationDriver = struct {
                         self.acquisition = .init(evaluator.unit.inherited.registry.acquireCursor(
                             modules_in_artifact[self.module_index],
                         ));
-                        return .{ .stepped = 1 };
+                        return .stepped;
                     }
                     var artifact_lease = self.loading.?.borrowMut();
                     evaluator.unit.inherited.module_snapshot.?.commitArtifact(
@@ -9320,7 +9348,7 @@ fn advanceRegistration(
             "a module cannot be registered from inside a state application",
         ),
     }) {
-        .pending => .{ .stepped = 1 },
+        .pending => .stepped,
         .blocked => .yielded,
         .complete => .completed,
     };

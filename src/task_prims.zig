@@ -234,8 +234,7 @@ const GiveDriver = struct {
     pub fn advance(evaluator: *Machine, self: *GiveDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.cursor.phase == .validating) {
-            var budget: poll.WorkBudget = .init(machine.kernel_poll_quantum);
-            if (self.cursor.advance(&budget) == .pending) return .yielded;
+            if (self.cursor.advance(evaluator.workBudget()) == .pending) return .stepped;
             if (self.cursor.refusal == .not_a_port)
                 return evaluator.typeError("a list of ports to give");
             self.cursor.phase = .done;
