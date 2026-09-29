@@ -228,20 +228,20 @@ const ConcatDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *ConcatDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        var budget = machine.kernel_poll_quantum;
+        const work = evaluator.workBudget();
         const values = self.values.borrow();
-        while (!self.materializing and budget != 0 and self.index != values.len) : (budget -= 1) {
+        while (!self.materializing and self.index != values.len and work.spend()) {
             values[self.index] = if (self.index == 0)
                 self.left.borrow()
             else
                 list.atUnchecked(self.right.borrow(), self.index - 1);
             self.index += 1;
         }
-        if (self.index != values.len) return .yielded;
+        if (self.index != values.len) return .stepped;
         self.materializing = true;
-        if (budget == 0) return .yielded;
-        return switch (try self.materializer.borrowMut().advance(evaluator.workBudget())) {
-            .pending => .yielded,
+        if (work.exhausted()) return .stepped;
+        return switch (try self.materializer.borrowMut().advance(work)) {
+            .pending => .stepped,
             .complete => |result| .{ .output = result },
         };
     }
@@ -557,16 +557,16 @@ const SymbolConversionDriver = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return evaluator.fail(.domain, "string contains an invalid Unicode scalar"),
         }) {
-            .pending => return .yielded,
+            .pending => return .stepped,
             .complete => |spelling| {
                 self.spelling = .init(spelling);
                 self.validation = .init(spelling);
                 return .yielded;
             },
         };
-        var budget: usize = machine.kernel_poll_quantum;
+        const work = evaluator.workBudget();
         if (self.validation) |*validation| {
-            while (budget != 0) : (budget -= 1) switch (validation.advance()) {
+            while (work.spend()) switch (validation.advance()) {
                 .pending => {},
                 .complete => |valid| {
                     if (!valid) return evaluator.fail(.domain, "string is not a valid symbol spelling");
@@ -579,9 +579,9 @@ const SymbolConversionDriver = struct {
                     break;
                 },
             };
-            if (self.validation != null) return .yielded;
+            if (self.validation != null) return .stepped;
         }
-        while (budget != 0) : (budget -= 1) switch (self.name) {
+        while (work.spend()) switch (self.name) {
             .none => unreachable,
             .lookup => |*cursor| switch (cursor.advance()) {
                 .pending => {},
@@ -596,7 +596,7 @@ const SymbolConversionDriver = struct {
                 .complete => |id| return .{ .output = .{ .symbol = id } },
             },
         };
-        return .yielded;
+        return .stepped;
     }
 };
 

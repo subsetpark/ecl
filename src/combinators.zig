@@ -1033,11 +1033,11 @@ const UpdateWorkDriver = struct {
         const state = self.state.borrow();
         evaluator.setActiveWord(state.word);
         try evaluator.pollKernel();
-        var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0) switch (state.phase) {
+        const work = evaluator.workBudget();
+        while (!work.exhausted()) switch (state.phase) {
             .count_positions => {
                 const progress = try state.selector_cursor.?.borrowMut().advanceOne();
-                budget -= 1;
+                _ = work.spend();
                 switch (progress) {
                     .pending => {},
                     .depth_exceeded => return evaluator.fail(
@@ -1063,7 +1063,7 @@ const UpdateWorkDriver = struct {
             },
             .fill_positions => {
                 const progress = try state.selector_cursor.?.borrowMut().advanceOne();
-                budget -= 1;
+                _ = work.spend();
                 switch (progress) {
                     .pending => {},
                     .depth_exceeded => return evaluator.fail(.domain, "update selector nesting exceeds 256 levels"),
@@ -1096,9 +1096,9 @@ const UpdateWorkDriver = struct {
                         state.requested_key.?,
                     ));
                 }
-                if (budget == 0) return .yielded;
+                if (work.exhausted()) return .stepped;
                 const progress = try poll.advanceWithin(state.finder.?.borrowMut(), 1);
-                budget -= 1;
+                _ = work.spend();
                 switch (progress) {
                     .pending => {},
                     .complete => |found| {
@@ -1120,7 +1120,7 @@ const UpdateWorkDriver = struct {
                 else
                     dict.valueAt(state.collection.borrow().dict, state.copy_index));
                 state.copy_index += 1;
-                budget -= 1;
+                _ = work.spend();
             },
             .apply => unreachable,
             .fill_pairs => {
@@ -1139,7 +1139,7 @@ const UpdateWorkDriver = struct {
                     state.values.borrow().values()[state.copy_index],
                 };
                 state.copy_index += 1;
-                budget -= 1;
+                _ = work.spend();
             },
             .materialize_list => {
                 if (state.list_materializer == null)
@@ -1147,8 +1147,8 @@ const UpdateWorkDriver = struct {
                         evaluator.allocator(),
                         state.values.borrow().values(),
                     ));
-                return switch (try state.list_materializer.?.borrowMut().advance(evaluator.workBudget())) {
-                    .pending => .yielded,
+                return switch (try state.list_materializer.?.borrowMut().advance(work)) {
+                    .pending => .stepped,
                     .complete => |result| completed: {
                         state.list_materializer.?.deinit(
                             evaluator.releaseDomain(),
@@ -1159,8 +1159,8 @@ const UpdateWorkDriver = struct {
                     },
                 };
             },
-            .materialize_dict => return switch (try state.dict_materializer.?.borrowMut().advance(evaluator.workBudget())) {
-                .pending => .yielded,
+            .materialize_dict => return switch (try state.dict_materializer.?.borrowMut().advance(work)) {
+                .pending => .stepped,
                 .duplicate_key => unreachable,
                 .complete => |result| completed: {
                     state.dict_materializer.?.borrowMut().deinit();
@@ -1169,7 +1169,7 @@ const UpdateWorkDriver = struct {
                 },
             },
         };
-        return .yielded;
+        return .stepped;
     }
 };
 
@@ -1727,19 +1727,19 @@ const InfraResultDriver = struct {
         try evaluator.pollKernel();
         if (self.result == null) {
             switch (try self.materializer.borrowMut().advance(evaluator.workBudget())) {
-                .pending => return .yielded,
+                .pending => return .stepped,
                 .complete => |result| {
                     self.result = .init(result);
                     return .yielded;
                 },
             }
         }
-        var remaining = machine.kernel_poll_quantum;
-        while (remaining != 0 and evaluator.unit.stack.items.len != self.base) : (remaining -= 1) {
+        const work = evaluator.workBudget();
+        while (evaluator.unit.stack.items.len != self.base and work.spend()) {
             var discarded = try evaluator.popValue();
             discarded.deinit();
         }
-        if (evaluator.unit.stack.items.len != self.base) return .yielded;
+        if (evaluator.unit.stack.items.len != self.base) return .stepped;
         const result = self.result.?.take();
         self.result = null;
         return .{ .output = result };

@@ -3025,8 +3025,8 @@ const GroupReduceDriver = struct {
         try evaluator.pollKernel();
         const count: usize = @intCast(self.groups.borrow().list.length());
         if (self.output == null) self.output = .init(try .init(evaluator.releaseDomain(), count));
-        var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0 and self.group != count) : (budget -= 1) {
+        const work = evaluator.workBudget();
+        while (self.group != count and work.spend()) {
             const indices = list.atUnchecked(self.groups.borrow(), self.group);
             if (indices != .list) return evaluator.typeError("group index lists");
             if (self.index == indices.list.length()) {
@@ -3064,7 +3064,7 @@ const GroupReduceDriver = struct {
             }
             self.index += 1;
         }
-        if (self.group != count) return .yielded;
+        if (self.group != count) return .stepped;
         const result = self.output.?.borrowMut().takeList();
         self.output = null;
         return .{ .output = result };

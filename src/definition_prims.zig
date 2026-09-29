@@ -246,8 +246,8 @@ const DefineDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *DefineDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0) switch (self.state.borrowMut().*) {
+        const work = evaluator.workBudget();
+        while (!work.exhausted()) switch (self.state.borrowMut().*) {
             .scan_annotation => |*scan| {
                 const count: usize = @intCast(scan.candidate.borrow().list.length());
                 if (scan.index == count) {
@@ -291,7 +291,7 @@ const DefineDriver = struct {
                     scan.colon_at = scan.index;
                 }
                 scan.index += 1;
-                budget -= 1;
+                _ = work.spend();
             },
             .validate_annotation => |*validation| {
                 if (validation.context.separator_at) |split| {
@@ -309,7 +309,7 @@ const DefineDriver = struct {
                             (validation.index <= split or validation.context.effect_end != split + 2))
                             return malformed(evaluator);
                         validation.index += 1;
-                        budget -= 1;
+                        _ = work.spend();
                         continue;
                     }
                 }
@@ -331,8 +331,8 @@ const DefineDriver = struct {
                     self.state.borrowMut().* = .{ .validate_name = .init(self.name) };
                 }
             },
-            .normalize_doc => |*normalization| switch (try normalization.normalizer.borrowMut().advance(evaluator.workBudget())) {
-                .pending => return .yielded,
+            .normalize_doc => |*normalization| switch (try normalization.normalizer.borrowMut().advance(work)) {
+                .pending => return .stepped,
                 .complete => |normalized| {
                     self.annotation.borrowMut().doc_source = normalized;
                     self.annotation.borrowMut().doc_value = env.documentation(normalized.list) orelse
@@ -348,7 +348,7 @@ const DefineDriver = struct {
                         );
                         self.state.borrowMut().* = .{ .validate_name = .init(self.name) };
                     }
-                    return .yielded;
+                    return .stepped;
                 },
             },
             .prepare_effect => |*context| {
@@ -379,10 +379,10 @@ const DefineDriver = struct {
                     copy.index,
                 );
                 copy.index += 1;
-                budget -= 1;
+                _ = work.spend();
             },
-            .materialize_effect => |*materialization| switch (try materialization.materializer.borrowMut().advance(evaluator.workBudget())) {
-                .pending => return .yielded,
+            .materialize_effect => |*materialization| switch (try materialization.materializer.borrowMut().advance(work)) {
+                .pending => return .stepped,
                 .complete => |effect_value| {
                     self.annotation.borrowMut().effect_value = effect_value;
                     self.annotation.borrowMut().effect = env.ValidatedEffect.fromValidated(
@@ -399,13 +399,13 @@ const DefineDriver = struct {
                         evaluator.allocator(),
                     );
                     self.state.borrowMut().* = .{ .validate_name = .init(self.name) };
-                    return .yielded;
+                    return .stepped;
                 },
             },
             .validate_name => |*validation| {
                 switch (validation.advance()) {
                     .pending => {
-                        budget -= 1;
+                        _ = work.spend();
                         continue;
                     },
                     .complete => |name| {
@@ -432,7 +432,7 @@ const DefineDriver = struct {
                 }
             },
             .source => |*source_state| switch (source_state.cursor.advance()) {
-                .pending => budget -= 1,
+                .pending => _ = work.spend(),
                 .complete => |source| {
                     // A module definition records only its own name. The
                     // qualified spelling belongs to whichever registration a call
@@ -484,7 +484,7 @@ const DefineDriver = struct {
                         "module environments are immutable after registration",
                     ),
                 }) {
-                    .pending => budget -= 1,
+                    .pending => _ = work.spend(),
                     .complete => return .completed,
                 }
             },
@@ -497,12 +497,12 @@ const DefineDriver = struct {
                         "module test catalogs are immutable after registration",
                     ),
                 }) {
-                    .pending => budget -= 1,
+                    .pending => _ = work.spend(),
                     .complete => return .completed,
                 }
             },
         };
-        return .yielded;
+        return .stepped;
     }
 
     pub const ownership: heap.DriverOwnership = .fields;

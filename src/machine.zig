@@ -9127,14 +9127,14 @@ const AttemptResultDriver = struct {
     }
     pub fn advance(evaluator: *Machine, self: *AttemptResultDriver) MachineError!WorkProgress {
         try evaluator.pollKernel();
-        var budget: usize = kernel_poll_quantum;
-        while (budget != 0) switch (self.phase) {
-            .materialize => switch (try self.materializer.borrowMut().advance(evaluator.workBudget())) {
-                .pending => return .yielded,
+        const work = evaluator.workBudget();
+        while (!work.exhausted()) switch (self.phase) {
+            .materialize => switch (try self.materializer.borrowMut().advance(work)) {
+                .pending => return .stepped,
                 .complete => |results| {
                     self.results = .init(results);
                     self.phase = .release;
-                    return .yielded;
+                    return .stepped;
                 },
             },
             .release => {
@@ -9143,7 +9143,7 @@ const AttemptResultDriver = struct {
                     continue;
                 }
                 evaluator.releaseDomain().releaseValue(evaluator.unit.stack.pop().?);
-                budget -= 1;
+                _ = work.spend();
             },
             .outcome => {
                 const results = self.results.?.take();
@@ -9152,7 +9152,7 @@ const AttemptResultDriver = struct {
                 return .{ .output = outcome };
             },
         };
-        return .yielded;
+        return .stepped;
     }
     pub const ownership: heap.DriverOwnership = .fields;
 };
@@ -9210,12 +9210,12 @@ const StateAcquireDriver = struct {
             self.based = true;
         }
         const durable = application.turn.stack();
-        var budget: usize = kernel_poll_quantum;
-        while (budget != 0 and self.copied != durable.len) : (budget -= 1) {
+        const work = evaluator.workBudget();
+        while (self.copied != durable.len and work.spend()) {
             try evaluator.pushBorrowed(durable[self.copied]);
             self.copied += 1;
         }
-        if (self.copied != durable.len) return .yielded;
+        if (self.copied != durable.len) return .stepped;
         // One move transfers exclusive ownership: `enterStateApplication` owns the
         // application on every exit path from here.
         try evaluator.enterStateApplication(
