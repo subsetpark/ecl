@@ -354,10 +354,11 @@ The lowering produces ordinary forms consumed directly by the frame machine.
 This keeps the machine point-free and local lifetime visible: the lowered
 prefix moves inputs into locals, indexed reads retrieve them, and a final
 operation drops the region. The three backend names are reserved from every
-publication, so in every scope they can only mean their core primitives; the
-machine binds them by interned name without a lookup, and they blame and fail
-exactly as a resolved core word does. The reader preserves source spans for
-the produced forms, keeping diagnostics anchored to the user's source.
+publication, so in every scope they can only mean their core primitives. The
+machine binds them by interned name when the activation holds the word's
+stamped scope; foreign stamps take ordinary resolution, including its retired
+scope failure. The reader preserves source spans for the produced forms,
+keeping diagnostics anchored to the user's source.
 
 ### Source metadata lives on a separate code plane
 
@@ -662,7 +663,14 @@ shape. Guards cover at most eight scopes; deeper chains keep using resumable
 resolution. A bounded Unit-owned pool stores guards outside hot cursor result
 payloads; slot reuse invalidates both old entries and unfinished candidates.
 The starting scope identity selects an immutable parent chain, whose live scopes
-keep their once-installed environments alive. Guards retain revisions rather
+keep their once-installed environments alive. That identity is the stamped
+scope the running activation resolves in directly: the running scope, or an
+ancestor reached only through scopes that have no environment, such as the
+child a combinator applies its body in. The reach is established afresh at
+every dispatch, so a child that binds a name leaves the cache for the rest of
+that application. A module-local cache context also requires the activation's
+home to belong to the stamped module root; foreign homes use ordinary
+resolution. Guards retain revisions rather
 than snapshot readers, so a dormant entry cannot prevent reclamation of
 publication history. Execution context and the existing module generation
 guards continue to determine

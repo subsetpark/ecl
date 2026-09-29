@@ -574,6 +574,52 @@ retains one two-way cache implementation with no experimental or legacy
 control branch; the two focused cases and local hit/miss counters remain in
 schema `ecl.workdrivers.*.v6`.
 
+## Call-site caches through unbound child scopes — 2026-09-28
+
+A combinator body runs each element in an isolated child scope that mints no
+scope cell, while its words carry the stamp of the scope that read them. The
+plain and module-local fast paths compared those two ids for equality, so every
+word in a generic `each`, `fold`, or `scan` body missed both caches without
+consulting them and took a full `DispatchDriver` resume and resolution walk.
+
+`executeWord` now resolves the stamp through the running chain: the stamped
+scope is accepted when the running scope is it, or reaches it only through
+scopes that have no environment. Such a scope contributes no lookup, so
+resolving from the child is resolving in the stamped ancestor, and the guard a
+cache entry carries already records each empty position and revalidates it on
+every hit. The walk runs on every dispatch, because `set` in a body
+materializes the child between one word and the next; from that word on the
+element takes the general path exactly as before. Foreign stamps, materialized
+children, and chains deeper than the guard's eight positions never borrow.
+
+Counters over 10,000 float elements, one worker, instrumented ReleaseSafe:
+
+| Body | Driver resumes before | after | Plain hits before | after |
+|---|---:|---:|---:|---:|
+| `(dup *) each` | 20,009 | 13 | 0 | 19,996 |
+| `(1 + 1 +) each` | 20,009 | 13 | 0 | 19,996 |
+| `(sq) each`, `sq` a source word | 10,015 | 17 | 19,996 | 29,994 |
+| `((1 +) call dup *) each` | 30,009 | 17 | 0 | 39,992 |
+| `(\|x\| x x *) each` | 50,009 | 40,011 | 0 | 9,998 |
+| `(dup 'k set k *) each` | 170,013 | 170,013 | 0 | 19,996 |
+
+Allocations, transitions, application resumes, and handoffs are unchanged.
+At this measurement stage, the locals body kept four resumes per element for
+its unscoped `_ll`-style words, which carry no stamp and never enter a cache;
+the later locals backend change below removes those resumes. The binding body
+keeps its cost by design: `set` materializes the child, and every later word in
+that element resolves generally.
+
+ReleaseFast on macOS arm64, five interleaved runs each, medians of ten passes
+over 100,000 floats, internal milliseconds:
+
+| Body | master | branch |
+|---|---:|---:|
+| `(dup *) each` | 731 | 283 |
+| `(1 + 1 +) each` | 741 | 327 |
+| `() each` | 173 | 171 |
+| `(dup 'k set k *) each` | 7,480 | 6,678 |
+
 ## Locals backend words bind without resolution — 2026-09-28
 
 The reader lowers `|a b|` into the three reserved words `_ll`, `_gl`, and
