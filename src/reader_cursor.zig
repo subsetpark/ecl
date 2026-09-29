@@ -821,7 +821,7 @@ const StringBuilder = struct {
                 } };
                 break :result .pending;
             },
-            .materialize => |*materialization| switch (try materialization.materializer.advance(1)) {
+            .materialize => |*materialization| switch (try poll.advanceWithin(&materialization.materializer, 1)) {
                 .pending => .pending,
                 .complete => |item| result: {
                     const spans = materialization.spans;
@@ -1338,7 +1338,7 @@ const CollectionBuilder = struct {
                 } };
                 break :result .pending;
             },
-            .materialize_list => |*materialization| switch (try materialization.materializer.advance(1)) {
+            .materialize_list => |*materialization| switch (try poll.advanceWithin(&materialization.materializer, 1)) {
                 .pending => .pending,
                 .complete => |item| result: {
                     const spans = materialization.spans;
@@ -1405,7 +1405,7 @@ const CollectionBuilder = struct {
                 } };
                 break :result .pending;
             },
-            .materialize_dict => |*materialization| switch (try materialization.materializer.advance(1)) {
+            .materialize_dict => |*materialization| switch (try poll.advanceWithin(&materialization.materializer, 1)) {
                 .pending => .pending,
                 .duplicate_key => {
                     self.diag.set(self.context.start, "dictionary literal contains a duplicate key");

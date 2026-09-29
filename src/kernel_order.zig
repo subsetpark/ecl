@@ -552,7 +552,7 @@ const GradeDriver = struct {
                 }
             },
             .materialize_values => |*materialize| {
-                return switch (try materialize.materializer.borrowMut().advance(budget)) {
+                return switch (try materialize.materializer.borrowMut().advance(evaluator.workBudget())) {
                     .pending => .yielded,
                     .complete => |result| completed: {
                         materialize.materializer.deinit(
@@ -675,7 +675,7 @@ const DistinctDriver = struct {
         var budget: usize = machine.kernel_poll_quantum;
         while (budget != 0) {
             if (self.materializer) |*materializer| {
-                return switch (try materializer.borrowMut().advance(budget)) {
+                return switch (try materializer.borrowMut().advance(evaluator.workBudget())) {
                     .pending => .yielded,
                     .complete => |result| completed: {
                         materializer.deinit(evaluator.releaseDomain(), evaluator.allocator());
@@ -707,7 +707,7 @@ const DistinctDriver = struct {
                 self.results.borrow()[self.candidate],
                 list.atUnchecked(self.collection.borrow(), self.item_index),
             ));
-            switch (try self.matcher.?.borrowMut().advance(1)) {
+            switch (try poll.advanceWithin(self.matcher.?.borrowMut(), 1)) {
                 .pending => budget -= 1,
                 .complete => |matches| {
                     self.matcher.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
@@ -856,7 +856,7 @@ const GroupDriver = struct {
                 } else blk: {
                     if (self.hasher == null) self.hasher = .init(try equal.HashCursor.init(evaluator.allocator(), item));
                     var work: poll.WorkBudget = .init(budget);
-                    const progress = try self.hasher.?.borrowMut().advanceWithBudget(&work);
+                    const progress = try self.hasher.?.borrowMut().advance(&work);
                     budget = work.remaining;
                     switch (progress) {
                         .pending => continue,
@@ -900,7 +900,7 @@ const GroupDriver = struct {
                 }
                 if (self.matcher == null) self.matcher = .init(try equal.MatchCursor.init(evaluator.allocator(), left, right));
                 var work: poll.WorkBudget = .init(budget);
-                const progress = try self.matcher.?.borrowMut().advanceWithBudget(&work);
+                const progress = try self.matcher.?.borrowMut().advance(&work);
                 budget = work.remaining;
                 switch (progress) {
                     .pending => {},
@@ -1001,7 +1001,7 @@ const GroupDriver = struct {
                 self.index += 1;
                 if (budget == 0) return .yielded;
             },
-            .dictionary => switch (try self.dict_materializer.?.borrowMut().advance(budget)) {
+            .dictionary => switch (try self.dict_materializer.?.borrowMut().advance(evaluator.workBudget())) {
                 .pending => return .yielded,
                 .duplicate_key => unreachable,
                 .complete => |result| {

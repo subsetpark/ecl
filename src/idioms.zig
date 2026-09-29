@@ -838,7 +838,7 @@ const PervadeEachDriver = struct {
         }
         if (self.materializer == null)
             self.materializer = .init(.init(evaluator.allocator(), self.results.borrow().values()));
-        return switch (try self.materializer.?.borrowMut().advance(machine.kernel_poll_quantum)) {
+        return switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
             .pending => .yielded,
             .complete => |result| completed: {
                 popRelease(evaluator, self.consumed);
@@ -951,7 +951,7 @@ const MatchEachDriver = struct {
                 }
                 self.cursor = .init(try .init(evaluator.allocator(), item, self.constant));
             }
-            switch (try self.cursor.?.borrowMut().advance(machine.kernel_poll_quantum)) {
+            switch (try self.cursor.?.borrowMut().advance(evaluator.workBudget())) {
                 .pending => return .yielded,
                 .complete => |matches| {
                     self.cursor.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
@@ -1015,7 +1015,7 @@ const MatchFindDriver = struct {
                 }
                 self.cursor = .init(try .init(evaluator.allocator(), item, self.needle));
             }
-            switch (try self.cursor.?.borrowMut().advance(machine.kernel_poll_quantum)) {
+            switch (try self.cursor.?.borrowMut().advance(evaluator.workBudget())) {
                 .pending => return .yielded,
                 .complete => |matches| {
                     self.cursor.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
@@ -1155,7 +1155,7 @@ const ReductionDriver = struct {
             ));
             self.materializing = true;
         }
-        return switch (try self.materializer.?.borrowMut().advance(machine.kernel_poll_quantum)) {
+        return switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
             .pending => .yielded,
             .complete => |result| completed: {
                 popRelease(evaluator, 3);

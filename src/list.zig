@@ -52,15 +52,15 @@ fn ExactSliceMaterializer(comptime Source: type, comptime kind: HeapKind) type {
         pub fn retire(self: *Self, releases: *heap.ReleaseDomain) void {
             if (self.builder) |*builder| builder.retirePartial(releases);
         }
-        pub fn advance(self: *Self, budget: usize) error{OutOfMemory}!MaterializeResult {
-            std.debug.assert(budget != 0 and !self.complete);
+        pub fn advance(self: *Self, work: *poll.WorkBudget) error{OutOfMemory}!MaterializeResult {
+            std.debug.assert(!self.complete);
             if (self.builder == null)
                 self.builder = try .init(
                     self.allocator,
                     self.source.len,
                     initialCapacity(self.source.len),
                 );
-            const end = @min(self.index + budget, self.source.len);
+            const end = self.index + work.take(self.source.len - self.index);
             @memcpy(self.builder.?.items()[self.index..end], self.source[self.index..end]);
             self.index = end;
             if (self.index != self.source.len) return .pending;
@@ -109,10 +109,9 @@ pub const CodepointMaterializer = struct {
     pub fn retire(self: *CodepointMaterializer, releases: *heap.ReleaseDomain) void {
         if (self.builder) |*builder| builder.retirePartial(releases);
     }
-    pub fn advance(self: *CodepointMaterializer, budget: usize) error{OutOfMemory}!MaterializeResult {
-        std.debug.assert(budget != 0 and self.phase != .complete);
-        var remaining = budget;
-        while (remaining != 0) switch (self.phase) {
+    pub fn advance(self: *CodepointMaterializer, work: *poll.WorkBudget) error{OutOfMemory}!MaterializeResult {
+        std.debug.assert(self.phase != .complete);
+        while (true) switch (self.phase) {
             .profile => {
                 if (self.index == self.source.len) {
                     const kind: HeapKind = if (self.max_codepoint <= std.math.maxInt(u8))
@@ -132,12 +131,12 @@ pub const CodepointMaterializer = struct {
                     self.index = 0;
                     continue;
                 }
+                if (!work.spend()) return .pending;
                 self.max_codepoint = @max(self.max_codepoint, self.source[self.index]);
                 self.index += 1;
-                remaining -= 1;
             },
             .fill => {
-                const end = @min(self.index + remaining, self.source.len);
+                const end = self.index + work.take(self.source.len - self.index);
                 while (self.index != end) : (self.index += 1)
                     self.builder.?.writeCodepoint(self.index, self.source[self.index]);
                 if (self.index != self.source.len) return .pending;
@@ -209,11 +208,7 @@ pub const ValueMaterializer = struct {
         self.builder = null;
         return .{ .list = header };
     }
-    pub fn advance(self: *ValueMaterializer, budget: usize) error{OutOfMemory}!MaterializeResult {
-        var work: poll.WorkBudget = .init(budget);
-        return self.advanceWithBudget(&work);
-    }
-    pub fn advanceWithBudget(
+    pub fn advance(
         self: *ValueMaterializer,
         work: *poll.WorkBudget,
     ) error{OutOfMemory}!MaterializeResult {
@@ -357,8 +352,8 @@ pub const GenericValueMaterializer = struct {
     pub fn retire(self: *GenericValueMaterializer, releases: *heap.ReleaseDomain) void {
         if (self.builder) |*builder| builder.retirePartial(releases);
     }
-    pub fn advance(self: *GenericValueMaterializer, budget: usize) error{OutOfMemory}!MaterializeResult {
-        std.debug.assert(budget != 0 and !self.complete);
+    pub fn advance(self: *GenericValueMaterializer, work: *poll.WorkBudget) error{OutOfMemory}!MaterializeResult {
+        std.debug.assert(!self.complete);
         if (self.builder == null) {
             var builder = try heap.ListBuilder(.generic_spine).initCode(
                 self.allocator,
@@ -369,7 +364,7 @@ pub const GenericValueMaterializer = struct {
             builder.setLen(0);
             self.builder = builder;
         }
-        const end = @min(self.index + budget, self.source.len);
+        const end = self.index + work.take(self.source.len - self.index);
         while (self.index != end) : (self.index += 1) {
             const item = self.source[self.index];
             heap.retainValue(item);
@@ -389,7 +384,8 @@ pub fn fromValues(
     source: []const Value,
 ) error{OutOfMemory}!Value {
     var cursor = ValueMaterializer.init(allocator, source);
-    const result = try poll.driveFallible(Value, &cursor, .{std.math.maxInt(usize)});
+    var work = poll.unbounded();
+    const result = try poll.driveFallible(Value, &cursor, .{&work});
     cursor.deinit();
     return result;
 }
@@ -401,7 +397,8 @@ pub fn fromValuesGeneric(
     source: []const Value,
 ) error{OutOfMemory}!Value {
     var cursor = GenericValueMaterializer.init(allocator, source);
-    const result = try poll.driveFallible(Value, &cursor, .{std.math.maxInt(usize)});
+    var work = poll.unbounded();
+    const result = try poll.driveFallible(Value, &cursor, .{&work});
     cursor.deinit();
     return result;
 }
@@ -411,7 +408,8 @@ pub fn fromI64Slice(
     source: []const i64,
 ) error{OutOfMemory}!Value {
     var cursor = I64Materializer.init(allocator, source);
-    const result = try poll.driveFallible(Value, &cursor, .{std.math.maxInt(usize)});
+    var work = poll.unbounded();
+    const result = try poll.driveFallible(Value, &cursor, .{&work});
     cursor.deinit();
     return result;
 }
@@ -421,7 +419,8 @@ pub fn fromU8Slice(
     source: []const u8,
 ) error{OutOfMemory}!Value {
     var cursor = ByteListMaterializer.init(allocator, source);
-    const result = try poll.driveFallible(Value, &cursor, .{std.math.maxInt(usize)});
+    var work = poll.unbounded();
+    const result = try poll.driveFallible(Value, &cursor, .{&work});
     cursor.deinit();
     return result;
 }
@@ -431,7 +430,8 @@ pub fn fromF64Slice(
     source: []const f64,
 ) error{OutOfMemory}!Value {
     var cursor = F64Materializer.init(allocator, source);
-    const result = try poll.driveFallible(Value, &cursor, .{std.math.maxInt(usize)});
+    var work = poll.unbounded();
+    const result = try poll.driveFallible(Value, &cursor, .{&work});
     cursor.deinit();
     return result;
 }
@@ -441,7 +441,8 @@ pub fn fromCodepoints(
     source: []const u32,
 ) error{OutOfMemory}!Value {
     var cursor = CodepointMaterializer.init(allocator, source);
-    const result = try poll.driveFallible(Value, &cursor, .{std.math.maxInt(usize)});
+    var work = poll.unbounded();
+    const result = try poll.driveFallible(Value, &cursor, .{&work});
     cursor.deinit();
     return result;
 }
@@ -459,7 +460,8 @@ pub fn fromSymbolIds(
     source: []const u32,
 ) error{OutOfMemory}!Value {
     var cursor = SymbolMaterializer.init(allocator, source);
-    const result = try poll.driveFallible(Value, &cursor, .{std.math.maxInt(usize)});
+    var work = poll.unbounded();
+    const result = try poll.driveFallible(Value, &cursor, .{&work});
     cursor.deinit();
     return result;
 }
@@ -667,9 +669,12 @@ test "blocking and resumable list construction share specialization behavior" {
         defer cleanup.releaseValue(blocking);
         var cursor = ValueMaterializer.init(allocator, case.source);
         var pending: usize = 0;
-        const resumed = while (true) switch (try cursor.advance(1)) {
-            .pending => pending += 1,
-            .complete => |result| break result,
+        const resumed = while (true) {
+            var step: poll.WorkBudget = .init(1);
+            switch (try cursor.advance(&step)) {
+                .pending => pending += 1,
+                .complete => |result| break result,
+            }
         };
         cursor.deinit();
         defer cleanup.releaseValue(resumed);

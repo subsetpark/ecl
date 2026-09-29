@@ -507,7 +507,7 @@ const OrdinaryErrorCursor = struct {
                 }
                 break :result .pending;
             },
-            .trace_build => |*trace| switch (try trace.builder.advance(1)) {
+            .trace_build => |*trace| switch (try poll_api.advanceWithin(&trace.builder, 1)) {
                 .pending => .pending,
                 .complete => |item| result: {
                     const message = trace.message;
@@ -591,7 +591,7 @@ const OrdinaryErrorCursor = struct {
                 } };
                 break :result .pending;
             },
-            .data_build => |*data| switch (try data.builder.advance(1)) {
+            .data_build => |*data| switch (try poll_api.advanceWithin(&data.builder, 1)) {
                 .pending => .pending,
                 .duplicate_key => unreachable,
                 .complete => |item| result: {
@@ -610,7 +610,7 @@ const OrdinaryErrorCursor = struct {
                 try self.beginOuter(values);
                 break :result .pending;
             },
-            .outer => |*outer| switch (try outer.builder.advance(1)) {
+            .outer => |*outer| switch (try poll_api.advanceWithin(&outer.builder, 1)) {
                 .pending => .pending,
                 .duplicate_key => unreachable,
                 .complete => |item| result: {
@@ -906,7 +906,7 @@ const RaisedErrorCursor = struct {
                 } };
                 break :result .pending;
             },
-            .field_find => |*find| switch (try find.cursor.advance(1)) {
+            .field_find => |*find| switch (try poll_api.advanceWithin(&find.cursor, 1)) {
                 .pending => .pending,
                 .complete => |found| result: {
                     const index = find.index;
@@ -945,7 +945,7 @@ const RaisedErrorCursor = struct {
                 }
                 break :result .pending;
             },
-            .trace_build => |*trace| switch (try trace.builder.advance(1)) {
+            .trace_build => |*trace| switch (try poll_api.advanceWithin(&trace.builder, 1)) {
                 .pending => .pending,
                 .complete => |item| result: {
                     const items = trace.items;
@@ -974,7 +974,7 @@ const RaisedErrorCursor = struct {
                 } };
                 break :result .pending;
             },
-            .data_field_find => |*find| switch (try find.cursor.advance(1)) {
+            .data_field_find => |*find| switch (try poll_api.advanceWithin(&find.cursor, 1)) {
                 .pending => .pending,
                 .complete => |found| result: {
                     const index = find.index;
@@ -1012,7 +1012,7 @@ const RaisedErrorCursor = struct {
                     break :result .pending;
                 },
             },
-            .data_build => |*data| switch (try data.builder.advance(1)) {
+            .data_build => |*data| switch (try poll_api.advanceWithin(&data.builder, 1)) {
                 .pending => .pending,
                 .duplicate_key => unreachable,
                 .complete => |item| result: {
@@ -1044,7 +1044,7 @@ const RaisedErrorCursor = struct {
                 } else try self.appendOuter(outer);
                 break :result .pending;
             },
-            .outer_build => |*outer| switch (try outer.builder.advance(1)) {
+            .outer_build => |*outer| switch (try poll_api.advanceWithin(&outer.builder, 1)) {
                 .pending => .pending,
                 .duplicate_key => unreachable,
                 .complete => |item| result: {
@@ -7189,7 +7189,7 @@ const JoinMaterializeDriver = struct {
             self.beginTeardown(evaluator, null, .continue_evaluation);
             return err;
         };
-        const materialized = self.materializer.advance(kernel_poll_quantum) catch {
+        const materialized = self.materializer.advance(evaluator.workBudget()) catch {
             self.beginTeardown(evaluator, null, .out_of_memory);
             return .completed;
         };
@@ -9113,7 +9113,7 @@ const AttemptResultDriver = struct {
         try evaluator.pollKernel();
         var budget: usize = kernel_poll_quantum;
         while (budget != 0) switch (self.phase) {
-            .materialize => switch (try self.materializer.borrowMut().advance(budget)) {
+            .materialize => switch (try self.materializer.borrowMut().advance(evaluator.workBudget())) {
                 .pending => return .yielded,
                 .complete => |results| {
                     self.results = .init(results);
@@ -10031,7 +10031,7 @@ const FailureDriver = struct {
                     .builder = builder,
                 } };
             },
-            .outcome => |*outcome_state| switch (try outcome_state.builder.advance(1)) {
+            .outcome => |*outcome_state| switch (try poll_api.advanceWithin(&outcome_state.builder, 1)) {
                 .pending => {},
                 .duplicate_key => unreachable,
                 .complete => |outcome| {

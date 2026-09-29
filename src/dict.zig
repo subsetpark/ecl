@@ -197,35 +197,36 @@ pub const Materializer = struct {
         if (self.table) |table| self.allocator.free(table);
     }
 
-    pub fn advance(self: *Materializer, budget: usize) error{OutOfMemory}!MaterializeProgress {
-        std.debug.assert(budget != 0 and self.state != .complete);
+    /// Draws on the caller's allowance and returns `pending` only once it is
+    /// spent, so a phase boundary is not a scheduler turn.
+    pub fn advance(self: *Materializer, work: *poll.WorkBudget) error{OutOfMemory}!MaterializeProgress {
+        std.debug.assert(self.state != .complete);
         while (true) switch (self.state) {
             .copy_pairs => |*source| {
-                const end = @min(source.index + budget, source.pairs.len);
+                const end = source.index + work.take(source.pairs.len - source.index);
                 for (source.index..end) |index| {
                     self.keys[index] = source.pairs[index][0];
                     self.vals[index] = source.pairs[index][1];
                 }
                 source.index = end;
-                if (end == source.pairs.len) self.state = if (self.table != null) .{ .table_init = 0 } else .{ .hash = .{} };
-                return .pending;
+                if (end != source.pairs.len) return .pending;
+                self.state = if (self.table != null) .{ .table_init = 0 } else .{ .hash = .{} };
             },
             .copy => |*source| {
-                const end = @min(source.index + budget, source.keys.len);
+                const end = source.index + work.take(source.keys.len - source.index);
                 @memcpy(self.keys[source.index..end], source.keys[source.index..end]);
                 @memcpy(self.vals[source.index..end], source.vals[source.index..end]);
                 source.index = end;
-                if (end == source.keys.len) self.state = if (self.table != null) .{ .table_init = 0 } else .{ .hash = .{} };
-                return .pending;
+                if (end != source.keys.len) return .pending;
+                self.state = if (self.table != null) .{ .table_init = 0 } else .{ .hash = .{} };
             },
             .table_init => |*index| {
                 const table = self.table.?;
-                const end = @min(index.* + budget, table.len);
+                const end = index.* + work.take(table.len - index.*);
                 @memset(table[index.*..end], empty_index);
                 index.* = end;
                 if (index.* != table.len) return .pending;
                 self.state = .{ .hash = .{} };
-                return .pending;
             },
             .hash => |*state| {
                 if (state.index == self.source_keys.len) {
@@ -234,7 +235,7 @@ pub const Materializer = struct {
                 }
                 if (state.cursor == null)
                     state.cursor = try .init(self.allocator, self.source_keys[state.index]);
-                switch (try state.cursor.?.advance(budget)) {
+                switch (try state.cursor.?.advance(work)) {
                     .pending => return .pending,
                     .complete => |computed| {
                         state.cursor.?.deinit();
@@ -250,16 +251,14 @@ pub const Materializer = struct {
                         } else {
                             state.index += 1;
                         }
-                        return .pending;
                     },
                 }
             },
             .duplicate_linear => |*state| {
-                var remaining = budget;
-                while (remaining != 0 and state.candidate != state.index) {
+                while (state.candidate != state.index) {
                     if (self.hashes[state.candidate] != self.hashes[state.index]) {
+                        if (!work.spend()) return .pending;
                         state.candidate += 1;
-                        remaining -= 1;
                         continue;
                     }
                     if (state.cursor == null) state.cursor = try .init(
@@ -267,36 +266,31 @@ pub const Materializer = struct {
                         self.keys[state.candidate],
                         self.keys[state.index],
                     );
-                    switch (try state.cursor.?.advance(remaining)) {
+                    switch (try state.cursor.?.advance(work)) {
                         .pending => return .pending,
                         .complete => |matches| {
                             state.cursor.?.deinit();
                             state.cursor = null;
                             if (matches) return .duplicate_key;
                             state.candidate += 1;
-                            return .pending;
                         },
                     }
                 }
-                if (state.candidate == state.index) {
-                    self.state = .{ .hash = .{ .index = state.index + 1 } };
-                }
-                return .pending;
+                self.state = .{ .hash = .{ .index = state.index + 1 } };
             },
             .duplicate_index => |*state| {
-                var remaining = budget;
                 const table = self.table.?;
-                while (remaining != 0) {
+                while (true) {
                     const encoded = table[state.slot];
                     if (encoded == empty_index) {
                         table[state.slot] = @intCast(state.index + 1);
                         self.state = .{ .hash = .{ .index = state.index + 1 } };
-                        return .pending;
+                        break;
                     }
                     const candidate = encoded - 1;
                     if (!self.check_duplicates or self.hashes[candidate] != self.hashes[state.index]) {
+                        if (!work.spend()) return .pending;
                         state.slot = (state.slot + 1) & (table.len - 1);
-                        remaining -= 1;
                         continue;
                     }
                     if (state.cursor == null) state.cursor = try .init(
@@ -304,30 +298,27 @@ pub const Materializer = struct {
                         self.keys[candidate],
                         self.keys[state.index],
                     );
-                    switch (try state.cursor.?.advance(remaining)) {
+                    switch (try state.cursor.?.advance(work)) {
                         .pending => return .pending,
                         .complete => |matches| {
                             state.cursor.?.deinit();
                             state.cursor = null;
                             if (matches) return .duplicate_key;
                             state.slot = (state.slot + 1) & (table.len - 1);
-                            return .pending;
                         },
                     }
                 }
-                return .pending;
             },
-            .keys => |*materializer| switch (try materializer.advance(budget)) {
+            .keys => |*materializer| switch (try materializer.advance(work)) {
                 .pending => return .pending,
                 .complete => |item| {
                     self.state = .{ .vals = .{
                         .keys = item,
                         .materializer = .init(self.allocator, self.vals),
                     } };
-                    return .pending;
                 },
             },
-            .vals => |*state| switch (try state.materializer.advance(budget)) {
+            .vals => |*state| switch (try state.materializer.advance(work)) {
                 .pending => return .pending,
                 .complete => |item| {
                     self.state = .{ .hashes = .{
@@ -335,10 +326,9 @@ pub const Materializer = struct {
                         .vals = item,
                         .materializer = .init(self.allocator, self.hashes),
                     } };
-                    return .pending;
                 },
             },
-            .hashes => |*state| switch (try state.materializer.advance(budget)) {
+            .hashes => |*state| switch (try state.materializer.advance(work)) {
                 .pending => return .pending,
                 .complete => |item| {
                     self.state = .{ .finish = .{
@@ -402,65 +392,54 @@ pub const FindCursor = struct {
     pub fn foundIndex(self: *const FindCursor) ?usize {
         return if (self.candidate < @as(usize, @intCast(self.header.length()))) self.candidate else null;
     }
-    pub fn advance(self: *FindCursor, budget: usize) error{OutOfMemory}!FindProgress {
-        std.debug.assert(budget != 0);
+    pub fn advance(self: *FindCursor, work: *poll.WorkBudget) error{OutOfMemory}!FindProgress {
         if (self.key_hash == null) {
             if (equal.scalarHash(self.key)) |computed| {
                 self.key_hash = computed;
-                return .pending;
-            }
-            if (self.hash_cursor == null) self.hash_cursor = try .init(self.allocator, self.key);
-            switch (try self.hash_cursor.?.advance(budget)) {
-                .pending => return .pending,
-                .complete => |computed| {
-                    self.hash_cursor.?.deinit();
-                    self.hash_cursor = null;
-                    self.key_hash = computed;
-                    return .pending;
-                },
+            } else {
+                if (self.hash_cursor == null) self.hash_cursor = try .init(self.allocator, self.key);
+                switch (try self.hash_cursor.?.advance(work)) {
+                    .pending => return .pending,
+                    .complete => |computed| {
+                        self.hash_cursor.?.deinit();
+                        self.hash_cursor = null;
+                        self.key_hash = computed;
+                    },
+                }
             }
         }
         const count: usize = @intCast(self.header.length());
         const table = heap.dictStorageConst(self.header).index();
-        if (table == null) return self.advanceLinear(count, budget);
+        if (table == null) return self.advanceLinear(count, work);
         if (self.slot == null) self.slot = @intCast(self.key_hash.? & (table.?.len - 1));
-        var remaining = budget;
-        while (remaining != 0 and self.slots_checked != table.?.len) {
+        while (self.slots_checked != table.?.len) {
             const encoded = table.?[self.slot.?];
             if (encoded == empty_index) return self.notFound(count);
             self.candidate = encoded - 1;
+            if (self.match_cursor == null and !work.spend()) return .pending;
             if (hashAt(self.header, self.candidate) == self.key_hash.?) {
-                if (try self.matchCandidate(remaining)) |matches| {
-                    if (matches) return .{ .complete = valueAt(self.header, self.candidate) };
-                    self.slot = (self.slot.? + 1) & (table.?.len - 1);
-                    self.slots_checked += 1;
-                    return .pending;
-                } else return .pending;
+                const matches = try self.matchCandidate(work) orelse return .pending;
+                if (matches) return .{ .complete = valueAt(self.header, self.candidate) };
             }
             self.slot = (self.slot.? + 1) & (table.?.len - 1);
             self.slots_checked += 1;
-            remaining -= 1;
         }
-        return if (self.slots_checked == table.?.len) self.notFound(count) else .pending;
+        return self.notFound(count);
     }
-    fn advanceLinear(self: *FindCursor, count: usize, budget: usize) error{OutOfMemory}!FindProgress {
-        var remaining = budget;
-        while (remaining != 0 and self.candidate != count) {
+    fn advanceLinear(self: *FindCursor, count: usize, work: *poll.WorkBudget) error{OutOfMemory}!FindProgress {
+        while (self.candidate != count) {
+            if (self.match_cursor == null and !work.spend()) return .pending;
             if (hashAt(self.header, self.candidate) == self.key_hash.?) {
-                if (try self.matchCandidate(remaining)) |matches| {
-                    if (matches) return .{ .complete = valueAt(self.header, self.candidate) };
-                    self.candidate += 1;
-                    return .pending;
-                } else return .pending;
+                const matches = try self.matchCandidate(work) orelse return .pending;
+                if (matches) return .{ .complete = valueAt(self.header, self.candidate) };
             }
             self.candidate += 1;
-            remaining -= 1;
         }
-        return if (self.candidate == count) .{ .complete = null } else .pending;
+        return .{ .complete = null };
     }
-    /// Null means a structural comparison consumed the remainder of this
-    /// poll. A boolean is a completed scalar or structural comparison.
-    fn matchCandidate(self: *FindCursor, budget: usize) error{OutOfMemory}!?bool {
+    /// Null means a structural comparison spent the allowance before it
+    /// finished. A boolean is a completed scalar or structural comparison.
+    fn matchCandidate(self: *FindCursor, work: *poll.WorkBudget) error{OutOfMemory}!?bool {
         if (equal.matchWithoutStructure(keyAt(self.header, self.candidate), self.key)) |matches|
             return matches;
         if (self.match_cursor == null) self.match_cursor = try .init(
@@ -468,7 +447,7 @@ pub const FindCursor = struct {
             keyAt(self.header, self.candidate),
             self.key,
         );
-        return switch (try self.match_cursor.?.advance(budget)) {
+        return switch (try self.match_cursor.?.advance(work)) {
             .pending => null,
             .complete => |matches| result: {
                 self.match_cursor.?.deinit();
@@ -491,7 +470,8 @@ pub fn fromPairs(
     var materializer = try Materializer.init(allocator, pairs, true);
     var completed = false;
     defer if (!completed) materializer.retire(releases);
-    while (true) switch (try materializer.advance(std.math.maxInt(usize))) {
+    var work = poll.unbounded();
+    while (true) switch (try materializer.advance(&work)) {
         .pending => {},
         .duplicate_key => return error.DuplicateKey,
         .complete => |dictionary| {
@@ -511,7 +491,8 @@ pub fn fromUniquePairs(
     var materializer = try Materializer.init(allocator, pairs, false);
     var completed = false;
     defer if (!completed) materializer.retire(releases);
-    while (true) switch (try materializer.advance(std.math.maxInt(usize))) {
+    var work = poll.unbounded();
+    while (true) switch (try materializer.advance(&work)) {
         .pending => {},
         .duplicate_key => unreachable,
         .complete => |dictionary| {
@@ -594,7 +575,8 @@ fn findWithAllocator(
 ) error{OutOfMemory}!?usize {
     var cursor = FindCursor.initHeader(allocator, header, key);
     defer cursor.deinit();
-    _ = try poll.driveFallible(?Value, &cursor, .{std.math.maxInt(usize)});
+    var work = poll.unbounded();
+    _ = try poll.driveFallible(?Value, &cursor, .{&work});
     return cursor.foundIndex();
 }
 
@@ -653,10 +635,13 @@ test "blocking and resumable dictionary APIs share construction and lookup" {
     };
     var materializer = try Materializer.init(allocator, &pairs, true);
     var pending: usize = 0;
-    const dictionary = while (true) switch (try materializer.advance(1)) {
-        .pending => pending += 1,
-        .duplicate_key => return error.UnexpectedDuplicateKey,
-        .complete => |result| break result,
+    const dictionary = while (true) {
+        var step: poll.WorkBudget = .init(1);
+        switch (try materializer.advance(&step)) {
+            .pending => pending += 1,
+            .duplicate_key => return error.UnexpectedDuplicateKey,
+            .complete => |result| break result,
+        }
     };
     materializer.deinit();
     defer cleanup.releaseValue(dictionary);
@@ -675,9 +660,12 @@ test "blocking and resumable dictionary APIs share construction and lookup" {
     try std.testing.expectError(error.DuplicateKey, fromPairs(allocator, releases, &duplicates));
     var duplicate_cursor = try Materializer.init(allocator, &duplicates, true);
     defer duplicate_cursor.retire(releases);
-    while (true) switch (try duplicate_cursor.advance(1)) {
-        .pending => {},
-        .duplicate_key => break,
-        .complete => return error.ExpectedDuplicateKey,
-    };
+    while (true) {
+        var step: poll.WorkBudget = .init(1);
+        switch (try duplicate_cursor.advance(&step)) {
+            .pending => {},
+            .duplicate_key => break,
+            .complete => return error.ExpectedDuplicateKey,
+        }
+    }
 }

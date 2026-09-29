@@ -202,7 +202,7 @@ const HasDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *HasDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        return switch (try self.cursor.borrowMut().advance(machine.kernel_poll_quantum)) {
+        return switch (try self.cursor.borrowMut().advance(evaluator.workBudget())) {
             .pending => .yielded,
             .complete => |found| .{ .output = .{ .int = @intFromBool(found != null) } },
         };
@@ -385,7 +385,7 @@ const PervasivePutDriver = struct {
         if (self.materializer == null)
             self.materializer = .init(list.ValueMaterializer.init(evaluator.allocator(), output));
         if (remaining == 0) return .yielded;
-        return switch (try self.materializer.?.borrowMut().advance(remaining)) {
+        return switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
             .pending => .yielded,
             .complete => |result| completed: {
                 self.materializer.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
@@ -548,7 +548,7 @@ const ListPutDriver = struct {
             self.materializer = .init(list.ValueMaterializer.init(evaluator.allocator(), values));
         }
         if (budget == 0) return .yielded;
-        return switch (try self.materializer.?.borrowMut().advance(budget)) {
+        return switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
             .pending => .yielded,
             .complete => |result| completed: {
                 self.materializer.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
@@ -602,7 +602,7 @@ const DictPutDriver = struct {
     pub fn advance(evaluator: *Machine, self: *DictPutDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
-        if (self.work.borrowMut().* == .finding) switch (try self.work.borrowMut().finding.advance(budget)) {
+        if (self.work.borrowMut().* == .finding) switch (try self.work.borrowMut().finding.advance(evaluator.workBudget())) {
             .pending => return .yielded,
             .complete => {
                 self.found_index = self.work.borrowMut().finding.foundIndex();
@@ -640,7 +640,7 @@ const DictPutDriver = struct {
             };
         }
         if (budget == 0) return .yielded;
-        return switch (try self.work.borrowMut().materializing.advance(budget)) {
+        return switch (try self.work.borrowMut().materializing.advance(evaluator.workBudget())) {
             .pending => .yielded,
             .duplicate_key => unreachable,
             .complete => |result| completed: {
@@ -695,7 +695,7 @@ const FromListsDriver = struct {
             if (self.index != pairs.len or budget == 0) return .yielded;
             self.materializer = .init(try .init(evaluator.allocator(), pairs, true));
         }
-        return switch (try self.materializer.?.borrowMut().advance(budget)) {
+        return switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
             .pending => .yielded,
             .duplicate_key => evaluator.fail(.domain, "dict.from-lists keys must be distinct"),
             .complete => |result| completed: {
@@ -843,7 +843,7 @@ const PervasiveDelDriver = struct {
                 self.index += 1;
                 budget -= 1;
             },
-            .materialize => return switch (try self.materializer.?.borrowMut().advance(budget)) {
+            .materialize => return switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
                 .pending => .yielded,
                 .complete => |result| completed: {
                     self.materializer.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
@@ -888,7 +888,7 @@ const ListDelDriver = struct {
             ));
         }
         if (budget == 0) return .yielded;
-        return switch (try self.materializer.?.borrowMut().advance(budget)) {
+        return switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
             .pending => .yielded,
             .complete => |result| completed: {
                 self.materializer.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
@@ -915,7 +915,7 @@ const DictDelDriver = struct {
     pub fn advance(evaluator: *Machine, self: *DictDelDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
-        if (self.work.borrowMut().* == .finding) switch (try self.work.borrowMut().finding.advance(budget)) {
+        if (self.work.borrowMut().* == .finding) switch (try self.work.borrowMut().finding.advance(evaluator.workBudget())) {
             .pending => return .yielded,
             .complete => {
                 self.removed_index = self.work.borrowMut().finding.foundIndex();
@@ -948,7 +948,7 @@ const DictDelDriver = struct {
                 false,
             ) };
         }
-        return switch (try self.work.borrowMut().materializing.advance(budget)) {
+        return switch (try self.work.borrowMut().materializing.advance(evaluator.workBudget())) {
             .pending => .yielded,
             .duplicate_key => unreachable,
             .complete => |result| completed: {
@@ -1031,7 +1031,7 @@ const MergeDriver = struct {
                         key,
                     ),
                 };
-                switch (try self.work.borrowMut().finding.advance(1)) {
+                switch (try poll.advanceWithin(&self.work.borrowMut().finding, 1)) {
                     .pending => budget -= 1,
                     .complete => {
                         const found = self.work.borrowMut().finding.foundIndex();
@@ -1048,7 +1048,7 @@ const MergeDriver = struct {
                     },
                 }
             },
-            .materialize => return switch (try self.work.borrowMut().materializing.advance(budget)) {
+            .materialize => return switch (try self.work.borrowMut().materializing.advance(evaluator.workBudget())) {
                 .pending => .yielded,
                 .duplicate_key => unreachable,
                 .complete => |result| completed: {
@@ -1257,7 +1257,7 @@ fn SplitDriver(comptime text_kind: value.HeapKind, comptime separator_kind: valu
                     self.codepoint_index += copied;
                     budget -= copied;
                 },
-                .materialize_result => switch (try self.result_materializer.?.borrowMut().advance(budget)) {
+                .materialize_result => switch (try poll.advanceWithin(self.result_materializer.?.borrowMut(), budget)) {
                     .pending => return .yielded,
                     .complete => |result| {
                         self.result_materializer.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
@@ -1650,7 +1650,7 @@ const FormatDriver = struct {
                 }
                 budget -= 1;
             },
-            .materialize => |*materialize| return switch (try materialize.materializer.borrowMut().advance(budget)) {
+            .materialize => |*materialize| return switch (try materialize.materializer.borrowMut().advance(evaluator.workBudget())) {
                 .pending => .yielded,
                 .complete => |result| completed: {
                     materialize.materializer.deinit(evaluator.releaseDomain(), evaluator.allocator());

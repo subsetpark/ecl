@@ -330,7 +330,7 @@ const DefineDriver = struct {
                     self.state.borrowMut().* = .{ .validate_name = .init(self.name) };
                 }
             },
-            .normalize_doc => |*normalization| switch (try normalization.normalizer.borrowMut().advance(budget)) {
+            .normalize_doc => |*normalization| switch (try normalization.normalizer.borrowMut().advance(evaluator.workBudget())) {
                 .pending => return .yielded,
                 .complete => |normalized| {
                     self.annotation.borrowMut().doc_source = normalized;
@@ -380,7 +380,7 @@ const DefineDriver = struct {
                 copy.index += 1;
                 budget -= 1;
             },
-            .materialize_effect => |*materialization| switch (try materialization.materializer.borrowMut().advance(budget)) {
+            .materialize_effect => |*materialization| switch (try materialization.materializer.borrowMut().advance(evaluator.workBudget())) {
                 .pending => return .yielded,
                 .complete => |effect_value| {
                     self.annotation.borrowMut().effect_value = effect_value;

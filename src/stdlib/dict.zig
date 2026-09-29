@@ -9,6 +9,7 @@
 const value = @import("../value.zig");
 const heap = @import("../heap.zig");
 const list = @import("../list.zig");
+const poll = @import("../poll.zig");
 const intern = @import("../intern.zig");
 const env = @import("../env.zig");
 const machine = @import("../machine.zig");
@@ -187,7 +188,7 @@ const DictLookupDriver = struct {
                 self.dictionary.borrow().dict,
                 list.atUnchecked(self.keys.borrow(), self.index),
             ));
-            switch (try self.cursor.?.borrowMut().advance(1)) {
+            switch (try poll.advanceWithin(self.cursor.?.borrowMut(), 1)) {
                 .pending => {},
                 .complete => |found| {
                     self.output.?.borrowMut().appendBorrowed(found orelse if (self.fallback) |*fallback| fallback.borrow() else return evaluator.fail(.domain, "dict.at could not find the dict key"));
@@ -284,7 +285,7 @@ const AssociateDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *AssociateDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        return switch (try self.materializer.borrowMut().advance(machine.kernel_poll_quantum)) {
+        return switch (try self.materializer.borrowMut().advance(evaluator.workBudget())) {
             .pending => .yielded,
             .duplicate_key => unreachable,
             .complete => |dictionary| .{ .output = dictionary },
@@ -327,7 +328,7 @@ const FromFlatDriver = struct {
             self.materializer = .init(try .init(evaluator.allocator(), flat_pairs, true));
             return .yielded;
         }
-        return switch (try self.materializer.?.borrowMut().advance(machine.kernel_poll_quantum)) {
+        return switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
             .pending => .yielded,
             .duplicate_key => evaluator.fail(.domain, "dict.from-flat received a duplicate key"),
             .complete => |dictionary| .{ .output = dictionary },
@@ -610,7 +611,7 @@ const DictSelectDriver = struct {
                     self.key_index += 1;
                 }
                 if (budget == 0) return .yielded;
-                const find_progress = try self.finder.?.borrowMut().advance(1);
+                const find_progress = try poll.advanceWithin(self.finder.?.borrowMut(), 1);
                 budget -= 1;
                 switch (find_progress) {
                     .pending => {},
@@ -646,7 +647,7 @@ const DictSelectDriver = struct {
                 self.index += 1;
                 budget -= 1;
             },
-            .materialize => return switch (try self.materializer.?.borrowMut().advance(budget)) {
+            .materialize => return switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
                 .pending => .yielded,
                 .duplicate_key => unreachable,
                 .complete => |result| completed: {
@@ -815,7 +816,7 @@ const MergeWithWorkDriver = struct {
                         key,
                     ),
                 };
-                switch (try state.work.borrowMut().finding.advance(1)) {
+                switch (try poll.advanceWithin(&state.work.borrowMut().finding, 1)) {
                     .pending => budget -= 1,
                     .complete => {
                         const found = state.work.borrowMut().finding.foundIndex();
@@ -838,7 +839,7 @@ const MergeWithWorkDriver = struct {
                     },
                 }
             },
-            .materialize => return switch (try state.work.borrowMut().materializing.advance(budget)) {
+            .materialize => return switch (try state.work.borrowMut().materializing.advance(evaluator.workBudget())) {
                 .pending => .yielded,
                 .duplicate_key => unreachable,
                 .complete => |result| completed: {

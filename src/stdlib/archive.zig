@@ -141,7 +141,7 @@ const MemberReadDriver = struct {
             const count = document.read(self.archive, self.buffer) catch return evaluator.fail(.io, "archive resource is closed");
             self.state = .{ .bytes = .init(evaluator.allocator(), self.buffer[0..count]) };
         }
-        return switch (try self.state.bytes.advance(work_quantum)) {
+        return switch (try self.state.bytes.advance(evaluator.workBudget())) {
             .pending => .yielded,
             .complete => |bytes| result: {
                 self.state.bytes.deinit();
@@ -589,6 +589,7 @@ const UnpackDriver = struct {
                 .allocate_results => self.allocateResults(scanning),
                 .materialize_paths => |*paths| self.materializePaths(evaluator, scanning, paths),
                 .materialize_result => |*materialization| materializeResult(
+                    evaluator,
                     active,
                     materialization,
                 ),
@@ -1181,10 +1182,11 @@ const UnpackDriver = struct {
     }
 
     fn materializeResult(
+        evaluator: *Machine,
         active: *Active,
         materialization: *@FieldType(ScanWork, "materialize_result"),
     ) MachineError!driver_completion.Progress {
-        return switch (try materialization.materializer.advance(work_quantum)) {
+        return switch (try materialization.materializer.advance(evaluator.workBudget())) {
             .pending => .yielded,
             .complete => |result| result: {
                 var completed = materialization.materializer;

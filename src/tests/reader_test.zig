@@ -5,6 +5,7 @@ const minish = @import("minish");
 const heap = @import("../heap.zig");
 const equal = @import("../equal.zig");
 const list = @import("../list.zig");
+const poll = @import("../poll.zig");
 const printer = @import("../print.zig");
 const lexer = @import("../lexer.zig");
 const locals = @import("../locals.zig");
@@ -87,7 +88,7 @@ fn materializeRoot(
     var materializer = archive.rootMaterializer(values);
     var completed = false;
     defer if (!completed) materializer.retire(releases);
-    while (true) switch (try materializer.advance(2)) {
+    while (true) switch (try poll.advanceWithin(&materializer, 2)) {
         .pending => {},
         .complete => |root| {
             materializer.deinit();

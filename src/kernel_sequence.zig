@@ -188,7 +188,7 @@ const FlatGatherDriver = struct {
         if (!self.cursor.complete()) return .yielded;
         if (self.materializer == null)
             self.materializer = .init(.initOwned(evaluator.allocator(), self.values.borrowMut().take()));
-        return switch (try self.materializer.?.borrowMut().advance(machine.kernel_poll_quantum)) {
+        return switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
             .pending => .yielded,
             .complete => |result| .{ .output = result },
         };
@@ -206,7 +206,7 @@ const DictAtDriver = struct {
     cursor: heap.Owned(dict.FindCursor),
     pub fn advance(evaluator: *Machine, self: *DictAtDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        return switch (try self.cursor.borrowMut().advance(machine.kernel_poll_quantum)) {
+        return switch (try self.cursor.borrowMut().advance(evaluator.workBudget())) {
             .pending => .yielded,
             .complete => |maybe_result| result: {
                 const found = maybe_result orelse
@@ -337,7 +337,7 @@ const IndexCursor = struct {
                     if (build.materializer == null)
                         build.materializer = .init(self.allocator, build.values.values());
                     try self.frames.reserve(1);
-                    switch (try build.materializer.?.advance(remaining)) {
+                    switch (try build.materializer.?.advance(evaluator.workBudget())) {
                         .pending => {
                             self.frames.pushReserved(.{ .build = build.* });
                             return .pending;
@@ -946,7 +946,7 @@ const MembershipCursor = struct {
                         search.needle,
                         candidate_value,
                     );
-                    switch (try search.match.?.advanceWithBudget(&work)) {
+                    switch (try search.match.?.advance(&work)) {
                         .pending => {
                             try self.frames.push(.{ .search = search.* });
                             return .pending;
@@ -995,7 +995,7 @@ const MembershipCursor = struct {
                         self.frames.pushReserved(.{ .build = build.* });
                         return .pending;
                     }
-                    switch (try build.materializer.?.advanceWithBudget(&work)) {
+                    switch (try build.materializer.?.advance(&work)) {
                         .pending => {
                             self.frames.pushReserved(.{ .build = build.* });
                             return .pending;
@@ -1074,7 +1074,7 @@ const RazeDriver = struct {
                 }
                 budget -= 1;
             },
-            .materialize => return switch (try self.materializer.?.borrowMut().advance(budget)) {
+            .materialize => return switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
                 .pending => .yielded,
                 .complete => |result| .{ .output = result },
             },
@@ -1192,7 +1192,7 @@ const TakeDriver = struct {
         if (self.result_index != values.len) return .yielded;
         self.materializing = true;
         if (budget == 0) return .yielded;
-        return switch (try self.materializer.borrowMut().advance(budget)) {
+        return switch (try self.materializer.borrowMut().advance(evaluator.workBudget())) {
             .pending => .yielded,
             .complete => |result| .{ .output = result },
         };
@@ -1313,7 +1313,7 @@ const ListCopyDriver = struct {
             self.index += 1;
         }
         if (self.index != values.len or budget == 0) return .yielded;
-        return switch (try self.materializer.borrowMut().advance(budget)) {
+        return switch (try self.materializer.borrowMut().advance(evaluator.workBudget())) {
             .pending => .yielded,
             .complete => |result| .{ .output = result },
         };
@@ -1556,11 +1556,11 @@ const FlipDriver = struct {
             self.cells = .init(try evaluator.allocator().alloc(Value, rows));
             return .yielded;
         }
-        if (self.outer) |*outer| return switch (try outer.borrowMut().advance(machine.kernel_poll_quantum)) {
+        if (self.outer) |*outer| return switch (try outer.borrowMut().advance(evaluator.workBudget())) {
             .pending => .yielded,
             .complete => |result| .{ .output = result },
         };
-        if (self.inner) |*inner| switch (try inner.borrowMut().advance(machine.kernel_poll_quantum)) {
+        if (self.inner) |*inner| switch (try inner.borrowMut().advance(evaluator.workBudget())) {
             .pending => return .yielded,
             .complete => |row_value| {
                 inner.deinit(evaluator.releaseDomain(), evaluator.allocator());
@@ -1797,7 +1797,7 @@ const ReshapeBuildCursor = struct {
             if (frame.materializer == null)
                 frame.materializer = .init(self.allocator, frame.values.values());
             try self.frames.reserve(1);
-            switch (try frame.materializer.?.advance(remaining)) {
+            switch (try poll.advanceWithin(&frame.materializer.?, remaining)) {
                 .pending => {
                     self.frames.pushReserved(frame);
                     return .pending;

@@ -175,9 +175,7 @@ const StackSnapshotDriver = struct {
             self.materializer = .init(.init(evaluator.allocator(), self.snapshot.borrow().items()));
             return .yielded;
         }
-        if (self.result == null) switch (try self.materializer.?.borrowMut().advance(
-            machine.kernel_poll_quantum,
-        )) {
+        if (self.result == null) switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
             .pending => return .yielded,
             .complete => |result| {
                 self.result = .init(result);
@@ -245,7 +243,7 @@ const ConcatDriver = struct {
         if (self.index != values.len) return .yielded;
         self.materializing = true;
         if (budget == 0) return .yielded;
-        return switch (try self.materializer.borrowMut().advance(budget)) {
+        return switch (try self.materializer.borrowMut().advance(evaluator.workBudget())) {
             .pending => .yielded,
             .complete => |result| .{ .output = result },
         };
@@ -279,7 +277,7 @@ const MatchDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *MatchDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        return switch (try self.cursor.borrowMut().advance(machine.kernel_poll_quantum)) {
+        return switch (try self.cursor.borrowMut().advance(evaluator.workBudget())) {
             .pending => .yielded,
             .complete => |matches| .{ .output = .{ .int = @intFromBool(matches) } },
         };
@@ -475,7 +473,7 @@ const StringBytesDriver = struct {
                 return .yielded;
             },
         };
-        return switch (try self.materializer.?.borrowMut().advance(machine.kernel_poll_quantum)) {
+        return switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
             .pending => .yielded,
             .complete => |result| .{ .output = result },
         };
@@ -759,7 +757,7 @@ const RaiseDriver = struct {
                     self.raised.borrow().dict,
                     .{ .symbol = self.keys[self.field_index] },
                 ));
-                switch (try self.lookup.?.borrowMut().advance(machine.kernel_poll_quantum)) {
+                switch (try self.lookup.?.borrowMut().advance(evaluator.workBudget())) {
                     .pending => return .yielded,
                     .complete => |found| {
                         self.lookup.?.deinit(evaluator.releaseDomain(), evaluator.allocator());

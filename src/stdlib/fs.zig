@@ -793,12 +793,12 @@ const Driver = struct {
             .waiting_lock => |file| self.waitForLock(evaluator, file),
             .removing_tree => |*tree| self.removeTreeStep(evaluator, tree),
             .read => |*read| self.readStep(evaluator, read),
-            .bytes_value => |*building| self.materializeBytes(building),
+            .bytes_value => |*building| self.materializeBytes(evaluator, building),
             .text_value => |*building| self.materializeText(evaluator, building),
             .list_collect => |*collect| self.collectEntries(evaluator, collect),
             .list_order => |*ordering| self.orderEntries(ordering),
             .list_build => |*build| self.buildEntries(evaluator, build),
-            .list_result => |*result| self.materializeEntries(result),
+            .list_result => |*result| self.materializeEntries(evaluator, result),
             .list_release => |*release| self.releaseEntries(evaluator, release),
             .write => |*write| self.writeStep(evaluator, write),
             .commit => |*staged| self.commitStep(evaluator, staged),
@@ -1173,9 +1173,10 @@ const Driver = struct {
 
     fn materializeBytes(
         self: *Driver,
+        evaluator: *Machine,
         building: *@FieldType(State, "bytes_value"),
     ) MachineError!driver_completion.Progress {
-        return switch (try building.materializer.advance(work_quantum)) {
+        return switch (try building.materializer.advance(evaluator.workBudget())) {
             .pending => .yielded,
             .complete => |result| complete: {
                 building.materializer.deinit();
@@ -1348,8 +1349,8 @@ const Driver = struct {
         return .yielded;
     }
 
-    fn materializeEntries(self: *Driver, result: *Result) MachineError!driver_completion.Progress {
-        return switch (try result.materializer.advance(work_quantum)) {
+    fn materializeEntries(self: *Driver, evaluator: *Machine, result: *Result) MachineError!driver_completion.Progress {
+        return switch (try result.materializer.advance(evaluator.workBudget())) {
             .pending => .yielded,
             .complete => |listing| complete: {
                 result.materializer.deinit();

@@ -9,6 +9,7 @@ const intern = @import("intern.zig");
 const machine = @import("machine.zig");
 const storage = @import("kernel_storage.zig");
 const list = @import("list.zig");
+const poll = @import("poll.zig");
 const value = @import("value.zig");
 
 const max_module_name_bytes = 256;
@@ -299,7 +300,7 @@ const DocumentBuild = struct {
                 self.state = .{ .normalize = .{ .source = source, .cursor = normalizer } };
                 return null;
             },
-            .normalize => |*normalizing| switch (try normalizing.cursor.advance(budget)) {
+            .normalize => |*normalizing| switch (try poll.advanceWithin(&normalizing.cursor, budget)) {
                 .pending => return null,
                 .complete => |normalized| {
                     const source = normalizing.source;
@@ -398,7 +399,7 @@ const EffectBuild = struct {
                     self.state = .{ .materialize = .init(self.host.allocator(), self.tokens) };
                 }
             },
-            .materialize => |*materializer| switch (try materializer.advance(remaining)) {
+            .materialize => |*materializer| switch (try poll.advanceWithin(materializer, remaining)) {
                 .pending => return null,
                 .complete => |item| {
                     materializer.deinit();

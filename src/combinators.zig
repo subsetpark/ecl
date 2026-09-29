@@ -1107,7 +1107,7 @@ const UpdateWorkDriver = struct {
                     ));
                 }
                 if (budget == 0) return .yielded;
-                const progress = try state.finder.?.borrowMut().advance(1);
+                const progress = try poll.advanceWithin(state.finder.?.borrowMut(), 1);
                 budget -= 1;
                 switch (progress) {
                     .pending => {},
@@ -1157,7 +1157,7 @@ const UpdateWorkDriver = struct {
                         evaluator.allocator(),
                         state.values.borrow().values(),
                     ));
-                return switch (try state.list_materializer.?.borrowMut().advance(budget)) {
+                return switch (try state.list_materializer.?.borrowMut().advance(evaluator.workBudget())) {
                     .pending => .yielded,
                     .complete => |result| completed: {
                         state.list_materializer.?.deinit(
@@ -1169,7 +1169,7 @@ const UpdateWorkDriver = struct {
                     },
                 };
             },
-            .materialize_dict => return switch (try state.dict_materializer.?.borrowMut().advance(budget)) {
+            .materialize_dict => return switch (try state.dict_materializer.?.borrowMut().advance(evaluator.workBudget())) {
                 .pending => .yielded,
                 .duplicate_key => unreachable,
                 .complete => |result| completed: {
@@ -1311,7 +1311,7 @@ const CollectedDriver = struct {
     pub fn advance(evaluator: *Machine, self: *CollectedDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.result == null) {
-            switch (try self.materializer.borrowMut().advance(machine.kernel_poll_quantum)) {
+            switch (try self.materializer.borrowMut().advance(evaluator.workBudget())) {
                 .pending => return .yielded,
                 .complete => |result| {
                     self.result = .init(result);
@@ -1379,7 +1379,7 @@ const StencilBootstrapDriver = struct {
                 self.window_values.borrow().values(),
             ));
         }
-        switch (try self.materializer.?.borrowMut().advance(machine.kernel_poll_quantum)) {
+        switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
             .pending => return .yielded,
             .complete => |window| {
                 var window_owner = heap.OwnedValue.init(evaluator.releaseDomain(), window);
@@ -1736,7 +1736,7 @@ const InfraResultDriver = struct {
     pub fn advance(evaluator: *Machine, self: *InfraResultDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.result == null) {
-            switch (try self.materializer.borrowMut().advance(machine.kernel_poll_quantum)) {
+            switch (try self.materializer.borrowMut().advance(evaluator.workBudget())) {
                 .pending => return .yielded,
                 .complete => |result| {
                     self.result = .init(result);

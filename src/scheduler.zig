@@ -2684,7 +2684,8 @@ pub const WorkerScheduler = enum(usize) {
                 };
             },
             .success_materializing => |*materializer| {
-                const materialized = materializer.advance(machine.kernel_poll_quantum) catch {
+                var work_budget: poll.WorkBudget = .init(machine.kernel_poll_quantum);
+                const materialized = materializer.advance(&work_budget) catch {
                     materializer.retire(self.releaseDomain());
                     work.* = .{ .ready = .oom };
                     return true;

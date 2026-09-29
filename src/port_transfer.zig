@@ -242,7 +242,7 @@ pub fn ReadDriver(comptime Backend: type) type {
                 };
                 self.state = .{ .materializing = .init(self.allocator, self.buffer[0..count]) };
             }
-            return switch (try self.state.materializing.advance(machine.kernel_poll_quantum)) {
+            return switch (try self.state.materializing.advance(evaluator.workBudget())) {
                 .pending => .yielded,
                 .complete => |item| complete: {
                     self.state.materializing.deinit();

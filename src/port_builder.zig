@@ -121,7 +121,7 @@ const State = struct {
                 if (symbol.index == symbol.bytes.len) symbol.cursor = intern.insertionCursor(symbol.bytes);
                 return .pending;
             },
-            .byte_list => |*building| switch (try building.materializer.advance(quantum)) {
+            .byte_list => |*building| switch (try poll.advanceWithin(&building.materializer, quantum)) {
                 .pending => return .pending,
                 .complete => |item| {
                     building.materializer.deinit();
@@ -148,7 +148,7 @@ const State = struct {
                 }
                 return .complete;
             },
-            .list => |*building| switch (try building.materializer.advance(quantum)) {
+            .list => |*building| switch (try poll.advanceWithin(&building.materializer, quantum)) {
                 .pending => return .pending,
                 .complete => |item| {
                     const start = building.start;
@@ -172,7 +172,7 @@ const State = struct {
                     }
                     return .pending;
                 },
-                .materializing => |*materializer| switch (try materializer.advance(quantum)) {
+                .materializing => |*materializer| switch (try poll.advanceWithin(materializer, quantum)) {
                     .pending => return .pending,
                     .duplicate_key => return error.DuplicateKey,
                     .complete => |item| {

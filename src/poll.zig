@@ -51,6 +51,40 @@ pub const WorkBudget = struct {
     }
 };
 
+/// The allowance for work no unit owns: a blocking constructor or setup path
+/// that runs on its caller's thread and drives a cursor to completion. Its
+/// inputs must be bounded by that caller. A unit's user-sized work draws on
+/// the unit's own budget instead.
+pub fn unbounded() WorkBudget {
+    return .{ .remaining = std.math.maxInt(usize) };
+}
+
+/// Advances a cursor against a private allowance of `units`. Transitional:
+/// each caller is a driver loop that still meters itself rather than drawing
+/// on its unit's budget, and moves to that budget with its driver.
+pub fn advanceWithin(cursor: anytype, units: usize) AdvanceResult(@TypeOf(cursor)) {
+    var work: WorkBudget = .{ .remaining = units };
+    return cursor.advance(&work);
+}
+
+fn AdvanceResult(comptime Pointer: type) type {
+    const Cursor = @typeInfo(Pointer).pointer.child;
+    return @typeInfo(@TypeOf(Cursor.advance)).@"fn".return_type.?;
+}
+
+/// Drive a fallible cursor to completion, lending it a fresh allowance of
+/// `units` on each advance. For callers that exercise a cursor's resumption at
+/// a small grain; a shared finite budget would stall once spent.
+pub fn driveInSlices(comptime T: type, cursor: anytype, units: usize) !T {
+    while (true) {
+        var work: WorkBudget = .{ .remaining = units };
+        switch (try cursor.advance(&work)) {
+            .pending => {},
+            .complete => |result| return result,
+        }
+    }
+}
+
 /// Drive a non-failing finite cursor to its observable result.
 pub fn drive(comptime T: type, cursor: anytype, args: anytype) T {
     const Cursor = @TypeOf(cursor.*);

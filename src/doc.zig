@@ -25,7 +25,8 @@ pub fn normalize(
 ) error{OutOfMemory}!Value {
     var cursor = try NormalizeCursor.init(allocator, document);
     defer cursor.deinit();
-    return poll.driveFallible(Value, &cursor, .{1024});
+    var work = poll.unbounded();
+    return poll.driveFallible(Value, &cursor, .{&work});
 }
 
 /// Resumable two-pass documentation normalization. Line discovery, margin
@@ -88,13 +89,12 @@ pub const NormalizeCursor = struct {
         self.allocator.free(self.lines);
     }
 
-    pub fn advance(self: *NormalizeCursor, budget: usize) error{OutOfMemory}!NormalizeProgress {
-        var remaining = budget;
-        while (remaining != 0) : (remaining -= 1) switch (self.phase) {
+    pub fn advance(self: *NormalizeCursor, work: *poll.WorkBudget) error{OutOfMemory}!NormalizeProgress {
+        while (self.phase == .materialize or work.spend()) switch (self.phase) {
             .scan => self.scanOne(),
             .bounds => self.boundOne(),
             .render_count, .render_fill => try self.renderOne(),
-            .materialize => return switch (try self.materializer.?.advance(remaining)) {
+            .materialize => return switch (try self.materializer.?.advance(work)) {
                 .pending => .pending,
                 .complete => |result| .{ .complete = result },
             },

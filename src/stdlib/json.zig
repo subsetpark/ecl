@@ -217,11 +217,11 @@ const ParseDriver = struct {
     fn advanceBuilding(self: *ParseDriver, evaluator: *Machine) MachineError!?Value {
         const building = &self.building.?;
         const result: ?Value = switch (building.target) {
-            .values => |*materializer| switch (try materializer.advance(machine.kernel_poll_quantum)) {
+            .values => |*materializer| switch (try materializer.advance(evaluator.workBudget())) {
                 .pending => null,
                 .complete => |item| item,
             },
-            .pairs => |*materializer| switch (try materializer.advance(machine.kernel_poll_quantum)) {
+            .pairs => |*materializer| switch (try materializer.advance(evaluator.workBudget())) {
                 .pending => null,
                 .duplicate_key => {
                     // RFC 8259 leaves duplicate names to the implementation;

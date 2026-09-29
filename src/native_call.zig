@@ -8,6 +8,7 @@ const env = @import("env.zig");
 const heap = @import("heap.zig");
 const intern = @import("intern.zig");
 const list = @import("list.zig");
+const poll = @import("poll.zig");
 const machine = @import("machine.zig");
 const native_module = @import("native_module.zig");
 const value = @import("value.zig");
@@ -305,7 +306,7 @@ const ListBuild = struct {
         while (call.budget != 0) {
             call.budget -= 1;
             const materializing = &self.state.materializing;
-            switch (try materializing.materializer.advance(1)) {
+            switch (try poll.advanceWithin(&materializing.materializer, 1)) {
                 .pending => {},
                 .complete => |result| {
                     materializing.materializer.deinit();
@@ -422,7 +423,7 @@ const DictBuild = struct {
         while (call.budget != 0) {
             call.budget -= 1;
             const materializing = &self.state.materializing;
-            switch (try materializing.materializer.advance(1)) {
+            switch (try poll.advanceWithin(&materializing.materializer, 1)) {
                 .pending => {},
                 .duplicate_key => {
                     materializing.materializer.retire(call.releases);

@@ -55,7 +55,8 @@ pub fn matchWithAllocator(
 ) error{OutOfMemory}!bool {
     var cursor = try MatchCursor.init(allocator, a, b);
     defer cursor.deinit();
-    return poll.driveFallible(bool, &cursor, .{1024});
+    var work = poll.unbounded();
+    return poll.driveFallible(bool, &cursor, .{&work});
 }
 
 /// The comparison a match needs no worklist for: any pair that is not a list
@@ -114,15 +115,10 @@ pub const MatchCursor = struct {
         self.* = undefined;
     }
 
-    pub fn advance(self: *MatchCursor, budget: usize) error{OutOfMemory}!MatchProgress {
-        var work: poll.WorkBudget = .init(budget);
-        return self.advanceWithBudget(&work);
-    }
-
     /// Advances against the caller's one shared allowance. A parent cursor
     /// can continue after completion without guessing how much child work the
     /// completed comparison consumed.
-    pub fn advanceWithBudget(
+    pub fn advance(
         self: *MatchCursor,
         work: *poll.WorkBudget,
     ) error{OutOfMemory}!MatchProgress {
@@ -413,7 +409,8 @@ pub fn hashWithAllocator(
 ) error{OutOfMemory}!u64 {
     var cursor = try HashCursor.init(allocator, item);
     defer cursor.deinit();
-    return poll.driveFallible(u64, &cursor, .{1024});
+    var work = poll.unbounded();
+    return poll.driveFallible(u64, &cursor, .{&work});
 }
 
 pub const HashProgress = poll.Progress(u64);
@@ -436,12 +433,7 @@ pub const HashCursor = struct {
         self.* = undefined;
     }
 
-    pub fn advance(self: *HashCursor, budget: usize) error{OutOfMemory}!HashProgress {
-        var work: poll.WorkBudget = .init(budget);
-        return self.advanceWithBudget(&work);
-    }
-
-    pub fn advanceWithBudget(self: *HashCursor, work: *poll.WorkBudget) error{OutOfMemory}!HashProgress {
+    pub fn advance(self: *HashCursor, work: *poll.WorkBudget) error{OutOfMemory}!HashProgress {
         while (work.spend()) {
             if (try self.step(work)) |result| return .{ .complete = result };
         }
@@ -773,16 +765,16 @@ test "identity: scalar composite children use bounded allocation-free cursors" {
     defer comparison.deinit();
     var exhausted: poll.WorkBudget = .init(1);
     try std.testing.expect(exhausted.spend());
-    try std.testing.expect(try comparison.advanceWithBudget(&exhausted) == .pending);
-    try std.testing.expect(try comparison.advance(1) == .pending);
-    try std.testing.expect(try poll.driveFallible(bool, &comparison, .{1}));
+    try std.testing.expect(try comparison.advance(&exhausted) == .pending);
+    try std.testing.expect(try poll.advanceWithin(&comparison, 1) == .pending);
+    try std.testing.expect(try poll.driveInSlices(bool, &comparison, 1));
     var hashing = try HashCursor.init(failing.allocator(), left);
     defer hashing.deinit();
-    try std.testing.expect(try hashing.advanceWithBudget(&exhausted) == .pending);
-    try std.testing.expect(try hashing.advance(1) == .pending);
+    try std.testing.expect(try hashing.advance(&exhausted) == .pending);
+    try std.testing.expect(try poll.advanceWithin(&hashing, 1) == .pending);
     try std.testing.expectEqual(
         try hashWithAllocator(failing.allocator(), right),
-        try poll.driveFallible(u64, &hashing, .{1}),
+        try poll.driveInSlices(u64, &hashing, 1),
     );
     reals[512] = .{ .float = 2 };
     const different = try list.fromValuesGeneric(allocator, &reals);
@@ -818,14 +810,14 @@ test "identity: strings share equality and hashes across widths and generic list
     }
     var comparison = try MatchCursor.init(allocator, strings[0], strings[1]);
     defer comparison.deinit();
-    try std.testing.expect(try comparison.advance(1) == .pending);
-    try std.testing.expect(try comparison.advance(1) == .pending);
-    try std.testing.expect(try poll.driveFallible(bool, &comparison, .{17}));
+    try std.testing.expect(try poll.advanceWithin(&comparison, 1) == .pending);
+    try std.testing.expect(try poll.advanceWithin(&comparison, 1) == .pending);
+    try std.testing.expect(try poll.driveInSlices(bool, &comparison, 17));
     var hashing = try HashCursor.init(allocator, strings[2]);
     defer hashing.deinit();
-    try std.testing.expect(try hashing.advance(1) == .pending);
-    try std.testing.expect(try hashing.advance(1) == .pending);
-    try std.testing.expectEqual(expected_hash, try poll.driveFallible(u64, &hashing, .{17}));
+    try std.testing.expect(try poll.advanceWithin(&hashing, 1) == .pending);
+    try std.testing.expect(try poll.advanceWithin(&hashing, 1) == .pending);
+    try std.testing.expectEqual(expected_hash, try poll.driveInSlices(u64, &hashing, 17));
     var mismatch_writer = try heap.LeafWriter(.leaf_char4).init(allocator, characters.len);
     mismatch_writer.fillRange(0, characters.len, 'a');
     mismatch_writer.fillRange(256, 1, 0);

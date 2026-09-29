@@ -508,7 +508,7 @@ pub const PervadeCursor = struct {
         if (frame.materializer == null)
             frame.materializer = .init(self.allocator, frame.values.values());
         try self.frames.reserve(1);
-        switch (try frame.materializer.?.advance(budget)) {
+        switch (try poll.advanceWithin(&frame.materializer.?, budget)) {
             .pending => {
                 self.frames.pushReserved(.{ .list = frame.* });
                 return false;
@@ -579,7 +579,7 @@ pub const PervadeCursor = struct {
                 false,
             );
             try self.frames.reserve(1);
-            switch (try frame.materializer.?.advance(budget)) {
+            switch (try poll.advanceWithin(&frame.materializer.?, budget)) {
                 .pending => {
                     self.frames.pushReserved(.{ .dictionary = frame.* });
                     return false;
@@ -674,7 +674,7 @@ pub const PervadeCursor = struct {
                     dict.keyAt(other.dict, frame.candidate),
                 );
                 try self.frames.reserve(2);
-                switch (try frame.match_cursor.?.advance(budget)) {
+                switch (try poll.advanceWithin(&frame.match_cursor.?, budget)) {
                     .pending => {
                         self.frames.pushReserved(.{ .dictionary = frame.* });
                         return false;

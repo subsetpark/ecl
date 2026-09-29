@@ -564,7 +564,7 @@ const RequestDriver = struct {
                     .dictionary = dictionary,
                 } };
             },
-            .headers_dictionary => |*headers| switch (try headers.dictionary.advance(machine.kernel_poll_quantum)) {
+            .headers_dictionary => |*headers| switch (try headers.dictionary.advance(evaluator.workBudget())) {
                 .pending => {},
                 .duplicate_key => unreachable,
                 .complete => |built| {
@@ -611,7 +611,7 @@ const RequestDriver = struct {
                     } };
                 },
             },
-            .response_body_bytes => |*body| switch (try body.bytes.advance(machine.kernel_poll_quantum)) {
+            .response_body_bytes => |*body| switch (try body.bytes.advance(evaluator.workBudget())) {
                 .pending => {},
                 .complete => |built| {
                     body.bytes.deinit();
@@ -640,7 +640,7 @@ const RequestDriver = struct {
                     .dictionary = dictionary,
                 } };
             },
-            .finish_dictionary => |*finish| switch (try finish.dictionary.advance(machine.kernel_poll_quantum)) {
+            .finish_dictionary => |*finish| switch (try finish.dictionary.advance(evaluator.workBudget())) {
                 .pending => {},
                 .duplicate_key => return evaluator.fail(.domain, "http response keys collided"),
                 .complete => |built| {

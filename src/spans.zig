@@ -1253,7 +1253,7 @@ pub const SpanArchive = enum(usize) {
                     }
                     break :result .pending;
                 },
-                .materializing => |*materializing| switch (try materializing.materializer.advance(1)) {
+                .materializing => |*materializing| switch (try poll.advanceWithin(&materializing.materializer, 1)) {
                     .pending => .pending,
                     .complete => |root| result: {
                         materializing.materializer.deinit();
@@ -1543,7 +1543,7 @@ const ArchiveFixture = struct {
     /// never produced, which is what every generic reconstruction is.
     fn rebuilt(self: *ArchiveFixture) !heap.OwnedValue {
         var materializer = self.archive.rootMaterializer(&.{.{ .int = 1 }});
-        const root = try poll.driveFallible(value.Value, &materializer, .{1});
+        const root = try poll.driveInSlices(value.Value, &materializer, 1);
         materializer.deinit();
         return .init(heap.hostDomain(self.owner.cleanup()), root);
     }
