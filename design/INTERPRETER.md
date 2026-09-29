@@ -1121,13 +1121,23 @@ a finished application continuation; a long primitive spends bounded work
 through its driver. At exhaustion the machine checks cancellation and yields.
 A scheduler slice therefore has a bound independent of the total source or
 collection size, including for a body that dispatches no form.
-A unit has one kernel budget for its logical work. Cursors doing that work draw
-on it and hand the same budget to the cursors they drive, so nested work
-cannot start an allowance of its own; only the machine refills it, at the
-boundary where it polls cancellation. A driver distinguishes progress from
-surrender: an unfinished step keeps the turn until one kernel quantum has been
-spent in it, and only a driver that cannot progress ends the turn early. A
-cursor of many small steps therefore costs one turn rather than one per step.
+A unit has one kernel budget per turn for its logical work. Every cursor takes
+the budget it is lent and hands the same budget to the cursors it drives, so
+nested work cannot begin an allowance of its own, and a hand-off is charged
+by the cursor that does the work rather than ahead of it. Exhausting the
+budget ends the turn; the next turn begins with a fresh quantum, and the charge
+that exhausts it polls cancellation. Only an owner creates a budget: the
+machine for a unit's turn, the scheduler and the port builder for their own
+steps, and a blocking helper, for work no unit owns, over an input its caller
+bounds.
+
+A driver distinguishes progress from waiting. An unfinished step keeps the turn
+while the budget lasts; a driver that must wait for another unit, the host, or
+a slot's turn ends it. A cursor of many small steps therefore costs one turn
+rather than one per step, and a wait never spends the budget polling. Work
+that must finish regardless of cancellation, such as a failure unwind or a
+completion's cleanup, draws on the budget but always ends the turn when it is
+spent rather than continuing through a charge that could observe cancellation.
 Failure entry detaches any installed native driver before unwinding frames.
 A suspended driver owns the stack handoff it needs. It cannot keep a mutable
 slice of the operand stack while another continuation runs, and a park request

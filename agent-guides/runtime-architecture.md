@@ -89,10 +89,19 @@ publication, reclamation, or architectural enforcement. The short rules in
 ## Bounded work and scheduling
 
 - Route every user-sized traversal, cleanup, and terminal unwind through
-  `WorkContext` cursors or bounded chunks. Use exact-size materialization for
+  cursors that draw on the owner's `poll.WorkBudget`. Use exact-size materialization for
   known results and fixed chunks plus one polled materialization pass for
   unknown results; do not introduce relocating or rehashing storage into
   cancellable paths.
+- Never mint a private allowance for unit work. A cursor takes the budget it is
+  lent and passes the same pointer to what it drives; it charges only its own
+  steps, never a hand-off, or a one-unit grain starves the nested cursor. A
+  driver reports `stepped` while it has work and the budget lasts, and
+  `yielded` only when it must wait or must not observe cancellation. A cursor
+  that can wait on another unit reports `blocked` distinctly from `pending`.
+  Turn length is the kernel quantum; an expensive element charges more units
+  rather than capping its driver's turn. The source audit owns who may create
+  a budget and who may use `poll.unbounded()`.
 - Treat reclamation and terminal cleanup as ordinary resumable scheduler work.
   A final reader, writer, reference, task, or generation may detach and enqueue
   work, but may not hide an unbounded traversal inside one nominal scheduler

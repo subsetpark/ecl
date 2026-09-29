@@ -858,24 +858,40 @@ fn auditUnsafeCasts() bool {
 /// budget and lending that instead; that is the one spelling this audit owns.
 const work_budget_issuers = [_][]const u8{ "poll.zig", "machine.zig", "scheduler.zig", "port_builder.zig" };
 
+/// `poll.unbounded()` is the allowance for work no unit owns, and the audit
+/// cannot tell a caller-bounded input from a user-sized one. The files below
+/// hold the blocking constructors and setup paths that use it today, each
+/// reviewed for a bounded input; a new use elsewhere needs the same review.
+const unbounded_allowance_users = [_][]const u8{
+    "dict.zig",          "doc.zig",  "equal.zig",   "inert_data.zig",
+    "kernel_random.zig", "list.zig", "machine.zig", "modules.zig",
+    "native_module.zig", "poll.zig", "print.zig",   "session.zig",
+    "task_prims.zig",
+};
+
 fn auditWorkBudgetIssuers() bool {
     const minted = [_][]const []const u8{
         &.{ "WorkBudget", ".", "init" },
         &.{ "WorkBudget", "=", ".", "init" },
         &.{ "WorkBudget", "=", ".", "{" },
     };
+    const unbounded = [_][]const []const u8{&.{ "unbounded", "(" }};
     var failed = false;
     for (source_groups) |component| {
         if (!component.production) continue;
         for (component.sources, component.files) |source, file| {
-            const issuer = for (work_budget_issuers) |allowed| {
-                if (std.mem.eql(u8, file, allowed)) break true;
-            } else false;
-            if (issuer) continue;
-            failed = auditProductionTokens(file, source, &minted) or failed;
+            if (!namedIn(&work_budget_issuers, file))
+                failed = auditProductionTokens(file, source, &minted) or failed;
+            if (!namedIn(&unbounded_allowance_users, file))
+                failed = auditProductionTokens(file, source, &unbounded) or failed;
         }
     }
     return failed;
+}
+
+fn namedIn(names: []const []const u8, file: []const u8) bool {
+    for (names) |name| if (std.mem.eql(u8, name, file)) return true;
+    return false;
 }
 
 /// `auditTokens` over everything but `test` declarations.
