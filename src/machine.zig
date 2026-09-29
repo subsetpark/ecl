@@ -4404,7 +4404,7 @@ pub const Machine = struct {
         pub fn advance(evaluator: *Machine, self: *NativeLoadDriver) MachineError!WorkProgress {
             try evaluator.pollKernel();
             switch (self.state.borrowMut().*) {
-                .validate => |*loader| switch (try loader.borrowMut().advance(kernel_poll_quantum)) {
+                .validate => |*loader| switch (try loader.borrowMut().advance(evaluator.workBudget())) {
                     .pending => return .yielded,
                     .failure => |failure| return self.failLoad(evaluator, failure.text()),
                     .loaded => |instance| {

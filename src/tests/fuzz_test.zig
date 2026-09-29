@@ -1,5 +1,6 @@
 const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
+const poll = @import("../poll.zig");
 const formatter = @import("../formatter.zig");
 const print = @import("../print.zig");
 const heap = @import("../heap.zig");
@@ -193,7 +194,7 @@ fn fuzzNativeDescriptor(_: void, smith: *std.testing.Smith) !void {
     };
     var cursor = native_descriptor.ValidateCursor.init(host.cleanup(), requested, &raw);
     defer cursor.deinit();
-    while (true) switch (cursor.advance(1 + smith.index(32)) catch |err| switch (err) {
+    while (true) switch (poll.advanceWithin(&cursor, 1 + smith.index(32)) catch |err| switch (err) {
         error.OutOfMemory => return err,
         else => return,
     }) {

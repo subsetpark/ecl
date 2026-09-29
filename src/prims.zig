@@ -133,9 +133,9 @@ const StackSnapshot = struct {
         };
     }
 
-    fn advanceCapture(self: *StackSnapshot, evaluator: *Machine, budget: usize) bool {
+    fn advanceCapture(self: *StackSnapshot, evaluator: *Machine) bool {
         std.debug.assert(evaluator.available() == self.depth);
-        const end = @min(self.index + budget, self.depth);
+        const end = self.index + evaluator.workBudget().take(self.depth - self.index);
         while (self.index != end) : (self.index += 1)
             self.values.appendBorrowed(evaluator.visibleOperandBorrowed(self.index));
         return self.index == self.depth;
@@ -166,10 +166,7 @@ const StackSnapshotDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *StackSnapshotDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        if (!self.snapshot.borrowMut().advanceCapture(
-            evaluator,
-            machine.kernel_poll_quantum,
-        )) return .yielded;
+        if (!self.snapshot.borrowMut().advanceCapture(evaluator)) return .stepped;
 
         if (self.materializer == null) {
             self.materializer = .init(.init(evaluator.allocator(), self.snapshot.borrow().items()));
@@ -865,10 +862,7 @@ const StackDisplayDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *StackDisplayDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        if (!self.snapshot.borrowMut().advanceCapture(
-            evaluator,
-            machine.kernel_poll_quantum,
-        )) return .yielded;
+        if (!self.snapshot.borrowMut().advanceCapture(evaluator)) return .stepped;
 
         var prefix_buffer: [64]u8 = undefined;
         const prefix = stackDisplayPrefix(&prefix_buffer, self.index);

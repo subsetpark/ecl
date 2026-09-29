@@ -210,9 +210,9 @@ const GuardCheckpoint = struct {
             .phase = self.phase,
         };
     }
-    fn advanceCapture(self: *GuardCheckpoint, evaluator: *Machine, budget: usize) bool {
+    fn advanceCapture(self: *GuardCheckpoint, evaluator: *Machine) bool {
         std.debug.assert(self.phase == .capture and evaluator.available() == self.depth);
-        const end = @min(self.index + budget, self.depth);
+        const end = self.index + evaluator.workBudget().take(self.depth - self.index);
         while (self.index != end) : (self.index += 1)
             self.values.appendBorrowed(evaluator.visibleOperandBorrowed(self.index));
         if (self.index != self.depth) return false;
@@ -227,10 +227,9 @@ const GuardCheckpoint = struct {
     fn advanceRestore(
         self: *GuardCheckpoint,
         evaluator: *Machine,
-        budget: usize,
     ) error{OutOfMemory}!bool {
-        var remaining = budget;
-        while (remaining != 0) : (remaining -= 1) switch (self.phase) {
+        const work = evaluator.workBudget();
+        while (work.spend()) switch (self.phase) {
             .discard => if (evaluator.available() != 0) {
                 evaluator.discard(1);
             } else {
@@ -338,10 +337,7 @@ const GuardSnapshotDriver = struct {
     pub fn advance(evaluator: *Machine, self: *GuardSnapshotDriver) MachineError!machine.WorkProgress {
         evaluator.setActiveWord(self.control.borrow().word);
         try evaluator.pollKernel();
-        if (!self.control.borrowMut().checkpoint.borrowMut().advanceCapture(
-            evaluator,
-            machine.kernel_poll_quantum,
-        )) return .yielded;
+        if (!self.control.borrowMut().checkpoint.borrowMut().advanceCapture(evaluator)) return .stepped;
         var control = heap.Owned(GuardControl).init(self.control.take());
         defer control.deinit(evaluator.releaseDomain(), evaluator.allocator());
         const target = self.target;
@@ -359,10 +355,7 @@ const GuardRestoreDriver = struct {
     pub fn advance(evaluator: *Machine, self: *GuardRestoreDriver) MachineError!machine.WorkProgress {
         evaluator.setActiveWord(self.control.borrow().word);
         try evaluator.pollKernel();
-        if (!try self.control.borrowMut().checkpoint.borrowMut().advanceRestore(
-            evaluator,
-            machine.kernel_poll_quantum,
-        )) return .yielded;
+        if (!try self.control.borrowMut().checkpoint.borrowMut().advanceRestore(evaluator)) return .stepped;
         var control = heap.Owned(GuardControl).init(self.control.take());
         defer control.deinit(evaluator.releaseDomain(), evaluator.allocator());
         const target = self.target;
@@ -525,7 +518,7 @@ const LinrecSnapshotDriver = struct {
         evaluator.setActiveWord(self.level.borrow().word);
         try evaluator.pollKernel();
         const checkpoint = self.level.borrowMut().checkpoint.?.borrowMut();
-        if (!checkpoint.advanceCapture(evaluator, machine.kernel_poll_quantum)) return .yielded;
+        if (!checkpoint.advanceCapture(evaluator)) return .stepped;
         var level = heap.Owned(LinrecLevel).init(self.level.take());
         defer level.deinit(evaluator.releaseDomain(), evaluator.allocator());
         evaluator.retireDriver(self);
@@ -546,10 +539,7 @@ const LinrecRestoreDriver = struct {
         evaluator.setActiveWord(self.level.borrow().word);
         try evaluator.pollKernel();
         const checkpoint = self.level.borrowMut().checkpoint.?.borrowMut();
-        if (!try checkpoint.advanceRestore(
-            evaluator,
-            machine.kernel_poll_quantum,
-        )) return .yielded;
+        if (!try checkpoint.advanceRestore(evaluator)) return .stepped;
         var level = heap.Owned(LinrecLevel).init(self.level.take());
         defer level.deinit(evaluator.releaseDomain(), evaluator.allocator());
         const branch = self.branch;
