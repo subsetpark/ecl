@@ -325,7 +325,7 @@ const ParseDriver = struct {
     source: ?heap.Owned([]u8) = null,
     pub fn advance(evaluator: *Machine, self: *ParseDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        if (self.source == null) switch (self.encoder.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+        if (self.source == null) switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return evaluator.fail(.domain, "string contains an invalid Unicode scalar"),
         }) {
@@ -389,7 +389,7 @@ const SpellingCharsDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *SpellingCharsDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        return switch (self.text.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+        return switch (self.text.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidUtf8 => return invalidUtf8(evaluator, "spelling is not valid UTF-8"),
         }) {
@@ -414,7 +414,7 @@ const BytesToCharsDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *BytesToCharsDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        if (self.bytes == null) switch (self.encoder.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+        if (self.bytes == null) switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidByte => return evaluator.typeError(chars_expected),
         }) {
@@ -425,7 +425,7 @@ const BytesToCharsDriver = struct {
                 return .yielded;
             },
         };
-        return switch (self.text.?.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+        return switch (self.text.?.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidUtf8 => return invalidUtf8(evaluator, "byte list is not valid UTF-8"),
         }) {
@@ -462,7 +462,7 @@ const StringBytesDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *StringBytesDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        if (self.encoded == null) switch (self.encoder.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+        if (self.encoded == null) switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return evaluator.fail(.domain, "string contains an invalid Unicode scalar"),
         }) {
@@ -489,7 +489,7 @@ const ByteListIdentityDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *ByteListIdentityDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        switch (self.encoder.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+        switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidByte => return evaluator.typeError("a string or byte list"),
         }) {
@@ -556,7 +556,7 @@ const SymbolConversionDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *SymbolConversionDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        if (self.spelling == null) switch (self.encoder.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+        if (self.spelling == null) switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return evaluator.fail(.domain, "string contains an invalid Unicode scalar"),
         }) {
@@ -945,7 +945,7 @@ const PrinDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *PrinDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        return switch (self.encoder.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+        return switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return evaluator.fail(
                 .domain,
@@ -986,7 +986,7 @@ const GetenvDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *GetenvDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        if (self.name == null) switch (self.encoder.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+        if (self.name == null) switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return evaluator.fail(
                 .domain,
@@ -1011,7 +1011,7 @@ const GetenvDriver = struct {
                 },
             }
         }
-        return switch (self.text.?.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+        return switch (self.text.?.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidUtf8 => return evaluator.fail(
                 .io,

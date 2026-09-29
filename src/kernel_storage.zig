@@ -40,35 +40,31 @@ pub const Utf8Materializer = struct {
 
     pub fn advance(
         self: *Utf8Materializer,
-        budget: usize,
+        work: *poll.WorkBudget,
     ) (error{OutOfMemory} || error{InvalidUtf8})!Utf8MaterializeResult {
-        std.debug.assert(budget != 0 and self.phase != .complete);
-        var remaining = budget;
-        while (remaining != 0) {
+        std.debug.assert(self.phase != .complete);
+        while (true) {
             switch (self.phase) {
                 .scan => {
                     if (self.byte_index == self.bytes.len) {
                         try self.beginFill();
                         continue;
                     }
+                    if (!work.spend()) return .pending;
                     const codepoint = try decodeUtf8Codepoint(self.bytes, &self.byte_index);
                     self.max_codepoint = @max(self.max_codepoint, codepoint);
                     self.count = std.math.add(usize, self.count, 1) catch return error.OutOfMemory;
-                    remaining -= 1;
                 },
                 .fill => {
                     if (self.byte_index == self.bytes.len) return self.finish();
+                    if (!work.spend()) return .pending;
                     const codepoint = try decodeUtf8Codepoint(self.bytes, &self.byte_index);
                     self.builder.?.writeCodepoint(self.value_index, codepoint);
                     self.value_index += 1;
-                    remaining -= 1;
                 },
                 .complete => unreachable,
             }
         }
-        if (self.phase == .scan and self.byte_index == self.bytes.len) try self.beginFill();
-        if (self.phase == .fill and self.byte_index == self.bytes.len) return self.finish();
-        return .pending;
     }
 
     fn beginFill(self: *Utf8Materializer) error{OutOfMemory}!void {
@@ -117,11 +113,11 @@ fn ChunkedMaterializer(
         pub fn retire(self: *Self, releases: *heap.ReleaseDomain) void {
             if (self.builder) |*builder| builder.retirePartial(releases);
         }
-        pub fn advance(self: *Self, budget: usize) error{OutOfMemory}!MaterializeResult {
-            std.debug.assert(budget != 0 and !self.complete);
+        pub fn advance(self: *Self, work: *poll.WorkBudget) error{OutOfMemory}!MaterializeResult {
+            std.debug.assert(!self.complete);
             if (self.builder == null)
                 self.builder = try Ops.begin(self.allocator, self.source, self.context);
-            const end = @min(self.index + budget, self.source.len);
+            const end = self.index + work.take(self.source.len - self.index);
             Ops.fill(&self.builder.?, self.source, &self.index, end);
             if (self.index != self.source.len) return .pending;
             const result = Ops.finish(&self.builder.?);
@@ -174,8 +170,8 @@ pub const ByteStringMaterializer = struct {
     pub fn retire(self: *ByteStringMaterializer, releases: *heap.ReleaseDomain) void {
         self.inner.retire(releases);
     }
-    pub fn advance(self: *ByteStringMaterializer, budget: usize) error{OutOfMemory}!MaterializeResult {
-        return self.inner.advance(budget);
+    pub fn advance(self: *ByteStringMaterializer, work: *poll.WorkBudget) error{OutOfMemory}!MaterializeResult {
+        return self.inner.advance(work);
     }
 };
 
@@ -209,18 +205,18 @@ pub const TextMaterializer = struct {
             inline else => |*materializer| materializer.retire(releases),
         }
     }
-    pub fn advance(self: *TextMaterializer, budget: usize) error{OutOfMemory}!Utf8MaterializeResult {
-        return switch (self.state) {
-            .utf8 => |*materializer| materializer.advance(budget) catch |err| switch (err) {
+    pub fn advance(self: *TextMaterializer, work: *poll.WorkBudget) error{OutOfMemory}!Utf8MaterializeResult {
+        switch (self.state) {
+            .utf8 => |*materializer| return materializer.advance(work) catch |err| switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
-                error.InvalidUtf8 => result: {
+                error.InvalidUtf8 => {
                     materializer.deinit();
                     self.state = .{ .raw = .init(self.allocator, self.bytes) };
-                    break :result .pending;
+                    return self.state.raw.advance(work);
                 },
             },
-            .raw => |*materializer| materializer.advance(budget),
-        };
+            .raw => |*materializer| return materializer.advance(work),
+        }
     }
 };
 
@@ -285,9 +281,9 @@ pub const ByteVectorEncoder = struct {
 
     pub fn advance(
         self: *ByteVectorEncoder,
-        budget: usize,
+        work: *poll.WorkBudget,
     ) (error{OutOfMemory} || error{InvalidByte})!ByteVectorEncodeResult {
-        std.debug.assert(budget != 0 and !self.complete);
+        std.debug.assert(!self.complete);
         if (self.source.list.kind() == .leaf_u8) {
             self.complete = true;
             return .{ .complete = .{
@@ -296,7 +292,7 @@ pub const ByteVectorEncoder = struct {
         }
         const count: usize = @intCast(self.source.list.length());
         if (self.output == null) self.output = try self.allocator.alloc(u8, count);
-        const end = @min(self.index + budget, count);
+        const end = self.index + work.take(count - self.index);
         while (self.index != end) : (self.index += 1) {
             const item = list.atUnchecked(self.source, self.index);
             if (item != .int or item.int < 0 or item.int > std.math.maxInt(u8)) {
@@ -315,9 +311,8 @@ pub const ByteVectorEncoder = struct {
 
 /// Exact-size resumable encoding for language strings. The first pass counts
 /// bytes and validates scalars; the second writes one codepoint per step.
-/// Each advance processes at most `budget` codepoints and completes at most
-/// one pass. Phase transitions do not charge a codepoint; even empty strings
-/// take a count turn and a fill turn. Completion transfers the buffer to the
+/// Each codepoint of each pass draws one unit from the caller's allowance;
+/// phase transitions draw nothing. Completion transfers the buffer to the
 /// caller, while deinit frees any unfinished buffer.
 pub const StringEncoder = struct {
     allocator: std.mem.Allocator,
@@ -340,20 +335,20 @@ pub const StringEncoder = struct {
 
     pub fn advance(
         self: *StringEncoder,
-        budget: usize,
+        work: *poll.WorkBudget,
     ) (error{OutOfMemory} || error{InvalidCodepoint})!StringEncodeResult {
-        return self.advanceLimited(budget, std.math.maxInt(usize)) catch |err| switch (err) {
+        return self.advanceLimited(work, std.math.maxInt(usize)) catch |err| switch (err) {
             error.Overflow => error.OutOfMemory,
             else => |failure| failure,
         };
     }
 
-    pub fn advanceLimited(self: *StringEncoder, budget: usize, limit: usize) (error{ OutOfMemory, InvalidCodepoint, Overflow })!StringEncodeResult {
-        std.debug.assert(budget != 0 and self.phase != .complete);
+    pub fn advanceLimited(self: *StringEncoder, work: *poll.WorkBudget, limit: usize) (error{ OutOfMemory, InvalidCodepoint, Overflow })!StringEncodeResult {
+        std.debug.assert(self.phase != .complete);
         if (self.byte_count > limit) return error.Overflow;
         const count: usize = @intCast(self.string.list.length());
-        var remaining = budget;
-        while (remaining != 0 and self.index != count) : (remaining -= 1) {
+        while (self.index != count) {
+            if (!work.spend()) return .pending;
             const codepoint = list.atUnchecked(self.string, self.index).char;
             var encoded: [4]u8 = undefined;
             const encoded_len = std.unicode.utf8Encode(
@@ -374,13 +369,12 @@ pub const StringEncoder = struct {
             }
             self.index += 1;
         }
-        if (self.index != count) return .pending;
         switch (self.phase) {
             .count => {
                 self.output = try self.allocator.alloc(u8, self.byte_count);
                 self.phase = .fill;
                 self.index = 0;
-                return .pending;
+                return self.advanceLimited(work, limit);
             },
             .fill => {
                 std.debug.assert(self.written == self.output.?.len);

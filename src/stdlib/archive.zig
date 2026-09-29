@@ -91,7 +91,7 @@ const MemberDriver = struct {
             };
             self.state = .{ .text = .init(evaluator.allocator(), self.path[0..self.metadata.length]) };
         }
-        return switch (self.state.text.advance(work_quantum) catch |err| switch (err) {
+        return switch (self.state.text.advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidUtf8 => return evaluator.fail(.domain, "archive member path is not UTF-8"),
         }) {
@@ -177,7 +177,7 @@ const Sha256Driver = struct {
 
     pub fn advance(evaluator: *Machine, self: *Sha256Driver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        if (self.bytes == null) switch (self.encoder.borrowMut().advance(work_quantum) catch |err| switch (err) {
+        if (self.bytes == null) switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidByte => return evaluator.failAtIndex(
                 .domain,
@@ -200,7 +200,7 @@ const Sha256Driver = struct {
             self.rendered = std.fmt.bytesToHex(self.digest, .lower);
             self.text = .init(.init(evaluator.allocator(), &self.rendered));
         }
-        return switch (try self.text.?.borrowMut().advance(work_quantum)) {
+        return switch (try self.text.?.borrowMut().advance(evaluator.workBudget())) {
             .pending => .yielded,
             .complete => |result| .{ .output = result },
         };
@@ -669,7 +669,7 @@ const UnpackDriver = struct {
         evaluator: *Machine,
         encoding: *@FieldType(Parsing, "encode_bytes"),
     ) MachineError!driver_completion.Progress {
-        switch (encoding.byte.borrowMut().advance(work_quantum) catch |err| switch (err) {
+        switch (encoding.byte.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidByte => return evaluator.failAtIndex(
                 .domain,
@@ -698,7 +698,7 @@ const UnpackDriver = struct {
         evaluator: *Machine,
         encoding: *@FieldType(Parsing, "encode_destination"),
     ) MachineError!driver_completion.Progress {
-        switch (encoding.destination.borrowMut().advance(work_quantum) catch |err| switch (err) {
+        switch (encoding.destination.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return self.failDomain(evaluator, "destination contains an invalid Unicode scalar"),
         }) {
@@ -1148,7 +1148,7 @@ const UnpackDriver = struct {
         paths: *@FieldType(ScanWork, "materialize_paths"),
     ) MachineError!driver_completion.Progress {
         switch (paths.work) {
-            .text => |*materializer| switch (materializer.advance(work_quantum) catch |err| switch (err) {
+            .text => |*materializer| switch (materializer.advance(evaluator.workBudget()) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.InvalidUtf8 => return self.failDomain(evaluator, "tar member path is not valid UTF-8"),
             }) {

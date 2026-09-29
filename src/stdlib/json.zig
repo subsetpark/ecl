@@ -93,7 +93,7 @@ const ParseDriver = struct {
     pub fn advance(evaluator: *Machine, self: *ParseDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.bytes == null) {
-            switch (self.encoder.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+            switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.InvalidCodepoint => return evaluator.fail(
                     .domain,
@@ -230,7 +230,7 @@ const ParseDriver = struct {
                 },
                 .complete => |item| item,
             },
-            .text => |*materializer| switch (try materializer.advance(machine.kernel_poll_quantum)) {
+            .text => |*materializer| switch (try materializer.advance(evaluator.workBudget())) {
                 .pending => null,
                 .complete => |item| item,
             },
@@ -365,7 +365,7 @@ const EmitDriver = struct {
     pub fn advance(evaluator: *Machine, self: *EmitDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.materializer) |*materializer| {
-            return switch (try materializer.advance(machine.kernel_poll_quantum)) {
+            return switch (try materializer.advance(evaluator.workBudget())) {
                 .pending => .yielded,
                 .complete => |text| output: {
                     materializer.deinit();

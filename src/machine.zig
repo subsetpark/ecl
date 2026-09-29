@@ -476,7 +476,7 @@ const OrdinaryErrorCursor = struct {
                     break :result .pending;
                 },
             },
-            .message => |*builder| switch (try builder.advance(1)) {
+            .message => |*builder| switch (try poll_api.advanceWithin(builder, 1)) {
                 .pending => .pending,
                 .complete => |item| result: {
                     builder.deinit();
@@ -556,7 +556,7 @@ const OrdinaryErrorCursor = struct {
                     break :result .pending;
                 },
             },
-            .source => |*source| switch (try source.builder.advance(1)) {
+            .source => |*source| switch (try poll_api.advanceWithin(&source.builder, 1)) {
                 .pending => .pending,
                 .complete => |item| result: {
                     const base = source.base;
@@ -916,7 +916,7 @@ const RaisedErrorCursor = struct {
                     break :result .pending;
                 },
             },
-            .message => |*builder| switch (try builder.advance(1)) {
+            .message => |*builder| switch (try poll_api.advanceWithin(builder, 1)) {
                 .pending => .pending,
                 .complete => |item| result: {
                     builder.deinit();
@@ -996,7 +996,7 @@ const RaisedErrorCursor = struct {
                 } else try self.appendDataContext(data);
                 break :result .pending;
             },
-            .source => |*source| switch (try source.builder.advance(1)) {
+            .source => |*source| switch (try poll_api.advanceWithin(&source.builder, 1)) {
                 .pending => .pending,
                 .complete => |item| result: {
                     const pairs = source.pairs;
@@ -1110,7 +1110,8 @@ pub fn stringValue(
 ) error{OutOfMemory}!Value {
     var materializer = kernel_storage.TextMaterializer.init(allocator, bytes);
     defer materializer.retire(releases);
-    return poll_api.driveFallible(Value, &materializer, .{kernel_poll_quantum});
+    var work = poll_api.unbounded();
+    return poll_api.driveFallible(Value, &materializer, .{&work});
 }
 /// What a dispatch acquired so its resolution scope stays alive while it is
 /// read, if it had to acquire anything.
@@ -3120,7 +3121,7 @@ pub fn PathActionDriver(
 
         pub fn advance(evaluator: *Machine, self: *Self) MachineError!WorkProgress {
             try evaluator.pollKernel();
-            if (self.path == null) switch (self.encoder.borrowMut().advance(kernel_poll_quantum) catch |err| switch (err) {
+            if (self.path == null) switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.InvalidCodepoint => return evaluator.fail(.domain, "path contains an invalid Unicode scalar"),
             }) {
@@ -4124,7 +4125,7 @@ pub const Machine = struct {
                     };
                     self.state.borrowMut().* = .{ .path_value = next };
                 },
-                .path_value => |*path| switch (path.materializer.borrowMut().advance(1) catch |err| switch (err) {
+                .path_value => |*path| switch (poll_api.advanceWithin(path.materializer.borrowMut(), 1) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.InvalidUtf8 => return evaluator.fail(.io, "module path is not valid UTF-8"),
                 }) {
@@ -5019,7 +5020,7 @@ pub const Machine = struct {
                     try self.buffer.appendSlice(self.allocator, self.chunk[0..amount]);
                     return .yielded;
                 },
-                .text => |*text| switch (text.borrowMut().advance(kernel_poll_quantum) catch |err| switch (err) {
+                .text => |*text| switch (text.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.InvalidUtf8 => return evaluator.fail(
                         .io,

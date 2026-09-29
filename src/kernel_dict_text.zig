@@ -113,9 +113,7 @@ const StrDriver = struct {
                     break :transitioned .yielded;
                 },
             },
-            .materializing => |*materializing| switch (materializing.cursor.advance(
-                machine.kernel_poll_quantum,
-            ) catch |err| switch (err) {
+            .materializing => |*materializing| switch (materializing.cursor.advance(evaluator.workBudget()) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.InvalidUtf8 => return evaluator.fail(
                     .domain,
@@ -1580,7 +1578,7 @@ const FormatDriver = struct {
                     return .yielded;
                 },
             },
-            .materialize_replacement => |*materialize| switch (materialize.materializer.borrowMut().advance(budget) catch |err| switch (err) {
+            .materialize_replacement => |*materialize| switch (materialize.materializer.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.InvalidUtf8 => return evaluator.fail(.domain, "rendered value is not valid UTF-8"),
             }) {

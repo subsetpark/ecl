@@ -2921,7 +2921,8 @@ pub const Registry = enum(usize) {
         ) error{OutOfMemory}!*env.DocumentationString {
             var materializer = kernel_storage.TextMaterializer.init(self.allocator, source);
             defer materializer.retire(self.releases);
-            const text = try poll_api.driveFallible(value.Value, &materializer, .{64});
+            var work = poll_api.unbounded();
+            const text = try poll_api.driveFallible(value.Value, &materializer, .{&work});
             return env.documentation(text.list) orelse {
                 self.releases.releaseValue(text);
                 return error.OutOfMemory;

@@ -190,7 +190,7 @@ const NextEntry = struct {
                 self.state = .{ .name = .init(evaluator.allocator(), self.entry.name[0..self.entry.length]) };
             },
         };
-        return switch (self.state.name.advance(work_quantum) catch |err| switch (err) {
+        return switch (self.state.name.advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidUtf8 => return evaluator.fail(.io, "directory entry is not UTF-8"),
         }) {
@@ -339,7 +339,7 @@ const WriteChunk = struct {
                 }
                 self.state = .{ .encoding = .init(evaluator.allocator(), self.payload) };
             },
-            .encoding => |*encoder| switch (encoder.advance(work_quantum) catch |err| switch (err) {
+            .encoding => |*encoder| switch (encoder.advance(evaluator.workBudget()) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.InvalidByte => return evaluator.failAtIndex(.type, "byte list members must be integers from 0 through 255", encoder.invalid_index.?),
             }) {
@@ -835,7 +835,7 @@ const Driver = struct {
         cursor: *kernel_storage.StringEncoder,
         which: Which,
     ) MachineError!driver_completion.Progress {
-        switch (cursor.advance(work_quantum) catch |err| switch (err) {
+        switch (cursor.advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return self.failMessage(evaluator, .domain, .invalid_path, "path contains an invalid Unicode scalar"),
         }) {
@@ -869,7 +869,7 @@ const Driver = struct {
         evaluator: *Machine,
         encoder: *kernel_storage.StringEncoder,
     ) MachineError!driver_completion.Progress {
-        switch (encoder.advance(work_quantum) catch |err| switch (err) {
+        switch (encoder.advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return self.failMessage(evaluator, .domain, .invalid_utf8, "string contains an invalid Unicode scalar"),
         }) {
@@ -888,7 +888,7 @@ const Driver = struct {
         evaluator: *Machine,
         encoder: *kernel_storage.ByteVectorEncoder,
     ) MachineError!driver_completion.Progress {
-        switch (encoder.advance(work_quantum) catch |err| switch (err) {
+        switch (encoder.advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidByte => return evaluator.failAtIndex(
                 .type,
@@ -1192,7 +1192,7 @@ const Driver = struct {
         evaluator: *Machine,
         building: *@FieldType(State, "text_value"),
     ) MachineError!driver_completion.Progress {
-        return switch (building.materializer.advance(work_quantum) catch |err| switch (err) {
+        return switch (building.materializer.advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidUtf8 => return self.failMessage(evaluator, .io, .invalid_utf8, "file is not valid UTF-8"),
         }) {
@@ -1330,7 +1330,7 @@ const Driver = struct {
             }
             const entry = build.sorted[build.built];
             if (build.name == null) build.name = .init(self.allocator, entry.name);
-            const name_value = switch (build.name.?.advance(work_quantum) catch |err| switch (err) {
+            const name_value = switch (build.name.?.advance(evaluator.workBudget()) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.InvalidUtf8 => return self.fail(evaluator, .invalid_utf8),
             }) {

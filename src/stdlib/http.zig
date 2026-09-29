@@ -521,7 +521,7 @@ const RequestDriver = struct {
                     } };
                 }
             },
-            .response_header_name => |*header| switch (try header.text.advance(machine.kernel_poll_quantum)) {
+            .response_header_name => |*header| switch (try header.text.advance(evaluator.workBudget())) {
                 .pending => {},
                 .complete => |key| {
                     header.text.deinit();
@@ -533,7 +533,7 @@ const RequestDriver = struct {
                     } };
                 },
             },
-            .response_header_value => |*header| switch (try header.text.advance(machine.kernel_poll_quantum)) {
+            .response_header_value => |*header| switch (try header.text.advance(evaluator.workBudget())) {
                 .pending => {},
                 .complete => |value_text| {
                     header.text.deinit();
@@ -598,7 +598,7 @@ const RequestDriver = struct {
                     } },
                 };
             },
-            .response_body_text => |*body| switch (try body.text.advance(machine.kernel_poll_quantum)) {
+            .response_body_text => |*body| switch (try body.text.advance(evaluator.workBudget())) {
                 .pending => {},
                 .complete => |built| {
                     body.text.deinit();
@@ -718,7 +718,7 @@ const RequestDriver = struct {
             .url => self.limits.target_bytes,
             else => self.limits.header_bytes - self.request_header_bytes,
         };
-        return encoder.advanceLimited(machine.kernel_poll_quantum, limit) catch |err| switch (err) {
+        return encoder.advanceLimited(evaluator.workBudget(), limit) catch |err| switch (err) {
             error.Overflow => return self.overflow(evaluator),
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return evaluator.fail(

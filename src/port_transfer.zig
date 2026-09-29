@@ -302,7 +302,7 @@ pub fn WriteDriver(comptime Backend: type) type {
         pub fn advance(evaluator: *machine.Machine, self: *Self) machine.MachineError!machine.WorkProgress {
             try evaluator.pollKernel();
             if (self.state == .encoding) {
-                const progress = self.state.encoding.encoder.advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+                const progress = self.state.encoding.encoder.advance(evaluator.workBudget()) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.InvalidByte => return evaluator.fail(.domain, Backend.invalid_byte_message),
                 };

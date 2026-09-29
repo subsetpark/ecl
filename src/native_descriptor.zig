@@ -287,7 +287,7 @@ const DocumentBuild = struct {
 
     fn advance(self: *DocumentBuild, budget: usize) ValidateError!?*env.DocumentationString {
         switch (self.state) {
-            .materialize => |*materializer| switch (try materializer.advance(budget)) {
+            .materialize => |*materializer| switch (try poll.advanceWithin(materializer, budget)) {
                 .pending => return null,
                 .complete => |document| {
                     materializer.deinit();
