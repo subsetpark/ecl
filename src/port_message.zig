@@ -177,7 +177,7 @@ pub const Validated = opaque {
 
 fn validate(message: *Message) ValidationError!void {
     while (true) {
-        var budget = poll.WorkBudget.init(1);
+        var budget = poll.testing.budget(1);
         if (try message.advance(&budget) == .complete) return;
     }
 }

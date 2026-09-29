@@ -1543,7 +1543,7 @@ const ArchiveFixture = struct {
     /// never produced, which is what every generic reconstruction is.
     fn rebuilt(self: *ArchiveFixture) !heap.OwnedValue {
         var materializer = self.archive.rootMaterializer(&.{.{ .int = 1 }});
-        const root = try poll.driveInSlices(value.Value, &materializer, 1);
+        const root = try poll.testing.driveInSlices(value.Value, &materializer, 1);
         materializer.deinit();
         return .init(heap.hostDomain(self.owner.cleanup()), root);
     }
@@ -1552,7 +1552,7 @@ const ArchiveFixture = struct {
 fn drive(fixture: *ArchiveFixture, cursor: *SpanArchive.RescopeCursor) !*value.ListHandle {
     _ = fixture;
     while (true) {
-        var work: poll.WorkBudget = .init(4);
+        var work = poll.testing.budget(4);
         switch (try cursor.advance(&work)) {
             .pending => {},
             .complete => |header| return header,

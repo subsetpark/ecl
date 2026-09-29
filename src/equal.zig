@@ -767,14 +767,14 @@ test "identity: scalar composite children use bounded allocation-free cursors" {
     try std.testing.expect(exhausted.spend());
     try std.testing.expect(try comparison.advance(&exhausted) == .pending);
     try std.testing.expect(try poll.testing.advanceWithin(&comparison, 1) == .pending);
-    try std.testing.expect(try poll.driveInSlices(bool, &comparison, 1));
+    try std.testing.expect(try poll.testing.driveInSlices(bool, &comparison, 1));
     var hashing = try HashCursor.init(failing.allocator(), left);
     defer hashing.deinit();
     try std.testing.expect(try hashing.advance(&exhausted) == .pending);
     try std.testing.expect(try poll.testing.advanceWithin(&hashing, 1) == .pending);
     try std.testing.expectEqual(
         try hashWithAllocator(failing.allocator(), right),
-        try poll.driveInSlices(u64, &hashing, 1),
+        try poll.testing.driveInSlices(u64, &hashing, 1),
     );
     reals[512] = .{ .float = 2 };
     const different = try list.fromValuesGeneric(allocator, &reals);
@@ -812,12 +812,12 @@ test "identity: strings share equality and hashes across widths and generic list
     defer comparison.deinit();
     try std.testing.expect(try poll.testing.advanceWithin(&comparison, 1) == .pending);
     try std.testing.expect(try poll.testing.advanceWithin(&comparison, 1) == .pending);
-    try std.testing.expect(try poll.driveInSlices(bool, &comparison, 17));
+    try std.testing.expect(try poll.testing.driveInSlices(bool, &comparison, 17));
     var hashing = try HashCursor.init(allocator, strings[2]);
     defer hashing.deinit();
     try std.testing.expect(try poll.testing.advanceWithin(&hashing, 1) == .pending);
     try std.testing.expect(try poll.testing.advanceWithin(&hashing, 1) == .pending);
-    try std.testing.expectEqual(expected_hash, try poll.driveInSlices(u64, &hashing, 17));
+    try std.testing.expectEqual(expected_hash, try poll.testing.driveInSlices(u64, &hashing, 17));
     var mismatch_writer = try heap.LeafWriter(.leaf_char4).init(allocator, characters.len);
     mismatch_writer.fillRange(0, characters.len, 'a');
     mismatch_writer.fillRange(256, 1, 0);

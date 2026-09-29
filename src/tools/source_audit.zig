@@ -231,6 +231,7 @@ pub fn main(init: std.process.Init) !void {
     failed = auditHttpServerWriteSink() or failed;
     failed = auditDynamicContextSpelling() or failed;
     failed = auditFormalValueKinds() or failed;
+    failed = auditWorkBudgetIssuers() or failed;
     if (failed) return error.SourceAuditFailed;
 }
 
@@ -847,6 +848,60 @@ fn auditUnsafeCasts() bool {
         },
     ) or failed;
     return failed;
+}
+
+/// A work budget is an owner's allowance, so only an owner may create one:
+/// the machine for a unit's turn, the scheduler and the port builder for their
+/// own steps, and `poll` itself. Everything else draws on a budget it was lent.
+/// A cursor cannot be handed a count, since every cursor takes `*WorkBudget`,
+/// but nothing in the type system stops a module from constructing a fresh
+/// budget and lending that instead; that is the one spelling this audit owns.
+const work_budget_issuers = [_][]const u8{ "poll.zig", "machine.zig", "scheduler.zig", "port_builder.zig" };
+
+fn auditWorkBudgetIssuers() bool {
+    const minted = [_][]const []const u8{
+        &.{ "WorkBudget", ".", "init" },
+        &.{ "WorkBudget", "=", ".", "init" },
+        &.{ "WorkBudget", "=", ".", "{" },
+    };
+    var failed = false;
+    for (source_groups) |component| {
+        if (!component.production) continue;
+        for (component.sources, component.files) |source, file| {
+            const issuer = for (work_budget_issuers) |allowed| {
+                if (std.mem.eql(u8, file, allowed)) break true;
+            } else false;
+            if (issuer) continue;
+            failed = auditProductionTokens(file, source, &minted) or failed;
+        }
+    }
+    return failed;
+}
+
+/// `auditTokens` over everything but `test` declarations.
+fn auditProductionTokens(
+    label: []const u8,
+    source: [:0]const u8,
+    forbidden: []const []const []const u8,
+) bool {
+    var tree = std.zig.Ast.parse(std.heap.page_allocator, source, .zig) catch {
+        std.log.err("{s}: could not parse source for architecture audit", .{label});
+        return true;
+    };
+    defer tree.deinit(std.heap.page_allocator);
+    if (tree.errors.len != 0) {
+        std.log.err("{s}: source has parser errors during architecture audit", .{label});
+        return true;
+    }
+    var failed = false;
+    var start: usize = 0;
+    for (tree.rootDecls()) |declaration| {
+        if (tree.nodeTag(declaration) != .test_decl) continue;
+        const first = tree.firstToken(declaration);
+        failed = hasForbiddenTokens(label, tree, start, first, forbidden) or failed;
+        start = tree.lastToken(declaration) + 1;
+    }
+    return hasForbiddenTokens(label, tree, start, tree.tokens.len, forbidden) or failed;
 }
 
 fn auditProductionFunctionTokenPair(

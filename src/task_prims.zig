@@ -170,7 +170,7 @@ const GiveCursor = struct {
     /// storage, not by the caller's input.
     fn run(self: *GiveCursor, phase: Phase) void {
         self.phase = phase;
-        var budget: poll.WorkBudget = .init(max_given_ports + 1);
+        var budget = poll.unbounded();
         poll.driveVoid(self, .{&budget});
         self.phase = .done;
     }

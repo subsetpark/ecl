@@ -72,27 +72,33 @@ fn AdvanceResult(comptime Pointer: type) type {
     return @typeInfo(@TypeOf(Cursor.advance)).@"fn".return_type.?;
 }
 
-/// Test-only drivers that exercise a cursor's resumption at a chosen grain.
+/// Test-only budgets and drivers that exercise a cursor's resumption at a
+/// chosen grain. They exist only in test builds, so production code cannot
+/// use them to mint an allowance of its own.
 pub const testing = if (@import("builtin").is_test) struct {
+    pub fn budget(units: usize) WorkBudget {
+        return .{ .remaining = units };
+    }
+
     /// Advances a cursor against a private allowance of `units`.
     pub fn advanceWithin(cursor: anytype, units: usize) AdvanceResult(@TypeOf(cursor)) {
         var work: WorkBudget = .{ .remaining = units };
         return cursor.advance(&work);
     }
-} else struct {};
 
-/// Drive a fallible cursor to completion, lending it a fresh allowance of
-/// `units` on each advance. For callers that exercise a cursor's resumption at
-/// a small grain; a shared finite budget would stall once spent.
-pub fn driveInSlices(comptime T: type, cursor: anytype, units: usize) !T {
-    while (true) {
-        var work: WorkBudget = .{ .remaining = units };
-        switch (try cursor.advance(&work)) {
-            .pending => {},
-            .complete => |result| return result,
+    /// Drive a fallible cursor to completion, lending it a fresh allowance of
+    /// `units` on each advance. For callers that exercise a cursor's resumption at
+    /// a small grain; a shared finite budget would stall once spent.
+    pub fn driveInSlices(comptime T: type, cursor: anytype, units: usize) !T {
+        while (true) {
+            var work: WorkBudget = .{ .remaining = units };
+            switch (try cursor.advance(&work)) {
+                .pending => {},
+                .complete => |result| return result,
+            }
         }
     }
-}
+} else struct {};
 
 /// Drive a non-failing finite cursor to its observable result.
 pub fn drive(comptime T: type, cursor: anytype, args: anytype) T {
