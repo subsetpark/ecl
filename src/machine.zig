@@ -7186,13 +7186,23 @@ fn dispatch(self: *Machine, form: Value) MachineError!void {
         .word => |reference| reference,
         .int, .float, .char, .symbol, .list, .dict, .task, .module, .port => return self.pushBorrowed(form),
     };
-    // The locals backend is reserved from every publication, so in every scope
-    // these three names can only mean their core primitives. Every lowered
-    // locals body runs them, so they skip resolution and its caches outright.
+    // The locals backend is reserved from every publication, so these names
+    // can only mean their core primitives. The activation must also hold the
+    // word's stamped scope: an escaped word from a retired image still needs
+    // ordinary dispatch to report that retirement.
     const locals = self.unit.environment.localsWords();
-    if (word.name == locals.get) return invokeBuiltin(self, .plain(word.name), prims.readLocal);
-    if (word.name == locals.load) return invokeBuiltin(self, .plain(word.name), prims.bindLocals);
-    if (word.name == locals.drop) return invokeBuiltin(self, .plain(word.name), prims.unbindLocals);
+    const backend: ?env.PrimitiveImpl = if (word.name == locals.get)
+        prims.readLocal
+    else if (word.name == locals.load)
+        prims.bindLocals
+    else if (word.name == locals.drop)
+        prims.unbindLocals
+    else
+        null;
+    if (backend) |primitive| {
+        if (self.unit.current.?.chainHolds(word.scope))
+            return invokeBuiltin(self, .plain(word.name), primitive);
+    }
     try self.executeWord(word);
 }
 

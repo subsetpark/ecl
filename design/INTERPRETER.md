@@ -354,10 +354,11 @@ The lowering produces ordinary forms consumed directly by the frame machine.
 This keeps the machine point-free and local lifetime visible: the lowered
 prefix moves inputs into locals, indexed reads retrieve them, and a final
 operation drops the region. The three backend names are reserved from every
-publication, so in every scope they can only mean their core primitives; the
-machine binds them by interned name without a lookup, and they blame and fail
-exactly as a resolved core word does. The reader preserves source spans for
-the produced forms, keeping diagnostics anchored to the user's source.
+publication, so in every scope they can only mean their core primitives. The
+machine binds them by interned name when the activation holds the word's
+stamped scope; foreign stamps take ordinary resolution, including its retired
+scope failure. The reader preserves source spans for the produced forms,
+keeping diagnostics anchored to the user's source.
 
 ### Source metadata lives on a separate code plane
 
