@@ -684,12 +684,12 @@ const NumericParseDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *NumericParseDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0) : (budget -= 1) switch (self.classifier.advance()) {
+        const work = evaluator.workBudget();
+        while (work.spend()) switch (self.classifier.advance()) {
             .pending => {},
             .complete => |classification| return self.finish(evaluator, classification),
         };
-        return .yielded;
+        return .stepped;
     }
 
     fn finish(

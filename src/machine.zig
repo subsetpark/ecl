@@ -457,7 +457,21 @@ const OrdinaryErrorCursor = struct {
             .builder = builder,
         } };
     }
-    pub fn advance(self: *OrdinaryErrorCursor) error{OutOfMemory}!ErrorValueProgress {
+    /// Own transitions draw one unit each; the value builders draw on the
+    /// same allowance themselves, so a hand-off is not charged twice.
+    pub fn advance(self: *OrdinaryErrorCursor, work: *poll_api.WorkBudget) error{OutOfMemory}!ErrorValueProgress {
+        while (true) {
+            const delegating = switch (self.state) {
+                .message, .trace_build, .source, .data_build, .outer => true,
+                else => false,
+            };
+            if (!delegating and !work.spend()) return .pending;
+            const progress = try self.step(work);
+            if (progress != .pending) return progress;
+            if (delegating and work.exhausted()) return .pending;
+        }
+    }
+    fn step(self: *OrdinaryErrorCursor, work: *poll_api.WorkBudget) error{OutOfMemory}!ErrorValueProgress {
         return switch (self.state) {
             .names => |index| result: {
                 if (index == self.names.len) {
@@ -476,7 +490,7 @@ const OrdinaryErrorCursor = struct {
                     break :result .pending;
                 },
             },
-            .message => |*builder| switch (try poll_api.advanceWithin(builder, 1)) {
+            .message => |*builder| switch (try builder.advance(work)) {
                 .pending => .pending,
                 .complete => |item| result: {
                     builder.deinit();
@@ -507,7 +521,7 @@ const OrdinaryErrorCursor = struct {
                 }
                 break :result .pending;
             },
-            .trace_build => |*trace| switch (try poll_api.advanceWithin(&trace.builder, 1)) {
+            .trace_build => |*trace| switch (try trace.builder.advance(work)) {
                 .pending => .pending,
                 .complete => |item| result: {
                     const message = trace.message;
@@ -556,7 +570,7 @@ const OrdinaryErrorCursor = struct {
                     break :result .pending;
                 },
             },
-            .source => |*source| switch (try poll_api.advanceWithin(&source.builder, 1)) {
+            .source => |*source| switch (try source.builder.advance(work)) {
                 .pending => .pending,
                 .complete => |item| result: {
                     const base = source.base;
@@ -591,7 +605,7 @@ const OrdinaryErrorCursor = struct {
                 } };
                 break :result .pending;
             },
-            .data_build => |*data| switch (try poll_api.advanceWithin(&data.builder, 1)) {
+            .data_build => |*data| switch (try data.builder.advance(work)) {
                 .pending => .pending,
                 .duplicate_key => unreachable,
                 .complete => |item| result: {
@@ -610,7 +624,7 @@ const OrdinaryErrorCursor = struct {
                 try self.beginOuter(values);
                 break :result .pending;
             },
-            .outer => |*outer| switch (try poll_api.advanceWithin(&outer.builder, 1)) {
+            .outer => |*outer| switch (try outer.builder.advance(work)) {
                 .pending => .pending,
                 .duplicate_key => unreachable,
                 .complete => |item| result: {
@@ -872,7 +886,21 @@ const RaisedErrorCursor = struct {
             .builder = builder,
         } };
     }
-    pub fn advance(self: *RaisedErrorCursor) error{OutOfMemory}!ErrorValueProgress {
+    /// Own transitions draw one unit each; the value builders draw on the
+    /// same allowance themselves, so a hand-off is not charged twice.
+    pub fn advance(self: *RaisedErrorCursor, work: *poll_api.WorkBudget) error{OutOfMemory}!ErrorValueProgress {
+        while (true) {
+            const delegating = switch (self.state) {
+                .field_find, .message, .trace_build, .data_field_find, .source, .data_build, .outer_build => true,
+                else => false,
+            };
+            if (!delegating and !work.spend()) return .pending;
+            const progress = try self.step(work);
+            if (progress != .pending) return progress;
+            if (delegating and work.exhausted()) return .pending;
+        }
+    }
+    fn step(self: *RaisedErrorCursor, work: *poll_api.WorkBudget) error{OutOfMemory}!ErrorValueProgress {
         const raised = self.failure.raised.?;
         return switch (self.state) {
             .names => |index| result: {
@@ -906,7 +934,7 @@ const RaisedErrorCursor = struct {
                 } };
                 break :result .pending;
             },
-            .field_find => |*find| switch (try poll_api.advanceWithin(&find.cursor, 1)) {
+            .field_find => |*find| switch (try find.cursor.advance(work)) {
                 .pending => .pending,
                 .complete => |found| result: {
                     const index = find.index;
@@ -916,7 +944,7 @@ const RaisedErrorCursor = struct {
                     break :result .pending;
                 },
             },
-            .message => |*builder| switch (try poll_api.advanceWithin(builder, 1)) {
+            .message => |*builder| switch (try builder.advance(work)) {
                 .pending => .pending,
                 .complete => |item| result: {
                     builder.deinit();
@@ -945,7 +973,7 @@ const RaisedErrorCursor = struct {
                 }
                 break :result .pending;
             },
-            .trace_build => |*trace| switch (try poll_api.advanceWithin(&trace.builder, 1)) {
+            .trace_build => |*trace| switch (try trace.builder.advance(work)) {
                 .pending => .pending,
                 .complete => |item| result: {
                     const items = trace.items;
@@ -974,7 +1002,7 @@ const RaisedErrorCursor = struct {
                 } };
                 break :result .pending;
             },
-            .data_field_find => |*find| switch (try poll_api.advanceWithin(&find.cursor, 1)) {
+            .data_field_find => |*find| switch (try find.cursor.advance(work)) {
                 .pending => .pending,
                 .complete => |found| result: {
                     const index = find.index;
@@ -996,7 +1024,7 @@ const RaisedErrorCursor = struct {
                 } else try self.appendDataContext(data);
                 break :result .pending;
             },
-            .source => |*source| switch (try poll_api.advanceWithin(&source.builder, 1)) {
+            .source => |*source| switch (try source.builder.advance(work)) {
                 .pending => .pending,
                 .complete => |item| result: {
                     const pairs = source.pairs;
@@ -1012,7 +1040,7 @@ const RaisedErrorCursor = struct {
                     break :result .pending;
                 },
             },
-            .data_build => |*data| switch (try poll_api.advanceWithin(&data.builder, 1)) {
+            .data_build => |*data| switch (try data.builder.advance(work)) {
                 .pending => .pending,
                 .duplicate_key => unreachable,
                 .complete => |item| result: {
@@ -1044,7 +1072,7 @@ const RaisedErrorCursor = struct {
                 } else try self.appendOuter(outer);
                 break :result .pending;
             },
-            .outer_build => |*outer| switch (try poll_api.advanceWithin(&outer.builder, 1)) {
+            .outer_build => |*outer| switch (try outer.builder.advance(work)) {
                 .pending => .pending,
                 .duplicate_key => unreachable,
                 .complete => |item| result: {
@@ -1079,9 +1107,9 @@ const ErrorValueCursor = union(enum) {
             inline else => |*cursor| cursor.retire(releases),
         }
     }
-    pub fn advance(self: *ErrorValueCursor) error{OutOfMemory}!ErrorValueProgress {
+    pub fn advance(self: *ErrorValueCursor, work: *poll_api.WorkBudget) error{OutOfMemory}!ErrorValueProgress {
         return switch (self.*) {
-            inline else => |*cursor| cursor.advance(),
+            inline else => |*cursor| cursor.advance(work),
         };
     }
 };
@@ -1101,7 +1129,8 @@ pub fn errorValue(
 ) error{OutOfMemory}!Value {
     var cursor = ErrorValueCursor.init(allocator, failure, resolved, location);
     defer cursor.retire(releases);
-    return poll_api.driveFallible(Value, &cursor, .{});
+    var work = poll_api.unbounded();
+    return poll_api.driveFallible(Value, &cursor, .{&work});
 }
 pub fn stringValue(
     allocator: std.mem.Allocator,
@@ -2213,10 +2242,11 @@ const TaskJoinCleanup = union(enum) {
 ///
 /// `stepped` and `yielded` separate progress from surrender. A driver whose
 /// work drew on the unit's budget and is not finished reports `stepped`; the
-/// evaluator charges the step itself one unit and keeps the turn until a
-/// kernel quantum has been spent in it. `yielded` ends the turn: the driver
-/// cannot progress until another unit does, or spent an allowance it does not
-/// draw from the unit's budget.
+/// evaluator charges the step itself one unit and keeps the turn until the
+/// budget is exhausted. That charge may observe cancellation, so only a
+/// driver that may be cancelled between its steps reports `stepped`.
+/// `yielded` ends the turn: the driver cannot progress until another unit
+/// does, or is an unwind that must not observe cancellation.
 pub const WorkProgress = union(enum) {
     completed,
     output: Value,
@@ -3761,8 +3791,8 @@ pub const Machine = struct {
         }
         pub fn advance(evaluator: *Machine, self: *AutoLoadDriver) MachineError!WorkProgress {
             try evaluator.pollKernel();
-            var budget: usize = kernel_poll_quantum;
-            work: while (budget != 0) : (budget -= 1) switch (self.state.borrowMut().*) {
+            const work = evaluator.workBudget();
+            work: while (work.spend()) switch (self.state.borrowMut().*) {
                 .begin => |*cursor| switch (try cursor.advance()) {
                     .pending => {},
                     .complete => |outcome| switch (outcome) {
@@ -4166,7 +4196,7 @@ pub const Machine = struct {
                     },
                 },
             };
-            return .yielded;
+            return .stepped;
         }
         /// The manifest owns constant bytes, and `sourceOwned` frees what it
         /// is given, so the text is duped for the reader to consume. A linked
@@ -4599,8 +4629,8 @@ pub const Machine = struct {
             // A source that needs another slice observes cancellation before
             // doing any more ingestion work.
             if (self.state != .start) try evaluator.pollKernel();
-            var budget: usize = kernel_poll_quantum;
-            while (budget != 0) : (budget -= 1) switch (self.state) {
+            const work = evaluator.workBudget();
+            while (work.spend()) switch (self.state) {
                 .start => {
                     if ((self.completion.borrow() == .call or self.completion.borrow() == .session) and
                         evaluator.unit.inherited.module_snapshot != null)
@@ -4701,7 +4731,7 @@ pub const Machine = struct {
                 },
                 .storage => unreachable,
             };
-            return .yielded;
+            return .stepped;
         }
         pub fn advanceRetirement(
             releases: *heap.ReleaseDomain,
@@ -7265,8 +7295,8 @@ const DispatchDriver = struct {
 
     pub fn advance(self_machine: *Machine, self: *DispatchDriver) MachineError!WorkProgress {
         try self_machine.pollKernel();
-        var budget: usize = kernel_poll_quantum;
-        while (budget != 0) : (budget -= 1) switch (self.resolution.borrowMut().advance()) {
+        const work = self_machine.workBudget();
+        while (work.spend()) switch (self.resolution.borrowMut().advance()) {
             .pending => {},
             .complete => |outcome| {
                 const installed = self_machine.unit.workDriver().?;
@@ -7324,7 +7354,7 @@ const DispatchDriver = struct {
                 }
             },
         };
-        return .yielded;
+        return .stepped;
     }
 
     pub const ownership: heap.DriverOwnership = .fields;
@@ -7363,8 +7393,8 @@ const QualifiedLoadPreparationDriver = struct {
         self: *QualifiedLoadPreparationDriver,
     ) MachineError!WorkProgress {
         try evaluator.pollKernel();
-        var budget: usize = kernel_poll_quantum;
-        while (budget != 0) : (budget -= 1) switch (try self.cursor.advance()) {
+        const work = evaluator.workBudget();
+        while (work.spend()) switch (try self.cursor.advance()) {
             .pending => {},
             .complete => |maybe_name| {
                 const name = maybe_name orelse return switch (self.restore) {
@@ -7385,7 +7415,7 @@ const QualifiedLoadPreparationDriver = struct {
                 return .detached;
             },
         };
-        return .yielded;
+        return .stepped;
     }
 };
 
@@ -7412,8 +7442,8 @@ const HandleDispatchDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *HandleDispatchDriver) MachineError!WorkProgress {
         try evaluator.pollKernel();
-        var budget: usize = kernel_poll_quantum;
-        while (budget != 0) : (budget -= 1) {
+        const work = evaluator.workBudget();
+        while (work.spend()) {
             if (self.binding == null) {
                 switch (self.validation.advance()) {
                     .pending => continue,
@@ -7476,7 +7506,7 @@ const HandleDispatchDriver = struct {
                 },
             }
         }
-        return .yielded;
+        return .stepped;
     }
 };
 
@@ -9244,8 +9274,8 @@ const StatePublishDriver = struct {
             .publish, .retire, .deliver => evaluator.unit.polls += 1,
         }
         const application = self.application.borrow().borrow();
-        var budget: usize = kernel_poll_quantum;
-        while (budget != 0) : (budget -= 1) switch (self.phase) {
+        const work = evaluator.workBudget();
+        while (work.spend()) switch (self.phase) {
             .reserve => {
                 const buffer = try application.turn.allocator().alloc(Value, self.remaining);
                 @memset(buffer, .{ .int = 0 });
@@ -9299,7 +9329,7 @@ const StatePublishDriver = struct {
                 return .completed;
             },
         };
-        return .yielded;
+        return .stepped;
     }
 };
 
@@ -9627,8 +9657,8 @@ const ModuleCompletionDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *ModuleCompletionDriver) MachineError!WorkProgress {
         try evaluator.pollKernel();
-        var budget: usize = kernel_poll_quantum;
-        while (budget != 0) : (budget -= 1) switch (self.state.borrowMut().*) {
+        const work = evaluator.workBudget();
+        while (work.spend()) switch (self.state.borrowMut().*) {
             .capture => |*capture| {
                 if (capture.remaining != 0) {
                     capture.remaining -= 1;
@@ -9677,7 +9707,7 @@ const ModuleCompletionDriver = struct {
             },
             .publish => |*publish| return advanceRegistration(evaluator, publish.cursor.borrowMut()),
         };
-        return .yielded;
+        return .stepped;
     }
     pub const ownership: heap.DriverOwnership = .fields;
 };
@@ -9872,9 +9902,15 @@ const FailureDriver = struct {
     fn beginUnwind(self: *FailureDriver, error_value: Value, target: UnwindTarget) void {
         self.state = .{ .current = .{ .error_value = error_value, .target = target } };
     }
+    /// Draws on the unit's budget, but yields rather than stepping when it is
+    /// spent: a stepped driver's charge can observe cancellation, and an
+    /// unwind already in progress must not start another failure.
     pub fn advance(evaluator: *Machine, self: *FailureDriver) MachineError!WorkProgress {
-        var budget: usize = kernel_poll_quantum;
-        while (budget != 0) : (budget -= 1) switch (self.state) {
+        const work = evaluator.workBudget();
+        while (switch (self.state) {
+            .value, .outcome => !work.exhausted(),
+            else => work.spend(),
+        }) switch (self.state) {
             .trace => |*frame_index| {
                 if (frame_index.* == 0) {
                     self.state = .{ .spell = 0 };
@@ -9915,8 +9951,8 @@ const FailureDriver = struct {
                 .pending => {},
                 .complete => |location| self.beginValue(location),
             },
-            .value => |*cursor| switch (try cursor.advance()) {
-                .pending => {},
+            .value => |*cursor| switch (try cursor.advance(work)) {
+                .pending => return .yielded,
                 .complete => |item| {
                     cursor.retire(evaluator.releaseDomain());
                     self.state = .{ .nearest = .{
@@ -10017,8 +10053,8 @@ const FailureDriver = struct {
                     .builder = builder,
                 } };
             },
-            .outcome => |*outcome_state| switch (try poll_api.advanceWithin(&outcome_state.builder, 1)) {
-                .pending => {},
+            .outcome => |*outcome_state| switch (try outcome_state.builder.advance(work)) {
+                .pending => return .yielded,
                 .duplicate_key => unreachable,
                 .complete => |outcome| {
                     const error_value = outcome_state.error_value;

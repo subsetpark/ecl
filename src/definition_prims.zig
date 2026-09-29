@@ -117,8 +117,8 @@ const UnbindDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *UnbindDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0) : (budget -= 1) switch (self.state.borrowMut().*) {
+        const work = evaluator.workBudget();
+        while (work.spend()) switch (self.state.borrowMut().*) {
             .validate_name => |*validation| switch (validation.advance()) {
                 .pending => {},
                 .complete => |maybe_name| {
@@ -142,7 +142,7 @@ const UnbindDriver = struct {
                 .complete => return .completed,
             },
         };
-        return .yielded;
+        return .stepped;
     }
 
     pub const ownership: heap.DriverOwnership = .fields;
@@ -553,8 +553,8 @@ const LookupDriver = struct {
     resolution: heap.Owned(machine.ResolutionCursor),
     pub fn advance(evaluator: *Machine, self: *LookupDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0) : (budget -= 1) switch (self.resolution.borrowMut().advance()) {
+        const work = evaluator.workBudget();
+        while (work.spend()) switch (self.resolution.borrowMut().advance()) {
             .pending => {},
             .complete => |outcome| {
                 var resolved = switch (try resolveForReflection(
@@ -573,7 +573,7 @@ const LookupDriver = struct {
                 return .completed;
             },
         };
-        return .yielded;
+        return .stepped;
     }
 };
 
@@ -718,8 +718,8 @@ const WhichDriver = struct {
     }
     pub fn advance(evaluator: *Machine, self: *WhichDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0) : (budget -= 1) switch (self.state.borrowMut().*) {
+        const work = evaluator.workBudget();
+        while (work.spend()) switch (self.state.borrowMut().*) {
             .resolve => |*cursor| switch (cursor.borrowMut().advance()) {
                 .pending => {},
                 .complete => |outcome| {
@@ -786,7 +786,7 @@ const WhichDriver = struct {
                 return .completed;
             },
         };
-        return .yielded;
+        return .stepped;
     }
 };
 
@@ -937,8 +937,8 @@ const SeeDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *SeeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0) : (budget -= 1) switch (self.state.borrowMut().*) {
+        const work = evaluator.workBudget();
+        while (work.spend()) switch (self.state.borrowMut().*) {
             .resolve => |*cursor| switch (cursor.borrowMut().advance()) {
                 .pending => {},
                 .complete => |outcome| {
@@ -995,7 +995,7 @@ const SeeDriver = struct {
                 return .completed;
             },
         };
-        return .yielded;
+        return .stepped;
     }
 };
 

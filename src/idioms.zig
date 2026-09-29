@@ -482,8 +482,8 @@ const IdiomDriver = struct {
     }
     pub fn advance(evaluator: *Machine, self: *IdiomDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0) : (budget -= 1) {
+        const work = evaluator.workBudget();
+        while (work.spend()) {
             if (self.resolution) |*cursor| switch (cursor.borrowMut().advance()) {
                 .pending => continue,
                 .complete => |outcome| {
@@ -619,7 +619,7 @@ const IdiomDriver = struct {
                 },
             }
         }
-        return .yielded;
+        return .stepped;
     }
     pub const ownership: heap.DriverOwnership = .fields;
 };
