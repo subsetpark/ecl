@@ -76,10 +76,9 @@ pub const RenderCursor = struct {
     pub fn advance(
         self: *RenderCursor,
         writer: *std.Io.Writer,
-        budget: usize,
+        work: *poll_api.WorkBudget,
     ) (error{OutOfMemory} || std.Io.Writer.Error)!RenderProgress {
-        std.debug.assert(budget != 0);
-        for (0..budget) |_| {
+        while (work.spend()) {
             const action = self.actions.pop() orelse return .complete;
             try self.renderAction(action, writer);
             if (self.actions.isEmpty()) return .complete;
@@ -445,14 +444,14 @@ pub const OwnedStringCursor = struct {
 
     pub fn advance(
         self: *OwnedStringCursor,
-        budget: usize,
+        work: *poll_api.WorkBudget,
     ) error{OutOfMemory}!OwnedStringProgress {
-        std.debug.assert(budget != 0 and self.phase != .complete);
-        switch (self.phase) {
+        std.debug.assert(self.phase != .complete);
+        while (true) switch (self.phase) {
             .count => {
                 var buffer: [256]u8 = undefined;
                 var counter = std.Io.Writer.Discarding.init(&buffer);
-                const progress = self.cursor.advance(&counter.writer, budget) catch |err| switch (err) {
+                const progress = self.cursor.advance(&counter.writer, work) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.WriteFailed => unreachable,
                 };
@@ -473,11 +472,10 @@ pub const OwnedStringCursor = struct {
                 self.cursor = fill_cursor;
                 self.output = output;
                 self.phase = .fill;
-                return .pending;
             },
             .fill => {
                 var fixed = std.Io.Writer.fixed(self.output.?[self.written..]);
-                const progress = self.cursor.advance(&fixed, budget) catch |err| switch (err) {
+                const progress = self.cursor.advance(&fixed, work) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.WriteFailed => unreachable,
                 };
@@ -490,7 +488,7 @@ pub const OwnedStringCursor = struct {
                 return .{ .complete = result };
             },
             .complete => unreachable,
-        }
+        };
     }
 };
 
@@ -520,10 +518,9 @@ pub const DisplayMeasureCursor = struct {
 
     pub fn advance(
         self: *DisplayMeasureCursor,
-        budget: usize,
+        work: *poll_api.WorkBudget,
     ) error{OutOfMemory}!DisplayMeasureProgress {
-        std.debug.assert(budget != 0);
-        const end = @min(self.index +| budget, self.text.len);
+        const end = self.index + work.take(self.text.len - self.index);
         while (self.index != end) : (self.index += 1) {
             if (self.text[self.index] != '\n') continue;
             self.width = @max(self.width, self.index - self.row_start);
@@ -566,10 +563,10 @@ pub const StackLayoutCursor = struct {
     pub fn advance(
         self: *StackLayoutCursor,
         writer: *std.Io.Writer,
-        budget: usize,
+        work: *poll_api.WorkBudget,
     ) (error{OutOfMemory} || std.Io.Writer.Error)!StackLayoutProgress {
-        std.debug.assert(budget != 0 and self.phase != .complete);
-        for (0..budget) |_| {
+        std.debug.assert(self.phase != .complete);
+        while (work.spend()) {
             switch (self.phase) {
                 .height => {
                     if (self.height_index == self.blocks.len) {
@@ -675,7 +672,8 @@ pub const StackLayoutCursor = struct {
 
 pub fn measureDisplayBlock(text: []u8) error{OutOfMemory}!DisplayBlock {
     var cursor = DisplayMeasureCursor.init(text);
-    return poll_api.driveFallible(DisplayBlock, &cursor, .{1024});
+    var work = poll_api.unbounded();
+    return poll_api.driveFallible(DisplayBlock, &cursor, .{&work});
 }
 
 pub fn toOwnedStackDisplayString(
@@ -685,7 +683,8 @@ pub fn toOwnedStackDisplayString(
     var count_buffer: [256]u8 = undefined;
     var counter = std.Io.Writer.Discarding.init(&count_buffer);
     var count_cursor = StackLayoutCursor.init(blocks);
-    while (true) switch (count_cursor.advance(&counter.writer, 1024) catch |err| switch (err) {
+    var count_work = poll_api.unbounded();
+    while (true) switch (count_cursor.advance(&counter.writer, &count_work) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.WriteFailed => return error.OutOfMemory,
     }) {
@@ -700,7 +699,8 @@ pub fn toOwnedStackDisplayString(
     errdefer allocator.free(output);
     var fixed = std.Io.Writer.fixed(output);
     var fill_cursor = StackLayoutCursor.init(blocks);
-    while (true) switch (fill_cursor.advance(&fixed, 1024) catch |err| switch (err) {
+    var fill_work = poll_api.unbounded();
+    while (true) switch (fill_cursor.advance(&fixed, &fill_work) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.WriteFailed => unreachable,
     }) {
@@ -726,7 +726,8 @@ pub fn printWithAllocator(
 ) (error{OutOfMemory} || std.Io.Writer.Error)!void {
     var cursor = try RenderCursor.init(allocator, item);
     defer cursor.deinit();
-    return poll_api.driveVoidFallible(&cursor, .{ writer, 1024 });
+    var work = poll_api.unbounded();
+    return poll_api.driveVoidFallible(&cursor, .{ writer, &work });
 }
 
 pub fn toOwnedString(
@@ -735,7 +736,8 @@ pub fn toOwnedString(
 ) error{OutOfMemory}![]u8 {
     var cursor = try OwnedStringCursor.init(allocator, item);
     defer cursor.deinit();
-    return poll_api.driveFallible([]u8, &cursor, .{1024});
+    var work = poll_api.unbounded();
+    return poll_api.driveFallible([]u8, &cursor, .{&work});
 }
 
 pub fn toOwnedDisplayString(
@@ -744,7 +746,8 @@ pub fn toOwnedDisplayString(
 ) error{OutOfMemory}![]u8 {
     var cursor = try OwnedStringCursor.initDisplay(allocator, item);
     defer cursor.deinit();
-    return poll_api.driveFallible([]u8, &cursor, .{1024});
+    var work = poll_api.unbounded();
+    return poll_api.driveFallible([]u8, &cursor, .{&work});
 }
 
 /// Display dictionaries stay compact when they are small scalar records.

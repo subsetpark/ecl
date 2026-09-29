@@ -28,10 +28,13 @@ fn fuzzMovedRenderCursor(_: void, smith: *std.testing.Smith) !void {
 
     var actual_storage: [64]u8 = undefined;
     var actual = std.Io.Writer.fixed(&actual_storage);
-    while (true) switch (try moved.advance(&actual, 1)) {
-        .pending => {},
-        .complete => break,
-    };
+    while (true) {
+        var step: poll.WorkBudget = .init(1);
+        switch (try moved.advance(&actual, &step)) {
+            .pending => {},
+            .complete => break,
+        }
+    }
 
     var expected_storage: [64]u8 = undefined;
     const expected = try std.fmt.bufPrint(&expected_storage, "{d}", .{number});

@@ -1108,10 +1108,11 @@ fn materializeCompletion(
     if (found.count == 0) return .empty;
     var cursor = try reflection.SortedUniqueNameCursor.init(allocator, found);
     defer cursor.deinit();
+    var work = poll.unbounded();
     var sorted = try poll.driveFallible(
         reflection.SortedUniqueNames,
         &cursor,
-        .{256},
+        .{&work},
     );
     defer sorted.deinit(allocator);
     const names = sorted.items();

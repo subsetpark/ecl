@@ -265,8 +265,20 @@ const IndexCursor = struct {
             },
         }
     }
+    fn delegates(frame: *const Frame) bool {
+        return switch (frame.*) {
+            .build => |*build| build.result == null and !build.waiting and build.index == build.values.capacity(),
+            .node => false,
+        };
+    }
     pub fn advance(self: *IndexCursor, evaluator: *Machine, work: *poll.WorkBudget) MachineError!IndexProgress {
-        while (work.spend()) {
+        while (true) {
+            // A frame handing work to a nested cursor is charged by that
+            // cursor; spending first would starve it at a one-unit grain.
+            if (self.frames.topPtr()) |top| {
+                if (!delegates(top) and !work.spend()) return .pending;
+            }
+
             var frame = self.frames.pop() orelse {
                 const result = self.last.?;
                 self.last = null;
@@ -891,8 +903,21 @@ const MembershipCursor = struct {
             },
         }
     }
+    fn delegates(frame: *const Frame) bool {
+        return switch (frame.*) {
+            .build => |*build| build.result == null and !build.waiting and build.index == build.values.capacity(),
+            .search => |*search| search.match != null,
+            .node => false,
+        };
+    }
     pub fn advance(self: *MembershipCursor, evaluator: *Machine, work: *poll.WorkBudget) MachineError!IndexProgress {
-        while (work.spend()) {
+        while (true) {
+            // A frame handing work to a nested cursor is charged by that
+            // cursor; spending first would starve it at a one-unit grain.
+            if (self.frames.topPtr()) |top| {
+                if (!delegates(top) and !work.spend()) return .pending;
+            }
+
             var frame = self.frames.pop() orelse {
                 const result = self.last.?;
                 self.last = null;
@@ -1749,8 +1774,17 @@ const ReshapeBuildCursor = struct {
         frame.values.deinit();
         if (frame.result) |result| self.releases.releaseValue(result);
     }
+    fn delegates(frame: *const Frame) bool {
+        return frame.result == null and !frame.waiting and frame.index == frame.values.capacity();
+    }
     pub fn advance(self: *ReshapeBuildCursor, work: *poll.WorkBudget) error{OutOfMemory}!PervadeResult {
-        while (work.spend()) {
+        while (true) {
+            // A frame handing work to a nested cursor is charged by that
+            // cursor; spending first would starve it at a one-unit grain.
+            if (self.frames.topPtr()) |top| {
+                if (!delegates(top) and !work.spend()) return .pending;
+            }
+
             var frame = self.frames.pop() orelse {
                 const result = self.last.?;
                 self.last = null;

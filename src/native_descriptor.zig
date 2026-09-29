@@ -385,7 +385,8 @@ const EffectBuild = struct {
 
     /// Null means the caller's allowance was spent first.
     fn advance(self: *EffectBuild, work: *poll.WorkBudget) ValidateError!?env.ValidatedEffect {
-        while (work.spend()) switch (self.state) {
+        // Materialization is charged by the materializer, not ahead of it.
+        while (self.state == .materialize or work.spend()) switch (self.state) {
             .inputs => |*slots| {
                 if (try self.advanceSlot(slots, true)) self.state = .separator;
             },
@@ -546,7 +547,11 @@ pub const ValidateCursor = struct {
 
     pub fn advance(self: *ValidateCursor, work: *poll.WorkBudget) ValidateError!Progress {
         std.debug.assert(self.state != .complete and self.state != .failed);
-        while (work.spend()) switch (self.state) {
+        // Documentation and effect builders are charged by their own work.
+        while (switch (self.state) {
+            .module_doc, .definition_doc, .definition_effect => true,
+            else => work.spend(),
+        }) switch (self.state) {
             .header => self.validateHeader() catch |err| return self.reject(err, null),
             .endpoint_storage => |*storage_state| {
                 if (storage_state.next == storage_state.allocated.endpoints.len) {

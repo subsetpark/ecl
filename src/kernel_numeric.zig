@@ -259,6 +259,18 @@ pub const PervadeCursor = struct {
         }
     };
 
+    /// Typed frames charge the unit through `Context`; list and dict frames
+    /// that are materializing or comparing hand their work to that cursor.
+    fn delegates(frame: *const Frame) bool {
+        return switch (frame.*) {
+            .binary, .unary => false,
+            .typed => true,
+            .list => |*list_frame| list_frame.result == null and !list_frame.waiting and
+                list_frame.index == list_frame.values.capacity(),
+            .dictionary => |*dict_frame| dict_frame.phase == .materialize or dict_frame.match_cursor != null,
+        };
+    }
+
     pub fn initBinary(
         releases: *heap.ReleaseDomain,
         allocator: std.mem.Allocator,
@@ -328,7 +340,13 @@ pub const PervadeCursor = struct {
         evaluator: *Machine,
         work: *poll.WorkBudget,
     ) MachineError!PervadeProgress {
-        while (work.spend()) {
+        while (true) {
+            // A frame handing work to a nested cursor is charged by that
+            // cursor; spending first would starve it at a one-unit grain.
+            if (self.frames.topPtr()) |top| {
+                if (!delegates(top) and !work.spend()) return .pending;
+            }
+
             var frame = self.frames.pop() orelse {
                 const result = self.last.?;
                 self.last = null;

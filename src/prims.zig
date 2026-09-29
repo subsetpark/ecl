@@ -831,7 +831,7 @@ const PpDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *PpDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        return switch (try self.render.borrowMut().advance(machine.kernel_poll_quantum)) {
+        return switch (try self.render.borrowMut().advance(evaluator.workBudget())) {
             .pending => .yielded,
             .complete => |rendered| completed: {
                 defer evaluator.allocator().free(rendered);
@@ -874,7 +874,7 @@ const StackDisplayDriver = struct {
                     prefix.len,
                 ));
             }
-            switch (try self.render.?.borrowMut().advance(machine.kernel_poll_quantum)) {
+            switch (try self.render.?.borrowMut().advance(evaluator.workBudget())) {
                 .pending => return .yielded,
                 .complete => |text| {
                     self.render.?.deinit(evaluator.releaseDomain(), evaluator.allocator());

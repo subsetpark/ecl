@@ -102,7 +102,7 @@ const StrDriver = struct {
         try evaluator.pollKernel();
         const phase = self.work.borrowMut();
         return switch (phase.*) {
-            .rendering => |*renderer| switch (try renderer.advance(machine.kernel_poll_quantum)) {
+            .rendering => |*renderer| switch (try renderer.advance(evaluator.workBudget())) {
                 .pending => .yielded,
                 .complete => |bytes| transitioned: {
                     renderer.deinit();
@@ -1565,7 +1565,7 @@ const FormatDriver = struct {
                 }
                 budget -= 1;
             },
-            .render => |*render| switch (try render.renderer.borrowMut().advance(budget)) {
+            .render => |*render| switch (try render.renderer.borrowMut().advance(evaluator.workBudget())) {
                 .pending => return .yielded,
                 .complete => |bytes| {
                     const scan = render.scan;

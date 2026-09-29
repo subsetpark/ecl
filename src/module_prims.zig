@@ -635,7 +635,7 @@ const WordsDriver = struct {
                 },
                 .item => |name| try self.append(name),
             },
-            .postprocess => |*cursor| switch (try cursor.borrowMut().advance(1)) {
+            .postprocess => |*cursor| switch (try poll_api.advanceWithin(cursor.borrowMut(), 1)) {
                 .pending => {},
                 .complete => |names| {
                     cursor.deinit(evaluator.releaseDomain(), evaluator.allocator());
@@ -660,7 +660,7 @@ const WordsDriver = struct {
                 const owned_names = actions.names.take();
                 self.state.borrowMut().* = .{ .render = .init(owned_names) };
             },
-            .render => |*names| switch (try self.actions.borrowMut().advance(1)) {
+            .render => |*names| switch (try poll_api.advanceWithin(self.actions.borrowMut(), 1)) {
                 .pending => {},
                 .complete => |bytes| {
                     self.state.borrowMut().* = .{ .write = .{
