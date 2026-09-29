@@ -17,7 +17,9 @@ pub const Completion = struct {
                 return .yielded;
             };
             switch (progress) {
-                .yielded => return .yielded,
+                // An operation waiting on the host parks the unit; one that
+                // yields without parking has more of its own work to do.
+                .yielded => return if (evaluator.unit.hasParkRequest()) .yielded else .stepped,
                 .completed => self.phase = .{ .success = null },
                 .output => |value| self.phase = .{ .success = value },
             }
