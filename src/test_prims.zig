@@ -79,10 +79,8 @@ const CollectedComparator = struct {
         };
     }
 
-    pub fn advance(cursor: *Cursor, budget: usize) poll.Progress(std.math.Order) {
-        std.debug.assert(budget != 0);
-        var remaining = budget;
-        while (remaining != 0) {
+    pub fn advance(cursor: *Cursor, work: *poll.WorkBudget) poll.Progress(std.math.Order) {
+        while (true) {
             const left = if (cursor.phase == .module) cursor.left_module else cursor.left_name;
             const right = if (cursor.phase == .module) cursor.right_module else cursor.right_name;
             const shared = @min(left.len, right.len);
@@ -94,14 +92,13 @@ const CollectedComparator = struct {
                 cursor.index = 0;
                 continue;
             }
+            if (!work.spend()) return .pending;
             const left_byte = left[cursor.index];
             const right_byte = right[cursor.index];
             cursor.index += 1;
-            remaining -= 1;
             if (left_byte != right_byte)
                 return .{ .complete = if (left_byte < right_byte) .lt else .gt };
         }
-        return .pending;
     }
 };
 
@@ -189,7 +186,7 @@ const DiscoveryDriver = struct {
             .sort => {
                 if (self.sorter == null)
                     self.sorter = try .init(evaluator.allocator(), self.items.items, {});
-                switch (self.sorter.?.advance(1)) {
+                switch (poll.advanceWithin(&self.sorter.?, 1)) {
                     .pending => budget -= 1,
                     .complete => {
                         self.sorter.?.deinit();

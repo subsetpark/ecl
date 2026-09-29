@@ -154,18 +154,17 @@ pub fn MergeSortCursor(comptime T: type, comptime Comparator: type) type {
             self.* = undefined;
         }
 
-        pub fn advance(self: *Self, budget: usize) Progress(void) {
-            var remaining = budget;
-            while (remaining != 0) {
+        /// Each merge step draws one unit, spent before its comparison so a
+        /// completed comparison is never lost to an exhausted allowance; the
+        /// comparator draws its own work from the same budget.
+        pub fn advance(self: *Self, work: *WorkBudget) Progress(void) {
+            while (true) {
                 if (self.width >= self.items.len) {
                     if (!self.source_scratch) return .complete;
-                    const end = @min(self.copy_index + remaining, self.items.len);
-                    const copied = end - self.copy_index;
+                    const end = self.copy_index + work.take(self.items.len - self.copy_index);
                     @memcpy(self.items[self.copy_index..end], self.scratch[self.copy_index..end]);
                     self.copy_index = end;
-                    if (self.copy_index == self.items.len) return .complete;
-                    remaining -= copied;
-                    continue;
+                    return if (self.copy_index == self.items.len) .complete else .pending;
                 }
                 if (!self.run_ready) {
                     if (self.start == self.items.len) {
@@ -192,29 +191,27 @@ pub fn MergeSortCursor(comptime T: type, comptime Comparator: type) type {
                 const source = if (self.source_scratch) self.scratch else self.items;
                 var choose_left = self.right == self.end;
                 if (!choose_left and self.left != self.middle) {
-                    if (self.comparator == null) self.comparator = Comparator.init(
-                        self.context,
-                        source[self.left],
-                        source[self.right],
-                    );
-                    switch (Comparator.advance(&self.comparator.?, 1)) {
-                        .pending => {
-                            remaining -= 1;
-                            continue;
-                        },
+                    if (self.comparator == null) {
+                        if (!work.spend()) return .pending;
+                        self.comparator = Comparator.init(
+                            self.context,
+                            source[self.left],
+                            source[self.right],
+                        );
+                    }
+                    switch (Comparator.advance(&self.comparator.?, work)) {
+                        .pending => return .pending,
                         .complete => |ordering| {
                             self.comparator = null;
                             choose_left = ordering != .gt;
                         },
                     }
-                }
+                } else if (!work.spend()) return .pending;
                 const destination = if (self.source_scratch) self.items else self.scratch;
                 destination[self.output] = if (choose_left) source[self.left] else source[self.right];
                 if (choose_left) self.left += 1 else self.right += 1;
                 self.output += 1;
-                remaining -= 1;
             }
-            return .pending;
         }
     };
 }

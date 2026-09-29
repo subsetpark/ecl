@@ -3036,7 +3036,7 @@ const GroupReduceDriver = struct {
                 .min, .max => {
                     if (self.index == 0) self.accumulator = item;
                     if (self.comparison == null) self.comparison = .init(self.accumulator, item);
-                    switch (self.comparison.?.advance(1)) {
+                    switch (poll.advanceWithin(&self.comparison.?, 1)) {
                         .pending => continue,
                         .not_comparable => return evaluator.typeError("comparable group values"),
                         .complete => |order| {

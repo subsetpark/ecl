@@ -59,11 +59,10 @@ pub fn Orderer(comptime T: type, comptime lessThan: fn (*const T, *const T) bool
             self.* = undefined;
         }
 
-        /// Performs at most `budget` pointer copies or merge steps.
-        pub fn advance(self: *Self, budget: usize) Progress {
-            std.debug.assert(budget != 0);
-            var remaining = budget;
-            while (remaining != 0) : (remaining -= 1) {
+        /// Each pointer copy or merge step draws one unit from the caller's
+        /// allowance.
+        pub fn advance(self: *Self, work: *poll.WorkBudget) Progress {
+            while (work.spend()) {
                 switch (self.phase) {
                     .collect => |*iterator| {
                         const item = iterator.next() orelse {
@@ -157,7 +156,7 @@ fn expectOrdered(comptime count: usize, seed: u64) !void {
     }
     var orderer = try Orderer(Named, namedLess).init(allocator, &list);
     var steps: usize = 0;
-    while (orderer.advance(64) == .pending) steps += 1;
+    while (poll.advanceWithin(&orderer, 64) == .pending) steps += 1;
     // Collection alone needs more than a dozen quanta at these sizes, so a
     // single-step completion would be a bounded-work regression.
     try std.testing.expect(steps > 15);
@@ -191,7 +190,7 @@ test "directory ordering is resumable and matches a reference sort" {
         defer small.deinit();
         for (names[0..count]) |*name| try small.append(.{ .name = name });
         var small_orderer = try Orderer(Named, namedLess).init(allocator, &small);
-        while (small_orderer.advance(1) == .pending) {}
+        while (poll.advanceWithin(&small_orderer, 1) == .pending) {}
         const ordered = small_orderer.take();
         defer allocator.free(ordered);
         try std.testing.expectEqual(count, ordered.len);

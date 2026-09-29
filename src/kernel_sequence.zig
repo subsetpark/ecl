@@ -154,7 +154,7 @@ const IndexDriver = struct {
     cursor: heap.Owned(IndexCursor),
     pub fn advance(evaluator: *Machine, self: *IndexDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        return switch (try self.cursor.borrowMut().advance(evaluator, machine.kernel_poll_quantum)) {
+        return switch (try self.cursor.borrowMut().advance(evaluator, evaluator.workBudget())) {
             .pending => .yielded,
             .complete => |result| .{ .output = result },
         };
@@ -265,9 +265,8 @@ const IndexCursor = struct {
             },
         }
     }
-    pub fn advance(self: *IndexCursor, evaluator: *Machine, budget: usize) MachineError!IndexProgress {
-        var remaining = budget;
-        while (remaining != 0) : (remaining -= 1) {
+    pub fn advance(self: *IndexCursor, evaluator: *Machine, work: *poll.WorkBudget) MachineError!IndexProgress {
+        while (work.spend()) {
             var frame = self.frames.pop() orelse {
                 const result = self.last.?;
                 self.last = null;
@@ -337,7 +336,7 @@ const IndexCursor = struct {
                     if (build.materializer == null)
                         build.materializer = .init(self.allocator, build.values.values());
                     try self.frames.reserve(1);
-                    switch (try build.materializer.?.advance(evaluator.workBudget())) {
+                    switch (try build.materializer.?.advance(work)) {
                         .pending => {
                             self.frames.pushReserved(.{ .build = build.* });
                             return .pending;
@@ -345,7 +344,6 @@ const IndexCursor = struct {
                         .complete => |result| {
                             build.result = result;
                             self.frames.pushReserved(.{ .build = build.* });
-                            return .pending;
                         },
                     }
                 },
@@ -831,7 +829,7 @@ const MembershipDriver = struct {
     cursor: heap.Owned(MembershipCursor),
     pub fn advance(evaluator: *Machine, self: *MembershipDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        return switch (try self.cursor.borrowMut().advance(evaluator, machine.kernel_poll_quantum)) {
+        return switch (try self.cursor.borrowMut().advance(evaluator, evaluator.workBudget())) {
             .pending => .yielded,
             .complete => |result| .{ .output = result },
         };
@@ -893,8 +891,7 @@ const MembershipCursor = struct {
             },
         }
     }
-    pub fn advance(self: *MembershipCursor, evaluator: *Machine, budget: usize) MachineError!IndexProgress {
-        var work: poll.WorkBudget = .init(budget);
+    pub fn advance(self: *MembershipCursor, evaluator: *Machine, work: *poll.WorkBudget) MachineError!IndexProgress {
         while (work.spend()) {
             var frame = self.frames.pop() orelse {
                 const result = self.last.?;
@@ -946,7 +943,7 @@ const MembershipCursor = struct {
                         search.needle,
                         candidate_value,
                     );
-                    switch (try search.match.?.advance(&work)) {
+                    switch (try search.match.?.advance(work)) {
                         .pending => {
                             try self.frames.push(.{ .search = search.* });
                             return .pending;
@@ -995,7 +992,7 @@ const MembershipCursor = struct {
                         self.frames.pushReserved(.{ .build = build.* });
                         return .pending;
                     }
-                    switch (try build.materializer.?.advance(&work)) {
+                    switch (try build.materializer.?.advance(work)) {
                         .pending => {
                             self.frames.pushReserved(.{ .build = build.* });
                             return .pending;
@@ -1398,8 +1395,8 @@ const ShapeCursor = struct {
         self.* = undefined;
     }
 
-    pub fn advance(self: *ShapeCursor, budget: usize) error{OutOfMemory}!ShapeProgress {
-        for (0..budget) |_| {
+    pub fn advance(self: *ShapeCursor, work: *poll.WorkBudget) error{OutOfMemory}!ShapeProgress {
+        while (work.spend()) {
             const action = self.actions.pop() orelse {
                 const result = try self.allocator.alloc(usize, self.rank);
                 @memcpy(result, self.dimensions[0..self.rank]);
@@ -1469,7 +1466,7 @@ const ShapeDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *ShapeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        if (self.dimensions == null) switch (try self.cursor.borrowMut().advance(machine.kernel_poll_quantum)) {
+        if (self.dimensions == null) switch (try self.cursor.borrowMut().advance(evaluator.workBudget())) {
             .pending => return .yielded,
             .ragged => return evaluator.fail(.shape, "shape requires a rectangular list"),
             .too_deep => return evaluator.fail(.shape, "shape nesting exceeds 256 levels"),
@@ -1668,8 +1665,8 @@ const RavelCursor = struct {
         self.actions.deinit();
         self.* = undefined;
     }
-    pub fn advance(self: *RavelCursor, budget: usize) error{OutOfMemory}!RavelProgress {
-        for (0..budget) |_| {
+    pub fn advance(self: *RavelCursor, work: *poll.WorkBudget) error{OutOfMemory}!RavelProgress {
+        while (work.spend()) {
             const action = self.actions.pop() orelse return .{ .complete = self.count };
             switch (action) {
                 .visit => |visit| {
@@ -1752,9 +1749,8 @@ const ReshapeBuildCursor = struct {
         frame.values.deinit();
         if (frame.result) |result| self.releases.releaseValue(result);
     }
-    pub fn advance(self: *ReshapeBuildCursor, budget: usize) error{OutOfMemory}!PervadeResult {
-        var remaining = budget;
-        while (remaining != 0) : (remaining -= 1) {
+    pub fn advance(self: *ReshapeBuildCursor, work: *poll.WorkBudget) error{OutOfMemory}!PervadeResult {
+        while (work.spend()) {
             var frame = self.frames.pop() orelse {
                 const result = self.last.?;
                 self.last = null;
@@ -1797,7 +1793,7 @@ const ReshapeBuildCursor = struct {
             if (frame.materializer == null)
                 frame.materializer = .init(self.allocator, frame.values.values());
             try self.frames.reserve(1);
-            switch (try poll.advanceWithin(&frame.materializer.?, remaining)) {
+            switch (try frame.materializer.?.advance(work)) {
                 .pending => {
                     self.frames.pushReserved(frame);
                     return .pending;
@@ -1805,7 +1801,6 @@ const ReshapeBuildCursor = struct {
                 .complete => |result| {
                     frame.result = result;
                     self.frames.pushReserved(frame);
-                    return .pending;
                 },
             }
         }
@@ -1856,11 +1851,11 @@ const ReshapeDriver = struct {
             }
             return .yielded;
         }
-        if (self.builder) |*builder| return switch (try builder.borrowMut().advance(machine.kernel_poll_quantum)) {
+        if (self.builder) |*builder| return switch (try builder.borrowMut().advance(evaluator.workBudget())) {
             .pending => .yielded,
             .complete => |result| .{ .output = result },
         };
-        switch (try self.ravel.borrowMut().advance(machine.kernel_poll_quantum)) {
+        switch (try self.ravel.borrowMut().advance(evaluator.workBudget())) {
             .pending => return .yielded,
             .too_deep => return evaluator.fail(.shape, "reshape data nesting exceeds 256 levels"),
             .complete => |count| if (!self.ravel_filling) {

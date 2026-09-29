@@ -196,8 +196,7 @@ fn TypedGradeComparator(comptime kind: value.HeapKind) type {
             return .{ .ordering = typedOrder(kind, collection[left], collection[right]) };
         }
 
-        pub fn advance(cursor: *Cursor, budget: usize) poll.Progress(std.math.Order) {
-            _ = budget;
+        pub fn advance(cursor: *Cursor, _: *poll.WorkBudget) poll.Progress(std.math.Order) {
             return .{ .complete = cursor.ordering };
         }
     };
@@ -246,7 +245,7 @@ fn TypedGradeDriver(comptime kind: value.HeapKind) type {
                 .sort => {
                     const charge = @max(context.remaining(), 1);
                     try context.advance(charge);
-                    switch (self.sort.?.borrowMut().advance(charge)) {
+                    switch (poll.advanceWithin(self.sort.?.borrowMut(), charge)) {
                         .pending => return .yielded,
                         .complete => {
                             self.sort.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
@@ -328,12 +327,12 @@ pub const CompareCursor = struct {
         return .{ .left = left, .right = right };
     }
 
-    pub fn advance(self: *CompareCursor, budget: usize) CompareProgress {
+    pub fn advance(self: *CompareCursor, work: *poll.WorkBudget) CompareProgress {
         if (self.left.isString() and self.right.isString()) {
             const left_count: usize = @intCast(self.left.list.length());
             const right_count: usize = @intCast(self.right.list.length());
             const shared = @min(left_count, right_count);
-            const end = @min(self.index + budget, shared);
+            const end = self.index + work.take(shared - self.index);
             while (self.index != end) : (self.index += 1) {
                 const left_char = list.atUnchecked(self.left, self.index).char;
                 const right_char = list.atUnchecked(self.right, self.index).char;
@@ -362,8 +361,8 @@ const GradeComparator = struct {
         return .init(list.atUnchecked(collection, left), list.atUnchecked(collection, right));
     }
 
-    pub fn advance(cursor: *Cursor, budget: usize) poll.Progress(std.math.Order) {
-        return switch (cursor.advance(budget)) {
+    pub fn advance(cursor: *Cursor, work: *poll.WorkBudget) poll.Progress(std.math.Order) {
+        return switch (cursor.advance(work)) {
             .pending => .pending,
             .not_comparable => unreachable,
             .complete => |ordering| .{ .complete = ordering },
@@ -380,7 +379,7 @@ const CompareDriver = struct {
     cursor: CompareCursor,
     pub fn advance(evaluator: *Machine, self: *CompareDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        return switch (self.cursor.advance(machine.kernel_poll_quantum)) {
+        return switch (self.cursor.advance(evaluator.workBudget())) {
             .pending => .yielded,
             .not_comparable => evaluator.typeError("two comparable numbers, chars, or strings"),
             .complete => |ordering| .{ .output = .{ .int = switch (ordering) {
@@ -454,7 +453,7 @@ const GradeDriver = struct {
                 } };
             },
             .compare => |*compare| {
-                switch (compare.cursor.advance(1)) {
+                switch (poll.advanceWithin(&compare.cursor, 1)) {
                     .pending => return .yielded,
                     .not_comparable => return evaluator.failAtIndex(
                         .type,
@@ -482,7 +481,7 @@ const GradeDriver = struct {
                     self.state.borrowMut().* = .{ .sort = .init(sort) };
                 }
             },
-            .sort => |*sort| switch (sort.borrowMut().advance(budget)) {
+            .sort => |*sort| switch (sort.borrowMut().advance(evaluator.workBudget())) {
                 .pending => return .yielded,
                 .complete => {
                     sort.deinit(evaluator.releaseDomain(), evaluator.allocator());

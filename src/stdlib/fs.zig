@@ -796,7 +796,7 @@ const Driver = struct {
             .bytes_value => |*building| self.materializeBytes(evaluator, building),
             .text_value => |*building| self.materializeText(evaluator, building),
             .list_collect => |*collect| self.collectEntries(evaluator, collect),
-            .list_order => |*ordering| self.orderEntries(ordering),
+            .list_order => |*ordering| self.orderEntries(evaluator, ordering),
             .list_build => |*build| self.buildEntries(evaluator, build),
             .list_result => |*result| self.materializeEntries(evaluator, result),
             .list_release => |*release| self.releaseEntries(evaluator, release),
@@ -1301,10 +1301,10 @@ const Driver = struct {
         return .yielded;
     }
 
-    /// Ordering advances one bounded quantum per step; only the completed
-    /// cursor yields the sorted pointers.
-    fn orderEntries(self: *Driver, ordering: *Ordering) MachineError!driver_completion.Progress {
-        if (ordering.orderer.advance(work_quantum) == .pending) return .yielded;
+    /// Ordering draws on the unit's budget; only the completed cursor yields
+    /// the sorted pointers.
+    fn orderEntries(self: *Driver, evaluator: *Machine, ordering: *Ordering) MachineError!driver_completion.Progress {
+        if (ordering.orderer.advance(evaluator.workBudget()) == .pending) return .yielded;
         const values = try self.allocator.alloc(Value, ordering.entries.count);
         const entries = ordering.entries;
         const sorted = ordering.orderer.take();

@@ -428,9 +428,9 @@ const NameCompareCursor = struct {
     fn init(left: u32, right: u32) NameCompareCursor {
         return .{ .left = intern.get(left), .right = intern.get(right) };
     }
-    fn advance(self: *NameCompareCursor, budget: usize) poll.Progress(std.math.Order) {
+    fn advance(self: *NameCompareCursor, work: *poll.WorkBudget) poll.Progress(std.math.Order) {
         const shared = @min(self.left.len, self.right.len);
-        const end = @min(self.index + budget, shared);
+        const end = self.index + work.take(shared - self.index);
         while (self.index != end) : (self.index += 1) {
             if (self.left[self.index] < self.right[self.index]) return .{ .complete = .lt };
             if (self.left[self.index] > self.right[self.index]) return .{ .complete = .gt };
@@ -448,8 +448,8 @@ const NameComparator = struct {
         return .init(left, right);
     }
 
-    pub fn advance(cursor: *Cursor, budget: usize) poll.Progress(std.math.Order) {
-        return cursor.advance(budget);
+    pub fn advance(cursor: *Cursor, work: *poll.WorkBudget) poll.Progress(std.math.Order) {
+        return cursor.advance(work);
     }
 };
 
@@ -465,8 +465,8 @@ const NameSortCursor = struct {
         self.sort.deinit();
         self.* = undefined;
     }
-    pub fn advance(self: *NameSortCursor, budget: usize) NameSortProgress {
-        return self.sort.advance(budget);
+    pub fn advance(self: *NameSortCursor, work: *poll.WorkBudget) NameSortProgress {
+        return self.sort.advance(work);
     }
 };
 
@@ -532,7 +532,7 @@ pub const SortedUniqueNameCursor = struct {
                 self.phase = .sort;
                 return .pending;
             },
-            .sort => switch (self.sorter.?.advance(remaining)) {
+            .sort => switch (poll.advanceWithin(&self.sorter.?, remaining)) {
                 .pending => return .pending,
                 .complete => {
                     self.sorter.?.deinit();
