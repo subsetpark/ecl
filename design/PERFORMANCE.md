@@ -617,6 +617,44 @@ milliseconds:
 | `1000000 (1 +) times`, control | 308 | 290 |
 | `() each`, 100k ×10, control | 172 | 168 |
 
+## Application continuations spend fuel — 2026-09-28
+
+Every finished application continuation (`each`, `times`, `fold`, `scan`,
+`dip`, `linrec`, `stencil`, dictionary `each`, `dict.merge-with`) used to mark
+the unit as yielded, so the machine loop ended its slice and the scheduler took
+one handoff per element or iteration. The marker predated any measurement. The
+continuation now charges one unit of dispatch fuel instead, the same charge a
+fetched form pays, and the loop's exhaustion check runs before an exhausted
+`Eval` is retired so a body that dispatches no form still reaches that safe
+point once per fuel quantum. Backpressure admission, driver-owned tails, and
+the frame protocol are unchanged.
+
+The new `-- --application-only` selection times an unrecognized `each` body
+(`(dup *)`), an empty `times` body, and a two-word `times` body. ReleaseSafe on
+macOS arm64 (Apple Silicon), Zig 0.16.0, 101 repetitions, one worker; wall
+p50 in microseconds, counters from the instrumented pass.
+
+| Case | Size | Control p50 | Fuel-charge p50 | Control handoffs | Fuel-charge handoffs | Control polls | Fuel-charge polls |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| generic-each-body | 1,024 | 841 | 708 | 1,026 | 4 | 3,079 | 2,056 |
+| generic-each-body | 65,536 | 52,612 | 42,224 | 65,665 | 194 | 196,742 | 131,270 |
+| empty-times-body | 1,024 | 213 | 94 | 1,024 | 1 | 1,025 | 2 |
+| empty-times-body | 65,536 | 10,239 | 2,713 | 65,536 | 64 | 65,537 | 65 |
+| counting-times-body | 1,024 | 291 | 169 | 1,026 | 3 | 1,029 | 6 |
+| counting-times-body | 65,536 | 15,193 | 7,513 | 65,664 | 192 | 65,667 | 195 |
+
+Allocations, logical transitions, driver resumes, and application resumes are
+identical in both variants. The empty body's 65 polls and 64 handoffs at 65,536
+iterations are the fuel quantum doing its job: the slice bound survives without
+a per-iteration handoff. The remaining generic-`each` cost is the body's two
+`DispatchDriver` resumes per element, which miss every call-site cache because
+the isolated child scope has no scope-cell id; that is a separate contributor.
+
+Four alternating `--latency-only` passes (treatment, control, treatment,
+control) left the mixed short-task and cancellation p50 values within 6% in
+both directions at one and eight workers. Eight-worker cancellation p95/p99
+tails above 500 µs appeared once on each side and did not reproduce.
+
 ## CSV and table primitives — 2026-09-10
 
 Baseline is the committed columnar implementation `05454f6`; updated is the

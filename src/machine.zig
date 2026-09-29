@@ -2304,7 +2304,6 @@ pub const WorkDriver = struct {
 /// evaluator cannot represent an unrelated driver, park, and join at once.
 pub const NativeContinuation = union(enum) {
     idle,
-    yielded,
     work: WorkDriver,
     work_park_request: struct { driver: WorkDriver, request: ParkRequest },
     work_park_resume: struct { driver: WorkDriver, result: ParkResume },
@@ -2958,11 +2957,6 @@ pub const Unit = struct {
                     consumed += 1;
                     continue;
                 },
-                .yielded => {
-                    self.native = .idle;
-                    consumed += 1;
-                    continue;
-                },
                 .idle => {},
                 .task_join, .task_join_request, .task_join_resume, .task_join_cleanup, .work_join_cleanup => unreachable,
             }
@@ -3071,7 +3065,7 @@ pub const Unit = struct {
         self.stack.deinit(self.allocator);
         self.terminal.deinit(self.releases);
         switch (self.native) {
-            .idle, .yielded => {},
+            .idle => {},
             .work => |driver| driver.deinit(self.releases, self.allocator),
             .work_park_request => |state| {
                 state.request.deinit(self.releases);
@@ -3243,9 +3237,6 @@ pub const Machine = struct {
         if (pointer.size != .one) @compileError("work driver context must be a single-item pointer");
         const Driver = pointer.child;
         const adapters = WorkDriverAdapters(Driver);
-        // A final application step may replace its scheduler-yield marker
-        // with bounded native materialization; that driver supplies its own
-        // scheduler slices, so the marker is consumed by this transition.
         const installed = WorkDriver{
             .context = @ptrCast(context),
             .resume_fn = adapters.advance,
@@ -3259,7 +3250,7 @@ pub const Machine = struct {
             } else null,
         };
         self.unit.native = switch (self.unit.native) {
-            .idle, .yielded => .{ .work = installed },
+            .idle => .{ .work = installed },
             .task_join_cleanup => |cleanup| .{ .work_join_cleanup = .{
                 .driver = installed,
                 .cleanup = cleanup,
@@ -3363,13 +3354,14 @@ pub const Machine = struct {
         const driver = self.unit.takeWorkDriver().?;
         std.debug.assert(driver.context == @as(*anyopaque, @ptrCast(context)));
     }
-    /// Marks a preserved native continuation boundary as scheduler-visible.
-    /// Application state already owns its next position, so no native stack
-    /// survives the return.
-    pub fn yieldNativeStep(self: *Machine) MachineError!void {
-        try self.pollKernel();
-        std.debug.assert(self.unit.native == .idle);
-        self.unit.native = .yielded;
+    /// Charges one finished application continuation to the unit's dispatch
+    /// fuel, exactly as fetching a form does. A body that dispatches nothing
+    /// still spends fuel here, so an empty iteration reaches the exhaustion
+    /// safe point where cancellation is observed and the slice ends. The
+    /// continuation itself never ends a slice: the same bound that limits a
+    /// run of forms limits a run of resumed continuations.
+    pub fn chargeContinuationStep(self: *Machine) void {
+        self.unit.fuel -|= 1;
     }
 
     /// Mints the nominal proof that this callback installed the work which
@@ -6857,21 +6849,10 @@ fn loop(self: *Machine) MachineError!RunStatus {
                 },
             };
             if (!resumed) return .completed;
-            // A frame continuation may replace its native-stack tail with an
-            // owned driver. Let that driver run before dispatching the parent
-            // Eval which resumeFrames may also have restored.
-            if (self.unit.hasWorkDriver()) continue;
-            if (self.unit.native == .yielded) {
-                self.unit.native = .idle;
-                return .yielded;
-            }
         }
-        const current = &self.unit.current.?;
-        if (!current.hasInstructions()) {
-            self.retireCompletedEval(current.*);
-            self.unit.current = null;
-            continue;
-        }
+        // Exhaustion is checked before another continuation, an owned driver,
+        // or an exhausted Eval runs. A body that dispatched nothing spent its
+        // fuel in its continuation.
         if (self.unit.fuel == 0) {
             self.unit.polls += 1;
             self.unit.fuel = fuel_quantum;
@@ -6882,6 +6863,16 @@ fn loop(self: *Machine) MachineError!RunStatus {
                 continue;
             }
             return .yielded;
+        }
+        // A frame continuation may replace its native-stack tail with an
+        // owned driver. Let that driver run before dispatching the parent
+        // Eval which resumeFrames may also have restored.
+        if (self.unit.hasWorkDriver()) continue;
+        const current = &self.unit.current.?;
+        if (!current.hasInstructions()) {
+            self.retireCompletedEval(current.*);
+            self.unit.current = null;
+            continue;
         }
         poll(self) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -8834,7 +8825,7 @@ fn prepareEffectCheck(
     };
 }
 fn resumeFrames(self: *Machine) MachineError!bool {
-    while (self.unit.frames.pop()) |frame| switch (frame) {
+    while (self.unit.fuel != 0) switch (self.unit.frames.pop() orelse return false) {
         .eval => |continuation| {
             self.unit.current = continuation;
             return true;
@@ -8922,14 +8913,10 @@ fn resumeFrames(self: *Machine) MachineError!bool {
             continuation.deinit_fn(self.releaseDomain(), self.unit.allocator, continuation.context);
             // Native work installed by an application continuation is the
             // continuation's tail. Do not cross later continuation frames until
-            // that owned work has produced its stack result.
+            // that owned work has produced its stack result. A continuation
+            // that installed nothing has charged its fuel; the next frame is
+            // resumed only while fuel remains.
             if (self.unit.hasWorkDriver()) return true;
-            // The same rule holds for the bounded native step a finished
-            // continuation records: the machine loop consumes exactly one per
-            // pass, so a second continuation resumed here would assert against
-            // a yield nobody observed. Nested in-place applications finishing
-            // in one unwind are the ordinary case — `(q) dip` inside `bi`.
-            if (self.unit.native == .yielded) return true;
         },
         .qualified_after_load => |continuation| {
             var loading = continuation.loading;
@@ -8991,7 +8978,9 @@ fn resumeFrames(self: *Machine) MachineError!bool {
             }
         },
     };
-    return false;
+    // Even if this was the last frame, the evaluator must poll cancellation
+    // and yield before reporting completion.
+    return true;
 }
 fn finishEffectCheck(self: *Machine, check: *EffectCheck) MachineError!void {
     check.restoreActive(self.unit);
@@ -9638,7 +9627,10 @@ pub fn outcomeDict(
     return dict.fromUniquePairs(allocator, releases, &.{.{ .{ .symbol = key }, payload }});
 }
 fn startFailure(self: *Machine) error{OutOfMemory}!void {
-    std.debug.assert(!self.unit.hasWorkDriver() and self.unit.hasPendingFailure());
+    std.debug.assert(self.unit.hasPendingFailure());
+    // Failure entry owns the native tail too: it must be detached before the
+    // frame unwinder can replace it with the failure driver.
+    clearWorkDriver(self.unit);
     const capacity = std.math.add(usize, self.unit.frames.items.len, 3) catch
         return error.OutOfMemory;
     const trace = try self.unit.allocator.alloc(intern.TraceWord, capacity);

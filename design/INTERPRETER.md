@@ -833,8 +833,8 @@ Each pass through the loop performs the first applicable action:
 3. advance an installed work driver;
 4. honor a requested process exit;
 5. resume a saved frame when no quotation is current;
-6. return from a completed quotation;
-7. check fuel and cancellation at a safe point; or
+6. check fuel and cancellation at a safe point;
+7. return from a completed quotation; or
 8. fetch and dispatch one form.
 
 That ordering is part of the machine's design. A driver completes before the
@@ -1108,10 +1108,12 @@ sanitizers.
 
 ### Fuel and drivers define safe points
 
-Each Unit has dispatch fuel. Fetching a form spends fuel; a long primitive
-spends bounded work through its driver. At exhaustion the machine checks
-cancellation and yields. A scheduler slice therefore has a bound independent
-of the total source or collection size.
+Each Unit has dispatch fuel. Fetching a form spends fuel, and so does resuming
+a finished application continuation; a long primitive spends bounded work
+through its driver. At exhaustion the machine checks cancellation and yields.
+A scheduler slice therefore has a bound independent of the total source or
+collection size, including for a body that dispatches no form.
+Failure entry detaches any installed native driver before unwinding frames.
 A suspended driver owns the stack handoff it needs. It cannot keep a mutable
 slice of the operand stack while another continuation runs, and a park request
 defines who owns its payload until delivery, cancellation, or teardown.

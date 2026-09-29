@@ -540,11 +540,11 @@ test "linrec: empty post retains explicit depth frames and cancellation reaches 
 }
 
 test "nested in-place applications finish in one unwind" {
-    // Each finished application continuation records one accounted native
-    // step, and the machine loop consumes one per pass: an inner application
-    // completing inside an outer one has to end the pass rather than resume
-    // the next continuation. `dip` recognition made the shape ordinary, since
-    // `bi` and `tri` apply a quotation beneath one.
+    // An inner application completing inside an outer one resumes the outer
+    // continuation in the same unwind; each finished continuation spends
+    // dispatch fuel, so the unwind is bounded like a run of forms. `dip`
+    // recognition made the shape ordinary, since `bi` and `tri` apply a
+    // quotation beneath one.
     try support.expectStacks(&.{
         .{ .name = "nested times", .source = "1 2 (1 (10 *) times) times", .expected = "100" },
         .{ .name = "nested dip", .source = "1 (2 (3 (4 5 +) dip) dip) dip", .expected = "9 3 2 1" },
@@ -555,6 +555,84 @@ test "nested in-place applications finish in one unwind" {
         .{ .name = "dip inside times", .source = "5 2 (9 (1 +) dip pop) times", .expected = "7" },
         .{ .name = "locals body under dip", .source = "10 20 (|lo hi| hi lo - lo +) call", .expected = "20" },
     });
+}
+
+test "application continuations spend fuel rather than scheduler slices" {
+    // A finished continuation charges the same fuel a fetched form does. An
+    // empty body dispatches no form, so its iterations reach the exhaustion
+    // safe point only through that charge: one poll per fuel quantum, not one
+    // per iteration, and never zero.
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    const iterations = 100_000;
+    switch (try runtime.runUnit("<continuation-fuel>", "100000 () times")) {
+        .ok => {},
+        .err => |failure| {
+            runtime.release(failure);
+            return error.TestUnexpectedResult;
+        },
+        .incomplete => return error.TestUnexpectedResult,
+    }
+    const polls = runtime.lastPolls();
+    try std.testing.expect(polls >= iterations / 4096);
+    try std.testing.expect(polls <= iterations / 256);
+    try std.testing.expect(runtime.lastMaxFrames() <= 2);
+}
+
+test "nested application unwind polls before completion" {
+    const depth = 1100;
+    var source: std.ArrayList(u8) = .empty;
+    defer source.deinit(std.testing.allocator);
+    for (0..depth) |_| try source.appendSlice(std.testing.allocator, "1 (");
+    try source.appendSlice(std.testing.allocator, "0");
+    for (0..depth) |_| try source.appendSlice(std.testing.allocator, ") dip ");
+
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    switch (try runtime.runUnit("<nested-application-fuel>", source.items)) {
+        .ok => {},
+        .err => |failure| {
+            runtime.release(failure);
+            return error.TestUnexpectedResult;
+        },
+        .incomplete => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(runtime.lastPolls() >= 3);
+    try std.testing.expectEqual(@as(usize, depth + 1), runtime.stackItems().len);
+}
+
+test "cancellation retires continuation-installed work before failure unwind" {
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+
+    var source: std.ArrayList(u8) = .empty;
+    defer source.deinit(std.testing.allocator);
+    // The conflict quotation cancels its own task as its final form. The
+    // padding leaves exactly one fuel charge for the merge continuation,
+    // which installs its materialization driver before cancellation is polled.
+    try source.appendSlice(std.testing.allocator, "[] (");
+    for (0..506) |_| try source.appendSlice(std.testing.allocator, "0 pop ");
+    try source.appendSlice(
+        std.testing.allocator,
+        "0 {'a 1} {'a 2} (pop pop victim task.cancel) dict.merge-with pop pop) " ++
+            "@spawn dup 'victim set task.await 'err at 'kind at",
+    );
+    try std.testing.expect((try runtime.runUnit("<driver-cancel>", source.items)) == .ok);
+    var display = try runtime.stackDisplay();
+    defer display.deinit();
+    try std.testing.expectEqualStrings("'cancelled", display.bytes());
 }
 
 test "empty inline iterations remain cancellable and bounded-frame" {

@@ -104,7 +104,7 @@ const TimesState = struct {
         _: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
         evaluator.setActiveWord(self.word);
-        try evaluator.yieldNativeStep();
+        evaluator.chargeContinuationStep();
         self.remaining -= 1;
         return if (self.remaining == 0) null else self.step();
     }
@@ -175,7 +175,7 @@ const DipState = struct {
         _: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
         evaluator.setActiveWord(self.word);
-        try evaluator.yieldNativeStep();
+        evaluator.chargeContinuationStep();
         try evaluator.pushOwned(self.protected.take());
         return null;
     }
@@ -628,7 +628,7 @@ const LinrecApplicationState = struct {
         _: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
         evaluator.setActiveWord(self.level.borrow().word);
-        try evaluator.yieldNativeStep();
+        evaluator.chargeContinuationStep();
         switch (self.phase) {
             .base, .post => return null,
             .pre => {
@@ -771,7 +771,7 @@ const IterationState = struct {
         site: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
         evaluator.setActiveWord(self.word);
-        try evaluator.yieldNativeStep();
+        evaluator.chargeContinuationStep();
         const base: usize = window.base();
         const observed = window.observed(evaluator.unit.stack.items.len) orelse
             return evaluator.applicationContractError(
@@ -973,7 +973,7 @@ const UpdateApplication = struct {
     ) MachineError!?ApplicationStep {
         const state = self.state.borrow();
         evaluator.setActiveWord(state.word);
-        try evaluator.yieldNativeStep();
+        evaluator.chargeContinuationStep();
         const observed = window.observed(evaluator.unit.stack.items.len) orelse
             return evaluator.applicationContractError(
                 site,
@@ -1426,7 +1426,7 @@ const StencilApplication = struct {
     ) MachineError!?ApplicationStep {
         const control = self.control.borrowMut();
         evaluator.setActiveWord(control.word);
-        try evaluator.yieldNativeStep();
+        evaluator.chargeContinuationStep();
         const observed = window.observed(evaluator.unit.stack.items.len) orelse
             return evaluator.applicationContractError(
                 site,
@@ -1559,7 +1559,7 @@ const UnfoldState = struct {
         site: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
         evaluator.setActiveWord(self.word);
-        try evaluator.yieldNativeStep();
+        evaluator.chargeContinuationStep();
         const observed = window.observed(evaluator.unit.stack.items.len) orelse
             return evaluator.applicationContractError(
                 site,
