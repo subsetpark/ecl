@@ -1856,7 +1856,7 @@ const ReshapeDriver = struct {
         try evaluator.pollKernel();
         if (self.dimension_index != self.dimensions.borrow().len) {
             const end = @min(self.dimension_index + machine.kernel_poll_quantum, self.dimensions.borrow().len);
-            while (self.dimension_index != end) : (self.dimension_index += 1) {
+            while (self.dimension_index != end and evaluator.workBudget().spend()) : (self.dimension_index += 1) {
                 const dimension = list.atUnchecked(self.shape_value.borrow(), self.dimension_index);
                 if (dimension != .int) return evaluator.typeError("an integer shape");
                 if (dimension.int < 0) return evaluator.failAtIndex(
