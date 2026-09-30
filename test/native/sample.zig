@@ -266,7 +266,9 @@ fn forwardNestedPort(
     };
     if (!schedule.state().appended) {
         schedule.state().appended = true;
-        if (!schedule.consume(65_536)) unreachable;
+        // Earlier work may have consumed part of this turn. Either result
+        // exhausts its remaining budget before probing nested forwarding.
+        _ = schedule.consume(65_536);
         return switch (try call.forwardNested(0, path)) {
             .yield_required => schedule.yield(),
             .candidate => call.fail(.user, "nested forwarding ignored the exhausted turn"),
