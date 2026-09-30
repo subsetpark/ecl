@@ -2430,7 +2430,8 @@ pub const WorkerScheduler = enum(usize) {
         defer std.Io.Threaded.mutexUnlock(&state_.queue_mutex);
         // Cancellation bypasses ordinary admission, so an idle node holds
         // nothing; a waiting node never runs a slice to release.
-        const decision = core.decideRelease(self.admissionPoolLocked(), node.coreState()) catch unreachable;
+        const decision = core.decideRelease(self.admissionPoolLocked(), node.coreState()) catch
+            @panic("a waiting evaluation released a slot it never held");
         node.state = .idle;
         state_.admitted = decision.admitted;
         self.grantAdmissionLocked();
