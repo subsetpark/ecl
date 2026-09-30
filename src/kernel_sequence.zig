@@ -1087,6 +1087,7 @@ const RazeDriver = struct {
                 } else if (self.child_index == item.list.length()) {
                     self.child_index = 0;
                     self.index += 1;
+                    _ = work.spend();
                     continue;
                 } else {
                     self.values.?.borrow()[self.destination] = list.atUnchecked(item, self.child_index);

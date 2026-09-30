@@ -1312,8 +1312,8 @@ const Driver = struct {
     }
 
     fn buildEntries(self: *Driver, evaluator: *Machine, build: *Build) MachineError!driver_completion.Progress {
-        var budget: usize = 64;
-        while (budget != 0) : (budget -= 1) {
+        const work = evaluator.workBudget();
+        while (!work.exhausted()) {
             if (build.built == build.sorted.len) {
                 const entries = build.entries;
                 const sorted = build.sorted;
@@ -1328,7 +1328,10 @@ const Driver = struct {
                 return .stepped;
             }
             const entry = build.sorted[build.built];
-            if (build.name == null) build.name = .init(self.allocator, entry.name);
+            if (build.name == null) {
+                _ = work.spend();
+                build.name = .init(self.allocator, entry.name);
+            }
             const name_value = switch (build.name.?.advance(evaluator.workBudget()) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.InvalidUtf8 => return self.fail(evaluator, .invalid_utf8),
@@ -1345,7 +1348,7 @@ const Driver = struct {
             });
             build.built += 1;
         }
-        return .stepped;
+        return .yielded;
     }
 
     fn materializeEntries(self: *Driver, evaluator: *Machine, result: *Result) MachineError!driver_completion.Progress {
@@ -1371,12 +1374,12 @@ const Driver = struct {
     /// The listing retains its element dictionaries, so the construction
     /// inputs release one per step before the result is published.
     fn releaseEntries(self: *Driver, evaluator: *Machine, release: *Release) MachineError!driver_completion.Progress {
-        var budget: usize = 64;
-        while (budget != 0 and release.index != release.built) : (budget -= 1) {
+        const work = evaluator.workBudget();
+        while (release.index != release.built and work.spend()) {
             evaluator.releaseDomain().releaseValue(release.values[release.index]);
             release.index += 1;
         }
-        if (release.index != release.built) return .stepped;
+        if (release.index != release.built) return .yielded;
         self.allocator.free(release.values);
         self.allocator.free(release.sorted);
         const result = release.result;

@@ -437,7 +437,7 @@ const RequestDriver = struct {
             },
             .request_body => |*body| {
                 const output = body.request.body.?;
-                const end = @min(output.len, body.index + machine.kernel_poll_quantum);
+                const end = body.index + evaluator.workBudget().take(output.len - body.index);
                 while (body.index < end) : (body.index += 1) {
                     const item = list.atUnchecked(self.fields.body.?, body.index);
                     if (item != .int or item.int < 0 or item.int > 255)
