@@ -1105,9 +1105,14 @@ the same semantics as worker execution.
 ### The policy is a functional core with an imperative shell
 
 `scheduler_core.zig` defines closed state machines for Unit execution, waits,
-registration, and task scopes. Given a state and an event, it returns the only
-legal decision. `scheduler.zig` owns mutexes, atomics, queues, workers, timer
-infrastructure, and the effects of those decisions.
+registration, task scopes, evaluation admission, and the executor's choice
+between ready work and retirement. Given a state and an event, it returns the
+only legal decision. `scheduler.zig` owns mutexes, atomics, queues, workers,
+timer infrastructure, and the effects of those decisions. `turn_core.zig` does
+the same for a unit's turn: the budget charge and what the evaluator does
+after a driver steps or yields, where every yield names whether the driver
+parked, waits on something outside its own work, or is settling work that
+must not observe cancellation.
 
 This split makes invalid transitions visible to exhaustive switching and keeps
 locking policy out of semantic decisions. Verification also exercises the real
@@ -1416,7 +1421,9 @@ destroyed only after the timer thread has joined.
 
 Workers may execute ready Units in any order. Determinism is restored where
 the language specifies an order: join materialization, indexed `any` results,
-and collection assembly. Random kernels use explicit key/counter addressing so
+and collection assembly. A cooperative executor can choose its ready order
+from a seed, so that a result which should not depend on scheduling can be
+checked against many orders. Random kernels use explicit key/counter addressing so
 parallel scheduling does not silently change a deterministic stream; host
 entropy is a separately authorized boundary.
 
