@@ -5661,6 +5661,11 @@ pub const Machine = struct {
     pub fn workBudget(self: *Machine) *poll_api.WorkBudget {
         return &self.unit.kernel_budget;
     }
+    /// A cancellable completion settles its last charge before transferring
+    /// execution. Committed delivery and failure cleanup must not use this.
+    pub fn pollCancellableCompletion(self: *Machine) MachineError!void {
+        if (self.workBudget().exhausted()) try self.pollKernel();
+    }
     /// Charges work that has already been committed, such as an inline kernel
     /// block that cannot stop part way. A charge that reaches the end of the
     /// turn's allowance polls cancellation and leaves the allowance exhausted:
@@ -9215,6 +9220,7 @@ const StateAcquireDriver = struct {
             self.copied += 1;
         }
         if (self.copied != durable.len) return .stepped;
+        try evaluator.pollCancellableCompletion();
         // One move transfers exclusive ownership: `enterStateApplication` owns the
         // application on every exit path from here.
         try evaluator.enterStateApplication(
@@ -9566,11 +9572,12 @@ const ConstructionDriver = struct {
                 // A construction that only had a body to re-scope reaches this
                 // phase with nothing to seed, which is the whole of its work.
                 if (self.materializer) |*materializer| {
-                    return if (try materializer.borrowMut().advance(
+                    if (!try materializer.borrowMut().advance(
                         evaluator.unit,
                         evaluator.workBudget(),
-                    )) .completed else .stepped;
+                    )) return .stepped;
                 }
+                try evaluator.pollCancellableCompletion();
                 return .completed;
             },
         }
@@ -9594,7 +9601,7 @@ const ChildSeedDriver = struct {
         )) {
             // An empty body has no later dispatch safe point. Settle the
             // final seed-copy charge before completion can retire this driver.
-            if (evaluator.workBudget().exhausted()) try evaluator.pollKernel();
+            try evaluator.pollCancellableCompletion();
             return .completed;
         }
         return .stepped;

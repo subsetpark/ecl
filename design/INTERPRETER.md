@@ -1126,7 +1126,9 @@ the budget it is lent and hands the same budget to the cursors it drives, so
 nested work cannot begin an allowance of its own, and a hand-off is charged
 by the cursor that does the work rather than ahead of it. Exhausting the
 budget ends the turn, including when a driver completes or delivers output;
-no successor driver or evaluation runs on an exhausted allowance. The next
+no successor driver or evaluation runs on an exhausted allowance. An ordinary
+cancellable completion settles exhaustion with a cancellation poll before
+handing execution onward, even when the body to follow is empty. The next
 turn begins with a fresh quantum, and the charge that exhausts it polls
 cancellation. Only an owner creates a budget: the
 machine for a unit's turn, the scheduler and the port builder for their own
