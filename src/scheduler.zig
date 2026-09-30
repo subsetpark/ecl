@@ -764,21 +764,21 @@ const WaitSet = struct {
         };
     }
 
-    fn advanceSetup(self: *WaitSet) bool {
-        var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0) switch (self.state) {
+    /// One setup step draws on the scheduler's allowance for that step.
+    fn advanceSetup(self: *WaitSet, work: *poll.WorkBudget) bool {
+        while (!work.exhausted()) switch (self.state) {
             .initializing => |*initializing| {
                 if (initializing.registrations != self.registrations.len) {
                     self.registrations[initializing.registrations] = .{ .wait = self };
                     initializing.registrations += 1;
                     self.wake_handles += 1;
-                    budget -= 1;
+                    _ = work.spend();
                     continue;
                 }
                 if (initializing.canonical != self.canonical.len) {
                     self.canonical[initializing.canonical] = .{};
                     initializing.canonical += 1;
-                    budget -= 1;
+                    _ = work.spend();
                     continue;
                 }
                 const request = initializing.request;
@@ -797,7 +797,7 @@ const WaitSet = struct {
                     cursor.deinit();
                     cancelling.work = .next;
                     cancelling.index += 1;
-                    budget -|= cancellation_tree_quantum;
+                    _ = work.take(cancellation_tree_quantum);
                 },
                 .next => {
                     const join = cancelling.join;
@@ -811,7 +811,7 @@ const WaitSet = struct {
                     const cell = taskCell(list.atUnchecked(join.tasks, cancelling.index)).?;
                     cancelArriving(cell);
                     cancelling.work = .{ .active = .{ .root = &cell.scope } };
-                    budget -= 1;
+                    _ = work.spend();
                 },
             },
             .finding_duplicate => |*finding| {
@@ -852,7 +852,7 @@ const WaitSet = struct {
                     finding.index += 1;
                     finding.probe = 0;
                 } else finding.probe = finding.probe % self.canonical.len + 1;
-                budget -= 1;
+                _ = work.spend();
             },
             .registering => |registering| {
                 const cell = requestCell(registering.request, registering.index);
@@ -867,7 +867,7 @@ const WaitSet = struct {
                     .request = registering.request,
                     .index = registering.index + 1,
                 } };
-                budget -= 1;
+                _ = work.spend();
             },
             .registering_external => |request| {
                 const source = switch (request) {
@@ -894,7 +894,7 @@ const WaitSet = struct {
                 const registered = source.register(target) catch {
                     self.select(.out_of_memory);
                     self.state = .{ .release_request = request };
-                    budget -= 1;
+                    _ = work.spend();
                     continue;
                 };
                 switch (registered) {
@@ -905,7 +905,7 @@ const WaitSet = struct {
                     .registered => |registration| self.external_registration = registration,
                 }
                 self.state = .{ .release_request = request };
-                budget -= 1;
+                _ = work.spend();
             },
             .timer => |request| {
                 const milliseconds: ?u63 = switch (request) {
@@ -926,7 +926,7 @@ const WaitSet = struct {
             .release_request => |request| {
                 request.deinit(self.scheduler.releaseDomain());
                 self.state = .activating;
-                budget -= 1;
+                _ = work.spend();
             },
             .activating => {
                 // `activate` publishes the wait set, and publication is what
@@ -976,7 +976,9 @@ const WaitSet = struct {
         return terminal;
     }
 
-    fn advanceDelivery(self: *WaitSet) DeliveryProgress {
+    /// Registration cleanup and cell release share the one allowance the
+    /// scheduler lends this delivery step.
+    fn advanceDelivery(self: *WaitSet, work: *poll.WorkBudget) DeliveryProgress {
         switch (self.state) {
             .discard => |request| return self.advanceDiscard(request),
             .ready => {
@@ -1001,14 +1003,13 @@ const WaitSet = struct {
         }
         const reason = self.deliveredReason();
         const delivery = &self.state.delivering;
-        var budget: usize = machine.kernel_poll_quantum;
         if (self.external_registration) |registration| {
             var owned = registration;
             self.external_registration = null;
             owned.cancel();
-            budget -= 1;
+            _ = work.spend();
         }
-        while (delivery.cleanup_index != self.registrations.len and budget != 0) : (budget -= 1) {
+        while (delivery.cleanup_index != self.registrations.len and work.spend()) {
             const registration = &self.registrations[delivery.cleanup_index];
             const command = if (registration.cell) |cell| command: {
                 std.Io.Threaded.mutexLock(&cell.mutex);
@@ -1036,8 +1037,7 @@ const WaitSet = struct {
         }
         std.Io.Threaded.mutexUnlock(&self.mutex);
 
-        var release_budget: usize = machine.kernel_poll_quantum;
-        while (delivery.cell_release_index != self.registrations.len and release_budget != 0) : (release_budget -= 1) {
+        while (delivery.cell_release_index != self.registrations.len and work.spend()) {
             const registration = &self.registrations[delivery.cell_release_index];
             if (registration.cell) |cell| self.scheduler.releaseDomain().releaseHeader(cell.handle());
             registration.cell = null;
@@ -2262,8 +2262,11 @@ pub const WorkerScheduler = enum(usize) {
             request,
         );
         _ = unit.takeParkRequest();
-        while (!wait.advanceSetup()) std.Thread.yield() catch
-            @panic("scheduler root wait setup yield failed");
+        while (true) {
+            var work = poll.WorkBudget.init(machine.kernel_poll_quantum);
+            if (wait.advanceSetup(&work)) break;
+            std.Thread.yield() catch @panic("scheduler root wait setup yield failed");
+        }
         if (state_.config.isCooperative()) {
             while (!root.completed()) {
                 if (!self.runNextCooperative())
@@ -2542,12 +2545,14 @@ pub const WorkerScheduler = enum(usize) {
             return;
         }
         std.debug.assert(parking.command == .register_wait);
-        if (!wait.advanceSetup()) self.enqueueTask(cell);
+        var work = poll.WorkBudget.init(machine.kernel_poll_quantum);
+        if (!wait.advanceSetup(&work)) self.enqueueTask(cell);
     }
 
     fn advanceParkSetup(self: *const WorkerScheduler, cell: *TaskCell) void {
         const wait = cell.waitset.?;
-        if (!wait.advanceSetup()) self.enqueueTask(cell);
+        var work = poll.WorkBudget.init(machine.kernel_poll_quantum);
+        if (!wait.advanceSetup(&work)) self.enqueueTask(cell);
     }
 
     fn finish(self: *const WorkerScheduler, cell: *TaskCell, disposition: Finish) void {
@@ -2783,7 +2788,8 @@ pub const WorkerScheduler = enum(usize) {
     }
 
     fn runWait(self: *const WorkerScheduler, wait: *WaitSet) void {
-        switch (wait.advanceDelivery()) {
+        var work = poll.WorkBudget.init(machine.kernel_poll_quantum);
+        switch (wait.advanceDelivery(&work)) {
             .yielded => self.enqueueWait(wait),
             .waiting, .complete => {},
         }
