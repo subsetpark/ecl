@@ -123,5 +123,6 @@ test {
     _ = @import("tests/clock_test.zig");
     _ = @import("tests/conversion_test.zig");
     _ = @import("tests/cursor_budget_test.zig");
+    _ = @import("tests/interleaving_test.zig");
     _ = @import("tests/kernel_typed_test.zig");
 }

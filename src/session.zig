@@ -42,12 +42,15 @@ pub const UnitOutcome = union(enum) {
 pub const Config = union(enum) {
     default,
     cooperative,
+    /// Cooperative, with the order among ready work chosen by the seed.
+    cooperative_explored: u64,
     worker_pool: usize,
 
     fn schedulerConfig(self: Config) scheduler_api.Config {
         return switch (self) {
             .default => .{ .worker_pool = default_worker_count },
             .cooperative => .cooperative,
+            .cooperative_explored => |seed| .{ .cooperative_explored = seed },
             .worker_pool => |count| .{ .worker_pool = count },
         };
     }

@@ -156,19 +156,28 @@ const MonotonicClock = union(enum) {
 
 pub const Config = union(enum) {
     cooperative,
+    /// Cooperative, but the seed chooses which ready entry runs next and
+    /// whether a turn serves ready work or retirement. The scheduler promises
+    /// no order among ready work; this executor makes that contract checkable.
+    /// Admission stays first-come, since that order is promised.
+    cooperative_explored: u64,
     worker_pool: usize,
 
     pub fn validate(self: Config) error{InvalidWorkerCount}!void {
         switch (self) {
-            .cooperative => {},
+            .cooperative, .cooperative_explored => {},
             .worker_pool => |count| if (count == 0) return error.InvalidWorkerCount,
         }
     }
 
     fn isCooperative(self: Config) bool {
-        return self == .cooperative;
+        return self != .worker_pool;
     }
 };
+
+/// How far into the ready queue an explored executor looks for its next
+/// entry. A small window keeps the choice cheap and still reorders any pair.
+const explored_ready_window = 8;
 
 const TerminalState = union(enum) {
     outcome: Value,
@@ -1590,6 +1599,8 @@ const WorkerState = struct {
     admission_first: ?*Admission = null,
     admission_last: ?*Admission = null,
     admitted: usize = 0,
+    /// The seeded chooser of an explored cooperative executor.
+    explorer: ?std.Random.DefaultPrng = null,
     stopping: bool = false,
     started: bool = false,
     threads: []std.Thread = &.{},
@@ -2364,7 +2375,7 @@ pub const WorkerScheduler = enum(usize) {
 
     fn admissionLimit(self: *const WorkerScheduler) usize {
         return switch (self.privateState().config) {
-            .cooperative => 1,
+            .cooperative, .cooperative_explored => 1,
             .worker_pool => |workers| workers +| 1,
         };
     }
@@ -2452,6 +2463,7 @@ pub const WorkerScheduler = enum(usize) {
 
     fn popLocked(self: *const WorkerScheduler) ?*QueueEntry {
         const state_ = self.privateState();
+        if (state_.explorer) |*explorer| return popExploredLocked(state_, explorer.random());
         const entry = state_.queue_first orelse return null;
         state_.queue_first = switch (entry.membership) {
             .linked => |next| next,
@@ -2460,6 +2472,27 @@ pub const WorkerScheduler = enum(usize) {
         if (state_.queue_first == null) state_.queue_last = null;
         entry.membership = .detached;
         return entry;
+    }
+
+    fn popExploredLocked(state_: *WorkerState, random: std.Random) ?*QueueEntry {
+        var available: usize = 0;
+        var cursor = state_.queue_first;
+        while (cursor) |entry| : (cursor = entry.membership.linked) {
+            available += 1;
+            if (available == explored_ready_window) break;
+        }
+        if (available == 0) return null;
+        var previous: ?*QueueEntry = null;
+        var chosen = state_.queue_first.?;
+        for (0..random.uintLessThan(usize, available)) |_| {
+            previous = chosen;
+            chosen = chosen.membership.linked.?;
+        }
+        const following = chosen.membership.linked;
+        if (previous) |before| before.membership = .{ .linked = following } else state_.queue_first = following;
+        if (following == null) state_.queue_last = previous;
+        chosen.membership = .detached;
+        return chosen;
     }
 
     fn runNextCooperative(self: *const WorkerScheduler) bool {
@@ -2472,7 +2505,12 @@ pub const WorkerScheduler = enum(usize) {
         const state_ = self.privateState();
         std.Io.Threaded.mutexLock(&state_.queue_mutex);
         self.grantAdmissionLocked();
-        const turn = arbitration.choose(state_.queue_first != null, self.releaseDomain().hasAvailable()) orelse {
+        const has_ready = state_.queue_first != null;
+        const has_retirement = self.releaseDomain().hasAvailable();
+        if (state_.explorer) |*explorer| {
+            if (has_ready and has_retirement) arbitration.next = if (explorer.random().boolean()) .ready else .retirement;
+        }
+        const turn = arbitration.choose(has_ready, has_retirement) orelse {
             std.Io.Threaded.mutexUnlock(&state_.queue_mutex);
             return false;
         };
@@ -2852,6 +2890,10 @@ pub const Scheduler = enum(usize) {
                 .releases = heap.hostDomain(host),
                 .config = config,
                 .clock = .init(clock),
+                .explorer = switch (config) {
+                    .cooperative_explored => |seed| .init(seed),
+                    .cooperative, .worker_pool => null,
+                },
             },
         };
         backing.worker_facade = @enumFromInt(@intFromPtr(&backing.worker));
