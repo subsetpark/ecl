@@ -1125,19 +1125,24 @@ A unit has one kernel budget per turn for its logical work. Every cursor takes
 the budget it is lent and hands the same budget to the cursors it drives, so
 nested work cannot begin an allowance of its own, and a hand-off is charged
 by the cursor that does the work rather than ahead of it. Exhausting the
-budget ends the turn; the next turn begins with a fresh quantum, and the charge
-that exhausts it polls cancellation. Only an owner creates a budget: the
+budget ends the turn, including when a driver completes or delivers output;
+no successor driver or evaluation runs on an exhausted allowance. The next
+turn begins with a fresh quantum, and the charge that exhausts it polls
+cancellation. Only an owner creates a budget: the
 machine for a unit's turn, the scheduler and the port builder for their own
 steps, and a blocking helper, for work no unit owns, over an input its caller
 bounds.
 
 A driver distinguishes progress from waiting. An unfinished step keeps the turn
 while the budget lasts; a driver that must wait for another unit, the host, or
-a slot's turn ends it. A cursor of many small steps therefore costs one turn
-rather than one per step, and a wait never spends the budget polling. Work
+a slot's turn ends it. Bounded host I/O transfers explicitly end the turn even
+without parking; compute progress and host yields are distinct driver results.
+A cursor of many small steps therefore costs one turn rather than one per
+step, and a wait never spends the budget polling. Work
 that must finish regardless of cancellation, such as a failure unwind or a
-completion's cleanup, draws on the budget but always ends the turn when it is
-spent rather than continuing through a charge that could observe cancellation.
+completion's cleanup or retirement and output delivery after state publication,
+draws on the budget but always ends the turn when it is spent rather than
+continuing through a charge that could observe cancellation.
 Failure entry detaches any installed native driver before unwinding frames.
 A suspended driver owns the stack handoff it needs. It cannot keep a mutable
 slice of the operand stack while another continuation runs, and a park request

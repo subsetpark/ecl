@@ -5,7 +5,9 @@ const heap = @import("heap.zig");
 const machine = @import("machine.zig");
 const Value = @import("value.zig").Value;
 
-pub const Progress = union(enum) { yielded, completed, output: Value };
+// Compute progress can retain the turn. An explicit yield ends it even when
+// there is no park request, as with a bounded host I/O transfer.
+pub const Progress = union(enum) { stepped, yielded, completed, output: Value };
 
 pub const Completion = struct {
     phase: union(enum) { running, success: ?Value, failure: machine.MachineError, abandoned, settled } = .running,
@@ -17,9 +19,8 @@ pub const Completion = struct {
                 return .yielded;
             };
             switch (progress) {
-                // An operation waiting on the host parks the unit; one that
-                // yields without parking has more of its own work to do.
-                .yielded => return if (evaluator.unit.hasParkRequest()) .yielded else .stepped,
+                .stepped => return .stepped,
+                .yielded => return .yielded,
                 .completed => self.phase = .{ .success = null },
                 .output => |value| self.phase = .{ .success = value },
             }

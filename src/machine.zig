@@ -6810,6 +6810,9 @@ pub fn run(unit: *Unit, code: *Header) MachineError!void {
 fn loop(self: *Machine) MachineError!RunStatus {
     var first_step = true;
     while (true) {
+        // Completion and output delivery may spend the last unit too. Never
+        // enter another driver, continuation, or Eval with an empty allowance.
+        if (self.unit.kernel_budget.exhausted()) return .yielded;
         // Admission reserves progress, not a whole instruction quantum of
         // allocation after pressure rises. Complete at least one transition
         // before yielding so a granted waiter cannot repeatedly lose its turn.
@@ -9323,7 +9326,12 @@ const StatePublishDriver = struct {
                 return .completed;
             },
         };
-        return .stepped;
+        return switch (self.phase) {
+            .reserve, .move => .stepped,
+            // Publication has committed: ending this turn must not introduce
+            // the machine's cancellable progress charge before delivery.
+            .publish, .retire, .deliver => .yielded,
+        };
     }
 };
 

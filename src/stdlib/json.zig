@@ -107,11 +107,12 @@ const ParseDriver = struct {
             }
         }
         const work = evaluator.workBudget();
-        while (work.spend()) {
+        while (!work.exhausted()) {
             if (self.building != null) {
                 if (try self.advanceBuilding(evaluator)) |item| try self.place(evaluator, item);
                 continue;
             }
+            _ = work.spend();
             if (self.root) |root| {
                 // A well-formed document holds exactly one value; the scanner
                 // still has to confirm nothing follows it.

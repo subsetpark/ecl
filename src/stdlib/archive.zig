@@ -676,7 +676,7 @@ const UnpackDriver = struct {
                 encoding.byte.borrow().invalid_index.?,
             ),
         }) {
-            .pending => return .yielded,
+            .pending => return .stepped,
             .complete => |bytes| {
                 const target = takeEncodeTarget(&encoding.target);
                 encoding.byte.deinit(evaluator.releaseDomain(), self.allocator);
@@ -687,7 +687,7 @@ const UnpackDriver = struct {
                         .destination = path,
                     } },
                 } };
-                return .yielded;
+                return .stepped;
             },
         }
     }
@@ -701,7 +701,7 @@ const UnpackDriver = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return self.failDomain(evaluator, "destination contains an invalid Unicode scalar"),
         }) {
-            .pending => return .yielded,
+            .pending => return .stepped,
             .complete => |path| {
                 if (path.len == 0) {
                     self.allocator.free(path);
@@ -720,7 +720,7 @@ const UnpackDriver = struct {
                     .bytes = .init(bytes),
                     .target = .{ .unpack = .init(path) },
                 } } };
-                return .yielded;
+                return .stepped;
             },
         }
     }
@@ -765,7 +765,7 @@ const UnpackDriver = struct {
             .inputs = inputs,
             .tar = .init(tar),
         } } };
-        return .yielded;
+        return .stepped;
     }
 
     fn allocateDecoder(
@@ -780,7 +780,7 @@ const UnpackDriver = struct {
             .tar = .init(tar),
             .decoder = .init(decoder),
         } } };
-        return .yielded;
+        return .stepped;
     }
 
     fn decompress(
@@ -795,7 +795,7 @@ const UnpackDriver = struct {
                 return self.failDomain(evaluator, "malformed gzip archive");
             if (read == 0) return self.failDomain(evaluator, "gzip size does not match its footer");
             decompression.index += read;
-            return .yielded;
+            return .stepped;
         }
         var extra: [1]u8 = undefined;
         const read = decompression.decoder.borrowMut().read(&extra) catch
@@ -809,7 +809,7 @@ const UnpackDriver = struct {
             .inputs = inputs,
             .tar = .init(tar),
         } } };
-        return .yielded;
+        return .stepped;
     }
 
     fn verifyGzip(
@@ -822,7 +822,7 @@ const UnpackDriver = struct {
             const end = verification.index + evaluator.workBudget().take(output.len - verification.index);
             verification.crc.update(output[verification.index..end]);
             verification.index = end;
-            return .yielded;
+            return .stepped;
         }
         const compressed = verification.inputs.bytes.borrow().bytes();
         const expected_crc = std.mem.readInt(u32, compressed[compressed.len - 8 ..][0..4], .little);
@@ -834,7 +834,7 @@ const UnpackDriver = struct {
             .inputs = inputs,
             .tar = .init(tar),
         } } };
-        return .yielded;
+        return .stepped;
     }
 
     fn allocateSlots(
@@ -849,7 +849,7 @@ const UnpackDriver = struct {
             .tar = .init(tar),
             .slots = .init(slots),
         } } };
-        return .yielded;
+        return .stepped;
     }
 
     fn initializeSlots(
@@ -861,7 +861,7 @@ const UnpackDriver = struct {
         const end = initialization.index + evaluator.workBudget().take(slots.len - initialization.index);
         @memset(slots[initialization.index..end], null);
         initialization.index = end;
-        if (end != slots.len) return .yielded;
+        if (end != slots.len) return .stepped;
 
         var inputs = takeEncodedInputs(&initialization.inputs);
         const archive: Archive = .{
@@ -874,7 +874,7 @@ const UnpackDriver = struct {
             .archive = archive,
             .work = .{ .scanning = .{} },
         } };
-        return .yielded;
+        return .stepped;
     }
 
     fn publishView(self: *UnpackDriver, evaluator: *Machine, archive: *Archive) MachineError!driver_completion.Progress {
@@ -906,7 +906,7 @@ const UnpackDriver = struct {
                 .view => .publish_view,
                 .unpack => .allocate_results,
             };
-            return .yielded;
+            return .stepped;
         }
         if (context.tar_offset + tar_block_bytes > tar.len)
             return self.failDomain(evaluator, "truncated tar header");
@@ -917,7 +917,7 @@ const UnpackDriver = struct {
             context.zero_blocks += 1;
             context.tar_offset += tar_block_bytes;
             if (context.zero_blocks == 2) scanning.work = .trailing_zeroes;
-            return .yielded;
+            return .stepped;
         }
         if (context.zero_blocks != 0) return self.failDomain(evaluator, "tar data follows an end marker");
         if (!validChecksum(header)) return self.failDomain(evaluator, "tar header checksum is invalid");
@@ -938,7 +938,7 @@ const UnpackDriver = struct {
                 .end = header_data_end,
                 .next_offset = header_next,
             } };
-            return .yielded;
+            return .stepped;
         }
         if (typeflag == 'L') {
             if (header_size == 0 or header_size > max_path_bytes + 1)
@@ -948,7 +948,7 @@ const UnpackDriver = struct {
             const trimmed = std.mem.trimEnd(u8, raw, "\x00");
             context.pending_path = .init(try self.allocator.dupe(u8, trimmed));
             context.tar_offset = header_next;
-            return .yielded;
+            return .stepped;
         }
 
         const kind: EntryKind = switch (typeflag) {
@@ -989,7 +989,7 @@ const UnpackDriver = struct {
             .next_offset = next_offset,
             .slot = @intCast(hash & (member_slots - 1)),
         } };
-        return .yielded;
+        return .stepped;
     }
 
     fn parsePaxRecord(
@@ -1002,7 +1002,7 @@ const UnpackDriver = struct {
         if (pax.offset == pax.end) {
             scanning.context.tar_offset = pax.next_offset;
             scanning.work = .tar_header;
-            return .yielded;
+            return .stepped;
         }
         const tar = archive.tar.borrow();
         var space = pax.offset;
@@ -1024,7 +1024,7 @@ const UnpackDriver = struct {
             .key_start = space + 1,
             .scan_offset = space + 1,
         } };
-        return .yielded;
+        return .stepped;
     }
 
     fn scanPaxRecord(
@@ -1040,7 +1040,7 @@ const UnpackDriver = struct {
         const equals_relative = std.mem.indexOfScalar(u8, tar[scan.scan_offset..end], '=') orelse {
             scan.scan_offset = end;
             if (end == payload_end) return self.failDomain(evaluator, "PAX record lacks a value");
-            return .yielded;
+            return .stepped;
         };
         const equals = equals_relative + scan.scan_offset;
         const key = tar[scan.key_start..equals];
@@ -1062,7 +1062,7 @@ const UnpackDriver = struct {
             .end = pax.end,
             .next_offset = pax.next_offset,
         } };
-        return .yielded;
+        return .stepped;
     }
 
     fn memberPath(
@@ -1108,9 +1108,9 @@ const UnpackDriver = struct {
             slot.* = stored;
             scanning.context.tar_offset = insertion.next_offset;
             scanning.work = .tar_header;
-            return .yielded;
+            return .stepped;
         }
-        return .yielded;
+        return .stepped;
     }
 
     fn trailingZeroes(
@@ -1124,12 +1124,12 @@ const UnpackDriver = struct {
         for (tar[scanning.context.tar_offset..end]) |byte| if (byte != 0)
             return self.failDomain(evaluator, "tar data follows its end marker");
         scanning.context.tar_offset = end;
-        if (end != tar.len) return .yielded;
+        if (end != tar.len) return .stepped;
         scanning.work = switch (self.operationMode()) {
             .view => .publish_view,
             .unpack => .allocate_results,
         };
-        return .yielded;
+        return .stepped;
     }
 
     fn allocateResults(self: *UnpackDriver, scanning: *Scanning) MachineError!driver_completion.Progress {
@@ -1138,7 +1138,7 @@ const UnpackDriver = struct {
             .inputs = .{ .values = values },
             .iterator = self.entries.borrow().iterator(),
         } };
-        return .yielded;
+        return .stepped;
     }
 
     fn materializePaths(
@@ -1152,14 +1152,14 @@ const UnpackDriver = struct {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.InvalidUtf8 => return self.failDomain(evaluator, "tar member path is not valid UTF-8"),
             }) {
-                .pending => return .yielded,
+                .pending => return .stepped,
                 .complete => |path_value| {
                     var completed = materializer.*;
                     paths.inputs.values[paths.inputs.built] = path_value;
                     paths.inputs.built += 1;
                     paths.work = .next;
                     completed.deinit();
-                    return .yielded;
+                    return .stepped;
                 },
             },
             .next => {},
@@ -1172,13 +1172,13 @@ const UnpackDriver = struct {
                     .inputs = inputs,
                     .materializer = .init(self.allocator, inputs.values),
                 } };
-                return .yielded;
+                return .stepped;
             };
             if (entry.kind == .directory) continue;
             paths.work = .{ .text = .init(self.allocator, entry.path) };
-            return .yielded;
+            return .stepped;
         }
-        return .yielded;
+        return .stepped;
     }
 
     fn materializeResult(
@@ -1187,7 +1187,7 @@ const UnpackDriver = struct {
         materialization: *@FieldType(ScanWork, "materialize_result"),
     ) MachineError!driver_completion.Progress {
         return switch (try materialization.materializer.advance(evaluator.workBudget())) {
-            .pending => .yielded,
+            .pending => .stepped,
             .complete => |result| result: {
                 var completed = materialization.materializer;
                 const inputs = materialization.inputs;
@@ -1199,7 +1199,7 @@ const UnpackDriver = struct {
                 } };
                 active.work = next;
                 completed.deinit();
-                break :result .yielded;
+                break :result .stepped;
             },
         };
     }
@@ -1215,7 +1215,7 @@ const UnpackDriver = struct {
                 release.release.values[release.release.index],
             );
             release.release.index += 1;
-            return .yielded;
+            return .stepped;
         }
         // The resolver is constructed before the input storage is released,
         // so an allocation failure leaves this state owning exactly what its
@@ -1240,7 +1240,7 @@ const UnpackDriver = struct {
         };
         self.allocator.free(release.release.values);
         active.work = .{ .publication = publication };
-        return .yielded;
+        return .stepped;
     }
 
     fn advancePublication(

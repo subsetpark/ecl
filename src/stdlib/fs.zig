@@ -838,7 +838,7 @@ const Driver = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return self.failMessage(evaluator, .domain, .invalid_path, "path contains an invalid Unicode scalar"),
         }) {
-            .pending => return .yielded,
+            .pending => return .stepped,
             .complete => |bytes| {
                 cursor.deinit();
                 switch (which) {
@@ -858,7 +858,7 @@ const Driver = struct {
                         self.state = .authorize;
                     },
                 }
-                return .yielded;
+                return .stepped;
             },
         }
     }
@@ -872,12 +872,12 @@ const Driver = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return self.failMessage(evaluator, .domain, .invalid_utf8, "string contains an invalid Unicode scalar"),
         }) {
-            .pending => return .yielded,
+            .pending => return .stepped,
             .complete => |text| {
                 encoder.deinit();
                 self.payload = .{ .text = text };
                 self.state = .authorize;
-                return .yielded;
+                return .stepped;
             },
         }
     }
@@ -895,12 +895,12 @@ const Driver = struct {
                 encoder.invalid_index.?,
             ),
         }) {
-            .pending => return .yielded,
+            .pending => return .stepped,
             .complete => |bytes| {
                 encoder.deinit();
                 self.payload = .{ .bytes = bytes };
                 self.state = .authorize;
-                return .yielded;
+                return .stepped;
             },
         }
     }
@@ -1176,7 +1176,7 @@ const Driver = struct {
         building: *@FieldType(State, "bytes_value"),
     ) MachineError!driver_completion.Progress {
         return switch (try building.materializer.advance(evaluator.workBudget())) {
-            .pending => .yielded,
+            .pending => .stepped,
             .complete => |result| complete: {
                 building.materializer.deinit();
                 self.allocator.free(building.buffer);
@@ -1195,7 +1195,7 @@ const Driver = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidUtf8 => return self.failMessage(evaluator, .io, .invalid_utf8, "file is not valid UTF-8"),
         }) {
-            .pending => .yielded,
+            .pending => .stepped,
             .complete => |result| complete: {
                 building.materializer.deinit();
                 self.allocator.free(building.buffer);
@@ -1303,12 +1303,12 @@ const Driver = struct {
     /// Ordering draws on the unit's budget; only the completed cursor yields
     /// the sorted pointers.
     fn orderEntries(self: *Driver, evaluator: *Machine, ordering: *Ordering) MachineError!driver_completion.Progress {
-        if (ordering.orderer.advance(evaluator.workBudget()) == .pending) return .yielded;
+        if (ordering.orderer.advance(evaluator.workBudget()) == .pending) return .stepped;
         const values = try self.allocator.alloc(Value, ordering.entries.count);
         const entries = ordering.entries;
         const sorted = ordering.orderer.take();
         self.state = .{ .list_build = .{ .entries = entries, .sorted = sorted, .values = values } };
-        return .yielded;
+        return .stepped;
     }
 
     fn buildEntries(self: *Driver, evaluator: *Machine, build: *Build) MachineError!driver_completion.Progress {
@@ -1325,7 +1325,7 @@ const Driver = struct {
                     .built = build.built,
                     .materializer = .init(self.allocator, values),
                 } };
-                return .yielded;
+                return .stepped;
             }
             const entry = build.sorted[build.built];
             if (build.name == null) build.name = .init(self.allocator, entry.name);
@@ -1333,7 +1333,7 @@ const Driver = struct {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.InvalidUtf8 => return self.fail(evaluator, .invalid_utf8),
             }) {
-                .pending => return .yielded,
+                .pending => return .stepped,
                 .complete => |name_value| name_value,
             };
             build.name.?.deinit();
@@ -1345,12 +1345,12 @@ const Driver = struct {
             });
             build.built += 1;
         }
-        return .yielded;
+        return .stepped;
     }
 
     fn materializeEntries(self: *Driver, evaluator: *Machine, result: *Result) MachineError!driver_completion.Progress {
         return switch (try result.materializer.advance(evaluator.workBudget())) {
-            .pending => .yielded,
+            .pending => .stepped,
             .complete => |listing| complete: {
                 result.materializer.deinit();
                 const entries = result.entries;
@@ -1363,7 +1363,7 @@ const Driver = struct {
                     .built = result.built,
                     .result = listing,
                 } };
-                break :complete .yielded;
+                break :complete .stepped;
             },
         };
     }
@@ -1376,7 +1376,7 @@ const Driver = struct {
             evaluator.releaseDomain().releaseValue(release.values[release.index]);
             release.index += 1;
         }
-        if (release.index != release.built) return .yielded;
+        if (release.index != release.built) return .stepped;
         self.allocator.free(release.values);
         self.allocator.free(release.sorted);
         const result = release.result;

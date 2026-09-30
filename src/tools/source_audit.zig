@@ -855,7 +855,7 @@ fn auditUnsafeCasts() bool {
 /// own steps, and `poll` itself. Everything else draws on a budget it was lent.
 /// A cursor cannot be handed a count, since every cursor takes `*WorkBudget`,
 /// but nothing in the type system stops a module from constructing a fresh
-/// budget and lending that instead; that is the one spelling this audit owns.
+/// budget and lending that instead; construction is the boundary this audit owns.
 const work_budget_issuers = [_][]const u8{ "poll.zig", "machine.zig", "scheduler.zig", "port_builder.zig" };
 
 /// `poll.unbounded()` is the allowance for work no unit owns, and the audit
@@ -880,11 +880,36 @@ fn auditWorkBudgetIssuers() bool {
     for (source_groups) |component| {
         if (!component.production) continue;
         for (component.sources, component.files) |source, file| {
-            if (!namedIn(&work_budget_issuers, file))
+            if (!namedIn(&work_budget_issuers, file)) {
                 failed = auditProductionTokens(file, source, &minted) or failed;
+                failed = auditTypedBudgetLiterals(file, source) or failed;
+            }
             if (!namedIn(&unbounded_allowance_users, file))
                 failed = auditProductionTokens(file, source, &unbounded) or failed;
         }
+    }
+    return failed;
+}
+
+fn auditTypedBudgetLiterals(file: []const u8, source: [:0]const u8) bool {
+    var tree = std.zig.Ast.parse(std.heap.page_allocator, source, .zig) catch return true;
+    defer tree.deinit(std.heap.page_allocator);
+    if (tree.errors.len != 0) return true;
+    var failed = false;
+    for (0..tree.nodes.len) |raw_node| {
+        const node: std.zig.Ast.Node.Index = @enumFromInt(raw_node);
+        var buffer: [2]std.zig.Ast.Node.Index = undefined;
+        const literal = tree.fullStructInit(&buffer, node) orelse continue;
+        const type_expr = literal.ast.type_expr.unwrap() orelse continue;
+        if (!std.mem.eql(u8, tree.tokenSlice(tree.lastToken(type_expr)), "WorkBudget")) continue;
+        const token = tree.firstToken(node);
+        const in_test = for (tree.rootDecls()) |declaration| {
+            if (tree.nodeTag(declaration) == .test_decl and
+                token >= tree.firstToken(declaration) and token <= tree.lastToken(declaration)) break true;
+        } else false;
+        if (in_test) continue;
+        std.log.err("{s}: production code constructs a typed WorkBudget literal", .{file});
+        failed = true;
     }
     return failed;
 }

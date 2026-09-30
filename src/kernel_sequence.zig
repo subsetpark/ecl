@@ -1546,8 +1546,7 @@ const FlipDriver = struct {
         const rows: usize = @intCast(self.collection.borrow().list.length());
         const columns = switch (self.validation) {
             .flat => |*next| {
-                const end = @min(next.* + machine.kernel_poll_quantum, rows);
-                while (next.* != end) : (next.* += 1) {
+                while (next.* != rows and evaluator.workBudget().spend()) : (next.* += 1) {
                     if (list.atUnchecked(self.collection.borrow(), next.*) == .list)
                         return evaluator.fail(.shape, "flip requires rows of the same length");
                 }
@@ -1556,8 +1555,7 @@ const FlipDriver = struct {
                 return .completed;
             },
             .rows => |*validation| {
-                const end = @min(validation.next + machine.kernel_poll_quantum, rows);
-                while (validation.next != end) : (validation.next += 1) {
+                while (validation.next != rows and evaluator.workBudget().spend()) : (validation.next += 1) {
                     const row = list.atUnchecked(self.collection.borrow(), validation.next);
                     if (row != .list or row.list.length() != validation.columns)
                         return evaluator.fail(.shape, "flip requires rows of the same length");
@@ -1598,8 +1596,7 @@ const FlipDriver = struct {
                 return .stepped;
             },
         };
-        const end = @min(self.row + machine.kernel_poll_quantum, rows);
-        while (self.row != end) : (self.row += 1) {
+        while (self.row != rows and evaluator.workBudget().spend()) : (self.row += 1) {
             const source_row = list.atUnchecked(self.collection.borrow(), self.row);
             self.cells.?.borrow()[self.row] = list.atUnchecked(source_row, self.column);
         }
