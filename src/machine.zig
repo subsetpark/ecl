@@ -9588,10 +9588,16 @@ const ChildSeedDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *ChildSeedDriver) MachineError!WorkProgress {
         try evaluator.pollKernel();
-        return if (try self.materializer.borrowMut().advance(
+        if (try self.materializer.borrowMut().advance(
             evaluator.unit,
             evaluator.workBudget(),
-        )) .completed else .stepped;
+        )) {
+            // An empty body has no later dispatch safe point. Settle the
+            // final seed-copy charge before completion can retire this driver.
+            if (evaluator.workBudget().exhausted()) try evaluator.pollKernel();
+            return .completed;
+        }
+        return .stepped;
     }
 };
 
