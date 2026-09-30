@@ -120,7 +120,7 @@ const StrDriver = struct {
                     "canonical rendering is not valid UTF-8",
                 ),
             }) {
-                .pending => .yielded,
+                .pending => .stepped,
                 .complete => |result| completed: {
                     materializing.cursor.deinit();
                     evaluator.allocator().free(materializing.bytes);

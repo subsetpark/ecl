@@ -1370,7 +1370,7 @@ const StencilBootstrapDriver = struct {
             ));
         }
         switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
-            .pending => return .yielded,
+            .pending => return .stepped,
             .complete => |window| {
                 var window_owner = heap.OwnedValue.init(evaluator.releaseDomain(), window);
                 defer window_owner.deinit();

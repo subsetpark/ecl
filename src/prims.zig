@@ -326,7 +326,7 @@ const ParseDriver = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return evaluator.fail(.domain, "string contains an invalid Unicode scalar"),
         }) {
-            .pending => return .yielded,
+            .pending => return .stepped,
             .complete => |source| self.source = .init(source),
         };
         const source = self.source.?.take();
@@ -390,7 +390,7 @@ const SpellingCharsDriver = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidUtf8 => return invalidUtf8(evaluator, "spelling is not valid UTF-8"),
         }) {
-            .pending => .yielded,
+            .pending => .stepped,
             .complete => |text| .{ .output = text },
         };
     }
@@ -415,7 +415,7 @@ const BytesToCharsDriver = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidByte => return evaluator.typeError(chars_expected),
         }) {
-            .pending => return .yielded,
+            .pending => return .stepped,
             .complete => |bytes| {
                 self.bytes = .init(bytes);
                 self.text = .init(.init(evaluator.allocator(), self.bytes.?.borrowMut().bytes()));
@@ -426,7 +426,7 @@ const BytesToCharsDriver = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidUtf8 => return invalidUtf8(evaluator, "byte list is not valid UTF-8"),
         }) {
-            .pending => .yielded,
+            .pending => .stepped,
             .complete => |text| .{ .output = text },
         };
     }
@@ -463,7 +463,7 @@ const StringBytesDriver = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return evaluator.fail(.domain, "string contains an invalid Unicode scalar"),
         }) {
-            .pending => return .yielded,
+            .pending => return .stepped,
             .complete => |encoded| {
                 self.encoded = .init(encoded);
                 self.materializer = .init(.init(evaluator.allocator(), self.encoded.?.borrow()));
@@ -490,7 +490,7 @@ const ByteListIdentityDriver = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidByte => return evaluator.typeError("a string or byte list"),
         }) {
-            .pending => return .yielded,
+            .pending => return .stepped,
             .complete => |vector| {
                 var owned = vector;
                 owned.retire(evaluator.releaseDomain(), evaluator.allocator());
@@ -946,7 +946,7 @@ const PrinDriver = struct {
                 "string contains an invalid Unicode scalar",
             ),
         }) {
-            .pending => .yielded,
+            .pending => .stepped,
             .complete => |encoded| completed: {
                 defer evaluator.allocator().free(encoded);
                 evaluator.unit.inherited.runtime().console.writeOutput(encoded, false) catch
@@ -987,7 +987,7 @@ const GetenvDriver = struct {
                 "variable name contains an invalid Unicode scalar",
             ),
         }) {
-            .pending => return .yielded,
+            .pending => return .stepped,
             .complete => |name| self.name = .init(name),
         };
         if (self.text == null) {
@@ -1012,7 +1012,7 @@ const GetenvDriver = struct {
                 "environment variable value is not valid UTF-8",
             ),
         }) {
-            .pending => .yielded,
+            .pending => .stepped,
             .complete => |text| .{ .output = text },
         };
     }

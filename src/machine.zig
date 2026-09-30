@@ -3149,7 +3149,7 @@ pub fn PathActionDriver(
                 error.OutOfMemory => return error.OutOfMemory,
                 error.InvalidCodepoint => return evaluator.fail(.domain, "path contains an invalid Unicode scalar"),
             }) {
-                .pending => return .yielded,
+                .pending => return .stepped,
                 .complete => |path| self.path = .init(path),
             };
             const path = self.path.?.take();
@@ -5048,7 +5048,7 @@ pub const Machine = struct {
                         "standard input is not valid UTF-8",
                     ),
                 }) {
-                    .pending => return .yielded,
+                    .pending => return .stepped,
                     .complete => |text_value| {
                         text.deinit(evaluator.releaseDomain(), evaluator.allocator());
                         self.state = .complete;
@@ -7207,6 +7207,8 @@ const JoinMaterializeDriver = struct {
             return .completed;
         };
         return switch (materialized) {
+            // Cancellation must enter through the teardown transfer above,
+            // rather than the dispatcher's cancellable progress charge.
             .pending => .yielded,
             .complete => |result| completed: {
                 self.beginTeardown(evaluator, null, .continue_evaluation);
