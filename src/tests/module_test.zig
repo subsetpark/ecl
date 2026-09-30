@@ -973,6 +973,64 @@ fn registryWorker(context: RegistryThreadContext, worker_id: u32) void {
     }
 }
 
+test "registry: reload reports blocked while another registration holds the slot" {
+    var host = heap.HostOwner.init(std.testing.allocator);
+    defer host.cleanup().drain();
+    var registry = try modules.Registry.init(host.cleanup());
+    defer registry.deinit();
+    const name = try intern.internModuleName("held-reload-slot");
+    try commitEmptyModule(&registry, name);
+
+    var image = try registry.createImage();
+    defer image.deinit();
+    var sealed = image.seal();
+    defer sealed.deinit();
+    var holder_authority: modules.TurnAuthority = .available;
+    var holder = registry.registrationCursor(sealed.ref(), name, .ordinary, &holder_authority);
+    defer holder.deinit();
+
+    // Spending the authority admits this registration to the slot's FIFO.
+    // With no predecessor it owns the turn, but has not published yet.
+    for (0..64) |_| {
+        try std.testing.expect((try holder.advance()) == .pending);
+        if (holder_authority == .spent) break;
+    } else return error.SlotTurnNotAcquired;
+
+    var waiter_authority: modules.TurnAuthority = .available;
+    var waiter = registry.registrationCursor(sealed.ref(), name, .ordinary, &waiter_authority);
+    defer waiter.deinit();
+    for (0..64) |_| switch (try waiter.advance()) {
+        .pending => {},
+        .blocked => break,
+        .complete => return error.PublishedThroughHeldSlot,
+    } else return error.SlotWaitDidNotBlock;
+
+    // A blocked result asks the driver to yield immediately rather than spend
+    // the rest of its quantum polling. Repeated polls cannot progress while
+    // the holder remains suspended, and the prior generation stays visible.
+    for (0..3) |_| try std.testing.expect((try waiter.advance()) == .blocked);
+    var prior = modules.testing.acquire(&registry, name).?;
+    defer prior.deinit();
+    try std.testing.expectEqual(@as(u64, 1), prior.generationNumber());
+
+    for (0..64) |_| switch (try holder.advance()) {
+        .pending => {},
+        .blocked => return error.UncontendedHolderBlocked,
+        .complete => |generation| {
+            try std.testing.expectEqual(@as(u64, 2), generation);
+            break;
+        },
+    } else return error.HolderDidNotComplete;
+    for (0..64) |_| switch (try waiter.advance()) {
+        .pending => {},
+        .blocked => return error.ReleasedSlotStillBlocked,
+        .complete => |generation| {
+            try std.testing.expectEqual(@as(u64, 3), generation);
+            break;
+        },
+    } else return error.WaiterDidNotComplete;
+}
+
 test "registry: concurrent commits are linearized without lost names" {
     var host = heap.HostOwner.init(std.testing.allocator);
     defer host.cleanup().drain();

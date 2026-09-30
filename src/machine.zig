@@ -2209,10 +2209,18 @@ const TaskJoinCleanup = union(enum) {
 /// A driver transfers an owned result through this completion state. The
 /// evaluator destroys the driver before committing that value to the stack,
 /// so stack-growth failure always has exactly one resumable owner.
+///
+/// `stepped` and `yielded` separate progress from surrender. A driver that
+/// finished a bounded step reports `stepped` with the logical elements that
+/// step performed; the evaluator charges them to the unit's kernel fuel and
+/// keeps the turn until a kernel quantum has been spent in it. `yielded` ends
+/// the turn: the driver cannot progress until another unit does, or spent an
+/// allowance it does not report.
 pub const WorkProgress = union(enum) {
     completed,
     output: Value,
     reserved_output: struct { reservation: StackReservation, value: Value },
+    stepped: usize,
     yielded,
     detached,
     failed,
@@ -3128,6 +3136,9 @@ pub fn PathActionDriver(
 
 pub const Machine = struct {
     unit: *Unit,
+    /// A Machine lives for one scheduler turn. Once any charge in the turn
+    /// crosses the kernel quantum, stepped drivers surrender the turn.
+    kernel_quantum_spent: bool = false,
     pub fn allocator(self: *const Machine) std.mem.Allocator {
         return self.unit.allocator;
     }
@@ -4291,11 +4302,11 @@ pub const Machine = struct {
                             "builtin module declares an invalid word name",
                         ),
                     }) {
-                        .pending => return .yielded,
+                        .pending => return .{ .stepped = 1 },
                         .complete => |candidate| {
                             var built = candidate;
                             self.candidate = .init(built.seal());
-                            return .yielded;
+                            return .{ .stepped = 1 };
                         },
                     }
                 }
@@ -4305,7 +4316,7 @@ pub const Machine = struct {
                     .standard_library,
                     &evaluator.unit.turn_authority,
                 ));
-                return .yielded;
+                return .{ .stepped = 1 };
             }
             switch (self.commit.?.borrowMut().advance() catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -4315,7 +4326,8 @@ pub const Machine = struct {
                     .{ intern.get(intern.moduleId(self.name)), @errorName(err) },
                 ),
             }) {
-                .pending => return .yielded,
+                .pending => return .{ .stepped = 1 },
+                .blocked => return .yielded,
                 .complete => {},
             }
             self.commit.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
@@ -4397,7 +4409,7 @@ pub const Machine = struct {
                     .loaded => |instance| {
                         loader.deinit(evaluator.releaseDomain(), evaluator.allocator());
                         self.state.borrowMut().* = .{ .loaded = .init(instance) };
-                        return .yielded;
+                        return .{ .stepped = 1 };
                     },
                 },
                 .loaded => |*instance| {
@@ -4409,10 +4421,10 @@ pub const Machine = struct {
                         .instance = .init(instance.take()),
                         .publication = .init(publication),
                     } };
-                    return .yielded;
+                    return .{ .stepped = 1 };
                 },
                 .definitions => |*definitions| switch (try definitions.publication.borrowMut().advance()) {
-                    .pending => return .yielded,
+                    .pending => return .{ .stepped = 1 },
                     .complete => |candidate| {
                         const instance = definitions.instance.take();
                         definitions.publication.deinit(
@@ -4432,7 +4444,7 @@ pub const Machine = struct {
                             .candidate = .init(sealed.take()),
                             .cursor = .init(cursor),
                         } };
-                        return .yielded;
+                        return .{ .stepped = 1 };
                     },
                 },
                 .commit => |*commit| switch (commit.cursor.borrowMut().advance() catch |err| switch (err) {
@@ -4443,7 +4455,8 @@ pub const Machine = struct {
                         .{ intern.get(intern.moduleId(self.name)), @errorName(err) },
                     ),
                 }) {
-                    .pending => return .yielded,
+                    .pending => return .{ .stepped = 1 },
+                    .blocked => return .yielded,
                     .complete => {
                         const next: State = .{ .published = .{
                             .instance = commit.instance,
@@ -5626,6 +5639,7 @@ pub const Machine = struct {
         if (amount >= self.unit.kernel_fuel) {
             try self.pollKernel();
             self.unit.kernel_fuel = kernel_poll_quantum;
+            self.kernel_quantum_spent = true;
             reached_boundary = true;
         }
         self.unit.kernel_fuel -= @intCast(amount);
@@ -6805,6 +6819,19 @@ fn loop(self: *Machine) MachineError!RunStatus {
                 }
             };
             switch (progress) {
+                .stepped => |cost| {
+                    std.debug.assert(!self.unit.hasParkRequest());
+                    std.debug.assert(cost != 0);
+                    self.advanceKernel(cost) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        error.Ecl => {
+                            try startFailure(self);
+                            continue;
+                        },
+                    };
+                    if (self.kernel_quantum_spent) return .yielded;
+                    continue;
+                },
                 .yielded => return if (self.unit.hasParkRequest()) .parked else .yielded,
                 .completed => {
                     clearWorkDriver(self.unit);
@@ -7519,7 +7546,7 @@ const QualifiedRegistrationDriver = struct {
     pub fn advance(evaluator: *Machine, self: *QualifiedRegistrationDriver) MachineError!WorkProgress {
         try evaluator.pollKernel();
         switch (self.acquisition.borrowMut().advance()) {
-            .pending => return .yielded,
+            .pending => return .{ .stepped = 1 },
             .complete => |maybe_generation| {
                 const checked_name = if (self.artifact) |artifact|
                     evaluator.unit.inherited.module_snapshot.?.artifactModules(artifact)[self.module_index]
@@ -7565,7 +7592,7 @@ const QualifiedRegistrationDriver = struct {
                         self.acquisition = .init(evaluator.unit.inherited.registry.acquireCursor(
                             modules_in_artifact[self.module_index],
                         ));
-                        return .yielded;
+                        return .{ .stepped = 1 };
                     }
                     var artifact_lease = self.loading.?.borrowMut();
                     evaluator.unit.inherited.module_snapshot.?.commitArtifact(
@@ -9284,22 +9311,19 @@ fn advanceRegistration(
     evaluator: *Machine,
     cursor: *modules.Registry.RegistrationCursor,
 ) MachineError!WorkProgress {
-    var budget: usize = kernel_poll_quantum;
-    while (budget != 0) : (budget -= 1) {
-        switch (cursor.advance() catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.NameConflict => return evaluator.fail(.domain, "module name collides with an alias"),
-            error.ReservedName => return evaluator.fail(.domain, "module name `core` is reserved for the core qualifier"),
-            error.StateApplicationActive => return evaluator.fail(
-                .domain,
-                "a module cannot be registered from inside a state application",
-            ),
-        }) {
-            .pending => {},
-            .complete => return .completed,
-        }
-    }
-    return .yielded;
+    return switch (cursor.advance() catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.NameConflict => return evaluator.fail(.domain, "module name collides with an alias"),
+        error.ReservedName => return evaluator.fail(.domain, "module name `core` is reserved for the core qualifier"),
+        error.StateApplicationActive => return evaluator.fail(
+            .domain,
+            "a module cannot be registered from inside a state application",
+        ),
+    }) {
+        .pending => .{ .stepped = 1 },
+        .blocked => .yielded,
+        .complete => .completed,
+    };
 }
 
 /// The one bounded owner/progress state for explicit seed materialization. Both an

@@ -1121,6 +1121,11 @@ a finished application continuation; a long primitive spends bounded work
 through its driver. At exhaustion the machine checks cancellation and yields.
 A scheduler slice therefore has a bound independent of the total source or
 collection size, including for a body that dispatches no form.
+A driver distinguishes progress from surrender. A bounded step it reports as
+progress is charged to the unit's kernel fuel, and the unit keeps its turn
+until one kernel quantum has been spent in it. Only a driver that cannot
+progress, or that spent an allowance it does not report, ends the turn early,
+so a cursor of many small steps costs one turn rather than one per step.
 Failure entry detaches any installed native driver before unwinding frames.
 A suspended driver owns the stack handoff it needs. It cannot keep a mutable
 slice of the operand stack while another continuation runs, and a park request

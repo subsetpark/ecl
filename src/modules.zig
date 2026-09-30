@@ -2799,7 +2799,7 @@ pub const Registry = enum(usize) {
 
     pub const BuiltinCandidateProgress = poll.Progress(OwnedImage);
 
-    /// Publication path for builtin-backed modules. One turn installs one
+    /// Publication path for builtin-backed modules. One step installs one
     /// word, so a module with many words is as bounded as a native one; the
     /// effect and documentation values are built from the compiled-in text
     /// whose size is fixed at compile time.
@@ -2948,7 +2948,9 @@ pub const Registry = enum(usize) {
         }
     };
 
-    pub const CommitProgress = poll.Progress(u64);
+    /// `blocked` means the cursor is waiting for another unit to release the
+    /// slot's turn; unlike `pending`, polling again cannot make progress.
+    pub const CommitProgress = union(enum) { pending, blocked, complete: u64 };
     /// Publishes one image under one canonical name. Registration is an
     /// upsert: a missing name creates a slot and seeds its durable stack from
     /// a *copy* of the image's template, while an existing name installs the
@@ -3347,7 +3349,7 @@ pub const Registry = enum(usize) {
                             },
                         };
                     }
-                    if (!self.barrier_turn.?.granted()) break :result .pending;
+                    if (!self.barrier_turn.?.granted()) break :result .blocked;
                     if (self.retired_reservation == null)
                         self.retired_reservation = try self.registry.allocator().create(RetiredGeneration);
                     // Removal may have won the turn ahead of this cursor, so
@@ -4405,7 +4407,10 @@ pub const testing = if (builtin.is_test) struct {
         var authority: TurnAuthority = .available;
         var cursor = registry.registrationCursor(image, name, .ordinary, &authority);
         defer cursor.deinit();
-        return poll.driveFallible(u64, &cursor, .{});
+        while (true) switch (try cursor.advance()) {
+            .pending, .blocked => {},
+            .complete => |generation| return generation,
+        };
     }
 
     pub fn alias(
