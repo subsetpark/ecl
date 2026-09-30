@@ -14,6 +14,7 @@ const native_module = @import("native_module.zig");
 const native_abi = @import("native-abi");
 const reader = @import("reader.zig");
 const poll_api = @import("poll.zig");
+const turn_core = @import("turn_core.zig");
 const stdlib = @import("stdlib.zig");
 const kernel_storage = @import("kernel_storage.zig");
 const console_api = @import("console.zig");
@@ -2234,19 +2235,15 @@ const TaskJoinCleanup = union(enum) {
 /// evaluator destroys the driver before committing that value to the stack,
 /// so stack-growth failure always has exactly one resumable owner.
 ///
-/// `stepped` and `yielded` separate progress from surrender. A driver whose
-/// work drew on the unit's budget and is not finished reports `stepped`; the
-/// evaluator charges the step itself one unit and keeps the turn until the
-/// budget is exhausted. That charge may observe cancellation, so only a
-/// driver that may be cancelled between its steps reports `stepped`.
-/// `yielded` ends the turn: the driver cannot progress until another unit
-/// does, or is an unwind that must not observe cancellation.
+/// `stepped` and `yielded` separate progress from surrender, and a yield names
+/// why the driver ends its turn; `turn_core` decides what the evaluator does
+/// with either.
 pub const WorkProgress = union(enum) {
     completed,
     output: Value,
     reserved_output: struct { reservation: StackReservation, value: Value },
     stepped,
-    yielded,
+    yielded: turn_core.Yield,
     detached,
     failed,
 };
@@ -3804,7 +3801,7 @@ pub const Machine = struct {
                                 self.request.module.name,
                                 .of(evaluator.unit),
                             ) };
-                            return .yielded;
+                            return .{ .yielded = .wait };
                         },
                         .granted => |lease| {
                             cursor.deinit();
@@ -3935,7 +3932,7 @@ pub const Machine = struct {
                                     .of(evaluator.unit),
                                 ),
                             } };
-                            return .yielded;
+                            return .{ .yielded = .wait };
                         },
                         .granted => |lease| {
                             const target = begin.target;
@@ -4352,7 +4349,7 @@ pub const Machine = struct {
                 ),
             }) {
                 .pending => return .stepped,
-                .blocked => return .yielded,
+                .blocked => return .{ .yielded = .wait },
                 .complete => {},
             }
             self.commit.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
@@ -4481,7 +4478,7 @@ pub const Machine = struct {
                     ),
                 }) {
                     .pending => return .stepped,
-                    .blocked => return .yielded,
+                    .blocked => return .{ .yielded = .wait },
                     .complete => {
                         const next: State = .{ .published = .{
                             .instance = commit.instance,
@@ -4907,7 +4904,7 @@ pub const Machine = struct {
                         .context = context.move(),
                         .file = .init(.{ .io = io, .file = file }),
                     } };
-                    return .yielded;
+                    return .stepped;
                 },
                 .size => |*size| {
                     const opened = size.file.borrow();
@@ -4931,11 +4928,11 @@ pub const Machine = struct {
                         .source = .init(source),
                         .offset = 0,
                     } };
-                    return .yielded;
+                    return .stepped;
                 },
                 .read => |*read| {
                     if (read.offset != read.source.borrow().len) {
-                        const end = @min(read.offset + kernel_poll_quantum, read.source.borrow().len);
+                        const end = read.offset + evaluator.workBudget().take(read.source.borrow().len - read.offset);
                         const amount = read.reader.interface.readSliceShort(
                             read.source.borrow()[read.offset..end],
                         ) catch {
@@ -4954,7 +4951,7 @@ pub const Machine = struct {
                             "source file changed while being read",
                         );
                         read.offset += amount;
-                        return .yielded;
+                        return .stepped;
                     }
                     const context = read.context.move();
                     const source = read.source.take();
@@ -4963,7 +4960,7 @@ pub const Machine = struct {
                         .context = context,
                         .source = .init(source),
                     } };
-                    return .yielded;
+                    return .stepped;
                 },
                 .transfer => |*transfer| {
                     const path = transfer.context.path.take();
@@ -5024,7 +5021,7 @@ pub const Machine = struct {
                         evaluator.unit.inherited.runtime().host_io,
                         &.{},
                     ) };
-                    return .yielded;
+                    return .{ .yielded = .wait };
                 },
                 .read => |*file_reader| {
                     const amount = file_reader.interface.readSliceShort(&self.chunk) catch {
@@ -5036,10 +5033,10 @@ pub const Machine = struct {
                             self.allocator,
                             self.buffer.items,
                         )) };
-                        return .yielded;
+                        return .stepped;
                     }
                     try self.buffer.appendSlice(self.allocator, self.chunk[0..amount]);
-                    return .yielded;
+                    return .stepped;
                 },
                 .text => |*text| switch (text.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
@@ -5658,6 +5655,11 @@ pub const Machine = struct {
     /// A cursor draws on it directly and hands the same pointer to any cursor
     /// it drives, so nested work cannot begin a quantum of its own. The
     /// machine settles exhaustion after the driver returns.
+    /// The result for a step that may have installed a park request: the unit
+    /// parks if it did, and otherwise has more of its own work to do.
+    pub fn afterStep(self: *const Machine) WorkProgress {
+        return if (self.unit.hasParkRequest()) .{ .yielded = .park } else .stepped;
+    }
     pub fn workBudget(self: *Machine) *poll_api.WorkBudget {
         return &self.unit.kernel_budget;
     }
@@ -5675,13 +5677,9 @@ pub const Machine = struct {
         if (amount == 0) return false;
         if (comptime root_execution_metrics_enabled)
             self.unit.root_execution_metrics.logical_transitions += amount;
-        if (amount >= self.unit.kernel_budget.remaining) {
-            try self.pollKernel();
-            self.unit.kernel_budget.remaining = 0;
-            return true;
-        }
-        self.unit.kernel_budget.remaining -= amount;
-        return false;
+        if (!turn_core.charge(&self.unit.kernel_budget, amount)) return false;
+        try self.pollKernel();
+        return true;
     }
     /// Consumes a quotation header and applies it inline.
     pub fn callOwned(self: *Machine, quotation: *Header) error{OutOfMemory}!void {
@@ -6780,7 +6778,7 @@ pub fn runSlice(unit: *Unit) MachineError!RunStatus {
     // Each turn begins with one full kernel quantum. The charge that exhausted
     // the previous one already polled cancellation, and every driver polls
     // before it draws.
-    unit.kernel_budget = .init(kernel_poll_quantum);
+    unit.kernel_budget = turn_core.beginTurn(kernel_poll_quantum);
     var evaluator = Machine{ .unit = unit };
     defer unit.dropSpareScope();
     const status = loop(&evaluator) catch |err| switch (err) {
@@ -6864,21 +6862,30 @@ fn loop(self: *Machine) MachineError!RunStatus {
                 }
             };
             switch (progress) {
-                .stepped => {
-                    std.debug.assert(!self.unit.hasParkRequest());
-                    // The step's own cost: a driver that drew nothing from the
-                    // budget still cannot keep the turn indefinitely.
-                    self.advanceKernel(1) catch |err| switch (err) {
+                inline .stepped, .yielded => |_, tag| {
+                    const outcome: turn_core.Outcome = switch (tag) {
+                        .stepped => .stepped,
+                        .yielded => .{ .yielded = progress.yielded },
+                        else => comptime unreachable,
+                    };
+                    const decision = turn_core.afterDriver(
+                        outcome,
+                        &self.unit.kernel_budget,
+                        self.unit.hasParkRequest(),
+                    ) catch @panic("driver outcome contradicts its park request");
+                    if (decision.poll_cancellation) self.pollKernel() catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         error.Ecl => {
                             try startFailure(self);
                             continue;
                         },
                     };
-                    if (self.unit.kernel_budget.exhausted()) return .yielded;
-                    continue;
+                    switch (decision.action) {
+                        .resume_driver => continue,
+                        .end_turn => return .yielded,
+                        .park => return .parked,
+                    }
                 },
-                .yielded => return if (self.unit.hasParkRequest()) .parked else .yielded,
                 .completed => {
                     clearWorkDriver(self.unit);
                     continue;
@@ -7214,7 +7221,7 @@ const JoinMaterializeDriver = struct {
         return switch (materialized) {
             // Cancellation must enter through the teardown transfer above,
             // rather than the dispatcher's cancellable progress charge.
-            .pending => .yielded,
+            .pending => .{ .yielded = .settle },
             .complete => |result| completed: {
                 self.beginTeardown(evaluator, null, .continue_evaluation);
                 break :completed .{ .output = result };
@@ -9199,7 +9206,7 @@ const StateAcquireDriver = struct {
     pub fn advance(evaluator: *Machine, self: *StateAcquireDriver) MachineError!WorkProgress {
         try evaluator.pollKernel();
         const application = self.application.borrow().borrow();
-        if (!application.turn.granted()) return .yielded;
+        if (!application.turn.granted()) return .{ .yielded = .wait };
         if (!self.checked) {
             // The turn may have been queued behind a re-registration, so the
             // currency of the invoking generation is re-established here as
@@ -9338,7 +9345,7 @@ const StatePublishDriver = struct {
             .reserve, .move => .stepped,
             // Publication has committed: ending this turn must not introduce
             // the machine's cancellable progress charge before delivery.
-            .publish, .retire, .deliver => .yielded,
+            .publish, .retire, .deliver => .{ .yielded = .settle },
         };
     }
 };
@@ -9375,7 +9382,7 @@ fn advanceRegistration(
         ),
     }) {
         .pending => .stepped,
-        .blocked => .yielded,
+        .blocked => .{ .yielded = .wait },
         .complete => .completed,
     };
 }
@@ -9966,7 +9973,7 @@ const FailureDriver = struct {
                 .complete => |location| self.beginValue(location),
             },
             .value => |*cursor| switch (try cursor.advance(work)) {
-                .pending => return .yielded,
+                .pending => return .{ .yielded = .settle },
                 .complete => |item| {
                     cursor.retire(evaluator.releaseDomain());
                     self.state = .{ .nearest = .{
@@ -10068,7 +10075,7 @@ const FailureDriver = struct {
                 } };
             },
             .outcome => |*outcome_state| switch (try outcome_state.builder.advance(work)) {
-                .pending => return .yielded,
+                .pending => return .{ .yielded = .settle },
                 .duplicate_key => unreachable,
                 .complete => |outcome| {
                     const error_value = outcome_state.error_value;
@@ -10081,7 +10088,7 @@ const FailureDriver = struct {
             .caught => unreachable,
             .failed => return .failed,
         };
-        return .yielded;
+        return .{ .yielded = .settle };
     }
 };
 fn releaseCurrent(self: *Machine) void {

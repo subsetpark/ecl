@@ -94,7 +94,7 @@ const MemberDriver = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidUtf8 => return evaluator.fail(.domain, "archive member path is not UTF-8"),
         }) {
-            .pending => .yielded,
+            .pending => .stepped,
             .complete => |path| result: {
                 self.state.text.deinit();
                 self.state = .complete;
@@ -141,7 +141,7 @@ const MemberReadDriver = struct {
             self.state = .{ .bytes = .init(evaluator.allocator(), self.buffer[0..count]) };
         }
         return switch (try self.state.bytes.advance(evaluator.workBudget())) {
-            .pending => .yielded,
+            .pending => .stepped,
             .complete => |bytes| result: {
                 self.state.bytes.deinit();
                 self.state = .complete;
@@ -184,7 +184,7 @@ const Sha256Driver = struct {
                 self.encoder.borrow().invalid_index.?,
             ),
         }) {
-            .pending => return .yielded,
+            .pending => return .stepped,
             .complete => |bytes| self.bytes = .init(bytes),
         };
         const input = self.bytes.?.borrow().bytes();
@@ -192,7 +192,7 @@ const Sha256Driver = struct {
             const end = self.index + evaluator.workBudget().take(input.len - self.index);
             self.hasher.update(input[self.index..end]);
             self.index = end;
-            return .yielded;
+            return .stepped;
         }
         if (self.text == null) {
             self.hasher.final(&self.digest);

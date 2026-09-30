@@ -119,7 +119,7 @@ fn TypedStringCompareDriver(comptime left_kind: value.HeapKind, comptime right_k
                     if (left_char > right_char) return self.done(evaluator, .gt);
                 }
             }
-            if (!self.cursor.complete()) return .yielded;
+            if (!self.cursor.complete()) return .stepped;
             return self.done(evaluator, if (left.len < right.len)
                 .lt
             else if (left.len > right.len)

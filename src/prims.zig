@@ -768,7 +768,7 @@ const RaiseDriver = struct {
             .trace => {
                 const trace = self.trace.?;
                 const count: usize = @intCast(trace.list.length());
-                const end = @min(self.trace_index + machine.kernel_poll_quantum, count);
+                const end = self.trace_index + evaluator.workBudget().take(count - self.trace_index);
                 while (self.trace_index != end) : (self.trace_index += 1) {
                     if (list.atUnchecked(trace, self.trace_index) != .symbol)
                         return evaluator.typeError("an error dict with symbols at 'trace");
@@ -880,7 +880,7 @@ const StackDisplayDriver = struct {
                     self.render.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                     self.render = null;
                     self.rendered = .init(text);
-                    return .yielded;
+                    return .stepped;
                 },
             }
         }
@@ -888,22 +888,24 @@ const StackDisplayDriver = struct {
         if (!self.prefix_written) {
             try writeStackDisplayChunk(evaluator, prefix, false);
             self.prefix_written = true;
-            return .yielded;
+            return .stepped;
         }
 
         const text = self.rendered.?.borrow();
-        const end = @min(self.written + 256, text.len);
+        // Console output is written in chunks of at most 256 bytes, each
+        // charged a unit per byte, so a large display spans turns.
+        const end = self.written + evaluator.workBudget().take(@min(256, text.len - self.written));
         const complete = end == text.len;
         try writeStackDisplayChunk(evaluator, text[self.written..end], complete);
         self.written = end;
-        if (!complete) return .yielded;
+        if (!complete) return .stepped;
 
         self.rendered.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
         self.rendered = null;
         self.prefix_written = false;
         self.written = 0;
         self.index += 1;
-        return if (self.index == self.snapshot.borrow().items().len) .completed else .yielded;
+        return if (self.index == self.snapshot.borrow().items().len) .completed else .stepped;
     }
 };
 

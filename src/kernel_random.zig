@@ -192,7 +192,7 @@ const DrawDriver = struct {
             self.writer.borrowMut().writeRange(piece.start, block[0..piece.len()]);
             offset += piece.len();
         }
-        if (!self.cursor.complete()) return .yielded;
+        if (!self.cursor.complete()) return .stepped;
         return .{ .output = self.writer.borrowMut().finish() };
     }
 };

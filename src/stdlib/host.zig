@@ -51,7 +51,7 @@ const Metadata = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidUtf8 => return evaluator.fail(.io, "host process path is not UTF-8"),
         }) {
-            .pending => .yielded,
+            .pending => .stepped,
             .complete => |result| done: {
                 self.state.text.deinit();
                 self.state = .complete;

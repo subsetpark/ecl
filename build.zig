@@ -1036,6 +1036,7 @@ pub fn build(b: *std.Build) void {
             "startup_environment.test.",
             "tests.value_test.",
             "tests.cursor_budget_test.",
+            "turn_core.test.",
             "tests.reader_test.",
             "tests.machine_test.",
             // Select both module suites whole. Family selection is

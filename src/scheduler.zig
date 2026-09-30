@@ -3013,7 +3013,7 @@ const TasksDriver = struct {
             }
             std.Io.Threaded.mutexUnlock(&scheduler_state.tree_mutex);
             pass.releaseRetained(self.scheduler.releaseDomain());
-            return .yielded;
+            return .{ .yielded = .wait };
         };
         const pass_epoch = if (old_pass) |pass| pass.tree_epoch else scheduler_state.tree_epoch;
         var current = if (old_pass) |pass| switch (pass.position) {

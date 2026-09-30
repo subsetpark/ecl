@@ -103,11 +103,11 @@ const source_groups = [_]SourceGroup{
     // vocabulary in external.zig and are opened only by their Session-owned
     // owner.
     embeddedGroup(true, &.{
-        "scheduler.zig",    "scheduler_core.zig",  "external.zig",           "console.zig",         "task_prims.zig",      "archive_document.zig",
-        "byte_ring.zig",    "port_transfer.zig",   "port_controller.zig",    "port_message.zig",    "port_failure.zig",    "port_builder.zig",
-        "port_bytes.zig",   "port_messages.zig",   "port_declarations.zig",  "port_resource.zig",   "module_bindings.zig", "port_endpoint.zig",
-        "port_result.zig",  "port_error_data.zig", "port_exchange.zig",      "port_operation.zig",  "port_service.zig",    "port_factory.zig",
-        "http_service.zig", "filesystem_port.zig", "directory_resource.zig", "directory_stage.zig", "directory_order.zig", "filesystem_stream.zig",
+        "scheduler.zig",       "scheduler_core.zig",    "turn_core.zig",         "external.zig",        "console.zig",       "task_prims.zig",      "archive_document.zig",
+        "byte_ring.zig",       "port_transfer.zig",     "port_controller.zig",   "port_message.zig",    "port_failure.zig",  "port_builder.zig",    "port_bytes.zig",
+        "port_messages.zig",   "port_declarations.zig", "port_resource.zig",     "module_bindings.zig", "port_endpoint.zig", "port_result.zig",     "port_error_data.zig",
+        "port_exchange.zig",   "port_operation.zig",    "port_service.zig",      "port_factory.zig",    "http_service.zig",  "filesystem_port.zig", "directory_resource.zig",
+        "directory_stage.zig", "directory_order.zig",   "filesystem_stream.zig",
     }),
     // The installed author SDK, its sized ABI records, validation, loader,
     // and transactional-call boundary form one separately rooted component.
@@ -160,6 +160,7 @@ const test_files = [_][]const u8{
     "tests/net_test.zig",
     "tests/clock_test.zig",
     "tests/conversion_test.zig",
+    "tests/cursor_budget_test.zig",
     "tests/http_server_test.zig",
 };
 const repository_verification_files = [_][]const u8{
@@ -869,6 +870,15 @@ const unbounded_allowance_users = [_][]const u8{
     "task_prims.zig",
 };
 
+/// The kernel quantum is the length of a unit's turn. Code that meters its
+/// own loop with it is minting a private allowance under another name, so the
+/// constant may appear only where a turn or an owner's step is defined, where
+/// typed kernels plan a range against the unit's remainder, and at the two
+/// sites that use it as a size rather than a budget.
+const kernel_quantum_users = [_][]const u8{
+    "machine.zig", "scheduler.zig", "kernel_support.zig", "prelude.zig", "native_call.zig",
+};
+
 fn auditWorkBudgetIssuers() bool {
     const minted = [_][]const []const u8{
         &.{ "WorkBudget", ".", "init" },
@@ -876,6 +886,7 @@ fn auditWorkBudgetIssuers() bool {
         &.{ "WorkBudget", "=", ".", "{" },
     };
     const unbounded = [_][]const []const u8{&.{ "unbounded", "(" }};
+    const kernel_quantum = [_][]const []const u8{&.{"kernel_poll_quantum"}};
     var failed = false;
     for (source_groups) |component| {
         if (!component.production) continue;
@@ -886,6 +897,8 @@ fn auditWorkBudgetIssuers() bool {
             }
             if (!namedIn(&unbounded_allowance_users, file))
                 failed = auditProductionTokens(file, source, &unbounded) or failed;
+            if (!namedIn(&kernel_quantum_users, file))
+                failed = auditProductionTokens(file, source, &kernel_quantum) or failed;
         }
     }
     return failed;

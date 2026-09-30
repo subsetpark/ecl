@@ -177,7 +177,7 @@ const NextEntry = struct {
     pub fn advance(evaluator: *Machine, self: *@This()) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.state == .reading) switch (directory.next(self.cursor)) {
-            .pending => return .yielded,
+            .pending => return .stepped,
             .closed => return evaluator.fail(.io, "directory enumeration is closed"),
             .failed => |reason| return evaluator.fail(errorKindFor(reason), reason.message()),
             .end => {
@@ -193,7 +193,7 @@ const NextEntry = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidUtf8 => return evaluator.fail(.io, "directory entry is not UTF-8"),
         }) {
-            .pending => .yielded,
+            .pending => .stepped,
             .complete => |name| result: {
                 self.state.name.deinit();
                 self.state = .complete;
@@ -242,14 +242,14 @@ const CommitDirectory = struct {
             .failed => |reason| return failResource(evaluator, self.stage, if (self.kind == .directory) "commit-dir" else "commit-file", reason),
             .pending => |source| {
                 try evaluator.park(.{ .external = source });
-                return .yielded;
+                return .{ .yielded = .park };
             },
             .committed => self.state = .joining,
         };
         const port = @import("../port_resource.zig").Resource.fromValue(self.stage).?;
         if (!port.joined()) {
             try evaluator.park(.{ .external = port.source() });
-            return .yielded;
+            return .{ .yielded = .park };
         }
         return .completed;
     }
@@ -310,7 +310,7 @@ const WriteChunk = struct {
                         if (item != .int or item.int < 0 or item.int > 255)
                             return evaluator.failAtIndex(.type, "byte list members must be integers from 0 through 255", index.*);
                     }
-                    if (index.* != count) return .yielded;
+                    if (index.* != count) return .stepped;
                 }
                 self.state = .waiting;
             },
@@ -319,7 +319,7 @@ const WriteChunk = struct {
                 .failed => |reason| return failResource(evaluator, self.writer, "write-chunk", reason),
                 .pending => |source| {
                     try evaluator.park(.{ .external = source });
-                    return .yielded;
+                    return .{ .yielded = .park };
                 },
                 .claimed => |claim| {
                     self.claim = claim;
@@ -330,7 +330,7 @@ const WriteChunk = struct {
                 const claim = self.claim.?;
                 if (!claim.ready()) {
                     try evaluator.park(.{ .external = claim.source() });
-                    return .yielded;
+                    return .{ .yielded = .park };
                 }
                 if (self.payload.list.length() > @min(fsport.transfer_quantum, claim.remaining())) {
                     claim.fail(.limit);
@@ -363,7 +363,7 @@ const WriteChunk = struct {
                 }
             },
         }
-        return .yielded;
+        return evaluator.afterStep();
     }
 };
 
@@ -1619,7 +1619,9 @@ const Driver = struct {
             self.state = .{ .commit = staged };
             return .yielded;
         }
-        const end = @min(copying.offset + fsport.transfer_quantum, copying.size);
+        // One transfer chunk per step, charged a unit per byte.
+        const end = copying.offset + evaluator.workBudget().take(@min(fsport.transfer_quantum, copying.size - copying.offset));
+        if (end == copying.offset) return .yielded;
         const chunk = copying.buffer[0 .. end - copying.offset];
         const amount = copying.file.readPositionalAll(self.io, chunk, copying.offset) catch |err|
             return self.fail(evaluator, fsport.reasonForError(err));

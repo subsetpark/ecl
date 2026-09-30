@@ -31,7 +31,7 @@ const DeclarationsDriver = struct {
     pub fn advance(evaluator: *machine.Machine, self: *DeclarationsDriver) machine.MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const forms = self.forms.borrow();
-        const end = @min(self.index + machine.kernel_poll_quantum, forms.list.length());
+        const end = self.index + evaluator.workBudget().take(forms.list.length() - self.index);
         while (self.index < end) : (self.index += 1) {
             if (self.scan.feed(list.atUnchecked(forms, self.index))) |name| {
                 if (self.output) |*output| {
@@ -39,7 +39,7 @@ const DeclarationsDriver = struct {
                 } else self.count += 1;
             }
         }
-        if (self.index != forms.list.length()) return .yielded;
+        if (self.index != forms.list.length()) return .stepped;
         if (self.output) |*output| {
             const result = output.borrowMut().takeList();
             self.output = null;
@@ -48,6 +48,6 @@ const DeclarationsDriver = struct {
         self.output = .init(try .init(evaluator.releaseDomain(), self.count));
         self.index = 0;
         self.scan = .{};
-        return .yielded;
+        return .stepped;
     }
 };

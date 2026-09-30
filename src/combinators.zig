@@ -705,12 +705,12 @@ const CondDriver = struct {
         try evaluator.pollKernel();
         const clauses = self.clauses.borrow();
         const count: usize = @intCast(clauses.list.length());
-        const end = @min(self.index + machine.kernel_poll_quantum, count);
+        const end = self.index + evaluator.workBudget().take(count - self.index);
         while (self.index != end) : (self.index += 1) {
             if (list.atUnchecked(clauses, self.index) != .list)
                 return evaluator.typeError("quotation clauses and else");
         }
-        if (self.index != count) return .yielded;
+        if (self.index != count) return .stepped;
         var checkpoint = try GuardCheckpoint.init(evaluator);
         const first: GuardTarget = if (count == 1)
             .{ .action = list.atUnchecked(clauses, 0).list }
@@ -1356,14 +1356,14 @@ const StencilBootstrapDriver = struct {
         try evaluator.pollKernel();
         const control = self.control.borrow();
         if (self.materializer == null) {
-            const end = @min(self.fill_index + machine.kernel_poll_quantum, control.width);
+            const end = self.fill_index + evaluator.workBudget().take(control.width - self.fill_index);
             while (self.fill_index != end) : (self.fill_index += 1) {
                 self.window_values.borrowMut().appendBorrowed(list.atUnchecked(
                     control.input.borrow(),
                     control.index + self.fill_index,
                 ));
             }
-            if (self.fill_index != control.width) return .yielded;
+            if (self.fill_index != control.width) return .stepped;
             self.materializer = .init(.init(
                 evaluator.allocator(),
                 self.window_values.borrow().values(),
@@ -1650,10 +1650,10 @@ const UnfoldCollectDriver = struct {
         self: *UnfoldCollectDriver,
     ) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        const end = @min(self.copied + machine.kernel_poll_quantum, self.count);
+        const end = self.copied + evaluator.workBudget().take(self.count - self.copied);
         while (self.copied != end) : (self.copied += 1)
             self.result.borrowMut().appendBorrowed(self.iterator.next().?.*);
-        if (self.copied != self.count) return .yielded;
+        if (self.copied != self.count) return .stepped;
         const result = self.result.take();
         evaluator.retireDriver(self);
         try evaluator.startDriver(CollectedDriver{
@@ -1756,12 +1756,12 @@ const InfraBootstrapDriver = struct {
     pub fn advance(evaluator: *Machine, self: *InfraBootstrapDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const iteration = self.iteration.borrow();
-        const end = @min(self.index + machine.kernel_poll_quantum, iteration.count);
+        const end = self.index + evaluator.workBudget().take(iteration.count - self.index);
         while (self.index != end) : (self.index += 1) {
             const item = list.atUnchecked(iteration.left.borrow(), self.index);
             self.stack.pushBorrowed(item);
         }
-        if (self.index != iteration.count) return .yielded;
+        if (self.index != iteration.count) return .stepped;
         std.debug.assert(self.stack.complete());
         const application = iteration.application(@intCast(iteration.count));
         _ = self.iteration.take();

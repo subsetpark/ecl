@@ -1457,7 +1457,7 @@ fn advanceFixedCharState(
 ) MachineError!machine.WorkProgress {
     const context = support.Context{ .evaluator = evaluator };
     try step(state, context);
-    if (!state.cursor.complete()) return .yielded;
+    if (!state.cursor.complete()) return .stepped;
     state.left.release(evaluator.releaseDomain());
     state.right.release(evaluator.releaseDomain());
     return .{ .output = state.output.finish() };
@@ -1576,7 +1576,7 @@ fn advanceDynamicCharState(
 ) MachineError!machine.WorkProgress {
     const context = support.Context{ .evaluator = evaluator };
     try step(state, context);
-    if (!state.cursor.complete()) return .yielded;
+    if (!state.cursor.complete()) return .stepped;
     if (state.phase == .profile) {
         state.writer = .init(try flat.CodepointWriter.init(
             evaluator.allocator(),
@@ -1585,7 +1585,7 @@ fn advanceDynamicCharState(
         ));
         state.cursor = .init(state.cursor.length);
         state.phase = .fill;
-        return .yielded;
+        return .stepped;
     }
     state.left.release(evaluator.releaseDomain());
     state.right.release(evaluator.releaseDomain());
@@ -1712,7 +1712,7 @@ fn advanceTypedState(
 ) MachineError!machine.WorkProgress {
     const context = support.Context{ .evaluator = evaluator };
     try step(state, context);
-    if (!state.cursor.complete()) return .yielded;
+    if (!state.cursor.complete()) return .stepped;
     state.left.release(evaluator.releaseDomain());
     state.right.release(evaluator.releaseDomain());
     const reused = state.output.reusing();
@@ -1752,9 +1752,9 @@ const NestedTyped = union(enum) {
             .dynamic_char => |*typed| try advanceDynamicCharState(evaluator, &typed.state, typed.step),
         };
         return switch (progress) {
-            .yielded => null,
+            .stepped => null,
             .output => |result| result,
-            .completed, .reserved_output, .stepped, .detached, .failed => unreachable,
+            .completed, .reserved_output, .yielded, .detached, .failed => unreachable,
         };
     }
 };
@@ -2779,7 +2779,7 @@ const TypedReduceDriver = struct {
         const context = support.Context{ .evaluator = evaluator };
         const state = self.state.borrowMut();
         try self.step(state, context);
-        if (!state.cursor.complete()) return .yielded;
+        if (!state.cursor.complete()) return .stepped;
         state.input.release(evaluator.releaseDomain());
         const result: Value = if (state.output) |*output|
             output.finish()

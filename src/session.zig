@@ -1233,7 +1233,7 @@ test "invocation effects: completion owns immediate deferred nested and failing 
                 try evaluator.pollKernel();
                 if (self.remaining != 0) {
                     self.remaining -= 1;
-                    return .yielded;
+                    return .{ .yielded = .wait };
                 }
                 return switch (self.mode) {
                     .exhausted_output => blk: {
@@ -1253,7 +1253,7 @@ test "invocation effects: completion owns immediate deferred nested and failing 
                     .output => .{ .output = .{ .int = 11 } },
                     .empty => .completed,
                     .failure => evaluator.fail(.user, "deferred failure"),
-                    .forever => .yielded,
+                    .forever => .{ .yielded = .wait },
                     .chain => blk: {
                         evaluator.retireDriver(self);
                         try evaluator.startDriver(Driver{ .mode = .output });

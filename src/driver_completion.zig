@@ -16,11 +16,13 @@ pub const Completion = struct {
         if (self.phase == .running) {
             const progress: Progress = driver.advanceOperation(evaluator) catch |err| {
                 self.phase = .{ .failure = err };
-                return .yielded;
+                return .{ .yielded = .settle };
             };
             switch (progress) {
                 .stepped => return .stepped,
-                .yielded => return .yielded,
+                // An explicit yield ends the turn: it parks when the operation
+                // waits on the host, and otherwise waits for its next turn.
+                .yielded => return if (evaluator.unit.hasParkRequest()) .{ .yielded = .park } else .{ .yielded = .wait },
                 .completed => self.phase = .{ .success = null },
                 .output => |value| self.phase = .{ .success = value },
             }
@@ -44,7 +46,7 @@ pub const Completion = struct {
                 .running, .abandoned, .settled => unreachable,
             };
         }
-        return .yielded;
+        return .{ .yielded = .settle };
     }
 
     /// Abandoning a pending result consumes it once; cleanup remains resumable.

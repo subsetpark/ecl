@@ -414,7 +414,6 @@ const NormalizeAdapter = struct {
     }
     fn abandon(fixture: *Fixture, cursor: *Cursor) void {
         cursor.retire(fixture.releases());
-        cursor.* = undefined;
     }
     const eql = ValueListAdapter.eql;
     const releaseOutcome = ValueListAdapter.releaseOutcome;
