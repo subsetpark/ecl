@@ -458,12 +458,15 @@ fn builderBudget(
     schedule: *TwoSliceSchedule,
 ) ecl.CallbackResult {
     if (!schedule.state().yielded) {
-        if (!schedule.consume(65_534)) unreachable;
         const item = try build.scalar(ecl.Scalar.int(1));
         switch (try build.appendList(0, 1, item)) {
             .appended => {},
-            .yield_required, .invalid => unreachable,
+            .yield_required => return schedule.yield(),
+            .invalid => return call.fail(.domain, "aggregate append was rejected"),
         }
+        // Prepare the input before exhausting whatever allowance this call
+        // inherited; earlier evaluator work may have spent part of the turn.
+        _ = schedule.consume(65_536);
         schedule.state().yielded = true;
         return switch (try build.finishList(0, 1)) {
             .yield_required => schedule.yield(),
