@@ -276,6 +276,14 @@ const Admission = struct {
         waiting: struct { previous: ?*Admission, next: ?*Admission = null },
         granted,
     } = .idle,
+
+    fn coreState(self: *const Admission) core.AdmissionNode {
+        return switch (self.state) {
+            .idle => .idle,
+            .waiting => .waiting,
+            .granted => .granted,
+        };
+    }
 };
 
 const ExecutorArbitration = struct {
@@ -283,16 +291,12 @@ const ExecutorArbitration = struct {
     // a scalar kernel iteration. Return to execution/control between batches
     // even when running tasks continuously replenish the retirement queue.
     const retirement_quantum = 256;
-    const Turn = enum { ready, retirement };
-    next: Turn = .ready,
+    next: core.ExecutorTurn = .ready,
 
-    fn choose(self: *ExecutorArbitration, ready: bool, retirement: bool) ?Turn {
-        if (!ready and !retirement) return null;
-        if (!ready) return .retirement;
-        if (!retirement) return .ready;
-        const selected = self.next;
-        self.next = if (selected == .ready) .retirement else .ready;
-        return selected;
+    fn choose(self: *ExecutorArbitration, ready: bool, retirement: bool) ?core.ExecutorTurn {
+        const chosen = core.chooseExecutorTurn(self.next, ready, retirement) orelse return null;
+        self.next = chosen.next;
+        return chosen.turn;
     }
 };
 
@@ -2364,10 +2368,20 @@ pub const WorkerScheduler = enum(usize) {
 
     /// Issue at most one grant per scheduler turn, before any newcomer can
     /// acquire capacity. Waking transfers the reservation, not a hint to race.
+    fn admissionPoolLocked(self: *const WorkerScheduler) core.AdmissionPool {
+        const state_ = self.privateState();
+        return .{
+            .admitted = state_.admitted,
+            .limit = self.admissionLimit(),
+            .queue_empty = state_.admission_first == null,
+            .backpressured = self.releaseDomain().evaluationBackpressured(),
+        };
+    }
+
     fn grantAdmissionLocked(self: *const WorkerScheduler) void {
         const state_ = self.privateState();
-        if (state_.admitted == self.admissionLimit() or self.releaseDomain().evaluationBackpressured()) return;
-        const node = state_.admission_first orelse return;
+        if (!core.decideGrant(self.admissionPoolLocked())) return;
+        const node = state_.admission_first.?;
         self.unlinkAdmissionLocked(node);
         node.state = .granted;
         state_.admitted += 1;
@@ -2385,27 +2399,25 @@ pub const WorkerScheduler = enum(usize) {
             .root => cancelled,
             .task => |cell| cell.cancelled.load(.acquire),
         };
-        if (cancelling) {
-            if (node.state == .waiting) self.unlinkAdmissionLocked(node);
-            return true;
+        const decision = core.decideAcquire(self.admissionPoolLocked(), node.coreState(), cancelling);
+        switch (decision.queue) {
+            .none => {},
+            .leave => self.unlinkAdmissionLocked(node),
+            // A task newly arriving here is executing its queue entry. Only a
+            // later grant may enqueue it again; direct admission stays local.
+            .join => {
+                node.state = .{ .waiting = .{ .previous = state_.admission_last } };
+                if (state_.admission_last) |last| last.state.waiting.next = node else state_.admission_first = node;
+                state_.admission_last = node;
+            },
         }
-        if (node.state == .granted) return true;
-        // A task newly arriving here is executing its queue entry. Only a
-        // later grant may enqueue it again; direct admission stays local.
-        if (node.state == .idle and state_.admission_first == null and
-            !self.releaseDomain().evaluationBackpressured())
-        {
-            if (state_.admitted < self.admissionLimit()) {
-                state_.admitted += 1;
-                node.state = .granted;
-                return true;
-            }
+        switch (decision.node) {
+            .idle => node.state = .idle,
+            .granted => node.state = .granted,
+            .waiting => std.debug.assert(node.state == .waiting),
         }
-        if (node.state == .idle) {
-            node.state = .{ .waiting = .{ .previous = state_.admission_last } };
-            if (state_.admission_last) |last| last.state.waiting.next = node else state_.admission_first = node;
-            state_.admission_last = node;
-        }
+        state_.admitted = decision.admitted;
+        if (decision.run) return true;
         // The root has no ready-queue entry and must also drive admission when
         // it is the only executor, including before workers have started.
         if (node.owner == .root) self.grantAdmissionLocked();
@@ -2416,14 +2428,11 @@ pub const WorkerScheduler = enum(usize) {
         const state_ = self.privateState();
         std.Io.Threaded.mutexLock(&state_.queue_mutex);
         defer std.Io.Threaded.mutexUnlock(&state_.queue_mutex);
-        switch (node.state) {
-            .idle => {}, // Cancellation bypasses ordinary admission.
-            .granted => {
-                state_.admitted -= 1;
-                node.state = .idle;
-            },
-            .waiting => unreachable,
-        }
+        // Cancellation bypasses ordinary admission, so an idle node holds
+        // nothing; a waiting node never runs a slice to release.
+        const decision = core.decideRelease(self.admissionPoolLocked(), node.coreState()) catch unreachable;
+        node.state = .idle;
+        state_.admitted = decision.admitted;
         self.grantAdmissionLocked();
     }
 
@@ -2431,7 +2440,7 @@ pub const WorkerScheduler = enum(usize) {
         const state_ = self.privateState();
         std.Io.Threaded.mutexLock(&state_.queue_mutex);
         defer std.Io.Threaded.mutexUnlock(&state_.queue_mutex);
-        if (cell.admission.state == .waiting) {
+        if (core.decideCancel(cell.admission.coreState()).leave_and_run) {
             self.unlinkAdmissionLocked(&cell.admission);
             self.enqueueLocked(&cell.queue);
         }

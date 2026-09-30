@@ -28,6 +28,8 @@ pub const native_call = @import("native_call.zig");
 pub const modules = @import("modules.zig");
 pub const module_map = @import("module_map.zig");
 pub const machine = @import("machine.zig");
+pub const scheduler_core = @import("scheduler_core.zig");
+pub const turn_core = @import("turn_core.zig");
 pub const prims = @import("prims.zig");
 pub const combinators = @import("combinators.zig");
 pub const idioms = @import("idioms.zig");
@@ -80,6 +82,8 @@ test {
     _ = session;
     _ = console;
     _ = scheduler;
+    _ = scheduler_core;
+    _ = turn_core;
     _ = external;
     _ = Filesystem;
     _ = directory_order;
