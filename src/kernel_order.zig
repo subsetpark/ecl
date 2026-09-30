@@ -196,8 +196,7 @@ fn TypedGradeComparator(comptime kind: value.HeapKind) type {
             return .{ .ordering = typedOrder(kind, collection[left], collection[right]) };
         }
 
-        pub fn advance(cursor: *Cursor, budget: usize) poll.Progress(std.math.Order) {
-            _ = budget;
+        pub fn advance(cursor: *Cursor, _: *poll.WorkBudget) poll.Progress(std.math.Order) {
             return .{ .complete = cursor.ordering };
         }
     };
@@ -234,20 +233,19 @@ fn TypedGradeDriver(comptime kind: value.HeapKind) type {
                     const range = (try self.cursor.nextRange(context)).?;
                     const indices = self.indices.borrow();
                     for (range.start..range.end) |index| indices[index] = index;
-                    if (!self.cursor.complete()) return .yielded;
+                    if (!self.cursor.complete()) return .stepped;
                     self.sort = .init(try Sort.init(
                         evaluator.allocator(),
                         indices,
                         self.collection.borrow().slice(),
                     ));
                     self.phase = .sort;
-                    return .yielded;
+                    return .stepped;
                 },
                 .sort => {
-                    const charge = @max(context.remaining(), 1);
-                    try context.advance(charge);
-                    switch (self.sort.?.borrowMut().advance(charge)) {
-                        .pending => return .yielded,
+                    try evaluator.pollKernel();
+                    switch (self.sort.?.borrowMut().advance(evaluator.workBudget())) {
+                        .pending => return .stepped,
                         .complete => {
                             self.sort.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                             self.sort = null;
@@ -259,7 +257,7 @@ fn TypedGradeDriver(comptime kind: value.HeapKind) type {
                             }
                             self.cursor = kernel_flat.FlatCursor.init(count);
                             self.phase = .output;
-                            return .yielded;
+                            return .stepped;
                         },
                     }
                 },
@@ -281,7 +279,7 @@ fn TypedGradeDriver(comptime kind: value.HeapKind) type {
                         }
                         offset += piece.len();
                     }
-                    if (!self.cursor.complete()) return .yielded;
+                    if (!self.cursor.complete()) return .stepped;
                     return self.finish(evaluator);
                 },
             }
@@ -328,12 +326,12 @@ pub const CompareCursor = struct {
         return .{ .left = left, .right = right };
     }
 
-    pub fn advance(self: *CompareCursor, budget: usize) CompareProgress {
+    pub fn advance(self: *CompareCursor, work: *poll.WorkBudget) CompareProgress {
         if (self.left.isString() and self.right.isString()) {
             const left_count: usize = @intCast(self.left.list.length());
             const right_count: usize = @intCast(self.right.list.length());
             const shared = @min(left_count, right_count);
-            const end = @min(self.index + budget, shared);
+            const end = self.index + work.take(shared - self.index);
             while (self.index != end) : (self.index += 1) {
                 const left_char = list.atUnchecked(self.left, self.index).char;
                 const right_char = list.atUnchecked(self.right, self.index).char;
@@ -362,8 +360,8 @@ const GradeComparator = struct {
         return .init(list.atUnchecked(collection, left), list.atUnchecked(collection, right));
     }
 
-    pub fn advance(cursor: *Cursor, budget: usize) poll.Progress(std.math.Order) {
-        return switch (cursor.advance(budget)) {
+    pub fn advance(cursor: *Cursor, work: *poll.WorkBudget) poll.Progress(std.math.Order) {
+        return switch (cursor.advance(work)) {
             .pending => .pending,
             .not_comparable => unreachable,
             .complete => |ordering| .{ .complete = ordering },
@@ -380,8 +378,8 @@ const CompareDriver = struct {
     cursor: CompareCursor,
     pub fn advance(evaluator: *Machine, self: *CompareDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        return switch (self.cursor.advance(machine.kernel_poll_quantum)) {
-            .pending => .yielded,
+        return switch (self.cursor.advance(evaluator.workBudget())) {
+            .pending => .stepped,
             .not_comparable => evaluator.typeError("two comparable numbers, chars, or strings"),
             .complete => |ordering| .{ .output = .{ .int = switch (ordering) {
                 .lt => -1,
@@ -438,8 +436,8 @@ const GradeDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *GradeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0) switch (self.state.borrowMut().*) {
+        const work = evaluator.workBudget();
+        while (!work.exhausted()) switch (self.state.borrowMut().*) {
             .validate => |index| {
                 if (self.indices.borrow().len == 0 or index == self.indices.borrow().len) {
                     self.state.borrowMut().* = .{ .initialize = 0 };
@@ -454,8 +452,8 @@ const GradeDriver = struct {
                 } };
             },
             .compare => |*compare| {
-                switch (compare.cursor.advance(1)) {
-                    .pending => return .yielded,
+                switch (compare.cursor.advance(work)) {
+                    .pending => return .stepped,
                     .not_comparable => return evaluator.failAtIndex(
                         .type,
                         "grade expected mutually comparable numbers, chars, or strings",
@@ -463,16 +461,14 @@ const GradeDriver = struct {
                     ),
                     .complete => {
                         self.state.borrowMut().* = .{ .validate = compare.index + 1 };
-                        budget -= 1;
+                        _ = work.spend();
                     },
                 }
             },
             .initialize => |*index| {
                 const indices = self.indices.borrow();
-                const end = @min(index.* + budget, indices.len);
-                const initialized = end - index.*;
+                const end = index.* + work.take(indices.len - index.*);
                 while (index.* != end) : (index.* += 1) indices[index.*] = index.*;
-                budget -= initialized;
                 if (index.* == indices.len) {
                     const sort = try GradeSortCursor.init(
                         evaluator.allocator(),
@@ -482,8 +478,8 @@ const GradeDriver = struct {
                     self.state.borrowMut().* = .{ .sort = .init(sort) };
                 }
             },
-            .sort => |*sort| switch (sort.borrowMut().advance(budget)) {
-                .pending => return .yielded,
+            .sort => |*sort| switch (sort.borrowMut().advance(work)) {
+                .pending => return .stepped,
                 .complete => {
                     sort.deinit(evaluator.releaseDomain(), evaluator.allocator());
                     self.state.borrowMut().* = .prepare;
@@ -514,11 +510,9 @@ const GradeDriver = struct {
             .prepare_values => |*prepare| {
                 const values = prepare.values.borrow();
                 const indices = self.indices.borrow();
-                const end = @min(prepare.index + budget, indices.len);
-                const prepared = end - prepare.index;
+                const end = prepare.index + work.take(indices.len - prepare.index);
                 while (prepare.index != end) : (prepare.index += 1)
                     values[prepare.index] = list.atUnchecked(self.collection.borrow(), indices[prepare.index]);
-                budget -= prepared;
                 if (prepare.index == indices.len) {
                     const materializer = list.ValueMaterializer.init(
                         evaluator.allocator(),
@@ -532,8 +526,7 @@ const GradeDriver = struct {
             },
             .prepare_indices => |*prepare| {
                 const indices = self.indices.borrow();
-                const end = @min(prepare.index + budget, indices.len);
-                const prepared = end - prepare.index;
+                const end = prepare.index + work.take(indices.len - prepare.index);
                 var block: [kernel_flat.block_size]i64 = undefined;
                 var offset = prepare.index;
                 while (offset != end) {
@@ -543,7 +536,6 @@ const GradeDriver = struct {
                     offset = piece_end;
                 }
                 prepare.index = end;
-                budget -= prepared;
                 if (prepare.index == indices.len) {
                     const result = prepare.writer.borrowMut().finish();
                     _ = prepare.writer.take();
@@ -552,8 +544,8 @@ const GradeDriver = struct {
                 }
             },
             .materialize_values => |*materialize| {
-                return switch (try materialize.materializer.borrowMut().advance(budget)) {
-                    .pending => .yielded,
+                return switch (try materialize.materializer.borrowMut().advance(work)) {
+                    .pending => .stepped,
                     .complete => |result| completed: {
                         materialize.materializer.deinit(
                             evaluator.releaseDomain(),
@@ -568,7 +560,7 @@ const GradeDriver = struct {
             },
             .complete_values, .complete => unreachable,
         };
-        return .yielded;
+        return .stepped;
     }
 };
 
@@ -610,11 +602,10 @@ fn TypedDistinctDriver(comptime kind: value.HeapKind) type {
         output_index: usize = 0,
 
         pub fn advance(evaluator: *Machine, self: *Self) MachineError!machine.WorkProgress {
-            const context = support.Context{ .evaluator = evaluator };
-            var budget = @max(context.remaining(), 1);
-            try context.advance(budget);
+            try evaluator.pollKernel();
+            const work = evaluator.workBudget();
             const source: []const Element = self.source.borrow().slice();
-            while (budget != 0) {
+            while (!work.exhausted()) {
                 if (self.item_index == source.len) {
                     if (self.phase == .count) {
                         self.writer = .init(try heap.LeafWriter(kind).init(
@@ -642,16 +633,16 @@ fn TypedDistinctDriver(comptime kind: value.HeapKind) type {
                     }
                     self.item_index += 1;
                     self.candidate = 0;
-                    budget -= 1;
+                    _ = work.spend();
                     continue;
                 }
                 if (source[self.candidate] == source[self.item_index]) {
                     self.item_index += 1;
                     self.candidate = 0;
                 } else self.candidate += 1;
-                budget -= 1;
+                _ = work.spend();
             }
-            return .yielded;
+            return .stepped;
         }
     };
 }
@@ -672,11 +663,11 @@ const DistinctDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *DistinctDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0) {
+        const work = evaluator.workBudget();
+        while (!work.exhausted()) {
             if (self.materializer) |*materializer| {
-                return switch (try materializer.borrowMut().advance(budget)) {
-                    .pending => .yielded,
+                return switch (try materializer.borrowMut().advance(work)) {
+                    .pending => .stepped,
                     .complete => |result| completed: {
                         materializer.deinit(evaluator.releaseDomain(), evaluator.allocator());
                         self.materializer = null;
@@ -699,7 +690,7 @@ const DistinctDriver = struct {
                 self.result_count += 1;
                 self.item_index += 1;
                 self.candidate = 0;
-                budget -= 1;
+                _ = work.spend();
                 continue;
             }
             if (self.matcher == null) self.matcher = .init(try equal.MatchCursor.init(
@@ -707,8 +698,8 @@ const DistinctDriver = struct {
                 self.results.borrow()[self.candidate],
                 list.atUnchecked(self.collection.borrow(), self.item_index),
             ));
-            switch (try self.matcher.?.borrowMut().advance(1)) {
-                .pending => budget -= 1,
+            switch (try self.matcher.?.borrowMut().advance(work)) {
+                .pending => _ = work.spend(),
                 .complete => |matches| {
                     self.matcher.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                     self.matcher = null;
@@ -716,11 +707,11 @@ const DistinctDriver = struct {
                         self.item_index += 1;
                         self.candidate = 0;
                     } else self.candidate += 1;
-                    budget -= 1;
+                    _ = work.spend();
                 },
             }
         }
-        return .yielded;
+        return .stepped;
     }
 };
 
@@ -803,8 +794,8 @@ const GroupDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *GroupDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0) switch (self.phase) {
+        const work = evaluator.workBudget();
+        while (!work.exhausted()) switch (self.phase) {
             .validate => {
                 const source = self.collection.borrow();
                 if (!self.columns) {
@@ -823,7 +814,7 @@ const GroupDriver = struct {
                 if (self.index == 0) self.row_count = @intCast(column.list.length());
                 if (column.list.length() != self.row_count) return evaluator.fail(.shape, "group-columns requires equal-length columns");
                 self.index += 1;
-                budget -= 1;
+                _ = work.spend();
             },
             .allocate => try self.allocate(evaluator),
             .initialize => {
@@ -835,7 +826,7 @@ const GroupDriver = struct {
                 }
                 slots[self.index] = 0;
                 self.index += 1;
-                budget -= 1;
+                _ = work.spend();
             },
             .hash => {
                 if (self.item_index == self.row_count) {
@@ -851,13 +842,11 @@ const GroupDriver = struct {
                 }
                 const item = self.cellValue(self.item_index, self.cell);
                 const hash_value = if (equal.scalarHash(item)) |h| scalar: {
-                    budget -= 1;
+                    _ = work.spend();
                     break :scalar h;
                 } else blk: {
                     if (self.hasher == null) self.hasher = .init(try equal.HashCursor.init(evaluator.allocator(), item));
-                    var work: poll.WorkBudget = .init(budget);
-                    const progress = try self.hasher.?.borrowMut().advanceWithBudget(&work);
-                    budget = work.remaining;
+                    const progress = try self.hasher.?.borrowMut().advance(work);
                     switch (progress) {
                         .pending => continue,
                         .complete => |h| {
@@ -881,7 +870,7 @@ const GroupDriver = struct {
                 const group = encoded - 1;
                 if (self.hashes.?.borrow()[group] != self.row_hash) {
                     self.candidate = (self.candidate + 1) & (slots.len - 1);
-                    budget -= 1;
+                    _ = work.spend();
                     continue;
                 }
                 if (self.cell == self.cellCount()) {
@@ -895,13 +884,11 @@ const GroupDriver = struct {
                         self.cell = 0;
                         self.candidate = (self.candidate + 1) & (slots.len - 1);
                     }
-                    budget -= 1;
+                    _ = work.spend();
                     continue;
                 }
                 if (self.matcher == null) self.matcher = .init(try equal.MatchCursor.init(evaluator.allocator(), left, right));
-                var work: poll.WorkBudget = .init(budget);
-                const progress = try self.matcher.?.borrowMut().advanceWithBudget(&work);
-                budget = work.remaining;
+                const progress = try self.matcher.?.borrowMut().advance(work);
                 switch (progress) {
                     .pending => {},
                     .complete => |matches| {
@@ -920,7 +907,7 @@ const GroupDriver = struct {
                     if (self.cell != self.cellCount()) {
                         self.key_builder.?.borrowMut().appendBorrowed(self.cellValue(self.item_index, self.cell));
                         self.cell += 1;
-                        budget -= 1;
+                        _ = work.spend();
                         continue;
                     }
                     const key = self.key_builder.?.borrowMut().takeList();
@@ -934,7 +921,7 @@ const GroupDriver = struct {
                 self.slots.?.borrow()[self.candidate] = self.key_count + 1;
                 self.key_count += 1;
                 self.assigned(self.key_count - 1);
-                budget -= 1;
+                _ = work.spend();
             },
             .offsets => {
                 if (self.index == self.key_count) {
@@ -945,7 +932,7 @@ const GroupDriver = struct {
                 self.offsets.?.borrow()[self.index + 1] =
                     self.offsets.?.borrow()[self.index] + self.frequencies.?.borrow()[self.index];
                 self.index += 1;
-                budget -= 1;
+                _ = work.spend();
             },
             .cursors => {
                 if (self.index == self.key_count) {
@@ -955,7 +942,7 @@ const GroupDriver = struct {
                 }
                 self.cursors.?.borrow()[self.index] = self.offsets.?.borrow()[self.index];
                 self.index += 1;
-                budget -= 1;
+                _ = work.spend();
             },
             .scatter => {
                 if (self.index == self.assignments.?.borrow().len) {
@@ -967,7 +954,7 @@ const GroupDriver = struct {
                 self.indices.?.borrow()[self.cursors.?.borrow()[group_index]] = @intCast(self.index);
                 self.cursors.?.borrow()[group_index] += 1;
                 self.index += 1;
-                budget -= 1;
+                _ = work.spend();
             },
             .groups => {
                 if (self.index == self.key_count) {
@@ -986,23 +973,22 @@ const GroupDriver = struct {
                     evaluator.allocator(),
                     end - start,
                 ));
-                const copied = @min(budget, end - start - self.group_fill);
+                const copied = work.take(end - start - self.group_fill);
                 self.group_writer.?.borrowMut().writeRange(
                     self.group_fill,
                     self.indices.?.borrow()[start + self.group_fill .. start + self.group_fill + copied],
                 );
                 self.group_fill += copied;
-                budget -= copied;
-                if (self.group_fill != end - start) return .yielded;
+                if (self.group_fill != end - start) return .stepped;
                 const group = self.group_writer.?.borrowMut().finish();
                 self.group_writer = null;
                 self.group_fill = 0;
                 self.group_values.?.borrowMut().appendOwned(group);
                 self.index += 1;
-                if (budget == 0) return .yielded;
+                if (work.exhausted()) return .stepped;
             },
-            .dictionary => switch (try self.dict_materializer.?.borrowMut().advance(budget)) {
-                .pending => return .yielded,
+            .dictionary => switch (try self.dict_materializer.?.borrowMut().advance(work)) {
+                .pending => return .stepped,
                 .duplicate_key => unreachable,
                 .complete => |result| {
                     self.dict_materializer.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
@@ -1013,6 +999,6 @@ const GroupDriver = struct {
                 },
             },
         };
-        return .yielded;
+        return .stepped;
     }
 };

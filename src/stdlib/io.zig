@@ -89,7 +89,7 @@ const EprintDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *EprintDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        return switch (self.encoder.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+        return switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return evaluator.fail(
                 .domain,

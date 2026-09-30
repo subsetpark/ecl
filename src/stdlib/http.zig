@@ -437,7 +437,7 @@ const RequestDriver = struct {
             },
             .request_body => |*body| {
                 const output = body.request.body.?;
-                const end = @min(output.len, body.index + machine.kernel_poll_quantum);
+                const end = body.index + evaluator.workBudget().take(output.len - body.index);
                 while (body.index < end) : (body.index += 1) {
                     const item = list.atUnchecked(self.fields.body.?, body.index);
                     if (item != .int or item.int < 0 or item.int > 255)
@@ -521,7 +521,7 @@ const RequestDriver = struct {
                     } };
                 }
             },
-            .response_header_name => |*header| switch (try header.text.advance(machine.kernel_poll_quantum)) {
+            .response_header_name => |*header| switch (try header.text.advance(evaluator.workBudget())) {
                 .pending => {},
                 .complete => |key| {
                     header.text.deinit();
@@ -533,7 +533,7 @@ const RequestDriver = struct {
                     } };
                 },
             },
-            .response_header_value => |*header| switch (try header.text.advance(machine.kernel_poll_quantum)) {
+            .response_header_value => |*header| switch (try header.text.advance(evaluator.workBudget())) {
                 .pending => {},
                 .complete => |value_text| {
                     header.text.deinit();
@@ -564,7 +564,7 @@ const RequestDriver = struct {
                     .dictionary = dictionary,
                 } };
             },
-            .headers_dictionary => |*headers| switch (try headers.dictionary.advance(machine.kernel_poll_quantum)) {
+            .headers_dictionary => |*headers| switch (try headers.dictionary.advance(evaluator.workBudget())) {
                 .pending => {},
                 .duplicate_key => unreachable,
                 .complete => |built| {
@@ -598,7 +598,7 @@ const RequestDriver = struct {
                     } },
                 };
             },
-            .response_body_text => |*body| switch (try body.text.advance(machine.kernel_poll_quantum)) {
+            .response_body_text => |*body| switch (try body.text.advance(evaluator.workBudget())) {
                 .pending => {},
                 .complete => |built| {
                     body.text.deinit();
@@ -611,7 +611,7 @@ const RequestDriver = struct {
                     } };
                 },
             },
-            .response_body_bytes => |*body| switch (try body.bytes.advance(machine.kernel_poll_quantum)) {
+            .response_body_bytes => |*body| switch (try body.bytes.advance(evaluator.workBudget())) {
                 .pending => {},
                 .complete => |built| {
                     body.bytes.deinit();
@@ -640,7 +640,7 @@ const RequestDriver = struct {
                     .dictionary = dictionary,
                 } };
             },
-            .finish_dictionary => |*finish| switch (try finish.dictionary.advance(machine.kernel_poll_quantum)) {
+            .finish_dictionary => |*finish| switch (try finish.dictionary.advance(evaluator.workBudget())) {
                 .pending => {},
                 .duplicate_key => return evaluator.fail(.domain, "http response keys collided"),
                 .complete => |built| {
@@ -718,7 +718,7 @@ const RequestDriver = struct {
             .url => self.limits.target_bytes,
             else => self.limits.header_bytes - self.request_header_bytes,
         };
-        return encoder.advanceLimited(machine.kernel_poll_quantum, limit) catch |err| switch (err) {
+        return encoder.advanceLimited(evaluator.workBudget(), limit) catch |err| switch (err) {
             error.Overflow => return self.overflow(evaluator),
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return evaluator.fail(

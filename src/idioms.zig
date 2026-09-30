@@ -482,8 +482,8 @@ const IdiomDriver = struct {
     }
     pub fn advance(evaluator: *Machine, self: *IdiomDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0) : (budget -= 1) {
+        const work = evaluator.workBudget();
+        while (work.spend()) {
             if (self.resolution) |*cursor| switch (cursor.borrowMut().advance()) {
                 .pending => continue,
                 .complete => |outcome| {
@@ -619,7 +619,7 @@ const IdiomDriver = struct {
                 },
             }
         }
-        return .yielded;
+        return .stepped;
     }
     pub const ownership: heap.DriverOwnership = .fields;
 };
@@ -825,21 +825,21 @@ const PervadeEachDriver = struct {
                 evaluator.releaseDomain(),
                 evaluator.allocator(),
             ));
-            switch (try self.cursor.?.borrowMut().advance(evaluator, machine.kernel_poll_quantum)) {
-                .pending => return .yielded,
+            switch (try self.cursor.?.borrowMut().advance(evaluator, evaluator.workBudget())) {
+                .pending => return .stepped,
                 .complete => |result| {
                     self.cursor.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                     self.cursor = null;
                     self.results.borrowMut().appendOwned(result);
                     self.index += 1;
-                    return .yielded;
+                    return .stepped;
                 },
             }
         }
         if (self.materializer == null)
             self.materializer = .init(.init(evaluator.allocator(), self.results.borrow().values()));
-        return switch (try self.materializer.?.borrowMut().advance(machine.kernel_poll_quantum)) {
-            .pending => .yielded,
+        return switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
+            .pending => .stepped,
             .complete => |result| completed: {
                 popRelease(evaluator, self.consumed);
                 break :completed .{ .output = result };
@@ -940,8 +940,8 @@ const MatchEachDriver = struct {
     pub fn advance(evaluator: *Machine, self: *MatchEachDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const count: usize = @intCast(self.input.list.length());
-        var budget: usize = machine.kernel_poll_quantum;
-        while (self.index != count and budget != 0) : (budget -= 1) {
+        const work = evaluator.workBudget();
+        while (self.index != count and work.spend()) {
             const item = list.atUnchecked(self.input, self.index);
             if (self.cursor == null) {
                 if (equal.matchWithoutStructure(item, self.constant)) |matches| {
@@ -951,21 +951,20 @@ const MatchEachDriver = struct {
                 }
                 self.cursor = .init(try .init(evaluator.allocator(), item, self.constant));
             }
-            switch (try self.cursor.?.borrowMut().advance(machine.kernel_poll_quantum)) {
-                .pending => return .yielded,
+            switch (try self.cursor.?.borrowMut().advance(work)) {
+                .pending => return .stepped,
                 .complete => |matches| {
                     self.cursor.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                     self.cursor = null;
                     self.writer.borrowMut().fillRange(self.index, 1, @intFromBool(matches));
                     self.index += 1;
-                    // One structural comparison already spent a separately
-                    // bounded quantum. Give the scheduler its turn before the
-                    // next element rather than pretending that work was free.
-                    return .yielded;
+                    // The comparison drew on the same budget, so the next
+                    // element continues within the turn while it lasts.
+                    continue;
                 },
             }
         }
-        if (self.index != count) return .yielded;
+        if (self.index != count) return .stepped;
         popRelease(evaluator, 2);
         return .{ .output = self.writer.borrowMut().finish() };
     }
@@ -1004,8 +1003,8 @@ const MatchFindDriver = struct {
     pub fn advance(evaluator: *Machine, self: *MatchFindDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const count: usize = @intCast(self.input.list.length());
-        var budget: usize = machine.kernel_poll_quantum;
-        while (self.index != count and budget != 0) : (budget -= 1) {
+        const work = evaluator.workBudget();
+        while (self.index != count and work.spend()) {
             const item = list.atUnchecked(self.input, self.index);
             if (self.cursor == null) {
                 if (equal.matchWithoutStructure(item, self.needle)) |matches| {
@@ -1015,20 +1014,20 @@ const MatchFindDriver = struct {
                 }
                 self.cursor = .init(try .init(evaluator.allocator(), item, self.needle));
             }
-            switch (try self.cursor.?.borrowMut().advance(machine.kernel_poll_quantum)) {
-                .pending => return .yielded,
+            switch (try self.cursor.?.borrowMut().advance(work)) {
+                .pending => return .stepped,
                 .complete => |matches| {
                     self.cursor.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                     self.cursor = null;
                     if (matches) return self.finish(evaluator, self.index);
                     self.index += 1;
-                    // A structural comparison spent a separately bounded
-                    // quantum, so yield before starting the next element.
-                    return .yielded;
+                    // The comparison drew on the same budget, so the next
+                    // element continues within the turn while it lasts.
+                    continue;
                 },
             }
         }
-        if (self.index != count) return .yielded;
+        if (self.index != count) return .stepped;
         return self.finish(evaluator, count);
     }
 
@@ -1129,8 +1128,8 @@ const ReductionDriver = struct {
                         row,
                     ));
             }
-            const next = switch (try self.cursor.?.borrowMut().advance(evaluator, machine.kernel_poll_quantum)) {
-                .pending => return .yielded,
+            const next = switch (try self.cursor.?.borrowMut().advance(evaluator, evaluator.workBudget())) {
+                .pending => return .stepped,
                 .complete => |result| result,
             };
             self.cursor.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
@@ -1142,7 +1141,7 @@ const ReductionDriver = struct {
                 self.accumulator.borrowMut().replaceOwned(evaluator.releaseDomain(), next);
             }
             self.initialized += 1;
-            return .yielded;
+            return .stepped;
         }
         if (!self.scan) {
             popRelease(evaluator, self.consumed);
@@ -1155,8 +1154,8 @@ const ReductionDriver = struct {
             ));
             self.materializing = true;
         }
-        return switch (try self.materializer.?.borrowMut().advance(machine.kernel_poll_quantum)) {
-            .pending => .yielded,
+        return switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
+            .pending => .stepped,
             .complete => |result| completed: {
                 popRelease(evaluator, 3);
                 break :completed .{ .output = result };

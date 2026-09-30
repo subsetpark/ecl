@@ -6,6 +6,7 @@ const heap = @import("heap.zig");
 const list = @import("list.zig");
 const machine = @import("machine.zig");
 const poll = @import("poll.zig");
+const WorkBudget = poll.WorkBudget;
 
 pub const Value = value.Value;
 pub const HeapKind = value.HeapKind;
@@ -283,11 +284,11 @@ pub const RandomOp = enum {
 
 /// The budget seam for every kernel cursor.
 ///
-/// `advanceKernel` is the only path that charges `Unit.kernel_fuel`, and it
-/// asserts the charge stays within the kernel quantum and polls at the
-/// boundary. A kernel that calls bare `pollKernel` with a private budget
-/// instead is invisible to that accounting, which is what this type exists to
-/// prevent: typed cursors accept only the narrow `Context` capability.
+/// Every charge lands on the unit's one kernel budget, which only the machine
+/// refills at the boundary where it polls cancellation. A kernel that calls
+/// bare `pollKernel` with a private budget instead is invisible to that
+/// accounting, which is what this type exists to prevent: typed cursors accept
+/// only the narrow `Context` capability.
 pub const Context = struct {
     evaluator: *Machine,
 
@@ -307,6 +308,12 @@ pub const Context = struct {
     /// worker without paying a scheduler turn per element.
     pub fn remaining(self: Context) usize {
         return self.evaluator.remainingKernelFuel();
+    }
+
+    /// The unit's budget itself, for a cursor that draws element by element
+    /// and hands the same allowance to the cursors it drives.
+    pub fn budget(self: Context) *WorkBudget {
+        return self.evaluator.workBudget();
     }
 
     pub fn advance(self: Context, logical_elements: usize) MachineError!void {

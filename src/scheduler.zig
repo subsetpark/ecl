@@ -2684,7 +2684,8 @@ pub const WorkerScheduler = enum(usize) {
                 };
             },
             .success_materializing => |*materializer| {
-                const materialized = materializer.advance(machine.kernel_poll_quantum) catch {
+                var work_budget: poll.WorkBudget = .init(machine.kernel_poll_quantum);
+                const materialized = materializer.advance(&work_budget) catch {
                     materializer.retire(self.releaseDomain());
                     work.* = .{ .ready = .oom };
                     return true;
@@ -2956,6 +2957,9 @@ fn taskCell(task: Value) ?*TaskCell {
     return @ptrCast(@alignCast(heap.taskStorage(task.task).payload));
 }
 
+/// Descendants visited per hold of the tree mutex. This bounds a critical
+/// section every worker contends for, not the unit's turn: the visits are
+/// charged to the unit's budget and the pass resumes after releasing the lock.
 const task_snapshot_quantum = 256;
 
 const TaskSnapshotPass = struct {
@@ -3016,8 +3020,9 @@ const TasksDriver = struct {
             .start => self.scope.first,
             .retained => |next| next,
         } else self.scope.first;
+        const work = evaluator.workBudget();
         var visited: usize = 0;
-        while (current != null and visited < task_snapshot_quantum) : (visited += 1) {
+        while (current != null and visited < task_snapshot_quantum and work.spend()) : (visited += 1) {
             const cell = current.?;
             current = nextDescendant(self.scope, cell);
             std.Io.Threaded.mutexLock(&cell.mutex);
@@ -3048,7 +3053,7 @@ const TasksDriver = struct {
         }
         std.Io.Threaded.mutexUnlock(&scheduler_state.tree_mutex);
         if (old_pass) |pass| pass.releaseRetained(self.scheduler.releaseDomain());
-        if (current != null) return .yielded;
+        if (current != null) return .stepped;
         switch (self.phase) {
             .count => {
                 if (self.count >= std.math.maxInt(u32)) return error.OutOfMemory;
@@ -3058,7 +3063,7 @@ const TasksDriver = struct {
                     self.count,
                 ));
                 self.phase = .collect;
-                return .yielded;
+                return .stepped;
             },
             .collect => {
                 var result_builder = self.result.?.take();

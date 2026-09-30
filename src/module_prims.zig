@@ -17,7 +17,6 @@ const MachineError = machine.MachineError;
 /// Removal advances one owner transition per cursor step. Keep its scheduler
 /// slice small enough that cancellation can run after the directory close edge
 /// while a user-sized durable stack is still retiring.
-const removal_poll_quantum: usize = 256;
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     try definition_prims.install(core);
     const definitions = comptime [_]env.BuiltinWord{
@@ -116,8 +115,8 @@ const FileDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *FileDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        return switch (try self.text.borrowMut().advance(machine.kernel_poll_quantum)) {
-            .pending => .yielded,
+        return switch (try self.text.borrowMut().advance(evaluator.workBudget())) {
+            .pending => .stepped,
             .complete => |result| .{ .output = result },
         };
     }
@@ -129,8 +128,8 @@ const UnmoduleDriver = struct {
     cursor: ?heap.Owned(modules.Registry.RemovalCursor) = null,
     pub fn advance(evaluator: *Machine, self: *UnmoduleDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        var budget: usize = removal_poll_quantum;
-        while (budget != 0) : (budget -= 1) {
+        const work = evaluator.workBudget();
+        while (work.spend()) {
             if (self.cursor == null) switch (self.validation.advance()) {
                 .pending => continue,
                 .complete => |maybe_name| {
@@ -158,6 +157,7 @@ const UnmoduleDriver = struct {
                 ),
             }) {
                 .pending => {},
+                .blocked => return .yielded,
                 // The close edge has transferred all remaining ownership to
                 // scheduler retirement. Yield before polling cancellation
                 // again so abandoning this Unit cannot abandon module state.
@@ -165,7 +165,7 @@ const UnmoduleDriver = struct {
                 .complete => return .completed,
             }
         }
-        return .yielded;
+        return .stepped;
     }
 };
 
@@ -214,8 +214,8 @@ const RegisterDriver = struct {
     validation: intern.ModuleNameCursor,
     pub fn advance(evaluator: *Machine, self: *RegisterDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0) : (budget -= 1) switch (self.validation.advance()) {
+        const work = evaluator.workBudget();
+        while (work.spend()) switch (self.validation.advance()) {
             .pending => {},
             .complete => |maybe_name| {
                 const name = maybe_name orelse return evaluator.fail(
@@ -229,7 +229,7 @@ const RegisterDriver = struct {
                 return .detached;
             },
         };
-        return .yielded;
+        return .stepped;
     }
 };
 
@@ -280,8 +280,8 @@ const ImportDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *ImportDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0) : (budget -= 1) {
+        const work = evaluator.workBudget();
+        while (work.spend()) {
             if (self.module_name == null) switch (self.module_validation.advance()) {
                 .pending => continue,
                 .complete => |maybe_name| {
@@ -444,7 +444,7 @@ const ImportDriver = struct {
                 },
             }
         }
-        return .yielded;
+        return .stepped;
     }
 };
 
@@ -457,8 +457,8 @@ const AliasDriver = struct {
     cursor: ?heap.Owned(modules.Registry.AliasCursor) = null,
     pub fn advance(evaluator: *Machine, self: *AliasDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0) : (budget -= 1) {
+        const work = evaluator.workBudget();
+        while (work.spend()) {
             if (self.target == null) switch (self.target_validation.advance()) {
                 .pending => continue,
                 .complete => |name| {
@@ -491,7 +491,7 @@ const AliasDriver = struct {
                 .complete => return .completed,
             }
         }
-        return .yielded;
+        return .stepped;
     }
 };
 
@@ -529,8 +529,8 @@ const QualifyDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *QualifyDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0) : (budget -= 1) {
+        const work = evaluator.workBudget();
+        while (work.spend()) {
             if (self.module_name == null) switch (self.module_validation.advance()) {
                 .pending => continue,
                 .complete => |name| {
@@ -560,7 +560,7 @@ const QualifyDriver = struct {
                 .complete => |word| return .{ .output = .{ .word = .{ .name = word } } },
             }
         }
-        return .yielded;
+        return .stepped;
     }
 };
 fn words(evaluator: *Machine) MachineError!void {
@@ -621,8 +621,8 @@ const WordsDriver = struct {
     }
     pub fn advance(evaluator: *Machine, self: *WordsDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0) : (budget -= 1) switch (self.state.borrowMut().*) {
+        const work = evaluator.workBudget();
+        while (work.spend()) switch (self.state.borrowMut().*) {
             .visible => |*visible| switch (visible.borrowMut().advance()) {
                 .pending => {},
                 .complete => {
@@ -635,7 +635,7 @@ const WordsDriver = struct {
                 },
                 .item => |name| try self.append(name),
             },
-            .postprocess => |*cursor| switch (try cursor.borrowMut().advance(1)) {
+            .postprocess => |*cursor| switch (try cursor.borrowMut().advance(work)) {
                 .pending => {},
                 .complete => |names| {
                     cursor.deinit(evaluator.releaseDomain(), evaluator.allocator());
@@ -660,7 +660,7 @@ const WordsDriver = struct {
                 const owned_names = actions.names.take();
                 self.state.borrowMut().* = .{ .render = .init(owned_names) };
             },
-            .render => |*names| switch (try self.actions.borrowMut().advance(1)) {
+            .render => |*names| switch (try self.actions.borrowMut().advance(work)) {
                 .pending => {},
                 .complete => |bytes| {
                     self.state.borrowMut().* = .{ .write = .{
@@ -674,7 +674,7 @@ const WordsDriver = struct {
                 return .completed;
             },
         };
-        return .yielded;
+        return .stepped;
     }
 };
 fn writeFailure(evaluator: *Machine) MachineError {

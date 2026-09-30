@@ -9,6 +9,7 @@ const intern = @import("intern.zig");
 const machine = @import("machine.zig");
 const storage = @import("kernel_storage.zig");
 const list = @import("list.zig");
+const poll = @import("poll.zig");
 const value = @import("value.zig");
 
 const max_module_name_bytes = 256;
@@ -284,22 +285,21 @@ const DocumentBuild = struct {
         self.* = undefined;
     }
 
-    fn advance(self: *DocumentBuild, budget: usize) ValidateError!?*env.DocumentationString {
-        switch (self.state) {
-            .materialize => |*materializer| switch (try materializer.advance(budget)) {
+    /// Null means the caller's allowance was spent first.
+    fn advance(self: *DocumentBuild, work: *poll.WorkBudget) ValidateError!?*env.DocumentationString {
+        while (true) switch (self.state) {
+            .materialize => |*materializer| switch (try materializer.advance(work)) {
                 .pending => return null,
                 .complete => |document| {
                     materializer.deinit();
                     self.state = .{ .source = document };
-                    return null;
                 },
             },
             .source => |source| {
                 const normalizer = try doc.NormalizeCursor.init(self.host.allocator(), source);
                 self.state = .{ .normalize = .{ .source = source, .cursor = normalizer } };
-                return null;
             },
-            .normalize => |*normalizing| switch (try normalizing.cursor.advance(budget)) {
+            .normalize => |*normalizing| switch (try normalizing.cursor.advance(work)) {
                 .pending => return null,
                 .complete => |normalized| {
                     const source = normalizing.source;
@@ -317,7 +317,7 @@ const DocumentBuild = struct {
             },
             .complete => |result| return result,
             .failed, .consumed => unreachable,
-        }
+        };
     }
 
     fn take(self: *DocumentBuild) *env.DocumentationString {
@@ -383,9 +383,10 @@ const EffectBuild = struct {
         self.* = undefined;
     }
 
-    fn advance(self: *EffectBuild, budget: usize) ValidateError!?env.ValidatedEffect {
-        var remaining = budget;
-        while (remaining != 0) : (remaining -= 1) switch (self.state) {
+    /// Null means the caller's allowance was spent first.
+    fn advance(self: *EffectBuild, work: *poll.WorkBudget) ValidateError!?env.ValidatedEffect {
+        // Materialization is charged by the materializer, not ahead of it.
+        while (self.state == .materialize or work.spend()) switch (self.state) {
             .inputs => |*slots| {
                 if (try self.advanceSlot(slots, true)) self.state = .separator;
             },
@@ -398,12 +399,11 @@ const EffectBuild = struct {
                     self.state = .{ .materialize = .init(self.host.allocator(), self.tokens) };
                 }
             },
-            .materialize => |*materializer| switch (try materializer.advance(remaining)) {
+            .materialize => |*materializer| switch (try materializer.advance(work)) {
                 .pending => return null,
                 .complete => |item| {
                     materializer.deinit();
                     self.state = .{ .materialized = item };
-                    return null;
                 },
             },
             .materialized => |item| {
@@ -545,10 +545,13 @@ pub const ValidateCursor = struct {
         return self.failure_definition;
     }
 
-    pub fn advance(self: *ValidateCursor, budget: usize) ValidateError!Progress {
-        std.debug.assert(budget != 0 and self.state != .complete and self.state != .failed);
-        var remaining = budget;
-        while (remaining != 0) : (remaining -= 1) switch (self.state) {
+    pub fn advance(self: *ValidateCursor, work: *poll.WorkBudget) ValidateError!Progress {
+        std.debug.assert(self.state != .complete and self.state != .failed);
+        // Documentation and effect builders are charged by their own work.
+        while (switch (self.state) {
+            .module_doc, .definition_doc, .definition_effect => true,
+            else => work.spend(),
+        }) switch (self.state) {
             .header => self.validateHeader() catch |err| return self.reject(err, null),
             .endpoint_storage => |*storage_state| {
                 if (storage_state.next == storage_state.allocated.endpoints.len) {
@@ -562,7 +565,7 @@ pub const ValidateCursor = struct {
             .module_name => |allocated| self.validateModuleName(allocated) catch |err|
                 return self.reject(err, null),
             .module_doc => |*module_doc| {
-                const completed = module_doc.builder.advance(remaining) catch |err|
+                const completed = module_doc.builder.advance(work) catch |err|
                     return self.reject(err, null);
                 if (completed == null) return .pending;
                 const allocated = module_doc.allocated;
@@ -585,7 +588,7 @@ pub const ValidateCursor = struct {
                 return self.reject(err, @intCast(module.definition_index)),
             .definition_doc => |*definition_doc| {
                 const definition_index = definition_doc.build.module.definition_index;
-                const completed = definition_doc.builder.advance(remaining) catch |err|
+                const completed = definition_doc.builder.advance(work) catch |err|
                     return self.reject(err, @intCast(definition_index));
                 if (completed == null) return .pending;
                 const build = definition_doc.build;
@@ -607,7 +610,7 @@ pub const ValidateCursor = struct {
             },
             .definition_effect => |*definition_effect| {
                 const definition_index = definition_effect.build.module.definition_index;
-                const completed = definition_effect.builder.advance(remaining) catch |err|
+                const completed = definition_effect.builder.advance(work) catch |err|
                     return self.reject(err, @intCast(definition_index));
                 if (completed == null) return .pending;
                 var module = definition_effect.build.module;

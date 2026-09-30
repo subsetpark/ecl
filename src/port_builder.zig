@@ -96,8 +96,10 @@ const State = struct {
         }
         self.phase = .failed;
     }
+    /// One construction step, bounded by this port's work quantum: every
+    /// phase of the step draws on the one allowance the step owns.
     fn advance(self: *State) Error!poll.Progress(void) {
-        const quantum = self.limits.work_quantum.count();
+        var budget = poll.WorkBudget.init(self.limits.work_quantum.count());
         switch (self.phase) {
             .idle, .ready, .child_configuration, .symbol_staging => return .complete,
             .failed => return error.InvalidState,
@@ -111,7 +113,6 @@ const State = struct {
                         return .complete;
                     },
                 };
-                var budget = poll.WorkBudget.init(quantum);
                 while (symbol.index < symbol.bytes.len and budget.spend()) {
                     const count = std.unicode.utf8ByteSequenceLength(symbol.bytes[symbol.index]) catch return error.InvalidValue;
                     if (count > symbol.bytes.len - symbol.index) return error.InvalidValue;
@@ -121,7 +122,7 @@ const State = struct {
                 if (symbol.index == symbol.bytes.len) symbol.cursor = intern.insertionCursor(symbol.bytes);
                 return .pending;
             },
-            .byte_list => |*building| switch (try building.materializer.advance(quantum)) {
+            .byte_list => |*building| switch (try building.materializer.advance(&budget)) {
                 .pending => return .pending,
                 .complete => |item| {
                     building.materializer.deinit();
@@ -132,7 +133,6 @@ const State = struct {
                 },
             },
             .validating => |validation| {
-                var budget = poll.WorkBudget.init(quantum);
                 if (try validation.message.advance(&budget) == .pending) return .pending;
                 if (validation.purpose == .finish) {
                     self.phase = .{ .ready = validation.message };
@@ -148,7 +148,7 @@ const State = struct {
                 }
                 return .complete;
             },
-            .list => |*building| switch (try building.materializer.advance(quantum)) {
+            .list => |*building| switch (try building.materializer.advance(&budget)) {
                 .pending => return .pending,
                 .complete => |item| {
                     const start = building.start;
@@ -159,7 +159,7 @@ const State = struct {
             },
             .dictionary => |*building| switch (building.phase) {
                 .split => |index| {
-                    const end = @min(index + quantum, building.keys.len);
+                    const end = index + budget.take(building.keys.len - index);
                     const source = self.stack.values();
                     for (index..end) |i| {
                         building.keys[i] = source[building.start + 2 * i];
@@ -172,7 +172,7 @@ const State = struct {
                     }
                     return .pending;
                 },
-                .materializing => |*materializer| switch (try materializer.advance(quantum)) {
+                .materializing => |*materializer| switch (try materializer.advance(&budget)) {
                     .pending => return .pending,
                     .duplicate_key => return error.DuplicateKey,
                     .complete => |item| {
@@ -186,7 +186,7 @@ const State = struct {
                 },
             },
             .retiring => |*retiring| {
-                const end = @min(retiring.next + quantum, retiring.end);
+                const end = retiring.next + budget.take(retiring.end - retiring.next);
                 for (retiring.next..end) |index| self.stack.replaceOwned(index, .{ .int = 0 });
                 retiring.next = end;
                 if (end == retiring.end) {

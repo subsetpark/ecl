@@ -1108,10 +1108,11 @@ fn materializeCompletion(
     if (found.count == 0) return .empty;
     var cursor = try reflection.SortedUniqueNameCursor.init(allocator, found);
     defer cursor.deinit();
+    var work = poll.unbounded();
     var sorted = try poll.driveFallible(
         reflection.SortedUniqueNames,
         &cursor,
-        .{256},
+        .{&work},
     );
     defer sorted.deinit(allocator);
     const names = sorted.items();
@@ -1180,6 +1181,35 @@ fn dictSymbol(
 
 test "invocation effects: completion owns immediate deferred nested and failing calls" {
     const Probe = struct {
+        const completion = @import("driver_completion.zig");
+        const YieldingDriver = struct {
+            pub const ownership: heap.DriverOwnership = .bounded_retirement;
+            retirement: heap.ReleaseDomain.Retirement = .{},
+            terminal: completion.Completion = .{},
+            first: bool = true,
+
+            pub fn advance(evaluator: *machine.Machine, self: *@This()) machine.MachineError!machine.WorkProgress {
+                return self.terminal.advance(evaluator, self);
+            }
+            pub fn advanceOperation(self: *@This(), evaluator: *machine.Machine) machine.MachineError!completion.Progress {
+                if (self.first) {
+                    self.first = false;
+                    _ = evaluator.workBudget().take(evaluator.remainingKernelFuel() -| 8);
+                    return .yielded;
+                }
+                if (evaluator.remainingKernelFuel() < machine.kernel_poll_quantum / 2)
+                    return evaluator.fail(.user, "host yield retained its worker turn");
+                return .{ .output = .{ .int = 11 } };
+            }
+            pub fn advanceCleanup(_: *@This(), _: *heap.ReleaseDomain, _: std.mem.Allocator) bool {
+                return true;
+            }
+            pub fn advanceRetirement(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *@This()) bool {
+                if (!self.terminal.retire(self, releases, allocator)) return false;
+                allocator.destroy(self);
+                return true;
+            }
+        };
         fn runOk(runtime: *Session, source: []const u8) !void {
             switch (try runtime.runUnit("invocation.ecl", source)) {
                 .ok => {},
@@ -1195,16 +1225,31 @@ test "invocation effects: completion owns immediate deferred nested and failing 
         }
         const Driver = struct {
             pub const ownership: heap.DriverOwnership = .fields;
-            mode: enum { output, empty, failure, chain, forever },
+            mode: enum { output, empty, failure, chain, forever, exhausted_output, exhausted_empty, exhausted_chain },
             remaining: u8 = 2,
 
             pub fn advance(evaluator: *machine.Machine, self: *@This()) machine.MachineError!machine.WorkProgress {
+                if (evaluator.workBudget().exhausted()) return evaluator.fail(.user, "driver ran on an exhausted turn");
                 try evaluator.pollKernel();
                 if (self.remaining != 0) {
                     self.remaining -= 1;
                     return .yielded;
                 }
                 return switch (self.mode) {
+                    .exhausted_output => blk: {
+                        _ = evaluator.workBudget().take(machine.kernel_poll_quantum);
+                        break :blk .{ .output = .{ .int = 11 } };
+                    },
+                    .exhausted_empty => blk: {
+                        _ = evaluator.workBudget().take(machine.kernel_poll_quantum);
+                        break :blk .completed;
+                    },
+                    .exhausted_chain => blk: {
+                        _ = evaluator.workBudget().take(machine.kernel_poll_quantum);
+                        evaluator.retireDriver(self);
+                        try evaluator.startDriver(Driver{ .mode = .output, .remaining = 0 });
+                        break :blk .detached;
+                    },
                     .output => .{ .output = .{ .int = 11 } },
                     .empty => .completed,
                     .failure => evaluator.fail(.user, "deferred failure"),
@@ -1219,6 +1264,9 @@ test "invocation effects: completion owns immediate deferred nested and failing 
         };
         fn immediate(evaluator: *machine.Machine) machine.MachineError!void {
             try evaluator.pushOwned(.{ .int = 11 });
+        }
+        fn hostYield(evaluator: *machine.Machine) machine.MachineError!void {
+            try evaluator.startDriver(YieldingDriver{});
         }
         fn empty(_: *machine.Machine) machine.MachineError!void {}
         fn deferred(evaluator: *machine.Machine) machine.MachineError!void {
@@ -1235,6 +1283,22 @@ test "invocation effects: completion owns immediate deferred nested and failing 
         }
         fn forever(evaluator: *machine.Machine) machine.MachineError!void {
             try evaluator.startDriver(Driver{ .mode = .forever });
+        }
+        fn exhaustedOutput(evaluator: *machine.Machine) machine.MachineError!void {
+            try evaluator.startDriver(Driver{ .mode = .exhausted_output, .remaining = 0 });
+        }
+        fn exhaustedEmpty(evaluator: *machine.Machine) machine.MachineError!void {
+            try evaluator.startDriver(Driver{ .mode = .exhausted_empty, .remaining = 0 });
+        }
+        fn exhaustedChain(evaluator: *machine.Machine) machine.MachineError!void {
+            try evaluator.startDriver(Driver{ .mode = .exhausted_chain, .remaining = 0 });
+        }
+        fn freshTurn(evaluator: *machine.Machine) machine.MachineError!void {
+            if (evaluator.remainingKernelFuel() < 128) return evaluator.fail(.user, "successor ran without a fresh allowance");
+            try evaluator.pushOwned(.{ .int = 1 });
+        }
+        fn shortTurn(evaluator: *machine.Machine) machine.MachineError!void {
+            _ = evaluator.workBudget().take(evaluator.remainingKernelFuel() -| 100);
         }
         fn nested(evaluator: *machine.Machine) machine.MachineError!void {
             var body = try evaluator.popQuotation();
@@ -1259,12 +1323,18 @@ test "invocation effects: completion owns immediate deferred nested and failing 
     const registry = &runtime.coreState().registry;
     var candidate = try modules.Registry.BuiltinCandidateCursor.init(registry, &.{
         .{ .name = "immediate", .primitive = Probe.immediate, .effect = "-- n", .doc = "Return one number." },
+        .{ .name = "host-yield", .primitive = Probe.hostYield, .effect = "-- n", .doc = "Yield without parking before returning a number." },
         .{ .name = "empty", .primitive = Probe.empty, .effect = "-- n", .doc = "Violate the output contract immediately." },
         .{ .name = "deferred", .primitive = Probe.deferred, .effect = "-- n", .doc = "Return one number after yielding." },
         .{ .name = "wrong", .primitive = Probe.wrong, .effect = "-- n", .doc = "Violate the output contract after yielding." },
         .{ .name = "failure", .primitive = Probe.failure, .effect = "-- n", .doc = "Fail after yielding." },
         .{ .name = "chain", .primitive = Probe.chain, .effect = "-- n", .doc = "Transfer work to another driver." },
         .{ .name = "forever", .primitive = Probe.forever, .effect = "-- n", .doc = "Wait for cancellation." },
+        .{ .name = "exhausted-output", .primitive = Probe.exhaustedOutput, .doc = "Deliver output on the last unit of work." },
+        .{ .name = "exhausted-empty", .primitive = Probe.exhaustedEmpty, .doc = "Complete on the last unit of work." },
+        .{ .name = "exhausted-chain", .primitive = Probe.exhaustedChain, .doc = "Install a successor on the last unit of work." },
+        .{ .name = "fresh-turn", .primitive = Probe.freshTurn, .doc = "Check that evaluation has a work allowance." },
+        .{ .name = "short-turn", .primitive = Probe.shortTurn, .doc = "Leave a small shared allowance for the next operation." },
         .{ .name = "nested", .primitive = Probe.nested, .effect = "quotation -- n", .doc = "Invoke a quotation." },
         .{ .name = "reflect", .primitive = Probe.reflect, .effect = "symbol --", .doc = "Reflect a word, loading its module if necessary." },
     });
@@ -1282,7 +1352,18 @@ test "invocation effects: completion owns immediate deferred nested and failing 
     try std.testing.expectEqual(@as(i64, 99), runtime.stackItems()[0].int);
     try Probe.runOk(&runtime, "pop");
 
-    for ([_][]const u8{ "probe.immediate", "probe.deferred", "probe.chain", "(probe.deferred) probe.nested" }) |call| {
+    for ([_][]const u8{
+        "probe.exhausted-output probe.fresh-turn swap pop",
+        "probe.exhausted-empty probe.fresh-turn",
+        "probe.exhausted-chain probe.fresh-turn swap pop",
+        "10000 range probe.short-turn flip probe.fresh-turn swap pop",
+    }) |source| {
+        try Probe.runOk(&runtime, source);
+        try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
+        try Probe.runOk(&runtime, "pop");
+    }
+
+    for ([_][]const u8{ "probe.immediate", "probe.deferred", "probe.chain", "probe.host-yield", "(probe.deferred) probe.nested" }) |call| {
         const source = try std.fmt.allocPrint(std.testing.allocator, "{s} 88 +", .{call});
         defer std.testing.allocator.free(source);
         try Probe.runOk(&runtime, source);

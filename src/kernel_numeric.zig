@@ -160,8 +160,8 @@ const PervadeDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *PervadeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        return switch (try self.cursor.borrowMut().advance(evaluator, machine.kernel_poll_quantum)) {
-            .pending => .yielded,
+        return switch (try self.cursor.borrowMut().advance(evaluator, evaluator.workBudget())) {
+            .pending => .stepped,
             .complete => |result| .{ .output = result },
         };
     }
@@ -259,6 +259,18 @@ pub const PervadeCursor = struct {
         }
     };
 
+    /// Typed frames charge the unit through `Context`; list and dict frames
+    /// that are materializing or comparing hand their work to that cursor.
+    fn delegates(frame: *const Frame) bool {
+        return switch (frame.*) {
+            .binary, .unary => false,
+            .typed => true,
+            .list => |*list_frame| list_frame.result == null and !list_frame.waiting and
+                list_frame.index == list_frame.values.capacity(),
+            .dictionary => |*dict_frame| dict_frame.phase == .materialize or dict_frame.match_cursor != null,
+        };
+    }
+
     pub fn initBinary(
         releases: *heap.ReleaseDomain,
         allocator: std.mem.Allocator,
@@ -326,11 +338,15 @@ pub const PervadeCursor = struct {
     pub fn advance(
         self: *PervadeCursor,
         evaluator: *Machine,
-        budget: usize,
+        work: *poll.WorkBudget,
     ) MachineError!PervadeProgress {
-        std.debug.assert(budget != 0);
-        var remaining = budget;
-        while (remaining != 0) : (remaining -= 1) {
+        while (true) {
+            // A frame handing work to a nested cursor is charged by that
+            // cursor; spending first would starve it at a one-unit grain.
+            if (self.frames.topPtr()) |top| {
+                if (!delegates(top) and !work.spend()) return .pending;
+            }
+
             var frame = self.frames.pop() orelse {
                 const result = self.last.?;
                 self.last = null;
@@ -340,10 +356,10 @@ pub const PervadeCursor = struct {
                 .binary => |node| try self.startBinary(evaluator, node),
                 .unary => |node| try self.startUnary(evaluator, node),
                 .list => |*list_frame| {
-                    if (!try self.advanceList(evaluator, list_frame, remaining)) return .pending;
+                    if (!try self.advanceList(list_frame, work)) return .pending;
                 },
                 .dictionary => |*dict_frame| {
-                    if (!try self.advanceDict(evaluator, dict_frame, remaining)) return .pending;
+                    if (!try self.advanceDict(dict_frame, work)) return .pending;
                 },
                 .typed => |*typed| {
                     errdefer typed.retire(self.releases);
@@ -464,11 +480,11 @@ pub const PervadeCursor = struct {
             return scalarFailure(evaluator, fault, node.logical_index);
     }
 
+    /// False means the allowance was spent before this frame could continue.
     fn advanceList(
         self: *PervadeCursor,
-        _: *Machine,
         frame: *ListFrame,
-        budget: usize,
+        work: *poll.WorkBudget,
     ) MachineError!bool {
         errdefer frame.deinit(self.releases);
         if (frame.result) |result| {
@@ -508,7 +524,7 @@ pub const PervadeCursor = struct {
         if (frame.materializer == null)
             frame.materializer = .init(self.allocator, frame.values.values());
         try self.frames.reserve(1);
-        switch (try frame.materializer.?.advance(budget)) {
+        switch (try frame.materializer.?.advance(work)) {
             .pending => {
                 self.frames.pushReserved(.{ .list = frame.* });
                 return false;
@@ -516,7 +532,7 @@ pub const PervadeCursor = struct {
             .complete => |result| {
                 frame.result = result;
                 self.frames.pushReserved(.{ .list = frame.* });
-                return false;
+                return true;
             },
         }
     }
@@ -548,11 +564,11 @@ pub const PervadeCursor = struct {
         } });
     }
 
+    /// False means the allowance was spent before this frame could continue.
     fn advanceDict(
         self: *PervadeCursor,
-        _: *Machine,
         frame: *DictFrame,
-        budget: usize,
+        work: *poll.WorkBudget,
     ) MachineError!bool {
         errdefer frame.deinit(self.releases, self.allocator);
         if (frame.phase == .release) {
@@ -579,7 +595,7 @@ pub const PervadeCursor = struct {
                 false,
             );
             try self.frames.reserve(1);
-            switch (try frame.materializer.?.advance(budget)) {
+            switch (try frame.materializer.?.advance(work)) {
                 .pending => {
                     self.frames.pushReserved(.{ .dictionary = frame.* });
                     return false;
@@ -591,7 +607,7 @@ pub const PervadeCursor = struct {
                     frame.result = result;
                     frame.phase = .release;
                     self.frames.pushReserved(.{ .dictionary = frame.* });
-                    return false;
+                    return true;
                 },
             }
         }
@@ -674,7 +690,7 @@ pub const PervadeCursor = struct {
                     dict.keyAt(other.dict, frame.candidate),
                 );
                 try self.frames.reserve(2);
-                switch (try frame.match_cursor.?.advance(budget)) {
+                switch (try frame.match_cursor.?.advance(work)) {
                     .pending => {
                         self.frames.pushReserved(.{ .dictionary = frame.* });
                         return false;
@@ -685,13 +701,13 @@ pub const PervadeCursor = struct {
                         if (!matches) {
                             frame.candidate += 1;
                             self.frames.pushReserved(.{ .dictionary = frame.* });
-                            return false;
+                            return true;
                         }
                         if (frame.phase == .right) {
                             frame.index += 1;
                             frame.candidate = 0;
                             self.frames.pushReserved(.{ .dictionary = frame.* });
-                            return false;
+                            return true;
                         }
                         const index = frame.index;
                         const candidate = frame.candidate;
@@ -705,7 +721,7 @@ pub const PervadeCursor = struct {
                             .depth = frame.depth + 1,
                             .logical_index = index,
                         } });
-                        return false;
+                        return true;
                     },
                 }
             },
@@ -3009,8 +3025,8 @@ const GroupReduceDriver = struct {
         try evaluator.pollKernel();
         const count: usize = @intCast(self.groups.borrow().list.length());
         if (self.output == null) self.output = .init(try .init(evaluator.releaseDomain(), count));
-        var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0 and self.group != count) : (budget -= 1) {
+        const work = evaluator.workBudget();
+        while (self.group != count and work.spend()) {
             const indices = list.atUnchecked(self.groups.borrow(), self.group);
             if (indices != .list) return evaluator.typeError("group index lists");
             if (self.index == indices.list.length()) {
@@ -3036,7 +3052,7 @@ const GroupReduceDriver = struct {
                 .min, .max => {
                     if (self.index == 0) self.accumulator = item;
                     if (self.comparison == null) self.comparison = .init(self.accumulator, item);
-                    switch (self.comparison.?.advance(1)) {
+                    switch (self.comparison.?.advance(work)) {
                         .pending => continue,
                         .not_comparable => return evaluator.typeError("comparable group values"),
                         .complete => |order| {
@@ -3048,7 +3064,7 @@ const GroupReduceDriver = struct {
             }
             self.index += 1;
         }
-        if (self.group != count) return .yielded;
+        if (self.group != count) return .stepped;
         const result = self.output.?.borrowMut().takeList();
         self.output = null;
         return .{ .output = result };

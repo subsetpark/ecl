@@ -1,6 +1,7 @@
 //! Native controller ownership, bounded streams, and scheduler readiness.
 const std = @import("std");
 const abi = @import("native-abi");
+const poll = @import("poll.zig");
 const external = @import("external.zig");
 const heap = @import("heap.zig");
 const native = @import("native_module.zig");
@@ -1807,9 +1808,9 @@ const CooperativeInvocation = struct {
 };
 
 /// The opaque opening owns the diagnostic state directly, without an erased wrapper.
-pub fn advanceOpening(opening: *factories.Opening, quantum: usize) error{OutOfMemory}!factories.Progress {
+pub fn advanceOpening(opening: *factories.Opening, work: *poll.WorkBudget) error{OutOfMemory}!factories.Progress {
     const owned: *RejectedOpening = @ptrCast(@alignCast(opening));
-    return owned.advance(quantum);
+    return owned.advance(work);
 }
 pub fn retireOpening(opening: *factories.Opening) void {
     const owned: *RejectedOpening = @ptrCast(@alignCast(opening));
@@ -1852,8 +1853,11 @@ const RejectedOpening = struct {
         definition.init_state(backend.ptr);
         return @ptrCast(owned);
     }
-    pub fn advance(self: *RejectedOpening, quantum: usize) error{OutOfMemory}!factories.Progress {
-        self.budget = @intCast(@min(quantum, self.instance.portAccess().state().limits.callback_quantum.count()));
+    /// The extension reports no consumption, so the callback's whole slice is
+    /// charged to the caller's allowance before it runs.
+    pub fn advance(self: *RejectedOpening, work: *poll.WorkBudget) error{OutOfMemory}!factories.Progress {
+        self.budget = @intCast(work.take(self.instance.portAccess().state().limits.callback_quantum.count()));
+        if (self.budget == 0) return .yielded;
         switch (self.phase) {
             .reporting => |backend| {
                 const progress = self.definition.step(backend.ptr, &table, self);

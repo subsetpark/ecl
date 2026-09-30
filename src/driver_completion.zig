@@ -5,7 +5,9 @@ const heap = @import("heap.zig");
 const machine = @import("machine.zig");
 const Value = @import("value.zig").Value;
 
-pub const Progress = union(enum) { yielded, completed, output: Value };
+// Compute progress can retain the turn. An explicit yield ends it even when
+// there is no park request, as with a bounded host I/O transfer.
+pub const Progress = union(enum) { stepped, yielded, completed, output: Value };
 
 pub const Completion = struct {
     phase: union(enum) { running, success: ?Value, failure: machine.MachineError, abandoned, settled } = .running,
@@ -17,14 +19,16 @@ pub const Completion = struct {
                 return .yielded;
             };
             switch (progress) {
+                .stepped => return .stepped,
                 .yielded => return .yielded,
                 .completed => self.phase = .{ .success = null },
                 .output => |value| self.phase = .{ .success = value },
             }
-            // Cleanup receives its own bounded allowance on the next turn.
-            return .yielded;
         }
-        for (0..machine.kernel_poll_quantum) |_| {
+        // Cleanup draws on the unit's budget but yields rather than stepping
+        // when it is spent: it must finish whether or not the unit is cancelled.
+        const work = evaluator.workBudget();
+        while (work.spend()) {
             if (!driver.advanceCleanup(evaluator.releaseDomain(), evaluator.allocator())) continue;
             const outcome = self.phase;
             self.phase = .settled;

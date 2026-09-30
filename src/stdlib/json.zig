@@ -40,9 +40,6 @@ pub const words = [_]env.BuiltinWord{
     },
 };
 
-/// How many scanner tokens or output bytes one scheduler turn may process.
-const token_quantum: usize = 4096;
-
 fn parse(evaluator: *Machine) MachineError!void {
     var text = try evaluator.popString();
     defer text.deinit();
@@ -93,28 +90,29 @@ const ParseDriver = struct {
     pub fn advance(evaluator: *Machine, self: *ParseDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.bytes == null) {
-            switch (self.encoder.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+            switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.InvalidCodepoint => return evaluator.fail(
                     .domain,
                     "string contains an invalid Unicode scalar",
                 ),
             }) {
-                .pending => return .yielded,
+                .pending => return .stepped,
                 .complete => |encoded| {
                     self.bytes = encoded;
                     self.arena = .init(self.allocator);
                     self.scanner = .initCompleteInput(self.arena.?.allocator(), encoded);
-                    return .yielded;
+                    return .stepped;
                 },
             }
         }
-        var budget: usize = token_quantum;
-        while (budget != 0) : (budget -= 1) {
+        const work = evaluator.workBudget();
+        while (!work.exhausted()) {
             if (self.building != null) {
                 if (try self.advanceBuilding(evaluator)) |item| try self.place(evaluator, item);
                 continue;
             }
+            _ = work.spend();
             if (self.root) |root| {
                 // A well-formed document holds exactly one value; the scanner
                 // still has to confirm nothing follows it.
@@ -146,7 +144,7 @@ const ParseDriver = struct {
                 else => return evaluator.fail(.parse, "json.parse could not tokenize the input"),
             }
         }
-        return .yielded;
+        return .stepped;
     }
 
     fn failParse(self: *ParseDriver, evaluator: *Machine) MachineError {
@@ -217,11 +215,11 @@ const ParseDriver = struct {
     fn advanceBuilding(self: *ParseDriver, evaluator: *Machine) MachineError!?Value {
         const building = &self.building.?;
         const result: ?Value = switch (building.target) {
-            .values => |*materializer| switch (try materializer.advance(machine.kernel_poll_quantum)) {
+            .values => |*materializer| switch (try materializer.advance(evaluator.workBudget())) {
                 .pending => null,
                 .complete => |item| item,
             },
-            .pairs => |*materializer| switch (try materializer.advance(machine.kernel_poll_quantum)) {
+            .pairs => |*materializer| switch (try materializer.advance(evaluator.workBudget())) {
                 .pending => null,
                 .duplicate_key => {
                     // RFC 8259 leaves duplicate names to the implementation;
@@ -230,7 +228,7 @@ const ParseDriver = struct {
                 },
                 .complete => |item| item,
             },
-            .text => |*materializer| switch (try materializer.advance(machine.kernel_poll_quantum)) {
+            .text => |*materializer| switch (try materializer.advance(evaluator.workBudget())) {
                 .pending => null,
                 .complete => |item| item,
             },
@@ -365,8 +363,8 @@ const EmitDriver = struct {
     pub fn advance(evaluator: *Machine, self: *EmitDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.materializer) |*materializer| {
-            return switch (try materializer.advance(machine.kernel_poll_quantum)) {
-                .pending => .yielded,
+            return switch (try materializer.advance(evaluator.workBudget())) {
+                .pending => .stepped,
                 .complete => |text| output: {
                     materializer.deinit();
                     self.materializer = null;
@@ -378,15 +376,15 @@ const EmitDriver = struct {
             self.started = true;
             try self.frames.append(self.allocator, .{ .value = self.item.borrow() });
         }
-        var budget: usize = token_quantum;
-        while (budget != 0) : (budget -= 1) {
+        const work = evaluator.workBudget();
+        while (work.spend()) {
             if (self.frames.items.len == 0) {
                 self.materializer = .init(self.allocator, self.out.items);
-                return .yielded;
+                return .stepped;
             }
             try self.step(evaluator);
         }
-        return .yielded;
+        return .stepped;
     }
 
     fn step(self: *EmitDriver, evaluator: *Machine) MachineError!void {

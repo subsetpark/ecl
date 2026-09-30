@@ -11,7 +11,6 @@ const scheduler_api = @import("scheduler.zig");
 const Value = value.Value;
 const Machine = machine.Machine;
 const MachineError = machine.MachineError;
-const par_each_work_quantum: usize = 256;
 
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     const definitions = comptime [_]env.BuiltinWord{
@@ -171,7 +170,7 @@ const GiveCursor = struct {
     /// storage, not by the caller's input.
     fn run(self: *GiveCursor, phase: Phase) void {
         self.phase = phase;
-        var budget: poll.WorkBudget = .init(max_given_ports + 1);
+        var budget = poll.unbounded();
         poll.driveVoid(self, .{&budget});
         self.phase = .done;
     }
@@ -234,8 +233,7 @@ const GiveDriver = struct {
     pub fn advance(evaluator: *Machine, self: *GiveDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.cursor.phase == .validating) {
-            var budget: poll.WorkBudget = .init(machine.kernel_poll_quantum);
-            if (self.cursor.advance(&budget) == .pending) return .yielded;
+            if (self.cursor.advance(evaluator.workBudget()) == .pending) return .stepped;
             if (self.cursor.refusal == .not_a_port)
                 return evaluator.typeError("a list of ports to give");
             self.cursor.phase = .done;
@@ -396,7 +394,7 @@ const ParEachDriver = struct {
     ) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const count: usize = @intCast(self.sequence.borrow().list.length());
-        const end = @min(self.index + par_each_work_quantum, count);
+        const end = self.index + evaluator.workBudget().take(count - self.index);
         while (self.index != end) : (self.index += 1) {
             const element = list.atUnchecked(self.sequence.borrow(), self.index);
             const borrowed = self.input.borrow().borrow();
@@ -408,7 +406,7 @@ const ParEachDriver = struct {
             );
             self.tasks.borrowMut().appendOwned(task);
         }
-        if (self.index != count) return .yielded;
+        if (self.index != count) return .stepped;
         const task_values = self.tasks.borrowMut().takeList();
         evaluator.retireDriver(self);
         try evaluator.beginTaskJoinOwned(task_values);

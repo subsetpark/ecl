@@ -210,9 +210,9 @@ const GuardCheckpoint = struct {
             .phase = self.phase,
         };
     }
-    fn advanceCapture(self: *GuardCheckpoint, evaluator: *Machine, budget: usize) bool {
+    fn advanceCapture(self: *GuardCheckpoint, evaluator: *Machine) bool {
         std.debug.assert(self.phase == .capture and evaluator.available() == self.depth);
-        const end = @min(self.index + budget, self.depth);
+        const end = self.index + evaluator.workBudget().take(self.depth - self.index);
         while (self.index != end) : (self.index += 1)
             self.values.appendBorrowed(evaluator.visibleOperandBorrowed(self.index));
         if (self.index != self.depth) return false;
@@ -227,10 +227,9 @@ const GuardCheckpoint = struct {
     fn advanceRestore(
         self: *GuardCheckpoint,
         evaluator: *Machine,
-        budget: usize,
     ) error{OutOfMemory}!bool {
-        var remaining = budget;
-        while (remaining != 0) : (remaining -= 1) switch (self.phase) {
+        const work = evaluator.workBudget();
+        while (work.spend()) switch (self.phase) {
             .discard => if (evaluator.available() != 0) {
                 evaluator.discard(1);
             } else {
@@ -338,10 +337,7 @@ const GuardSnapshotDriver = struct {
     pub fn advance(evaluator: *Machine, self: *GuardSnapshotDriver) MachineError!machine.WorkProgress {
         evaluator.setActiveWord(self.control.borrow().word);
         try evaluator.pollKernel();
-        if (!self.control.borrowMut().checkpoint.borrowMut().advanceCapture(
-            evaluator,
-            machine.kernel_poll_quantum,
-        )) return .yielded;
+        if (!self.control.borrowMut().checkpoint.borrowMut().advanceCapture(evaluator)) return .stepped;
         var control = heap.Owned(GuardControl).init(self.control.take());
         defer control.deinit(evaluator.releaseDomain(), evaluator.allocator());
         const target = self.target;
@@ -359,10 +355,7 @@ const GuardRestoreDriver = struct {
     pub fn advance(evaluator: *Machine, self: *GuardRestoreDriver) MachineError!machine.WorkProgress {
         evaluator.setActiveWord(self.control.borrow().word);
         try evaluator.pollKernel();
-        if (!try self.control.borrowMut().checkpoint.borrowMut().advanceRestore(
-            evaluator,
-            machine.kernel_poll_quantum,
-        )) return .yielded;
+        if (!try self.control.borrowMut().checkpoint.borrowMut().advanceRestore(evaluator)) return .stepped;
         var control = heap.Owned(GuardControl).init(self.control.take());
         defer control.deinit(evaluator.releaseDomain(), evaluator.allocator());
         const target = self.target;
@@ -525,7 +518,7 @@ const LinrecSnapshotDriver = struct {
         evaluator.setActiveWord(self.level.borrow().word);
         try evaluator.pollKernel();
         const checkpoint = self.level.borrowMut().checkpoint.?.borrowMut();
-        if (!checkpoint.advanceCapture(evaluator, machine.kernel_poll_quantum)) return .yielded;
+        if (!checkpoint.advanceCapture(evaluator)) return .stepped;
         var level = heap.Owned(LinrecLevel).init(self.level.take());
         defer level.deinit(evaluator.releaseDomain(), evaluator.allocator());
         evaluator.retireDriver(self);
@@ -546,10 +539,7 @@ const LinrecRestoreDriver = struct {
         evaluator.setActiveWord(self.level.borrow().word);
         try evaluator.pollKernel();
         const checkpoint = self.level.borrowMut().checkpoint.?.borrowMut();
-        if (!try checkpoint.advanceRestore(
-            evaluator,
-            machine.kernel_poll_quantum,
-        )) return .yielded;
+        if (!try checkpoint.advanceRestore(evaluator)) return .stepped;
         var level = heap.Owned(LinrecLevel).init(self.level.take());
         defer level.deinit(evaluator.releaseDomain(), evaluator.allocator());
         const branch = self.branch;
@@ -1043,11 +1033,11 @@ const UpdateWorkDriver = struct {
         const state = self.state.borrow();
         evaluator.setActiveWord(state.word);
         try evaluator.pollKernel();
-        var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0) switch (state.phase) {
+        const work = evaluator.workBudget();
+        while (!work.exhausted()) switch (state.phase) {
             .count_positions => {
                 const progress = try state.selector_cursor.?.borrowMut().advanceOne();
-                budget -= 1;
+                _ = work.spend();
                 switch (progress) {
                     .pending => {},
                     .depth_exceeded => return evaluator.fail(
@@ -1073,7 +1063,7 @@ const UpdateWorkDriver = struct {
             },
             .fill_positions => {
                 const progress = try state.selector_cursor.?.borrowMut().advanceOne();
-                budget -= 1;
+                _ = work.spend();
                 switch (progress) {
                     .pending => {},
                     .depth_exceeded => return evaluator.fail(.domain, "update selector nesting exceeds 256 levels"),
@@ -1106,9 +1096,9 @@ const UpdateWorkDriver = struct {
                         state.requested_key.?,
                     ));
                 }
-                if (budget == 0) return .yielded;
-                const progress = try state.finder.?.borrowMut().advance(1);
-                budget -= 1;
+                if (work.exhausted()) return .stepped;
+                const progress = try state.finder.?.borrowMut().advance(work);
+                _ = work.spend();
                 switch (progress) {
                     .pending => {},
                     .complete => |found| {
@@ -1130,7 +1120,7 @@ const UpdateWorkDriver = struct {
                 else
                     dict.valueAt(state.collection.borrow().dict, state.copy_index));
                 state.copy_index += 1;
-                budget -= 1;
+                _ = work.spend();
             },
             .apply => unreachable,
             .fill_pairs => {
@@ -1149,7 +1139,7 @@ const UpdateWorkDriver = struct {
                     state.values.borrow().values()[state.copy_index],
                 };
                 state.copy_index += 1;
-                budget -= 1;
+                _ = work.spend();
             },
             .materialize_list => {
                 if (state.list_materializer == null)
@@ -1157,8 +1147,8 @@ const UpdateWorkDriver = struct {
                         evaluator.allocator(),
                         state.values.borrow().values(),
                     ));
-                return switch (try state.list_materializer.?.borrowMut().advance(budget)) {
-                    .pending => .yielded,
+                return switch (try state.list_materializer.?.borrowMut().advance(work)) {
+                    .pending => .stepped,
                     .complete => |result| completed: {
                         state.list_materializer.?.deinit(
                             evaluator.releaseDomain(),
@@ -1169,8 +1159,8 @@ const UpdateWorkDriver = struct {
                     },
                 };
             },
-            .materialize_dict => return switch (try state.dict_materializer.?.borrowMut().advance(budget)) {
-                .pending => .yielded,
+            .materialize_dict => return switch (try state.dict_materializer.?.borrowMut().advance(work)) {
+                .pending => .stepped,
                 .duplicate_key => unreachable,
                 .complete => |result| completed: {
                     state.dict_materializer.?.borrowMut().deinit();
@@ -1179,7 +1169,7 @@ const UpdateWorkDriver = struct {
                 },
             },
         };
-        return .yielded;
+        return .stepped;
     }
 };
 
@@ -1311,11 +1301,11 @@ const CollectedDriver = struct {
     pub fn advance(evaluator: *Machine, self: *CollectedDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.result == null) {
-            switch (try self.materializer.borrowMut().advance(machine.kernel_poll_quantum)) {
-                .pending => return .yielded,
+            switch (try self.materializer.borrowMut().advance(evaluator.workBudget())) {
+                .pending => return .stepped,
                 .complete => |result| {
                     self.result = .init(result);
-                    return .yielded;
+                    return .stepped;
                 },
             }
         }
@@ -1379,8 +1369,8 @@ const StencilBootstrapDriver = struct {
                 self.window_values.borrow().values(),
             ));
         }
-        switch (try self.materializer.?.borrowMut().advance(machine.kernel_poll_quantum)) {
-            .pending => return .yielded,
+        switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
+            .pending => return .stepped,
             .complete => |window| {
                 var window_owner = heap.OwnedValue.init(evaluator.releaseDomain(), window);
                 defer window_owner.deinit();
@@ -1736,20 +1726,20 @@ const InfraResultDriver = struct {
     pub fn advance(evaluator: *Machine, self: *InfraResultDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.result == null) {
-            switch (try self.materializer.borrowMut().advance(machine.kernel_poll_quantum)) {
-                .pending => return .yielded,
+            switch (try self.materializer.borrowMut().advance(evaluator.workBudget())) {
+                .pending => return .stepped,
                 .complete => |result| {
                     self.result = .init(result);
-                    return .yielded;
+                    return .stepped;
                 },
             }
         }
-        var remaining = machine.kernel_poll_quantum;
-        while (remaining != 0 and evaluator.unit.stack.items.len != self.base) : (remaining -= 1) {
+        const work = evaluator.workBudget();
+        while (evaluator.unit.stack.items.len != self.base and work.spend()) {
             var discarded = try evaluator.popValue();
             discarded.deinit();
         }
-        if (evaluator.unit.stack.items.len != self.base) return .yielded;
+        if (evaluator.unit.stack.items.len != self.base) return .stepped;
         const result = self.result.?.take();
         self.result = null;
         return .{ .output = result };

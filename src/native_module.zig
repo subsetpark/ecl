@@ -7,6 +7,7 @@ const native_port = @import("native_port.zig");
 const descriptor_api = @import("native_descriptor.zig");
 const heap = @import("heap.zig");
 const intern = @import("intern.zig");
+const poll = @import("poll.zig");
 
 const supported_platform = builtin.os.tag == .macos or
     (builtin.os.tag == .linux and builtin.link_libc and
@@ -155,8 +156,8 @@ pub const LoadCursor = struct {
         self.state = .complete;
     }
 
-    pub fn advance(self: *LoadCursor, budget: usize) error{OutOfMemory}!LoadProgress {
-        std.debug.assert(self.state != .complete and budget != 0);
+    pub fn advance(self: *LoadCursor, work: *poll.WorkBudget) error{OutOfMemory}!LoadProgress {
+        std.debug.assert(self.state != .complete);
         if (self.state == .cached) {
             const instance = self.state.cached;
             self.state = .complete;
@@ -174,7 +175,11 @@ pub const LoadCursor = struct {
                 .initialized => unreachable,
             };
             const table = state.instanceTable();
-            switch (lifecycle.definition.initialize(lifecycle.storage.ptr, &table, state, @intCast(@min(budget, 256)))) {
+            // The extension reports no consumption, so its whole grant is
+            // charged to the caller's allowance before it runs.
+            const grant = work.take(256);
+            if (grant == 0) return .pending;
+            switch (lifecycle.definition.initialize(lifecycle.storage.ptr, &table, state, @intCast(grant))) {
                 .pending => return .pending,
                 .complete => {
                     const completed = state.lifecycle.initializing;
@@ -193,7 +198,7 @@ pub const LoadCursor = struct {
             }
         }
         const validating = &self.state.validating;
-        const progress = validating.validator.advance(budget) catch |err| switch (err) {
+        const progress = validating.validator.advance(work) catch |err| switch (err) {
             error.OutOfMemory => {
                 self.deinit();
                 return error.OutOfMemory;
@@ -576,7 +581,8 @@ pub const Owner = opaque {
                 .failure => return error.InvalidConfiguration,
             };
             defer cursor.deinit();
-            const instance = while (true) switch (try cursor.advance(256)) {
+            var work = poll.unbounded();
+            const instance = while (true) switch (try cursor.advance(&work)) {
                 .pending => {},
                 .failure => return error.InvalidConfiguration,
                 .loaded => |instance| break instance,

@@ -5,7 +5,6 @@ const machine = @import("../machine.zig");
 const Value = @import("../value.zig").Value;
 const std = @import("std");
 const message = @import("../port_message.zig");
-const poll = @import("../poll.zig");
 const scheduler = @import("../scheduler.zig");
 const bytes = @import("../port_bytes.zig");
 const transfer = @import("../port_transfer.zig");
@@ -165,13 +164,12 @@ const SendDriver = struct {
         try evaluator.pollKernel();
         if (self.state == .validating) {
             const input = self.state.validating;
-            var budget = poll.WorkBudget.init(machine.kernel_poll_quantum);
-            const progress = input.advance(&budget) catch |err| return switch (err) {
+            const progress = input.advance(evaluator.workBudget()) catch |err| return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 error.InvalidValue => evaluator.typeError("a structured message without executable words, tasks, or modules"),
                 error.Overflow => evaluator.fail(.overflow, "port message exceeds its structured value limits"),
             };
-            if (progress == .pending) return .yielded;
+            if (progress == .pending) return .stepped;
             const envelope = try self.queue.envelope(input.validated().?);
             self.state = .{ .ready = envelope };
             input.retire(evaluator.releaseDomain());
@@ -312,18 +310,17 @@ const Request = struct {
     pub fn advance(evaluator: *machine.Machine, self: *Request) machine.MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.state == .validating) {
-            var budget = poll.WorkBudget.init(machine.kernel_poll_quantum);
-            const progress = self.message.advance(&budget) catch |err| return switch (err) {
+            const progress = self.message.advance(evaluator.workBudget()) catch |err| return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 error.InvalidValue => evaluator.fail(.type, "port messages cannot contain executable words, tasks, or modules"),
                 error.Overflow => evaluator.fail(.overflow, "port message exceeds its structured value limits"),
             };
-            if (progress == .pending) return .yielded;
+            if (progress == .pending) return .stepped;
             self.state = .ready;
         }
         if (self.state == .preparing) {
             const opening = self.state.preparing;
-            switch (try opening.advance(machine.kernel_poll_quantum)) {
+            switch (try opening.advance(evaluator.workBudget())) {
                 .yielded => {},
                 .pending => |source| try evaluator.park(.{ .external = source }),
                 .failed => |failure| return factoryFailure(evaluator, failure),

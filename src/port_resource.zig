@@ -621,7 +621,7 @@ const PublicationProbe = struct {
         const messages = @import("port_messages.zig");
         const validating = try message_api.Message.create(allocator, value, .{});
         defer validating.retire(cleanup.domain());
-        var work = @import("poll.zig").WorkBudget.init(64);
+        var work = @import("poll.zig").testing.budget(64);
         try std.testing.expect(try validating.advance(&work) == .complete);
         const budget = try messages.Budget.create(cleanup.capability(), 8);
         defer budget.release();

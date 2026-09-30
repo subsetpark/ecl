@@ -2921,7 +2921,8 @@ pub const Registry = enum(usize) {
         ) error{OutOfMemory}!*env.DocumentationString {
             var materializer = kernel_storage.TextMaterializer.init(self.allocator, source);
             defer materializer.retire(self.releases);
-            const text = try poll_api.driveFallible(value.Value, &materializer, .{64});
+            var work = poll_api.unbounded();
+            const text = try poll_api.driveFallible(value.Value, &materializer, .{&work});
             return env.documentation(text.list) orelse {
                 self.releases.releaseValue(text);
                 return error.OutOfMemory;
@@ -3482,7 +3483,9 @@ pub const Registry = enum(usize) {
         }
     };
 
-    pub const RemovalProgress = enum { pending, detached, complete };
+    /// `blocked` means the cursor is waiting for another unit to release the
+    /// slot's turn; unlike `pending`, polling again cannot make progress.
+    pub const RemovalProgress = enum { pending, blocked, detached, complete };
     /// The owner-issued removal protocol: close new resolution, take the
     /// slot's barrier turn so no state application straddles the close, then
     /// retire the code generation and every durable value through bounded
@@ -3646,7 +3649,7 @@ pub const Registry = enum(usize) {
                         };
                         break :result .pending;
                     }
-                    if (!retirement.turn.granted()) break :result .pending;
+                    if (!retirement.turn.granted()) break :result .blocked;
                     const canonical = barrier.canonical;
                     const directory = barrier.directory;
                     const cloner = directory.directory.?.modules

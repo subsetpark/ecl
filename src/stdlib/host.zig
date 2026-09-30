@@ -47,7 +47,7 @@ const Metadata = struct {
             };
             self.state = .{ .text = .init(evaluator.allocator(), bytes) };
         }
-        return switch (self.state.text.advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+        return switch (self.state.text.advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidUtf8 => return evaluator.fail(.io, "host process path is not UTF-8"),
         }) {

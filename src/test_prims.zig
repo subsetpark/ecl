@@ -79,10 +79,8 @@ const CollectedComparator = struct {
         };
     }
 
-    pub fn advance(cursor: *Cursor, budget: usize) poll.Progress(std.math.Order) {
-        std.debug.assert(budget != 0);
-        var remaining = budget;
-        while (remaining != 0) {
+    pub fn advance(cursor: *Cursor, work: *poll.WorkBudget) poll.Progress(std.math.Order) {
+        while (true) {
             const left = if (cursor.phase == .module) cursor.left_module else cursor.left_name;
             const right = if (cursor.phase == .module) cursor.right_module else cursor.right_name;
             const shared = @min(left.len, right.len);
@@ -94,14 +92,13 @@ const CollectedComparator = struct {
                 cursor.index = 0;
                 continue;
             }
+            if (!work.spend()) return .pending;
             const left_byte = left[cursor.index];
             const right_byte = right[cursor.index];
             cursor.index += 1;
-            remaining -= 1;
             if (left_byte != right_byte)
                 return .{ .complete = if (left_byte < right_byte) .lt else .gt };
         }
-        return .pending;
     }
 };
 
@@ -169,16 +166,16 @@ const DiscoveryDriver = struct {
         self: *DiscoveryDriver,
     ) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0) switch (self.phase) {
+        const work = evaluator.workBudget();
+        while (!work.exhausted()) switch (self.phase) {
             .discover => switch (self.cursor.?.advance()) {
-                .pending => budget -= 1,
+                .pending => _ = work.spend(),
                 .item => |found| {
                     try self.items.ensureUnusedCapacity(evaluator.allocator(), 1);
                     const item = Collected{ .module = found.module, .source = found.source, .metadata = found.metadata };
                     item.retain();
                     self.items.appendAssumeCapacity(item);
-                    budget -= 1;
+                    _ = work.spend();
                 },
                 .complete => {
                     self.cursor.?.deinit();
@@ -189,8 +186,8 @@ const DiscoveryDriver = struct {
             .sort => {
                 if (self.sorter == null)
                     self.sorter = try .init(evaluator.allocator(), self.items.items, {});
-                switch (self.sorter.?.advance(1)) {
-                    .pending => budget -= 1,
+                switch (self.sorter.?.advance(work)) {
+                    .pending => _ = work.spend(),
                     .complete => {
                         self.sorter.?.deinit();
                         self.sorter = null;
@@ -214,7 +211,7 @@ const DiscoveryDriver = struct {
                     self.items.items[self.descriptor_index],
                 ));
                 self.descriptor_index += 1;
-                budget -= 1;
+                _ = work.spend();
             },
             .finish => {
                 const result = self.values.?.takeList();
@@ -222,7 +219,7 @@ const DiscoveryDriver = struct {
                 return .{ .output = result };
             },
         };
-        return .yielded;
+        return .stepped;
     }
 };
 
@@ -293,11 +290,11 @@ const InvocationDriver = struct {
         self: *InvocationDriver,
     ) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0) {
+        const work = evaluator.workBudget();
+        while (!work.exhausted()) {
             if (self.lookup) |*lookup| switch (lookup.advance()) {
                 .pending => {
-                    budget -= 1;
+                    _ = work.spend();
                     continue;
                 },
                 .complete => |maybe_invocation| {
@@ -338,7 +335,7 @@ const InvocationDriver = struct {
 
             if (self.module_validation) |*validation| switch (validation.advance()) {
                 .pending => {
-                    budget -= 1;
+                    _ = work.spend();
                     continue;
                 },
                 .complete => |maybe_name| {
@@ -350,7 +347,7 @@ const InvocationDriver = struct {
             };
             if (self.name_validation) |*validation| switch (validation.advance()) {
                 .pending => {
-                    budget -= 1;
+                    _ = work.spend();
                     continue;
                 },
                 .complete => |maybe_name| {
@@ -385,13 +382,13 @@ const InvocationDriver = struct {
                 } else if (key.symbol != self.keys.effect and key.symbol != self.keys.doc) {
                     return invalid(evaluator);
                 }
-                budget -= 1;
+                _ = work.spend();
                 continue;
             }
             if (self.module_id == null or self.name_id == null) return invalid(evaluator);
             self.module_validation = .init(self.module_id.?);
         }
-        return .yielded;
+        return .stepped;
     }
 };
 

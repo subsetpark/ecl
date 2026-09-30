@@ -154,8 +154,8 @@ const IndexDriver = struct {
     cursor: heap.Owned(IndexCursor),
     pub fn advance(evaluator: *Machine, self: *IndexDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        return switch (try self.cursor.borrowMut().advance(evaluator, machine.kernel_poll_quantum)) {
-            .pending => .yielded,
+        return switch (try self.cursor.borrowMut().advance(evaluator, evaluator.workBudget())) {
+            .pending => .stepped,
             .complete => |result| .{ .output = result },
         };
     }
@@ -183,13 +183,13 @@ const FlatGatherDriver = struct {
                 if (offset >= source.list.length()) return evaluator.fail(.domain, "at index is out of bounds");
                 self.values.borrowMut().appendBorrowed(list.atUnchecked(source, offset));
             }
-            return .yielded;
+            return .stepped;
         }
-        if (!self.cursor.complete()) return .yielded;
+        if (!self.cursor.complete()) return .stepped;
         if (self.materializer == null)
             self.materializer = .init(.initOwned(evaluator.allocator(), self.values.borrowMut().take()));
-        return switch (try self.materializer.?.borrowMut().advance(machine.kernel_poll_quantum)) {
-            .pending => .yielded,
+        return switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
+            .pending => .stepped,
             .complete => |result| .{ .output = result },
         };
     }
@@ -206,8 +206,8 @@ const DictAtDriver = struct {
     cursor: heap.Owned(dict.FindCursor),
     pub fn advance(evaluator: *Machine, self: *DictAtDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        return switch (try self.cursor.borrowMut().advance(machine.kernel_poll_quantum)) {
-            .pending => .yielded,
+        return switch (try self.cursor.borrowMut().advance(evaluator.workBudget())) {
+            .pending => .stepped,
             .complete => |maybe_result| result: {
                 const found = maybe_result orelse
                     return evaluator.fail(.domain, "at could not find the dict key");
@@ -265,9 +265,20 @@ const IndexCursor = struct {
             },
         }
     }
-    pub fn advance(self: *IndexCursor, evaluator: *Machine, budget: usize) MachineError!IndexProgress {
-        var remaining = budget;
-        while (remaining != 0) : (remaining -= 1) {
+    fn delegates(frame: *const Frame) bool {
+        return switch (frame.*) {
+            .build => |*build| build.result == null and !build.waiting and build.index == build.values.capacity(),
+            .node => false,
+        };
+    }
+    pub fn advance(self: *IndexCursor, evaluator: *Machine, work: *poll.WorkBudget) MachineError!IndexProgress {
+        while (true) {
+            // A frame handing work to a nested cursor is charged by that
+            // cursor; spending first would starve it at a one-unit grain.
+            if (self.frames.topPtr()) |top| {
+                if (!delegates(top) and !work.spend()) return .pending;
+            }
+
             var frame = self.frames.pop() orelse {
                 const result = self.last.?;
                 self.last = null;
@@ -337,7 +348,7 @@ const IndexCursor = struct {
                     if (build.materializer == null)
                         build.materializer = .init(self.allocator, build.values.values());
                     try self.frames.reserve(1);
-                    switch (try build.materializer.?.advance(remaining)) {
+                    switch (try build.materializer.?.advance(work)) {
                         .pending => {
                             self.frames.pushReserved(.{ .build = build.* });
                             return .pending;
@@ -345,7 +356,6 @@ const IndexCursor = struct {
                         .complete => |result| {
                             build.result = result;
                             self.frames.pushReserved(.{ .build = build.* });
-                            return .pending;
                         },
                     }
                 },
@@ -399,8 +409,8 @@ const WhereDriver = struct {
     pub fn advance(evaluator: *Machine, self: *WhereDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const count: usize = @intCast(self.counts.borrow().list.length());
-        var budget = machine.kernel_poll_quantum;
-        while (budget != 0) switch (self.phase) {
+        const work = evaluator.workBudget();
+        while (!work.exhausted()) switch (self.phase) {
             .count => {
                 if (self.index == count) {
                     self.writer = .init(try heap.LeafWriter(.leaf_i64).init(
@@ -431,7 +441,7 @@ const WhereDriver = struct {
                 self.total = std.math.add(usize, self.total, repetitions) catch
                     return evaluator.fail(.overflow, "where result is too large");
                 self.index += 1;
-                budget -= 1;
+                _ = work.spend();
             },
             .fill => {
                 if (self.index == count) {
@@ -442,7 +452,7 @@ const WhereDriver = struct {
                     self.repetition = @intCast(self.countAt(self.index).int);
                     if (self.repetition == 0) {
                         self.index += 1;
-                        budget -= 1;
+                        _ = work.spend();
                         continue;
                     }
                 }
@@ -450,11 +460,10 @@ const WhereDriver = struct {
                     return evaluator.fail(.overflow, "where index exceeds integer range");
                 // One run of equal indices is one bounded fill, charged for the
                 // elements it actually wrote.
-                const run = @min(self.repetition, budget);
+                const run = work.take(self.repetition);
                 self.writer.?.borrowMut().fillRange(self.destination, run, element);
                 self.destination += run;
                 self.repetition -= run;
-                budget -= run;
                 if (self.repetition == 0) self.index += 1;
             },
             .materialize => {
@@ -463,7 +472,7 @@ const WhereDriver = struct {
                 return .{ .output = self.writer.?.borrowMut().finish() };
             },
         };
-        return .yielded;
+        return .stepped;
     }
 };
 
@@ -540,8 +549,8 @@ const FirstWhereDriver = struct {
     pub fn advance(evaluator: *Machine, self: *FirstWhereDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const count: usize = @intCast(self.counts.borrow().list.length());
-        var budget: usize = machine.kernel_poll_quantum;
-        while (self.index != count and budget != 0) : (budget -= 1) {
+        const work = evaluator.workBudget();
+        while (self.index != count and work.spend()) {
             const item = list.atUnchecked(self.counts.borrow(), self.index);
             if (item != .int) return evaluator.failAtIndex(
                 .type,
@@ -556,7 +565,7 @@ const FirstWhereDriver = struct {
             if (item.int != 0) return self.finish(evaluator, self.index);
             self.index += 1;
         }
-        if (self.index != count) return .yielded;
+        if (self.index != count) return .stepped;
         return self.finish(evaluator, count);
     }
 };
@@ -831,8 +840,8 @@ const MembershipDriver = struct {
     cursor: heap.Owned(MembershipCursor),
     pub fn advance(evaluator: *Machine, self: *MembershipDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        return switch (try self.cursor.borrowMut().advance(evaluator, machine.kernel_poll_quantum)) {
-            .pending => .yielded,
+        return switch (try self.cursor.borrowMut().advance(evaluator, evaluator.workBudget())) {
+            .pending => .stepped,
             .complete => |result| .{ .output = result },
         };
     }
@@ -893,9 +902,21 @@ const MembershipCursor = struct {
             },
         }
     }
-    pub fn advance(self: *MembershipCursor, evaluator: *Machine, budget: usize) MachineError!IndexProgress {
-        var work: poll.WorkBudget = .init(budget);
-        while (work.spend()) {
+    fn delegates(frame: *const Frame) bool {
+        return switch (frame.*) {
+            .build => |*build| build.result == null and !build.waiting and build.index == build.values.capacity(),
+            .search => |*search| search.match != null,
+            .node => false,
+        };
+    }
+    pub fn advance(self: *MembershipCursor, evaluator: *Machine, work: *poll.WorkBudget) MachineError!IndexProgress {
+        while (true) {
+            // A frame handing work to a nested cursor is charged by that
+            // cursor; spending first would starve it at a one-unit grain.
+            if (self.frames.topPtr()) |top| {
+                if (!delegates(top) and !work.spend()) return .pending;
+            }
+
             var frame = self.frames.pop() orelse {
                 const result = self.last.?;
                 self.last = null;
@@ -946,7 +967,7 @@ const MembershipCursor = struct {
                         search.needle,
                         candidate_value,
                     );
-                    switch (try search.match.?.advanceWithBudget(&work)) {
+                    switch (try search.match.?.advance(work)) {
                         .pending => {
                             try self.frames.push(.{ .search = search.* });
                             return .pending;
@@ -995,7 +1016,7 @@ const MembershipCursor = struct {
                         self.frames.pushReserved(.{ .build = build.* });
                         return .pending;
                     }
-                    switch (try build.materializer.?.advanceWithBudget(&work)) {
+                    switch (try build.materializer.?.advance(work)) {
                         .pending => {
                             self.frames.pushReserved(.{ .build = build.* });
                             return .pending;
@@ -1033,8 +1054,8 @@ const RazeDriver = struct {
     pub fn advance(evaluator: *Machine, self: *RazeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const count: usize = @intCast(self.collection.borrow().list.length());
-        var budget = machine.kernel_poll_quantum;
-        while (budget != 0) switch (self.phase) {
+        const work = evaluator.workBudget();
+        while (!work.exhausted()) switch (self.phase) {
             .count => {
                 if (self.index == count) {
                     self.values = .init(try evaluator.allocator().alloc(Value, self.total));
@@ -1047,7 +1068,7 @@ const RazeDriver = struct {
                 self.total = std.math.add(usize, self.total, contribution) catch
                     return evaluator.fail(.overflow, "raze result is too large");
                 self.index += 1;
-                budget -= 1;
+                _ = work.spend();
             },
             .fill => {
                 if (self.index == count) {
@@ -1066,20 +1087,21 @@ const RazeDriver = struct {
                 } else if (self.child_index == item.list.length()) {
                     self.child_index = 0;
                     self.index += 1;
+                    _ = work.spend();
                     continue;
                 } else {
                     self.values.?.borrow()[self.destination] = list.atUnchecked(item, self.child_index);
                     self.destination += 1;
                     self.child_index += 1;
                 }
-                budget -= 1;
+                _ = work.spend();
             },
-            .materialize => return switch (try self.materializer.?.borrowMut().advance(budget)) {
-                .pending => .yielded,
+            .materialize => return switch (try self.materializer.?.borrowMut().advance(work)) {
+                .pending => .stepped,
                 .complete => |result| .{ .output = result },
             },
         };
-        return .yielded;
+        return .stepped;
     }
 };
 
@@ -1180,20 +1202,20 @@ const TakeDriver = struct {
         self: *TakeDriver,
     ) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        var budget = machine.kernel_poll_quantum;
+        const work = evaluator.workBudget();
         const values = self.values.borrow();
-        while (!self.materializing and budget != 0 and self.result_index < values.len) {
+        while (!self.materializing and !work.exhausted() and self.result_index < values.len) {
             values[self.result_index] = list.atUnchecked(self.collection.borrow(), self.source_index);
             self.result_index += 1;
             self.source_index += 1;
             if (self.source_index == self.source_count) self.source_index = 0;
-            budget -= 1;
+            _ = work.spend();
         }
-        if (self.result_index != values.len) return .yielded;
+        if (self.result_index != values.len) return .stepped;
         self.materializing = true;
-        if (budget == 0) return .yielded;
-        return switch (try self.materializer.borrowMut().advance(budget)) {
-            .pending => .yielded,
+        if (work.exhausted()) return .stepped;
+        return switch (try self.materializer.borrowMut().advance(work)) {
+            .pending => .stepped,
             .complete => |result| .{ .output = result },
         };
     }
@@ -1298,9 +1320,9 @@ const ListCopyDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *ListCopyDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        var budget = machine.kernel_poll_quantum;
+        const work = evaluator.workBudget();
         const values = self.values.borrow();
-        while (budget != 0 and self.index != values.len) : (budget -= 1) {
+        while (self.index != values.len and work.spend()) {
             if (self.right) |*right| {
                 values[self.index] = if (self.index < self.left_count)
                     list.atUnchecked(self.left.borrow(), self.index)
@@ -1312,9 +1334,9 @@ const ListCopyDriver = struct {
             }
             self.index += 1;
         }
-        if (self.index != values.len or budget == 0) return .yielded;
-        return switch (try self.materializer.borrowMut().advance(budget)) {
-            .pending => .yielded,
+        if (self.index != values.len or work.exhausted()) return .stepped;
+        return switch (try self.materializer.borrowMut().advance(work)) {
+            .pending => .stepped,
             .complete => |result| .{ .output = result },
         };
     }
@@ -1398,8 +1420,8 @@ const ShapeCursor = struct {
         self.* = undefined;
     }
 
-    pub fn advance(self: *ShapeCursor, budget: usize) error{OutOfMemory}!ShapeProgress {
-        for (0..budget) |_| {
+    pub fn advance(self: *ShapeCursor, work: *poll.WorkBudget) error{OutOfMemory}!ShapeProgress {
+        while (work.spend()) {
             const action = self.actions.pop() orelse {
                 const result = try self.allocator.alloc(usize, self.rank);
                 @memcpy(result, self.dimensions[0..self.rank]);
@@ -1469,8 +1491,8 @@ const ShapeDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *ShapeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        if (self.dimensions == null) switch (try self.cursor.borrowMut().advance(machine.kernel_poll_quantum)) {
-            .pending => return .yielded,
+        if (self.dimensions == null) switch (try self.cursor.borrowMut().advance(evaluator.workBudget())) {
+            .pending => return .stepped,
             .ragged => return evaluator.fail(.shape, "shape requires a rectangular list"),
             .too_deep => return evaluator.fail(.shape, "shape nesting exceeds 256 levels"),
             .complete => |dimensions| self.dimensions = .init(dimensions),
@@ -1525,43 +1547,41 @@ const FlipDriver = struct {
         const rows: usize = @intCast(self.collection.borrow().list.length());
         const columns = switch (self.validation) {
             .flat => |*next| {
-                const end = @min(next.* + machine.kernel_poll_quantum, rows);
-                while (next.* != end) : (next.* += 1) {
+                while (next.* != rows and evaluator.workBudget().spend()) : (next.* += 1) {
                     if (list.atUnchecked(self.collection.borrow(), next.*) == .list)
                         return evaluator.fail(.shape, "flip requires rows of the same length");
                 }
-                if (next.* != rows) return .yielded;
+                if (next.* != rows) return .stepped;
                 try evaluator.pushBorrowed(self.collection.borrow());
                 return .completed;
             },
             .rows => |*validation| {
-                const end = @min(validation.next + machine.kernel_poll_quantum, rows);
-                while (validation.next != end) : (validation.next += 1) {
+                while (validation.next != rows and evaluator.workBudget().spend()) : (validation.next += 1) {
                     const row = list.atUnchecked(self.collection.borrow(), validation.next);
                     if (row != .list or row.list.length() != validation.columns)
                         return evaluator.fail(.shape, "flip requires rows of the same length");
                 }
-                if (validation.next != rows) return .yielded;
+                if (validation.next != rows) return .stepped;
                 if (validation.columns == 0) return evaluator.fail(
                     .shape,
                     "flip cannot retain trailing axes after a transposed zero dimension",
                 );
                 self.validation = .{ .ready = validation.columns };
-                return .yielded;
+                return .stepped;
             },
             .ready => |columns| columns,
         };
         if (self.result_rows == null) {
             self.result_rows = .init(try .init(evaluator.releaseDomain(), columns));
             self.cells = .init(try evaluator.allocator().alloc(Value, rows));
-            return .yielded;
+            return .stepped;
         }
-        if (self.outer) |*outer| return switch (try outer.borrowMut().advance(machine.kernel_poll_quantum)) {
-            .pending => .yielded,
+        if (self.outer) |*outer| return switch (try outer.borrowMut().advance(evaluator.workBudget())) {
+            .pending => .stepped,
             .complete => |result| .{ .output = result },
         };
-        if (self.inner) |*inner| switch (try inner.borrowMut().advance(machine.kernel_poll_quantum)) {
-            .pending => return .yielded,
+        if (self.inner) |*inner| switch (try inner.borrowMut().advance(evaluator.workBudget())) {
+            .pending => return .stepped,
             .complete => |row_value| {
                 inner.deinit(evaluator.releaseDomain(), evaluator.allocator());
                 self.inner = null;
@@ -1574,11 +1594,10 @@ const FlipDriver = struct {
                         self.result_rows.?.borrow().values(),
                     ));
                 }
-                return .yielded;
+                return .stepped;
             },
         };
-        const end = @min(self.row + machine.kernel_poll_quantum, rows);
-        while (self.row != end) : (self.row += 1) {
+        while (self.row != rows and evaluator.workBudget().spend()) : (self.row += 1) {
             const source_row = list.atUnchecked(self.collection.borrow(), self.row);
             self.cells.?.borrow()[self.row] = list.atUnchecked(source_row, self.column);
         }
@@ -1586,7 +1605,7 @@ const FlipDriver = struct {
             evaluator.allocator(),
             self.cells.?.borrow(),
         ));
-        return .yielded;
+        return .stepped;
     }
 
     pub const ownership: heap.DriverOwnership = .fields;
@@ -1668,8 +1687,8 @@ const RavelCursor = struct {
         self.actions.deinit();
         self.* = undefined;
     }
-    pub fn advance(self: *RavelCursor, budget: usize) error{OutOfMemory}!RavelProgress {
-        for (0..budget) |_| {
+    pub fn advance(self: *RavelCursor, work: *poll.WorkBudget) error{OutOfMemory}!RavelProgress {
+        while (work.spend()) {
             const action = self.actions.pop() orelse return .{ .complete = self.count };
             switch (action) {
                 .visit => |visit| {
@@ -1752,9 +1771,17 @@ const ReshapeBuildCursor = struct {
         frame.values.deinit();
         if (frame.result) |result| self.releases.releaseValue(result);
     }
-    pub fn advance(self: *ReshapeBuildCursor, budget: usize) error{OutOfMemory}!PervadeResult {
-        var remaining = budget;
-        while (remaining != 0) : (remaining -= 1) {
+    fn delegates(frame: *const Frame) bool {
+        return frame.result == null and !frame.waiting and frame.index == frame.values.capacity();
+    }
+    pub fn advance(self: *ReshapeBuildCursor, work: *poll.WorkBudget) error{OutOfMemory}!PervadeResult {
+        while (true) {
+            // A frame handing work to a nested cursor is charged by that
+            // cursor; spending first would starve it at a one-unit grain.
+            if (self.frames.topPtr()) |top| {
+                if (!delegates(top) and !work.spend()) return .pending;
+            }
+
             var frame = self.frames.pop() orelse {
                 const result = self.last.?;
                 self.last = null;
@@ -1797,7 +1824,7 @@ const ReshapeBuildCursor = struct {
             if (frame.materializer == null)
                 frame.materializer = .init(self.allocator, frame.values.values());
             try self.frames.reserve(1);
-            switch (try frame.materializer.?.advance(remaining)) {
+            switch (try frame.materializer.?.advance(work)) {
                 .pending => {
                     self.frames.pushReserved(frame);
                     return .pending;
@@ -1805,7 +1832,6 @@ const ReshapeBuildCursor = struct {
                 .complete => |result| {
                     frame.result = result;
                     self.frames.pushReserved(frame);
-                    return .pending;
                 },
             }
         }
@@ -1830,7 +1856,7 @@ const ReshapeDriver = struct {
         try evaluator.pollKernel();
         if (self.dimension_index != self.dimensions.borrow().len) {
             const end = @min(self.dimension_index + machine.kernel_poll_quantum, self.dimensions.borrow().len);
-            while (self.dimension_index != end) : (self.dimension_index += 1) {
+            while (self.dimension_index != end and evaluator.workBudget().spend()) : (self.dimension_index += 1) {
                 const dimension = list.atUnchecked(self.shape_value.borrow(), self.dimension_index);
                 if (dimension != .int) return evaluator.typeError("an integer shape");
                 if (dimension.int < 0) return evaluator.failAtIndex(
@@ -1854,14 +1880,14 @@ const ReshapeDriver = struct {
                 self.volume = std.math.mul(usize, self.volume, self.dimensions.borrow()[self.dimension_index]) catch
                     return evaluator.fail(.overflow, "reshape volume overflows addressable size");
             }
-            return .yielded;
+            return .stepped;
         }
-        if (self.builder) |*builder| return switch (try builder.borrowMut().advance(machine.kernel_poll_quantum)) {
-            .pending => .yielded,
+        if (self.builder) |*builder| return switch (try builder.borrowMut().advance(evaluator.workBudget())) {
+            .pending => .stepped,
             .complete => |result| .{ .output = result },
         };
-        switch (try self.ravel.borrowMut().advance(machine.kernel_poll_quantum)) {
-            .pending => return .yielded,
+        switch (try self.ravel.borrowMut().advance(evaluator.workBudget())) {
+            .pending => return .stepped,
             .too_deep => return evaluator.fail(.shape, "reshape data nesting exceeds 256 levels"),
             .complete => |count| if (!self.ravel_filling) {
                 self.flat = .init(try evaluator.allocator().alloc(Value, count));
@@ -1873,7 +1899,7 @@ const ReshapeDriver = struct {
                 self.ravel.deinit(evaluator.releaseDomain(), evaluator.allocator());
                 self.ravel = .init(next);
                 self.ravel_filling = true;
-                return .yielded;
+                return .stepped;
             } else {
                 std.debug.assert(count == self.flat.?.borrow().len);
                 if (self.volume > 0 and count == 0) return evaluator.fail(
@@ -1886,7 +1912,7 @@ const ReshapeDriver = struct {
                     self.dimensions.borrow(),
                     self.flat.?.borrow(),
                 ));
-                return .yielded;
+                return .stepped;
             },
         }
     }

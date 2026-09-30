@@ -180,14 +180,14 @@ const DictLookupDriver = struct {
         try evaluator.pollKernel();
         const count: usize = @intCast(self.keys.borrow().list.length());
         if (self.output == null) self.output = .init(try .init(evaluator.releaseDomain(), count));
-        var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0 and self.index < count) : (budget -= 1) {
+        const work = evaluator.workBudget();
+        while (self.index < count and work.spend()) {
             if (self.cursor == null) self.cursor = .init(dict_storage.FindCursor.initHeader(
                 evaluator.allocator(),
                 self.dictionary.borrow().dict,
                 list.atUnchecked(self.keys.borrow(), self.index),
             ));
-            switch (try self.cursor.?.borrowMut().advance(1)) {
+            switch (try self.cursor.?.borrowMut().advance(work)) {
                 .pending => {},
                 .complete => |found| {
                     self.output.?.borrowMut().appendBorrowed(found orelse if (self.fallback) |*fallback| fallback.borrow() else return evaluator.fail(.domain, "dict.at could not find the dict key"));
@@ -197,7 +197,7 @@ const DictLookupDriver = struct {
                 },
             }
         }
-        if (self.index != count) return .yielded;
+        if (self.index != count) return .stepped;
         const result = self.output.?.borrowMut().takeList();
         self.output = null;
         return .{ .output = result };
@@ -284,8 +284,8 @@ const AssociateDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *AssociateDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        return switch (try self.materializer.borrowMut().advance(machine.kernel_poll_quantum)) {
-            .pending => .yielded,
+        return switch (try self.materializer.borrowMut().advance(evaluator.workBudget())) {
+            .pending => .stepped,
             .duplicate_key => unreachable,
             .complete => |dictionary| .{ .output = dictionary },
         };
@@ -323,12 +323,12 @@ const FromFlatDriver = struct {
                 list.atUnchecked(self.entries.borrow(), self.index * 2),
                 list.atUnchecked(self.entries.borrow(), self.index * 2 + 1),
             };
-            if (self.index != flat_pairs.len) return .yielded;
+            if (self.index != flat_pairs.len) return .stepped;
             self.materializer = .init(try .init(evaluator.allocator(), flat_pairs, true));
-            return .yielded;
+            return .stepped;
         }
-        return switch (try self.materializer.?.borrowMut().advance(machine.kernel_poll_quantum)) {
-            .pending => .yielded,
+        return switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
+            .pending => .stepped,
             .duplicate_key => evaluator.fail(.domain, "dict.from-flat received a duplicate key"),
             .complete => |dictionary| .{ .output = dictionary },
         };
@@ -582,8 +582,8 @@ const DictSelectDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *DictSelectDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0) switch (self.phase) {
+        const work = evaluator.workBudget();
+        while (!work.exhausted()) switch (self.phase) {
             .initialize => {
                 if (self.index == self.selected.borrow().len) {
                     self.index = 0;
@@ -592,7 +592,7 @@ const DictSelectDriver = struct {
                 }
                 self.selected.borrow()[self.index] = false;
                 self.index += 1;
-                budget -= 1;
+                _ = work.spend();
             },
             .find => {
                 if (self.finder == null) {
@@ -609,9 +609,9 @@ const DictSelectDriver = struct {
                     ));
                     self.key_index += 1;
                 }
-                if (budget == 0) return .yielded;
-                const find_progress = try self.finder.?.borrowMut().advance(1);
-                budget -= 1;
+                if (work.exhausted()) return .stepped;
+                const find_progress = try self.finder.?.borrowMut().advance(work);
+                _ = work.spend();
                 switch (find_progress) {
                     .pending => {},
                     .complete => {
@@ -644,10 +644,10 @@ const DictSelectDriver = struct {
                     self.destination_index += 1;
                 }
                 self.index += 1;
-                budget -= 1;
+                _ = work.spend();
             },
-            .materialize => return switch (try self.materializer.?.borrowMut().advance(budget)) {
-                .pending => .yielded,
+            .materialize => return switch (try self.materializer.?.borrowMut().advance(work)) {
+                .pending => .stepped,
                 .duplicate_key => unreachable,
                 .complete => |result| completed: {
                     self.materializer.?.borrowMut().deinit();
@@ -656,7 +656,7 @@ const DictSelectDriver = struct {
                 },
             },
         };
-        return .yielded;
+        return .stepped;
     }
 };
 
@@ -779,9 +779,9 @@ const MergeWithWorkDriver = struct {
     pub fn advance(evaluator: *Machine, self: *MergeWithWorkDriver) MachineError!machine.WorkProgress {
         evaluator.setActiveWord(self.state.borrow().word);
         try evaluator.pollKernel();
-        var budget: usize = machine.kernel_poll_quantum;
+        const work = evaluator.workBudget();
         const state = self.state.borrow();
-        while (budget != 0) switch (state.phase) {
+        while (!work.exhausted()) switch (state.phase) {
             .copy_left => {
                 const count: usize = @intCast(state.left.borrow().dict.length());
                 if (state.index == count) {
@@ -794,7 +794,7 @@ const MergeWithWorkDriver = struct {
                     dict_storage.valueAt(state.left.borrow().dict, state.index),
                 };
                 state.index += 1;
-                budget -= 1;
+                _ = work.spend();
             },
             .merge_right => {
                 const count: usize = @intCast(state.right.borrow().dict.length());
@@ -815,8 +815,8 @@ const MergeWithWorkDriver = struct {
                         key,
                     ),
                 };
-                switch (try state.work.borrowMut().finding.advance(1)) {
-                    .pending => budget -= 1,
+                switch (try state.work.borrowMut().finding.advance(work)) {
+                    .pending => _ = work.spend(),
                     .complete => {
                         const found = state.work.borrowMut().finding.foundIndex();
                         state.work.borrowMut().retire(evaluator.releaseDomain());
@@ -838,8 +838,8 @@ const MergeWithWorkDriver = struct {
                     },
                 }
             },
-            .materialize => return switch (try state.work.borrowMut().materializing.advance(budget)) {
-                .pending => .yielded,
+            .materialize => return switch (try state.work.borrowMut().materializing.advance(work)) {
+                .pending => .stepped,
                 .duplicate_key => unreachable,
                 .complete => |result| completed: {
                     state.work.borrowMut().retire(evaluator.releaseDomain());
@@ -847,6 +847,6 @@ const MergeWithWorkDriver = struct {
                 },
             },
         };
-        return .yielded;
+        return .stepped;
     }
 };

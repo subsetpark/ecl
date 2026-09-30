@@ -100,7 +100,8 @@ fn stateValue(evaluator: *Machine, state: State) error{OutOfMemory}!Value {
     };
     var materializer = list.ValueMaterializer.init(evaluator.allocator(), &items);
     defer materializer.retire(evaluator.releaseDomain());
-    return poll_api.driveFallible(Value, &materializer, .{2});
+    var work = poll_api.unbounded();
+    return poll_api.driveFallible(Value, &materializer, .{&work});
 }
 
 fn popState(evaluator: *Machine) MachineError!State {

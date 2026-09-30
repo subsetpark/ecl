@@ -127,8 +127,8 @@ pub const FlatCursor = struct {
         return self.length - self.index;
     }
 
-    /// Reserves and charges the next range. The charge goes through the one
-    /// seam that owns `Unit.kernel_fuel`, which polls at the interval boundary,
+    /// Reserves and charges the next range. The charge lands on the unit's one
+    /// kernel budget, whose refill polls at the interval boundary,
     /// so cancellation surfaces here as an error rather than as a missed check.
     /// Element accounting is deliberately conservative: a copied or gathered
     /// element is charged like a computed one.

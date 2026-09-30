@@ -133,9 +133,9 @@ const StackSnapshot = struct {
         };
     }
 
-    fn advanceCapture(self: *StackSnapshot, evaluator: *Machine, budget: usize) bool {
+    fn advanceCapture(self: *StackSnapshot, evaluator: *Machine) bool {
         std.debug.assert(evaluator.available() == self.depth);
-        const end = @min(self.index + budget, self.depth);
+        const end = self.index + evaluator.workBudget().take(self.depth - self.index);
         while (self.index != end) : (self.index += 1)
             self.values.appendBorrowed(evaluator.visibleOperandBorrowed(self.index));
         return self.index == self.depth;
@@ -166,22 +166,17 @@ const StackSnapshotDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *StackSnapshotDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        if (!self.snapshot.borrowMut().advanceCapture(
-            evaluator,
-            machine.kernel_poll_quantum,
-        )) return .yielded;
+        if (!self.snapshot.borrowMut().advanceCapture(evaluator)) return .stepped;
 
         if (self.materializer == null) {
             self.materializer = .init(.init(evaluator.allocator(), self.snapshot.borrow().items()));
-            return .yielded;
+            return .stepped;
         }
-        if (self.result == null) switch (try self.materializer.?.borrowMut().advance(
-            machine.kernel_poll_quantum,
-        )) {
-            .pending => return .yielded,
+        if (self.result == null) switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
+            .pending => return .stepped,
             .complete => |result| {
                 self.result = .init(result);
-                return .yielded;
+                return .stepped;
             },
         };
 
@@ -233,20 +228,20 @@ const ConcatDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *ConcatDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        var budget = machine.kernel_poll_quantum;
+        const work = evaluator.workBudget();
         const values = self.values.borrow();
-        while (!self.materializing and budget != 0 and self.index != values.len) : (budget -= 1) {
+        while (!self.materializing and self.index != values.len and work.spend()) {
             values[self.index] = if (self.index == 0)
                 self.left.borrow()
             else
                 list.atUnchecked(self.right.borrow(), self.index - 1);
             self.index += 1;
         }
-        if (self.index != values.len) return .yielded;
+        if (self.index != values.len) return .stepped;
         self.materializing = true;
-        if (budget == 0) return .yielded;
-        return switch (try self.materializer.borrowMut().advance(budget)) {
-            .pending => .yielded,
+        if (work.exhausted()) return .stepped;
+        return switch (try self.materializer.borrowMut().advance(work)) {
+            .pending => .stepped,
             .complete => |result| .{ .output = result },
         };
     }
@@ -279,8 +274,8 @@ const MatchDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *MatchDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        return switch (try self.cursor.borrowMut().advance(machine.kernel_poll_quantum)) {
-            .pending => .yielded,
+        return switch (try self.cursor.borrowMut().advance(evaluator.workBudget())) {
+            .pending => .stepped,
             .complete => |matches| .{ .output = .{ .int = @intFromBool(matches) } },
         };
     }
@@ -327,11 +322,11 @@ const ParseDriver = struct {
     source: ?heap.Owned([]u8) = null,
     pub fn advance(evaluator: *Machine, self: *ParseDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        if (self.source == null) switch (self.encoder.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+        if (self.source == null) switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return evaluator.fail(.domain, "string contains an invalid Unicode scalar"),
         }) {
-            .pending => return .yielded,
+            .pending => return .stepped,
             .complete => |source| self.source = .init(source),
         };
         const source = self.source.?.take();
@@ -391,11 +386,11 @@ const SpellingCharsDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *SpellingCharsDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        return switch (self.text.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+        return switch (self.text.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidUtf8 => return invalidUtf8(evaluator, "spelling is not valid UTF-8"),
         }) {
-            .pending => .yielded,
+            .pending => .stepped,
             .complete => |text| .{ .output = text },
         };
     }
@@ -416,22 +411,22 @@ const BytesToCharsDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *BytesToCharsDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        if (self.bytes == null) switch (self.encoder.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+        if (self.bytes == null) switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidByte => return evaluator.typeError(chars_expected),
         }) {
-            .pending => return .yielded,
+            .pending => return .stepped,
             .complete => |bytes| {
                 self.bytes = .init(bytes);
                 self.text = .init(.init(evaluator.allocator(), self.bytes.?.borrowMut().bytes()));
-                return .yielded;
+                return .stepped;
             },
         };
-        return switch (self.text.?.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+        return switch (self.text.?.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidUtf8 => return invalidUtf8(evaluator, "byte list is not valid UTF-8"),
         }) {
-            .pending => .yielded,
+            .pending => .stepped,
             .complete => |text| .{ .output = text },
         };
     }
@@ -464,19 +459,19 @@ const StringBytesDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *StringBytesDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        if (self.encoded == null) switch (self.encoder.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+        if (self.encoded == null) switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return evaluator.fail(.domain, "string contains an invalid Unicode scalar"),
         }) {
-            .pending => return .yielded,
+            .pending => return .stepped,
             .complete => |encoded| {
                 self.encoded = .init(encoded);
                 self.materializer = .init(.init(evaluator.allocator(), self.encoded.?.borrow()));
-                return .yielded;
+                return .stepped;
             },
         };
-        return switch (try self.materializer.?.borrowMut().advance(machine.kernel_poll_quantum)) {
-            .pending => .yielded,
+        return switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
+            .pending => .stepped,
             .complete => |result| .{ .output = result },
         };
     }
@@ -491,11 +486,11 @@ const ByteListIdentityDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *ByteListIdentityDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        switch (self.encoder.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+        switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidByte => return evaluator.typeError("a string or byte list"),
         }) {
-            .pending => return .yielded,
+            .pending => return .stepped,
             .complete => |vector| {
                 var owned = vector;
                 owned.retire(evaluator.releaseDomain(), evaluator.allocator());
@@ -558,20 +553,20 @@ const SymbolConversionDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *SymbolConversionDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        if (self.spelling == null) switch (self.encoder.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+        if (self.spelling == null) switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return evaluator.fail(.domain, "string contains an invalid Unicode scalar"),
         }) {
-            .pending => return .yielded,
+            .pending => return .stepped,
             .complete => |spelling| {
                 self.spelling = .init(spelling);
                 self.validation = .init(spelling);
-                return .yielded;
+                return .stepped;
             },
         };
-        var budget: usize = machine.kernel_poll_quantum;
+        const work = evaluator.workBudget();
         if (self.validation) |*validation| {
-            while (budget != 0) : (budget -= 1) switch (validation.advance()) {
+            while (work.spend()) switch (validation.advance()) {
                 .pending => {},
                 .complete => |valid| {
                     if (!valid) return evaluator.fail(.domain, "string is not a valid symbol spelling");
@@ -584,9 +579,9 @@ const SymbolConversionDriver = struct {
                     break;
                 },
             };
-            if (self.validation != null) return .yielded;
+            if (self.validation != null) return .stepped;
         }
-        while (budget != 0) : (budget -= 1) switch (self.name) {
+        while (work.spend()) switch (self.name) {
             .none => unreachable,
             .lookup => |*cursor| switch (cursor.advance()) {
                 .pending => {},
@@ -601,7 +596,7 @@ const SymbolConversionDriver = struct {
                 .complete => |id| return .{ .output = .{ .symbol = id } },
             },
         };
-        return .yielded;
+        return .stepped;
     }
 };
 
@@ -689,12 +684,12 @@ const NumericParseDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *NumericParseDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0) : (budget -= 1) switch (self.classifier.advance()) {
+        const work = evaluator.workBudget();
+        while (work.spend()) switch (self.classifier.advance()) {
             .pending => {},
             .complete => |classification| return self.finish(evaluator, classification),
         };
-        return .yielded;
+        return .stepped;
     }
 
     fn finish(
@@ -752,21 +747,21 @@ const RaiseDriver = struct {
             .lookup => {
                 if (self.field_index == self.keys.len) {
                     self.phase = .finish;
-                    return .yielded;
+                    return .stepped;
                 }
                 if (self.lookup == null) self.lookup = .init(.initHeader(
                     evaluator.allocator(),
                     self.raised.borrow().dict,
                     .{ .symbol = self.keys[self.field_index] },
                 ));
-                switch (try self.lookup.?.borrowMut().advance(machine.kernel_poll_quantum)) {
-                    .pending => return .yielded,
+                switch (try self.lookup.?.borrowMut().advance(evaluator.workBudget())) {
+                    .pending => return .stepped,
                     .complete => |found| {
                         self.lookup.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                         self.lookup = null;
                         try self.validateField(evaluator, found);
                         if (self.phase == .lookup) self.field_index += 1;
-                        return .yielded;
+                        return .stepped;
                     },
                 }
             },
@@ -783,7 +778,7 @@ const RaiseDriver = struct {
                     self.field_index += 1;
                     self.phase = .lookup;
                 }
-                return .yielded;
+                return .stepped;
             },
             .finish => {
                 const raised = self.raised.take();
@@ -836,8 +831,8 @@ const PpDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *PpDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        return switch (try self.render.borrowMut().advance(machine.kernel_poll_quantum)) {
-            .pending => .yielded,
+        return switch (try self.render.borrowMut().advance(evaluator.workBudget())) {
+            .pending => .stepped,
             .complete => |rendered| completed: {
                 defer evaluator.allocator().free(rendered);
                 evaluator.unit.inherited.runtime().console.writeOutput(rendered, true) catch
@@ -867,10 +862,7 @@ const StackDisplayDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *StackDisplayDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        if (!self.snapshot.borrowMut().advanceCapture(
-            evaluator,
-            machine.kernel_poll_quantum,
-        )) return .yielded;
+        if (!self.snapshot.borrowMut().advanceCapture(evaluator)) return .stepped;
 
         var prefix_buffer: [64]u8 = undefined;
         const prefix = stackDisplayPrefix(&prefix_buffer, self.index);
@@ -882,8 +874,8 @@ const StackDisplayDriver = struct {
                     prefix.len,
                 ));
             }
-            switch (try self.render.?.borrowMut().advance(machine.kernel_poll_quantum)) {
-                .pending => return .yielded,
+            switch (try self.render.?.borrowMut().advance(evaluator.workBudget())) {
+                .pending => return .stepped,
                 .complete => |text| {
                     self.render.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                     self.render = null;
@@ -947,14 +939,14 @@ const PrinDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *PrinDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        return switch (self.encoder.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+        return switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return evaluator.fail(
                 .domain,
                 "string contains an invalid Unicode scalar",
             ),
         }) {
-            .pending => .yielded,
+            .pending => .stepped,
             .complete => |encoded| completed: {
                 defer evaluator.allocator().free(encoded);
                 evaluator.unit.inherited.runtime().console.writeOutput(encoded, false) catch
@@ -988,39 +980,39 @@ const GetenvDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *GetenvDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        if (self.name == null) switch (self.encoder.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+        if (self.name == null) switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return evaluator.fail(
                 .domain,
                 "variable name contains an invalid Unicode scalar",
             ),
         }) {
-            .pending => return .yielded,
+            .pending => return .stepped,
             .complete => |name| self.name = .init(name),
         };
         if (self.text == null) {
             if (self.lookup == null)
                 self.lookup = evaluator.environLookup(self.name.?.borrow());
-            switch (self.lookup.?.advance(machine.kernel_poll_quantum)) {
-                .pending => return .yielded,
+            switch (self.lookup.?.advance(evaluator.workBudget())) {
+                .pending => return .stepped,
                 .complete => |found| {
                     const bytes = found orelse return evaluator.unsetEnvironVariable(
                         self.name.?.borrow(),
                         self.name_value.borrow(),
                     );
                     self.text = .init(.init(evaluator.allocator(), bytes));
-                    return .yielded;
+                    return .stepped;
                 },
             }
         }
-        return switch (self.text.?.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+        return switch (self.text.?.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidUtf8 => return evaluator.fail(
                 .io,
                 "environment variable value is not valid UTF-8",
             ),
         }) {
-            .pending => .yielded,
+            .pending => .stepped,
             .complete => |text| .{ .output = text },
         };
     }

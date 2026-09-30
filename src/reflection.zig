@@ -167,12 +167,13 @@ pub const PlanCursor = struct {
     pub fn advance(
         self: *PlanCursor,
         writer: *std.Io.Writer,
-        budget: usize,
+        work: *poll.WorkBudget,
     ) (error{OutOfMemory} || std.Io.Writer.Error)!PlanProgress {
-        var remaining = budget;
-        while (remaining != 0) : (remaining -= 1) {
-            if (self.renderer) |*renderer| switch (try renderer.advance(writer, 1)) {
-                .pending => continue,
+        // A step handed to the renderer is charged by the renderer; spending a
+        // unit here first would starve it at a one-unit grain.
+        while (true) {
+            if (self.renderer) |*renderer| switch (try renderer.advance(writer, work)) {
+                .pending => return .pending,
                 .complete => {
                     renderer.deinit();
                     self.renderer = null;
@@ -181,6 +182,7 @@ pub const PlanCursor = struct {
                 },
             };
             if (self.action_index == self.actions.len) return .complete;
+            if (!work.spend()) return .pending;
             switch (self.actions[self.action_index]) {
                 .value => |item| self.renderer = try .init(self.allocator, item),
                 .bytes => |bytes| try self.writeBytes(writer, bytes),
@@ -189,10 +191,6 @@ pub const PlanCursor = struct {
                 .document => |item| try self.writeDocument(writer, item),
             }
         }
-        return if (self.action_index == self.actions.len and self.renderer == null)
-            .complete
-        else
-            .pending;
     }
     fn writeSegment(
         self: *PlanCursor,
@@ -284,12 +282,12 @@ pub const OwnedPlanCursor = struct {
         if (self.output) |output| self.allocator.free(output);
         self.* = undefined;
     }
-    pub fn advance(self: *OwnedPlanCursor, budget: usize) error{OutOfMemory}!OwnedPlanProgress {
-        switch (self.phase) {
+    pub fn advance(self: *OwnedPlanCursor, work: *poll.WorkBudget) error{OutOfMemory}!OwnedPlanProgress {
+        while (true) switch (self.phase) {
             .count => {
                 var buffer: [256]u8 = undefined;
                 var counter = std.Io.Writer.Discarding.init(&buffer);
-                const progress = self.cursor.advance(&counter.writer, budget) catch |err| switch (err) {
+                const progress = self.cursor.advance(&counter.writer, work) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.WriteFailed => unreachable,
                 };
@@ -301,11 +299,10 @@ pub const OwnedPlanCursor = struct {
                 self.cursor = .init(self.allocator, self.actions);
                 self.output = output;
                 self.phase = .fill;
-                return .pending;
             },
             .fill => {
                 var fixed = std.Io.Writer.fixed(self.output.?[self.written..]);
-                const progress = self.cursor.advance(&fixed, budget) catch |err| switch (err) {
+                const progress = self.cursor.advance(&fixed, work) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.WriteFailed => unreachable,
                 };
@@ -317,7 +314,7 @@ pub const OwnedPlanCursor = struct {
                 return .{ .complete = result };
             },
             .complete => unreachable,
-        }
+        };
     }
 };
 
@@ -378,9 +375,8 @@ pub const ActionPlan = struct {
         self.state = .sealed;
     }
 
-    pub fn advance(self: *ActionPlan, budget: usize) error{OutOfMemory}!OwnedPlanProgress {
-        std.debug.assert(self.state != .building and budget != 0);
-        var remaining = budget;
+    pub fn advance(self: *ActionPlan, work: *poll.WorkBudget) error{OutOfMemory}!OwnedPlanProgress {
+        std.debug.assert(self.state != .building);
         if (self.state == .sealed) {
             const actions = try self.allocator.alloc(Action, self.pending.count);
             self.state = .{ .materializing = .{
@@ -389,7 +385,8 @@ pub const ActionPlan = struct {
                 .index = 0,
             } };
         }
-        while (remaining != 0 and self.state == .materializing) : (remaining -= 1) {
+        while (self.state == .materializing) {
+            if (!work.spend()) return .pending;
             const materializing = &self.state.materializing;
             if (materializing.iterator.next()) |action| {
                 materializing.actions[materializing.index] = action.*;
@@ -403,9 +400,8 @@ pub const ActionPlan = struct {
             }
         }
         return switch (self.state) {
-            .materializing => .pending,
-            .rendering => |*rendering| rendering.renderer.advance(@max(remaining, 1)),
-            .building, .sealed => unreachable,
+            .rendering => |*rendering| rendering.renderer.advance(work),
+            .building, .sealed, .materializing => unreachable,
         };
     }
 
@@ -428,9 +424,9 @@ const NameCompareCursor = struct {
     fn init(left: u32, right: u32) NameCompareCursor {
         return .{ .left = intern.get(left), .right = intern.get(right) };
     }
-    fn advance(self: *NameCompareCursor, budget: usize) poll.Progress(std.math.Order) {
+    fn advance(self: *NameCompareCursor, work: *poll.WorkBudget) poll.Progress(std.math.Order) {
         const shared = @min(self.left.len, self.right.len);
-        const end = @min(self.index + budget, shared);
+        const end = self.index + work.take(shared - self.index);
         while (self.index != end) : (self.index += 1) {
             if (self.left[self.index] < self.right[self.index]) return .{ .complete = .lt };
             if (self.left[self.index] > self.right[self.index]) return .{ .complete = .gt };
@@ -448,8 +444,8 @@ const NameComparator = struct {
         return .init(left, right);
     }
 
-    pub fn advance(cursor: *Cursor, budget: usize) poll.Progress(std.math.Order) {
-        return cursor.advance(budget);
+    pub fn advance(cursor: *Cursor, work: *poll.WorkBudget) poll.Progress(std.math.Order) {
+        return cursor.advance(work);
     }
 };
 
@@ -465,8 +461,8 @@ const NameSortCursor = struct {
         self.sort.deinit();
         self.* = undefined;
     }
-    pub fn advance(self: *NameSortCursor, budget: usize) NameSortProgress {
-        return self.sort.advance(budget);
+    pub fn advance(self: *NameSortCursor, work: *poll.WorkBudget) NameSortProgress {
+        return self.sort.advance(work);
     }
 };
 
@@ -518,28 +514,27 @@ pub const SortedUniqueNameCursor = struct {
     }
     pub fn advance(
         self: *SortedUniqueNameCursor,
-        budget: usize,
+        work: *poll.WorkBudget,
     ) error{OutOfMemory}!SortedUniqueNameProgress {
-        std.debug.assert(budget != 0 and self.phase != .complete);
-        var remaining = budget;
-        while (remaining != 0) switch (self.phase) {
-            .materialize => if (self.iterator.next()) |name| {
-                self.storage.?[self.index] = name.*;
-                self.index += 1;
-                remaining -= 1;
-            } else {
-                self.sorter = try .init(self.allocator, self.storage.?);
-                self.phase = .sort;
-                return .pending;
+        std.debug.assert(self.phase != .complete);
+        while (true) switch (self.phase) {
+            .materialize => {
+                if (!work.spend()) return .pending;
+                if (self.iterator.next()) |name| {
+                    self.storage.?[self.index] = name.*;
+                    self.index += 1;
+                } else {
+                    self.sorter = try .init(self.allocator, self.storage.?);
+                    self.phase = .sort;
+                }
             },
-            .sort => switch (self.sorter.?.advance(remaining)) {
+            .sort => switch (self.sorter.?.advance(work)) {
                 .pending => return .pending,
                 .complete => {
                     self.sorter.?.deinit();
                     self.sorter = null;
                     self.phase = .unique;
                     self.index = 0;
-                    return .pending;
                 },
             },
             .unique => {
@@ -553,9 +548,9 @@ pub const SortedUniqueNameCursor = struct {
                         .unique_len = unique_len,
                     } };
                 }
+                if (!work.spend()) return .pending;
                 const name = self.storage.?[self.index];
                 self.index += 1;
-                remaining -= 1;
                 if (self.previous != null and self.previous.? == name) continue;
                 self.storage.?[self.unique_len] = name;
                 self.unique_len += 1;
@@ -563,7 +558,6 @@ pub const SortedUniqueNameCursor = struct {
             },
             .complete => unreachable,
         };
-        return .pending;
     }
 };
 
@@ -580,7 +574,7 @@ test "sorted unique names share one resumable post-collection pipeline" {
     var cursor = try SortedUniqueNameCursor.init(allocator, &found);
     defer cursor.deinit();
     var pending: usize = 0;
-    var names = while (true) switch (try cursor.advance(1)) {
+    var names = while (true) switch (try poll.testing.advanceWithin(&cursor, 1)) {
         .pending => pending += 1,
         .complete => |result| break result,
     };

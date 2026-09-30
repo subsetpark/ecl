@@ -7,6 +7,7 @@ const value = @import("value.zig");
 const dict = @import("dict.zig");
 const intern = @import("intern.zig");
 const storage = @import("kernel_storage.zig");
+const poll = @import("poll.zig");
 const Value = value.Value;
 
 pub const ValidationError = error{ Invalid, OutOfMemory };
@@ -45,7 +46,8 @@ pub fn ownedUtf8(allocator: std.mem.Allocator, item: Value) ValidationError![]u8
     if (!item.isString()) return error.Invalid;
     var cursor = storage.StringEncoder.init(allocator, item);
     defer cursor.deinit();
-    while (true) switch (cursor.advance(65_536) catch |err| switch (err) {
+    var work = poll.unbounded();
+    while (true) switch (cursor.advance(&work) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.InvalidCodepoint => return error.Invalid,
     }) {

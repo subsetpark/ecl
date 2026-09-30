@@ -51,6 +51,55 @@ pub const WorkBudget = struct {
     }
 };
 
+/// The allowance for work no unit owns: a blocking constructor or setup path
+/// that runs on its caller's thread and drives a cursor to completion. Its
+/// inputs must be bounded by that caller. A unit's user-sized work draws on
+/// the unit's own budget instead.
+pub fn unbounded() WorkBudget {
+    return .{ .remaining = std.math.maxInt(usize) };
+}
+
+/// One unit of a budgeted cursor, as one transition of a single-step cursor
+/// whose caller charges one unit per call. This is the only budget a
+/// production caller may create outside an owner's allowance.
+pub fn advanceOne(cursor: anytype) AdvanceResult(@TypeOf(cursor)) {
+    var work: WorkBudget = .{ .remaining = 1 };
+    return cursor.advance(&work);
+}
+
+fn AdvanceResult(comptime Pointer: type) type {
+    const Cursor = @typeInfo(Pointer).pointer.child;
+    return @typeInfo(@TypeOf(Cursor.advance)).@"fn".return_type.?;
+}
+
+/// Test-only budgets and drivers that exercise a cursor's resumption at a
+/// chosen grain. They exist only in test builds, so production code cannot
+/// use them to mint an allowance of its own.
+pub const testing = if (@import("builtin").is_test) struct {
+    pub fn budget(units: usize) WorkBudget {
+        return .{ .remaining = units };
+    }
+
+    /// Advances a cursor against a private allowance of `units`.
+    pub fn advanceWithin(cursor: anytype, units: usize) AdvanceResult(@TypeOf(cursor)) {
+        var work: WorkBudget = .{ .remaining = units };
+        return cursor.advance(&work);
+    }
+
+    /// Drive a fallible cursor to completion, lending it a fresh allowance of
+    /// `units` on each advance. For callers that exercise a cursor's resumption at
+    /// a small grain; a shared finite budget would stall once spent.
+    pub fn driveInSlices(comptime T: type, cursor: anytype, units: usize) !T {
+        while (true) {
+            var work: WorkBudget = .{ .remaining = units };
+            switch (try cursor.advance(&work)) {
+                .pending => {},
+                .complete => |result| return result,
+            }
+        }
+    }
+} else struct {};
+
 /// Drive a non-failing finite cursor to its observable result.
 pub fn drive(comptime T: type, cursor: anytype, args: anytype) T {
     const Cursor = @TypeOf(cursor.*);
@@ -120,18 +169,17 @@ pub fn MergeSortCursor(comptime T: type, comptime Comparator: type) type {
             self.* = undefined;
         }
 
-        pub fn advance(self: *Self, budget: usize) Progress(void) {
-            var remaining = budget;
-            while (remaining != 0) {
+        /// Each merge step draws one unit, spent before its comparison so a
+        /// completed comparison is never lost to an exhausted allowance; the
+        /// comparator draws its own work from the same budget.
+        pub fn advance(self: *Self, work: *WorkBudget) Progress(void) {
+            while (true) {
                 if (self.width >= self.items.len) {
                     if (!self.source_scratch) return .complete;
-                    const end = @min(self.copy_index + remaining, self.items.len);
-                    const copied = end - self.copy_index;
+                    const end = self.copy_index + work.take(self.items.len - self.copy_index);
                     @memcpy(self.items[self.copy_index..end], self.scratch[self.copy_index..end]);
                     self.copy_index = end;
-                    if (self.copy_index == self.items.len) return .complete;
-                    remaining -= copied;
-                    continue;
+                    return if (self.copy_index == self.items.len) .complete else .pending;
                 }
                 if (!self.run_ready) {
                     if (self.start == self.items.len) {
@@ -158,29 +206,27 @@ pub fn MergeSortCursor(comptime T: type, comptime Comparator: type) type {
                 const source = if (self.source_scratch) self.scratch else self.items;
                 var choose_left = self.right == self.end;
                 if (!choose_left and self.left != self.middle) {
-                    if (self.comparator == null) self.comparator = Comparator.init(
-                        self.context,
-                        source[self.left],
-                        source[self.right],
-                    );
-                    switch (Comparator.advance(&self.comparator.?, 1)) {
-                        .pending => {
-                            remaining -= 1;
-                            continue;
-                        },
+                    if (self.comparator == null) {
+                        if (!work.spend()) return .pending;
+                        self.comparator = Comparator.init(
+                            self.context,
+                            source[self.left],
+                            source[self.right],
+                        );
+                    }
+                    switch (Comparator.advance(&self.comparator.?, work)) {
+                        .pending => return .pending,
                         .complete => |ordering| {
                             self.comparator = null;
                             choose_left = ordering != .gt;
                         },
                     }
-                }
+                } else if (!work.spend()) return .pending;
                 const destination = if (self.source_scratch) self.items else self.scratch;
                 destination[self.output] = if (choose_left) source[self.left] else source[self.right];
                 if (choose_left) self.left += 1 else self.right += 1;
                 self.output += 1;
-                remaining -= 1;
             }
-            return .pending;
         }
     };
 }
