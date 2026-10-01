@@ -217,9 +217,12 @@ reason before selecting the matrix.
   `-w /work` aborts them with `ReadOnlyFileSystem` before any race can be observed.
   Under amd64 emulation the test step alone takes about 20 minutes; an exit of 124 is
   the timeout, not a test result, so read the build summary before the exit code.
+  `--init` is what lets the host timeout stop the run: without it the shell is the
+  container's PID 1, which ignores SIGTERM, so the run continues to completion and
+  still reports 124.
 
   ```sh
-  timeout 50m docker run --rm --platform linux/amd64 \
+  timeout 50m docker run --rm --init --platform linux/amd64 \
     -v "$PWD":/work:ro ubuntu:24.04 bash -euxo pipefail -c '
       export DEBIAN_FRONTEND=noninteractive
       apt-get update
