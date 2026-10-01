@@ -96,7 +96,7 @@ const EprintDriver = struct {
                 "string contains an invalid Unicode scalar",
             ),
         }) {
-            .pending => .yielded,
+            .pending => .stepped,
             .complete => |encoded| completed: {
                 defer evaluator.allocator().free(encoded);
                 try writeDiagnosticsLine(evaluator, encoded);

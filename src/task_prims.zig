@@ -426,7 +426,7 @@ const AwaitAnyDriver = struct {
         try evaluator.pollKernel();
         const task_values = self.tasks.?.borrow();
         const count: usize = @intCast(task_values.list.length());
-        const end = @min(self.index + machine.kernel_poll_quantum, count);
+        const end = self.index + evaluator.workBudget().take(count - self.index);
         while (self.index != end) : (self.index += 1) {
             if (list.atUnchecked(task_values, self.index) != .task) {
                 return evaluator.failAtIndex(
@@ -436,7 +436,7 @@ const AwaitAnyDriver = struct {
                 );
             }
         }
-        if (self.index != count) return .yielded;
+        if (self.index != count) return .stepped;
         _ = self.tasks.?.take();
         self.tasks = null;
         evaluator.retireDriver(self);

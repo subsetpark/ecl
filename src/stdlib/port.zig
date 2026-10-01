@@ -183,7 +183,7 @@ const SendDriver = struct {
             .overflow => return evaluator.fail(.overflow, "message exceeds the resource queue byte budget"),
             .failed => |failure| return transportFailure(evaluator, failure),
         }
-        return .yielded;
+        return evaluator.afterStep();
     }
 };
 
@@ -237,7 +237,7 @@ const ReceiveDriver = struct {
             .eof => return output.output(try dict.fromUniquePairs(evaluator.allocator(), evaluator.releaseDomain(), &.{.{ .{ .symbol = try intern.intern("kind") }, .{ .symbol = try intern.intern("eof") } }})),
             .message => |event| return output.output(event),
         }
-        return .yielded;
+        return evaluator.afterStep();
     }
 };
 
@@ -329,14 +329,14 @@ const Request = struct {
                     opening.release();
                 },
             }
-            return .yielded;
+            return evaluator.afterStep();
         }
         if (self.state == .failed_open) {
             const failed = self.state.failed_open;
             const resource = Resource.fromValue(failed.resource).?;
             if (!resource.joined()) {
                 try evaluator.park(.{ .external = resource.source() });
-                return .yielded;
+                return .{ .yielded = .park };
             }
             return evaluator.failWithErrorData(failed.failure);
         }
@@ -346,12 +346,12 @@ const Request = struct {
             switch (resource.initialization()) {
                 .pending => |source| {
                     try evaluator.park(.{ .external = source });
-                    return .yielded;
+                    return .{ .yielded = .park };
                 },
                 .failed => |failure| {
                     resource.close();
                     self.state = .{ .failed_open = .{ .resource = item, .failure = failure } };
-                    return .yielded;
+                    return .stepped;
                 },
                 .ready => {
                     const output = try evaluator.reserveStack(1);
@@ -384,7 +384,7 @@ const Request = struct {
                 .failed => |failure| return factoryFailure(evaluator, failure),
             },
         }
-        return .yielded;
+        return evaluator.afterStep();
     }
 };
 
@@ -494,7 +494,7 @@ const Observe = struct {
                 }
             },
         }
-        return .yielded;
+        return evaluator.afterStep();
     }
 };
 

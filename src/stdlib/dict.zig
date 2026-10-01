@@ -318,7 +318,7 @@ const FromFlatDriver = struct {
         try evaluator.pollKernel();
         if (self.materializer == null) {
             const flat_pairs = self.pairs.borrow();
-            const end = @min(self.index + machine.kernel_poll_quantum, flat_pairs.len);
+            const end = self.index + evaluator.workBudget().take(flat_pairs.len - self.index);
             while (self.index != end) : (self.index += 1) flat_pairs[self.index] = .{
                 list.atUnchecked(self.entries.borrow(), self.index * 2),
                 list.atUnchecked(self.entries.borrow(), self.index * 2 + 1),

@@ -42,12 +42,15 @@ pub const UnitOutcome = union(enum) {
 pub const Config = union(enum) {
     default,
     cooperative,
+    /// Cooperative, with the order among ready work chosen by the seed.
+    cooperative_explored: u64,
     worker_pool: usize,
 
     fn schedulerConfig(self: Config) scheduler_api.Config {
         return switch (self) {
             .default => .{ .worker_pool = default_worker_count },
             .cooperative => .cooperative,
+            .cooperative_explored => |seed| .{ .cooperative_explored = seed },
             .worker_pool => |count| .{ .worker_pool = count },
         };
     }
@@ -1233,7 +1236,7 @@ test "invocation effects: completion owns immediate deferred nested and failing 
                 try evaluator.pollKernel();
                 if (self.remaining != 0) {
                     self.remaining -= 1;
-                    return .yielded;
+                    return .{ .yielded = .wait };
                 }
                 return switch (self.mode) {
                     .exhausted_output => blk: {
@@ -1253,7 +1256,7 @@ test "invocation effects: completion owns immediate deferred nested and failing 
                     .output => .{ .output = .{ .int = 11 } },
                     .empty => .completed,
                     .failure => evaluator.fail(.user, "deferred failure"),
-                    .forever => .yielded,
+                    .forever => .{ .yielded = .wait },
                     .chain => blk: {
                         evaluator.retireDriver(self);
                         try evaluator.startDriver(Driver{ .mode = .output });
@@ -1393,6 +1396,64 @@ test "invocation effects: completion owns immediate deferred nested and failing 
     defer cancelled.deinit();
     try std.testing.expect(std.mem.indexOf(u8, cancelled.bytes(), "'kind 'cancelled") != null);
 }
+test "port writes share the remaining turn allowance with boxed byte encoding" {
+    const Counts = struct {
+        written: usize = 0,
+        calls: usize = 0,
+        finished: bool = false,
+    };
+    const Probe = struct {
+        counts: *Counts,
+        pub const invalid_byte_message = "invalid byte";
+        pub const WritePermit = struct {
+            probe: *Counts,
+            pub fn finish(self: @This()) void {
+                self.probe.finished = true;
+            }
+            pub fn cancel(_: @This()) void {}
+            pub fn source(_: @This()) @import("external.zig").ReadinessSource {
+                unreachable;
+            }
+        };
+        pub fn write(self: *@This(), evaluator: *machine.Machine, _: WritePermit, bytes: []const u8) machine.MachineError!@import("port_transfer.zig").WriteProgress {
+            if (bytes.len == 0 or bytes.len > evaluator.remainingKernelFuel())
+                return evaluator.fail(.user, "write exceeds remaining allowance");
+            self.counts.calls += 1;
+            self.counts.written += bytes.len;
+            return .{ .written = bytes.len };
+        }
+    };
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
+    defer runtime.deinit();
+    try std.testing.expect((try runtime.runUnit("write-budget.ecl", "")) == .ok);
+    var unit = Session.initRootUnit(runtime.coreState());
+    defer unit.deinit();
+    var evaluator: machine.Machine = .{ .unit = &unit };
+    const Driver = @import("port_transfer.zig").WriteDriver(Probe);
+    for ([_]usize{ 5, machine.kernel_poll_quantum }) |length| {
+        const items = try std.testing.allocator.alloc(Value, length);
+        defer std.testing.allocator.free(items);
+        @memset(items, .{ .int = 97 });
+        const bytes = try list.fromValuesGeneric(std.testing.allocator, items);
+        var probe: Counts = .{};
+        var driver = Driver.init(std.testing.allocator, .{ .int = 0 }, bytes, .{ .counts = &probe }, .{ .probe = &probe });
+        defer driver.deinit(unit.releases, std.testing.allocator);
+        const grant = if (length == 5) 8 else length;
+        unit.kernel_budget = poll.testing.budget(grant);
+        try std.testing.expect((try Driver.advance(&evaluator, &driver)) == .stepped);
+        try std.testing.expectEqual(grant - length, probe.written);
+        try std.testing.expectEqual(@as(usize, 0), unit.kernel_budget.remaining);
+        try std.testing.expectEqual(@as(usize, if (length == 5) 1 else 0), probe.calls);
+        while (!probe.finished) {
+            unit.kernel_budget = poll.testing.budget(7);
+            _ = try Driver.advance(&evaluator, &driver);
+        }
+        try std.testing.expectEqual(length, probe.written);
+    }
+}
+
 test "session runs the soul test" {
     const allocator = std.testing.allocator;
     var runtime_inputs1 = try runtime_fixture.Fixture.init();

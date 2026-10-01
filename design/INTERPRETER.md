@@ -1101,13 +1101,22 @@ cooperatively on the calling thread or on a fixed worker pool; both modes use
 the same machine, queues, wait protocol, task tree, and retirement domain.
 Cooperative mode gives deterministic tests and allocation-failure testing
 the same semantics as worker execution.
+Ready work and retirement alternate when both are available. Seeded exploration
+randomizes the order within pairs of turns, servicing both classes in each pair;
+neither class can be passed over for more than two contested turns.
 
 ### The policy is a functional core with an imperative shell
 
 `scheduler_core.zig` defines closed state machines for Unit execution, waits,
-registration, and task scopes. Given a state and an event, it returns the only
-legal decision. `scheduler.zig` owns mutexes, atomics, queues, workers, timer
-infrastructure, and the effects of those decisions.
+registration, task scopes, evaluation admission, and the executor's choice
+between ready work and retirement. Given a state and an event, it returns the
+only legal decision. `scheduler.zig` owns mutexes, atomics, queues, workers,
+timer infrastructure, and the effects of those decisions. `turn_core.zig` does
+the same for a unit's turn: the budget charge, whether more work may start,
+whether a cancellable completion observes cancellation before handing
+execution onward, and what the evaluator does after a driver steps or yields,
+where every yield names whether the driver parked, waits on something outside
+its own work, or is settling work that must not observe cancellation.
 
 This split makes invalid transitions visible to exhaustive switching and keeps
 locking policy out of semantic decisions. Verification also exercises the real
@@ -1124,7 +1133,9 @@ collection size, including for a body that dispatches no form.
 A unit has one kernel budget per turn for its logical work. Every cursor takes
 the budget it is lent and hands the same budget to the cursors it drives, so
 nested work cannot begin an allowance of its own, and a hand-off is charged
-by the cursor that does the work rather than ahead of it. Exhausting the
+by the cursor that does the work rather than ahead of it. Byte writes are
+bounded before backend I/O by the allowance remaining after encoding, and
+charge for the bytes moved. Exhausting the
 budget ends the turn, including when a driver completes or delivers output;
 no successor driver or evaluation runs on an exhausted allowance. An ordinary
 cancellable completion settles exhaustion with a cancellation poll before
@@ -1416,7 +1427,9 @@ destroyed only after the timer thread has joined.
 
 Workers may execute ready Units in any order. Determinism is restored where
 the language specifies an order: join materialization, indexed `any` results,
-and collection assembly. Random kernels use explicit key/counter addressing so
+and collection assembly. A cooperative executor can choose its ready order
+from a seed, so that a result which should not depend on scheduling can be
+checked against many orders. Random kernels use explicit key/counter addressing so
 parallel scheduling does not silently change a deterministic stream; host
 entropy is a separately authorized boundary.
 

@@ -901,13 +901,13 @@ const LengthEachDriver = struct {
     pub fn advance(evaluator: *Machine, self: *LengthEachDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const count: usize = @intCast(self.input.list.length());
-        const end = @min(self.index + machine.kernel_poll_quantum, count);
+        const end = self.index + evaluator.workBudget().take(count - self.index);
         while (self.index < end) : (self.index += 1) {
             const item = list.atUnchecked(self.input, self.index);
             if (item != .list) return evaluator.typeError("a list");
             self.writer.borrowMut().fillRange(self.index, 1, @intCast(item.list.length()));
         }
-        if (self.index != count) return .yielded;
+        if (self.index != count) return .stepped;
         popRelease(evaluator, 2);
         return .{ .output = self.writer.borrowMut().finish() };
     }

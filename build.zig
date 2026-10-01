@@ -1035,6 +1035,10 @@ pub fn build(b: *std.Build) void {
             // Two-allocation startup capture and validation have no Session cost.
             "startup_environment.test.",
             "tests.value_test.",
+            "tests.cursor_budget_test.",
+            "tests.interleaving_test.",
+            "turn_core.test.",
+            "scheduler_core.test.",
             "tests.reader_test.",
             "tests.machine_test.",
             // Select both module suites whole. Family selection is

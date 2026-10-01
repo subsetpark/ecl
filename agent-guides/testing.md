@@ -215,9 +215,14 @@ reason before selecting the matrix.
   the container rather than building in the read-only mount: suites that call
   `std.testing.tmpDir` create their directory under the working directory, so a read-only
   `-w /work` aborts them with `ReadOnlyFileSystem` before any race can be observed.
+  Under amd64 emulation the test step alone takes about 20 minutes; an exit of 124 is
+  the timeout, not a test result, so read the build summary before the exit code.
+  `--init` is what lets the host timeout stop the run: without it the shell is the
+  container's PID 1, which ignores SIGTERM, so the run continues to completion and
+  still reports 124.
 
   ```sh
-  timeout 25m docker run --rm --platform linux/amd64 \
+  timeout 50m docker run --rm --init --platform linux/amd64 \
     -v "$PWD":/work:ro ubuntu:24.04 bash -euxo pipefail -c '
       export DEBIAN_FRONTEND=noninteractive
       apt-get update
@@ -226,8 +231,11 @@ reason before selecting the matrix.
       echo "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00  /tmp/zig.tar.xz" | sha256sum -c -
       mkdir -p /tmp/zig
       tar -C /tmp/zig --strip-components=1 -xf /tmp/zig.tar.xz
-      mkdir -p /build && cp -a /work/. /build/ && cd /build
-      timeout 20m /tmp/zig/zig build --cache-dir /tmp/ecl-cache \
+      # Copy sources only; a host .zig-cache can be hundreds of GB and fills the VM disk.
+      mkdir -p /build
+      tar -C /work --exclude=./.zig-cache --exclude=./zig-out --exclude=./.claude -cf - . | tar -C /build -xf -
+      cd /build
+      timeout 45m /tmp/zig/zig build --cache-dir /tmp/ecl-cache \
         --global-cache-dir /tmp/ecl-global test-tsan < /dev/null
     '
   ```

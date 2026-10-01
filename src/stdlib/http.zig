@@ -336,7 +336,7 @@ const RequestDriver = struct {
                 const header_value = self.fields.headers orelse {
                     const request = headers.request;
                     try self.beginBody(evaluator, request);
-                    return .yielded;
+                    return .stepped;
                 };
                 const header_dict = header_value.dict;
                 const count: usize = @intCast(dict.keysOf(header_dict).list.length());
@@ -352,7 +352,7 @@ const RequestDriver = struct {
                         return evaluator.typeError("request header values to be lists of strings");
                     if (values.list.length() == 0) {
                         headers.index += 1;
-                        return .yielded;
+                        return .stepped;
                     }
                     if (@as(usize, @intCast(values.list.length())) > self.limits.header_fields - headers.request.fields.items.len)
                         return self.overflow(evaluator);
@@ -511,7 +511,7 @@ const RequestDriver = struct {
                     for (fields[headers.index + 1 ..]) |later| {
                         if (std.ascii.eqlIgnoreCase(fields[headers.index].name, later.name)) {
                             headers.index += 1;
-                            return .yielded;
+                            return .stepped;
                         }
                     }
                     const moved = headers.*;
@@ -580,7 +580,7 @@ const RequestDriver = struct {
                 if (release.build.pairs.pop()) |pair| {
                     evaluator.releaseDomain().releaseValue(pair[0]);
                     evaluator.releaseDomain().releaseValue(pair[1]);
-                    return .yielded;
+                    return .stepped;
                 }
                 release.build.pairs.deinit(self.allocator);
                 const exchange_data = release.build.exchange;
@@ -665,7 +665,7 @@ const RequestDriver = struct {
             .cleanup_destroy,
             => unreachable,
         }
-        return .yielded;
+        return evaluator.afterStep();
     }
 
     fn beginMethod(self: *RequestDriver) void {

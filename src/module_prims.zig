@@ -157,11 +157,11 @@ const UnmoduleDriver = struct {
                 ),
             }) {
                 .pending => {},
-                .blocked => return .yielded,
+                .blocked => return .{ .yielded = .wait },
                 // The close edge has transferred all remaining ownership to
                 // scheduler retirement. Yield before polling cancellation
                 // again so abandoning this Unit cannot abandon module state.
-                .detached => return .yielded,
+                .detached => return .{ .yielded = .settle },
                 .complete => return .completed,
             }
         }

@@ -683,7 +683,7 @@ const Transaction = struct {
                     "native callback yielded without Reschedule authority",
                 )
             else
-                .yielded,
+                .{ .yielded = .wait },
             _ => return evaluator.fail(.contract, "native callback returned an unknown result tag"),
         };
     }

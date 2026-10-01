@@ -528,7 +528,7 @@ fn TypedFirstWhereDriver(comptime kind: value.HeapKind) type {
                     if (item != 0) return self.finish(evaluator, index);
                 }
             }
-            if (!self.cursor.complete()) return .yielded;
+            if (!self.cursor.complete()) return .stepped;
             return self.finish(evaluator, self.count);
         }
     };
@@ -694,7 +694,7 @@ fn ScalarMembershipDriver(comptime haystack_kind: value.HeapKind) type {
                     }
                 }
             }
-            if (!self.cursor.complete()) return .yielded;
+            if (!self.cursor.complete()) return .stepped;
             self.haystack.deinit(evaluator.releaseDomain(), evaluator.allocator());
             return .{ .output = .{ .int = 0 } };
         }
@@ -734,7 +734,7 @@ fn LeafMembershipDriver(
                 if (try self.cursor.nextRange(context)) |range| {
                     self.writer.borrowMut().fillRange(range.start, range.len(), 0);
                 }
-                if (!self.cursor.complete()) return .yielded;
+                if (!self.cursor.complete()) return .stepped;
                 return self.finish(evaluator);
             }
 
@@ -768,7 +768,7 @@ fn LeafMembershipDriver(
                     self.cursor = kernel_flat.FlatCursor.init(candidates.len);
                 }
             }
-            return .yielded;
+            return .stepped;
         }
     };
 }
@@ -1384,7 +1384,7 @@ const RangeDriver = struct {
                 offset += piece.len();
             }
         }
-        if (!self.cursor.complete()) return .yielded;
+        if (!self.cursor.complete()) return .stepped;
         return .{ .output = self.writer.borrowMut().finish() };
     }
 };
@@ -1855,8 +1855,7 @@ const ReshapeDriver = struct {
     pub fn advance(evaluator: *Machine, self: *ReshapeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.dimension_index != self.dimensions.borrow().len) {
-            const end = @min(self.dimension_index + machine.kernel_poll_quantum, self.dimensions.borrow().len);
-            while (self.dimension_index != end and evaluator.workBudget().spend()) : (self.dimension_index += 1) {
+            while (self.dimension_index != self.dimensions.borrow().len and evaluator.workBudget().spend()) : (self.dimension_index += 1) {
                 const dimension = list.atUnchecked(self.shape_value.borrow(), self.dimension_index);
                 if (dimension != .int) return evaluator.typeError("an integer shape");
                 if (dimension.int < 0) return evaluator.failAtIndex(
@@ -2026,7 +2025,7 @@ fn TypedCopyDriver(comptime kind: value.HeapKind, comptime index_kind: value.Hea
                     offset += piece.len();
                 }
             }
-            if (!self.cursor.complete()) return .yielded;
+            if (!self.cursor.complete()) return .stepped;
             self.source.deinit(evaluator.releaseDomain(), evaluator.allocator());
             if (self.other) |*other| other.deinit(evaluator.releaseDomain(), evaluator.allocator());
             self.other = null;

@@ -235,7 +235,7 @@ pub fn ReadDriver(comptime Backend: type) type {
                 const count = switch (try self.backend.read(evaluator, self.buffer)) {
                     .pending => {
                         try evaluator.park(.{ .external = self.backend.readSource() });
-                        return .yielded;
+                        return .{ .yielded = .park };
                     },
                     .eof => @as(usize, 0),
                     .data => |count| count,
@@ -307,7 +307,7 @@ pub fn WriteDriver(comptime Backend: type) type {
                     error.InvalidByte => return evaluator.fail(.domain, Backend.invalid_byte_message),
                 };
                 switch (progress) {
-                    .pending => return .yielded,
+                    .pending => return .stepped,
                     .complete => |bytes| {
                         const permit = self.state.encoding.permit;
                         self.state.encoding.encoder.deinit();
@@ -323,14 +323,20 @@ pub fn WriteDriver(comptime Backend: type) type {
                 self.state = .{ .complete = bytes };
                 return .completed;
             }
-            return switch (try self.backend.write(evaluator, state.permit, source[state.offset..])) {
+            // Encoding and I/O share this turn's allowance. Do not offer the
+            // backend bytes the remaining budget cannot pay for.
+            const limit = @min(source.len - state.offset, evaluator.workBudget().remaining);
+            if (limit == 0) return .stepped;
+            return switch (try self.backend.write(evaluator, state.permit, source[state.offset..][0..limit])) {
                 .written => |count| progressed: {
                     state.offset += count;
-                    break :progressed .yielded;
+                    // A write is charged a unit per byte it moved.
+                    _ = evaluator.workBudget().take(count);
+                    break :progressed .stepped;
                 },
                 .pending => parked: {
                     try evaluator.park(.{ .external = state.permit.source() });
-                    break :parked .yielded;
+                    break :parked .{ .yielded = .park };
                 },
             };
         }

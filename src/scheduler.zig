@@ -156,19 +156,28 @@ const MonotonicClock = union(enum) {
 
 pub const Config = union(enum) {
     cooperative,
+    /// Cooperative, but the seed chooses which ready entry runs next and
+    /// whether a turn serves ready work or retirement. The scheduler promises
+    /// no order among ready work; this executor makes that contract checkable.
+    /// Admission stays first-come, since that order is promised.
+    cooperative_explored: u64,
     worker_pool: usize,
 
     pub fn validate(self: Config) error{InvalidWorkerCount}!void {
         switch (self) {
-            .cooperative => {},
+            .cooperative, .cooperative_explored => {},
             .worker_pool => |count| if (count == 0) return error.InvalidWorkerCount,
         }
     }
 
     fn isCooperative(self: Config) bool {
-        return self == .cooperative;
+        return self != .worker_pool;
     }
 };
+
+/// How far into the ready queue an explored executor looks for its next
+/// entry. A small window keeps the choice cheap and still reorders any pair.
+const explored_ready_window = 8;
 
 const TerminalState = union(enum) {
     outcome: Value,
@@ -276,6 +285,14 @@ const Admission = struct {
         waiting: struct { previous: ?*Admission, next: ?*Admission = null },
         granted,
     } = .idle,
+
+    fn coreState(self: *const Admission) core.AdmissionNode {
+        return switch (self.state) {
+            .idle => .idle,
+            .waiting => .waiting,
+            .granted => .granted,
+        };
+    }
 };
 
 const ExecutorArbitration = struct {
@@ -283,16 +300,20 @@ const ExecutorArbitration = struct {
     // a scalar kernel iteration. Return to execution/control between batches
     // even when running tasks continuously replenish the retirement queue.
     const retirement_quantum = 256;
-    const Turn = enum { ready, retirement };
-    next: Turn = .ready,
+    next: core.ExecutorTurn = .ready,
+    explored_due: ?core.ExecutorTurn = null,
 
-    fn choose(self: *ExecutorArbitration, ready: bool, retirement: bool) ?Turn {
-        if (!ready and !retirement) return null;
-        if (!ready) return .retirement;
-        if (!retirement) return .ready;
-        const selected = self.next;
-        self.next = if (selected == .ready) .retirement else .ready;
-        return selected;
+    fn chooseExplored(self: *ExecutorArbitration, ready: bool, retirement: bool, random: std.Random) ?core.ExecutorTurn {
+        const preferred: core.ExecutorTurn = if (random.boolean()) .ready else .retirement;
+        const decision = core.chooseExploredExecutorTurn(self.explored_due, preferred, ready, retirement) orelse return null;
+        self.explored_due = decision.next;
+        return decision.turn;
+    }
+
+    fn choose(self: *ExecutorArbitration, ready: bool, retirement: bool) ?core.ExecutorTurn {
+        const chosen = core.chooseExecutorTurn(self.next, ready, retirement) orelse return null;
+        self.next = chosen.next;
+        return chosen.turn;
     }
 };
 
@@ -760,21 +781,21 @@ const WaitSet = struct {
         };
     }
 
-    fn advanceSetup(self: *WaitSet) bool {
-        var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0) switch (self.state) {
+    /// One setup step draws on the scheduler's allowance for that step.
+    fn advanceSetup(self: *WaitSet, work: *poll.WorkBudget) bool {
+        while (!work.exhausted()) switch (self.state) {
             .initializing => |*initializing| {
                 if (initializing.registrations != self.registrations.len) {
                     self.registrations[initializing.registrations] = .{ .wait = self };
                     initializing.registrations += 1;
                     self.wake_handles += 1;
-                    budget -= 1;
+                    _ = work.spend();
                     continue;
                 }
                 if (initializing.canonical != self.canonical.len) {
                     self.canonical[initializing.canonical] = .{};
                     initializing.canonical += 1;
-                    budget -= 1;
+                    _ = work.spend();
                     continue;
                 }
                 const request = initializing.request;
@@ -793,7 +814,7 @@ const WaitSet = struct {
                     cursor.deinit();
                     cancelling.work = .next;
                     cancelling.index += 1;
-                    budget -|= cancellation_tree_quantum;
+                    _ = work.take(cancellation_tree_quantum);
                 },
                 .next => {
                     const join = cancelling.join;
@@ -807,7 +828,7 @@ const WaitSet = struct {
                     const cell = taskCell(list.atUnchecked(join.tasks, cancelling.index)).?;
                     cancelArriving(cell);
                     cancelling.work = .{ .active = .{ .root = &cell.scope } };
-                    budget -= 1;
+                    _ = work.spend();
                 },
             },
             .finding_duplicate => |*finding| {
@@ -848,7 +869,7 @@ const WaitSet = struct {
                     finding.index += 1;
                     finding.probe = 0;
                 } else finding.probe = finding.probe % self.canonical.len + 1;
-                budget -= 1;
+                _ = work.spend();
             },
             .registering => |registering| {
                 const cell = requestCell(registering.request, registering.index);
@@ -863,7 +884,7 @@ const WaitSet = struct {
                     .request = registering.request,
                     .index = registering.index + 1,
                 } };
-                budget -= 1;
+                _ = work.spend();
             },
             .registering_external => |request| {
                 const source = switch (request) {
@@ -890,7 +911,7 @@ const WaitSet = struct {
                 const registered = source.register(target) catch {
                     self.select(.out_of_memory);
                     self.state = .{ .release_request = request };
-                    budget -= 1;
+                    _ = work.spend();
                     continue;
                 };
                 switch (registered) {
@@ -901,7 +922,7 @@ const WaitSet = struct {
                     .registered => |registration| self.external_registration = registration,
                 }
                 self.state = .{ .release_request = request };
-                budget -= 1;
+                _ = work.spend();
             },
             .timer => |request| {
                 const milliseconds: ?u63 = switch (request) {
@@ -922,7 +943,7 @@ const WaitSet = struct {
             .release_request => |request| {
                 request.deinit(self.scheduler.releaseDomain());
                 self.state = .activating;
-                budget -= 1;
+                _ = work.spend();
             },
             .activating => {
                 // `activate` publishes the wait set, and publication is what
@@ -972,7 +993,9 @@ const WaitSet = struct {
         return terminal;
     }
 
-    fn advanceDelivery(self: *WaitSet) DeliveryProgress {
+    /// Registration cleanup and cell release share the one allowance the
+    /// scheduler lends this delivery step.
+    fn advanceDelivery(self: *WaitSet, work: *poll.WorkBudget) DeliveryProgress {
         switch (self.state) {
             .discard => |request| return self.advanceDiscard(request),
             .ready => {
@@ -997,14 +1020,13 @@ const WaitSet = struct {
         }
         const reason = self.deliveredReason();
         const delivery = &self.state.delivering;
-        var budget: usize = machine.kernel_poll_quantum;
         if (self.external_registration) |registration| {
             var owned = registration;
             self.external_registration = null;
             owned.cancel();
-            budget -= 1;
+            _ = work.spend();
         }
-        while (delivery.cleanup_index != self.registrations.len and budget != 0) : (budget -= 1) {
+        while (delivery.cleanup_index != self.registrations.len and work.spend()) {
             const registration = &self.registrations[delivery.cleanup_index];
             const command = if (registration.cell) |cell| command: {
                 std.Io.Threaded.mutexLock(&cell.mutex);
@@ -1032,8 +1054,7 @@ const WaitSet = struct {
         }
         std.Io.Threaded.mutexUnlock(&self.mutex);
 
-        var release_budget: usize = machine.kernel_poll_quantum;
-        while (delivery.cell_release_index != self.registrations.len and release_budget != 0) : (release_budget -= 1) {
+        while (delivery.cell_release_index != self.registrations.len and work.spend()) {
             const registration = &self.registrations[delivery.cell_release_index];
             if (registration.cell) |cell| self.scheduler.releaseDomain().releaseHeader(cell.handle());
             registration.cell = null;
@@ -1586,6 +1607,8 @@ const WorkerState = struct {
     admission_first: ?*Admission = null,
     admission_last: ?*Admission = null,
     admitted: usize = 0,
+    /// The seeded chooser of an explored cooperative executor.
+    explorer: ?std.Random.DefaultPrng = null,
     stopping: bool = false,
     started: bool = false,
     threads: []std.Thread = &.{},
@@ -2258,8 +2281,11 @@ pub const WorkerScheduler = enum(usize) {
             request,
         );
         _ = unit.takeParkRequest();
-        while (!wait.advanceSetup()) std.Thread.yield() catch
-            @panic("scheduler root wait setup yield failed");
+        while (true) {
+            var work = poll.WorkBudget.init(machine.kernel_poll_quantum);
+            if (wait.advanceSetup(&work)) break;
+            std.Thread.yield() catch @panic("scheduler root wait setup yield failed");
+        }
         if (state_.config.isCooperative()) {
             while (!root.completed()) {
                 if (!self.runNextCooperative())
@@ -2357,17 +2383,27 @@ pub const WorkerScheduler = enum(usize) {
 
     fn admissionLimit(self: *const WorkerScheduler) usize {
         return switch (self.privateState().config) {
-            .cooperative => 1,
+            .cooperative, .cooperative_explored => 1,
             .worker_pool => |workers| workers +| 1,
         };
     }
 
     /// Issue at most one grant per scheduler turn, before any newcomer can
     /// acquire capacity. Waking transfers the reservation, not a hint to race.
+    fn admissionPoolLocked(self: *const WorkerScheduler) core.AdmissionPool {
+        const state_ = self.privateState();
+        return .{
+            .admitted = state_.admitted,
+            .limit = self.admissionLimit(),
+            .queue_empty = state_.admission_first == null,
+            .backpressured = self.releaseDomain().evaluationBackpressured(),
+        };
+    }
+
     fn grantAdmissionLocked(self: *const WorkerScheduler) void {
         const state_ = self.privateState();
-        if (state_.admitted == self.admissionLimit() or self.releaseDomain().evaluationBackpressured()) return;
-        const node = state_.admission_first orelse return;
+        if (!core.decideGrant(self.admissionPoolLocked())) return;
+        const node = state_.admission_first.?;
         self.unlinkAdmissionLocked(node);
         node.state = .granted;
         state_.admitted += 1;
@@ -2385,27 +2421,25 @@ pub const WorkerScheduler = enum(usize) {
             .root => cancelled,
             .task => |cell| cell.cancelled.load(.acquire),
         };
-        if (cancelling) {
-            if (node.state == .waiting) self.unlinkAdmissionLocked(node);
-            return true;
+        const decision = core.decideAcquire(self.admissionPoolLocked(), node.coreState(), cancelling);
+        switch (decision.queue) {
+            .none => {},
+            .leave => self.unlinkAdmissionLocked(node),
+            // A task newly arriving here is executing its queue entry. Only a
+            // later grant may enqueue it again; direct admission stays local.
+            .join => {
+                node.state = .{ .waiting = .{ .previous = state_.admission_last } };
+                if (state_.admission_last) |last| last.state.waiting.next = node else state_.admission_first = node;
+                state_.admission_last = node;
+            },
         }
-        if (node.state == .granted) return true;
-        // A task newly arriving here is executing its queue entry. Only a
-        // later grant may enqueue it again; direct admission stays local.
-        if (node.state == .idle and state_.admission_first == null and
-            !self.releaseDomain().evaluationBackpressured())
-        {
-            if (state_.admitted < self.admissionLimit()) {
-                state_.admitted += 1;
-                node.state = .granted;
-                return true;
-            }
+        switch (decision.node) {
+            .idle => node.state = .idle,
+            .granted => node.state = .granted,
+            .waiting => std.debug.assert(node.state == .waiting),
         }
-        if (node.state == .idle) {
-            node.state = .{ .waiting = .{ .previous = state_.admission_last } };
-            if (state_.admission_last) |last| last.state.waiting.next = node else state_.admission_first = node;
-            state_.admission_last = node;
-        }
+        state_.admitted = decision.admitted;
+        if (decision.run) return true;
         // The root has no ready-queue entry and must also drive admission when
         // it is the only executor, including before workers have started.
         if (node.owner == .root) self.grantAdmissionLocked();
@@ -2416,14 +2450,12 @@ pub const WorkerScheduler = enum(usize) {
         const state_ = self.privateState();
         std.Io.Threaded.mutexLock(&state_.queue_mutex);
         defer std.Io.Threaded.mutexUnlock(&state_.queue_mutex);
-        switch (node.state) {
-            .idle => {}, // Cancellation bypasses ordinary admission.
-            .granted => {
-                state_.admitted -= 1;
-                node.state = .idle;
-            },
-            .waiting => unreachable,
-        }
+        // Cancellation bypasses ordinary admission, so an idle node holds
+        // nothing; a waiting node never runs a slice to release.
+        const decision = core.decideRelease(self.admissionPoolLocked(), node.coreState()) catch
+            @panic("a waiting evaluation released a slot it never held");
+        node.state = .idle;
+        state_.admitted = decision.admitted;
         self.grantAdmissionLocked();
     }
 
@@ -2431,7 +2463,7 @@ pub const WorkerScheduler = enum(usize) {
         const state_ = self.privateState();
         std.Io.Threaded.mutexLock(&state_.queue_mutex);
         defer std.Io.Threaded.mutexUnlock(&state_.queue_mutex);
-        if (cell.admission.state == .waiting) {
+        if (core.decideCancel(cell.admission.coreState()).leave_and_run) {
             self.unlinkAdmissionLocked(&cell.admission);
             self.enqueueLocked(&cell.queue);
         }
@@ -2439,6 +2471,7 @@ pub const WorkerScheduler = enum(usize) {
 
     fn popLocked(self: *const WorkerScheduler) ?*QueueEntry {
         const state_ = self.privateState();
+        if (state_.explorer) |*explorer| return popExploredLocked(state_, explorer.random());
         const entry = state_.queue_first orelse return null;
         state_.queue_first = switch (entry.membership) {
             .linked => |next| next,
@@ -2447,6 +2480,27 @@ pub const WorkerScheduler = enum(usize) {
         if (state_.queue_first == null) state_.queue_last = null;
         entry.membership = .detached;
         return entry;
+    }
+
+    fn popExploredLocked(state_: *WorkerState, random: std.Random) ?*QueueEntry {
+        var available: usize = 0;
+        var cursor = state_.queue_first;
+        while (cursor) |entry| : (cursor = entry.membership.linked) {
+            available += 1;
+            if (available == explored_ready_window) break;
+        }
+        if (available == 0) return null;
+        var previous: ?*QueueEntry = null;
+        var chosen = state_.queue_first.?;
+        for (0..random.uintLessThan(usize, available)) |_| {
+            previous = chosen;
+            chosen = chosen.membership.linked.?;
+        }
+        const following = chosen.membership.linked;
+        if (previous) |before| before.membership = .{ .linked = following } else state_.queue_first = following;
+        if (following == null) state_.queue_last = previous;
+        chosen.membership = .detached;
+        return chosen;
     }
 
     fn runNextCooperative(self: *const WorkerScheduler) bool {
@@ -2459,7 +2513,12 @@ pub const WorkerScheduler = enum(usize) {
         const state_ = self.privateState();
         std.Io.Threaded.mutexLock(&state_.queue_mutex);
         self.grantAdmissionLocked();
-        const turn = arbitration.choose(state_.queue_first != null, self.releaseDomain().hasAvailable()) orelse {
+        const has_ready = state_.queue_first != null;
+        const has_retirement = self.releaseDomain().hasAvailable();
+        const turn = (if (state_.explorer) |*explorer|
+            arbitration.chooseExplored(has_ready, has_retirement, explorer.random())
+        else
+            arbitration.choose(has_ready, has_retirement)) orelse {
             std.Io.Threaded.mutexUnlock(&state_.queue_mutex);
             return false;
         };
@@ -2532,12 +2591,14 @@ pub const WorkerScheduler = enum(usize) {
             return;
         }
         std.debug.assert(parking.command == .register_wait);
-        if (!wait.advanceSetup()) self.enqueueTask(cell);
+        var work = poll.WorkBudget.init(machine.kernel_poll_quantum);
+        if (!wait.advanceSetup(&work)) self.enqueueTask(cell);
     }
 
     fn advanceParkSetup(self: *const WorkerScheduler, cell: *TaskCell) void {
         const wait = cell.waitset.?;
-        if (!wait.advanceSetup()) self.enqueueTask(cell);
+        var work = poll.WorkBudget.init(machine.kernel_poll_quantum);
+        if (!wait.advanceSetup(&work)) self.enqueueTask(cell);
     }
 
     fn finish(self: *const WorkerScheduler, cell: *TaskCell, disposition: Finish) void {
@@ -2773,7 +2834,8 @@ pub const WorkerScheduler = enum(usize) {
     }
 
     fn runWait(self: *const WorkerScheduler, wait: *WaitSet) void {
-        switch (wait.advanceDelivery()) {
+        var work = poll.WorkBudget.init(machine.kernel_poll_quantum);
+        switch (wait.advanceDelivery(&work)) {
             .yielded => self.enqueueWait(wait),
             .waiting, .complete => {},
         }
@@ -2836,6 +2898,10 @@ pub const Scheduler = enum(usize) {
                 .releases = heap.hostDomain(host),
                 .config = config,
                 .clock = .init(clock),
+                .explorer = switch (config) {
+                    .cooperative_explored => |seed| .init(seed),
+                    .cooperative, .worker_pool => null,
+                },
             },
         };
         backing.worker_facade = @enumFromInt(@intFromPtr(&backing.worker));
@@ -3013,7 +3079,7 @@ const TasksDriver = struct {
             }
             std.Io.Threaded.mutexUnlock(&scheduler_state.tree_mutex);
             pass.releaseRetained(self.scheduler.releaseDomain());
-            return .yielded;
+            return .{ .yielded = .wait };
         };
         const pass_epoch = if (old_pass) |pass| pass.tree_epoch else scheduler_state.tree_epoch;
         var current = if (old_pass) |pass| switch (pass.position) {

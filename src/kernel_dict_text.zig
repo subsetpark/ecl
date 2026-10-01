@@ -110,7 +110,7 @@ const StrDriver = struct {
                         .bytes = bytes,
                         .cursor = .init(evaluator.allocator(), bytes),
                     } };
-                    break :transitioned .yielded;
+                    break :transitioned .stepped;
                 },
             },
             .materializing => |*materializing| switch (materializing.cursor.advance(evaluator.workBudget()) catch |err| switch (err) {
@@ -464,7 +464,7 @@ fn TypedListPutDriver(comptime kind: value.HeapKind) type {
                     offset += piece.len();
                 }
             }
-            if (!self.cursor.complete()) return .yielded;
+            if (!self.cursor.complete()) return .stepped;
             self.source.deinit(evaluator.releaseDomain(), evaluator.allocator());
             return .{ .output = self.writer.borrowMut().finish() };
         }
