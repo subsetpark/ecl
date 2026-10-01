@@ -455,6 +455,22 @@ pub fn chooseExecutorTurn(
     return .{ .turn = next, .next = if (next == .ready) .retirement else .ready };
 }
 
+/// Explore both orders in each contested pair. A missing class leaves the
+/// owed turn intact; continuously available classes receive service at least
+/// once in every three contested turns, even across pair boundaries.
+pub fn chooseExploredExecutorTurn(
+    due: ?ExecutorTurn,
+    preferred: ExecutorTurn,
+    ready: bool,
+    retirement: bool,
+) ?struct { turn: ExecutorTurn, next: ?ExecutorTurn } {
+    if (!ready and !retirement) return null;
+    if (!ready) return .{ .turn = .retirement, .next = due };
+    if (!retirement) return .{ .turn = .ready, .next = due };
+    if (due) |turn| return .{ .turn = turn, .next = null };
+    return .{ .turn = preferred, .next = if (preferred == .ready) .retirement else .ready };
+}
+
 test "external readiness and cancellation still publish one wait winner" {
     const selected = try decideWait(.registering, .{ .candidate = .external_ready });
     try std.testing.expectEqual(Wait{ .selected = .external_ready }, selected.next);
@@ -641,6 +657,31 @@ test "executor turns alternate when both classes are available" {
                     try std.testing.expectEqual(next, chosen.turn);
                     try std.testing.expect(chosen.next != chosen.turn);
                 } else try std.testing.expectEqual(next, chosen.next);
+            }
+        }
+    }
+}
+
+test "explored executor pairs serve both classes with at most two consecutive selections" {
+    for (0..64) |seed| {
+        var random = std.Random.DefaultPrng.init(seed);
+        var due: ?ExecutorTurn = null;
+        var previous: ?ExecutorTurn = null;
+        var consecutive: usize = 0;
+        for (0..128) |_| {
+            const decision = chooseExploredExecutorTurn(due, if (random.random().boolean()) .ready else .retirement, true, true).?;
+            due = decision.next;
+            const first = decision.turn;
+            // A temporarily empty queue must not erase the owed turn.
+            try std.testing.expectEqual(null, chooseExploredExecutorTurn(due, .ready, false, false));
+            const owed = chooseExploredExecutorTurn(due, if (random.random().boolean()) .ready else .retirement, true, true).?;
+            due = owed.next;
+            const second = owed.turn;
+            try std.testing.expect(first != second);
+            for ([_]ExecutorTurn{ first, second }) |turn| {
+                consecutive = if (previous == turn) consecutive + 1 else 1;
+                try std.testing.expect(consecutive <= 2);
+                previous = turn;
             }
         }
     }

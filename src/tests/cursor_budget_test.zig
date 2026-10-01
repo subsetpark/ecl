@@ -565,6 +565,18 @@ fn dictProperties(recipe: testgen.ValueRecipe) anyerror!void {
         8 * weightOf(keys) + 8 * weight(probe) + 16,
         seedOf(recipe),
     );
+    // Select an integer outside the dictionary, including when generated
+    // keys themselves are integers. At most keys.len + 1 probes suffice.
+    var absent: Value = .{ .int = 0 };
+    while (try dict.getWithAllocator(allocator, dictionary, absent) != null) absent.int += 1;
+    try checkCursor(
+        FindAdapter,
+        &fixture,
+        .{ .dictionary = dictionary, .key = absent },
+        null,
+        8 * weightOf(keys) + 24,
+        seedOf(recipe),
+    );
 }
 
 fn equalityProperties(recipe: testgen.ValueRecipe) anyerror!void {
@@ -651,6 +663,22 @@ test "cursor budget: list materializers pause only when their grant is spent" {
 
 test "cursor budget: dict build and lookup pause only when their grant is spent" {
     try minish.check(allocator, testgen.value_recipe_generator, dictProperties, options);
+}
+
+test "cursor budget: absent keys finish in linear and indexed dictionaries at both grains" {
+    var fixture = Fixture.init();
+    defer fixture.deinit();
+    for ([_]usize{ 1, 16, 17, 40 }) |count| {
+        var pairs: [40]dict.Pair = undefined;
+        for (pairs[0..count], 0..) |*pair, index| pair.* = .{
+            .{ .int = @intCast(index) }, .{ .int = @intCast(index + 100) },
+        };
+        const dictionary = try dict.fromPairs(allocator, fixture.releases(), pairs[0..count]);
+        defer fixture.release(dictionary);
+        const absent: Value = .{ .int = @intCast(count) };
+        try std.testing.expectEqual(null, try dict.getWithAllocator(allocator, dictionary, absent));
+        try checkCursor(FindAdapter, &fixture, .{ .dictionary = dictionary, .key = absent }, null, 8 * count + 24, count);
+    }
 }
 
 test "cursor budget: structural match and hash pause only when their grant is spent" {

@@ -323,7 +323,11 @@ pub fn WriteDriver(comptime Backend: type) type {
                 self.state = .{ .complete = bytes };
                 return .completed;
             }
-            return switch (try self.backend.write(evaluator, state.permit, source[state.offset..])) {
+            // Encoding and I/O share this turn's allowance. Do not offer the
+            // backend bytes the remaining budget cannot pay for.
+            const limit = @min(source.len - state.offset, evaluator.workBudget().remaining);
+            if (limit == 0) return .stepped;
+            return switch (try self.backend.write(evaluator, state.permit, source[state.offset..][0..limit])) {
                 .written => |count| progressed: {
                     state.offset += count;
                     // A write is charged a unit per byte it moved.

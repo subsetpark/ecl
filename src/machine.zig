@@ -5036,7 +5036,9 @@ pub const Machine = struct {
                         return .stepped;
                     }
                     try self.buffer.appendSlice(self.allocator, self.chunk[0..amount]);
-                    return .stepped;
+                    // Give ready units a turn before another potentially
+                    // blocking host read, even on a continuously ready stream.
+                    return .{ .yielded = .wait };
                 },
                 .text => |*text| switch (text.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,

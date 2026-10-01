@@ -1101,6 +1101,9 @@ cooperatively on the calling thread or on a fixed worker pool; both modes use
 the same machine, queues, wait protocol, task tree, and retirement domain.
 Cooperative mode gives deterministic tests and allocation-failure testing
 the same semantics as worker execution.
+Ready work and retirement alternate when both are available. Seeded exploration
+randomizes the order within pairs of turns, servicing both classes in each pair;
+neither class can be passed over for more than two contested turns.
 
 ### The policy is a functional core with an imperative shell
 
@@ -1130,7 +1133,9 @@ collection size, including for a body that dispatches no form.
 A unit has one kernel budget per turn for its logical work. Every cursor takes
 the budget it is lent and hands the same budget to the cursors it drives, so
 nested work cannot begin an allowance of its own, and a hand-off is charged
-by the cursor that does the work rather than ahead of it. Exhausting the
+by the cursor that does the work rather than ahead of it. Byte writes are
+bounded before backend I/O by the allowance remaining after encoding, and
+charge for the bytes moved. Exhausting the
 budget ends the turn, including when a driver completes or delivers output;
 no successor driver or evaluation runs on an exhausted allowance. An ordinary
 cancellable completion settles exhaustion with a cancellation poll before

@@ -301,6 +301,14 @@ const ExecutorArbitration = struct {
     // even when running tasks continuously replenish the retirement queue.
     const retirement_quantum = 256;
     next: core.ExecutorTurn = .ready,
+    explored_due: ?core.ExecutorTurn = null,
+
+    fn chooseExplored(self: *ExecutorArbitration, ready: bool, retirement: bool, random: std.Random) ?core.ExecutorTurn {
+        const preferred: core.ExecutorTurn = if (random.boolean()) .ready else .retirement;
+        const decision = core.chooseExploredExecutorTurn(self.explored_due, preferred, ready, retirement) orelse return null;
+        self.explored_due = decision.next;
+        return decision.turn;
+    }
 
     fn choose(self: *ExecutorArbitration, ready: bool, retirement: bool) ?core.ExecutorTurn {
         const chosen = core.chooseExecutorTurn(self.next, ready, retirement) orelse return null;
@@ -2507,10 +2515,10 @@ pub const WorkerScheduler = enum(usize) {
         self.grantAdmissionLocked();
         const has_ready = state_.queue_first != null;
         const has_retirement = self.releaseDomain().hasAvailable();
-        if (state_.explorer) |*explorer| {
-            if (has_ready and has_retirement) arbitration.next = if (explorer.random().boolean()) .ready else .retirement;
-        }
-        const turn = arbitration.choose(has_ready, has_retirement) orelse {
+        const turn = (if (state_.explorer) |*explorer|
+            arbitration.chooseExplored(has_ready, has_retirement, explorer.random())
+        else
+            arbitration.choose(has_ready, has_retirement)) orelse {
             std.Io.Threaded.mutexUnlock(&state_.queue_mutex);
             return false;
         };
