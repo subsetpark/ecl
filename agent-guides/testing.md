@@ -226,7 +226,10 @@ reason before selecting the matrix.
       echo "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00  /tmp/zig.tar.xz" | sha256sum -c -
       mkdir -p /tmp/zig
       tar -C /tmp/zig --strip-components=1 -xf /tmp/zig.tar.xz
-      mkdir -p /build && cp -a /work/. /build/ && cd /build
+      # Copy sources only; a host .zig-cache can be hundreds of GB and fills the VM disk.
+      mkdir -p /build
+      tar -C /work --exclude=./.zig-cache --exclude=./zig-out --exclude=./.claude -cf - . | tar -C /build -xf -
+      cd /build
       timeout 20m /tmp/zig/zig build --cache-dir /tmp/ecl-cache \
         --global-cache-dir /tmp/ecl-global test-tsan < /dev/null
     '
