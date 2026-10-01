@@ -215,9 +215,11 @@ reason before selecting the matrix.
   the container rather than building in the read-only mount: suites that call
   `std.testing.tmpDir` create their directory under the working directory, so a read-only
   `-w /work` aborts them with `ReadOnlyFileSystem` before any race can be observed.
+  Under amd64 emulation the test step alone takes about 20 minutes; an exit of 124 is
+  the timeout, not a test result, so read the build summary before the exit code.
 
   ```sh
-  timeout 25m docker run --rm --platform linux/amd64 \
+  timeout 50m docker run --rm --platform linux/amd64 \
     -v "$PWD":/work:ro ubuntu:24.04 bash -euxo pipefail -c '
       export DEBIAN_FRONTEND=noninteractive
       apt-get update
@@ -230,7 +232,7 @@ reason before selecting the matrix.
       mkdir -p /build
       tar -C /work --exclude=./.zig-cache --exclude=./zig-out --exclude=./.claude -cf - . | tar -C /build -xf -
       cd /build
-      timeout 20m /tmp/zig/zig build --cache-dir /tmp/ecl-cache \
+      timeout 45m /tmp/zig/zig build --cache-dir /tmp/ecl-cache \
         --global-cache-dir /tmp/ecl-global test-tsan < /dev/null
     '
   ```
