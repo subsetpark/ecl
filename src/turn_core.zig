@@ -87,6 +87,21 @@ pub fn beginTurn(quantum: usize) poll.WorkBudget {
     return .init(quantum);
 }
 
+/// Whether another driver, continuation, or Eval may start this turn. A
+/// completion or delivery can spend the last unit, so nothing runs after it
+/// on an exhausted budget.
+pub fn mayDispatch(budget: poll.WorkBudget) bool {
+    return !budget.exhausted();
+}
+
+/// Whether a cancellable completion must observe cancellation before it
+/// hands execution onward: its last charge ended the turn, and the work it
+/// hands to may have no later safe point. Committed delivery and failure
+/// cleanup never ask.
+pub fn completionPolls(budget: poll.WorkBudget) bool {
+    return budget.exhausted();
+}
+
 const remainders = [_]usize{ 0, 1, 2, 3, 64, 65_535, 65_536 };
 const outcomes = [_]Outcome{ .stepped, .{ .yielded = .park }, .{ .yielded = .wait }, .{ .yielded = .settle } };
 
@@ -162,5 +177,63 @@ test "a stepped driver cannot keep the turn past one quantum" {
             try std.testing.expect(steps < quantum);
         }
         try std.testing.expectEqual(quantum, steps);
+    }
+}
+
+/// One unit of driver work in the turn model below.
+const Event = struct {
+    kind: enum { stepped, cancellable_completion, committed_completion },
+    charge: usize,
+};
+
+/// Runs one turn the way the machine loop composes these decisions and
+/// checks it against the turn contract: nothing starts on an exhausted
+/// budget, and cancellation is observed exactly when cancellable work ends
+/// the turn.
+fn checkTurn(quantum: usize, events: []const Event) !void {
+    var budget = beginTurn(quantum);
+    for (events) |event| {
+        if (!mayDispatch(budget)) {
+            try std.testing.expectEqual(@as(usize, 0), budget.remaining);
+            return;
+        }
+        const before = budget.remaining;
+        const charged = charge(&budget, event.charge);
+        const ends_turn = event.charge != 0 and event.charge >= before;
+        switch (event.kind) {
+            .stepped => {
+                const decision = try afterDriver(.stepped, &budget, false);
+                const step_ends = ends_turn or before -| event.charge <= 1;
+                try std.testing.expectEqual(step_ends, charged or decision.poll_cancellation);
+                if (decision.action == .end_turn) return;
+            },
+            .cancellable_completion => {
+                try std.testing.expectEqual(ends_turn, charged);
+                try std.testing.expectEqual(ends_turn, completionPolls(budget));
+            },
+            // Committed work never consults the completion poll; its charge
+            // still exhausts the budget, which ends the turn below.
+            .committed_completion => try std.testing.expectEqual(ends_turn, budget.exhausted()),
+        }
+    }
+}
+
+test "turn decisions compose: no work starts on an exhausted budget" {
+    const kinds = [_]@FieldType(Event, "kind"){ .stepped, .cancellable_completion, .committed_completion };
+    const charges = [_]usize{ 0, 1, 2 };
+    const per_event = kinds.len * charges.len;
+    for ([_]usize{ 1, 2, 3 }) |quantum| {
+        var code: usize = 0;
+        const total = per_event * per_event * per_event * per_event;
+        while (code < total) : (code += 1) {
+            var events: [4]Event = undefined;
+            var rest = code;
+            for (&events) |*event| {
+                const choice = rest % per_event;
+                rest /= per_event;
+                event.* = .{ .kind = kinds[choice / charges.len], .charge = charges[choice % charges.len] };
+            }
+            try checkTurn(quantum, &events);
+        }
     }
 }

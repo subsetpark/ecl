@@ -5666,7 +5666,7 @@ pub const Machine = struct {
     /// A cancellable completion settles its last charge before transferring
     /// execution. Committed delivery and failure cleanup must not use this.
     pub fn pollCancellableCompletion(self: *Machine) MachineError!void {
-        if (self.workBudget().exhausted()) try self.pollKernel();
+        if (turn_core.completionPolls(self.workBudget().*)) try self.pollKernel();
     }
     /// Charges work that has already been committed, such as an inline kernel
     /// block that cannot stop part way. A charge that reaches the end of the
@@ -6815,7 +6815,7 @@ fn loop(self: *Machine) MachineError!RunStatus {
     while (true) {
         // Completion and output delivery may spend the last unit too. Never
         // enter another driver, continuation, or Eval with an empty allowance.
-        if (self.unit.kernel_budget.exhausted()) return .yielded;
+        if (!turn_core.mayDispatch(self.unit.kernel_budget)) return .yielded;
         // Admission reserves progress, not a whole instruction quantum of
         // allocation after pressure rises. Complete at least one transition
         // before yielding so a granted waiter cannot repeatedly lose its turn.
