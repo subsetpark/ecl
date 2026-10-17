@@ -2430,24 +2430,40 @@ pub fn Owned(comptime T: type) type {
         const Self = @This();
         pub const owned_payload = T;
 
-        item: ?T,
+        // A flag beside the payload rather than `?T`: assigning `null` to an
+        // optional of a large `T` lowers to a memset of the whole payload,
+        // and per-element cursors are emptied once per element.
+        // SAFETY: `item` is read only while `present` is set.
+        item: T,
+        present: bool,
+
+        /// An empty marker, for an owner whose payload arrives later.
+        // SAFETY: `present` is false, so no accessor reads `item` until
+        // `init` replaces the whole marker.
+        pub const none: Self = .{ .item = undefined, .present = false };
 
         pub fn init(item: T) Self {
-            return .{ .item = item };
+            return .{ .item = item, .present = true };
+        }
+
+        pub fn isPresent(self: *const Self) bool {
+            return self.present;
         }
 
         pub fn borrow(self: *const Self) T {
-            return self.item.?;
+            std.debug.assert(self.present);
+            return self.item;
         }
 
         pub fn borrowMut(self: *Self) *T {
-            return &self.item.?;
+            std.debug.assert(self.present);
+            return &self.item;
         }
 
         pub fn take(self: *Self) T {
-            const item = self.item.?;
-            self.item = null;
-            return item;
+            std.debug.assert(self.present);
+            self.present = false;
+            return self.item;
         }
 
         pub fn deinit(
@@ -2455,8 +2471,8 @@ pub fn Owned(comptime T: type) type {
             releases: *ReleaseDomain,
             allocator: std.mem.Allocator,
         ) void {
-            if (self.item) |*item| disposeOwned(T, releases, allocator, item);
-            self.item = null;
+            if (self.present) disposeOwned(T, releases, allocator, &self.item);
+            self.present = false;
         }
     };
 }

@@ -701,6 +701,48 @@ control) left the mixed short-task and cancellation p50 values within 6% in
 both directions at one and eight workers. Eight-worker cancellation p95/p99
 tails above 500 µs appeared once on each side and did not reproduce.
 
+## Empty markers without payload clears — 2026-10-17
+
+Zig 0.16 lowers an assignment of `null` to `?T`, or of a void variant to a
+`union(enum)`, as a store of the whole constant, including the payload bytes
+that are logically undefined. LLVM turns that into `memset(dest, 0, @sizeOf)`,
+and on Linux the linked `memset` is compiler-rt's byte-at-a-time loop rather
+than glibc's. Three such stores ran once per element on every generic
+pervasion step: `ChunkStack.pop` emptying its inline `union(enum) { empty,
+item: Frame }` slot (824 bytes, introduced by the inline-first A/B above),
+`Owned(PervadeCursor)` emptying its `?PervadeCursor` (944 bytes), and
+`ReductionDriver` setting its `?Owned(PervadeCursor)` to `null` (952 bytes).
+`ChunkStack` now pairs an undefined slot with a `first_full` flag, `Owned`
+pairs its payload with a `present` flag, and `ReductionDriver` holds a
+non-optional `Owned` that starts as `.none`. Emptying is a one-byte store.
+
+Callgrind instruction counts, Zig 0.16.0 ReleaseFast `-Dcpu=native`, x86_64
+Linux (Intel Core Ultra 5 125U), control `026ef29`:
+
+| Workload | Control Ir | Treatment Ir | Control memset share | Treatment memset share |
+|---|---:|---:|---:|---:|
+| 300 `0.0 (+) fold`s over a mixed 1,000-element vector | 1.81 G | 0.35 G | 81.0% | <0.1% |
+| `1000 spectralnorm` (weighted columns) | 1.30 G | 1.02 G | 22.5% | <0.1% |
+
+Native wall-clock medians, same build, pinned to one P-core, 7–9 shuffled
+runs; internal milliseconds unless marked as whole process:
+
+| Case | Control | Treatment |
+|---|---:|---:|
+| 1,000 mixed `sum`s of 1,000 elements | 499 | 76 |
+| 1,000 nested `[0.0] (+) fold`s of 1,000 elements | 686 | 177 |
+| 1,000 mixed `v v +` | 257 | 183 |
+| 10 row-wise `(+) fold1` over 2,000×2,000 floats | 38 | 26 |
+| `2000 spectralnorm`, whole process | 474 | 418 |
+| `1000 spectralnorm`, whole process | 144 | 119 |
+
+Typed kernels, transpose, and peak RSS are unchanged. The compiler-rt routine
+itself is left alone: with these stores gone it is under 0.1% of both profiles,
+and arm64 macOS already links the platform `memset`. Other large optional or
+union clears remain outside per-element paths, chiefly in port and native-module
+setup. The generic path's largest remaining cost is `memcpy` of the cursor and
+its frames by value, about 320 instructions per element.
+
 ## CSV and table primitives — 2026-09-10
 
 Baseline is the committed columnar implementation `05454f6`; updated is the
