@@ -1097,7 +1097,9 @@ const ReductionDriver = struct {
     initialized: usize = 0,
     materializing: bool = false,
     materializer: ?heap.Owned(list.ValueMaterializer),
-    cursor: ?heap.Owned(numeric.PervadeCursor) = null,
+    // Not optional: emptying a `?Owned` of this size clears it whole, and
+    // the cursor is emptied once per row.
+    cursor: heap.Owned(numeric.PervadeCursor) = .none,
 
     pub fn advance(
         evaluator: *Machine,
@@ -1105,7 +1107,7 @@ const ReductionDriver = struct {
     ) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (!self.materializing and self.initialized < self.input.list.length()) {
-            if (self.cursor == null) {
+            if (!self.cursor.isPresent()) {
                 const row = list.atUnchecked(self.input, self.initialized);
                 // A fold's intermediate accumulator is solely this driver's,
                 // so the step may take over its buffer. A seed is borrowed
@@ -1128,12 +1130,11 @@ const ReductionDriver = struct {
                         row,
                     ));
             }
-            const next = switch (try self.cursor.?.borrowMut().advance(evaluator, evaluator.workBudget())) {
+            const next = switch (try self.cursor.borrowMut().advance(evaluator, evaluator.workBudget())) {
                 .pending => return .stepped,
                 .complete => |result| result,
             };
-            self.cursor.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
-            self.cursor = null;
+            self.cursor.deinit(evaluator.releaseDomain(), evaluator.allocator());
             if (self.scan) {
                 self.results.?.borrowMut().appendOwned(next);
                 self.accumulator.borrowMut().* = .{ .borrowed = next };

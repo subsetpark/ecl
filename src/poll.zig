@@ -475,7 +475,6 @@ pub fn ChunkStack(comptime T: type) type {
         const Self = @This();
         pub const owned_disposal: heap.OwnedDisposal = .retire;
         const chunk_len = 256;
-        const First = union(enum) { empty, item: T };
         const Chunk = struct {
             retirement: heap.ReleaseDomain.Retirement = .{},
             previous: ?*Chunk,
@@ -497,8 +496,14 @@ pub fn ChunkStack(comptime T: type) type {
         allocator: std.mem.Allocator,
         // This owns only the entry. In particular it has no pointer back into
         // Self, so moving a cursor before polling cannot leave an internal
-        // link aimed at the cursor's old inline storage.
-        first: First = .empty,
+        // link aimed at the cursor's old inline storage. It is a flag beside
+        // an undefined slot rather than a `union(enum) { empty, item: T }`
+        // because assigning the empty variant of a union over a large `T`
+        // lowers to a memset of the whole payload, on every pop.
+        // SAFETY: `first` is read only while `first_full` is set, after push
+        // or pushReserved initializes it.
+        first: T = undefined,
+        first_full: bool = false,
         top: ?*Chunk = null,
 
         pub fn init(allocator: std.mem.Allocator) Self {
@@ -510,17 +515,18 @@ pub fn ChunkStack(comptime T: type) type {
                 self.top = chunk.previous;
                 self.allocator.destroy(chunk);
             }
-            self.first = .empty;
+            self.first_full = false;
         }
         pub fn retire(self: *Self, releases: *heap.ReleaseDomain) void {
             if (self.top) |top| releases.retire(top, &top.retirement);
             self.top = null;
-            self.first = .empty;
+            self.first_full = false;
         }
 
         pub fn push(self: *Self, item: T) error{OutOfMemory}!void {
             if (self.firstEmpty()) {
-                self.first = .{ .item = item };
+                self.first = item;
+                self.first_full = true;
                 return;
             }
             if (self.top == null or self.top.?.len == chunk_len) {
@@ -543,7 +549,8 @@ pub fn ChunkStack(comptime T: type) type {
         /// Commits one item after `reserve`; ownership transfer cannot fail.
         pub fn pushReserved(self: *Self, item: T) void {
             if (self.firstEmpty()) {
-                self.first = .{ .item = item };
+                self.first = item;
+                self.first_full = true;
                 return;
             }
             self.pushHeap(item);
@@ -565,22 +572,15 @@ pub fn ChunkStack(comptime T: type) type {
                 }
                 return result;
             }
-            return switch (self.first) {
-                .empty => null,
-                .item => |item| result: {
-                    self.first = .empty;
-                    break :result item;
-                },
-            };
+            if (!self.first_full) return null;
+            self.first_full = false;
+            return self.first;
         }
 
         pub fn topPtr(self: *Self) ?*T {
             if (self.newestNonemptyChunk()) |location|
                 return &location.chunk.items[location.chunk.len - 1];
-            return switch (self.first) {
-                .empty => null,
-                .item => |*item| item,
-            };
+            return if (self.first_full) &self.first else null;
         }
 
         pub fn isEmpty(self: *const Self) bool {
@@ -591,7 +591,7 @@ pub fn ChunkStack(comptime T: type) type {
         }
 
         fn firstEmpty(self: *const Self) bool {
-            return self.first == .empty;
+            return !self.first_full;
         }
 
         fn allocateChunk(self: *Self) error{OutOfMemory}!void {
