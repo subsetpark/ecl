@@ -2438,6 +2438,8 @@ pub fn Owned(comptime T: type) type {
         present: bool,
 
         /// An empty marker, for an owner whose payload arrives later.
+        // SAFETY: `present` is false, so no accessor reads `item` until
+        // `init` replaces the whole marker.
         pub const none: Self = .{ .item = undefined, .present = false };
 
         pub fn init(item: T) Self {
