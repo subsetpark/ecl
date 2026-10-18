@@ -179,6 +179,19 @@ pub const PervadeCursor = struct {
     /// candidate: a descended element with one reference is owned by its
     /// spine, not by this operation.
     root: ?heap.OwnedValue = null,
+    /// The whole operation, until the first `advance` starts it.
+    root_child: ?Child = null,
+
+    /// One pervasion step: an operation over operands that may themselves be
+    /// containers. Starting it either finishes it at once or leaves exactly one
+    /// frame on top that will.
+    const Child = union(enum) { binary: BinaryNode, unary: UnaryNode };
+    const Started = enum { finished, framed };
+    /// What one list child is charged: the units its node frame and its
+    /// parent's return visit cost when every child was pushed and popped.
+    /// Started in place, a child keeps that weight rather than changing the
+    /// turn length; its real weight is a separate measurement.
+    const list_child_units = 2;
 
     const BinaryNode = struct {
         operation: BinaryOp,
@@ -228,6 +241,10 @@ pub const PervadeCursor = struct {
         candidate: usize = 0,
         pair_count: usize = 0,
         waiting: bool = false,
+        /// The keys at `index` and `candidate` matched, and their child has
+        /// not yet paid its start unit. Kept so a comparison that spent the
+        /// turn's last unit is not repeated when the frame resumes.
+        matched: bool = false,
         match_cursor: ?equal.MatchCursor = null,
         materializer: ?dict.Materializer = null,
 
@@ -244,15 +261,12 @@ pub const PervadeCursor = struct {
     /// lives behind a pointer; dictionary pervasion already allocates its
     /// pairs, and list and typed frames stay small.
     const Frame = union(enum) {
-        binary: BinaryNode,
-        unary: UnaryNode,
         list: ListFrame,
         dictionary: *DictFrame,
         typed: NestedTyped,
 
         fn deinit(self: *Frame, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
             switch (self.*) {
-                .binary, .unary => {},
                 .list => |*frame| frame.deinit(releases),
                 .dictionary => |frame| {
                     frame.deinit(releases, allocator);
@@ -268,14 +282,15 @@ pub const PervadeCursor = struct {
     /// possibly under children it pushed; `pending` ends the turn.
     const FrameStep = enum { pending, progressed, done };
 
-    /// Typed frames charge the unit through `Context`; list and dict frames
-    /// that are materializing or comparing hand their work to that cursor.
+    /// Typed frames charge the unit through `Context`. A list frame spends one
+    /// unit per child it starts and lends the budget to its materializer, and a
+    /// dict frame that is materializing or comparing hands its work to that
+    /// cursor.
     fn delegates(frame: *const Frame) bool {
         return switch (frame.*) {
-            .binary, .unary => false,
-            .typed => true,
-            .list => |*list_frame| !list_frame.waiting and list_frame.index == list_frame.values.capacity(),
-            .dictionary => |dict_frame| dict_frame.phase == .materialize or dict_frame.match_cursor != null,
+            .typed, .list => true,
+            .dictionary => |dict_frame| dict_frame.phase == .materialize or
+                dict_frame.match_cursor != null or dict_frame.matched,
         };
     }
 
@@ -286,16 +301,18 @@ pub const PervadeCursor = struct {
         left: Value,
         right: Value,
     ) error{OutOfMemory}!PervadeCursor {
-        var frames = poll.ChunkStack(Frame).init(allocator);
-        errdefer frames.deinit();
-        try frames.push(.{ .binary = .{
-            .operation = operation,
-            .left = left,
-            .right = right,
-            .depth = 0,
-            .logical_index = null,
-        } });
-        return .{ .releases = releases, .allocator = allocator, .frames = frames };
+        return .{
+            .releases = releases,
+            .allocator = allocator,
+            .frames = poll.ChunkStack(Frame).init(allocator),
+            .root_child = .{ .binary = .{
+                .operation = operation,
+                .left = left,
+                .right = right,
+                .depth = 0,
+                .logical_index = null,
+            } },
+        };
     }
 
     /// Like `initBinary`, but consumes `left`: the cursor owns it on success
@@ -321,15 +338,17 @@ pub const PervadeCursor = struct {
         operation: UnaryOp,
         operand: Value,
     ) error{OutOfMemory}!PervadeCursor {
-        var frames = poll.ChunkStack(Frame).init(allocator);
-        errdefer frames.deinit();
-        try frames.push(.{ .unary = .{
-            .operation = operation,
-            .operand = operand,
-            .depth = 0,
-            .logical_index = null,
-        } });
-        return .{ .releases = releases, .allocator = allocator, .frames = frames };
+        return .{
+            .releases = releases,
+            .allocator = allocator,
+            .frames = poll.ChunkStack(Frame).init(allocator),
+            .root_child = .{ .unary = .{
+                .operation = operation,
+                .operand = operand,
+                .depth = 0,
+                .logical_index = null,
+            } },
+        };
     }
 
     pub fn deinit(self: *PervadeCursor) void {
@@ -354,6 +373,12 @@ pub const PervadeCursor = struct {
             // is popped only once it is finished; until then the stack owns it,
             // and an error leaves it for `deinit` like every other frame.
             const top = self.frames.topPtr() orelse {
+                if (self.root_child) |child| {
+                    if (!work.spend()) return .pending;
+                    self.root_child = null;
+                    _ = try self.start(evaluator, child);
+                    continue;
+                }
                 const result = self.last.?;
                 self.last = null;
                 return .{ .complete = result };
@@ -362,19 +387,8 @@ pub const PervadeCursor = struct {
             // cursor; spending first would starve it at a one-unit grain.
             if (!delegates(top) and !work.spend()) return .pending;
             const step: FrameStep = switch (top.*) {
-                // A node is consumed as it starts: what it pushes replaces it.
-                .binary => |node| node: {
-                    _ = self.frames.pop();
-                    try self.startBinary(evaluator, node);
-                    break :node .progressed;
-                },
-                .unary => |node| node: {
-                    _ = self.frames.pop();
-                    try self.startUnary(evaluator, node);
-                    break :node .progressed;
-                },
-                .list => |*list_frame| try self.advanceList(list_frame, work),
-                .dictionary => |dict_frame| try self.advanceDict(dict_frame, work),
+                .list => |*list_frame| try self.advanceList(evaluator, list_frame, work),
+                .dictionary => |dict_frame| try self.advanceDict(evaluator, dict_frame, work),
                 .typed => |*typed| typed: {
                     self.last = try typed.advance(evaluator) orelse break :typed .pending;
                     // A completed typed state has already released its inputs
@@ -395,13 +409,34 @@ pub const PervadeCursor = struct {
         return .pending;
     }
 
-    fn startBinary(self: *PervadeCursor, evaluator: *Machine, node: BinaryNode) MachineError!void {
+    fn start(self: *PervadeCursor, evaluator: *Machine, child: Child) MachineError!Started {
+        return switch (child) {
+            .binary => |node| self.startBinary(evaluator, node),
+            .unary => |node| self.startUnary(evaluator, node),
+        };
+    }
+
+    /// A typed leaf runs as soon as it is built. Only one that suspends becomes
+    /// a frame; one that finishes leaves its value in `last` with no frame.
+    fn runTyped(self: *PervadeCursor, evaluator: *Machine, typed_value: NestedTyped) MachineError!Started {
+        var typed = typed_value;
+        errdefer typed.retire(self.releases);
+        if (try typed.advance(evaluator)) |result| {
+            self.last = result;
+            return .finished;
+        }
+        try self.frames.reserve(1);
+        self.frames.pushReserved(.{ .typed = typed });
+        return .framed;
+    }
+
+    fn startBinary(self: *PervadeCursor, evaluator: *Machine, node: BinaryNode) MachineError!Started {
         if (node.depth >= support.max_depth and
             (node.left == .list or node.left == .dict or node.right == .list or node.right == .dict))
             return evaluator.fail(.domain, "pervasion nesting exceeds 256 levels");
         if (node.left == .dict or node.right == .dict) {
             try self.pushDictBinary(node);
-            return;
+            return .framed;
         }
         if (node.left == .list or node.right == .list) {
             if (try buildNestedTypedBinary(
@@ -411,13 +446,7 @@ pub const PervadeCursor = struct {
                 node.right,
                 self.rootCandidate(node),
                 .{},
-            )) |typed_value| {
-                var typed = typed_value;
-                errdefer typed.retire(self.releases);
-                try self.frames.reserve(1);
-                self.frames.pushReserved(.{ .typed = typed });
-                return;
-            }
+            )) |typed| return self.runTyped(evaluator, typed);
             const left_count: usize = if (node.left == .list) @intCast(node.left.list.length()) else 0;
             const right_count: usize = if (node.right == .list) @intCast(node.right.list.length()) else 0;
             if (node.left == .list and node.right == .list and left_count != right_count)
@@ -435,10 +464,11 @@ pub const PervadeCursor = struct {
                 .depth = node.depth,
                 .values = values.take(),
             } });
-            return;
+            return .framed;
         }
         self.last = selectScalar(node.operation)(node.left, node.right) catch |fault|
             return scalarFailure(evaluator, fault, node.logical_index);
+        return .finished;
     }
 
     /// Descended nodes are always deeper than zero, so only the initial node
@@ -452,7 +482,7 @@ pub const PervadeCursor = struct {
         return root;
     }
 
-    fn startUnary(self: *PervadeCursor, evaluator: *Machine, node: UnaryNode) MachineError!void {
+    fn startUnary(self: *PervadeCursor, evaluator: *Machine, node: UnaryNode) MachineError!Started {
         if (node.depth >= support.max_depth and (node.operand == .list or node.operand == .dict))
             return evaluator.fail(.domain, "pervasion nesting exceeds 256 levels");
         if (node.operand == .dict) {
@@ -473,16 +503,11 @@ pub const PervadeCursor = struct {
                 .values = values.take(),
             };
             self.frames.pushReserved(.{ .dictionary = frame });
-            return;
+            return .framed;
         }
         if (node.operand == .list) {
-            if (try buildNestedTypedUnary(evaluator, node.operation, node.operand, .{})) |typed_value| {
-                var typed = typed_value;
-                errdefer typed.retire(self.releases);
-                try self.frames.reserve(1);
-                self.frames.pushReserved(.{ .typed = typed });
-                return;
-            }
+            if (try buildNestedTypedUnary(evaluator, node.operation, node.operand, .{})) |typed|
+                return self.runTyped(evaluator, typed);
             const count: usize = @intCast(node.operand.list.length());
             var values = try heap.OwnedValueBuffer.init(self.releases, count);
             errdefer values.deinit();
@@ -496,43 +521,50 @@ pub const PervadeCursor = struct {
                 .depth = node.depth,
                 .values = values.take(),
             } });
-            return;
+            return .framed;
         }
         self.last = selectUnary(node.operation)(node.operand) catch |fault|
             return scalarFailure(evaluator, fault, node.logical_index);
+        return .finished;
     }
 
     fn advanceList(
         self: *PervadeCursor,
+        evaluator: *Machine,
         frame: *ListFrame,
         work: *poll.WorkBudget,
     ) MachineError!FrameStep {
         if (frame.waiting) {
-            frame.values.appendOwned(self.last.?);
-            self.last = null;
-            frame.index += 1;
             frame.waiting = false;
+            self.acceptListChild(frame);
         }
-        if (frame.index != frame.values.capacity()) {
+        // Children start where they are found. One that finishes is appended
+        // without touching the stack; one that leaves a frame is waited on.
+        while (frame.index != frame.values.capacity()) {
+            if (work.take(list_child_units) == 0) return .pending;
             const index = frame.index;
-            try self.frames.reserve(1);
-            frame.waiting = true;
-            switch (frame.operation) {
-                .binary => |operation| self.frames.pushReserved(.{ .binary = .{
+            const child: Child = switch (frame.operation) {
+                .binary => |operation| .{ .binary = .{
                     .operation = operation,
                     .left = if (frame.left_scalar) frame.left else list.atUnchecked(frame.left, index),
                     .right = if (frame.right_scalar) frame.right.? else list.atUnchecked(frame.right.?, index),
                     .depth = frame.depth + 1,
                     .logical_index = index,
-                } }),
-                .unary => |operation| self.frames.pushReserved(.{ .unary = .{
+                } },
+                .unary => |operation| .{ .unary = .{
                     .operation = operation,
                     .operand = list.atUnchecked(frame.left, index),
                     .depth = frame.depth + 1,
                     .logical_index = index,
-                } }),
+                } },
+            };
+            switch (try self.start(evaluator, child)) {
+                .finished => self.acceptListChild(frame),
+                .framed => {
+                    frame.waiting = true;
+                    return .progressed;
+                },
             }
-            return .progressed;
         }
         if (frame.materializer == null)
             frame.materializer = .init(self.allocator, frame.values.values());
@@ -543,6 +575,12 @@ pub const PervadeCursor = struct {
                 return .done;
             },
         }
+    }
+
+    fn acceptListChild(self: *PervadeCursor, frame: *ListFrame) void {
+        frame.values.appendOwned(self.last.?);
+        self.last = null;
+        frame.index += 1;
     }
 
     fn pushDictBinary(self: *PervadeCursor, node: BinaryNode) error{OutOfMemory}!void {
@@ -577,17 +615,13 @@ pub const PervadeCursor = struct {
 
     fn advanceDict(
         self: *PervadeCursor,
+        evaluator: *Machine,
         frame: *DictFrame,
         work: *poll.WorkBudget,
     ) MachineError!FrameStep {
         if (frame.waiting) {
-            frame.values.appendOwned(self.last.?);
-            frame.pairs[frame.pair_count][1] = self.last.?;
-            self.last = null;
-            frame.pair_count += 1;
-            frame.index += 1;
-            frame.candidate = 0;
             frame.waiting = false;
+            self.acceptDictChild(frame);
         }
         if (frame.phase == .materialize) {
             if (frame.materializer == null) frame.materializer = try .init(
@@ -619,33 +653,31 @@ pub const PervadeCursor = struct {
                     return .progressed;
                 }
                 const index = frame.index;
-                try self.frames.reserve(1);
                 frame.pairs[frame.pair_count][0] = dict.keyAt(dictionary.dict, index);
-                frame.waiting = true;
-                switch (frame.mode) {
-                    .unary => |operation| self.frames.pushReserved(.{ .unary = .{
+                const child: Child = switch (frame.mode) {
+                    .unary => |operation| .{ .unary = .{
                         .operation = operation,
                         .operand = dict.valueAt(dictionary.dict, index),
                         .depth = frame.depth + 1,
                         .logical_index = index,
-                    } }),
-                    .left => |operation| self.frames.pushReserved(.{ .binary = .{
+                    } },
+                    .left => |operation| .{ .binary = .{
                         .operation = operation,
                         .left = dict.valueAt(dictionary.dict, index),
                         .right = frame.right.?,
                         .depth = frame.depth + 1,
                         .logical_index = index,
-                    } }),
-                    .right => |operation| self.frames.pushReserved(.{ .binary = .{
+                    } },
+                    .right => |operation| .{ .binary = .{
                         .operation = operation,
                         .left = frame.left,
                         .right = dict.valueAt(dictionary.dict, index),
                         .depth = frame.depth + 1,
                         .logical_index = index,
-                    } }),
+                    } },
                     .both => unreachable,
-                }
-                return .progressed;
+                };
+                return self.startDictChild(evaluator, frame, child, work);
             },
             .both => |operation| {
                 const left_count: usize = @intCast(frame.left.dict.length());
@@ -672,42 +704,64 @@ pub const PervadeCursor = struct {
                     frame.candidate = 0;
                     return .progressed;
                 }
-                if (frame.match_cursor == null) frame.match_cursor = try .init(
-                    self.allocator,
-                    dict.keyAt(source.dict, frame.index),
-                    dict.keyAt(other.dict, frame.candidate),
-                );
-                try self.frames.reserve(1);
-                switch (try frame.match_cursor.?.advance(work)) {
-                    .pending => return .pending,
-                    .complete => |matches| {
-                        frame.match_cursor.?.deinit();
-                        frame.match_cursor = null;
-                        if (!matches) {
-                            frame.candidate += 1;
-                            return .progressed;
-                        }
-                        if (frame.phase == .right) {
-                            frame.index += 1;
-                            frame.candidate = 0;
-                            return .progressed;
-                        }
-                        const index = frame.index;
-                        const candidate = frame.candidate;
-                        frame.pairs[frame.pair_count][0] = dict.keyAt(frame.left.dict, index);
-                        frame.waiting = true;
-                        self.frames.pushReserved(.{ .binary = .{
-                            .operation = operation,
-                            .left = dict.valueAt(frame.left.dict, index),
-                            .right = dict.valueAt(frame.right.?.dict, candidate),
-                            .depth = frame.depth + 1,
-                            .logical_index = index,
-                        } });
-                        return .progressed;
-                    },
+                if (!frame.matched) {
+                    if (frame.match_cursor == null) frame.match_cursor = try .init(
+                        self.allocator,
+                        dict.keyAt(source.dict, frame.index),
+                        dict.keyAt(other.dict, frame.candidate),
+                    );
+                    switch (try frame.match_cursor.?.advance(work)) {
+                        .pending => return .pending,
+                        .complete => |matches| {
+                            frame.match_cursor.?.deinit();
+                            frame.match_cursor = null;
+                            if (!matches) {
+                                frame.candidate += 1;
+                                return .progressed;
+                            }
+                            if (frame.phase == .right) {
+                                frame.index += 1;
+                                frame.candidate = 0;
+                                return .progressed;
+                            }
+                            frame.matched = true;
+                        },
+                    }
                 }
+                const index = frame.index;
+                const candidate = frame.candidate;
+                frame.pairs[frame.pair_count][0] = dict.keyAt(frame.left.dict, index);
+                return self.startDictChild(evaluator, frame, .{ .binary = .{
+                    .operation = operation,
+                    .left = dict.valueAt(frame.left.dict, index),
+                    .right = dict.valueAt(frame.right.?.dict, candidate),
+                    .depth = frame.depth + 1,
+                    .logical_index = index,
+                } }, work);
             },
         }
+    }
+
+    /// A dict frame still pays for its own visit; this is the unit the child's
+    /// node frame used to cost.
+    fn startDictChild(self: *PervadeCursor, evaluator: *Machine, frame: *DictFrame, child: Child, work: *poll.WorkBudget) MachineError!FrameStep {
+        if (!work.spend()) return .pending;
+        frame.matched = false;
+        switch (try self.start(evaluator, child)) {
+            .finished => self.acceptDictChild(frame),
+            .framed => frame.waiting = true,
+        }
+        return .progressed;
+    }
+
+    /// Records the value of the child whose key is staged at `pair_count`.
+    fn acceptDictChild(self: *PervadeCursor, frame: *DictFrame) void {
+        frame.values.appendOwned(self.last.?);
+        frame.pairs[frame.pair_count][1] = self.last.?;
+        self.last = null;
+        frame.pair_count += 1;
+        frame.index += 1;
+        frame.candidate = 0;
     }
 };
 

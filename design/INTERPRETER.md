@@ -519,6 +519,11 @@ that the current runtime cannot reclaim.
 Dropping the last reference detaches a typed retirement item into the Session's
 `ReleaseDomain` in constant work. The host or scheduler later advances graph
 destruction in bounded slices.
+An object that owns no references and needs no retirement hook, such as a
+leaf list without code provenance, has no graph; its destruction is already
+constant work, so its final release performs it instead of enqueuing it.
+Graph destruction charges one unit per edge, and an object being destroyed
+stays with the drainer until it is finished or the slice's budget is spent.
 
 `HostOwner` is the only authority that can drain the domain synchronously.
 Executing Units receive a facade that can release, enqueue, and advance bounded

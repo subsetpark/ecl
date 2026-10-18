@@ -839,8 +839,13 @@ fn renderStep(
             .failed => |outcome| return .{ .failed = outcome },
             .required => |required| state.quoted = required,
         }
+        // The part advances only once its character is appended: a yield
+        // here resumes at the same quote rather than past it.
+        if (state.quoted) {
+            const outcome = try append(build, state, '"');
+            if (outcome == .failed) return outcome;
+        }
         state.part = .body;
-        if (state.quoted) return append(build, state, '"');
     }
     switch (state.part) {
         .open_quote => unreachable,
@@ -873,8 +878,11 @@ fn renderStep(
             state.character += 1;
         },
         .close_quote => {
+            if (state.quoted) {
+                const outcome = try append(build, state, '"');
+                if (outcome == .failed) return outcome;
+            }
             state.part = if (state.field + 1 == state.field_count) .terminator_cr else .comma;
-            if (state.quoted) return append(build, state, '"');
         },
         .comma => {
             const outcome = try append(build, state, ',');
