@@ -241,6 +241,10 @@ pub const PervadeCursor = struct {
         candidate: usize = 0,
         pair_count: usize = 0,
         waiting: bool = false,
+        /// The keys at `index` and `candidate` matched, and their child has
+        /// not yet paid its start unit. Kept so a comparison that spent the
+        /// turn's last unit is not repeated when the frame resumes.
+        matched: bool = false,
         match_cursor: ?equal.MatchCursor = null,
         materializer: ?dict.Materializer = null,
 
@@ -285,7 +289,8 @@ pub const PervadeCursor = struct {
     fn delegates(frame: *const Frame) bool {
         return switch (frame.*) {
             .typed, .list => true,
-            .dictionary => |dict_frame| dict_frame.phase == .materialize or dict_frame.match_cursor != null,
+            .dictionary => |dict_frame| dict_frame.phase == .materialize or
+                dict_frame.match_cursor != null or dict_frame.matched,
         };
     }
 
@@ -699,37 +704,40 @@ pub const PervadeCursor = struct {
                     frame.candidate = 0;
                     return .progressed;
                 }
-                if (frame.match_cursor == null) frame.match_cursor = try .init(
-                    self.allocator,
-                    dict.keyAt(source.dict, frame.index),
-                    dict.keyAt(other.dict, frame.candidate),
-                );
-                switch (try frame.match_cursor.?.advance(work)) {
-                    .pending => return .pending,
-                    .complete => |matches| {
-                        frame.match_cursor.?.deinit();
-                        frame.match_cursor = null;
-                        if (!matches) {
-                            frame.candidate += 1;
-                            return .progressed;
-                        }
-                        if (frame.phase == .right) {
-                            frame.index += 1;
-                            frame.candidate = 0;
-                            return .progressed;
-                        }
-                        const index = frame.index;
-                        const candidate = frame.candidate;
-                        frame.pairs[frame.pair_count][0] = dict.keyAt(frame.left.dict, index);
-                        return self.startDictChild(evaluator, frame, .{ .binary = .{
-                            .operation = operation,
-                            .left = dict.valueAt(frame.left.dict, index),
-                            .right = dict.valueAt(frame.right.?.dict, candidate),
-                            .depth = frame.depth + 1,
-                            .logical_index = index,
-                        } }, work);
-                    },
+                if (!frame.matched) {
+                    if (frame.match_cursor == null) frame.match_cursor = try .init(
+                        self.allocator,
+                        dict.keyAt(source.dict, frame.index),
+                        dict.keyAt(other.dict, frame.candidate),
+                    );
+                    switch (try frame.match_cursor.?.advance(work)) {
+                        .pending => return .pending,
+                        .complete => |matches| {
+                            frame.match_cursor.?.deinit();
+                            frame.match_cursor = null;
+                            if (!matches) {
+                                frame.candidate += 1;
+                                return .progressed;
+                            }
+                            if (frame.phase == .right) {
+                                frame.index += 1;
+                                frame.candidate = 0;
+                                return .progressed;
+                            }
+                            frame.matched = true;
+                        },
+                    }
                 }
+                const index = frame.index;
+                const candidate = frame.candidate;
+                frame.pairs[frame.pair_count][0] = dict.keyAt(frame.left.dict, index);
+                return self.startDictChild(evaluator, frame, .{ .binary = .{
+                    .operation = operation,
+                    .left = dict.valueAt(frame.left.dict, index),
+                    .right = dict.valueAt(frame.right.?.dict, candidate),
+                    .depth = frame.depth + 1,
+                    .logical_index = index,
+                } }, work);
             },
         }
     }
@@ -738,6 +746,7 @@ pub const PervadeCursor = struct {
     /// node frame used to cost.
     fn startDictChild(self: *PervadeCursor, evaluator: *Machine, frame: *DictFrame, child: Child, work: *poll.WorkBudget) MachineError!FrameStep {
         if (!work.spend()) return .pending;
+        frame.matched = false;
         switch (try self.start(evaluator, child)) {
             .finished => self.acceptDictChild(frame),
             .framed => frame.waiting = true,
