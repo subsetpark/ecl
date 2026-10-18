@@ -1912,6 +1912,14 @@ pub const ReleaseDomain = struct {
         std.debug.assert(old != 0);
         if (old != 1) return;
         _ = headerImpl(header).rc.load(.acquire);
+        // Destruction is deferred so that walking a graph never hides inside
+        // one release. An object that owns no references has no graph: its
+        // destruction is one constant step, so its final release performs it.
+        // It never enters the queue, so it has no intrusive node to serialize.
+        if (ownsNoReferences(header)) {
+            destroyObject(self.allocator, header);
+            return;
+        }
         self.enqueueZero(header, .new);
     }
 
@@ -2046,42 +2054,54 @@ pub const ReleaseDomain = struct {
         return owned.advance(budget);
     }
 
+    /// Every edge transition spends one unit of `budget`. A popped object stays
+    /// with this claim until it is destroyed or the budget runs out, rather
+    /// than being requeued after each edge; the queues alternate per object.
     fn advanceLocked(self: *ReleaseDomain, budget: usize) bool {
-        for (0..budget) |_| {
+        var remaining = budget;
+        while (remaining != 0) {
             if (self.prefer_retirement) {
                 if (self.popRetirement()) |node| {
                     self.prefer_retirement = false;
-                    const advance_fn = node.advance_fn.?;
-                    const context = node.context.?;
-                    if (!advance_fn(self, self.allocator, context)) {
-                        self.enqueueRetirement(node, .continuation);
-                    } else self.completeOwner();
+                    remaining -= 1;
+                    self.advanceRetirementNode(node);
                     continue;
                 }
             }
             if (self.popZero()) |header| {
                 self.prefer_retirement = true;
-                if (self.releaseNextChild(header)) {
-                    self.enqueueZero(header, .continuation);
-                } else {
-                    self.retireCodeIdentity(header);
-                    destroyObject(self.allocator, header);
-                    self.completeOwner();
+                while (true) {
+                    remaining -= 1;
+                    if (!self.releaseNextChild(header)) {
+                        self.retireCodeIdentity(header);
+                        destroyObject(self.allocator, header);
+                        self.completeOwner();
+                        break;
+                    }
+                    if (remaining == 0) {
+                        self.enqueueZero(header, .continuation);
+                        break;
+                    }
                 }
                 continue;
             }
             if (self.popRetirement()) |node| {
                 self.prefer_retirement = false;
-                const advance_fn = node.advance_fn.?;
-                const context = node.context.?;
-                if (!advance_fn(self, self.allocator, context)) {
-                    self.enqueueRetirement(node, .continuation);
-                } else self.completeOwner();
+                remaining -= 1;
+                self.advanceRetirementNode(node);
                 continue;
             }
             return true;
         }
         return !self.hasPending();
+    }
+
+    fn advanceRetirementNode(self: *ReleaseDomain, node: *Retirement) void {
+        const advance_fn = node.advance_fn.?;
+        const context = node.context.?;
+        if (!advance_fn(self, self.allocator, context)) {
+            self.enqueueRetirement(node, .continuation);
+        } else self.completeOwner();
     }
 
     fn drainOwned(self: *ReleaseDomain) void {
@@ -2828,6 +2848,15 @@ pub const OwnedValueChain = union(enum) {
         self.* = .moved;
     }
 };
+
+/// A leaf list holds unboxed elements and no references, and one without code
+/// provenance has no retirement hook, so destroying it is a single step.
+fn ownsNoReferences(header: *const Header) bool {
+    return switch (kind(header)) {
+        .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => objectConst(header).provenance_namespace == .none,
+        .generic_spine, .dict, .task, .port, .module, .reserved_mask => false,
+    };
+}
 
 /// Frees an object and what it owns directly. A list is one block; the other
 /// kinds keep their storage in a separate allocation behind `payload`.

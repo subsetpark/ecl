@@ -701,6 +701,34 @@ control) left the mixed short-task and cancellation p50 values within 6% in
 both directions at one and eight workers. Eight-worker cancellation p95/p99
 tails above 500 µs appeared once on each side and did not reproduce.
 
+## Reference-free objects skip the retirement queue — 2026-10-18
+
+Every object whose count reached zero went through the retirement queue: an
+enqueue under the queue mutex, a later pop under the same mutex, then the
+free. Graph destruction also released one child per step and requeued its
+parent after each one, so a result spine of N rows was pushed and popped N
+times. A leaf list without code provenance owns no references and has no
+retirement hook, so its final release now destroys it directly; and an object
+being destroyed now stays with the drainer, one budget unit per edge, until it
+is finished or the budget is spent. The queues alternate per object instead of
+per edge.
+
+Callgrind, `t v *` over a 250 × 250 float matrix, net of setup, Zig 0.16.0
+ReleaseFast `-Dcpu=native`, x86_64 Linux (Intel Core Ultra 5 125U), control
+`d8804e9`: 2,208 → 2,093 instructions per row. The wall-time effect is larger
+than the instruction count, since each removed step was a mutex round trip.
+Native medians, pinned to one P-core, seven to nine interleaved runs:
+
+| Case | Control | Treatment |
+|---|---:|---:|
+| `t v *`, 100 × 100, ns per element | 3.15 | 2.30 |
+| `t v *`, 250 × 250, ns per element | 1.88 | 1.65 |
+| `t v *`, 1,000 × 1,000, ns per element | 0.95 | 0.90 |
+| 2,000 × string `split`/`cat`/`join`, ms | 13 | 9 |
+| 100 × building and dropping 500 rows of 100, ms | 27 | 22 |
+| `1000 spectralnorm`, whole process, ms | 94.3 | 90.2 |
+| `2000 spectralnorm`, whole process, ms | 341.4 | 334.2 |
+
 ## Pervasion children start where they are found — 2026-10-18
 
 A pervasion child (one element pair of a list or dictionary, or the whole
