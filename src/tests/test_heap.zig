@@ -59,7 +59,7 @@
 //! value with one allocator and hands it to a session backed by another —
 //! `define`, `pushOwned`, `publishTop`, `publishModule` — frees across
 //! allocators and aborts with "Invalid free" at teardown, from inside
-//! `heap.freePayload`, far from the line at fault.
+//! `heap.destroyObject`, far from the line at fault.
 //!
 //! So this heap suits suites that only run source strings through a session
 //! (`kernel_test_support`, `combinator_test`, `machine_test`,

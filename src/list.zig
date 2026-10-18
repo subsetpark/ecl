@@ -495,52 +495,6 @@ pub fn atUnchecked(collection: Value, index: usize) Value {
     };
 }
 
-/// `collection` remains owned by the caller. The result tag states whether
-/// that owner was updated or an additional root was returned.
-pub fn append(
-    allocator: std.mem.Allocator,
-    releases: *heap.ReleaseDomain,
-    collection: Value,
-    item: Value,
-) Error!heap.UpdateResult {
-    const header = try listHeader(collection);
-    const unique = heap.claimUniqueList(header) orelse
-        return rebuildWithItem(allocator, releases, collection, item, false);
-
-    const used: usize = @intCast(header.length());
-    if (used == 0 and header.kind() == .generic_spine) {
-        return rebuildWithItem(allocator, releases, collection, item, true);
-    }
-
-    const same_kind = switch (header.kind()) {
-        .generic_spine => true,
-        .leaf_u8 => item == .int and item.int >= 0 and item.int <= std.math.maxInt(u8),
-        .leaf_i64 => item == .int,
-        .leaf_f64 => item == .float,
-        .leaf_char1 => item == .char and item.char <= std.math.maxInt(u8),
-        .leaf_char2 => item == .char and item.char <= std.math.maxInt(u16),
-        .leaf_char4 => item == .char,
-        .leaf_symbol => item == .symbol,
-        .dict, .task, .module, .port, .reserved_mask => return error.NotAList,
-    };
-    if (!same_kind) return rebuildWithItem(allocator, releases, collection, item, true);
-
-    if (used == heap.capacity(header)) {
-        const new_capacity = growCapacity(used + 1);
-        try heap.replaceBuffer(allocator, unique, new_capacity);
-    }
-    switch (header.kind()) {
-        .generic_spine => {
-            heap.retainValue(item);
-            heap.writeUniqueList(unique, used, item);
-        },
-        .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => heap.writeUniqueList(unique, used, item),
-        .dict, .task, .module, .port, .reserved_mask => return error.NotAList,
-    }
-    heap.setUniqueListLength(unique, used + 1);
-    return .{ .in_place = collection };
-}
-
 fn listHeader(collection: Value) error{NotAList}!*ListHandle {
     return switch (collection) {
         .list => |header| switch (header.kind()) {
@@ -557,28 +511,6 @@ fn listHeader(collection: Value) error{NotAList}!*ListHandle {
         },
         .int, .float, .char, .symbol, .word, .dict, .task, .module, .port => error.NotAList,
     };
-}
-
-fn rebuildWithItem(
-    allocator: std.mem.Allocator,
-    releases: *heap.ReleaseDomain,
-    collection: Value,
-    item: Value,
-    adopt: bool,
-) Error!heap.UpdateResult {
-    const old_len = try len(collection);
-    const materialized = try allocator.alloc(Value, old_len + 1);
-    defer allocator.free(materialized);
-    for (0..old_len) |index| materialized[index] = try at(collection, index);
-    materialized[old_len] = item;
-    const replacement = try fromValues(allocator, materialized);
-    if (!adopt) return .{ .replacement = replacement };
-    heap.adoptListRepresentationDeferred(
-        releases,
-        heap.claimUniqueList(collection.list).?,
-        heap.claimUniqueList(replacement.list).?,
-    );
-    return .{ .in_place = collection };
 }
 
 fn initialCapacity(used: usize) usize {
@@ -612,24 +544,10 @@ fn constructionFailureProbe(allocator: std.mem.Allocator) !void {
     defer cleanup.releaseValue(symbols);
 }
 
-fn appendFailureProbe(allocator: std.mem.Allocator) !void {
-    var cleanup = heap.testing.Cleanup.init(allocator);
-    defer cleanup.deinit();
-    const original = try fromValues(allocator, &.{ .{ .char = 'a' }, .{ .char = 'b' } });
-    defer cleanup.releaseValue(original);
-    const result = try append(allocator, cleanup.domain(), original, .{ .int = 3 });
-    if (result == .replacement) cleanup.releaseValue(result.value());
-}
-
-test "constructors and append exhaust allocation failures" {
+test "constructors exhaust allocation failures" {
     try std.testing.checkAllAllocationFailures(
         std.testing.allocator,
         constructionFailureProbe,
-        .{},
-    );
-    try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
-        appendFailureProbe,
         .{},
     );
 }

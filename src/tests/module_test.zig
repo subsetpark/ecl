@@ -2,7 +2,7 @@
 //!
 //! Everything here either builds a value on the host and publishes it into a
 //! session — where the value and the session must agree on their allocator, or
-//! teardown aborts in `heap.freePayload` far from the line at fault — or owns a
+//! teardown aborts in `heap.destroyObject` far from the line at fault — or owns a
 //! counting allocator to state a memory bound. Both needs pin the file to
 //! `std.testing.allocator` and to `DebugAllocator{ .enable_memory_limit }`.
 //!

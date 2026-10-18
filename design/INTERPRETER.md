@@ -420,8 +420,14 @@ Ordinary value-list construction profiles elements and selects the narrowest
 valid form; code roots and tooling may explicitly request a generic spine.
 Strings are character leaves, so ASCII text occupies one byte per scalar while
 indexing remains constant time. A byte leaf is also the compact representation
-of an ordinary integer list whose elements fit `0...255`; widening is automatic
-when a mutation no longer fits.
+of an ordinary integer list whose elements fit `0...255`; an operation whose
+result no longer fits builds it in a wider form.
+
+A list is one allocation: its header followed by its elements. Capacity is
+fixed when the list is allocated, so a list never grows or relocates its
+elements in place; an operation that needs more room builds a new list. The
+only in-place change of representation is a same-width retag of a uniquely
+owned list, which keeps the allocation's size.
 
 The representation tag is a construction fact. Semantic operations switch
 exhaustively over the closed representation set, so every operation handles
