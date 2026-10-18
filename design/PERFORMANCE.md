@@ -701,6 +701,39 @@ control) left the mixed short-task and cancellation p50 values within 6% in
 both directions at one and eight workers. Eight-worker cancellation p95/p99
 tails above 500 µs appeared once on each side and did not reproduce.
 
+## Pervasion frames advance in place — 2026-10-18
+
+The pervasion cursor popped its top frame to advance it and, on almost every
+path, pushed it back: sixteen push-backs across list and dictionary frames, one
+for a suspended typed frame, and an error path in each that tore down the frame
+it had popped. List and dictionary frames also kept a `result` field, and
+dictionaries a `release` phase, only so a finished frame could be pushed back
+and popped once more to hand its result over. Frames are now advanced where they
+lie on the stack, which never moves an entry, and popped only when finished;
+the stack owns every frame until then, so an error leaves it to the cursor's
+`deinit` like any other. The push-backs, the popped-frame error paths, both
+`result` fields, and the `release` phase are gone.
+
+An inline path that ran typed rows inside the list frame was measured against
+this and removed: with frames in place it saved about 160 instructions per row
+but no consistent wall time.
+
+Callgrind, `t v *` over a 250 × 250 float matrix, net of setup, Zig 0.16.0
+ReleaseFast `-Dcpu=native`, x86_64 Linux (Intel Core Ultra 5 125U), control
+`78c135e`: 2,915 → 2,764 instructions per row. Native medians, pinned to one
+P-core, seven interleaved runs, ns per element:
+
+| Matrix | Control | Treatment |
+|---|---:|---:|
+| 100 × 100 | 3.92 | 3.50 |
+| 250 × 250 | 2.33 | 2.17 |
+| 1,000 × 1,000 | 1.08 | 1.00 |
+
+The rest of a row's fixed cost is spread across allocating the result row,
+reclaiming the previous one, and preparing the typed state. Swapping glibc
+`malloc` for Zig's `smp_allocator` removed about 590 instructions per row but
+did not change wall time at these sizes and slowed whole spectralnorm.
+
 ## Table-driven numeric plan selection — 2026-10-18
 
 Every typed leaf operation, including each row of a spine, selected its plan

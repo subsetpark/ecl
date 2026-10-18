@@ -351,6 +351,10 @@ test "typed differential: numeric logical and bitwise pervasion parity across si
         try expectParity(&runtime, .{ .ints = numbers }, "1 +");
         try expectParity(&runtime, .{ .ints = numbers }, "neg");
         try expectParity(&runtime, .{ .ints = numbers }, "dup <");
+        // Typed rows of a spine run inside the list frame; a row longer than
+        // the quantum must suspend there and resume through the frame stack.
+        try expectParity(&runtime, .{ .ints = numbers }, "dup 2 pack 1 +");
+        try expectParity(&runtime, .{ .ints = numbers }, "dup 2 pack neg");
     }
 
     // Character-element pervasion has two typed result shapes: fixed i64 for
