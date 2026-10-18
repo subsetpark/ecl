@@ -204,12 +204,10 @@ pub const PervadeCursor = struct {
         index: usize = 0,
         waiting: bool = false,
         materializer: ?list.ValueMaterializer = null,
-        result: ?Value = null,
 
         fn deinit(self: *ListFrame, releases: *heap.ReleaseDomain) void {
             if (self.materializer) |*materializer| materializer.retire(releases);
             self.values.deinit();
-            if (self.result) |result| releases.releaseValue(result);
         }
     };
     const DictMode = union(enum) {
@@ -225,21 +223,19 @@ pub const PervadeCursor = struct {
         depth: usize,
         pairs: []dict.Pair,
         values: heap.OwnedValueBuffer,
-        phase: enum { left, right, materialize, release } = .left,
+        phase: enum { left, right, materialize } = .left,
         index: usize = 0,
         candidate: usize = 0,
         pair_count: usize = 0,
         waiting: bool = false,
         match_cursor: ?equal.MatchCursor = null,
         materializer: ?dict.Materializer = null,
-        result: ?Value = null,
 
         fn deinit(self: *DictFrame, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
             if (self.match_cursor) |*cursor| cursor.deinit();
             if (self.materializer) |*materializer| materializer.retire(releases);
             self.values.deinit();
             allocator.free(self.pairs);
-            if (self.result) |result| releases.releaseValue(result);
         }
     };
     /// Every pervasion step moves frames by value, so the union's size is a
@@ -267,14 +263,18 @@ pub const PervadeCursor = struct {
         }
     };
 
+    /// What advancing the top frame did. `done` means the frame left its result
+    /// in `last` and is popped and torn down; `progressed` leaves it in place,
+    /// possibly under children it pushed; `pending` ends the turn.
+    const FrameStep = enum { pending, progressed, done };
+
     /// Typed frames charge the unit through `Context`; list and dict frames
     /// that are materializing or comparing hand their work to that cursor.
     fn delegates(frame: *const Frame) bool {
         return switch (frame.*) {
             .binary, .unary => false,
             .typed => true,
-            .list => |*list_frame| list_frame.result == null and !list_frame.waiting and
-                list_frame.index == list_frame.values.capacity(),
+            .list => |*list_frame| !list_frame.waiting and list_frame.index == list_frame.values.capacity(),
             .dictionary => |dict_frame| dict_frame.phase == .materialize or dict_frame.match_cursor != null,
         };
     }
@@ -349,35 +349,46 @@ pub const PervadeCursor = struct {
         work: *poll.WorkBudget,
     ) MachineError!PervadeProgress {
         while (true) {
-            // A frame handing work to a nested cursor is charged by that
-            // cursor; spending first would starve it at a one-unit grain.
-            if (self.frames.topPtr()) |top| {
-                if (!delegates(top) and !work.spend()) return .pending;
-            }
-
-            var frame = self.frames.pop() orelse {
+            // The top frame is advanced where it lies. The stack never moves an
+            // entry, so it stays put while children are pushed above it, and it
+            // is popped only once it is finished; until then the stack owns it,
+            // and an error leaves it for `deinit` like every other frame.
+            const top = self.frames.topPtr() orelse {
                 const result = self.last.?;
                 self.last = null;
                 return .{ .complete = result };
             };
-            switch (frame) {
-                .binary => |node| try self.startBinary(evaluator, node),
-                .unary => |node| try self.startUnary(evaluator, node),
-                .list => |*list_frame| {
-                    if (!try self.advanceList(list_frame, work)) return .pending;
+            // A frame handing work to a nested cursor is charged by that
+            // cursor; spending first would starve it at a one-unit grain.
+            if (!delegates(top) and !work.spend()) return .pending;
+            const step: FrameStep = switch (top.*) {
+                // A node is consumed as it starts: what it pushes replaces it.
+                .binary => |node| node: {
+                    _ = self.frames.pop();
+                    try self.startBinary(evaluator, node);
+                    break :node .progressed;
                 },
-                .dictionary => |dict_frame| {
-                    if (!try self.advanceDict(dict_frame, work)) return .pending;
+                .unary => |node| node: {
+                    _ = self.frames.pop();
+                    try self.startUnary(evaluator, node);
+                    break :node .progressed;
                 },
-                .typed => |*typed| {
-                    errdefer typed.retire(self.releases);
-                    if (try typed.advance(evaluator)) |result| {
-                        self.last = result;
-                    } else {
-                        try self.frames.reserve(1);
-                        self.frames.pushReserved(.{ .typed = typed.* });
-                        return .pending;
-                    }
+                .list => |*list_frame| try self.advanceList(list_frame, work),
+                .dictionary => |dict_frame| try self.advanceDict(dict_frame, work),
+                .typed => |*typed| typed: {
+                    self.last = try typed.advance(evaluator) orelse break :typed .pending;
+                    // A completed typed state has already released its inputs
+                    // and published its output; there is nothing left to retire.
+                    _ = self.frames.pop();
+                    break :typed .progressed;
+                },
+            };
+            switch (step) {
+                .pending => return .pending,
+                .progressed => {},
+                .done => {
+                    var finished = self.frames.pop().?;
+                    finished.deinit(self.releases, self.allocator);
                 },
             }
         }
@@ -491,19 +502,11 @@ pub const PervadeCursor = struct {
             return scalarFailure(evaluator, fault, node.logical_index);
     }
 
-    /// False means the allowance was spent before this frame could continue.
     fn advanceList(
         self: *PervadeCursor,
         frame: *ListFrame,
         work: *poll.WorkBudget,
-    ) MachineError!bool {
-        errdefer frame.deinit(self.releases);
-        if (frame.result) |result| {
-            frame.values.deinit();
-            frame.result = null;
-            self.last = result;
-            return true;
-        }
+    ) MachineError!FrameStep {
         if (frame.waiting) {
             frame.values.appendOwned(self.last.?);
             self.last = null;
@@ -512,9 +515,8 @@ pub const PervadeCursor = struct {
         }
         if (frame.index != frame.values.capacity()) {
             const index = frame.index;
+            try self.frames.reserve(1);
             frame.waiting = true;
-            try self.frames.reserve(2);
-            self.frames.pushReserved(.{ .list = frame.* });
             switch (frame.operation) {
                 .binary => |operation| self.frames.pushReserved(.{ .binary = .{
                     .operation = operation,
@@ -530,20 +532,15 @@ pub const PervadeCursor = struct {
                     .logical_index = index,
                 } }),
             }
-            return true;
+            return .progressed;
         }
         if (frame.materializer == null)
             frame.materializer = .init(self.allocator, frame.values.values());
-        try self.frames.reserve(1);
         switch (try frame.materializer.?.advance(work)) {
-            .pending => {
-                self.frames.pushReserved(.{ .list = frame.* });
-                return false;
-            },
+            .pending => return .pending,
             .complete => |result| {
-                frame.result = result;
-                self.frames.pushReserved(.{ .list = frame.* });
-                return true;
+                self.last = result;
+                return .done;
             },
         }
     }
@@ -578,26 +575,11 @@ pub const PervadeCursor = struct {
         self.frames.pushReserved(.{ .dictionary = frame });
     }
 
-    /// False means the allowance was spent before this frame could continue.
-    /// The popped frame is owned here until it is pushed back or completed.
     fn advanceDict(
         self: *PervadeCursor,
         frame: *DictFrame,
         work: *poll.WorkBudget,
-    ) MachineError!bool {
-        errdefer {
-            frame.deinit(self.releases, self.allocator);
-            self.allocator.destroy(frame);
-        }
-        if (frame.phase == .release) {
-            frame.values.deinit();
-            self.allocator.free(frame.pairs);
-            const result = frame.result.?;
-            frame.result = null;
-            self.last = result;
-            self.allocator.destroy(frame);
-            return true;
-        }
+    ) MachineError!FrameStep {
         if (frame.waiting) {
             frame.values.appendOwned(self.last.?);
             frame.pairs[frame.pair_count][1] = self.last.?;
@@ -613,20 +595,14 @@ pub const PervadeCursor = struct {
                 frame.pairs[0..frame.pair_count],
                 false,
             );
-            try self.frames.reserve(1);
             switch (try frame.materializer.?.advance(work)) {
-                .pending => {
-                    self.frames.pushReserved(.{ .dictionary = frame });
-                    return false;
-                },
+                .pending => return .pending,
                 .duplicate_key => unreachable,
                 .complete => |result| {
                     frame.materializer.?.deinit();
                     frame.materializer = null;
-                    frame.result = result;
-                    frame.phase = .release;
-                    self.frames.pushReserved(.{ .dictionary = frame });
-                    return true;
+                    self.last = result;
+                    return .done;
                 },
             }
         }
@@ -640,15 +616,12 @@ pub const PervadeCursor = struct {
                 const count: usize = @intCast(dictionary.dict.length());
                 if (frame.index == count) {
                     frame.phase = .materialize;
-                    try self.frames.reserve(1);
-                    self.frames.pushReserved(.{ .dictionary = frame });
-                    return true;
+                    return .progressed;
                 }
                 const index = frame.index;
+                try self.frames.reserve(1);
                 frame.pairs[frame.pair_count][0] = dict.keyAt(dictionary.dict, index);
                 frame.waiting = true;
-                try self.frames.reserve(2);
-                self.frames.pushReserved(.{ .dictionary = frame });
                 switch (frame.mode) {
                     .unary => |operation| self.frames.pushReserved(.{ .unary = .{
                         .operation = operation,
@@ -672,7 +645,7 @@ pub const PervadeCursor = struct {
                     } }),
                     .both => unreachable,
                 }
-                return true;
+                return .progressed;
             },
             .both => |operation| {
                 const left_count: usize = @intCast(frame.left.dict.length());
@@ -687,9 +660,7 @@ pub const PervadeCursor = struct {
                         frame.index = 0;
                         frame.candidate = 0;
                     } else frame.phase = .materialize;
-                    try self.frames.reserve(1);
-                    self.frames.pushReserved(.{ .dictionary = frame });
-                    return true;
+                    return .progressed;
                 }
                 if (frame.candidate == other_count) {
                     const key = dict.keyAt(source.dict, frame.index);
@@ -699,40 +670,32 @@ pub const PervadeCursor = struct {
                     frame.pair_count += 1;
                     frame.index += 1;
                     frame.candidate = 0;
-                    try self.frames.reserve(1);
-                    self.frames.pushReserved(.{ .dictionary = frame });
-                    return true;
+                    return .progressed;
                 }
                 if (frame.match_cursor == null) frame.match_cursor = try .init(
                     self.allocator,
                     dict.keyAt(source.dict, frame.index),
                     dict.keyAt(other.dict, frame.candidate),
                 );
-                try self.frames.reserve(2);
+                try self.frames.reserve(1);
                 switch (try frame.match_cursor.?.advance(work)) {
-                    .pending => {
-                        self.frames.pushReserved(.{ .dictionary = frame });
-                        return false;
-                    },
+                    .pending => return .pending,
                     .complete => |matches| {
                         frame.match_cursor.?.deinit();
                         frame.match_cursor = null;
                         if (!matches) {
                             frame.candidate += 1;
-                            self.frames.pushReserved(.{ .dictionary = frame });
-                            return true;
+                            return .progressed;
                         }
                         if (frame.phase == .right) {
                             frame.index += 1;
                             frame.candidate = 0;
-                            self.frames.pushReserved(.{ .dictionary = frame });
-                            return true;
+                            return .progressed;
                         }
                         const index = frame.index;
                         const candidate = frame.candidate;
                         frame.pairs[frame.pair_count][0] = dict.keyAt(frame.left.dict, index);
                         frame.waiting = true;
-                        self.frames.pushReserved(.{ .dictionary = frame });
                         self.frames.pushReserved(.{ .binary = .{
                             .operation = operation,
                             .left = dict.valueAt(frame.left.dict, index),
@@ -740,7 +703,7 @@ pub const PervadeCursor = struct {
                             .depth = frame.depth + 1,
                             .logical_index = index,
                         } });
-                        return true;
+                        return .progressed;
                     },
                 }
             },
