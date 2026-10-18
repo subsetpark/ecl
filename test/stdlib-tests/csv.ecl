@@ -43,6 +43,16 @@
   dup [] csv.parse flip csv.emit match? 1 equal)
  'emit test
 
+ ### test emit-across-turns
+ (-- : "A yield at any character, quotes included, resumes without losing it.")
+ # Each size ends its turns at a different offset, so across the sweep
+ # some yield lands on an opening and a closing quote.
+ (16 range 50 * 700 +
+  (|n| ["a\"b"] n take ["c,d"] n take pair flip csv.emit
+   "\"a\"\"b\",\"c,d\"\u{d}\n" n repeat match?)
+  each 1 (and) fold 1 equal)
+ 'emit-across-turns test
+
  ### test invalid-input
  (-- : "Reject malformed quoting and invalid row or field shapes.")
  (("\"unclosed" [] csv.parse) 'parse "malformed quoting" raises-containing
