@@ -233,6 +233,7 @@ pub const SequenceOp = enum {
 pub const OrderOp = enum {
     cmp,
     grade,
+    distinct,
     group,
     group_columns,
 
@@ -240,6 +241,7 @@ pub const OrderOp = enum {
         return switch (self) {
             .cmp => "cmp",
             .grade => "grade",
+            .distinct => "distinct",
             .group => "group",
             .group_columns => "group-columns",
         };

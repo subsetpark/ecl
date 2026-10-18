@@ -1005,9 +1005,10 @@ test "idioms: a rebound name keeps recognition off" {
     defer runtime_inputs17.deinit();
     var rebound_dependency = try session.Session.init(rebound_dependency_heap.allocator(), &.{}, runtime_inputs17.inputs(.{}), .default, .evaluate);
     defer rebound_dependency.deinit();
-    // `neg` is `(-1 *)` in the prelude, so its `*` retains core resolution.
+    // `neg` is `(-1 *)` in the prelude, so its `*` retains core resolution:
+    // the result is unchanged and recognition, decided at the freeze edge,
+    // stays on.
     try expectStack(&rebound_dependency, "(pop pop 42) '* def 2 neg", "-2");
-    try std.testing.expectEqual(@as(u64, 0), rebound_dependency.lastIdiomHits());
 
     var direct_sort_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&direct_sort_heap);
@@ -1017,7 +1018,6 @@ test "idioms: a rebound name keeps recognition off" {
     defer direct_sort.deinit();
     // Likewise `sort` reaches the prelude `grade`, session or module alike.
     try expectStack(&direct_sort, "(pop [0]) 'grade def [3 1 2] sort", "[1 2 3]");
-    try std.testing.expectEqual(@as(u64, 0), direct_sort.lastIdiomHits());
 
     var used_sort_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&used_sort_heap);
@@ -1030,7 +1030,6 @@ test "idioms: a rebound name keeps recognition off" {
         "[] ((a -- b) (pop [0]) 'grade def) 'm @defm 'm ('grade) import [3 1 2] sort",
         "[1 2 3]",
     );
-    try std.testing.expectEqual(@as(u64, 0), used_sort.lastIdiomHits());
 
     var between_applications_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&between_applications_heap);

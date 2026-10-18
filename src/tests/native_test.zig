@@ -1403,7 +1403,7 @@ test "native: the static transport publishes a linked descriptor through the sam
         .complete => |candidate| break candidate,
     };
     defer candidate.deinit();
-    var candidate_sealed = candidate.seal();
+    var candidate_sealed = try candidate.seal(null);
     defer candidate_sealed.deinit();
     _ = try modules.testing.register(&registry, candidate_sealed.ref(), requested);
     var generation = modules.testing.acquire(&registry, requested).?;

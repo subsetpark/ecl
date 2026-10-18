@@ -387,7 +387,7 @@ pub const Session = enum(usize) {
         errdefer archive_owner.deinit();
         const archive = archive_owner.view();
         var bootstrap_cancelled: std.atomic.Value(bool) = .init(false);
-        prelude.install(host_owner.cleanup(), &building, &registry, &archive_owner, &bootstrap_cancelled) catch |err| switch (err) {
+        prelude.install(host_owner.cleanup(), &building, &registry, &archive_owner, &bootstrap_cancelled, idioms.freeze_recognizer) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidPrelude => @panic("embedded prelude is invalid"),
         };
@@ -597,6 +597,7 @@ pub const Session = enum(usize) {
                 .module_snapshot = core.module_snapshot,
                 .idiom_mode = core.idiom_mode,
                 .phrase_recognizer = idioms.tryApply,
+                .freeze_recognizer = idioms.freeze_recognizer,
                 .phase = .{ .runtime = .{
                     .native_loader = core.native_owner.loader(),
                     .console = &core.console,
@@ -1347,7 +1348,7 @@ test "invocation effects: completion owns immediate deferred nested and failing 
         .complete => |owned| break owned,
     };
     defer image.deinit();
-    var sealed = image.seal();
+    var sealed = try image.seal(null);
     defer sealed.deinit();
     _ = try modules.testing.register(registry, sealed.ref(), try intern.internModuleName("probe"));
 

@@ -64,8 +64,6 @@ fn execute(
     runtime.setIdiomMode(mode);
     const warmup: ?[]const u8 = if (std.mem.indexOf(u8, source, "str.format") != null)
         "\"\" str.upper pop"
-    else if (std.mem.indexOf(u8, source, "distinct") != null)
-        "{} dict.keys pop"
     else
         null;
     if (warmup) |stdlib_source| switch (try runtime.runUnit("<idiom-warmup>", stdlib_source)) {
@@ -400,13 +398,6 @@ fn directInput(operation: ecl.idioms.DirectOp, variant: Variant) []const u8 {
             .empty => "[]",
             .spine => "[[1] [2]]",
             .float => "[0.1 -0.0 0.2]",
-            .failure => "1",
-        },
-        .distinct => switch (variant) {
-            .atom => "[1 2 1]",
-            .empty => "[]",
-            .spine => "[[1] [2] [1]]",
-            .float => "[0.1 -0.0 0.1]",
             .failure => "1",
         },
         // `dip` needs a value below the protected one for its quotation to

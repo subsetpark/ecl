@@ -1811,12 +1811,12 @@ comptime {
     if (@sizeOf(Frame) > 144) @compileError("machine frames must remain at most 144 bytes");
 }
 pub const IdiomRequest = union(enum) {
+    /// A trusted source word whose body was recognized when its environment
+    /// froze. Only whether this call's operands admit the entry is left.
     direct: struct {
         body: *Header,
         word: u32,
-        /// The trusted source word's defining chain: null for core, the
-        /// standard module image for a shipped source word.
-        scope: ?*env.Scope,
+        idiom: env.DirectIdiom,
     },
     each,
     zip_with,
@@ -1856,6 +1856,8 @@ pub const InheritedContext = struct {
     module_snapshot: ?*const map_state.Snapshot = null,
     idiom_mode: IdiomMode = .automatic,
     phrase_recognizer: ?PhraseRecognizer = null,
+    /// Decides trusted definitions' idioms when a module image freezes.
+    freeze_recognizer: ?env.FreezeRecognizer = null,
     phase: union(enum) { bootstrap, runtime: RuntimeContext },
 
     pub fn console(self: *const InheritedContext) ?*console_api.Console {
@@ -4327,7 +4329,8 @@ pub const Machine = struct {
                         .pending => return .stepped,
                         .complete => |candidate| {
                             var built = candidate;
-                            self.candidate = .init(built.seal());
+                            errdefer built.deinit();
+                            self.candidate = .init(try built.seal(evaluator.moduleRecognition()));
                             return .stepped;
                         },
                     }
@@ -4448,13 +4451,16 @@ pub const Machine = struct {
                 .definitions => |*definitions| switch (try definitions.publication.borrowMut().advance()) {
                     .pending => return .stepped,
                     .complete => |candidate| {
+                        // Sealing can fail; until it succeeds the instance and
+                        // the publication stay with this driver's state.
+                        var built = candidate;
+                        errdefer built.deinit();
+                        var sealed = heap.Owned(modules.SealedImage).init(try built.seal(evaluator.moduleRecognition()));
                         const instance = definitions.instance.take();
                         definitions.publication.deinit(
                             evaluator.releaseDomain(),
                             evaluator.allocator(),
                         );
-                        var built = candidate;
-                        var sealed = heap.Owned(modules.SealedImage).init(built.seal());
                         const cursor = evaluator.unit.inherited.registry.registrationCursor(
                             sealed.borrow().ref(),
                             self.name,
@@ -5481,6 +5487,17 @@ pub const Machine = struct {
         }
         return error.Ecl;
     }
+    /// What a module image built by this unit recognizes against when it
+    /// seals: the session's recognizer and core. Null when the unit has none.
+    pub fn moduleRecognition(self: *Machine) ?env.ModuleRecognition {
+        const recognizer = self.unit.inherited.freeze_recognizer orelse return null;
+        return .{
+            .recognizer = recognizer,
+            .core = self.unit.environment.coreView(),
+            .core_scope = self.unit.environment.coreScopeId(),
+        };
+    }
+
     pub fn continueWithIdiom(self: *Machine, request: IdiomRequest, fallback: IdiomFallback) MachineError!void {
         if (self.unit.inherited.phrase_recognizer) |recognize| return recognize(self, request, fallback);
         var owned = fallback;
@@ -7671,7 +7688,11 @@ fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
     switch (resolved.lease.binding) {
         .word => |body| {
             const body_header = env.quotationHeader(body);
-            if (resolved.origin == .core or resolved.origin == .standard_library) {
+            // A trusted definition's recognition was decided when its
+            // environment froze; one that recognized nothing runs as any
+            // source word does.
+            const trusted = resolved.origin == .core or resolved.origin == .standard_library;
+            if (trusted) if (resolved.lease.direct_idiom) |idiom| {
                 heap.incRef(body_header);
                 const fallback: DirectWordFallback = .{
                     .body = .init(body_header),
@@ -7690,14 +7711,11 @@ fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
                     .{ .direct = .{
                         .body = body_header,
                         .word = resolved.trace_word.atom(),
-                        .scope = if (resolved.home) |home|
-                            home.scope(self.unit.module_access)
-                        else
-                            null,
+                        .idiom = idiom,
                     } },
                     typedIdiomFallback(fallback),
                 );
-            }
+            };
             try scheduleWord(
                 self,
                 body_header,
@@ -9692,7 +9710,7 @@ const ModuleCompletionDriver = struct {
                     continue;
                 }
                 const completion = capture.completion;
-                var sealed = heap.Owned(modules.SealedImage).init(capture.image.borrowMut().seal());
+                var sealed = heap.Owned(modules.SealedImage).init(try capture.image.borrowMut().seal(evaluator.moduleRecognition()));
                 capture.image.deinit(evaluator.releaseDomain(), evaluator.allocator());
                 switch (completion) {
                     .value => self.state.borrowMut().* = .{ .value = .init(sealed.take()) },

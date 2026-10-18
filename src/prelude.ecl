@@ -228,10 +228,6 @@
 (sequence -- sorted : "Return a stably ascending permutation of a sequence.")
 (dup grade at) 'sort def
 
-### def distinct
-(list -- list : "Return the first occurrence of each distinct list value in input order.")
-(group dict.keys) 'distinct def
-
 ### def at-path
 (ds l -- x : "Look up each key or index in a path from left to right.")
 (swap (at) fold) 'at-path def

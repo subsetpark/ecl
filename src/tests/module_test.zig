@@ -165,7 +165,7 @@ const TestEffect = struct {
 fn commitEmptyModule(registry: *modules.Registry, name: intern.ModuleName) !void {
     var candidate = try registry.createImage();
     defer candidate.deinit();
-    var sealed = candidate.seal();
+    var sealed = try candidate.seal(null);
     defer sealed.deinit();
     _ = try modules.testing.register(registry, sealed.ref(), name);
 }
@@ -298,7 +298,7 @@ test "env: creating and removing names bump the shape generation and rebinding d
     var expected = [_]u32{intern.namespaceId(second)};
     std.mem.sort(u32, &expected, {}, std.sort.asc(u32));
     try std.testing.expectEqualSlices(u32, &expected, names);
-    scope.publisher().module.freeze();
+    try scope.publisher().module.freeze(.none, null);
     try std.testing.expectError(
         error.Frozen,
         scope.publisher().module.publish(first, binding.module(effect.effect, .public)),
@@ -950,7 +950,7 @@ const RegistryThreadContext = struct {
 fn commitCandidate(context: RegistryThreadContext, name: intern.ModuleName) bool {
     var candidate = context.registry.createImage() catch return false;
     defer candidate.deinit();
-    var sealed = candidate.seal();
+    var sealed = candidate.seal(null) catch return false;
     defer sealed.deinit();
     _ = modules.testing.register(context.registry, sealed.ref(), name) catch return false;
     return true;
@@ -983,7 +983,7 @@ test "registry: reload reports blocked while another registration holds the slot
 
     var image = try registry.createImage();
     defer image.deinit();
-    var sealed = image.seal();
+    var sealed = try image.seal(null);
     defer sealed.deinit();
     var holder_authority: modules.TurnAuthority = .available;
     var holder = registry.registrationCursor(sealed.ref(), name, .ordinary, &holder_authority);
@@ -1097,13 +1097,13 @@ test "registry: old generation leases survive reload and reclaim after release" 
         .visibility = .public,
         .effect = effect.effect,
     } });
-    var first_sealed = first.seal();
+    var first_sealed = try first.seal(null);
     defer first_sealed.deinit();
     _ = try modules.testing.register(&registry, first_sealed.ref(), module_name);
     var old = modules.testing.acquire(&registry, module_name).?;
     var second = try registry.createImage();
     defer second.deinit();
-    var second_sealed = second.seal();
+    var second_sealed = try second.seal(null);
     defer second_sealed.deinit();
     _ = try modules.testing.register(&registry, second_sealed.ref(), module_name);
     try std.testing.expectEqual(@as(u64, 1), old.generationNumber());
@@ -1139,7 +1139,7 @@ test "registry: generation cursors independently pin their snapshot" {
     const effect = try TestEffect.init(std.testing.allocator);
     defer effect.release(releases);
     _ = try first.publishDefinition(value_name, binding.module(effect.effect, .public));
-    var first_sealed = first.seal();
+    var first_sealed = try first.seal(null);
     defer first_sealed.deinit();
     _ = try modules.testing.register(&registry, first_sealed.ref(), module_name);
 
@@ -1149,7 +1149,7 @@ test "registry: generation cursors independently pin their snapshot" {
     lease.deinit();
     var second = try registry.createImage();
     defer second.deinit();
-    var second_sealed = second.seal();
+    var second_sealed = try second.seal(null);
     defer second_sealed.deinit();
     _ = try modules.testing.register(&registry, second_sealed.ref(), module_name);
     for (0..64) |_| _ = releases.advance(1);
@@ -1269,7 +1269,7 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
         .effect = effect,
         .doc = document,
     } });
-    var first_sealed = first.seal();
+    var first_sealed = try first.seal(null);
     defer first_sealed.deinit();
     _ = try modules.testing.register(&registry, first_sealed.ref(), first_name);
     try modules.testing.alias(&registry, alias_name, first_name);
@@ -1283,7 +1283,7 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
         .effect = effect,
         .doc = document,
     } });
-    var second_sealed = second.seal();
+    var second_sealed = try second.seal(null);
     defer second_sealed.deinit();
     _ = try modules.testing.register(&registry, second_sealed.ref(), first_name);
     var third = try registry.createImage();
@@ -1291,7 +1291,7 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     const constant = try TestBinding.init(allocator);
     defer releases.releaseValue(constant.body);
     _ = try third.publishDefinition(word_name, constant.module(effect, .public));
-    var third_sealed = third.seal();
+    var third_sealed = try third.seal(null);
     defer third_sealed.deinit();
     _ = try modules.testing.register(&registry, third_sealed.ref(), second_name);
 }
