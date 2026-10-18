@@ -242,18 +242,26 @@ pub const PervadeCursor = struct {
             if (self.result) |result| releases.releaseValue(result);
         }
     };
+    /// Every pervasion step moves frames by value, so the union's size is a
+    /// per-element cost. A dictionary frame carries a match cursor and a
+    /// materializer inline and is several times larger than the rest, so it
+    /// lives behind a pointer; dictionary pervasion already allocates its
+    /// pairs, and list and typed frames stay small.
     const Frame = union(enum) {
         binary: BinaryNode,
         unary: UnaryNode,
         list: ListFrame,
-        dictionary: DictFrame,
+        dictionary: *DictFrame,
         typed: NestedTyped,
 
         fn deinit(self: *Frame, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
             switch (self.*) {
                 .binary, .unary => {},
                 .list => |*frame| frame.deinit(releases),
-                .dictionary => |*frame| frame.deinit(releases, allocator),
+                .dictionary => |frame| {
+                    frame.deinit(releases, allocator);
+                    allocator.destroy(frame);
+                },
                 .typed => |*typed| typed.retire(releases),
             }
         }
@@ -267,7 +275,7 @@ pub const PervadeCursor = struct {
             .typed => true,
             .list => |*list_frame| list_frame.result == null and !list_frame.waiting and
                 list_frame.index == list_frame.values.capacity(),
-            .dictionary => |*dict_frame| dict_frame.phase == .materialize or dict_frame.match_cursor != null,
+            .dictionary => |dict_frame| dict_frame.phase == .materialize or dict_frame.match_cursor != null,
         };
     }
 
@@ -358,7 +366,7 @@ pub const PervadeCursor = struct {
                 .list => |*list_frame| {
                     if (!try self.advanceList(list_frame, work)) return .pending;
                 },
-                .dictionary => |*dict_frame| {
+                .dictionary => |dict_frame| {
                     if (!try self.advanceDict(dict_frame, work)) return .pending;
                 },
                 .typed => |*typed| {
@@ -442,15 +450,18 @@ pub const PervadeCursor = struct {
             errdefer self.allocator.free(pairs);
             var values = try heap.OwnedValueBuffer.init(self.releases, count);
             errdefer values.deinit();
+            const frame = try self.allocator.create(DictFrame);
+            errdefer self.allocator.destroy(frame);
             try self.frames.reserve(1);
-            self.frames.pushReserved(.{ .dictionary = .{
+            frame.* = .{
                 .mode = .{ .unary = node.operation },
                 .left = node.operand,
                 .right = null,
                 .depth = node.depth,
                 .pairs = pairs,
                 .values = values.take(),
-            } });
+            };
+            self.frames.pushReserved(.{ .dictionary = frame });
             return;
         }
         if (node.operand == .list) {
@@ -548,8 +559,10 @@ pub const PervadeCursor = struct {
         errdefer self.allocator.free(pairs);
         var values = try heap.OwnedValueBuffer.init(self.releases, capacity);
         errdefer values.deinit();
+        const frame = try self.allocator.create(DictFrame);
+        errdefer self.allocator.destroy(frame);
         try self.frames.reserve(1);
-        self.frames.pushReserved(.{ .dictionary = .{
+        frame.* = .{
             .mode = if (both)
                 .{ .both = node.operation }
             else if (node.left == .dict)
@@ -561,22 +574,28 @@ pub const PervadeCursor = struct {
             .depth = node.depth,
             .pairs = pairs,
             .values = values.take(),
-        } });
+        };
+        self.frames.pushReserved(.{ .dictionary = frame });
     }
 
     /// False means the allowance was spent before this frame could continue.
+    /// The popped frame is owned here until it is pushed back or completed.
     fn advanceDict(
         self: *PervadeCursor,
         frame: *DictFrame,
         work: *poll.WorkBudget,
     ) MachineError!bool {
-        errdefer frame.deinit(self.releases, self.allocator);
+        errdefer {
+            frame.deinit(self.releases, self.allocator);
+            self.allocator.destroy(frame);
+        }
         if (frame.phase == .release) {
             frame.values.deinit();
             self.allocator.free(frame.pairs);
             const result = frame.result.?;
             frame.result = null;
             self.last = result;
+            self.allocator.destroy(frame);
             return true;
         }
         if (frame.waiting) {
@@ -597,7 +616,7 @@ pub const PervadeCursor = struct {
             try self.frames.reserve(1);
             switch (try frame.materializer.?.advance(work)) {
                 .pending => {
-                    self.frames.pushReserved(.{ .dictionary = frame.* });
+                    self.frames.pushReserved(.{ .dictionary = frame });
                     return false;
                 },
                 .duplicate_key => unreachable,
@@ -606,7 +625,7 @@ pub const PervadeCursor = struct {
                     frame.materializer = null;
                     frame.result = result;
                     frame.phase = .release;
-                    self.frames.pushReserved(.{ .dictionary = frame.* });
+                    self.frames.pushReserved(.{ .dictionary = frame });
                     return true;
                 },
             }
@@ -622,14 +641,14 @@ pub const PervadeCursor = struct {
                 if (frame.index == count) {
                     frame.phase = .materialize;
                     try self.frames.reserve(1);
-                    self.frames.pushReserved(.{ .dictionary = frame.* });
+                    self.frames.pushReserved(.{ .dictionary = frame });
                     return true;
                 }
                 const index = frame.index;
                 frame.pairs[frame.pair_count][0] = dict.keyAt(dictionary.dict, index);
                 frame.waiting = true;
                 try self.frames.reserve(2);
-                self.frames.pushReserved(.{ .dictionary = frame.* });
+                self.frames.pushReserved(.{ .dictionary = frame });
                 switch (frame.mode) {
                     .unary => |operation| self.frames.pushReserved(.{ .unary = .{
                         .operation = operation,
@@ -669,7 +688,7 @@ pub const PervadeCursor = struct {
                         frame.candidate = 0;
                     } else frame.phase = .materialize;
                     try self.frames.reserve(1);
-                    self.frames.pushReserved(.{ .dictionary = frame.* });
+                    self.frames.pushReserved(.{ .dictionary = frame });
                     return true;
                 }
                 if (frame.candidate == other_count) {
@@ -681,7 +700,7 @@ pub const PervadeCursor = struct {
                     frame.index += 1;
                     frame.candidate = 0;
                     try self.frames.reserve(1);
-                    self.frames.pushReserved(.{ .dictionary = frame.* });
+                    self.frames.pushReserved(.{ .dictionary = frame });
                     return true;
                 }
                 if (frame.match_cursor == null) frame.match_cursor = try .init(
@@ -692,7 +711,7 @@ pub const PervadeCursor = struct {
                 try self.frames.reserve(2);
                 switch (try frame.match_cursor.?.advance(work)) {
                     .pending => {
-                        self.frames.pushReserved(.{ .dictionary = frame.* });
+                        self.frames.pushReserved(.{ .dictionary = frame });
                         return false;
                     },
                     .complete => |matches| {
@@ -700,20 +719,20 @@ pub const PervadeCursor = struct {
                         frame.match_cursor = null;
                         if (!matches) {
                             frame.candidate += 1;
-                            self.frames.pushReserved(.{ .dictionary = frame.* });
+                            self.frames.pushReserved(.{ .dictionary = frame });
                             return true;
                         }
                         if (frame.phase == .right) {
                             frame.index += 1;
                             frame.candidate = 0;
-                            self.frames.pushReserved(.{ .dictionary = frame.* });
+                            self.frames.pushReserved(.{ .dictionary = frame });
                             return true;
                         }
                         const index = frame.index;
                         const candidate = frame.candidate;
                         frame.pairs[frame.pair_count][0] = dict.keyAt(frame.left.dict, index);
                         frame.waiting = true;
-                        self.frames.pushReserved(.{ .dictionary = frame.* });
+                        self.frames.pushReserved(.{ .dictionary = frame });
                         self.frames.pushReserved(.{ .binary = .{
                             .operation = operation,
                             .left = dict.valueAt(frame.left.dict, index),
@@ -1272,6 +1291,10 @@ const LoopPolicy = enum {
     vector_checked,
     scalar_infallible,
     scalar_checked,
+
+    fn isVector(self: LoopPolicy) bool {
+        return self == .vector_infallible or self == .vector_checked;
+    }
 };
 
 fn binaryLoopPolicy(
@@ -1365,6 +1388,36 @@ const TypedOutput = union(enum) {
                 .fresh_bytes, .fresh_ints, .reuse_bytes, .reuse_ints => unreachable,
             },
         }
+    }
+
+    fn isFresh(self: *const TypedOutput) bool {
+        return switch (self.*) {
+            .fresh_bytes, .fresh_ints, .fresh_reals => true,
+            .reuse_bytes, .reuse_ints, .reuse_reals => false,
+        };
+    }
+
+    /// A fresh buffer's range, which a vector block may compute in place
+    /// before its faults are known. A reused input has none: its blocks stage
+    /// until clean, since its operands are what a replay reads.
+    fn freshRange(self: *TypedOutput, comptime class: Number, piece: flat.Chunk) ?[]class.Element() {
+        return switch (class) {
+            .byte => switch (self.*) {
+                .fresh_bytes => |*writer| writer.unpublishedRange(piece.start, piece.len()),
+                .reuse_bytes => null,
+                .fresh_ints, .fresh_reals, .reuse_ints, .reuse_reals => unreachable,
+            },
+            .integer => switch (self.*) {
+                .fresh_ints => |*writer| writer.unpublishedRange(piece.start, piece.len()),
+                .reuse_ints => null,
+                .fresh_bytes, .fresh_reals, .reuse_bytes, .reuse_reals => unreachable,
+            },
+            .real => switch (self.*) {
+                .fresh_reals => |*writer| writer.unpublishedRange(piece.start, piece.len()),
+                .reuse_reals => null,
+                .fresh_bytes, .fresh_ints, .reuse_bytes, .reuse_ints => unreachable,
+            },
+        };
     }
 
     /// The reused buffer read as the operand representation it still holds.
@@ -1834,6 +1887,16 @@ fn exactFloatFaults(
     return faults;
 }
 
+/// The next piece of a charged range. A vector loop writing a fresh output
+/// stages nothing, so it takes the rest of the range as one block and pays
+/// its fixed per-block work once; anything staged is bounded by the staging
+/// array. Either way the piece lies inside the range already charged, which
+/// also bounds a faulted piece's exact pass and scalar replay.
+fn nextPiece(comptime vector: bool, output: *const TypedOutput, range: flat.Chunk, offset: usize) flat.Chunk {
+    if (vector and output.isFresh()) return .{ .start = range.start + offset, .end = range.end };
+    return flat.blockRange(range, offset);
+}
+
 /// One charged chunk of a binary typed operation.
 fn binaryStep(
     comptime operation: BinaryOp,
@@ -1918,11 +1981,27 @@ fn binaryStep(
             };
         }
     }.run;
+    const real_lanes = struct {
+        fn arithmetic(a: @Vector(lanes, f64), b: @Vector(lanes, f64)) @Vector(lanes, f64) {
+            return switch (operation) {
+                .add => a + b,
+                .sub => a - b,
+                .mul => a * b,
+                .div => a / b,
+                else => unreachable,
+            };
+        }
+
+        fn finite(result: @Vector(lanes, f64)) @Vector(lanes, bool) {
+            const inf: @Vector(lanes, f64) = @splat(std.math.inf(f64));
+            return @abs(result) < inf;
+        }
+    };
     const checked_vector_body = struct {
         fn run(
             a: @Vector(lanes, left_class.Element()),
             b: @Vector(lanes, right_class.Element()),
-        ) flat.MaskedVector(out.Element(), lanes) {
+        ) Vectors.Masked {
             if (left_class == .integer and right_class == .integer) {
                 const result = switch (operation) {
                     .add => @addWithOverflow(a, b),
@@ -1931,30 +2010,19 @@ fn binaryStep(
                     else => unreachable,
                 };
                 const no_overflow: @Vector(lanes, u1) = @splat(0);
-                return .{ .values = result[0], .faults = result[1] != no_overflow };
+                return .{ .values = result[0], .faults = Vectors.mask(result[1] != no_overflow) };
             }
             if (left_class == .real and right_class == .real and
                 (operation == .add or operation == .sub or operation == .mul or operation == .div))
             {
-                // The mask must be exactly the scalar authority's fault set, not
-                // a superset: a faulted block replays through `numericBinary` or
-                // `divide`, and a lane the scalar accepts leaves that replay with
-                // nothing to report. Strict float mode keeps each lane's bits
-                // identical to the scalar operation, with no contraction.
-                const inf: @Vector(lanes, f64) = @splat(std.math.inf(f64));
-                const result = switch (operation) {
-                    .add => a + b,
-                    .sub => a - b,
-                    .mul => a * b,
-                    .div => a / b,
-                    else => unreachable,
-                };
                 // Every fault has a non-finite result, including division by
-                // either signed zero, so finite lanes need no further test.
-                const finite = @abs(result) < inf;
-                const clean: @Vector(lanes, bool) = @splat(false);
-                if (@reduce(.And, finite)) return .{ .values = result, .faults = clean };
-                return .{ .values = result, .faults = exactFloatFaults(operation, lanes, a, b, result) };
+                // either signed zero, so non-finite lanes cover the faults. They
+                // over-approximate them, since a non-finite operand propagates
+                // without faulting; `exact_vector_faults` settles a nominated
+                // block. Strict float mode keeps each lane's bits identical to
+                // the scalar operation, with no contraction.
+                const result = real_lanes.arithmetic(a, b);
+                return .{ .values = result, .faults = Vectors.mask(!real_lanes.finite(result)) };
             }
             const nan = (a != a) | (b != b);
             const ones: @Vector(lanes, i64) = @splat(1);
@@ -1971,10 +2039,36 @@ fn binaryStep(
                     .max => @select(left_class.Element(), b > a, b, a),
                     else => unreachable,
                 },
-                .faults = nan,
+                .faults = Vectors.mask(nan),
             };
         }
     }.run;
+    // Exactly the scalar authority's fault set, not a superset: a faulted block
+    // replays through `numericBinary` or `divide`, and a lane the scalar accepts
+    // would leave that replay with nothing to report. Only float arithmetic's
+    // mask over-approximates, so every other body is already exact.
+    const exact_vector_faults = struct {
+        fn run(
+            a: @Vector(lanes, left_class.Element()),
+            b: @Vector(lanes, right_class.Element()),
+        ) @Vector(lanes, bool) {
+            if (left_class == .real and right_class == .real and
+                (operation == .add or operation == .sub or operation == .mul or operation == .div))
+            {
+                const result = real_lanes.arithmetic(a, b);
+                const clean: @Vector(lanes, bool) = @splat(false);
+                if (@reduce(.And, real_lanes.finite(result))) return clean;
+                return exactFloatFaults(operation, lanes, a, b, result);
+            }
+            const none: @TypeOf(checked_vector_body(a, b).faults) = @splat(0);
+            return checked_vector_body(a, b).faults != none;
+        }
+    }.run;
+    const checked: Vectors.Checked = .{
+        .vector = checked_vector_body,
+        .exact = exact_vector_faults,
+        .scalar = checked_body,
+    };
     return struct {
         fn leftSlice(state: *const TypedState) []const left_class.Element() {
             return if (state.left == .aliased)
@@ -1995,21 +2089,23 @@ fn binaryStep(
             var block = flat.Block(out.Element()).init();
             var offset: usize = 0;
             while (offset != range.len()) {
-                const piece = flat.blockRange(range, offset);
+                const piece = nextPiece(comptime policy.isVector(), &state.output, range, offset);
+                const direct = state.output.freshRange(out, piece);
+                const dest = direct orelse block.items[0..piece.len()];
                 const status: flat.CheckedStatus = switch (comptime policy) {
                     .vector_infallible => blk: {
                         switch (shape) {
-                            .leaf_leaf => Vectors.binary(vector_body, infallible_body, leftSlice(state), rightSlice(state), piece, &block),
-                            .leaf_scalar => Vectors.binaryScalarRight(vector_body, infallible_body, leftSlice(state), right_class.unboxed(state.right.scalar), piece, &block),
-                            .scalar_leaf => Vectors.binaryScalarLeft(vector_body, infallible_body, left_class.unboxed(state.left.scalar), rightSlice(state), piece, &block),
+                            .leaf_leaf => Vectors.binary(vector_body, infallible_body, leftSlice(state), rightSlice(state), piece, dest),
+                            .leaf_scalar => Vectors.binaryScalarRight(vector_body, infallible_body, leftSlice(state), right_class.unboxed(state.right.scalar), piece, dest),
+                            .scalar_leaf => Vectors.binaryScalarLeft(vector_body, infallible_body, left_class.unboxed(state.left.scalar), rightSlice(state), piece, dest),
                             .leaf_only => unreachable,
                         }
                         break :blk .clean;
                     },
                     .vector_checked => switch (shape) {
-                        .leaf_leaf => Vectors.checkedBinary(checked_vector_body, checked_body, leftSlice(state), rightSlice(state), piece, &block),
-                        .leaf_scalar => Vectors.checkedBinaryScalarRight(checked_vector_body, checked_body, leftSlice(state), right_class.unboxed(state.right.scalar), piece, &block),
-                        .scalar_leaf => Vectors.checkedBinaryScalarLeft(checked_vector_body, checked_body, left_class.unboxed(state.left.scalar), rightSlice(state), piece, &block),
+                        .leaf_leaf => Vectors.checkedBinary(checked, leftSlice(state), rightSlice(state), piece, dest),
+                        .leaf_scalar => Vectors.checkedBinaryScalarRight(checked, leftSlice(state), right_class.unboxed(state.right.scalar), piece, dest),
+                        .scalar_leaf => Vectors.checkedBinaryScalarLeft(checked, left_class.unboxed(state.left.scalar), rightSlice(state), piece, dest),
                         .leaf_only => unreachable,
                     },
                     .scalar_infallible => blk: {
@@ -2028,10 +2124,15 @@ fn binaryStep(
                         .leaf_only => unreachable,
                     },
                 };
-                // Nothing is stored until the whole block is known clean: a
-                // reused input buffer still holds the operands the replay reads.
+                // Nothing reaches a reused input buffer until the whole block is
+                // known clean, since it still holds the operands the replay
+                // reads. A fresh buffer was written in place and is retired
+                // unpublished if the replay fails.
                 if (status == .faulted) return replayNumericBinary(state, context, piece, selectScalar(operation));
-                state.output.store(out, piece.start, block.written());
+                switch (comptime policy) {
+                    .vector_infallible, .vector_checked => if (direct == null) state.output.store(out, piece.start, dest),
+                    .scalar_infallible, .scalar_checked => state.output.store(out, piece.start, block.written()),
+                }
                 offset += piece.len();
             }
         }
@@ -2080,17 +2181,23 @@ fn unaryStep(comptime operation: UnaryOp, comptime operand_class: Number) TypedS
             var block = flat.Block(out.Element()).init();
             var offset: usize = 0;
             while (offset != range.len()) {
-                const piece = flat.blockRange(range, offset);
+                const piece = nextPiece(comptime policy.isVector(), &state.output, range, offset);
+                const direct = state.output.freshRange(out, piece);
+                const dest = direct orelse block.items[0..piece.len()];
                 const status: flat.CheckedStatus = switch (comptime policy) {
                     .vector_infallible => blk: {
-                        Vectors.unary(vector_body, infallible_body, operandSlice(state), piece, &block);
+                        Vectors.unary(vector_body, infallible_body, operandSlice(state), piece, dest);
                         break :blk .clean;
                     },
                     .scalar_checked => Checked.unary(checked_body, operandSlice(state), piece, &block),
                     .vector_checked, .scalar_infallible => unreachable,
                 };
                 if (status == .faulted) return replayNumericUnary(state, context, piece, selectUnary(operation));
-                state.output.store(out, piece.start, block.written());
+                switch (comptime policy) {
+                    .vector_infallible => if (direct == null) state.output.store(out, piece.start, dest),
+                    .scalar_checked => state.output.store(out, piece.start, block.written()),
+                    .vector_checked, .scalar_infallible => unreachable,
+                }
                 offset += piece.len();
             }
         }

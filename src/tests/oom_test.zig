@@ -703,6 +703,7 @@ fn projectSessionInitializationProbe(allocator: std.mem.Allocator) !void {
 const StdlibSurface = enum {
     transitioning_reductions,
     owned_reductions,
+    dictionary_pervasion,
     archive_view,
     archive_resource,
     directory_enumeration,
@@ -824,6 +825,13 @@ fn stdlibSessionAllocationProbe(
                 "[[[1.0] [2.0]] [[3.0] [4.0]] [[5.0] [6.0]]] (+) fold1 pop " ++
                 "[{'a 1.0} {'a 2.0} {'a 3.0}] (+) fold1 pop " ++
                 "[] ([[1.0 2.0] [1e308 1e308] [1e308 1e308]] (+) fold1) @attempt pop",
+        ),
+        // Each dictionary pervasion frame is allocated on its own: unary,
+        // dictionary by scalar, and dictionary by dictionary each create one.
+        .dictionary_pervasion => try runOk(
+            &runtime,
+            "oom-dictionary-pervasion.ecl",
+            "{'a 1.0} neg pop {'a 1.0} 2.0 * pop {'a 1.0} {'a 2.0} + pop",
         ),
         .root_source_preload => {
             while (true) switch (try runtime.advanceLocalPreload()) {
@@ -1318,6 +1326,11 @@ test "oom: standard-library and host: transitioning reductions" {
 test "oom: standard-library and host: owned reductions" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.owned_reductions);
+}
+
+test "oom: standard-library and host: dictionary pervasion" {
+    try requireSelectedOomTest(@src());
+    try checkStdlibSurface(.dictionary_pervasion);
 }
 
 fn nativePortForwardingProbe(

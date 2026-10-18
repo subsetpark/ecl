@@ -65,11 +65,12 @@ pub fn LeafReader(comptime kind_value: HeapKind) type {
 
 /// A write capability over one freshly allocated typed output buffer.
 ///
-/// It owns its allocation, exposes only bounded range writes, and publishes
-/// through exactly one consuming `finish`. There is deliberately no
-/// whole-slice accessor: a caller that must know a block's faults before
-/// storing it cannot be handed the destination to scribble on, which is what
-/// keeps the rescan evidence of an aliased input intact.
+/// It owns its allocation, exposes only bounded ranges, and publishes through
+/// exactly one consuming `finish`. The buffer aliases no input and nothing
+/// reads it before publication, so a producer may write a range before it
+/// knows whether that block faulted: a faulted operation retires the writer
+/// unpublished. A reused input buffer is a `UniqueLeafAdoption` instead, which
+/// has no such range, because its operands are the evidence a replay rescans.
 pub fn LeafWriter(comptime kind_value: HeapKind) type {
     requireLeafRepresentation(kind_value, "LeafWriter");
     const Element = LeafElement(kind_value);
@@ -100,6 +101,13 @@ pub fn LeafWriter(comptime kind_value: HeapKind) type {
             std.debug.assert(offset + source.len <= self.length);
             if (source.len == 0) return;
             @memcpy(self.builder.?.items()[offset..][0..source.len], source);
+        }
+
+        /// One bounded unpublished range, for producers that compute a block in
+        /// place. Asserts containment for the same reason `writeRange` does.
+        pub fn unpublishedRange(self: *Self, offset: usize, count: usize) []Element {
+            std.debug.assert(offset + count <= self.length);
+            return self.builder.?.items()[offset..][0..count];
         }
 
         /// The fill counterpart, for producers whose block is one repeated

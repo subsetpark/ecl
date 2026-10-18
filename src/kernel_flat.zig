@@ -324,18 +324,30 @@ pub fn CheckedFamily(comptime Left: type, comptime Right: type, comptime Out: ty
     };
 }
 
-/// One vector result and its lane fault mask. Checked vector loops reduce the
-/// mask before making the staged block publishable; they never expose a
-/// per-element optional or error union to the hot loop.
-pub fn MaskedVector(comptime Element: type, comptime lanes: comptime_int) type {
+/// One vector result and a lane mask covering its faults. A checked body's
+/// mask may over-approximate, so the hot loop can test it once per block; the
+/// paired exact mask decides whether a nominated block really faulted.
+///
+/// The mask is all-ones or zero per lane in an integer as wide as `MaskLane`,
+/// the shape a vector compare produces. A `@Vector(lanes, bool)` crossing the
+/// body boundary is lowered on x86 as a packed bitmask and re-expanded, which
+/// costs more than the arithmetic it guards.
+pub fn MaskedVector(comptime Element: type, comptime MaskLane: type, comptime lanes: comptime_int) type {
     return struct {
         values: @Vector(lanes, Element),
-        faults: @Vector(lanes, bool),
+        faults: @Vector(lanes, MaskLane),
     };
 }
 
 /// Explicit vector loops for a same-width input pair. Full vectors use the
 /// target's suggested width; the scalar callback owns the bounded tail.
+///
+/// Each loop writes one block into `dest`, exactly `range.len()` elements.
+/// The caller passes a staging block when the output is a reused input buffer,
+/// whose operands a replay may still need, and the fresh output's own range
+/// otherwise, since nothing reads a fresh buffer before it is published. Only
+/// a staged block is bounded by `block_size`; a fresh one may be a whole
+/// charged range.
 pub fn VectorFamily(
     comptime Left: type,
     comptime Right: type,
@@ -347,11 +359,123 @@ pub fn VectorFamily(
         const LeftVector = @Vector(lanes, Left);
         const RightVector = @Vector(lanes, Right);
         const OutVector = @Vector(lanes, Out);
-        const Masked = MaskedVector(Out, lanes);
+        const FaultMask = @Vector(lanes, bool);
+        const MaskLane = std.meta.Int(.unsigned, @bitSizeOf(Left));
+        const LaneMask = @Vector(lanes, MaskLane);
+        pub const Masked = MaskedVector(Out, MaskLane, lanes);
+
+        /// A lane condition in the mask shape `Masked` carries.
+        pub fn mask(condition: FaultMask) LaneMask {
+            const none: LaneMask = @splat(0);
+            const all: LaneMask = @splat(std.math.maxInt(MaskLane));
+            return @select(MaskLane, condition, all, none);
+        }
         const Fault = error{Fault};
 
-        fn storeVector(block: *Staging, offset: usize, values: OutVector) void {
-            block.items[offset..][0..lanes].* = values;
+        /// The three bodies of a checked operation. `vector` may report a
+        /// superset of the faulting lanes; `exact` reports precisely the lanes
+        /// `scalar` rejects, because a block declared faulted is replayed
+        /// through the scalar authority, which must then find its fault.
+        pub const Checked = struct {
+            vector: fn (LeftVector, RightVector) Masked,
+            exact: fn (LeftVector, RightVector) FaultMask,
+            scalar: fn (Left, Right) Fault!Out,
+        };
+
+        fn storeVector(dest: []Out, offset: usize, values: OutVector) void {
+            dest[offset..][0..lanes].* = values;
+        }
+
+        const LeafLeaf = struct {
+            left: []const Left,
+            right: []const Right,
+
+            fn vectors(self: LeafLeaf, index: usize) struct { LeftVector, RightVector } {
+                return .{ self.left[index..][0..lanes].*, self.right[index..][0..lanes].* };
+            }
+
+            fn scalars(self: LeafLeaf, index: usize) struct { Left, Right } {
+                return .{ self.left[index], self.right[index] };
+            }
+        };
+
+        const LeafScalar = struct {
+            left: []const Left,
+            right: Right,
+            broadcast: RightVector,
+
+            fn vectors(self: LeafScalar, index: usize) struct { LeftVector, RightVector } {
+                return .{ self.left[index..][0..lanes].*, self.broadcast };
+            }
+
+            fn scalars(self: LeafScalar, index: usize) struct { Left, Right } {
+                return .{ self.left[index], self.right };
+            }
+        };
+
+        const ScalarLeaf = struct {
+            left: Left,
+            right: []const Right,
+            broadcast: LeftVector,
+
+            fn vectors(self: ScalarLeaf, index: usize) struct { LeftVector, RightVector } {
+                return .{ self.broadcast, self.right[index..][0..lanes].* };
+            }
+
+            fn scalars(self: ScalarLeaf, index: usize) struct { Left, Right } {
+                return .{ self.left, self.right[index] };
+            }
+        };
+
+        fn infallibleRange(
+            comptime vector_body: fn (LeftVector, RightVector) OutVector,
+            comptime scalar_body: fn (Left, Right) Out,
+            source: anytype,
+            range: Chunk,
+            dest: []Out,
+        ) void {
+            std.debug.assert(dest.len == range.len());
+            const vector_end = range.start + range.len() / lanes * lanes;
+            for (0..range.len() / lanes) |vector| {
+                const offset = vector * lanes;
+                const a, const b = source.vectors(range.start + offset);
+                storeVector(dest, offset, vector_body(a, b));
+            }
+            for (vector_end..range.end) |index| {
+                const a, const b = source.scalars(index);
+                dest[index - range.start] = scalar_body(a, b);
+            }
+        }
+
+        /// Accumulates the possibly over-approximate fault masks across the
+        /// whole block and reduces them once, instead of reducing and
+        /// branching on every vector. Only a nominated block pays a second,
+        /// exact pass, which keeps `.faulted` meaning a real scalar fault.
+        fn checkedRange(comptime body: Checked, source: anytype, range: Chunk, dest: []Out) CheckedStatus {
+            std.debug.assert(dest.len == range.len());
+            // Counting whole vectors keeps one induction variable; stepping an
+            // index by `lanes` against `index + lanes <= end` kept two, and the
+            // loop control cost more than the arithmetic.
+            const vectors = range.len() / lanes;
+            const vector_end = range.start + vectors * lanes;
+            var suspect: LaneMask = @splat(0);
+            for (0..vectors) |vector| {
+                const offset = vector * lanes;
+                const a, const b = source.vectors(range.start + offset);
+                const result = body.vector(a, b);
+                suspect |= result.faults;
+                storeVector(dest, offset, result.values);
+            }
+            for (vector_end..range.end) |index| {
+                const a, const b = source.scalars(index);
+                dest[index - range.start] = body.scalar(a, b) catch return .faulted;
+            }
+            if (@reduce(.Or, suspect) == 0) return .clean;
+            for (0..vectors) |vector| {
+                const a, const b = source.vectors(range.start + vector * lanes);
+                if (@reduce(.Or, body.exact(a, b))) return .faulted;
+            }
+            return .clean;
         }
 
         pub fn binary(
@@ -360,21 +484,10 @@ pub fn VectorFamily(
             left: []const Left,
             right: []const Right,
             range: Chunk,
-            block: *Staging,
+            dest: []Out,
         ) void {
-            block.reset();
-            std.debug.assert(range.len() <= block_size);
             std.debug.assert(range.end <= left.len and range.end <= right.len);
-            var index = range.start;
-            while (index + lanes <= range.end) : (index += lanes) {
-                const a: LeftVector = left[index..][0..lanes].*;
-                const b: RightVector = right[index..][0..lanes].*;
-                storeVector(block, index - range.start, vector_body(a, b));
-            }
-            while (index < range.end) : (index += 1) {
-                block.items[index - range.start] = scalar_body(left[index], right[index]);
-            }
-            block.len = range.len();
+            infallibleRange(vector_body, scalar_body, LeafLeaf{ .left = left, .right = right }, range, dest);
         }
 
         pub fn binaryScalarRight(
@@ -383,21 +496,11 @@ pub fn VectorFamily(
             left: []const Left,
             right: Right,
             range: Chunk,
-            block: *Staging,
+            dest: []Out,
         ) void {
-            block.reset();
-            std.debug.assert(range.len() <= block_size);
             std.debug.assert(range.end <= left.len);
-            const broadcast: RightVector = @splat(right);
-            var index = range.start;
-            while (index + lanes <= range.end) : (index += lanes) {
-                const a: LeftVector = left[index..][0..lanes].*;
-                storeVector(block, index - range.start, vector_body(a, broadcast));
-            }
-            while (index < range.end) : (index += 1) {
-                block.items[index - range.start] = scalar_body(left[index], right);
-            }
-            block.len = range.len();
+            const source: LeafScalar = .{ .left = left, .right = right, .broadcast = @splat(right) };
+            infallibleRange(vector_body, scalar_body, source, range, dest);
         }
 
         pub fn binaryScalarLeft(
@@ -406,95 +509,46 @@ pub fn VectorFamily(
             left: Left,
             right: []const Right,
             range: Chunk,
-            block: *Staging,
+            dest: []Out,
         ) void {
-            block.reset();
-            std.debug.assert(range.len() <= block_size);
             std.debug.assert(range.end <= right.len);
-            const broadcast: LeftVector = @splat(left);
-            var index = range.start;
-            while (index + lanes <= range.end) : (index += lanes) {
-                const b: RightVector = right[index..][0..lanes].*;
-                storeVector(block, index - range.start, vector_body(broadcast, b));
-            }
-            while (index < range.end) : (index += 1) {
-                block.items[index - range.start] = scalar_body(left, right[index]);
-            }
-            block.len = range.len();
+            const source: ScalarLeaf = .{ .left = left, .right = right, .broadcast = @splat(left) };
+            infallibleRange(vector_body, scalar_body, source, range, dest);
         }
 
         pub fn checkedBinary(
-            comptime vector_body: fn (LeftVector, RightVector) Masked,
-            comptime scalar_body: fn (Left, Right) Fault!Out,
+            comptime body: Checked,
             left: []const Left,
             right: []const Right,
             range: Chunk,
-            block: *Staging,
+            dest: []Out,
         ) CheckedStatus {
-            block.reset();
-            std.debug.assert(range.len() <= block_size);
             std.debug.assert(range.end <= left.len and range.end <= right.len);
-            var index = range.start;
-            while (index + lanes <= range.end) : (index += lanes) {
-                const result = vector_body(left[index..][0..lanes].*, right[index..][0..lanes].*);
-                if (@reduce(.Or, result.faults)) return .faulted;
-                storeVector(block, index - range.start, result.values);
-            }
-            while (index < range.end) : (index += 1) {
-                block.items[index - range.start] = scalar_body(left[index], right[index]) catch return .faulted;
-            }
-            block.len = range.len();
-            return .clean;
+            return checkedRange(body, LeafLeaf{ .left = left, .right = right }, range, dest);
         }
 
         pub fn checkedBinaryScalarRight(
-            comptime vector_body: fn (LeftVector, RightVector) Masked,
-            comptime scalar_body: fn (Left, Right) Fault!Out,
+            comptime body: Checked,
             left: []const Left,
             right: Right,
             range: Chunk,
-            block: *Staging,
+            dest: []Out,
         ) CheckedStatus {
-            block.reset();
-            std.debug.assert(range.len() <= block_size);
             std.debug.assert(range.end <= left.len);
-            const broadcast: RightVector = @splat(right);
-            var index = range.start;
-            while (index + lanes <= range.end) : (index += lanes) {
-                const result = vector_body(left[index..][0..lanes].*, broadcast);
-                if (@reduce(.Or, result.faults)) return .faulted;
-                storeVector(block, index - range.start, result.values);
-            }
-            while (index < range.end) : (index += 1) {
-                block.items[index - range.start] = scalar_body(left[index], right) catch return .faulted;
-            }
-            block.len = range.len();
-            return .clean;
+            const source: LeafScalar = .{ .left = left, .right = right, .broadcast = @splat(right) };
+            return checkedRange(body, source, range, dest);
         }
 
         pub fn checkedBinaryScalarLeft(
-            comptime vector_body: fn (LeftVector, RightVector) Masked,
-            comptime scalar_body: fn (Left, Right) Fault!Out,
+            comptime body: Checked,
             left: Left,
             right: []const Right,
             range: Chunk,
-            block: *Staging,
+            dest: []Out,
         ) CheckedStatus {
-            block.reset();
-            std.debug.assert(range.len() <= block_size);
             std.debug.assert(range.end <= right.len);
-            const broadcast: LeftVector = @splat(left);
-            var index = range.start;
-            while (index + lanes <= range.end) : (index += lanes) {
-                const result = vector_body(broadcast, right[index..][0..lanes].*);
-                if (@reduce(.Or, result.faults)) return .faulted;
-                storeVector(block, index - range.start, result.values);
-            }
-            while (index < range.end) : (index += 1) {
-                block.items[index - range.start] = scalar_body(left, right[index]) catch return .faulted;
-            }
-            block.len = range.len();
-            return .clean;
+            const source: ScalarLeaf = .{ .left = left, .right = right, .broadcast = @splat(left) };
+            return checkedRange(body, source, range, dest);
         }
 
         pub fn unary(
@@ -502,20 +556,19 @@ pub fn VectorFamily(
             comptime scalar_body: fn (Left) Out,
             operand: []const Left,
             range: Chunk,
-            block: *Staging,
+            dest: []Out,
         ) void {
-            block.reset();
-            std.debug.assert(range.len() <= block_size);
+            std.debug.assert(dest.len == range.len());
             std.debug.assert(range.end <= operand.len);
-            var index = range.start;
-            while (index + lanes <= range.end) : (index += lanes) {
-                const a: LeftVector = operand[index..][0..lanes].*;
-                storeVector(block, index - range.start, vector_body(a));
+            const vector_end = range.start + range.len() / lanes * lanes;
+            for (0..range.len() / lanes) |vector| {
+                const offset = vector * lanes;
+                const a: LeftVector = operand[range.start + offset ..][0..lanes].*;
+                storeVector(dest, offset, vector_body(a));
             }
-            while (index < range.end) : (index += 1) {
-                block.items[index - range.start] = scalar_body(operand[index]);
+            for (vector_end..range.end) |index| {
+                dest[index - range.start] = scalar_body(operand[index]);
             }
-            block.len = range.len();
         }
     };
 }

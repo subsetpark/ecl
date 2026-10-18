@@ -701,6 +701,63 @@ control) left the mixed short-task and cancellation p50 values within 6% in
 both directions at one and eight workers. Eight-worker cancellation p95/p99
 tails above 500 µs appeared once on each side and did not reproduce.
 
+## Checked vector blocks: one fault test, no fresh staging — 2026-10-17
+
+Four costs sat around the arithmetic of a checked vector operation:
+
+- **Two fault tests per vector.** The loop reduced and branched on a fault mask
+  for every vector: `@reduce(.And, finite)` inside the float body to choose its
+  exact path, then `@reduce(.Or, faults)` to stop early. It now ORs each
+  vector's mask into a block accumulator and tests it once. The float body's
+  mask is the cheap non-finite test; a nominated block reruns the exact mask
+  before it is declared faulted.
+- **Masks crossing the body boundary.** Carried as `@Vector(lanes, bool)`, a
+  mask was packed to a bitmask and re-expanded on every vector, which at first
+  made the block test slower than the per-vector one. Masks are now lane-width
+  integers, the shape a vector compare produces.
+- **Staging fresh outputs.** Every block was computed into a staging array and
+  copied out with `memcpy`, even when the output was freshly allocated. A fresh
+  output's range is now written in place, as one block per charged range. Only
+  a claimed input buffer still stages, bounded by the staging array.
+- **Loop control.** `while (index + lanes <= end) : (index += lanes)` kept two
+  induction variables and cost more than the arithmetic. Counting whole vectors
+  lets LLVM keep one and unroll by four.
+
+Separately, `PervadeCursor.Frame` was 816 bytes because its dictionary variant
+carries a match cursor and a materializer inline; the list, binary and typed
+variants a row actually moves are 64–224 bytes. Every pop and push copied the
+full union. Dictionary frames now live behind a pointer.
+
+Callgrind, net of setup, 20 calls at N=2,000 (80 M elements), Zig 0.16.0
+ReleaseFast `-Dcpu=native`, x86_64 Linux (Intel Core Ultra 5 125U), control
+`ca195af`:
+
+| Operation | Control Ir/element | Treatment Ir/element |
+|---|---:|---:|
+| `t v *` (rows times broadcast scalars, fresh rows) | 7.83 | 2.82 |
+| `w (+) fold1` (row-wise adds into an adopted accumulator) | 7.30 | 3.74 |
+
+Native medians, same builds, on AC power, pinned to one P-core, 7–9
+interleaved runs; internal milliseconds unless marked whole process:
+
+| Case | Control ReleaseFast | Treatment ReleaseFast | Control ReleaseSafe | Treatment ReleaseSafe |
+|---|---:|---:|---:|---:|
+| 10 × `t v *`, N=2,000 | 55 | 46 | 132 | 126 |
+| 10 × `w (+) fold1`, N=2,000 | 26 | 23 | 38 | 35 |
+| 20 × `v v *` over 1M floats | 24 | 19 | 67 | 63 |
+| 20 × `v v +` over 1M floats | 24 | 19 | 67 | 63 |
+| `2000 spectralnorm` iteration | 302 | 261 | 689 | 651 |
+| `2000 spectralnorm`, whole process | 413 | 370 | 867 | 831 |
+
+Peak RSS is unchanged. Instructions fell further than time: at N=2,000 the
+multiply streams a 32 MB matrix and writes a 32 MB result, and its per-element
+cost now sits within 1.3× of K's. At small N the gap is per row, not per
+element: at N=250 a row costs about 3,100 instructions, of which about 250 are
+arithmetic. Most of the rest is allocating the result row (glibc `malloc` on a
+size its per-thread cache does not hold), reclaiming the previous one, and
+selecting and preparing the typed plan. ReleaseSafe gains less because its
+safety checks, not the fault test, dominate its kernels.
+
 ## Empty markers without payload clears — 2026-10-17
 
 Zig 0.16 lowers an assignment of `null` to `?T`, or of a void variant to a
