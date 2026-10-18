@@ -701,6 +701,23 @@ control) left the mixed short-task and cancellation p50 values within 6% in
 both directions at one and eight workers. Eight-worker cancellation p95/p99
 tails above 500 µs appeared once on each side and did not reproduce.
 
+## Pervasion children start where they are found — 2026-10-18
+
+A pervasion child (one element pair of a list or dictionary, or the whole
+operation) used to be pushed as a node frame, popped, and started; a typed leaf
+it built was pushed again and popped to run. Children now start in place: one
+either finishes at once, leaving its value for the parent, or leaves exactly one
+frame (a container or a suspended typed leaf). The `binary` and `unary` frame
+variants are gone. Each child is still charged the units its node frame and its
+parent's return visit cost, so turn lengths are unchanged.
+
+Callgrind, `t v *` over a 250 × 250 float matrix, net of setup, Zig 0.16.0
+ReleaseFast `-Dcpu=native`, x86_64 Linux (Intel Core Ultra 5 125U), control
+`fd796bf`: 2,359 → 2,208 instructions per row; `w (+) fold1`, 2,181 → 2,133.
+Native wall time is within run-to-run variation on the matrix probes and on
+whole spectralnorm. The remaining per-row cost is the arithmetic, allocating
+and reclaiming result rows, and typed-state setup.
+
 ## Lists are one allocation — 2026-10-18
 
 Every list was two allocations, an `Object` header and a separately allocated
