@@ -1367,6 +1367,29 @@ const TypedOutput = union(enum) {
         }
     }
 
+    /// A fresh buffer's range, which a vector block may compute in place
+    /// before its faults are known. A reused input has none: its blocks stage
+    /// until clean, since its operands are what a replay reads.
+    fn freshRange(self: *TypedOutput, comptime class: Number, piece: flat.Chunk) ?[]class.Element() {
+        return switch (class) {
+            .byte => switch (self.*) {
+                .fresh_bytes => |*writer| writer.unpublishedRange(piece.start, piece.len()),
+                .reuse_bytes => null,
+                .fresh_ints, .fresh_reals, .reuse_ints, .reuse_reals => unreachable,
+            },
+            .integer => switch (self.*) {
+                .fresh_ints => |*writer| writer.unpublishedRange(piece.start, piece.len()),
+                .reuse_ints => null,
+                .fresh_bytes, .fresh_reals, .reuse_bytes, .reuse_reals => unreachable,
+            },
+            .real => switch (self.*) {
+                .fresh_reals => |*writer| writer.unpublishedRange(piece.start, piece.len()),
+                .reuse_reals => null,
+                .fresh_bytes, .fresh_ints, .reuse_bytes, .reuse_ints => unreachable,
+            },
+        };
+    }
+
     /// The reused buffer read as the operand representation it still holds.
     fn aliasedSlice(self: *const TypedOutput, comptime class: Number) []const class.Element() {
         return switch (self.*) {
@@ -1918,11 +1941,27 @@ fn binaryStep(
             };
         }
     }.run;
+    const real_lanes = struct {
+        fn arithmetic(a: @Vector(lanes, f64), b: @Vector(lanes, f64)) @Vector(lanes, f64) {
+            return switch (operation) {
+                .add => a + b,
+                .sub => a - b,
+                .mul => a * b,
+                .div => a / b,
+                else => unreachable,
+            };
+        }
+
+        fn finite(result: @Vector(lanes, f64)) @Vector(lanes, bool) {
+            const inf: @Vector(lanes, f64) = @splat(std.math.inf(f64));
+            return @abs(result) < inf;
+        }
+    };
     const checked_vector_body = struct {
         fn run(
             a: @Vector(lanes, left_class.Element()),
             b: @Vector(lanes, right_class.Element()),
-        ) flat.MaskedVector(out.Element(), lanes) {
+        ) Vectors.Masked {
             if (left_class == .integer and right_class == .integer) {
                 const result = switch (operation) {
                     .add => @addWithOverflow(a, b),
@@ -1931,30 +1970,19 @@ fn binaryStep(
                     else => unreachable,
                 };
                 const no_overflow: @Vector(lanes, u1) = @splat(0);
-                return .{ .values = result[0], .faults = result[1] != no_overflow };
+                return .{ .values = result[0], .faults = Vectors.mask(result[1] != no_overflow) };
             }
             if (left_class == .real and right_class == .real and
                 (operation == .add or operation == .sub or operation == .mul or operation == .div))
             {
-                // The mask must be exactly the scalar authority's fault set, not
-                // a superset: a faulted block replays through `numericBinary` or
-                // `divide`, and a lane the scalar accepts leaves that replay with
-                // nothing to report. Strict float mode keeps each lane's bits
-                // identical to the scalar operation, with no contraction.
-                const inf: @Vector(lanes, f64) = @splat(std.math.inf(f64));
-                const result = switch (operation) {
-                    .add => a + b,
-                    .sub => a - b,
-                    .mul => a * b,
-                    .div => a / b,
-                    else => unreachable,
-                };
                 // Every fault has a non-finite result, including division by
-                // either signed zero, so finite lanes need no further test.
-                const finite = @abs(result) < inf;
-                const clean: @Vector(lanes, bool) = @splat(false);
-                if (@reduce(.And, finite)) return .{ .values = result, .faults = clean };
-                return .{ .values = result, .faults = exactFloatFaults(operation, lanes, a, b, result) };
+                // either signed zero, so non-finite lanes cover the faults. They
+                // over-approximate them, since a non-finite operand propagates
+                // without faulting; `exact_vector_faults` settles a nominated
+                // block. Strict float mode keeps each lane's bits identical to
+                // the scalar operation, with no contraction.
+                const result = real_lanes.arithmetic(a, b);
+                return .{ .values = result, .faults = Vectors.mask(!real_lanes.finite(result)) };
             }
             const nan = (a != a) | (b != b);
             const ones: @Vector(lanes, i64) = @splat(1);
@@ -1971,10 +1999,36 @@ fn binaryStep(
                     .max => @select(left_class.Element(), b > a, b, a),
                     else => unreachable,
                 },
-                .faults = nan,
+                .faults = Vectors.mask(nan),
             };
         }
     }.run;
+    // Exactly the scalar authority's fault set, not a superset: a faulted block
+    // replays through `numericBinary` or `divide`, and a lane the scalar accepts
+    // would leave that replay with nothing to report. Only float arithmetic's
+    // mask over-approximates, so every other body is already exact.
+    const exact_vector_faults = struct {
+        fn run(
+            a: @Vector(lanes, left_class.Element()),
+            b: @Vector(lanes, right_class.Element()),
+        ) @Vector(lanes, bool) {
+            if (left_class == .real and right_class == .real and
+                (operation == .add or operation == .sub or operation == .mul or operation == .div))
+            {
+                const result = real_lanes.arithmetic(a, b);
+                const clean: @Vector(lanes, bool) = @splat(false);
+                if (@reduce(.And, real_lanes.finite(result))) return clean;
+                return exactFloatFaults(operation, lanes, a, b, result);
+            }
+            const none: @TypeOf(checked_vector_body(a, b).faults) = @splat(0);
+            return checked_vector_body(a, b).faults != none;
+        }
+    }.run;
+    const checked: Vectors.Checked = .{
+        .vector = checked_vector_body,
+        .exact = exact_vector_faults,
+        .scalar = checked_body,
+    };
     return struct {
         fn leftSlice(state: *const TypedState) []const left_class.Element() {
             return if (state.left == .aliased)
@@ -1996,20 +2050,22 @@ fn binaryStep(
             var offset: usize = 0;
             while (offset != range.len()) {
                 const piece = flat.blockRange(range, offset);
+                const direct = state.output.freshRange(out, piece);
+                const dest = direct orelse block.items[0..piece.len()];
                 const status: flat.CheckedStatus = switch (comptime policy) {
                     .vector_infallible => blk: {
                         switch (shape) {
-                            .leaf_leaf => Vectors.binary(vector_body, infallible_body, leftSlice(state), rightSlice(state), piece, &block),
-                            .leaf_scalar => Vectors.binaryScalarRight(vector_body, infallible_body, leftSlice(state), right_class.unboxed(state.right.scalar), piece, &block),
-                            .scalar_leaf => Vectors.binaryScalarLeft(vector_body, infallible_body, left_class.unboxed(state.left.scalar), rightSlice(state), piece, &block),
+                            .leaf_leaf => Vectors.binary(vector_body, infallible_body, leftSlice(state), rightSlice(state), piece, dest),
+                            .leaf_scalar => Vectors.binaryScalarRight(vector_body, infallible_body, leftSlice(state), right_class.unboxed(state.right.scalar), piece, dest),
+                            .scalar_leaf => Vectors.binaryScalarLeft(vector_body, infallible_body, left_class.unboxed(state.left.scalar), rightSlice(state), piece, dest),
                             .leaf_only => unreachable,
                         }
                         break :blk .clean;
                     },
                     .vector_checked => switch (shape) {
-                        .leaf_leaf => Vectors.checkedBinary(checked_vector_body, checked_body, leftSlice(state), rightSlice(state), piece, &block),
-                        .leaf_scalar => Vectors.checkedBinaryScalarRight(checked_vector_body, checked_body, leftSlice(state), right_class.unboxed(state.right.scalar), piece, &block),
-                        .scalar_leaf => Vectors.checkedBinaryScalarLeft(checked_vector_body, checked_body, left_class.unboxed(state.left.scalar), rightSlice(state), piece, &block),
+                        .leaf_leaf => Vectors.checkedBinary(checked, leftSlice(state), rightSlice(state), piece, dest),
+                        .leaf_scalar => Vectors.checkedBinaryScalarRight(checked, leftSlice(state), right_class.unboxed(state.right.scalar), piece, dest),
+                        .scalar_leaf => Vectors.checkedBinaryScalarLeft(checked, left_class.unboxed(state.left.scalar), rightSlice(state), piece, dest),
                         .leaf_only => unreachable,
                     },
                     .scalar_infallible => blk: {
@@ -2028,10 +2084,15 @@ fn binaryStep(
                         .leaf_only => unreachable,
                     },
                 };
-                // Nothing is stored until the whole block is known clean: a
-                // reused input buffer still holds the operands the replay reads.
+                // Nothing reaches a reused input buffer until the whole block is
+                // known clean, since it still holds the operands the replay
+                // reads. A fresh buffer was written in place and is retired
+                // unpublished if the replay fails.
                 if (status == .faulted) return replayNumericBinary(state, context, piece, selectScalar(operation));
-                state.output.store(out, piece.start, block.written());
+                switch (comptime policy) {
+                    .vector_infallible, .vector_checked => if (direct == null) state.output.store(out, piece.start, dest),
+                    .scalar_infallible, .scalar_checked => state.output.store(out, piece.start, block.written()),
+                }
                 offset += piece.len();
             }
         }
@@ -2081,16 +2142,22 @@ fn unaryStep(comptime operation: UnaryOp, comptime operand_class: Number) TypedS
             var offset: usize = 0;
             while (offset != range.len()) {
                 const piece = flat.blockRange(range, offset);
+                const direct = state.output.freshRange(out, piece);
+                const dest = direct orelse block.items[0..piece.len()];
                 const status: flat.CheckedStatus = switch (comptime policy) {
                     .vector_infallible => blk: {
-                        Vectors.unary(vector_body, infallible_body, operandSlice(state), piece, &block);
+                        Vectors.unary(vector_body, infallible_body, operandSlice(state), piece, dest);
                         break :blk .clean;
                     },
                     .scalar_checked => Checked.unary(checked_body, operandSlice(state), piece, &block),
                     .vector_checked, .scalar_infallible => unreachable,
                 };
                 if (status == .faulted) return replayNumericUnary(state, context, piece, selectUnary(operation));
-                state.output.store(out, piece.start, block.written());
+                switch (comptime policy) {
+                    .vector_infallible => if (direct == null) state.output.store(out, piece.start, dest),
+                    .scalar_checked => state.output.store(out, piece.start, block.written()),
+                    .vector_checked, .scalar_infallible => unreachable,
+                }
                 offset += piece.len();
             }
         }

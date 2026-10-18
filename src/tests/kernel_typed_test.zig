@@ -859,6 +859,23 @@ test "typed kernels: checked float vector arithmetic matches the scalar fault co
         }
     }
 
+    // A propagating infinity nominates its block for the exact pass without
+    // faulting, so a genuine fault later in the same block must still be the
+    // one reported. The last pair sits wholly in the final scalar tail.
+    for ([_][2]usize{
+        .{ 0, 9 },
+        .{ 1, flat.block_size - 1 },
+        .{ flat.block_size, flat.block_size + 4 },
+        .{ flat.block_size * 2, length - 1 },
+    }) |positions| {
+        @memset(left, 1.5);
+        left[positions[0]] = inf;
+        left[positions[1]] = nan;
+        try expectParity(&runtime, .{ .floats = left }, "2.0 *");
+        try expectFaultAt(&runtime, &.{try buildFloats(.specialized, left)}, "2.0 *", "domain", positions[1]);
+        try expectFaultRetainsInput(&runtime, try buildFloats(.specialized, left), "2.0 *");
+    }
+
     // A zero divisor broadcast from the right faults at the first lane.
     @memset(left, 1.5);
     inline for ([_][]const u8{ "0.0 /", "-0.0 /" }) |source| {

@@ -701,6 +701,48 @@ control) left the mixed short-task and cancellation p50 values within 6% in
 both directions at one and eight workers. Eight-worker cancellation p95/p99
 tails above 500 µs appeared once on each side and did not reproduce.
 
+## Checked vector blocks: one fault test, no fresh staging — 2026-10-17
+
+The checked vector loop reduced and branched on a fault mask for every vector:
+`@reduce(.And, finite)` inside the float body to choose its exact path, then
+`@reduce(.Or, faults)` in the loop to stop early. Every block was also computed
+into a staging array and copied to the output with `memcpy`, even when the
+output was freshly allocated. The loop now ORs each vector's mask into a block
+accumulator and tests it once after the block. The float body's mask is the
+cheap non-finite test; a nominated block reruns the exact mask before it is
+declared faulted. A fresh output's range is written in place; only a claimed
+input buffer still stages. The masks travel as lane-width integers, the shape a
+vector compare produces: carried as `@Vector(lanes, bool)` across the body
+boundary, they were packed to a bitmask and re-expanded on every vector, which
+first made the loop slower than before.
+
+The f64 multiply loop is now `vmulpd`, `vandpd`, `vpcmpgtq`, `vpor`, the store,
+and loop control: about 2.75 instructions per element. Callgrind, net of setup,
+20 calls at N=2,000 (80 M elements), Zig 0.16.0 ReleaseFast `-Dcpu=native`,
+x86_64 Linux (Intel Core Ultra 5 125U), control `ca195af`:
+
+| Operation | Control Ir/element | Treatment Ir/element |
+|---|---:|---:|
+| `t v *` (rows times broadcast scalars) | 7.83 | 4.70 |
+| `w (+) fold1` (row-wise vector adds) | 7.30 | 5.14 |
+
+Native medians, same builds, on AC power, pinned to one P-core, 7–9
+interleaved runs; internal milliseconds unless marked whole process:
+
+| Case | Control ReleaseFast | Treatment ReleaseFast | Control ReleaseSafe | Treatment ReleaseSafe |
+|---|---:|---:|---:|---:|
+| 10 × `t v *`, N=2,000 | 56 | 49 | 133 | 133 |
+| 10 × `w (+) fold1`, N=2,000 | 26 | 23 | 38 | 38 |
+| 20 × `v v *` over 1M floats | 22 | 19 | 68 | 63 |
+| 20 × `v v +` over 1M floats | 23 | 20 | 68 | 64 |
+| `2000 spectralnorm` iteration | 303 | 270 | 691 | 680 |
+| `2000 spectralnorm`, whole process | 414 | 378 | 875 | 859 |
+
+Peak RSS is unchanged. Most of the remaining per-element cost in the multiply
+is per row, not in the loop: about 2,900 instructions of typed-state setup per
+2,000-element row. ReleaseSafe gains little because its safety checks, not the
+fault test, dominate its kernels.
+
 ## Empty markers without payload clears — 2026-10-17
 
 Zig 0.16 lowers an assignment of `null` to `?T`, or of a void variant to a

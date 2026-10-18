@@ -1054,6 +1054,14 @@ is published. Replay reads retained input capabilities in logical order; a
 reused buffer's owned root preserves its original representation until final
 publication, even when the result changes numeric kind at the same byte width.
 Sharing this cold path does not add work outside the already charged block.
+A fresh `LeafWriter` buffer aliases no input and is unread until `finish`, so a
+vector block may be computed in it before its faults are known; only a claimed
+input buffer stages a block until it is known clean.
+
+A vector block may be nominated by a fault mask that over-approximates the
+scalar fault set, such as "some lane is non-finite", tested once per block.
+A nominated block is declared faulted only if the exact mask agrees, so a
+replay always finds the fault it is sent for.
 
 Scalar broadcasting reads a repeated operand in stride-zero style, avoiding an
 array of copies. SIMD is permitted only behind a closed policy whose scalar
