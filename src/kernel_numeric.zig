@@ -242,18 +242,26 @@ pub const PervadeCursor = struct {
             if (self.result) |result| releases.releaseValue(result);
         }
     };
+    /// Every pervasion step moves frames by value, so the union's size is a
+    /// per-element cost. A dictionary frame carries a match cursor and a
+    /// materializer inline and is several times larger than the rest, so it
+    /// lives behind a pointer; dictionary pervasion already allocates its
+    /// pairs, and list and typed frames stay small.
     const Frame = union(enum) {
         binary: BinaryNode,
         unary: UnaryNode,
         list: ListFrame,
-        dictionary: DictFrame,
+        dictionary: *DictFrame,
         typed: NestedTyped,
 
         fn deinit(self: *Frame, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
             switch (self.*) {
                 .binary, .unary => {},
                 .list => |*frame| frame.deinit(releases),
-                .dictionary => |*frame| frame.deinit(releases, allocator),
+                .dictionary => |frame| {
+                    frame.deinit(releases, allocator);
+                    allocator.destroy(frame);
+                },
                 .typed => |*typed| typed.retire(releases),
             }
         }
@@ -267,7 +275,7 @@ pub const PervadeCursor = struct {
             .typed => true,
             .list => |*list_frame| list_frame.result == null and !list_frame.waiting and
                 list_frame.index == list_frame.values.capacity(),
-            .dictionary => |*dict_frame| dict_frame.phase == .materialize or dict_frame.match_cursor != null,
+            .dictionary => |dict_frame| dict_frame.phase == .materialize or dict_frame.match_cursor != null,
         };
     }
 
@@ -358,7 +366,7 @@ pub const PervadeCursor = struct {
                 .list => |*list_frame| {
                     if (!try self.advanceList(list_frame, work)) return .pending;
                 },
-                .dictionary => |*dict_frame| {
+                .dictionary => |dict_frame| {
                     if (!try self.advanceDict(dict_frame, work)) return .pending;
                 },
                 .typed => |*typed| {
@@ -442,15 +450,18 @@ pub const PervadeCursor = struct {
             errdefer self.allocator.free(pairs);
             var values = try heap.OwnedValueBuffer.init(self.releases, count);
             errdefer values.deinit();
+            const frame = try self.allocator.create(DictFrame);
+            errdefer self.allocator.destroy(frame);
             try self.frames.reserve(1);
-            self.frames.pushReserved(.{ .dictionary = .{
+            frame.* = .{
                 .mode = .{ .unary = node.operation },
                 .left = node.operand,
                 .right = null,
                 .depth = node.depth,
                 .pairs = pairs,
                 .values = values.take(),
-            } });
+            };
+            self.frames.pushReserved(.{ .dictionary = frame });
             return;
         }
         if (node.operand == .list) {
@@ -548,8 +559,10 @@ pub const PervadeCursor = struct {
         errdefer self.allocator.free(pairs);
         var values = try heap.OwnedValueBuffer.init(self.releases, capacity);
         errdefer values.deinit();
+        const frame = try self.allocator.create(DictFrame);
+        errdefer self.allocator.destroy(frame);
         try self.frames.reserve(1);
-        self.frames.pushReserved(.{ .dictionary = .{
+        frame.* = .{
             .mode = if (both)
                 .{ .both = node.operation }
             else if (node.left == .dict)
@@ -561,22 +574,28 @@ pub const PervadeCursor = struct {
             .depth = node.depth,
             .pairs = pairs,
             .values = values.take(),
-        } });
+        };
+        self.frames.pushReserved(.{ .dictionary = frame });
     }
 
     /// False means the allowance was spent before this frame could continue.
+    /// The popped frame is owned here until it is pushed back or completed.
     fn advanceDict(
         self: *PervadeCursor,
         frame: *DictFrame,
         work: *poll.WorkBudget,
     ) MachineError!bool {
-        errdefer frame.deinit(self.releases, self.allocator);
+        errdefer {
+            frame.deinit(self.releases, self.allocator);
+            self.allocator.destroy(frame);
+        }
         if (frame.phase == .release) {
             frame.values.deinit();
             self.allocator.free(frame.pairs);
             const result = frame.result.?;
             frame.result = null;
             self.last = result;
+            self.allocator.destroy(frame);
             return true;
         }
         if (frame.waiting) {
@@ -597,7 +616,7 @@ pub const PervadeCursor = struct {
             try self.frames.reserve(1);
             switch (try frame.materializer.?.advance(work)) {
                 .pending => {
-                    self.frames.pushReserved(.{ .dictionary = frame.* });
+                    self.frames.pushReserved(.{ .dictionary = frame });
                     return false;
                 },
                 .duplicate_key => unreachable,
@@ -606,7 +625,7 @@ pub const PervadeCursor = struct {
                     frame.materializer = null;
                     frame.result = result;
                     frame.phase = .release;
-                    self.frames.pushReserved(.{ .dictionary = frame.* });
+                    self.frames.pushReserved(.{ .dictionary = frame });
                     return true;
                 },
             }
@@ -622,14 +641,14 @@ pub const PervadeCursor = struct {
                 if (frame.index == count) {
                     frame.phase = .materialize;
                     try self.frames.reserve(1);
-                    self.frames.pushReserved(.{ .dictionary = frame.* });
+                    self.frames.pushReserved(.{ .dictionary = frame });
                     return true;
                 }
                 const index = frame.index;
                 frame.pairs[frame.pair_count][0] = dict.keyAt(dictionary.dict, index);
                 frame.waiting = true;
                 try self.frames.reserve(2);
-                self.frames.pushReserved(.{ .dictionary = frame.* });
+                self.frames.pushReserved(.{ .dictionary = frame });
                 switch (frame.mode) {
                     .unary => |operation| self.frames.pushReserved(.{ .unary = .{
                         .operation = operation,
@@ -669,7 +688,7 @@ pub const PervadeCursor = struct {
                         frame.candidate = 0;
                     } else frame.phase = .materialize;
                     try self.frames.reserve(1);
-                    self.frames.pushReserved(.{ .dictionary = frame.* });
+                    self.frames.pushReserved(.{ .dictionary = frame });
                     return true;
                 }
                 if (frame.candidate == other_count) {
@@ -681,7 +700,7 @@ pub const PervadeCursor = struct {
                     frame.index += 1;
                     frame.candidate = 0;
                     try self.frames.reserve(1);
-                    self.frames.pushReserved(.{ .dictionary = frame.* });
+                    self.frames.pushReserved(.{ .dictionary = frame });
                     return true;
                 }
                 if (frame.match_cursor == null) frame.match_cursor = try .init(
@@ -692,7 +711,7 @@ pub const PervadeCursor = struct {
                 try self.frames.reserve(2);
                 switch (try frame.match_cursor.?.advance(work)) {
                     .pending => {
-                        self.frames.pushReserved(.{ .dictionary = frame.* });
+                        self.frames.pushReserved(.{ .dictionary = frame });
                         return false;
                     },
                     .complete => |matches| {
@@ -700,20 +719,20 @@ pub const PervadeCursor = struct {
                         frame.match_cursor = null;
                         if (!matches) {
                             frame.candidate += 1;
-                            self.frames.pushReserved(.{ .dictionary = frame.* });
+                            self.frames.pushReserved(.{ .dictionary = frame });
                             return true;
                         }
                         if (frame.phase == .right) {
                             frame.index += 1;
                             frame.candidate = 0;
-                            self.frames.pushReserved(.{ .dictionary = frame.* });
+                            self.frames.pushReserved(.{ .dictionary = frame });
                             return true;
                         }
                         const index = frame.index;
                         const candidate = frame.candidate;
                         frame.pairs[frame.pair_count][0] = dict.keyAt(frame.left.dict, index);
                         frame.waiting = true;
-                        self.frames.pushReserved(.{ .dictionary = frame.* });
+                        self.frames.pushReserved(.{ .dictionary = frame });
                         self.frames.pushReserved(.{ .binary = .{
                             .operation = operation,
                             .left = dict.valueAt(frame.left.dict, index),
@@ -1272,6 +1291,10 @@ const LoopPolicy = enum {
     vector_checked,
     scalar_infallible,
     scalar_checked,
+
+    fn isVector(self: LoopPolicy) bool {
+        return self == .vector_infallible or self == .vector_checked;
+    }
 };
 
 fn binaryLoopPolicy(
@@ -1365,6 +1388,13 @@ const TypedOutput = union(enum) {
                 .fresh_bytes, .fresh_ints, .reuse_bytes, .reuse_ints => unreachable,
             },
         }
+    }
+
+    fn isFresh(self: *const TypedOutput) bool {
+        return switch (self.*) {
+            .fresh_bytes, .fresh_ints, .fresh_reals => true,
+            .reuse_bytes, .reuse_ints, .reuse_reals => false,
+        };
     }
 
     /// A fresh buffer's range, which a vector block may compute in place
@@ -1857,6 +1887,16 @@ fn exactFloatFaults(
     return faults;
 }
 
+/// The next piece of a charged range. A vector loop writing a fresh output
+/// stages nothing, so it takes the rest of the range as one block and pays
+/// its fixed per-block work once; anything staged is bounded by the staging
+/// array. Either way the piece lies inside the range already charged, which
+/// also bounds a faulted piece's exact pass and scalar replay.
+fn nextPiece(comptime vector: bool, output: *const TypedOutput, range: flat.Chunk, offset: usize) flat.Chunk {
+    if (vector and output.isFresh()) return .{ .start = range.start + offset, .end = range.end };
+    return flat.blockRange(range, offset);
+}
+
 /// One charged chunk of a binary typed operation.
 fn binaryStep(
     comptime operation: BinaryOp,
@@ -2049,7 +2089,7 @@ fn binaryStep(
             var block = flat.Block(out.Element()).init();
             var offset: usize = 0;
             while (offset != range.len()) {
-                const piece = flat.blockRange(range, offset);
+                const piece = nextPiece(comptime policy.isVector(), &state.output, range, offset);
                 const direct = state.output.freshRange(out, piece);
                 const dest = direct orelse block.items[0..piece.len()];
                 const status: flat.CheckedStatus = switch (comptime policy) {
@@ -2141,7 +2181,7 @@ fn unaryStep(comptime operation: UnaryOp, comptime operand_class: Number) TypedS
             var block = flat.Block(out.Element()).init();
             var offset: usize = 0;
             while (offset != range.len()) {
-                const piece = flat.blockRange(range, offset);
+                const piece = nextPiece(comptime policy.isVector(), &state.output, range, offset);
                 const direct = state.output.freshRange(out, piece);
                 const dest = direct orelse block.items[0..piece.len()];
                 const status: flat.CheckedStatus = switch (comptime policy) {

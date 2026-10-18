@@ -345,7 +345,9 @@ pub fn MaskedVector(comptime Element: type, comptime MaskLane: type, comptime la
 /// Each loop writes one block into `dest`, exactly `range.len()` elements.
 /// The caller passes a staging block when the output is a reused input buffer,
 /// whose operands a replay may still need, and the fresh output's own range
-/// otherwise, since nothing reads a fresh buffer before it is published.
+/// otherwise, since nothing reads a fresh buffer before it is published. Only
+/// a staged block is bounded by `block_size`; a fresh one may be a whole
+/// charged range.
 pub fn VectorFamily(
     comptime Left: type,
     comptime Right: type,
@@ -432,13 +434,14 @@ pub fn VectorFamily(
             range: Chunk,
             dest: []Out,
         ) void {
-            std.debug.assert(range.len() <= block_size and dest.len == range.len());
-            var index = range.start;
-            while (index + lanes <= range.end) : (index += lanes) {
-                const a, const b = source.vectors(index);
-                storeVector(dest, index - range.start, vector_body(a, b));
+            std.debug.assert(dest.len == range.len());
+            const vector_end = range.start + range.len() / lanes * lanes;
+            for (0..range.len() / lanes) |vector| {
+                const offset = vector * lanes;
+                const a, const b = source.vectors(range.start + offset);
+                storeVector(dest, offset, vector_body(a, b));
             }
-            while (index < range.end) : (index += 1) {
+            for (vector_end..range.end) |index| {
                 const a, const b = source.scalars(index);
                 dest[index - range.start] = scalar_body(a, b);
             }
@@ -449,24 +452,27 @@ pub fn VectorFamily(
         /// branching on every vector. Only a nominated block pays a second,
         /// exact pass, which keeps `.faulted` meaning a real scalar fault.
         fn checkedRange(comptime body: Checked, source: anytype, range: Chunk, dest: []Out) CheckedStatus {
-            std.debug.assert(range.len() <= block_size and dest.len == range.len());
+            std.debug.assert(dest.len == range.len());
+            // Counting whole vectors keeps one induction variable; stepping an
+            // index by `lanes` against `index + lanes <= end` kept two, and the
+            // loop control cost more than the arithmetic.
+            const vectors = range.len() / lanes;
+            const vector_end = range.start + vectors * lanes;
             var suspect: LaneMask = @splat(0);
-            var index = range.start;
-            while (index + lanes <= range.end) : (index += lanes) {
-                const a, const b = source.vectors(index);
+            for (0..vectors) |vector| {
+                const offset = vector * lanes;
+                const a, const b = source.vectors(range.start + offset);
                 const result = body.vector(a, b);
                 suspect |= result.faults;
-                storeVector(dest, index - range.start, result.values);
+                storeVector(dest, offset, result.values);
             }
-            const vector_end = index;
-            while (index < range.end) : (index += 1) {
+            for (vector_end..range.end) |index| {
                 const a, const b = source.scalars(index);
                 dest[index - range.start] = body.scalar(a, b) catch return .faulted;
             }
             if (@reduce(.Or, suspect) == 0) return .clean;
-            index = range.start;
-            while (index < vector_end) : (index += lanes) {
-                const a, const b = source.vectors(index);
+            for (0..vectors) |vector| {
+                const a, const b = source.vectors(range.start + vector * lanes);
                 if (@reduce(.Or, body.exact(a, b))) return .faulted;
             }
             return .clean;
@@ -552,14 +558,15 @@ pub fn VectorFamily(
             range: Chunk,
             dest: []Out,
         ) void {
-            std.debug.assert(range.len() <= block_size and dest.len == range.len());
+            std.debug.assert(dest.len == range.len());
             std.debug.assert(range.end <= operand.len);
-            var index = range.start;
-            while (index + lanes <= range.end) : (index += lanes) {
-                const a: LeftVector = operand[index..][0..lanes].*;
-                storeVector(dest, index - range.start, vector_body(a));
+            const vector_end = range.start + range.len() / lanes * lanes;
+            for (0..range.len() / lanes) |vector| {
+                const offset = vector * lanes;
+                const a: LeftVector = operand[range.start + offset ..][0..lanes].*;
+                storeVector(dest, offset, vector_body(a));
             }
-            while (index < range.end) : (index += 1) {
+            for (vector_end..range.end) |index| {
                 dest[index - range.start] = scalar_body(operand[index]);
             }
         }
