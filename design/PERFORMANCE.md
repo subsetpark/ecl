@@ -701,6 +701,21 @@ control) left the mixed short-task and cancellation p50 values within 6% in
 both directions at one and eight workers. Eight-worker cancellation p95/p99
 tails above 500 µs appeared once on each side and did not reproduce.
 
+## Table-driven numeric plan selection — 2026-10-18
+
+Every typed leaf operation, including each row of a spine, selected its plan
+through a chain of comparisons over every left class, right class, and shape,
+and nested rows first ran the character-kernel classification, which a numeric
+row always fails. Selection is now one indexed load from a comptime table whose
+index order is checked at compile time, and the numeric builder runs first; the
+two builders accept disjoint operands, so the order changes no result.
+
+Callgrind, `t v *` over a 250 × 250 float matrix, net of setup, Zig 0.16.0
+ReleaseFast `-Dcpu=native`, x86_64 Linux (Intel Core Ultra 5 125U), control
+`eb4c73f`: 3,129 → 2,915 instructions per row. Native medians, pinned to one
+P-core, seven interleaved runs: 3.67 → 3.60 ns per element at 100 × 100,
+2.30 → 2.20 at 250 × 250, and 1.00 → 0.97 at 1,000 × 1,000.
+
 ## Checked vector blocks: one fault test, no fresh staging — 2026-10-17
 
 Four costs sat around the arithmetic of a checked vector operation:

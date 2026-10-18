@@ -2265,29 +2265,46 @@ const NumericBinaryPlan = opaque {
         };
     }
 
+    /// One indexed load per call. The nested comparison chain this replaces
+    /// was a fixed cost of every nested row.
     fn selectFor(comptime operation: BinaryOp, left: Number, right: Number, shape: Shape) ?*const NumericBinaryPlan {
-        inline for (number_classes) |candidate_left| {
-            inline for (number_classes) |candidate_right| {
-                inline for (binary_shapes) |candidate_shape| {
-                    if (comptime candidate_shape == .scalar_leaf and candidate_left == .byte) continue;
-                    if (comptime candidate_shape == .leaf_scalar and candidate_right == .byte) continue;
-                    if (candidate_left == left and candidate_right == right and candidate_shape == shape) {
-                        const maybe_out = comptime binaryResult(operation, candidate_left, candidate_right);
-                        if (comptime maybe_out == null) return null;
-                        const out = comptime maybe_out.?;
-                        const data = comptime Data{
-                            .left = candidate_left,
-                            .right = candidate_right,
-                            .shape = candidate_shape,
-                            .out = out,
-                            .step = binaryStep(operation, candidate_left, candidate_right, candidate_shape),
-                        };
-                        return @ptrCast(&data);
-                    }
+        // There is no byte scalar, so neither broadcast shape pairs one with a leaf.
+        std.debug.assert(!(shape == .scalar_leaf and left == .byte) and !(shape == .leaf_scalar and right == .byte));
+        std.debug.assert(shape != .leaf_only);
+        const table = comptime plans(operation);
+        return table[@intFromEnum(left)][@intFromEnum(right)][@intFromEnum(shape)];
+    }
+
+    const PlanTable = [number_classes.len][number_classes.len][binary_shapes.len]?*const NumericBinaryPlan;
+
+    comptime {
+        // The table is indexed by enum value, so the class and shape lists
+        // must list each enum in value order; `leaf_only` is never binary.
+        for (number_classes, 0..) |class, index| std.debug.assert(@intFromEnum(class) == index);
+        for (binary_shapes, 0..) |shape, index| std.debug.assert(@intFromEnum(shape) == index);
+    }
+
+    fn plans(comptime operation: BinaryOp) PlanTable {
+        var table: PlanTable = @splat(@splat(@splat(null)));
+        for (number_classes) |candidate_left| {
+            for (number_classes) |candidate_right| {
+                for (binary_shapes) |candidate_shape| {
+                    if (candidate_shape == .scalar_leaf and candidate_left == .byte) continue;
+                    if (candidate_shape == .leaf_scalar and candidate_right == .byte) continue;
+                    const out = binaryResult(operation, candidate_left, candidate_right) orelse continue;
+                    const data = Data{
+                        .left = candidate_left,
+                        .right = candidate_right,
+                        .shape = candidate_shape,
+                        .out = out,
+                        .step = binaryStep(operation, candidate_left, candidate_right, candidate_shape),
+                    };
+                    table[@intFromEnum(candidate_left)][@intFromEnum(candidate_right)][@intFromEnum(candidate_shape)] =
+                        @ptrCast(&data);
                 }
             }
         }
-        unreachable;
+        return table;
     }
 
     /// On success the returned payload owns its readers and output, including
@@ -2609,9 +2626,11 @@ fn buildNestedTypedBinary(
     reuse_candidate: ?*heap.OwnedValue,
     report: FaultReport,
 ) MachineError!?NestedTyped {
+    // The builders are disjoint: numeric needs both operands numeric, and
+    // character needs one character operand. The common numeric row is tried
+    // first so it does not pay the character classification.
+    if (try buildNestedTypedNumericBinary(evaluator, operation, left, right, reuse_candidate, report)) |typed| return typed;
     if (try buildNestedTypedCharBinary(evaluator, operation, left, right, report)) |typed| return typed;
-    const numeric = try buildNestedTypedNumericBinary(evaluator, operation, left, right, reuse_candidate, report);
-    if (numeric) |typed| return typed;
     _ = try rejectUnsupportedFlatBinary(evaluator, operation, left, right, report);
     return null;
 }
