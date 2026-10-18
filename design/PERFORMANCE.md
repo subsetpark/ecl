@@ -701,6 +701,34 @@ control) left the mixed short-task and cancellation p50 values within 6% in
 both directions at one and eight workers. Eight-worker cancellation p95/p99
 tails above 500 µs appeared once on each side and did not reproduce.
 
+## Lists are one allocation — 2026-10-18
+
+Every list was two allocations, an `Object` header and a separately allocated
+payload, so that a payload could be reallocated behind its header (growth) or
+swapped between headers (representation adoption). Both served only an
+in-place `list.append` that nothing in the runtime called; the language's
+`append` builds a new list. With that path removed, capacity is fixed at
+allocation, a list's elements follow its header in the same block, and the
+payload address is derived from the block rather than loaded. Allocating and
+freeing a list is one allocator call each.
+
+Callgrind, Zig 0.16.0 ReleaseFast `-Dcpu=native`, x86_64 Linux (Intel Core
+Ultra 5 125U), control `c1ccb3f`: `t v *` over a 250 × 250 float matrix,
+2,915 → 2,500 instructions per row; `1000 spectralnorm`, 0.628 → 0.585 G
+instructions. Native medians, pinned to one P-core, seven interleaved runs:
+
+| Case | Control | Treatment |
+|---|---:|---:|
+| `t v *`, 100 × 100, ns per element | 3.60 | 3.48 |
+| `t v *`, 250 × 250, ns per element | 2.23 | 1.98 |
+| `t v *`, 1,000 × 1,000, ns per element | 0.97 | 0.97 |
+| 200 × nested `range`/`each`/`sum`, ms | 40 | 39 |
+| 2,000 × string `split`/`cat`/`join`, ms | 17 | 13 |
+| `1000 spectralnorm`, whole process, ms | 102 | 96 |
+| `2000 spectralnorm`, whole process, ms | 364 | 350 |
+
+Many short lists gain the most, since allocator calls are a larger share of
+their cost.
 ## Pervasion frames advance in place — 2026-10-18
 
 The pervasion cursor popped its top frame to advance it and, on almost every

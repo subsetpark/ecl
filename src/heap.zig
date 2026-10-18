@@ -225,8 +225,8 @@ pub fn UniqueLeafAdoption(comptime result_kind: HeapKind) type {
 }
 
 /// Retag a solely-owned list. Legal only between representations whose
-/// elements occupy the same bytes, because the payload allocation is freed
-/// against the element type the kind names.
+/// elements occupy the same bytes, because the list's block is freed with a
+/// length recomputed from the element size the kind names.
 fn setUniqueListKind(list_header: *UniqueList, kind_value: HeapKind) void {
     const header: *UniqueHeader = @ptrCast(@alignCast(list_header));
     std.debug.assert(leafElementSize(uniqueImpl(header).kind()) == leafElementSize(kind_value));
@@ -521,19 +521,6 @@ const InitializingPort = opaque {};
 const InitializingModule = opaque {};
 const UniqueHeader = opaque {};
 pub const UniqueList = opaque {};
-
-/// Makes copy-on-write ownership visible to callers. `in_place` aliases the
-/// caller's existing owner; `replacement` is one additional owned root.
-pub const UpdateResult = union(enum) {
-    in_place: Value,
-    replacement: Value,
-
-    pub fn value(self: UpdateResult) Value {
-        return switch (self) {
-            inline else => |item| item,
-        };
-    }
-};
 
 const HeaderImpl = extern struct {
     rc: std.atomic.Value(u32),
@@ -939,8 +926,19 @@ fn allocObject(
     capacity_value: usize,
 ) error{OutOfMemory}!*Header {
     std.debug.assert(len_value <= capacity_value or kind_value == .dict);
-    const obj = try allocator.create(Object);
-    errdefer allocator.destroy(obj);
+    const obj: *Object = switch (kind_value) {
+        inline .generic_spine,
+        .leaf_u8,
+        .leaf_i64,
+        .leaf_f64,
+        .leaf_char1,
+        .leaf_char2,
+        .leaf_char4,
+        .leaf_symbol,
+        => |list_kind| try allocListObject(LeafElement(list_kind), allocator, capacity_value),
+        .dict, .reserved_mask => try allocator.create(Object),
+        .task, .port, .module => unreachable,
+    };
     obj.* = .{
         .header = HeaderImpl.init(kind_value, len_value),
         .capacity = capacity_value,
@@ -949,19 +947,10 @@ fn allocObject(
         .next_destroy = null,
         .destroy_index = 0,
     };
-    obj.payload = switch (kind_value) {
-        .generic_spine => try allocPayload(Value, allocator, capacity_value),
-        .leaf_u8 => try allocPayload(u8, allocator, capacity_value),
-        .leaf_i64 => try allocPayload(i64, allocator, capacity_value),
-        .leaf_f64 => try allocPayload(f64, allocator, capacity_value),
-        .leaf_char1 => try allocPayload(u8, allocator, capacity_value),
-        .leaf_char2 => try allocPayload(u16, allocator, capacity_value),
-        .leaf_char4 => try allocPayload(u32, allocator, capacity_value),
-        .leaf_symbol => try allocPayload(u32, allocator, capacity_value),
-        .dict => @ptrCast(try allocator.create(DictStorage)),
-        .task, .port, .module => unreachable,
-        .reserved_mask => null,
-    };
+    if (kind_value == .dict) obj.payload = @ptrCast(allocator.create(DictStorage) catch |err| {
+        allocator.destroy(obj);
+        return err;
+    });
     return @ptrCast(@alignCast(&obj.header));
 }
 
@@ -1458,21 +1447,41 @@ pub fn moduleStorage(header: *const ModuleHandle) *const ModuleStorage {
     return @ptrCast(@alignCast(objectConst(headerFromModule(@constCast(header))).payload.?));
 }
 
-fn allocPayload(
-    comptime T: type,
-    allocator: std.mem.Allocator,
-    count: usize,
-) error{OutOfMemory}!?*anyopaque {
-    if (count == 0) return null;
-    const buffer = try allocator.alloc(T, count);
-    return @ptrCast(buffer.ptr);
+/// A list is one allocation: its payload follows its `Object` directly.
+/// Every list element fits the object's alignment, so the offset is the same
+/// for every kind, and capacity is fixed at allocation, so the block's length
+/// is recomputed from kind and capacity when it is freed. Same-width retags
+/// keep that length because element sizes match.
+const list_payload_offset = @sizeOf(Object);
+
+comptime {
+    for ([_]type{ Value, u8, u16, u32, i64, f64 }) |Element| {
+        std.debug.assert(@alignOf(Element) <= @alignOf(Object));
+        std.debug.assert(list_payload_offset % @alignOf(Element) == 0);
+    }
+}
+
+fn listBlockLength(comptime Element: type, capacity_value: usize) error{OutOfMemory}!usize {
+    const bytes = std.math.mul(usize, capacity_value, @sizeOf(Element)) catch return error.OutOfMemory;
+    return std.math.add(usize, list_payload_offset, bytes) catch return error.OutOfMemory;
+}
+
+fn allocListObject(comptime Element: type, allocator: std.mem.Allocator, capacity_value: usize) error{OutOfMemory}!*Object {
+    const block = try allocator.alignedAlloc(u8, .of(Object), try listBlockLength(Element, capacity_value));
+    return @ptrCast(block.ptr);
+}
+
+fn freeListObject(comptime Element: type, allocator: std.mem.Allocator, obj: *Object) void {
+    // Allocation already proved this length does not overflow.
+    const block_length = list_payload_offset + obj.capacity * @sizeOf(Element);
+    const base: [*]align(@alignOf(Object)) u8 = @ptrCast(obj);
+    allocator.free(base[0..block_length]);
 }
 
 fn payloadItems(comptime T: type, header: *Header) []T {
-    const cap = capacity(header);
-    if (cap == 0) return &.{};
-    const ptr: [*]T = @ptrCast(@alignCast(object(header).payload.?));
-    return ptr[0..cap];
+    const base: [*]u8 = @ptrCast(object(header));
+    const items: [*]T = @ptrCast(@alignCast(base + list_payload_offset));
+    return items[0..capacity(header)];
 }
 
 pub fn valuesConst(header: *ListHandle) []const Value {
@@ -1513,23 +1522,6 @@ pub fn chars32(header: *ListHandle) []const u32 {
 pub fn symbols(header: *ListHandle) []const u32 {
     std.debug.assert(listKind(header) == .leaf_symbol);
     return payloadItems(u32, mutableHeader(header));
-}
-
-pub fn writeUniqueList(list_header: *UniqueList, index: usize, item: Value) void {
-    const header: *UniqueHeader = @ptrCast(@alignCast(list_header));
-    const raw = uniqueHeader(header);
-    std.debug.assert(index < capacity(raw));
-    switch (uniqueImpl(header).kind()) {
-        .generic_spine => payloadItems(Value, raw)[index] = item,
-        .leaf_u8 => payloadItems(u8, raw)[index] = @intCast(item.int),
-        .leaf_i64 => payloadItems(i64, raw)[index] = item.int,
-        .leaf_f64 => payloadItems(f64, raw)[index] = item.float,
-        .leaf_char1 => payloadItems(u8, raw)[index] = @intCast(item.char),
-        .leaf_char2 => payloadItems(u16, raw)[index] = @intCast(item.char),
-        .leaf_char4 => payloadItems(u32, raw)[index] = item.char,
-        .leaf_symbol => payloadItems(u32, raw)[index] = item.symbol,
-        .dict, .task, .port, .module, .reserved_mask => unreachable,
-    }
 }
 
 pub fn setUniqueListLength(list_header: *UniqueList, new_len: usize) void {
@@ -2073,8 +2065,7 @@ pub const ReleaseDomain = struct {
                     self.enqueueZero(header, .continuation);
                 } else {
                     self.retireCodeIdentity(header);
-                    freePayload(self.allocator, header);
-                    self.allocator.destroy(object(header));
+                    destroyObject(self.allocator, header);
                     self.completeOwner();
                 }
                 continue;
@@ -2838,18 +2829,30 @@ pub const OwnedValueChain = union(enum) {
     }
 };
 
-fn freePayload(allocator: std.mem.Allocator, header: *Header) void {
-    const obj = object(header);
-    const cap = obj.capacity;
+/// Frees an object and what it owns directly. A list is one block; the other
+/// kinds keep their storage in a separate allocation behind `payload`.
+fn destroyObject(allocator: std.mem.Allocator, header: *Header) void {
     switch (kind(header)) {
-        .generic_spine => freeItems(Value, allocator, obj.payload, cap),
-        .leaf_u8 => freeItems(u8, allocator, obj.payload, cap),
-        .leaf_i64 => freeItems(i64, allocator, obj.payload, cap),
-        .leaf_f64 => freeItems(f64, allocator, obj.payload, cap),
-        .leaf_char1 => freeItems(u8, allocator, obj.payload, cap),
-        .leaf_char2 => freeItems(u16, allocator, obj.payload, cap),
-        .leaf_char4 => freeItems(u32, allocator, obj.payload, cap),
-        .leaf_symbol => freeItems(u32, allocator, obj.payload, cap),
+        inline .generic_spine,
+        .leaf_u8,
+        .leaf_i64,
+        .leaf_f64,
+        .leaf_char1,
+        .leaf_char2,
+        .leaf_char4,
+        .leaf_symbol,
+        => |list_kind| freeListObject(LeafElement(list_kind), allocator, object(header)),
+        .dict, .task, .port, .module, .reserved_mask => {
+            freeStorage(allocator, header);
+            allocator.destroy(object(header));
+        },
+    }
+}
+
+fn freeStorage(allocator: std.mem.Allocator, header: *Header) void {
+    const obj = object(header);
+    switch (kind(header)) {
+        .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => unreachable,
         .dict => {
             const storage: *DictStorage = @constCast(dictStorageConst(@ptrCast(@alignCast(header))));
             switch (storage.*) {
@@ -2874,103 +2877,4 @@ fn freePayload(allocator: std.mem.Allocator, header: *Header) void {
     }
     obj.payload = null;
     obj.capacity = 0;
-}
-
-fn freeItems(
-    comptime T: type,
-    allocator: std.mem.Allocator,
-    payload: ?*anyopaque,
-    count: usize,
-) void {
-    if (count == 0) return;
-    const ptr: [*]T = @ptrCast(@alignCast(payload.?));
-    allocator.free(ptr[0..count]);
-}
-
-fn resizePayload(
-    comptime T: type,
-    allocator: std.mem.Allocator,
-    header: *Header,
-    new_capacity: usize,
-) error{OutOfMemory}!void {
-    const obj = object(header);
-    const old_capacity = obj.capacity;
-    if (old_capacity == 0) {
-        const replacement = try allocator.alloc(T, new_capacity);
-        obj.payload = @ptrCast(replacement.ptr);
-    } else {
-        const ptr: [*]T = @ptrCast(@alignCast(obj.payload.?));
-        const replacement = try allocator.realloc(ptr[0..old_capacity], new_capacity);
-        obj.payload = @ptrCast(replacement.ptr);
-    }
-    obj.capacity = new_capacity;
-}
-
-pub fn replaceBuffer(
-    allocator: std.mem.Allocator,
-    list_header: *UniqueList,
-    new_capacity: usize,
-) error{OutOfMemory}!void {
-    const header: *UniqueHeader = @ptrCast(@alignCast(list_header));
-    const raw = uniqueHeader(header);
-    return switch (uniqueImpl(header).kind()) {
-        .generic_spine => resizePayload(Value, allocator, raw, new_capacity),
-        .leaf_u8 => resizePayload(u8, allocator, raw, new_capacity),
-        .leaf_i64 => resizePayload(i64, allocator, raw, new_capacity),
-        .leaf_f64 => resizePayload(f64, allocator, raw, new_capacity),
-        .leaf_char1 => resizePayload(u8, allocator, raw, new_capacity),
-        .leaf_char2 => resizePayload(u16, allocator, raw, new_capacity),
-        .leaf_char4, .leaf_symbol => resizePayload(u32, allocator, raw, new_capacity),
-        .dict, .task, .port, .module, .reserved_mask => unreachable,
-    };
-}
-
-/// Moves a fully-built representation into a unique destination header. The
-/// consumed source wrapper receives the destination's old representation and
-/// is retired through the sole graph-reclamation implementation.
-pub fn adoptListRepresentationDeferred(
-    releases: *ReleaseDomain,
-    dest: *UniqueList,
-    source: *UniqueList,
-) void {
-    adoptRepresentationDeferred(
-        releases,
-        @ptrCast(@alignCast(dest)),
-        @ptrCast(@alignCast(source)),
-    );
-}
-
-fn adoptRepresentationDeferred(
-    releases: *ReleaseDomain,
-    dest: *UniqueHeader,
-    source: *UniqueHeader,
-) void {
-    const dest_raw = uniqueHeader(dest);
-    const source_raw = uniqueHeader(source);
-    std.debug.assert(dest_raw != source_raw);
-    const dest_obj = object(dest_raw);
-    const source_obj = object(source_raw);
-    std.debug.assert(dest_obj.next_destroy == null and source_obj.next_destroy == null);
-
-    const dest_kind = uniqueImpl(dest).kind();
-    const dest_len = uniqueImpl(dest).len;
-    const dest_capacity = dest_obj.capacity;
-    const dest_payload = dest_obj.payload;
-    const source_kind = uniqueImpl(source).kind();
-    const source_len = uniqueImpl(source).len;
-    const source_capacity = source_obj.capacity;
-    const source_payload = source_obj.payload;
-
-    dest_obj.capacity = source_capacity;
-    dest_obj.payload = source_payload;
-    dest_obj.destroy_index = 0;
-    uniqueImpl(dest).setKind(source_kind);
-    uniqueImpl(dest).len = source_len;
-
-    source_obj.capacity = dest_capacity;
-    source_obj.payload = dest_payload;
-    source_obj.destroy_index = 0;
-    uniqueImpl(source).setKind(dest_kind);
-    uniqueImpl(source).len = dest_len;
-    releases.releaseHeader(source_raw);
 }
