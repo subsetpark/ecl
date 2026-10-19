@@ -1911,8 +1911,12 @@ fn scanGeneric(evaluator: *Machine, _: ?*anyopaque) MachineError!void {
 
 fn statelessFallback(
     comptime run: *const fn (*Machine, ?*anyopaque) MachineError!void,
-) machine.IdiomFallback {
-    return .{ .run_fn = run, .deinit_fn = deinitStatelessFallback };
+) machine.FallbackSource {
+    return .{ .make_fn = struct {
+        fn make(_: ?*const anyopaque, _: *Machine) machine.IdiomFallback {
+            return .{ .run_fn = run, .deinit_fn = deinitStatelessFallback };
+        }
+    }.make };
 }
 fn deinitStatelessFallback(_: *heap.ReleaseDomain, _: std.mem.Allocator, _: ?*anyopaque) void {}
 

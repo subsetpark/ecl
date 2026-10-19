@@ -38,6 +38,12 @@ pub fn LeafReader(comptime kind_value: HeapKind) type {
             return .{ .root = handle };
         }
 
+        /// Takes over a reference the caller owns instead of retaining one.
+        pub fn adopt(handle: *ListHandle) Self {
+            std.debug.assert(listKind(handle) == kind_value);
+            return .{ .root = handle };
+        }
+
         pub fn slice(self: *const Self) []const Element {
             const root = self.root.?;
             const items = payloadItems(Element, mutableHeader(root));

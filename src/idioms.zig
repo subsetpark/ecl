@@ -432,24 +432,46 @@ fn frozenBindingMatches(
 pub fn tryApply(
     evaluator: *Machine,
     request: machine.IdiomRequest,
-    fallback: machine.IdiomFallback,
+    source: machine.FallbackSource,
 ) MachineError!void {
-    if (evaluator.unit.inherited.idiom_mode == .generic_only) return runFallback(evaluator, fallback);
-    switch (request) {
-        .direct => |direct| return applyRecognized(evaluator, direct, fallback),
-        .each, .zip_with, .fold, .fold1, .scan => {},
-    }
-    const candidate = requestCandidate(evaluator, request) orelse return runFallback(evaluator, fallback);
+    const decline: Decline = .{ .deferred = source };
+    if (evaluator.unit.inherited.idiom_mode == .generic_only) return decline.run(evaluator);
+    const candidate = requestCandidate(evaluator, request) orelse return decline.run(evaluator);
     const entries = entriesShaped(candidate.context, candidate.phrase.list.length());
-    if (entries.len == 0) return runFallback(evaluator, fallback);
-    return matchOffered(evaluator, .{ .candidate = candidate, .entries = entries }, fallback);
+    if (entries.len == 0) return decline.run(evaluator);
+    return matchOffered(evaluator, .{ .candidate = candidate, .entries = entries }, decline);
 }
 
-fn runFallback(evaluator: *Machine, fallback: machine.IdiomFallback) MachineError!void {
-    var owned = fallback;
-    defer owned.deinit(evaluator.releaseDomain(), evaluator.allocator());
-    return owned.run(evaluator);
-}
+/// What an offered match runs if it declines: still the caller's source while
+/// the match is synchronous, and a made fallback once a match that must wait
+/// carries it into a driver.
+const Decline = union(enum) {
+    deferred: machine.FallbackSource,
+    made: machine.IdiomFallback,
+
+    fn take(self: Decline, evaluator: *Machine) machine.IdiomFallback {
+        return switch (self) {
+            .deferred => |source| source.make(evaluator),
+            .made => |fallback| fallback,
+        };
+    }
+
+    fn run(self: Decline, evaluator: *Machine) MachineError!void {
+        var owned = self.take(evaluator);
+        defer owned.deinit(evaluator.releaseDomain(), evaluator.allocator());
+        return owned.run(evaluator);
+    }
+
+    fn discard(self: Decline, evaluator: *Machine) void {
+        switch (self) {
+            .deferred => {},
+            .made => |fallback| {
+                var owned = fallback;
+                owned.deinit(evaluator.releaseDomain(), evaluator.allocator());
+            },
+        }
+    }
+};
 
 /// A user quotation offered to a combinator. Trusted definitions never reach
 /// the driver: their recognition was decided when their environment froze.
@@ -466,7 +488,6 @@ const Capture = struct {
 
 fn requestCandidate(evaluator: *Machine, request: machine.IdiomRequest) ?Candidate {
     const context: Context, const depth: usize = switch (request) {
-        .direct => unreachable,
         .each => .{ .each, 2 },
         .fold1 => .{ .fold1, 2 },
         .zip_with => .{ .zip_with, 3 },
@@ -480,38 +501,23 @@ fn requestCandidate(evaluator: *Machine, request: machine.IdiomRequest) ?Candida
 }
 
 /// Applies a trusted word's recognized entry when this call's operands admit
-/// it, and otherwise runs the word's body.
-fn applyRecognized(
-    evaluator: *Machine,
-    direct: @FieldType(machine.IdiomRequest, "direct"),
-    fallback: machine.IdiomFallback,
-) MachineError!void {
-    const entry = registry[direct.idiom.entry];
-    if (!canApplyEntry(evaluator, entry)) return runFallback(evaluator, fallback);
-    return settle(evaluator, .{ .list = direct.body }, entry, .{
-        .constant = direct.idiom.constant,
-        .active_word = direct.idiom.active_word,
-        .active_index = direct.idiom.active_index,
-    }, fallback);
+/// it. A declined call runs the word's body, so nothing is prepared for it.
+/// `fold1` is the combinator itself: it offers the caller's quotation, and the
+/// body is the fallback should that be declined.
+pub fn applyTrusted(evaluator: *Machine, call: machine.TrustedCall) MachineError!machine.TrustedOutcome {
+    if (evaluator.unit.inherited.idiom_mode == .generic_only) return .declined;
+    const entry = registry[call.idiom.entry];
+    if (entry.operation == .direct and entry.operation.direct == .fold1) return .{ .offered = .fold1 };
+    if (!canApplyEntry(evaluator, entry)) return .declined;
+    try applySelected(evaluator, .{ .list = call.body }, entry, .{
+        .constant = call.idiom.constant,
+        .active_word = call.idiom.active_word,
+        .active_index = call.idiom.active_index,
+    });
+    return .applied;
 }
 
-/// Runs the selected entry, or the fallback when nothing was selected. The
-/// fallback is consumed on every path.
-fn settle(
-    evaluator: *Machine,
-    phrase: Value,
-    entry: ?RegistryEntry,
-    capture: Capture,
-    fallback_value: machine.IdiomFallback,
-) MachineError!void {
-    var fallback = fallback_value;
-    const selected = entry orelse return runFallback(evaluator, fallback);
-    if (selected.operation == .direct and selected.operation.direct == .fold1) {
-        // Keep the original source continuation until the reducer's
-        // independent binding guard succeeds as well.
-        return evaluator.continueWithIdiom(.fold1, fallback);
-    }
-    defer fallback.deinit(evaluator.releaseDomain(), evaluator.allocator());
+fn applySelected(evaluator: *Machine, phrase: Value, selected: RegistryEntry, capture: Capture) MachineError!void {
     const direct_parent = if (selected.context == .direct or selected.context == .fold1)
         evaluator.commitDirectIdiomTrace()
     else
@@ -689,14 +695,18 @@ const Matcher = struct {
 /// Matches as far as the call-site cache allows, settling at once when it
 /// answers every pattern word; otherwise a driver resolves the missing word
 /// and carries the match on from there.
-fn matchOffered(evaluator: *Machine, matcher: Matcher, fallback: machine.IdiomFallback) MachineError!void {
+fn matchOffered(evaluator: *Machine, matcher: Matcher, decline: Decline) MachineError!void {
     var matching = matcher;
     while (true) switch (matching.step(evaluator)) {
         .progressed => {},
-        .done => |entry| return settle(evaluator, matching.candidate.phrase, entry, matching.capture, fallback),
+        .done => |entry| {
+            const selected = entry orelse return decline.run(evaluator);
+            decline.discard(evaluator);
+            return applySelected(evaluator, matching.candidate.phrase, selected, matching.capture);
+        },
         .resolve => |pending| return evaluator.startDriver(IdiomDriver{
             .matcher = matching,
-            .fallback = .init(fallback),
+            .fallback = .init(decline.take(evaluator)),
             .cache = pending.cache,
             .word = pending.word,
             .resolution = .init(.init(evaluator, pending.word, pending.start, null, null, pending.guard)),
@@ -731,7 +741,7 @@ const IdiomDriver = struct {
                 const matcher = self.matcher;
                 const fallback = self.fallback.take();
                 evaluator.retireDriver(self);
-                try matchOffered(evaluator, matcher, fallback);
+                try matchOffered(evaluator, matcher, .{ .made = fallback });
                 return .detached;
             },
         };
@@ -765,7 +775,7 @@ fn canApplyEntry(evaluator: *Machine, entry: RegistryEntry) bool {
         // non-list top must reach the generic composition so the type error
         // still names the word that observed it.
         .direct => |operation| switch (operation) {
-            .fold1 => evaluator.available() >= 2 and stack[stack.len - 2] == .list and stack[stack.len - 2].list.length() != 0 and stack[stack.len - 1] == .list,
+            .fold1 => unreachable, // Offers its quotation instead; see `applyTrusted`.
             .dip => evaluator.available() >= 2 and stack[stack.len - 1] == .list,
             .find => evaluator.available() >= 2 and stack[stack.len - 2] == .list,
             .str_format => evaluator.available() >= 2,
@@ -801,7 +811,7 @@ fn applyEntry(evaluator: *Machine, entry: RegistryEntry, capture: Capture) Machi
 
 fn applyDirect(evaluator: *Machine, operation: DirectOp) MachineError!void {
     try switch (operation) {
-        .fold1 => unreachable, // Transfers the source fallback to the reducer guard.
+        .fold1 => unreachable, // Offers its quotation instead; see `applyTrusted`.
         .sort => order.sortForIdiom(evaluator),
         .first => sequence.firstForIdiom(evaluator),
         .find => applyMatchFind(evaluator),

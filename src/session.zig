@@ -597,7 +597,7 @@ pub const Session = enum(usize) {
                 .ecl_path = core.ecl_path,
                 .module_snapshot = core.module_snapshot,
                 .idiom_mode = core.idiom_mode,
-                .phrase_recognizer = idioms.tryApply,
+                .phrase_recognizer = .{ .offered = idioms.tryApply, .trusted = idioms.applyTrusted },
                 .freeze_recognizer = idioms.freeze_recognizer,
                 .phase = .{ .runtime = .{
                     .native_loader = core.native_owner.loader(),

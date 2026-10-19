@@ -1759,6 +1759,9 @@ const TypedStep = *const fn (*TypedState, support.Context) MachineError!void;
 
 const TypedDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
+    /// Installed only to resume an operation longer than the rest of its
+    /// turn, and released when it publishes.
+    pub const inline_driver = true;
 
     state: heap.Owned(TypedState),
     step: TypedStep,
@@ -2258,6 +2261,25 @@ fn acquireOperand(class: Number, item: Value) TypedOperand {
     };
 }
 
+/// The operand whose reference `owner` holds, read through that reference
+/// rather than a second one.
+fn takeOperand(class: Number, owner: *heap.OwnedValue) TypedOperand {
+    const item = owner.take();
+    return switch (class) {
+        .byte => .{ .bytes = heap.LeafReader(.leaf_u8).adopt(item.list) },
+        .integer => .{ .ints = heap.LeafReader(.leaf_i64).adopt(item.list) },
+        .real => .{ .reals = heap.LeafReader(.leaf_f64).adopt(item.list) },
+    };
+}
+
+/// The holders of a binary operation's operand references, when its caller
+/// owns them. A typed operand then reads through that reference instead of
+/// retaining another. The left owner is also the reuse candidate.
+const OperandOwners = struct {
+    left: ?*heap.OwnedValue = null,
+    right: ?*heap.OwnedValue = null,
+};
+
 /// Static selection binds the element classes, output width, and monomorphic
 /// step together. Preparation runs once outside the operation/type expansion;
 /// callers cannot supply a step independently of its storage contract.
@@ -2328,12 +2350,12 @@ const NumericBinaryPlan = opaque {
         evaluator: *Machine,
         left: Value,
         right: Value,
-        reuse_candidate: ?*heap.OwnedValue,
+        owners: OperandOwners,
         length: usize,
         report: FaultReport,
     ) error{OutOfMemory}!NestedTyped {
         const data: *const Data = @ptrCast(@alignCast(self));
-        const reuse = if (data.shape == .scalar_leaf) null else reuse_candidate;
+        const reuse = if (data.shape == .scalar_leaf) null else owners.left;
         const acquired = switch (data.out) {
             inline else => |out| try acquireOutput(evaluator, out, reuse, length),
         };
@@ -2343,10 +2365,14 @@ const NumericBinaryPlan = opaque {
                     .aliased
                 else if (data.shape == .scalar_leaf)
                     .{ .scalar = left }
+                else if (owners.left) |owner|
+                    takeOperand(data.left, owner)
                 else
                     acquireOperand(data.left, left),
                 .right = if (data.shape == .leaf_scalar)
                     .{ .scalar = right }
+                else if (owners.right) |owner|
+                    takeOperand(data.right, owner)
                 else
                     acquireOperand(data.right, right),
                 .output = acquired.output,
@@ -2363,8 +2389,8 @@ fn startTypedDriver(
     evaluator: *Machine,
     state: TypedState,
     step: TypedStep,
-) error{OutOfMemory}!bool {
-    try evaluator.startDriver(TypedDriver{ .state = .init(state), .step = step });
+) MachineError!bool {
+    try evaluator.runDriver(TypedDriver{ .state = .init(state), .step = step });
     return true;
 }
 
@@ -2528,11 +2554,11 @@ fn startTypedCharBinary(
         report,
     )) orelse return false;
     switch (typed) {
-        .fixed_char => |payload| try evaluator.startDriver(FixedCharDriver{
+        .fixed_char => |payload| try evaluator.runDriver(FixedCharDriver{
             .state = .init(payload.state),
             .step = payload.step,
         }),
-        .dynamic_char => |payload| try evaluator.startDriver(DynamicCharDriver{
+        .dynamic_char => |payload| try evaluator.runDriver(DynamicCharDriver{
             .state = .init(payload.state),
             .step = payload.step,
         }),
@@ -2624,7 +2650,7 @@ fn buildNestedTypedNumericBinary(
     const left_class = left_leaf orelse left_scalar.?;
     const right_class = right_leaf orelse right_scalar.?;
     const plan = NumericBinaryPlan.select(operation, left_class, right_class, shape) orelse return null;
-    return try plan.prepare(evaluator, left_item, right_item, reuse_candidate, length, report);
+    return try plan.prepare(evaluator, left_item, right_item, .{ .left = reuse_candidate }, length, report);
 }
 
 /// `reuse_candidate` must own `left`, and reaches only the numeric builder:
@@ -2685,7 +2711,12 @@ const NumericUnaryPlan = opaque {
         };
         return .{ .numeric = .{
             .state = .{
-                .left = if (acquired.aliased) .aliased else acquireOperand(data.input, operand),
+                .left = if (acquired.aliased)
+                    .aliased
+                else if (reuse) |owner|
+                    takeOperand(data.input, owner)
+                else
+                    acquireOperand(data.input, operand),
                 .right = .absent,
                 .output = acquired.output,
                 .cursor = .init(length),
@@ -2748,7 +2779,7 @@ fn startTypedBinary(
 
     // Mixed min/max stays on the generic route without acquiring storage.
     const plan = NumericBinaryPlan.select(operation, left_class, right_class, shape) orelse return false;
-    const typed = try plan.prepare(evaluator, left_item, right_item, left, length, report);
+    const typed = try plan.prepare(evaluator, left_item, right_item, .{ .left = left, .right = right }, length, report);
     // startDriver consumes the payload on both success and failure.
     return startTypedDriver(evaluator, typed.numeric.state, typed.numeric.step);
 }
@@ -3120,7 +3151,7 @@ const NumericReducePlan = opaque {
             .real => state.output.?.store(.real, cursor_start, &.{seed.float}),
         };
         held_locally = false;
-        return evaluator.startDriver(TypedReduceDriver{
+        return evaluator.runDriver(TypedReduceDriver{
             .state = .init(state),
             .step = data.step,
             .consumed = consumed,
