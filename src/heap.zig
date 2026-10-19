@@ -69,8 +69,9 @@ pub fn LeafReader(comptime kind_value: HeapKind) type {
 /// exactly one consuming `finish`. The buffer aliases no input and nothing
 /// reads it before publication, so a producer may write a range before it
 /// knows whether that block faulted: a faulted operation retires the writer
-/// unpublished. A reused input buffer is a `UniqueLeafAdoption` instead, which
-/// has no such range, because its operands are the evidence a replay rescans.
+/// unpublished. A reused input buffer is a `UniqueLeafAdoption` instead, whose
+/// ranges hold operands until each position is stored, because those operands
+/// are the evidence a replay rescans.
 pub fn LeafWriter(comptime kind_value: HeapKind) type {
     requireLeafRepresentation(kind_value, "LeafWriter");
     const Element = LeafElement(kind_value);
@@ -150,9 +151,12 @@ pub fn LeafWriter(comptime kind_value: HeapKind) type {
 /// occupy the same bytes as the result's, so the result can take over the
 /// buffer by retag instead of by allocation. The authority is consumed exactly
 /// once — by `finish`, which republishes that same list as the result, or by
-/// `abandon`, which leaves the input exactly as it was. Callers never see the
-/// header: the claim is the only door to in-place reuse, and `writeRange`
-/// stores nothing a caller has not already decided is fault-free.
+/// `abandon`, which leaves the input's representation, length, and the
+/// caller's reference but not necessarily its elements. Only that reference
+/// can reach the input, and an abandoned operation has failed, so it is only
+/// ever released. Callers never see the header: the claim is the only door to
+/// in-place reuse, and a producer stores an element only once it has read every
+/// operand at that position and knows the result is fault-free.
 pub fn UniqueLeafAdoption(comptime result_kind: HeapKind) type {
     requireLeafRepresentation(result_kind, "UniqueLeafAdoption");
     const Element = LeafElement(result_kind);
@@ -181,13 +185,21 @@ pub fn UniqueLeafAdoption(comptime result_kind: HeapKind) type {
         }
 
         /// The reused buffer read as its original representation, bounded by the
-        /// claimed length. Reads stay const and stores stay ranged, which is
-        /// what makes reuse safe: an element is read in its own block, before
-        /// that block's mask is known and therefore before anything is stored.
+        /// claimed length. An element is read before its own position is
+        /// stored, so a producer reads its operands here and writes its result
+        /// over them lane by lane.
         pub fn sourceSlice(self: *const Self, comptime source_kind: HeapKind) []const LeafElement(source_kind) {
             std.debug.assert(leafElementSize(source_kind) == leafElementSize(result_kind));
             const items = payloadItems(LeafElement(source_kind), mutableHeader(self.handle));
             return items[0..self.length];
+        }
+
+        /// One bounded range of the buffer in the result representation, for
+        /// producers that write each position after reading its operands.
+        pub fn inPlaceRange(self: *Self, offset: usize, count: usize) []Element {
+            std.debug.assert(self.claimed != null);
+            std.debug.assert(offset + count <= self.length);
+            return payloadItems(Element, mutableHeader(self.handle))[offset..][0..count];
         }
 
         pub fn writeRange(self: *Self, offset: usize, source: []const Element) void {
@@ -210,13 +222,14 @@ pub fn UniqueLeafAdoption(comptime result_kind: HeapKind) type {
         }
 
         /// Consumes the authority without publishing. The input keeps its
-        /// representation, its length, and the caller's reference.
+        /// representation, its length, and the caller's reference; positions a
+        /// producer already stored hold results.
         pub fn abandon(self: *Self) void {
             self.claimed = null;
         }
 
         /// The `heap.Owned` disposal protocol. Abandoning consumes the authority
-        /// and touches neither the input nor any reference.
+        /// and touches no reference.
         pub fn retire(self: *Self, releases: *ReleaseDomain) void {
             _ = releases;
             self.abandon();

@@ -1405,31 +1405,26 @@ const TypedOutput = union(enum) {
         }
     }
 
-    fn isFresh(self: *const TypedOutput) bool {
-        return switch (self.*) {
-            .fresh_bytes, .fresh_ints, .fresh_reals => true,
-            .reuse_bytes, .reuse_ints, .reuse_reals => false,
-        };
-    }
-
-    /// A fresh buffer's range, which a vector block may compute in place
-    /// before its faults are known. A reused input has none: its blocks stage
-    /// until clean, since its operands are what a replay reads.
-    fn freshRange(self: *TypedOutput, comptime class: Number, piece: flat.Chunk) ?[]class.Element() {
+    /// The output's own range, which a vector loop writes directly. Nothing
+    /// reads a fresh buffer before it is published, so a block may land there
+    /// before its faults are known. A reused input's positions are its
+    /// operands until stored, so its loop stores a vector only after reading
+    /// it and, when checked, knowing it clean.
+    fn vectorRange(self: *TypedOutput, comptime class: Number, piece: flat.Chunk) []class.Element() {
         return switch (class) {
             .byte => switch (self.*) {
                 .fresh_bytes => |*writer| writer.unpublishedRange(piece.start, piece.len()),
-                .reuse_bytes => null,
+                .reuse_bytes => |*adoption| adoption.inPlaceRange(piece.start, piece.len()),
                 .fresh_ints, .fresh_reals, .reuse_ints, .reuse_reals => unreachable,
             },
             .integer => switch (self.*) {
                 .fresh_ints => |*writer| writer.unpublishedRange(piece.start, piece.len()),
-                .reuse_ints => null,
+                .reuse_ints => |*adoption| adoption.inPlaceRange(piece.start, piece.len()),
                 .fresh_bytes, .fresh_reals, .reuse_bytes, .reuse_reals => unreachable,
             },
             .real => switch (self.*) {
                 .fresh_reals => |*writer| writer.unpublishedRange(piece.start, piece.len()),
-                .reuse_reals => null,
+                .reuse_reals => |*adoption| adoption.inPlaceRange(piece.start, piece.len()),
                 .fresh_bytes, .fresh_ints, .reuse_bytes, .reuse_ints => unreachable,
             },
         };
@@ -1463,8 +1458,8 @@ const TypedOutput = union(enum) {
             .fresh_bytes => |*writer| writer.retirePartial(releases),
             .fresh_ints => |*writer| writer.retirePartial(releases),
             .fresh_reals => |*writer| writer.retirePartial(releases),
-            // An abandoned reuse leaves the input exactly as it was; the
-            // caller's reference to it is the one `root` holds.
+            // An abandoned reuse may hold stored results; the caller's
+            // reference to it is the one `root` holds, and only releases it.
             .reuse_bytes => |*adoption| adoption.abandon(),
             .reuse_ints => |*adoption| adoption.abandon(),
             .reuse_reals => |*adoption| adoption.abandon(),
@@ -1902,13 +1897,13 @@ fn exactFloatFaults(
     return faults;
 }
 
-/// The next piece of a charged range. A vector loop writing a fresh output
-/// stages nothing, so it takes the rest of the range as one block and pays
-/// its fixed per-block work once; anything staged is bounded by the staging
-/// array. Either way the piece lies inside the range already charged, which
-/// also bounds a faulted piece's exact pass and scalar replay.
-fn nextPiece(comptime vector: bool, output: *const TypedOutput, range: flat.Chunk, offset: usize) flat.Chunk {
-    if (vector and output.isFresh()) return .{ .start = range.start + offset, .end = range.end };
+/// The next piece of a charged range. A vector loop writes its output's own
+/// range and stages nothing, so it takes the rest of the range as one block and
+/// pays its fixed per-block work once; a scalar loop's staging is bounded by the
+/// staging array. Either way the piece lies inside the range already charged,
+/// which also bounds a faulted piece's exact pass and scalar replay.
+fn nextPiece(comptime vector: bool, range: flat.Chunk, offset: usize) flat.Chunk {
+    if (vector) return .{ .start = range.start + offset, .end = range.end };
     return flat.blockRange(range, offset);
 }
 
@@ -2102,13 +2097,13 @@ fn binaryStep(
         fn step(state: *TypedState, context: support.Context) MachineError!void {
             const range = try state.cursor.nextRange(context) orelse return;
             var block = flat.Block(out.Element()).init();
+            const placement: flat.Placement = if (state.output.reusing()) .over_operands else .fresh;
             var offset: usize = 0;
             while (offset != range.len()) {
-                const piece = nextPiece(comptime policy.isVector(), &state.output, range, offset);
-                const direct = state.output.freshRange(out, piece);
-                const dest = direct orelse block.items[0..piece.len()];
-                const status: flat.CheckedStatus = switch (comptime policy) {
+                const piece = nextPiece(comptime policy.isVector(), range, offset);
+                const outcome: flat.CheckedOutcome = switch (comptime policy) {
                     .vector_infallible => blk: {
+                        const dest = state.output.vectorRange(out, piece);
                         switch (shape) {
                             .leaf_leaf => Vectors.binary(vector_body, infallible_body, leftSlice(state), rightSlice(state), piece, dest),
                             .leaf_scalar => Vectors.binaryScalarRight(vector_body, infallible_body, leftSlice(state), right_class.unboxed(state.right.scalar), piece, dest),
@@ -2117,11 +2112,14 @@ fn binaryStep(
                         }
                         break :blk .clean;
                     },
-                    .vector_checked => switch (shape) {
-                        .leaf_leaf => Vectors.checkedBinary(checked, leftSlice(state), rightSlice(state), piece, dest),
-                        .leaf_scalar => Vectors.checkedBinaryScalarRight(checked, leftSlice(state), right_class.unboxed(state.right.scalar), piece, dest),
-                        .scalar_leaf => Vectors.checkedBinaryScalarLeft(checked, left_class.unboxed(state.left.scalar), rightSlice(state), piece, dest),
-                        .leaf_only => unreachable,
+                    .vector_checked => blk: {
+                        const dest = state.output.vectorRange(out, piece);
+                        break :blk switch (shape) {
+                            .leaf_leaf => Vectors.checkedBinary(checked, placement, leftSlice(state), rightSlice(state), piece, dest),
+                            .leaf_scalar => Vectors.checkedBinaryScalarRight(checked, placement, leftSlice(state), right_class.unboxed(state.right.scalar), piece, dest),
+                            .scalar_leaf => Vectors.checkedBinaryScalarLeft(checked, placement, left_class.unboxed(state.left.scalar), rightSlice(state), piece, dest),
+                            .leaf_only => unreachable,
+                        };
                     },
                     .scalar_infallible => blk: {
                         switch (shape) {
@@ -2130,23 +2128,28 @@ fn binaryStep(
                             .scalar_leaf => ScalarInfallible.binaryScalarLeft(infallible_body, left_class.unboxed(state.left.scalar), rightSlice(state), piece, &block),
                             .leaf_only => unreachable,
                         }
+                        state.output.store(out, piece.start, block.written());
                         break :blk .clean;
                     },
-                    .scalar_checked => switch (shape) {
-                        .leaf_leaf => ScalarChecked.binary(checked_body, leftSlice(state), rightSlice(state), piece, &block),
-                        .leaf_scalar => ScalarChecked.binaryScalarRight(checked_body, leftSlice(state), right_class.unboxed(state.right.scalar), piece, &block),
-                        .scalar_leaf => ScalarChecked.binaryScalarLeft(checked_body, left_class.unboxed(state.left.scalar), rightSlice(state), piece, &block),
-                        .leaf_only => unreachable,
+                    .scalar_checked => blk: {
+                        const status = switch (shape) {
+                            .leaf_leaf => ScalarChecked.binary(checked_body, leftSlice(state), rightSlice(state), piece, &block),
+                            .leaf_scalar => ScalarChecked.binaryScalarRight(checked_body, leftSlice(state), right_class.unboxed(state.right.scalar), piece, &block),
+                            .scalar_leaf => ScalarChecked.binaryScalarLeft(checked_body, left_class.unboxed(state.left.scalar), rightSlice(state), piece, &block),
+                            .leaf_only => unreachable,
+                        };
+                        // A staged block stores nothing until it is clean.
+                        if (status == .faulted) break :blk .{ .faulted = piece.start };
+                        state.output.store(out, piece.start, block.written());
+                        break :blk .clean;
                     },
                 };
-                // Nothing reaches a reused input buffer until the whole block is
-                // known clean, since it still holds the operands the replay
-                // reads. A fresh buffer was written in place and is retired
-                // unpublished if the replay fails.
-                if (status == .faulted) return replayNumericBinary(state, context, piece, selectScalar(operation));
-                switch (comptime policy) {
-                    .vector_infallible, .vector_checked => if (direct == null) state.output.store(out, piece.start, dest),
-                    .scalar_infallible, .scalar_checked => state.output.store(out, piece.start, block.written()),
+                switch (outcome) {
+                    .clean => {},
+                    // The replay rescans from the first position whose
+                    // operands are still the input's; a fresh buffer holds
+                    // partial results and is retired unpublished if it fails.
+                    .faulted => |from| return replayNumericBinary(state, context, .{ .start = from, .end = piece.end }, selectScalar(operation)),
                 }
                 offset += piece.len();
             }
@@ -2196,21 +2199,14 @@ fn unaryStep(comptime operation: UnaryOp, comptime operand_class: Number) TypedS
             var block = flat.Block(out.Element()).init();
             var offset: usize = 0;
             while (offset != range.len()) {
-                const piece = nextPiece(comptime policy.isVector(), &state.output, range, offset);
-                const direct = state.output.freshRange(out, piece);
-                const dest = direct orelse block.items[0..piece.len()];
-                const status: flat.CheckedStatus = switch (comptime policy) {
-                    .vector_infallible => blk: {
-                        Vectors.unary(vector_body, infallible_body, operandSlice(state), piece, dest);
-                        break :blk .clean;
-                    },
-                    .scalar_checked => Checked.unary(checked_body, operandSlice(state), piece, &block),
-                    .vector_checked, .scalar_infallible => unreachable,
-                };
-                if (status == .faulted) return replayNumericUnary(state, context, piece, selectUnary(operation));
+                const piece = nextPiece(comptime policy.isVector(), range, offset);
                 switch (comptime policy) {
-                    .vector_infallible => if (direct == null) state.output.store(out, piece.start, dest),
-                    .scalar_checked => state.output.store(out, piece.start, block.written()),
+                    .vector_infallible => Vectors.unary(vector_body, infallible_body, operandSlice(state), piece, state.output.vectorRange(out, piece)),
+                    .scalar_checked => {
+                        if (Checked.unary(checked_body, operandSlice(state), piece, &block) == .faulted)
+                            return replayNumericUnary(state, context, piece, selectUnary(operation));
+                        state.output.store(out, piece.start, block.written());
+                    },
                     .vector_checked, .scalar_infallible => unreachable,
                 }
                 offset += piece.len();

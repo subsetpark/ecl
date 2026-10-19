@@ -1066,8 +1066,12 @@ reused buffer's owned root preserves its original representation until final
 publication, even when the result changes numeric kind at the same byte width.
 Sharing this cold path does not add work outside the already charged block.
 A fresh `LeafWriter` buffer aliases no input and is unread until `finish`, so a
-vector block may be computed in it before its faults are known; only a claimed
-input buffer stages a block until it is known clean.
+vector block may be computed in it before its faults are known. A claimed input
+buffer is written over its own operands: each position is stored only after its
+operands are read and, for a checked operation, after its vector is known clean,
+so the replay begins at the first faulting vector, whose operands are intact.
+Nothing else can observe a claimed input, which was solely owned and is only
+released when its operation fails.
 
 A vector block may be nominated by a fault mask that over-approximates the
 scalar fault set, such as "some lane is non-finite", tested once per block.
