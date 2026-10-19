@@ -30,6 +30,7 @@ fn definition(comptime operation: Op) env.BuiltinWord {
     return switch (operation) {
         .cmp => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "left right -- ordering", .doc = "Return -1, 0, or 1 for the whole-value order of two comparable values." },
         .grade => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- indices", .doc = "Return the stable ascending sort permutation of a comparable list." },
+        .distinct => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- list", .doc = "Return the first occurrence of each distinct list value in input order." },
         .group_columns => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "columns -- groups", .doc = "Group equal-length columns by composite row keys in first-occurrence order." },
         .group => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- dict", .doc = "Group equal list values into a dictionary of zero-based index lists." },
     };
@@ -41,6 +42,7 @@ fn bind(comptime operation: Op) env.PrimitiveImpl {
             return switch (operation) {
                 .cmp => cmpPrimitive(evaluator),
                 .grade => gradePrimitive(evaluator),
+                .distinct => distinctPrimitive(evaluator),
                 .group => groupPrimitive(evaluator),
                 .group_columns => groupColumnsPrimitive(evaluator),
             };
@@ -645,10 +647,6 @@ fn TypedDistinctDriver(comptime kind: value.HeapKind) type {
             return .stepped;
         }
     };
-}
-
-pub fn distinctForIdiom(evaluator: *Machine) MachineError!void {
-    return distinctPrimitive(evaluator);
 }
 
 const DistinctDriver = struct {

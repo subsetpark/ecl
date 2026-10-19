@@ -701,6 +701,33 @@ control) left the mixed short-task and cancellation p50 values within 6% in
 both directions at one and eight workers. Eight-worker cancellation p95/p99
 tails above 500 µs appeared once on each side and did not reproduce.
 
+## Trusted idioms are recognized at the freeze edge — 2026-10-18
+
+A prelude or standard-library definition that matched an idiom used to be
+matched again on every application: each pattern word was resolved through
+the running scope chain to confirm it still named the trusted binding. The
+words inside a trusted body are stamped with their defining scope and resolve
+there regardless of later user definitions, and that scope is immutable once
+it freezes. Recognition is now decided once, when core finishes or a module
+image seals, by looking up only the registry's pattern names; the binding
+records the result, and dispatch reads it. Offered quotations, such as
+`(+) fold1` written in user code, are still checked per application. `distinct`
+became a builtin over the kernel its idiom already called, because its
+prelude body reached through the replaceable `dict` registration and so could
+not be decided at the edge.
+
+Callgrind, `a u (* (+) fold1) partial each` row dots over a 250 × 250 float
+matrix, net of setup, Zig 0.16.0 ReleaseFast `-Dcpu=native`, x86_64 Linux
+(Intel Core Ultra 5 125U), control `ebeec93`: 80,065 → 22,463 instructions per
+row. The remainder is the user quotation's context check (two resolutions of
+`+` per row), the arithmetic, and dispatch. Whole process, pinned to one
+P-core, median of five runs after a warmup:
+
+| Case | Control | Treatment |
+|---|---:|---:|
+| `1000 spectralnorm`, row dots and weighted rows, ms | 223 | 135 |
+| `1000 spectralnorm`, weighted columns, ms | 90 | 91 |
+
 ## Reference-free objects skip the retirement queue — 2026-10-18
 
 Every object whose count reached zero went through the retirement queue: an

@@ -101,7 +101,7 @@ pub const Operation = union(enum) {
             },
             .order => |operation| switch (operation) {
                 .cmp => .two,
-                .grade, .group, .group_columns => .one,
+                .grade, .distinct, .group, .group_columns => .one,
             },
             .text => |operation| switch (operation) {
                 // `split`, `join`, and `format` read two sized operands; the
@@ -683,6 +683,18 @@ const order_rows = [_]Row{
         .left = OperandSet{ .aggregates = &.{.leaf_symbol} },
         .class = .generic_fallback,
         // symbols are deliberately unordered and fail before sorting
+    },
+    .{
+        .operations = only(.{Operation{ .order = .distinct }}),
+        .left = all_leaves,
+        .class = .sequential_typed,
+        // hash membership over pinned typed keys, publishing a leaf of the same kind
+    },
+    .{
+        .operations = only(.{Operation{ .order = .distinct }}),
+        .left = union2(spine, dictionary),
+        .class = .generic_fallback,
+        // boxed items hash and compare structurally; a dict fails before traversal
     },
     .{
         .operations = only(.{Operation{ .order = .group }}),

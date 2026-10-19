@@ -223,6 +223,67 @@ pub const ModulePublication = union(enum) {
     },
 };
 
+/// What a trusted definition's body was recognized as, decided once when its
+/// environment froze. A frozen environment cannot change what the body's
+/// words mean, so the outcome is a property of the definition; only whether
+/// a particular call's operands admit it is left to that call. `env` stores
+/// the record for the recognizer that produced it and does not interpret it.
+pub const DirectIdiom = struct {
+    entry: u16,
+    /// Borrowed from the body, which the binding retains.
+    constant: ?value.Value = null,
+    active_word: ?u32 = null,
+    active_index: ?u32 = null,
+};
+
+/// Recognition performed at a freeze edge. `names` are the only definitions
+/// it can recognize, so the edge looks those up rather than walking the
+/// environment, and its work does not grow with the environment's size.
+pub const FreezeRecognizer = struct {
+    names: []const []const u8,
+    recognize: *const fn (lookup: FrozenLookup, name: []const u8, body: *Quotation) ?DirectIdiom,
+};
+
+/// Name resolution in an environment that is about to freeze, as a word in
+/// one of its definitions resolves at runtime: its own environment, then core.
+pub const FrozenLookup = struct {
+    own: *const Environment,
+    /// The core a module image falls back to; null when `own` is core.
+    core: ?*const Environment,
+    own_scope: u32,
+    core_scope: u32,
+
+    pub const Hit = struct {
+        lease: BindingLease,
+        in_core: bool,
+    };
+
+    /// Whether a word written with `stamp` resolves in this chain. A word with
+    /// no written-in scope resolves wherever it is invoked, so nothing about
+    /// it is a property of the definition.
+    pub fn admits(self: FrozenLookup, stamp: u32) bool {
+        return stamp != 0 and (stamp == self.own_scope or stamp == self.core_scope);
+    }
+
+    /// Resolves `name` written with `stamp`: a core stamp in core alone, the
+    /// environment's own stamp there first and then in core.
+    pub fn resolve(self: FrozenLookup, stamp: u32, name: u32) ?Hit {
+        const core = self.core orelse self.own;
+        if (self.core != null and stamp == self.own_scope) {
+            if (lookupFrozen(self.own, name)) |lease| return .{ .lease = lease, .in_core = false };
+        }
+        const lease = lookupFrozen(core, name) orelse return null;
+        return .{ .lease = lease, .in_core = true };
+    }
+};
+
+/// One lookup on the blocking freeze edge, which owns the environment.
+fn lookupFrozen(environment: *const Environment, name: u32) ?BindingLease {
+    var cursor = environment.directLookupCursor(name);
+    defer cursor.deinit();
+    return poll.drive(?BindingLease, &cursor, .{});
+}
+
 const BindingSpec = struct {
     binding: Binding,
     visibility: Visibility = .public,
@@ -231,6 +292,7 @@ const BindingSpec = struct {
     doc: ?*DocumentationString = null,
     compiled: ?*Quotation = null,
     source: ?reader_types.SourceSlice = null,
+    direct_idiom: ?DirectIdiom = null,
     fn fromTop(publication: TopPublication) BindingSpec {
         return switch (publication) {
             .word => |word| .{
@@ -342,6 +404,7 @@ pub const BindingLease = struct {
     doc: ?*DocumentationString,
     compiled: ?*Quotation,
     source: ?reader_types.SourceSlice,
+    direct_idiom: ?DirectIdiom,
 
     fn fromSpec(spec: BindingSpec, releases: *heap.ReleaseDomain) BindingLease {
         return .{
@@ -353,11 +416,14 @@ pub const BindingLease = struct {
             .doc = spec.doc,
             .compiled = spec.compiled,
             .source = spec.source,
+            .direct_idiom = spec.direct_idiom,
         };
     }
 
-    pub fn deinit(self: *BindingLease) void {
-        const spec = BindingSpec{
+    /// The specification this lease holds, borrowed: it owns nothing apart
+    /// from the lease.
+    fn heldSpec(self: *const BindingLease) BindingSpec {
+        return .{
             .binding = self.binding,
             .visibility = self.visibility,
             .origin = self.origin,
@@ -365,8 +431,12 @@ pub const BindingLease = struct {
             .doc = self.doc,
             .compiled = self.compiled,
             .source = self.source,
+            .direct_idiom = self.direct_idiom,
         };
-        spec.retire(self.releases);
+    }
+
+    pub fn deinit(self: *BindingLease) void {
+        self.heldSpec().retire(self.releases);
         self.* = undefined;
     }
 
@@ -1143,6 +1213,29 @@ pub const Environment = struct {
     pub fn shapeGeneration(self: *const Environment) u64 {
         return self.shape_generation.load(.acquire) / 2;
     }
+    /// Records each recognizable definition's outcome before the environment
+    /// freezes. It republishes only cells that change and never walks the
+    /// environment, so a failure leaves every definition as it was.
+    fn recognizeDirect(self: *Environment, lookup: FrozenLookup, recognizer: FreezeRecognizer) error{OutOfMemory}!void {
+        for (recognizer.names) |spelling| {
+            const id = try intern.intern(spelling);
+            var lease = lookupFrozen(self, id) orelse continue;
+            defer lease.deinit();
+            const body = switch (lease.binding) {
+                .word => |body| body,
+                .builtin, .native => continue,
+            };
+            const idiom = recognizer.recognize(lookup, spelling, body) orelse continue;
+            const name = intern.namespaceName(id) catch continue;
+            var recognized = lease.heldSpec();
+            recognized.direct_idiom = idiom;
+            _ = self.bind(name, recognized) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Frozen => unreachable,
+            };
+        }
+    }
+
     fn freeze(self: *Environment) void {
         self.lockBlocking();
         defer self.unlock();
@@ -1609,10 +1702,26 @@ pub const ModulePublisher = enum(usize) {
 
     /// Ends construction. A sealed image has no publisher, so this is the one
     /// transition that makes late definition impossible rather than merely
-    /// refused.
-    pub fn freeze(self: ModulePublisher) void {
-        self.target().freeze();
+    /// refused. Recognition runs first, against the image's final bindings;
+    /// if it fails, the image is not frozen and is not published.
+    pub fn freeze(self: ModulePublisher, own_scope: ScopeId, recognition: ?ModuleRecognition) error{OutOfMemory}!void {
+        const environment = self.target();
+        if (recognition) |selected| try environment.recognizeDirect(.{
+            .own = environment,
+            .core = selected.core.target(),
+            .own_scope = @intFromEnum(own_scope),
+            .core_scope = @intFromEnum(selected.core_scope),
+        }, selected.recognizer);
+        environment.freeze();
     }
+};
+
+/// What a module image's freeze edge recognizes against besides the image
+/// itself: the core its definitions fall back to.
+pub const ModuleRecognition = struct {
+    recognizer: FreezeRecognizer,
+    core: EnvironmentView,
+    core_scope: ScopeId,
 };
 
 /// Which publication one scope accepts. Exactly one arm exists per scope.
@@ -2263,8 +2372,19 @@ pub const BuildingEnv = struct {
     pub fn rootScope(self: *BuildingEnv, allocator: std.mem.Allocator) Scope {
         return Scope.direct(allocator, .{ .core_build = &self.target.privateState().core }, null);
     }
-    pub fn finish(self: *BuildingEnv) void {
-        self.target.privateState().core.freeze();
+    /// Recognizes the core's trusted definitions against their final bindings,
+    /// then freezes the core. On failure the core is not frozen and the builder
+    /// is not consumed, so the session that owns it does not start.
+    pub fn finish(self: *BuildingEnv, recognizer: ?FreezeRecognizer) error{OutOfMemory}!void {
+        const core = &self.target.privateState().core;
+        const core_scope = @intFromEnum(self.target.coreScopeId());
+        if (recognizer) |selected| try core.recognizeDirect(.{
+            .own = core,
+            .core = null,
+            .own_scope = core_scope,
+            .core_scope = core_scope,
+        }, selected);
+        core.freeze();
         // SAFETY: Finishing consumes the builder; invalidation catches reuse
         // after its target environment becomes immutable.
         self.* = undefined;

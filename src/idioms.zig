@@ -24,7 +24,6 @@ pub const DirectOp = enum {
     find,
     rest,
     reverse,
-    distinct,
     dip,
     str_format,
     fold1,
@@ -174,10 +173,6 @@ const reverse_pattern = [_]PatternAtom{
     .literal,
     .{ .word = .{ .spelling = "if" } },
 };
-const distinct_pattern = [_]PatternAtom{
-    .{ .word = .{ .spelling = "group" } },
-    .{ .word = .{ .spelling = "dict.keys" } },
-};
 const dip_pattern = [_]PatternAtom{
     .{ .word = .{ .spelling = "swap" } },
     .{ .word = .{ .spelling = "literal", .binding = .source } },
@@ -201,7 +196,7 @@ const fold1_pattern = [_]PatternAtom{
 const unary_count = std.meta.fields(numeric.UnaryOp).len;
 const binary_count = std.meta.fields(numeric.BinaryOp).len;
 pub const registry = blk: {
-    var entries: [unary_count + binary_count * 5 + 5 + 18 + 17]RegistryEntry = undefined;
+    var entries: [unary_count + binary_count * 5 + 5 + 18 + 16]RegistryEntry = undefined;
     var index: usize = 0;
     entries[index] = .{ .context = .each, .pattern = &operation_pattern, .operation = .length };
     index += 1;
@@ -301,7 +296,6 @@ pub const registry = blk: {
         .{ .operation = .find, .pattern = &find_pattern },
         .{ .operation = .rest, .pattern = &rest_pattern },
         .{ .operation = .reverse, .pattern = &reverse_pattern },
-        .{ .operation = .distinct, .pattern = &distinct_pattern },
         .{ .operation = .dip, .pattern = &dip_pattern },
         .{ .operation = .str_format, .pattern = &str_format_pattern },
     }) |direct| {
@@ -320,27 +314,146 @@ pub const registry = blk: {
     break :blk entries;
 };
 
+/// Every trusted definition a direct entry can recognize, by name.
+const direct_names = blk: {
+    var names: [registry.len][]const u8 = undefined;
+    var count: usize = 0;
+    for (registry) |entry| {
+        if (entry.context != .direct) continue;
+        const name = entry.source_word.?;
+        const seen = for (names[0..count]) |existing| {
+            if (std.mem.eql(u8, existing, name)) break true;
+        } else false;
+        if (seen) continue;
+        names[count] = name;
+        count += 1;
+    }
+    const final = names[0..count].*;
+    break :blk final;
+};
+
+/// Decides each trusted definition's direct entry when its environment
+/// freezes, against bindings that can no longer change.
+pub const freeze_recognizer: env.FreezeRecognizer = .{
+    .names = &direct_names,
+    .recognize = recognizeTrusted,
+};
+
+fn recognizeTrusted(lookup: env.FrozenLookup, name: []const u8, body: *env.Quotation) ?env.DirectIdiom {
+    const phrase: Value = .{ .list = env.quotationHeader(body) };
+    for (registry, 0..) |entry, index| {
+        if (entry.context != .direct or !std.mem.eql(u8, entry.source_word.?, name)) continue;
+        if (phrase.list.length() != entry.pattern.len) continue;
+        const capture = matchFrozen(lookup, phrase, entry) orelse continue;
+        return .{
+            .entry = @intCast(index),
+            .constant = capture.constant,
+            .active_word = capture.active_word,
+            .active_index = capture.active_index,
+        };
+    }
+    return null;
+}
+
+/// The atom-by-atom match `IdiomDriver` performs, over a frozen environment.
+fn matchFrozen(lookup: env.FrozenLookup, phrase: Value, entry: RegistryEntry) ?Capture {
+    var capture: Capture = .{};
+    for (entry.pattern, 0..) |atom, atom_index| {
+        const actual = list.atUnchecked(phrase, atom_index);
+        switch (atom) {
+            .constant => {
+                if (capture.constant != null or actual == .word) return null;
+                capture.constant = actual;
+            },
+            .capture => {
+                if (capture.constant != null or actual != .list or actual.list.length() != 1) return null;
+                capture.constant = list.atUnchecked(actual, 0);
+            },
+            .literal => if (actual == .word) return null,
+            .quotation_word => |expected| {
+                if (actual != .list or actual.list.length() != 1) return null;
+                const quoted = list.atUnchecked(actual, 0);
+                if (quoted != .word or !frozenWordMatches(lookup, quoted.word, expected)) return null;
+            },
+            .operation => {
+                if (actual != .word) return null;
+                const word = actual.word;
+                if (!std.mem.eql(u8, intern.get(word.name), entry.operation.spelling())) return null;
+                const binding = operationBinding(entry.operation);
+                const primitive = if (binding == .builtin) operationPrimitive(entry.operation) else null;
+                if (!frozenBindingMatches(lookup, word, binding, primitive, .trusted)) return null;
+                capture.active_word = word.name;
+                capture.active_index = @intCast(atom_index);
+            },
+            .word => |expected| {
+                if (actual != .word or !frozenWordMatches(lookup, actual.word, expected)) return null;
+                if (std.mem.eql(u8, expected.spelling, "grade")) {
+                    capture.active_word = actual.word.name;
+                    capture.active_index = @intCast(atom_index);
+                }
+            },
+        }
+    }
+    return capture;
+}
+
+fn frozenWordMatches(lookup: env.FrozenLookup, word: value.WordRef, expected: ExpectedWord) bool {
+    if (!std.mem.eql(u8, intern.get(word.name), expected.spelling)) return false;
+    return frozenBindingMatches(lookup, word, expected.binding, null, expected.origin);
+}
+
+/// The binding guard, decided once. A trusted word may resolve in the frozen
+/// environment or core; a candidate-module word only in the frozen image.
+fn frozenBindingMatches(
+    lookup: env.FrozenLookup,
+    word: value.WordRef,
+    binding: BindingKind,
+    primitive: ?env.PrimitiveImpl,
+    origin: ExpectedOrigin,
+) bool {
+    if (!lookup.admits(word.scope)) return false;
+    var hit = lookup.resolve(word.scope, word.name) orelse return false;
+    defer hit.lease.deinit();
+    const binding_matches = switch (binding) {
+        .builtin => hit.lease.binding == .builtin and
+            (primitive == null or hit.lease.binding.builtin == primitive.?),
+        .source => hit.lease.binding == .word,
+    };
+    const origin_matches = switch (origin) {
+        .trusted => true,
+        .candidate_module => !hit.in_core,
+    };
+    return binding_matches and origin_matches;
+}
+
 pub fn tryApply(
     evaluator: *Machine,
     request: machine.IdiomRequest,
     fallback: machine.IdiomFallback,
 ) MachineError!void {
-    if (evaluator.unit.inherited.idiom_mode == .generic_only or requestCandidate(evaluator, request) == null) {
-        var owned = fallback;
-        defer owned.deinit(evaluator.releaseDomain(), evaluator.allocator());
-        return owned.run(evaluator);
+    if (evaluator.unit.inherited.idiom_mode == .generic_only) return runFallback(evaluator, fallback);
+    switch (request) {
+        .direct => |direct| return applyRecognized(evaluator, direct, fallback),
+        .each, .zip_with, .fold, .fold1, .scan => {},
     }
+    const candidate = requestCandidate(evaluator, request) orelse return runFallback(evaluator, fallback);
     try evaluator.startDriver(IdiomDriver{
-        .candidate = requestCandidate(evaluator, request).?,
+        .candidate = candidate,
         .fallback = .init(fallback),
     });
 }
 
+fn runFallback(evaluator: *Machine, fallback: machine.IdiomFallback) MachineError!void {
+    var owned = fallback;
+    defer owned.deinit(evaluator.releaseDomain(), evaluator.allocator());
+    return owned.run(evaluator);
+}
+
+/// A user quotation offered to a combinator. Trusted definitions never reach
+/// the driver: their recognition was decided when their environment froze.
 const Candidate = struct {
     context: Context,
     phrase: Value,
-    source_word: ?u32 = null,
-    direct_scope: ?*env.Scope = null,
 };
 
 const Capture = struct {
@@ -350,38 +463,69 @@ const Capture = struct {
 };
 
 fn requestCandidate(evaluator: *Machine, request: machine.IdiomRequest) ?Candidate {
-    const context: Context = switch (request) {
-        .direct => .direct,
-        .each => .each,
-        .zip_with => .zip_with,
-        .fold => .fold,
-        .fold1 => .fold1,
-        .scan => .scan,
+    const context: Context, const depth: usize = switch (request) {
+        .direct => unreachable,
+        .each => .{ .each, 2 },
+        .fold1 => .{ .fold1, 2 },
+        .zip_with => .{ .zip_with, 3 },
+        .fold => .{ .fold, 3 },
+        .scan => .{ .scan, 3 },
     };
-    const phrase: Value = switch (request) {
-        .direct => |direct| .{ .list = direct.body },
-        .each, .fold1 => blk: {
-            if (evaluator.available() < 2) return null;
-            break :blk evaluator.unit.stack.items[evaluator.unit.stack.items.len - 1];
-        },
-        .zip_with, .fold, .scan => blk: {
-            if (evaluator.available() < 3) return null;
-            break :blk evaluator.unit.stack.items[evaluator.unit.stack.items.len - 1];
-        },
-    };
+    if (evaluator.available() < depth) return null;
+    const phrase = evaluator.unit.stack.items[evaluator.unit.stack.items.len - 1];
     if (phrase != .list) return null;
-    return .{
-        .context = context,
-        .phrase = phrase,
-        .source_word = switch (request) {
-            .direct => |direct| direct.word,
-            else => null,
-        },
-        .direct_scope = switch (request) {
-            .direct => |direct| direct.scope,
-            else => null,
-        },
+    return .{ .context = context, .phrase = phrase };
+}
+
+/// Applies a trusted word's recognized entry when this call's operands admit
+/// it, and otherwise runs the word's body.
+fn applyRecognized(
+    evaluator: *Machine,
+    direct: @FieldType(machine.IdiomRequest, "direct"),
+    fallback: machine.IdiomFallback,
+) MachineError!void {
+    const entry = registry[direct.idiom.entry];
+    if (!canApplyEntry(evaluator, entry)) return runFallback(evaluator, fallback);
+    return settle(evaluator, .{ .list = direct.body }, entry, .{
+        .constant = direct.idiom.constant,
+        .active_word = direct.idiom.active_word,
+        .active_index = direct.idiom.active_index,
+    }, fallback);
+}
+
+/// Runs the selected entry, or the fallback when nothing was selected. The
+/// fallback is consumed on every path.
+fn settle(
+    evaluator: *Machine,
+    phrase: Value,
+    entry: ?RegistryEntry,
+    capture: Capture,
+    fallback_value: machine.IdiomFallback,
+) MachineError!void {
+    var fallback = fallback_value;
+    const selected = entry orelse return runFallback(evaluator, fallback);
+    if (selected.operation == .direct and selected.operation.direct == .fold1) {
+        // Keep the original source continuation until the reducer's
+        // independent binding guard succeeds as well.
+        return evaluator.continueWithIdiom(.fold1, fallback);
+    }
+    defer fallback.deinit(evaluator.releaseDomain(), evaluator.allocator());
+    const direct_parent = if (selected.context == .direct or selected.context == .fold1)
+        evaluator.commitDirectIdiomTrace()
+    else
+        null;
+    evaluator.unit.idiom_hits += 1;
+    applyEntry(evaluator, selected, capture) catch |err| {
+        if (err == error.Ecl) {
+            if (capture.active_index) |index| evaluator.setFailureSite(phrase.list, index);
+            if (direct_parent) |word| evaluator.setFailureTraceParent(word);
+        }
+        return err;
     };
+    if (capture.active_index) |index| {
+        evaluator.setWorkDriverSite(phrase.list, index);
+    }
+    if (direct_parent) |word| evaluator.setWorkDriverTraceParent(word);
 }
 
 const IdiomDriver = struct {
@@ -397,7 +541,6 @@ const IdiomDriver = struct {
     resolution: ?heap.Owned(machine.ResolutionCursor) = null,
     expected: ?env.PrimitiveImpl = null,
     expected_binding: BindingKind = .builtin,
-    expected_origin: ExpectedOrigin = .trusted,
 
     fn rejectEntry(self: *IdiomDriver) void {
         self.entry_index += 1;
@@ -405,7 +548,6 @@ const IdiomDriver = struct {
         self.capture = .{};
         self.expected = null;
         self.expected_binding = .builtin;
-        self.expected_origin = .trusted;
     }
     fn beginWordResolution(
         self: *IdiomDriver,
@@ -413,23 +555,18 @@ const IdiomDriver = struct {
         word: value.WordRef,
         expected_word: ExpectedWord,
     ) bool {
+        std.debug.assert(expected_word.origin == .trusted);
         if (!std.mem.eql(u8, intern.get(word.name), expected_word.spelling) or
-            !stampOnCandidateChain(
-                evaluator,
-                self.candidate,
-                word.scope,
-                expected_word.origin,
-            ))
+            !stampOnRunningChain(evaluator, word.scope))
         {
             return false;
         }
         self.expected_binding = expected_word.binding;
-        self.expected_origin = expected_word.origin;
         self.expected = null;
         self.resolution = .init(.init(
             evaluator,
             word.name,
-            resolutionScopeForOrigin(evaluator, self.candidate, expected_word.origin),
+            evaluator.unit.current.?.resolutionScope(),
             null,
             null,
             null,
@@ -441,7 +578,7 @@ const IdiomDriver = struct {
         evaluator: *Machine,
         entry: ?RegistryEntry,
     ) MachineError!machine.WorkProgress {
-        var fallback = self.fallback.take();
+        const fallback = self.fallback.take();
         const candidate = self.candidate;
         const capture = self.capture;
         if (self.resolution) |*cursor| cursor.deinit(
@@ -450,34 +587,7 @@ const IdiomDriver = struct {
         );
         self.resolution = null;
         evaluator.retireDriver(self);
-        if (entry) |selected| {
-            if (selected.operation == .direct and selected.operation.direct == .fold1) {
-                // Keep the original source continuation until the reducer's
-                // independent binding guard succeeds as well.
-                try evaluator.continueWithIdiom(.fold1, fallback);
-                return .detached;
-            }
-            defer fallback.deinit(evaluator.releaseDomain(), evaluator.allocator());
-            const direct_parent = if (selected.context == .direct or selected.context == .fold1)
-                evaluator.commitDirectIdiomTrace()
-            else
-                null;
-            evaluator.unit.idiom_hits += 1;
-            applyEntry(evaluator, selected, capture) catch |err| {
-                if (err == error.Ecl) {
-                    if (capture.active_index) |index| evaluator.setFailureSite(candidate.phrase.list, index);
-                    if (direct_parent) |word| evaluator.setFailureTraceParent(word);
-                }
-                return err;
-            };
-            if (capture.active_index) |index| {
-                evaluator.setWorkDriverSite(candidate.phrase.list, index);
-            }
-            if (direct_parent) |word| evaluator.setWorkDriverTraceParent(word);
-        } else {
-            defer fallback.deinit(evaluator.releaseDomain(), evaluator.allocator());
-            try fallback.run(evaluator);
-        }
+        try settle(evaluator, candidate.phrase, entry, capture, fallback);
         return .detached;
     }
     pub fn advance(evaluator: *Machine, self: *IdiomDriver) MachineError!machine.WorkProgress {
@@ -499,15 +609,7 @@ const IdiomDriver = struct {
                             (self.expected == null or resolved.lease.binding.builtin == self.expected.?),
                         .source => resolved.lease.binding == .word,
                     };
-                    const origin_matches = switch (self.expected_origin) {
-                        .trusted => resolved.origin == .core or resolved.origin == .standard_library,
-                        .candidate_module => resolved.origin == .standard_library or
-                            (resolved.origin == .module and
-                                self.candidate.direct_scope != null and
-                                resolved.home != null and
-                                resolved.home.?.scope(evaluator.unit.module_access) ==
-                                    self.candidate.direct_scope.?),
-                    };
+                    const origin_matches = resolved.origin == .core or resolved.origin == .standard_library;
                     if (!origin_matches or !binding_matches) {
                         self.rejectEntry();
                         continue;
@@ -515,15 +617,13 @@ const IdiomDriver = struct {
                     self.atom_index += 1;
                     self.expected = null;
                     self.expected_binding = .builtin;
-                    self.expected_origin = .trusted;
                     continue;
                 },
             };
             if (self.entry_index == registry.len) return self.finish(evaluator, null);
             const entry = registry[self.entry_index];
             if (entry.context != self.candidate.context or
-                self.candidate.phrase.list.length() != entry.pattern.len or
-                !sourceWordMatches(self.candidate, entry))
+                self.candidate.phrase.list.length() != entry.pattern.len)
             {
                 self.rejectEntry();
                 continue;
@@ -583,7 +683,7 @@ const IdiomDriver = struct {
                         self.rejectEntry();
                         continue;
                     }
-                    if (!stampOnCandidateChain(evaluator, self.candidate, word.scope, .trusted)) {
+                    if (!stampOnRunningChain(evaluator, word.scope)) {
                         self.rejectEntry();
                         continue;
                     }
@@ -597,7 +697,7 @@ const IdiomDriver = struct {
                     self.resolution = .init(.init(
                         evaluator,
                         word.name,
-                        resolutionScopeForOrigin(evaluator, self.candidate, .trusted),
+                        evaluator.unit.current.?.resolutionScope(),
                         null,
                         null,
                         null,
@@ -623,12 +723,6 @@ const IdiomDriver = struct {
     }
     pub const ownership: heap.DriverOwnership = .fields;
 };
-
-fn sourceWordMatches(candidate: Candidate, entry: RegistryEntry) bool {
-    const expected = entry.source_word orelse return candidate.source_word == null;
-    const actual = candidate.source_word orelse return false;
-    return std.mem.eql(u8, intern.get(actual), expected);
-}
 
 fn canApplyEntry(evaluator: *Machine, entry: RegistryEntry) bool {
     const stack = evaluator.unit.stack.items;
@@ -697,7 +791,6 @@ fn applyDirect(evaluator: *Machine, operation: DirectOp) MachineError!void {
         .find => applyMatchFind(evaluator),
         .rest => sequence.restForIdiom(evaluator),
         .reverse => sequence.reverseForIdiom(evaluator),
-        .distinct => order.distinctForIdiom(evaluator),
         .dip => combinators.dipForIdiom(evaluator),
         .str_format => dict_text.formatForIdiom(evaluator),
     };
@@ -1285,26 +1378,12 @@ fn binaryPrimitive(operation: numeric.BinaryOp) env.PrimitiveImpl {
 /// cannot appear on any chain; it is admitted directly, and the untouched
 /// resolution behind this gate still suppresses recognition when anything on the
 /// chain has rebound the name.
-fn resolutionScopeForOrigin(
-    evaluator: *machine.Machine,
-    candidate: Candidate,
-    expected_origin: ExpectedOrigin,
-) ?*env.Scope {
-    return if (expected_origin == .candidate_module)
-        candidate.direct_scope
-    else
-        evaluator.unit.current.?.resolutionScope();
-}
-
-fn stampOnCandidateChain(
-    evaluator: *machine.Machine,
-    candidate: Candidate,
-    stamp: u32,
-    expected_origin: ExpectedOrigin,
-) bool {
+/// Whether a word written with `stamp` resolves in the running chain: no
+/// written-in scope, the core, or a scope the running activation reaches.
+fn stampOnRunningChain(evaluator: *machine.Machine, stamp: u32) bool {
     if (stamp == 0) return true;
     if (@intFromEnum(evaluator.unit.environment.coreScopeId()) == stamp) return true;
-    var node = resolutionScopeForOrigin(evaluator, candidate, expected_origin);
+    var node = evaluator.unit.current.?.resolutionScope();
     while (node) |scope| : (node = scope.parent) {
         if (@intFromEnum(scope.cellId()) == stamp) return true;
     }

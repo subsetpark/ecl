@@ -1081,15 +1081,28 @@ prologue, vector blocks, tail, and fault reporting preserve the same contract.
 ### Idiom recognition is guarded, source-preserving fusion
 
 Some compact source definitions express a useful bulk operation but would
-otherwise decompose it back into many interpreter steps. At direct source-word
-entry and selected combinator boundaries, `idioms.zig` matches a small closed
-table of quotation shapes.
+otherwise decompose it back into many interpreter steps. `idioms.zig` matches
+a small closed table of quotation shapes against trusted source definitions
+and against quotations offered at selected combinator boundaries.
 
 Recognition is guarded by binding identity. Every named token in the pattern
 must resolve, in the candidate's actual scope chain, to the expected trusted
 builtin or source definition. Shadowing, escaped code from another module,
 wrong literal shape, or any other mismatch selects the generic frame-machine
-path. The `(len) each` list idiom reads stored child lengths into a typed result
+path.
+
+A trusted definition, in the core or in a shipped standard-library image, is
+recognized once, when its environment freezes. Its body's words carry that
+environment's scope, and a frozen environment cannot rebind them, so whether
+the body matches an entry is a property of the definition rather than of any
+call. The outcome is recorded on the definition's binding; a call decides only
+whether its operands admit the entry and otherwise runs the body. The freeze
+edge looks up only the names the table can recognize, so its work does not
+grow with the environment, and if it cannot finish the environment is not
+published. A quotation offered to a combinator is still checked when it is
+offered, in the scope chain it runs in, since user scopes can change.
+
+The `(len) each` list idiom reads stored child lengths into a typed result
 under the normal work budget; dictionary inputs retain generic `each`
 semantics, and invalid elements retain the source word's failure site.
 Boolean reductions share the numeric reduction machinery, including validation
@@ -1097,8 +1110,8 @@ of every operand. Recognized `fold1` reductions retain the original input and
 start after its first element; they never materialize a tail. An empty fold
 preserves its seed and a singleton `fold1` preserves its sole value without
 invoking the reducer. Arbitrary quotations retain generic application semantics.
-The guard result lives for that application and is discarded afterward,
-so redefinition receives a fresh check.
+For an offered quotation the guard result lives for that application and is
+discarded afterward, so redefinition receives a fresh check.
 
 This has the role of a superinstruction—one checked phrase becomes one more
 substantial host operation—but preserves the properties ecl cares about:

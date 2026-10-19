@@ -1929,9 +1929,12 @@ pub const OwnedImage = enum(usize) {
     /// registered or handed to a program. The environment's frozen flag stops
     /// late definitions; only the typestate stops a late template write, which
     /// has no frozen check because a sealed image has no writer.
-    pub fn seal(self: *OwnedImage) SealedImage {
+    /// Recognition of the image's trusted definitions happens here, against
+    /// their final bindings. If it fails the image is neither frozen nor
+    /// consumed, and the caller still owns it.
+    pub fn seal(self: *OwnedImage, recognition: ?env.ModuleRecognition) error{OutOfMemory}!SealedImage {
         const image = self.borrow();
-        image.environment.modulePublisher().freeze();
+        try image.environment.modulePublisher().freeze(image.scope.cellId(), recognition);
         image.tests.freeze();
         self.* = .consumed;
         return .init(image);
